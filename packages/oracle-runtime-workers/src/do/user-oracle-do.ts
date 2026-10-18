@@ -1,3 +1,27 @@
+import { digestTopicProposalEffect } from '../action-proposals/topic-store';
+import {
+  chainIdsFromConfig,
+  chainIdConfigSchema,
+} from '../plugins/ixo-transaction/chain-ids';
+import { TopicProposalStore } from '../action-proposals/topic-store';
+import {
+  prepareTopicSubject,
+  type TopicCandidate,
+} from '../action-proposals/topic-prepare';
+import {
+  assertTopicDependencies,
+  reconcileTopicReferences,
+  type TopicVerificationContext,
+} from '../action-proposals/topic-verify';
+import { topicExpectedEffect } from '../action-proposals/topic-effects';
+import {
+  topicActionOutcome,
+  type ActionProposalWire,
+  type TopicActionProposal,
+  type TopicProposalSubject,
+  type BeginTopicStep,
+  type TopicReceiptReferences,
+} from '@ixo/ixo-transaction/topic-proposals';
 import type { ChannelTurnResponse } from '../channels/contract';
 import { refreshActionProposal } from '../action-proposals/reconcile';
 import { actionOutcome } from '@ixo/ixo-transaction/action-proposals';
@@ -793,6 +817,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     /** Chat delivery's artefacts; null when no bucket is bound (see `canShare` for new ones). */
     private artifacts: ArtifactStore | null = null;
     private actionProposals: ActionProposalStore | null = null;
+    private topicProposals: TopicProposalStore | null = null;
     /** Text `view_attachment` extracted, per session (`attachments/view-cache.ts`). */
     private attachmentTextCache: AttachmentTextCacheStore | null = null;
     /**
@@ -1695,6 +1720,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       await this.saver.setup();
       this.actionProposals = new ActionProposalStore(liveDb);
       await this.actionProposals.setup();
+      this.topicProposals = new TopicProposalStore(liveDb);
+      await this.topicProposals.setup();
       this.sessions = new SessionsStore(liveDb);
       await this.sessions.setup();
       this.matrixLedger = new MatrixTurnLedger(liveDb);
@@ -1899,6 +1926,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.ambient = createAmbientServices({
         actionProposals: {
           create: (subject) => this.prepareActionProposal(subject),
+          prepareTopic: (input) => this.prepareTopicProposal(input),
         },
         ...(this.taskScheduler ? { tasks: this.taskScheduler.surface } : {}),
         preferences: this.preferences,
@@ -1978,6 +2006,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.resultStore = null;
       this.artifacts = null;
       this.actionProposals = null;
+      this.topicProposals = null;
       this.attachmentTextCache = null;
       this.domainContextStore = null;
       // Its store is bound to the database just dropped: a caller that sees
@@ -2846,6 +2875,32 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         attempted ||= refreshed.attempted;
         actionOutcomes.push(actionOutcome(refreshed.proposal));
       }
+      for (const proposal of await this.topicProposals!.forRun(
+        ownerDid,
+        result.sessionId,
+        result.runId,
+      )) {
+        const refs = await this.topicProposals!.references(
+          ownerDid,
+          proposal.id,
+        );
+        let refreshed = proposal;
+        if (
+          !attempted &&
+          refs.length &&
+          (await this.topicProposals!.claimVerification(ownerDid, proposal.id))
+        ) {
+          attempted = true;
+          refreshed = await reconcileTopicReferences(
+            this.topicProposals!,
+            proposal,
+            { v: 2, references: refs },
+            this.topicVerificationContext(proposal),
+            true,
+          );
+        }
+        actionOutcomes.push(topicActionOutcome(refreshed));
+      }
       if (attempted) {
         this.markDirty();
         await this.requestHousekeeping(Date.now() + 1000);
@@ -2982,6 +3037,125 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return deleted;
     }
 
+    private topicVerificationContext(
+      proposal: TopicActionProposal,
+    ): TopicVerificationContext {
+      return {
+        reader: {
+          state: async (room) =>
+            JSON.parse(await this.gateway.getTopicRoomState(room)),
+          event: async (room, id) => {
+            const raw = await this.gateway.getTopicEvent(room, id);
+            return raw ? JSON.parse(raw) : null;
+          },
+          history: async (room, root) =>
+            JSON.parse(await this.gateway.getTopicHistory(room, root)),
+        },
+        blocksync: this.env.BLOCKSYNC_GRAPHQL_URL,
+        rpc: this.actionProposalRpc(proposal),
+      };
+    }
+    private async prepareTopicProposal(input: {
+      candidate: TopicCandidate;
+      origin: TopicProposalSubject['origin'];
+      evidenceRefs: string[];
+    }): Promise<TopicActionProposal> {
+      if (
+        this.env.ACTION_PROPOSALS_ENABLED !== 'true' ||
+        this.env.ACTION_TOPIC_PROPOSALS_ENABLED !== 'true' ||
+        !this.userDid
+      )
+        throw new Error('Topic preparation unavailable');
+      const record = await this.runStore!.get(input.origin.runId);
+      if (!record) throw new Error('Originating run unavailable');
+      const request = (JSON.parse(record.request) as StoredRunRequest).turn;
+      if (
+        request.identity.userDid !== this.userDid ||
+        request.sessionId !== input.origin.sessionId
+      )
+        throw new Error('Topic origin mismatch');
+      const candidateDigest = await digestTopicProposalEffect(input.candidate);
+      const prior = await this.topicProposals!.replayPreparation(
+        this.userDid,
+        input.origin,
+        input.candidate,
+        input.evidenceRefs,
+      );
+      if (prior) return prior;
+      const rpc = {
+        devnet: this.env.ACTION_PROPOSALS_RPC_DEVNET,
+        testnet: this.env.ACTION_PROPOSALS_RPC_TESTNET,
+        mainnet: this.env.ACTION_PROPOSALS_RPC_MAINNET,
+      }[input.candidate.network];
+      const chainId = chainIdsFromConfig(chainIdConfigSchema.parse(this.env))[
+        input.candidate.network
+      ];
+      const subject = await prepareTopicSubject(
+        input.candidate,
+        [...input.evidenceRefs, `candidate:${candidateDigest}`],
+        {
+          ownerDid: this.userDid,
+          ...input.origin,
+          blocksync: this.env.BLOCKSYNC_GRAPHQL_URL,
+          rpc,
+          chainId,
+          reader: {
+            state: async (room) =>
+              JSON.parse(await this.gateway.getTopicRoomState(room)),
+            event: async (room, id) => {
+              const raw = await this.gateway.getTopicEvent(room, id);
+              return raw ? JSON.parse(raw) : null;
+            },
+            history: async (room, root) =>
+              JSON.parse(await this.gateway.getTopicHistory(room, root)),
+          },
+        },
+      );
+      const roomId =
+        request.roomId ??
+        (await this.sessions!.getSession(request.sessionId))?.roomId;
+      const origin =
+        request.sessionId.startsWith('$') && roomId
+          ? {
+              sessionId: request.sessionId,
+              roomId,
+              client: request.client,
+              ...(request.channel ? { channel: request.channel } : {}),
+            }
+          : null;
+      const p = await this.topicProposals!.create(subject, origin);
+      this.markDirty();
+      return p;
+    }
+    async beginTopicStep(
+      identity: TurnIdentity,
+      id: string,
+      input: BeginTopicStep,
+    ): Promise<string | null> {
+      await this.ready(identity);
+      try {
+        const proposal = await this.topicProposals!.get(identity.userDid, id);
+        if (!proposal) return null;
+        await assertTopicDependencies(
+          proposal,
+          this.topicVerificationContext(proposal),
+        );
+        const effect = await topicExpectedEffect(proposal, input.step);
+        const result = await this.topicProposals!.begin(
+          identity.userDid,
+          id,
+          input,
+          effect,
+        );
+        this.markDirty();
+        return result ? JSON.stringify({ ok: true, result }) : null;
+      } catch (error) {
+        if (error instanceof ActionProposalConflict || error instanceof Error)
+          return JSON.stringify({ ok: false, error: error.message });
+        throw error;
+      }
+    }
+
     private async prepareActionProposal(
       subject: ActionProposalSubject,
     ): Promise<ActionProposal> {
@@ -3061,10 +3235,54 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           );
         }
       }
-      return this.actionProposals.nextReceiptAttempt(this.userDid);
+      for (const {
+        proposal,
+        origin,
+      } of await this.topicProposals!.takeReceipts(this.userDid)) {
+        try {
+          const receipt = proposal.lifecycle.receipt;
+          if (!receipt) continue;
+          const text =
+            receipt.kind === 'topic-created'
+              ? `${proposal.title} created. Room ${receipt.roomId}. Topic ${receipt.topicId}. Root ${receipt.rootEventId}.`
+              : `${proposal.title} ${receipt.kind === 'topic-access-granted' ? 'confirmed' : 'failed'} on chain. Transaction ${receipt.transactionHash}. Block ${receipt.height}. Code ${receipt.code}.`;
+          await this.replayToRoom(
+            {
+              ...origin,
+              identity: { userDid: proposal.ownerDid },
+              message: '',
+              requestId: `action-receipt:${proposal.id}:${proposal.digest}`,
+            },
+            text,
+            'oracle',
+            true,
+          );
+          await this.topicProposals!.receiptMirrored(
+            proposal.ownerDid,
+            proposal.id,
+          );
+          this.markDirty();
+        } catch (error) {
+          console.warn(
+            '[topic-actions] receipt mirror pending',
+            error instanceof Error ? error.message : 'mirror failed',
+          );
+        }
+      }
+      const due = await this.actionProposals.nextReceiptAttempt(this.userDid);
+      const topicDue = await this.topicProposals!.nextReceiptAttempt(
+        this.userDid,
+      );
+      return due === undefined
+        ? topicDue
+        : topicDue === undefined
+          ? due
+          : Math.min(due, topicDue);
     }
 
-    private actionProposalRpc(proposal: ActionProposal): string | undefined {
+    private actionProposalRpc(
+      proposal: ActionProposalWire,
+    ): string | undefined {
       return {
         devnet: this.env.ACTION_PROPOSALS_RPC_DEVNET,
         testnet: this.env.ACTION_PROPOSALS_RPC_TESTNET,
@@ -3074,10 +3292,65 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     async actionProposal(
       identity: TurnIdentity,
       id: string,
-      command?: ProposalCommand,
+      command?:
+        | ProposalCommand
+        | { kind: 'topic-reconcile'; input: TopicReceiptReferences },
     ): Promise<string | null> {
       await this.ready(identity);
       try {
+        const topic = await this.topicProposals!.get(identity.userDid, id);
+        if (topic) {
+          let result = topic;
+          let topicAttempted = false;
+          const verification = {
+            ...this.topicVerificationContext(topic),
+            onAttempt: () => {
+              topicAttempted = true;
+            },
+          };
+          if (command?.kind === 'topic-reconcile')
+            result = await reconcileTopicReferences(
+              this.topicProposals!,
+              topic,
+              command.input,
+              verification,
+            );
+          else if (command) {
+            if (command.kind === 'reconcile')
+              throw new ActionProposalConflict(
+                'Topic reconciliation requires references',
+              );
+            if (command.kind === 'claim')
+              await assertTopicDependencies(
+                topic,
+                this.topicVerificationContext(topic),
+              );
+            result = (await this.topicProposals!.transition(
+              identity.userDid,
+              id,
+              command.kind,
+              command.digest,
+            ))!;
+          } else {
+            const refs = await this.topicProposals!.references(
+              identity.userDid,
+              id,
+            );
+            if (refs.length)
+              result = await reconcileTopicReferences(
+                this.topicProposals!,
+                topic,
+                { v: 2, references: refs },
+                verification,
+              );
+          }
+          if (command || topicAttempted) {
+            this.markDirty();
+            await this.requestHousekeeping(Date.now() + 1000);
+          }
+          return JSON.stringify({ ok: true, proposal: result });
+        }
+        if (command?.kind === 'topic-reconcile') return null;
         let result = command
           ? await this.actionProposals!.transition(
               identity.userDid,

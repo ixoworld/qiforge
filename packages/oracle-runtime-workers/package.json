@@ -68,7 +68,8 @@
     "yjs": "13.6.32",
     "zod": "^4.4.3",
     "@ixo/impactxclient-sdk": "^3.0.0",
-    "protobufjs": "^7.6.5"
+    "protobufjs": "^7.6.5",
+    "@ixo/topic-protocol": "1.0.0-rc.7"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",

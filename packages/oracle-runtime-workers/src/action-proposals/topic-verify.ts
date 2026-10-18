@@ -1,0 +1,231 @@
+import { withTopicReadBudget } from './topic-budget';
+import { canonicalizeIxoJson } from '@ixo/ixo-transaction/action-proposals';
+import {
+  digestTopicEffect,
+  type TopicActionProposal,
+  type ExpectedTopicEffect,
+  type TopicReceiptReferences,
+} from '@ixo/ixo-transaction/topic-proposals';
+import { assertCreatePlanUnchanged } from '@ixo/ixo-transaction/topic-create-plan';
+import {
+  TopicMatrixEventSchema,
+  assertTopicRoomUnchanged,
+  type TopicMatrixReader,
+} from './topic-matrix';
+import { readTopicAuthority } from './topic-history';
+import { TopicChainReader } from './topic-chain';
+import {
+  digestTopicProposalEffect,
+  type TopicProposalStore,
+} from './topic-store';
+import { verifyTopicGrantTransaction } from './verify';
+export type TopicVerificationContext = {
+  reader: TopicMatrixReader;
+  blocksync: string | undefined;
+  rpc: string | undefined;
+  fetcher?: typeof fetch;
+  onAttempt?: () => void;
+};
+export async function assertTopicDependencies(
+  proposal: TopicActionProposal,
+  ctx: TopicVerificationContext,
+) {
+  return withTopicReadBudget(
+    ctx.reader,
+    ctx.fetcher ?? fetch,
+    (reader, fetcher) =>
+      assertTopicDependenciesWithinBudget(proposal, {
+        ...ctx,
+        reader,
+        fetcher,
+      }),
+  );
+}
+async function assertTopicDependenciesWithinBudget(
+  proposal: TopicActionProposal,
+  ctx: TopicVerificationContext,
+) {
+  await assertTopicRoomUnchanged(
+    proposal,
+    ctx.reader,
+    ctx.blocksync,
+    ctx.fetcher,
+  );
+  if (proposal.action.name === 'create_topic') {
+    await assertCreatePlanUnchanged(proposal.action.plan);
+    return;
+  }
+  if (!ctx.rpc) throw new Error('Trusted chain endpoint unavailable');
+  const action = proposal.action;
+  const topic = await readTopicAuthority(
+    ctx.reader,
+    action.roomId,
+    action.topicId,
+    action.owner.matrixUserId,
+  );
+  const chain = new TopicChainReader(ctx.rpc, action.chainId, ctx.fetcher);
+  const collection = await chain.collection(
+    action.entityDid,
+    action.collectionId,
+    action.signerAddress,
+  );
+  const current: TopicActionProposal['action']['dependencies'] = [
+    ...topic.dependencies,
+    ...collection.dependencies,
+  ];
+  for (const grant of action.grants)
+    current.push(
+      (
+        await chain.authorization(
+          action.adminAddress,
+          grant.address,
+          grant.role,
+        )
+      ).dependency,
+    );
+  for (const dep of action.dependencies.filter((d) => d.kind !== 'matrix'))
+    if (
+      !current.some(
+        (d) =>
+          d.kind === dep.kind && d.key === dep.key && d.digest === dep.digest,
+      )
+    )
+      throw new Error('Topic or chain authority changed');
+}
+export async function verifyTopicReference(
+  proposal: TopicActionProposal,
+  effect: ExpectedTopicEffect,
+  reference: TopicReceiptReferences['references'][number],
+  ctx: TopicVerificationContext,
+) {
+  if (effect.kind === 'chain') {
+    if (reference.kind !== 'chain' || !ctx.rpc)
+      throw new Error('Expected a chain reference');
+    const verified = await verifyTopicGrantTransaction(
+      effect,
+      reference.transactionHash,
+      ctx.rpc,
+      ctx.fetcher,
+    );
+    return {
+      kind: 'chain' as const,
+      chainId: effect.chainId,
+      ...verified,
+      messageDigest: await digestTopicEffect(effect),
+    };
+  }
+  if (reference.kind !== 'matrix')
+    throw new Error('Expected a Matrix reference');
+  const event = TopicMatrixEventSchema.parse(
+    await ctx.reader.event(effect.roomId, reference.eventId),
+  );
+  if (
+    event.event_id !== reference.eventId ||
+    event.room_id !== effect.roomId ||
+    event.sender !== effect.sender ||
+    event.type !== effect.eventType ||
+    event.state_key !== effect.stateKey ||
+    canonicalizeIxoJson(event.content) !== canonicalizeIxoJson(effect.content)
+  )
+    throw new Error('Matrix receipt does not match the reviewed effect');
+  if (reference.step === 'snapshot') {
+    const state = await ctx.reader.state(effect.roomId);
+    const { z } = await import('zod');
+    const events = z.array(TopicMatrixEventSchema).parse(state);
+    if (
+      !events.some(
+        (e) =>
+          e.event_id === event.event_id &&
+          e.state_key === effect.stateKey &&
+          e.type === effect.eventType,
+      )
+    )
+      throw new Error('Topic snapshot was replaced before verification');
+    if (proposal.action.name === 'create_topic') {
+      const current = await readTopicAuthority(
+        ctx.reader,
+        effect.roomId,
+        proposal.action.plan.identity.topicId,
+        effect.sender,
+      );
+      if (
+        current.authority.revision !==
+          proposal.action.plan.identity.operationId ||
+        current.authority.contractBodyHash !== proposal.action.plan.bodyHash
+      )
+        throw new Error('Created topic is not canonically readable');
+    }
+  }
+  return {
+    kind: 'matrix' as const,
+    roomId: effect.roomId,
+    eventId: event.event_id,
+    sender: event.sender,
+    eventType: event.type,
+    ...(event.state_key !== undefined ? { stateKey: event.state_key } : {}),
+    contentDigest: await digestTopicProposalEffect(event.content),
+    verifiedAt: new Date().toISOString(),
+  };
+}
+export async function reconcileTopicReferences(
+  store: TopicProposalStore,
+  p: TopicActionProposal,
+  input: TopicReceiptReferences,
+  ctx: TopicVerificationContext,
+  verificationClaimed = false,
+) {
+  let newReference = false;
+  for (const reference of input.references) {
+    newReference ||= !(await store.hasReference(
+      p.ownerDid,
+      p.id,
+      reference.step,
+    ));
+    await store.recordReference(p.ownerDid, p.id, reference);
+  }
+  const claimed =
+    verificationClaimed || (await store.claimVerification(p.ownerDid, p.id));
+  if (!claimed && !newReference)
+    return (await store.get(p.ownerDid, p.id)) ?? p;
+  ctx.onAttempt?.();
+  return withTopicReadBudget(
+    ctx.reader,
+    ctx.fetcher ?? fetch,
+    (reader, fetcher) =>
+      reconcileWithinBudget(store, p, input, { ...ctx, reader, fetcher }),
+  ).catch(async () => (await store.get(p.ownerDid, p.id)) ?? p);
+}
+async function reconcileWithinBudget(
+  store: TopicProposalStore,
+  p: TopicActionProposal,
+  input: TopicReceiptReferences,
+  ctx: TopicVerificationContext,
+) {
+  let current = p;
+  const all = [
+    ...input.references,
+    ...(await store.references(p.ownerDid, p.id)).filter(
+      (r) => !input.references.some((s) => s.step === r.step),
+    ),
+  ];
+  for (const reference of all) {
+    const effect = await store.recordReference(p.ownerDid, p.id, reference);
+    try {
+      const receipt = await verifyTopicReference(
+        current,
+        effect,
+        reference,
+        ctx,
+      );
+      current = await store.verifyStep(
+        p.ownerDid,
+        p.id,
+        reference.step,
+        receipt,
+      );
+    } catch {
+      current = (await store.get(p.ownerDid, p.id)) ?? current;
+    }
+  }
+  return current;
+}

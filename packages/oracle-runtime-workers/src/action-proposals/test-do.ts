@@ -1,3 +1,11 @@
+import { TopicProposalStore } from './topic-store';
+import {
+  TopicProposalSubjectSchema,
+  BeginTopicStepSchema,
+  TopicReceiptReferencesSchema,
+} from '@ixo/ixo-transaction/topic-proposals';
+import { topicExpectedEffect } from './topic-effects';
+import { reconcileTopicReferences } from './topic-verify';
 import { refreshActionProposal } from './reconcile';
 import { DurableObject } from 'cloudflare:workers';
 import { DoSqliteDatabase } from '../sqlite/database';
@@ -54,6 +62,110 @@ export class ActionProposalTestDO extends DurableObject {
       fetcher,
     );
     return JSON.stringify(refreshed.proposal);
+  }
+  private async topics() {
+    await this.proposals();
+    const store = new TopicProposalStore(this.db!, () => this.now);
+    await store.setup();
+    return store;
+  }
+  async topicCreate(raw: string) {
+    return JSON.stringify(
+      await (
+        await this.topics()
+      ).create(TopicProposalSubjectSchema.parse(JSON.parse(raw))),
+    );
+  }
+  async topicGet(owner: string, id: string) {
+    return JSON.stringify(await (await this.topics()).get(owner, id));
+  }
+  async topicTransition(
+    owner: string,
+    id: string,
+    kind: 'claim' | 'reject' | 'revoke' | 'supersede',
+    digest: string,
+  ) {
+    return JSON.stringify(
+      await (await this.topics()).transition(owner, id, kind, digest),
+    );
+  }
+  async topicReplay(
+    owner: string,
+    origin: string,
+    candidate: string,
+    evidence: string[],
+  ) {
+    try {
+      return JSON.stringify(
+        await (
+          await this.topics()
+        ).replayPreparation(
+          owner,
+          JSON.parse(origin),
+          JSON.parse(candidate),
+          evidence,
+        ),
+      );
+    } catch (error) {
+      return JSON.stringify({
+        error: error instanceof Error ? error.message : 'Failed',
+      });
+    }
+  }
+  async topicBegin(owner: string, id: string, input: string) {
+    try {
+      const store = await this.topics();
+      const p = await store.get(owner, id);
+      if (!p) return null;
+      const parsed = BeginTopicStepSchema.parse(JSON.parse(input));
+      return JSON.stringify(
+        await store.begin(
+          owner,
+          id,
+          parsed,
+          await topicExpectedEffect(p, parsed.step),
+        ),
+      );
+    } catch (error) {
+      return JSON.stringify({
+        error: error instanceof Error ? error.message : 'Failed',
+      });
+    }
+  }
+  async topicReconcile(
+    owner: string,
+    id: string,
+    input: string,
+    events: string,
+    state: string,
+  ) {
+    const store = await this.topics();
+    const p = await store.get(owner, id);
+    if (!p) return null;
+    const values = JSON.parse(events);
+    return JSON.stringify(
+      await reconcileTopicReferences(
+        store,
+        p,
+        TopicReceiptReferencesSchema.parse(JSON.parse(input)),
+        {
+          reader: {
+            state: async () => JSON.parse(state),
+            event: async (_room, id) => values[id],
+            history: async () =>
+              Object.values(values).filter(
+                (value) =>
+                  typeof value === 'object' &&
+                  value !== null &&
+                  'type' in value &&
+                  value.type === 'ixo.topic.operation',
+              ),
+          },
+          blocksync: undefined,
+          rpc: undefined,
+        },
+      ),
+    );
   }
   async setNow(now: number) {
     this.now = now;

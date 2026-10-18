@@ -70,6 +70,7 @@ export const baseEnvSchema = z.object({
   ACTION_PROPOSALS_RPC_DEVNET: z.url().optional(),
   ACTION_PROPOSALS_RPC_MAINNET: z.url().optional(),
   ACTION_PROPOSALS_ENABLED: z.enum(['true', 'false']).default('false'),
+  ACTION_TOPIC_PROPOSALS_ENABLED: z.enum(['true', 'false']).default('false'),
   ACTION_PROPOSALS_PORTAL_ORIGIN: z.url().optional(),
   // --- identity -----------------------------------------------------------
   ORACLE_NAME: z.string().min(1),

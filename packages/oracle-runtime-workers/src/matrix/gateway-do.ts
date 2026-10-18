@@ -1194,6 +1194,70 @@ export class MatrixGatewayDO
     return { roomId };
   }
 
+  async getTopicRoomState(roomId: string): Promise<JsonString> {
+    const response = await this.fetchCapped<unknown>(
+      `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state`,
+      {},
+      { capBytes: 524288, timeoutMs: 10000 },
+    );
+    if (response.oversized || !response.json)
+      throw new Error('Topic room state exceeds verification bounds');
+    return JSON.stringify(response.json);
+  }
+  async getTopicEvent(
+    roomId: string,
+    eventId: string,
+  ): Promise<JsonString | null> {
+    const raw = await this.fetchCapped<Record<string, unknown>>(
+      `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/event/${encodeURIComponent(eventId)}`,
+      {},
+      { capBytes: 262144, timeoutMs: 10000 },
+    );
+    if (raw.oversized || !raw.json)
+      throw new Error('Topic event exceeds verification bounds');
+    if (raw.json.room_id !== undefined && raw.json.room_id !== roomId)
+      throw new Error('Topic event room binding mismatch');
+    const decrypted = await this.getEvent(roomId, eventId);
+    if (!decrypted) return null;
+    return JSON.stringify({
+      ...JSON.parse(decrypted),
+      ...(typeof raw.json.state_key === 'string'
+        ? { state_key: raw.json.state_key }
+        : {}),
+      room_id: roomId,
+    });
+  }
+  async getTopicHistory(roomId: string, root: string): Promise<JsonString> {
+    const events: unknown[] = [];
+    const deadline = Date.now() + 10000;
+    let from: string | undefined;
+    for (let page = 0; page < 8; page++) {
+      if (Date.now() >= deadline)
+        throw new Error('Topic history verification timed out');
+      const response = await this.fetchCapped<{
+        chunk: { event_id?: string }[];
+        next_batch?: string;
+      }>(
+        `/_matrix/client/v1/rooms/${encodeURIComponent(roomId)}/relations/${encodeURIComponent(root)}/m.reference`,
+        { limit: '32', ...(from ? { from } : {}) },
+        { capBytes: 524288, timeoutMs: 10000 },
+      );
+      if (response.oversized || !response.json)
+        throw new Error('Topic history exceeds verification bounds');
+      for (const event of response.json.chunk) {
+        if (Date.now() >= deadline)
+          throw new Error('Topic history verification timed out');
+        if (!event.event_id) throw new Error('Topic history event has no ID');
+        const value = await this.getTopicEvent(roomId, event.event_id);
+        if (!value) throw new Error('Topic history is incomplete');
+        events.push(JSON.parse(value));
+      }
+      if (!response.json.next_batch) return JSON.stringify(events);
+      from = response.json.next_batch;
+    }
+    throw new Error('Topic history exceeds 256 events');
+  }
+
   override async getRoomState(roomId: string): Promise<JsonString> {
     const deadline = Date.now() + PENDING_INVITE_GRACE_MS;
     for (;;) {

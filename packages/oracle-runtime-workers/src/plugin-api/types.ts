@@ -1,4 +1,9 @@
 import type {
+  TopicActionProposal,
+  TopicProposalSubject,
+} from '@ixo/ixo-transaction/topic-proposals';
+import type { TopicCandidate } from '../action-proposals/topic-prepare';
+import type {
   ActionProposal,
   ActionProposalSubject,
 } from '@ixo/ixo-transaction/action-proposals';
@@ -730,6 +735,11 @@ export interface RuntimeContext<TConfig = MergedConfig> {
    */
   actionProposals?: {
     create(subject: ActionProposalSubject): Promise<ActionProposal>;
+    prepareTopic?(input: {
+      candidate: TopicCandidate;
+      origin: TopicProposalSubject['origin'];
+      evidenceRefs: string[];
+    }): Promise<TopicActionProposal>;
   };
 
   decisions: {

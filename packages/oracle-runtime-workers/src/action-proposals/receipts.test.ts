@@ -1,3 +1,7 @@
+import { subject as topicSubject, executor } from './fixtures/topic';
+import { topicExpectedEffect } from './topic-effects';
+import { verifyTopicReference } from './topic-verify';
+import { TopicProposalStore } from './topic-store';
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
 import type { ActionProposal } from '@ixo/ixo-transaction/action-proposals';
@@ -46,8 +50,10 @@ async function harness(state: DurableObjectState) {
   let now = NOW;
   let db = await DoSqliteDatabase.open(state, 'receipts.db');
   let store = new ActionProposalStore(db, () => now);
+  let topicStore = new TopicProposalStore(db, () => now);
   let runStore = new RunStore(db, () => now);
   await store.setup();
+  await topicStore.setup();
   const send = vi.fn(async (_message: MirrorSend) => '$receipt');
   const host: object = Object.create(UserOracleDO.prototype);
   const assignHost = () =>
@@ -57,6 +63,7 @@ async function harness(state: DurableObjectState) {
       env: { ACTION_PROPOSALS_ENABLED: 'true' },
       runStore,
       actionProposals: store,
+      topicProposals: topicStore,
       sessionRooms: new Map<string, string>(),
       markDirty: vi.fn(),
       mirror: new RoomMirror({
@@ -69,6 +76,8 @@ async function harness(state: DurableObjectState) {
     });
   assignHost();
   return {
+    host,
+    topics: () => topicStore,
     send,
     async prepare(index: number, sessionId = `$thread-${index}`) {
       const subject = proposalSubject({
@@ -143,8 +152,10 @@ async function harness(state: DurableObjectState) {
       await db.close();
       db = await DoSqliteDatabase.open(state, 'receipts.db');
       store = new ActionProposalStore(db, () => now);
+      topicStore = new TopicProposalStore(db, () => now);
       runStore = new RunStore(db, () => now);
       await store.setup();
+      await topicStore.setup();
       assignHost();
     },
     async wrongOwnerReceipts() {
@@ -222,5 +233,85 @@ describe('durable canonical action receipts', () => {
       ).toEqual(original.map((message) => message.txnId));
       expect(h.send).toHaveBeenCalledTimes(9);
     });
+  });
+});
+
+it('a delayed topic completion found by GET schedules the original conversation receipt', async () => {
+  await withReceipts('topic-read-completion', async (h) => {
+    const store = h.topics();
+    const input = await topicSubject();
+    let p = await store.create(input, {
+      sessionId: '$original',
+      roomId: '!origin:matrix.test',
+      client: 'channel',
+    });
+    p = (await store.transition(OWNER, p.id, 'claim', p.digest))!;
+    const events = new Map<string, unknown>();
+    const states: unknown[] = [];
+    const reader = {
+      state: async () => states,
+      event: async (_room: string, id: string) => events.get(id),
+      history: async () => [events.get('$operation')],
+    };
+    for (const step of ['anchor', 'body', 'operation', 'snapshot'] as const) {
+      const effect = await topicExpectedEffect(p, step);
+      await store.begin(
+        OWNER,
+        p.id,
+        { digest: p.digest, step, executor },
+        effect,
+      );
+      if (effect.kind !== 'matrix') throw new Error('Expected Matrix');
+      const eventId = `$${step}`;
+      events.set(eventId, {
+        event_id: eventId,
+        room_id: effect.roomId,
+        sender: effect.sender,
+        type: effect.eventType,
+        content: effect.content,
+        ...(effect.stateKey ? { state_key: effect.stateKey } : {}),
+      });
+      const reference = { kind: 'matrix' as const, step, eventId };
+      await store.recordReference(OWNER, p.id, reference);
+      if (step === 'snapshot') states.push(events.get(eventId));
+      else
+        p = await store.verifyStep(
+          OWNER,
+          p.id,
+          step,
+          await verifyTopicReference(p, effect, reference, {
+            reader,
+            blocksync: undefined,
+            rpc: undefined,
+          }),
+        );
+    }
+    const requestHousekeeping = vi.fn(async () => {});
+    Object.assign(h.host, {
+      ready: async () => {},
+      requestHousekeeping,
+    });
+    Object.defineProperty(h.host, 'gateway', {
+      value: {
+        getTopicRoomState: async () => JSON.stringify(states),
+        getTopicEvent: async (_room: string, id: string) =>
+          JSON.stringify(events.get(id)),
+        getTopicHistory: async () => JSON.stringify([events.get('$operation')]),
+      },
+      configurable: true,
+    });
+    const result = JSON.parse(
+      (await call<string>(h.host, 'actionProposal', { userDid: OWNER }, p.id))!,
+    );
+    expect(result.proposal.lifecycle.status).toBe('succeeded');
+    expect(requestHousekeeping).toHaveBeenCalledOnce();
+    await h.drain();
+    expect(h.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        roomId: '!origin:matrix.test',
+        threadId: '$original',
+        body: expect.stringContaining('created'),
+      }),
+    );
   });
 });

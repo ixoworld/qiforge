@@ -1,0 +1,1348 @@
+{
+  "owner": "@alice:example.org",
+  "roomId": "!room:example.org",
+  "topicId": "ixo:topic:019c8e56-9d28-7c9b-b981-7f8298c96c30",
+  "form": {
+    "title": "Workshop claims",
+    "topicStatus": "draft",
+    "contractStatus": "draft",
+    "kindRef": {
+      "source": "standard",
+      "kind": "claims"
+    },
+    "baseRecipe": "claims",
+    "workingMode": "team",
+    "tags": [],
+    "ownerId": "@alice:example.org",
+    "participants": [
+      {
+        "id": "@alice:example.org"
+      },
+      {
+        "id": "@worker:example.org"
+      },
+      {
+        "id": "@evaluator:example.org"
+      }
+    ],
+    "roles": [
+      {
+        "roleId": "worker",
+        "assignees": ["@worker:example.org"]
+      },
+      {
+        "roleId": "evaluator",
+        "assignees": ["@evaluator:example.org"]
+      }
+    ],
+    "claimBinding": {
+      "entityDid": "did:ixo:entity:test",
+      "collectionId": "collection-1"
+    },
+    "effectiveShape": {
+      "version": 1,
+      "shape": {
+        "version": 1,
+        "code": "kind/claims",
+        "axes": [
+          {
+            "code": "contract",
+            "phase": "forming",
+            "required": true,
+            "initialState": "proposed",
+            "states": [
+              {
+                "code": "proposed"
+              },
+              {
+                "code": "effective",
+                "terminal": true
+              }
+            ]
+          },
+          {
+            "code": "decision",
+            "phase": "deciding",
+            "required": true,
+            "initialState": "pending",
+            "states": [
+              {
+                "code": "pending"
+              },
+              {
+                "code": "approved",
+                "terminal": true
+              }
+            ]
+          },
+          {
+            "code": "topic",
+            "phase": "complete",
+            "required": true,
+            "initialState": "open",
+            "states": [
+              {
+                "code": "open"
+              },
+              {
+                "code": "complete",
+                "terminal": true
+              }
+            ]
+          },
+          {
+            "code": "verification",
+            "phase": "verifying",
+            "required": true,
+            "initialState": "pending",
+            "states": [
+              {
+                "code": "pending"
+              },
+              {
+                "code": "verified",
+                "terminal": true
+              }
+            ]
+          },
+          {
+            "code": "work",
+            "phase": "working",
+            "required": true,
+            "initialState": "pending",
+            "states": [
+              {
+                "code": "pending"
+              },
+              {
+                "code": "in-progress"
+              },
+              {
+                "code": "submitted",
+                "terminal": true
+              }
+            ]
+          }
+        ],
+        "transitions": [
+          {
+            "code": "answer-question",
+            "phase": "working",
+            "predecessor": {
+              "axis": "work",
+              "state": "in-progress"
+            },
+            "target": {
+              "axis": "work",
+              "state": "in-progress"
+            },
+            "command": "topic.answer-question",
+            "requiredAbility": "topic/write",
+            "assignedTo": {
+              "kind": "role",
+              "value": "worker"
+            },
+            "gates": [
+              {
+                "kind": "field",
+                "path": "/questions/open",
+                "predicate": "present"
+              }
+            ],
+            "confirmation": "none",
+            "consequence": "shared-state",
+            "evidence": {
+              "kind": "operation",
+              "type": "answer-question"
+            },
+            "presentation": {
+              "reasonCode": "question-awaits-answer",
+              "actionLabelKey": "topic.action.answer-question.label",
+              "bodyKey": "topic.action.answer-question.prompt",
+              "purposeKey": "topic.action.answer-question.purpose",
+              "unlocksKey": "topic.action.answer-question.unlocks",
+              "priority": 900
+            }
+          },
+          {
+            "code": "change-due-date",
+            "phase": "working",
+            "predecessor": {
+              "axis": "work",
+              "state": "in-progress"
+            },
+            "target": {
+              "axis": "work",
+              "state": "in-progress"
+            },
+            "command": "topic.change-due-date",
+            "requiredAbility": "topic/write",
+            "assignedTo": {
+              "kind": "role",
+              "value": "worker"
+            },
+            "gates": [
+              {
+                "kind": "field",
+                "path": "/outcome/target/value",
+                "predicate": "present"
+              }
+            ],
+            "confirmation": "none",
+            "consequence": "shared-state",
+            "evidence": {
+              "kind": "operation",
+              "type": "change-due-date"
+            },
+            "presentation": {
+              "reasonCode": "due-date-review",
+              "actionLabelKey": "topic.action.change-due-date.label",
+              "bodyKey": "topic.action.change-due-date.prompt",
+              "purposeKey": "topic.action.change-due-date.purpose",
+              "unlocksKey": "topic.action.change-due-date.unlocks",
+              "priority": 900
+            }
+          },
+          {
+            "code": "complete-topic",
+            "phase": "complete",
+            "predecessor": {
+              "axis": "topic",
+              "state": "open"
+            },
+            "target": {
+              "axis": "topic",
+              "state": "complete"
+            },
+            "command": "topic.complete",
+            "requiredAbility": "topic/confirm-completion",
+            "assignedTo": {
+              "kind": "role",
+              "value": "completion-authority"
+            },
+            "gates": [
+              {
+                "kind": "axis",
+                "axis": "work",
+                "states": ["submitted"]
+              }
+            ],
+            "confirmation": "authority",
+            "consequence": "shared-state",
+            "evidence": {
+              "kind": "operation",
+              "type": "complete-topic"
+            },
+            "completesTopic": true,
+            "presentation": {
+              "reasonCode": "complete-topic",
+              "actionLabelKey": "topic.action.complete-topic.label",
+              "bodyKey": "topic.action.complete-topic.prompt",
+              "purposeKey": "topic.action.complete-topic.purpose",
+              "unlocksKey": "topic.action.complete-topic.unlocks",
+              "priority": 900
+            }
+          },
+          {
+            "code": "confirm-setup",
+            "phase": "forming",
+            "predecessor": {
+              "axis": "contract",
+              "state": "proposed"
+            },
+            "target": {
+              "axis": "contract",
+              "state": "effective"
+            },
+            "command": "topic.confirm-setup",
+            "requiredAbility": "topic/confirm-setup",
+            "assignedTo": {
+              "kind": "role",
+              "value": "setup-confirmer"
+            },
+            "gates": [
+              {
+                "kind": "field",
+                "path": "/title",
+                "predicate": "present",
+                "requirement": {
+                  "code": "setup.title",
+                  "labelKey": "topic.requirement.title.label",
+                  "promptKey": "topic.requirement.title.prompt",
+                  "purposeKey": "topic.requirement.title.purpose",
+                  "priority": 100,
+                  "focusPath": "/title",
+                  "assignedTo": {
+                    "kind": "role",
+                    "value": "setup-editor"
+                  }
+                }
+              },
+              {
+                "kind": "field",
+                "path": "/intent",
+                "predicate": "present",
+                "requirement": {
+                  "code": "setup.purpose",
+                  "labelKey": "topic.requirement.purpose.label",
+                  "promptKey": "topic.requirement.purpose.prompt",
+                  "purposeKey": "topic.requirement.purpose.purpose",
+                  "priority": 200,
+                  "focusPath": "/intent",
+                  "assignedTo": {
+                    "kind": "role",
+                    "value": "setup-editor"
+                  }
+                }
+              },
+              {
+                "kind": "field",
+                "path": "/outcome/statement",
+                "predicate": "present",
+                "requirement": {
+                  "code": "setup.result",
+                  "labelKey": "topic.requirement.result.label",
+                  "promptKey": "topic.requirement.result.prompt",
+                  "purposeKey": "topic.requirement.result.purpose",
+                  "priority": 300,
+                  "focusPath": "/outcome/statement",
+                  "assignedTo": {
+                    "kind": "role",
+                    "value": "setup-editor"
+                  }
+                }
+              },
+              {
+                "kind": "field",
+                "path": "/claimBinding/entityDid",
+                "predicate": "present",
+                "requirement": {
+                  "code": "setup.claim-entity",
+                  "labelKey": "topic.requirement.claim-entity.label",
+                  "promptKey": "topic.requirement.claim-entity.prompt",
+                  "purposeKey": "topic.requirement.claim-entity.purpose",
+                  "priority": 400,
+                  "focusPath": "/claimBinding/entityDid",
+                  "assignedTo": {
+                    "kind": "role",
+                    "value": "setup-editor"
+                  }
+                }
+              },
+              {
+                "kind": "field",
+                "path": "/claimBinding/collectionId",
+                "predicate": "present",
+                "requirement": {
+                  "code": "setup.claim-collection",
+                  "labelKey": "topic.requirement.claim-collection.label",
+                  "promptKey": "topic.requirement.claim-collection.prompt",
+                  "purposeKey": "topic.requirement.claim-collection.purpose",
+                  "priority": 410,
+                  "focusPath": "/claimBinding/collectionId",
+                  "assignedTo": {
+                    "kind": "role",
+                    "value": "setup-editor"
+                  }
+                }
+              },
+              {
+                "kind": "field",
+                "path": "/ownerId",
+                "predicate": "present",
+                "requirement": {
+                  "code": "setup.owner",
+                  "labelKey": "topic.requirement.owner.label",
+                  "promptKey": "topic.requirement.owner.prompt",
+                  "purposeKey": "topic.requirement.owner.purpose",
+                  "priority": 400,
+                  "focusPath": "/ownerId",
+                  "assignedTo": {
+                    "kind": "role",
+                    "value": "setup-editor"
+                  }
+                }
+              },
+              {
+                "kind": "field",
+                "path": "/completion/acceptanceAuthorityIds",
+                "predicate": "present",
+                "requirement": {
+                  "code": "setup.acceptor",
+                  "labelKey": "topic.requirement.acceptor.label",
+                  "promptKey": "topic.requirement.acceptor.prompt",
+                  "purposeKey": "topic.requirement.acceptor.purpose",
+                  "priority": 450,
+                  "focusPath": "/completion/acceptanceAuthorityIds",
+                  "assignedTo": {
+                    "kind": "role",
+                    "value": "setup-editor"
+                  }
+                }
+              }
+            ],
+            "confirmation": "authority",
+            "consequence": "shared-state",
+            "evidence": {
+              "kind": "operation",
+              "type": "confirm-setup"
+            },
+            "presentation": {
+              "reasonCode": "setup-awaits-confirmation",
+              "actionLabelKey": "topic.action.confirm-setup.label",
+              "bodyKey": "topic.setup.confirm.body",
+              "purposeKey": "topic.setup.confirm.purpose",
+              "unlocksKey": "topic.setup.confirm.unlocks",
+              "priority": 700
+            }
+          },
+          {
+            "code": "edit-setup",
+            "phase": "forming",
+            "predecessor": {
+              "axis": "contract",
+              "state": "proposed"
+            },
+            "target": {
+              "axis": "contract",
+              "state": "proposed"
+            },
+            "command": "topic.edit-setup",
+            "requiredAbility": "topic/write",
+            "assignedTo": {
+              "kind": "role",
+              "value": "setup-editor"
+            },
+            "gates": [],
+            "confirmation": "none",
+            "consequence": "shared-state",
+            "evidence": {
+              "kind": "operation",
+              "type": "update-contract"
+            },
+            "presentation": {
+              "reasonCode": "setup-needs-input",
+              "actionLabelKey": "topic.action.edit-setup.label",
+              "bodyKey": "topic.setup.edit.body",
+              "purposeKey": "topic.setup.edit.purpose",
+              "unlocksKey": "topic.setup.edit.unlocks",
+              "priority": 800
+            }
+          },
+          {
+            "code": "raise-dispute",
+            "phase": "working",
+            "predecessor": {
+              "axis": "topic",
+              "state": "open"
+            },
+            "target": {
+              "axis": "topic",
+              "state": "open"
+            },
+            "command": "topic.raise-dispute",
+            "requiredAbility": "topic/raise-dispute",
+            "assignedTo": {
+              "kind": "role",
+              "value": "participant"
+            },
+            "gates": [],
+            "confirmation": "none",
+            "consequence": "shared-state",
+            "evidence": {
+              "kind": "operation",
+              "type": "raise-dispute"
+            },
+            "presentation": {
+              "reasonCode": "dispute-available",
+              "actionLabelKey": "topic.action.raise-dispute.label",
+              "bodyKey": "topic.action.raise-dispute.prompt",
+              "purposeKey": "topic.action.raise-dispute.purpose",
+              "unlocksKey": "topic.action.raise-dispute.unlocks",
+              "priority": 900
+            }
+          },
+          {
+            "code": "record-decision",
+            "phase": "deciding",
+            "predecessor": {
+              "axis": "decision",
+              "state": "pending"
+            },
+            "target": {
+              "axis": "decision",
+              "state": "approved"
+            },
+            "command": "topic.record-decision",
+            "requiredAbility": "claim/decide",
+            "assignedTo": {
+              "kind": "role",
+              "value": "decision-authority"
+            },
+            "gates": [
+              {
+                "kind": "axis",
+                "axis": "verification",
+                "states": ["verified"]
+              }
+            ],
+            "confirmation": "authority",
+            "consequence": "shared-state",
+            "evidence": {
+              "kind": "record",
+              "type": "ixo.decision",
+              "finality": "accepted",
+              "status": "approved"
+            },
+            "presentation": {
+              "reasonCode": "decision-required",
+              "actionLabelKey": "topic.action.record-decision.label",
+              "bodyKey": "topic.action.record-decision.prompt",
+              "purposeKey": "topic.action.record-decision.purpose",
+              "unlocksKey": "topic.action.record-decision.unlocks",
+              "priority": 900
+            }
+          },
+          {
+            "code": "record-flow-run",
+            "phase": "working",
+            "predecessor": {
+              "axis": "work",
+              "state": "in-progress"
+            },
+            "target": {
+              "axis": "work",
+              "state": "in-progress"
+            },
+            "command": "topic.record-flow-run",
+            "requiredAbility": "topic/record-action",
+            "assignedTo": {
+              "kind": "role",
+              "value": "worker"
+            },
+            "gates": [
+              {
+                "kind": "binding",
+                "type": "flow"
+              }
+            ],
+            "confirmation": "none",
+            "consequence": "shared-state",
+            "evidence": {
+              "kind": "operation",
+              "type": "record-action-receipt"
+            },
+            "handoff": {
+              "kind": "flow",
+              "binding": "action"
+            },
+            "presentation": {
+              "reasonCode": "flow-run-result",
+              "actionLabelKey": "topic.action.record-flow-run.label",
+              "bodyKey": "topic.action.record-flow-run.prompt",
+              "purposeKey": "topic.action.record-flow-run.purpose",
+              "unlocksKey": "topic.action.record-flow-run.unlocks",
+              "priority": 960
+            }
+          },
+          {
+            "code": "record-verification",
+            "phase": "verifying",
+            "predecessor": {
+              "axis": "verification",
+              "state": "pending"
+            },
+            "target": {
+              "axis": "verification",
+              "state": "verified"
+            },
+            "command": "topic.record-verification",
+            "requiredAbility": "claim/evaluate",
+            "assignedTo": {
+              "kind": "role",
+              "value": "evaluator"
+            },
+            "gates": [
+              {
+                "kind": "axis",
+                "axis": "work",
+                "states": ["submitted"]
+              }
+            ],
+            "confirmation": "none",
+            "consequence": "shared-state",
+            "evidence": {
+              "kind": "record",
+              "type": "ixo.evaluation",
+              "finality": "accepted",
+              "status": "verified"
+            },
+            "handoff": {
+              "kind": "flow",
+              "binding": "evaluation"
+            },
+            "presentation": {
+              "reasonCode": "verification-required",
+              "actionLabelKey": "topic.action.record-verification.label",
+              "bodyKey": "topic.action.record-verification.prompt",
+              "purposeKey": "topic.action.record-verification.purpose",
+              "unlocksKey": "topic.action.record-verification.unlocks",
+              "priority": 900
+            }
+          },
+          {
+            "code": "resolve-dispute",
+            "phase": "working",
+            "predecessor": {
+              "axis": "topic",
+              "state": "open"
+            },
+            "target": {
+              "axis": "topic",
+              "state": "open"
+            },
+            "command": "topic.resolve-dispute",
+            "requiredAbility": "topic/resolve-dispute",
+            "assignedTo": {
+              "kind": "role",
+              "value": "dispute-resolver"
+            },
+            "gates": [
+              {
+                "kind": "condition",
+                "states": ["disputed"]
+              }
+            ],
+            "confirmation": "authority",
+            "consequence": "shared-state",
+            "evidence": {
+              "kind": "operation",
+              "type": "resolve-dispute"
+            },
+            "presentation": {
+              "reasonCode": "dispute-awaits-resolution",
+              "actionLabelKey": "topic.action.resolve-dispute.label",
+              "bodyKey": "topic.action.resolve-dispute.prompt",
+              "purposeKey": "topic.action.resolve-dispute.purpose",
+              "unlocksKey": "topic.action.resolve-dispute.unlocks",
+              "priority": 900
+            }
+          },
+          {
+            "code": "run-flow",
+            "phase": "working",
+            "predecessor": {
+              "axis": "work",
+              "state": "in-progress"
+            },
+            "target": {
+              "axis": "work",
+              "state": "in-progress"
+            },
+            "command": "topic.request-action",
+            "requiredAbility": "topic/request-action",
+            "assignedTo": {
+              "kind": "role",
+              "value": "worker"
+            },
+            "gates": [
+              {
+                "kind": "binding",
+                "type": "flow"
+              }
+            ],
+            "confirmation": "viewer",
+            "consequence": "external-effect",
+            "evidence": {
+              "kind": "operation",
+              "type": "request-action"
+            },
+            "handoff": {
+              "kind": "flow",
+              "binding": "action"
+            },
+            "presentation": {
+              "reasonCode": "flow-run-available",
+              "actionLabelKey": "topic.action.run-flow.label",
+              "bodyKey": "topic.action.run-flow.prompt",
+              "purposeKey": "topic.action.run-flow.purpose",
+              "unlocksKey": "topic.action.run-flow.unlocks",
+              "priority": 950
+            }
+          },
+          {
+            "code": "start-work",
+            "phase": "working",
+            "predecessor": {
+              "axis": "work",
+              "state": "pending"
+            },
+            "target": {
+              "axis": "work",
+              "state": "in-progress"
+            },
+            "command": "topic.start-work",
+            "requiredAbility": "topic/write",
+            "assignedTo": {
+              "kind": "role",
+              "value": "worker"
+            },
+            "gates": [
+              {
+                "kind": "axis",
+                "axis": "contract",
+                "states": ["effective"]
+              }
+            ],
+            "confirmation": "none",
+            "consequence": "shared-state",
+            "evidence": {
+              "kind": "operation",
+              "type": "change-progress"
+            },
+            "presentation": {
+              "reasonCode": "start-work",
+              "actionLabelKey": "topic.action.start-work.label",
+              "bodyKey": "topic.action.start-work.prompt",
+              "purposeKey": "topic.action.start-work.purpose",
+              "unlocksKey": "topic.action.start-work.unlocks",
+              "priority": 900
+            }
+          },
+          {
+            "code": "submit-work",
+            "phase": "working",
+            "predecessor": {
+              "axis": "work",
+              "state": "in-progress"
+            },
+            "target": {
+              "axis": "work",
+              "state": "submitted"
+            },
+            "command": "topic.record-outcome",
+            "requiredAbility": "topic/record-outcome",
+            "assignedTo": {
+              "kind": "role",
+              "value": "worker"
+            },
+            "gates": [],
+            "confirmation": "none",
+            "consequence": "shared-state",
+            "evidence": {
+              "kind": "record",
+              "type": "ixo.topic.work-submission",
+              "finality": "accepted"
+            },
+            "presentation": {
+              "reasonCode": "submit-work",
+              "actionLabelKey": "topic.action.submit-work.label",
+              "bodyKey": "topic.action.submit-work.prompt",
+              "purposeKey": "topic.action.submit-work.purpose",
+              "unlocksKey": "topic.action.submit-work.unlocks",
+              "priority": 900
+            }
+          },
+          {
+            "code": "unblock-topic",
+            "phase": "working",
+            "predecessor": {
+              "axis": "topic",
+              "state": "open"
+            },
+            "target": {
+              "axis": "topic",
+              "state": "open"
+            },
+            "command": "topic.unblock",
+            "requiredAbility": "topic/unblock",
+            "assignedTo": {
+              "kind": "role",
+              "value": "block-resolver"
+            },
+            "gates": [
+              {
+                "kind": "condition",
+                "states": ["blocked"]
+              }
+            ],
+            "confirmation": "none",
+            "consequence": "shared-state",
+            "evidence": {
+              "kind": "operation",
+              "type": "unblock-topic"
+            },
+            "presentation": {
+              "reasonCode": "topic-blocked",
+              "actionLabelKey": "topic.action.unblock-topic.label",
+              "bodyKey": "topic.action.unblock-topic.prompt",
+              "purposeKey": "topic.action.unblock-topic.purpose",
+              "unlocksKey": "topic.action.unblock-topic.unlocks",
+              "priority": 900
+            }
+          }
+        ],
+        "progressRules": [
+          {
+            "code": "blocked",
+            "condition": "blocked",
+            "priority": 600,
+            "source": {
+              "kind": "topic",
+              "value": "blocked"
+            },
+            "requiresTarget": true
+          },
+          {
+            "code": "disputed",
+            "condition": "disputed",
+            "priority": 700,
+            "source": {
+              "kind": "record",
+              "value": "ixo.topic.dispute"
+            }
+          },
+          {
+            "code": "failed",
+            "condition": "failed",
+            "priority": 650,
+            "source": {
+              "kind": "receipt",
+              "value": "failed"
+            }
+          },
+          {
+            "code": "needs-confirmation",
+            "condition": "needs-confirmation",
+            "priority": 350,
+            "source": {
+              "kind": "axis",
+              "value": "contract"
+            },
+            "states": ["proposed"]
+          },
+          {
+            "code": "needs-input",
+            "condition": "needs-input",
+            "priority": 400,
+            "source": {
+              "kind": "record",
+              "value": "ixo.topic.question"
+            }
+          },
+          {
+            "code": "waiting",
+            "condition": "waiting",
+            "priority": 500,
+            "source": {
+              "kind": "topic",
+              "value": "waiting"
+            },
+            "requiresTarget": true
+          }
+        ],
+        "inferredRecordPolicy": {
+          "autoAccept": [
+            "ixo.topic.classification",
+            "ixo.topic.fact",
+            "ixo.topic.summary"
+          ],
+          "neverAutoAccept": [
+            "ixo.claim",
+            "ixo.evaluation",
+            "ixo.settlement",
+            "ixo.topic.action",
+            "ixo.topic.authority",
+            "ixo.topic.contract",
+            "ixo.topic.outcome"
+          ]
+        }
+      },
+      "sources": [
+        {
+          "kind": "base-recipe",
+          "id": "https://topic-protocol.ixo.world/base-recipes/claims",
+          "version": "1.0.0-rc.7",
+          "digest": "sha256:647dc64cfdbea39692b6b116a1b4a25d7029e91b46b4180ef91ab9d77380e52f"
+        },
+        {
+          "kind": "kind",
+          "id": "https://topic-protocol.ixo.world/kinds/claims",
+          "version": "1.0.0-rc.7",
+          "digest": "sha256:1fc2ec2616aeab4fb9d533a4ab9f8075dc25b5df729b30e3689876343aaad6c8"
+        }
+      ],
+      "digest": "sha256:35770406f687aeab195b81c6df2f583c592e96da8e460a6e8ffb03033c02beee"
+    }
+  },
+  "bodyHash": "sha256:fc8dc426bf89f6b5849d6df861337f04b4b7a1f716a0be454b5623798392cd55",
+  "root": {
+    "event_id": "$root",
+    "type": "m.room.message",
+    "room_id": "!room:example.org",
+    "sender": "@alice:example.org",
+    "origin_server_ts": 1792281600000,
+    "content": {
+      "msgtype": "m.notice",
+      "body": "Topic: Workshop claims",
+      "ixo.topic": {
+        "version": 4,
+        "id": "ixo:topic:019c8e56-9d28-7c9b-b981-7f8298c96c30",
+        "title": "Workshop claims",
+        "kind": "claims",
+        "baseRecipe": "claims",
+        "shapeDigest": "sha256:35770406f687aeab195b81c6df2f583c592e96da8e460a6e8ffb03033c02beee",
+        "status": "draft",
+        "createdBy": "@alice:example.org",
+        "createdAt": "2026-10-18T00:00:00.000Z"
+      }
+    }
+  },
+  "body": {
+    "event_id": "$body",
+    "type": "ixo.topic.contract.body",
+    "room_id": "!room:example.org",
+    "sender": "@alice:example.org",
+    "origin_server_ts": 1792281600000,
+    "content": {
+      "body": "Topic contract",
+      "mediaType": "application/vnd.ixo.topic-contract+json",
+      "m.relates_to": {
+        "rel_type": "m.thread",
+        "event_id": "$root"
+      },
+      "contract": {
+        "version": 4,
+        "revision": "ixo:topic-operation:019c8e56-9d28-7c9b-b981-7f8298c96c30",
+        "authoredBy": "@alice:example.org",
+        "authoredAt": "2026-10-18T00:00:00.000Z",
+        "kindRef": {
+          "source": "standard",
+          "kind": "claims"
+        },
+        "workingMode": "team",
+        "baseRecipe": "claims",
+        "claimBinding": {
+          "entityDid": "did:ixo:entity:test",
+          "collectionId": "collection-1"
+        },
+        "tags": [],
+        "ownerId": "@alice:example.org",
+        "participants": [
+          {
+            "id": "@alice:example.org"
+          },
+          {
+            "id": "@worker:example.org"
+          },
+          {
+            "id": "@evaluator:example.org"
+          }
+        ],
+        "roles": [
+          {
+            "roleId": "worker",
+            "assignees": ["@worker:example.org"]
+          },
+          {
+            "roleId": "evaluator",
+            "assignees": ["@evaluator:example.org"]
+          }
+        ],
+        "shapeSources": [
+          {
+            "kind": "base-recipe",
+            "id": "https://topic-protocol.ixo.world/base-recipes/claims",
+            "version": "1.0.0-rc.7",
+            "digest": "sha256:647dc64cfdbea39692b6b116a1b4a25d7029e91b46b4180ef91ab9d77380e52f"
+          },
+          {
+            "kind": "kind",
+            "id": "https://topic-protocol.ixo.world/kinds/claims",
+            "version": "1.0.0-rc.7",
+            "digest": "sha256:1fc2ec2616aeab4fb9d533a4ab9f8075dc25b5df729b30e3689876343aaad6c8"
+          }
+        ],
+        "shapeDigest": "sha256:35770406f687aeab195b81c6df2f583c592e96da8e460a6e8ffb03033c02beee"
+      }
+    }
+  },
+  "operation": {
+    "event_id": "$operation",
+    "type": "ixo.topic.operation",
+    "room_id": "!room:example.org",
+    "sender": "@alice:example.org",
+    "origin_server_ts": 1792281600000,
+    "content": {
+      "body": "Topic created: “Workshop claims”",
+      "operation": {
+        "version": 2,
+        "operationId": "ixo:topic-operation:019c8e56-9d28-7c9b-b981-7f8298c96c30",
+        "topicId": "ixo:topic:019c8e56-9d28-7c9b-b981-7f8298c96c30",
+        "type": "propose-contract",
+        "previousRevision": "$root",
+        "actor": "@alice:example.org",
+        "createdAt": "2026-10-18T00:00:00.000Z",
+        "payload": {
+          "previousRevision": "$root",
+          "topicPreviousRevision": "$root",
+          "nextRevision": "ixo:topic-operation:019c8e56-9d28-7c9b-b981-7f8298c96c30",
+          "contractRef": {
+            "revision": "ixo:topic-operation:019c8e56-9d28-7c9b-b981-7f8298c96c30",
+            "bodyHash": "sha256:fc8dc426bf89f6b5849d6df861337f04b4b7a1f716a0be454b5623798392cd55",
+            "bodyRef": {
+              "provider": "matrix",
+              "roomId": "!room:example.org",
+              "eventId": "$body",
+              "eventType": "ixo.topic.contract.body",
+              "contentHash": "sha256:fc8dc426bf89f6b5849d6df861337f04b4b7a1f716a0be454b5623798392cd55",
+              "mediaType": "application/vnd.ixo.topic-contract+json",
+              "encryption": "none"
+            }
+          },
+          "contract": {
+            "revision": "ixo:topic-operation:019c8e56-9d28-7c9b-b981-7f8298c96c30",
+            "bodyHash": "fc8dc426bf89f6b5849d6df861337f04b4b7a1f716a0be454b5623798392cd55",
+            "bodyRef": {
+              "provider": "matrix",
+              "roomId": "!room:example.org",
+              "eventId": "$body",
+              "eventType": "ixo.topic.contract.body",
+              "contentHash": "sha256:fc8dc426bf89f6b5849d6df861337f04b4b7a1f716a0be454b5623798392cd55",
+              "mediaType": "application/vnd.ixo.topic-contract+json",
+              "encryption": "none"
+            }
+          },
+          "bodyHash": "sha256:fc8dc426bf89f6b5849d6df861337f04b4b7a1f716a0be454b5623798392cd55",
+          "changedPaths": [
+            "/title",
+            "/topicStatus",
+            "/kindRef",
+            "/workingMode",
+            "/baseRecipe",
+            "/claimBinding",
+            "/tags",
+            "/ownerId",
+            "/participants",
+            "/roles",
+            "/shapeSources",
+            "/shapeDigest"
+          ],
+          "projection": {
+            "title": "Workshop claims",
+            "status": "draft",
+            "kindRef": {
+              "source": "standard",
+              "kind": "claims"
+            },
+            "tags": [],
+            "contractStatus": "draft"
+          }
+        }
+      },
+      "m.relates_to": {
+        "rel_type": "m.reference",
+        "event_id": "$root"
+      }
+    }
+  },
+  "snapshot": {
+    "event_id": "$state",
+    "type": "ixo.topic.contract",
+    "room_id": "!room:example.org",
+    "sender": "@alice:example.org",
+    "origin_server_ts": 1792281600000,
+    "content": {
+      "version": 4,
+      "profile": "qi.topic-contract-state/v4",
+      "schema": "https://topic-protocol.ixo.world/schemas/topic-contract-state.schema.json",
+      "topicId": "ixo:topic:019c8e56-9d28-7c9b-b981-7f8298c96c30",
+      "anchor": {
+        "mode": "native",
+        "roomId": "!room:example.org",
+        "rootEventId": "$root",
+        "manifestSource": "root-event"
+      },
+      "manifest": {
+        "version": 4,
+        "id": "ixo:topic:019c8e56-9d28-7c9b-b981-7f8298c96c30",
+        "title": "Workshop claims",
+        "kind": "claims",
+        "status": "draft",
+        "createdBy": "@alice:example.org",
+        "createdAt": "2026-10-18T00:00:00.000Z",
+        "baseRecipe": "claims",
+        "shapeDigest": "sha256:35770406f687aeab195b81c6df2f583c592e96da8e460a6e8ffb03033c02beee"
+      },
+      "contracts": {
+        "proposed": {
+          "revision": "ixo:topic-operation:019c8e56-9d28-7c9b-b981-7f8298c96c30",
+          "bodyHash": "sha256:fc8dc426bf89f6b5849d6df861337f04b4b7a1f716a0be454b5623798392cd55",
+          "bodyRef": {
+            "provider": "matrix",
+            "roomId": "!room:example.org",
+            "eventId": "$body",
+            "eventType": "ixo.topic.contract.body",
+            "contentHash": "sha256:fc8dc426bf89f6b5849d6df861337f04b4b7a1f716a0be454b5623798392cd55",
+            "mediaType": "application/vnd.ixo.topic-contract+json",
+            "encryption": "none"
+          }
+        }
+      },
+      "shape": {
+        "digest": "sha256:35770406f687aeab195b81c6df2f583c592e96da8e460a6e8ffb03033c02beee",
+        "sources": [
+          {
+            "kind": "base-recipe",
+            "id": "https://topic-protocol.ixo.world/base-recipes/claims",
+            "version": "1.0.0-rc.7",
+            "digest": "sha256:647dc64cfdbea39692b6b116a1b4a25d7029e91b46b4180ef91ab9d77380e52f"
+          },
+          {
+            "kind": "kind",
+            "id": "https://topic-protocol.ixo.world/kinds/claims",
+            "version": "1.0.0-rc.7",
+            "digest": "sha256:1fc2ec2616aeab4fb9d533a4ab9f8075dc25b5df729b30e3689876343aaad6c8"
+          }
+        ]
+      },
+      "progress": {
+        "version": 2,
+        "topicId": "ixo:topic:019c8e56-9d28-7c9b-b981-7f8298c96c30",
+        "topicRevision": "ixo:topic-operation:019c8e56-9d28-7c9b-b981-7f8298c96c30",
+        "contractRevision": "ixo:topic-operation:019c8e56-9d28-7c9b-b981-7f8298c96c30",
+        "shapeDigest": "sha256:35770406f687aeab195b81c6df2f583c592e96da8e460a6e8ffb03033c02beee",
+        "phase": "forming",
+        "condition": "needs-input",
+        "reasonCode": "obligation:setup.purpose",
+        "axisStates": {
+          "contract": "proposed",
+          "decision": "pending",
+          "topic": "open",
+          "verification": "pending",
+          "work": "pending"
+        },
+        "stateTags": [
+          {
+            "code": "phase:forming",
+            "source": {
+              "axis": "contract",
+              "state": "proposed"
+            },
+            "priority": 100,
+            "tone": "neutral",
+            "provenance": [
+              "ixo:topic-operation:019c8e56-9d28-7c9b-b981-7f8298c96c30"
+            ]
+          },
+          {
+            "code": "condition:needs-input",
+            "source": {
+              "progressRule": "condition:needs-input"
+            },
+            "priority": 500,
+            "tone": "attention",
+            "provenance": [
+              "ixo:topic-operation:019c8e56-9d28-7c9b-b981-7f8298c96c30"
+            ]
+          }
+        ],
+        "candidates": [
+          {
+            "transition": {
+              "code": "edit-setup",
+              "phase": "forming",
+              "predecessor": {
+                "axis": "contract",
+                "state": "proposed"
+              },
+              "target": {
+                "axis": "contract",
+                "state": "proposed"
+              },
+              "command": "topic.edit-setup",
+              "requiredAbility": "topic/write",
+              "assignedTo": {
+                "kind": "role",
+                "value": "setup-editor"
+              },
+              "gates": [],
+              "confirmation": "none",
+              "consequence": "shared-state",
+              "evidence": {
+                "kind": "operation",
+                "type": "update-contract"
+              },
+              "presentation": {
+                "reasonCode": "setup-needs-input",
+                "actionLabelKey": "topic.action.edit-setup.label",
+                "bodyKey": "topic.setup.edit.body",
+                "purposeKey": "topic.setup.edit.purpose",
+                "unlocksKey": "topic.setup.edit.unlocks",
+                "priority": 800
+              }
+            },
+            "assignedActors": [],
+            "gateStatus": []
+          }
+        ],
+        "obligations": [
+          {
+            "id": "requirement:setup.purpose",
+            "code": "setup.purpose",
+            "kind": "input",
+            "phase": "forming",
+            "status": "open",
+            "priority": 200,
+            "blocking": true,
+            "responsibility": {
+              "kind": "role",
+              "value": "setup-editor"
+            },
+            "assignedActors": [],
+            "requiredAbility": "topic/write",
+            "consequence": "shared-state",
+            "focusPath": "/intent",
+            "presentation": {
+              "labelKey": "topic.requirement.purpose.label",
+              "promptKey": "topic.requirement.purpose.prompt",
+              "purposeKey": "topic.requirement.purpose.purpose",
+              "unlocksKey": "topic.requirement.setup.unlocks"
+            },
+            "provenance": [
+              "ixo:topic-operation:019c8e56-9d28-7c9b-b981-7f8298c96c30"
+            ]
+          },
+          {
+            "id": "requirement:setup.result",
+            "code": "setup.result",
+            "kind": "input",
+            "phase": "forming",
+            "status": "open",
+            "priority": 300,
+            "blocking": true,
+            "responsibility": {
+              "kind": "role",
+              "value": "setup-editor"
+            },
+            "assignedActors": [],
+            "requiredAbility": "topic/write",
+            "consequence": "shared-state",
+            "focusPath": "/outcome/statement",
+            "presentation": {
+              "labelKey": "topic.requirement.result.label",
+              "promptKey": "topic.requirement.result.prompt",
+              "purposeKey": "topic.requirement.result.purpose",
+              "unlocksKey": "topic.requirement.setup.unlocks"
+            },
+            "provenance": [
+              "ixo:topic-operation:019c8e56-9d28-7c9b-b981-7f8298c96c30"
+            ]
+          },
+          {
+            "id": "requirement:setup.acceptor",
+            "code": "setup.acceptor",
+            "kind": "input",
+            "phase": "forming",
+            "status": "open",
+            "priority": 450,
+            "blocking": true,
+            "responsibility": {
+              "kind": "role",
+              "value": "setup-editor"
+            },
+            "assignedActors": [],
+            "requiredAbility": "topic/write",
+            "consequence": "shared-state",
+            "focusPath": "/completion/acceptanceAuthorityIds",
+            "presentation": {
+              "labelKey": "topic.requirement.acceptor.label",
+              "promptKey": "topic.requirement.acceptor.prompt",
+              "purposeKey": "topic.requirement.acceptor.purpose",
+              "unlocksKey": "topic.requirement.setup.unlocks"
+            },
+            "provenance": [
+              "ixo:topic-operation:019c8e56-9d28-7c9b-b981-7f8298c96c30"
+            ]
+          },
+          {
+            "id": "transition:edit-setup",
+            "code": "edit-setup",
+            "kind": "transition",
+            "phase": "forming",
+            "status": "ready",
+            "priority": 800,
+            "blocking": true,
+            "responsibility": {
+              "kind": "role",
+              "value": "setup-editor"
+            },
+            "assignedActors": [],
+            "requiredAbility": "topic/write",
+            "consequence": "shared-state",
+            "transitionCode": "edit-setup",
+            "command": "topic.edit-setup",
+            "presentation": {
+              "labelKey": "topic.action.edit-setup.label",
+              "promptKey": "topic.setup.edit.body",
+              "purposeKey": "topic.setup.edit.purpose",
+              "unlocksKey": "topic.setup.edit.unlocks"
+            },
+            "provenance": [
+              "ixo:topic-operation:019c8e56-9d28-7c9b-b981-7f8298c96c30"
+            ]
+          }
+        ],
+        "primaryObligationId": "requirement:setup.purpose",
+        "evaluatedAt": {
+          "at": "2026-10-18T00:00:00.000Z",
+          "source": "server",
+          "trusted": true
+        },
+        "provenance": [
+          "ixo:topic-operation:019c8e56-9d28-7c9b-b981-7f8298c96c30"
+        ]
+      },
+      "projection": {
+        "revision": "ixo:topic-operation:019c8e56-9d28-7c9b-b981-7f8298c96c30",
+        "contractRevision": "ixo:topic-operation:019c8e56-9d28-7c9b-b981-7f8298c96c30",
+        "title": "Workshop claims",
+        "status": "draft",
+        "kindRef": {
+          "source": "standard",
+          "kind": "claims"
+        },
+        "contractStatus": "draft",
+        "ownerId": "@alice:example.org",
+        "attachmentCount": 0,
+        "operationCount": 1,
+        "claimBinding": {
+          "entityDid": "did:ixo:entity:test",
+          "collectionId": "collection-1"
+        },
+        "digest": "277405c51f74cb4150d2c5f16ae0677e378622c160c65044aa8a57734a866605",
+        "setupStatus": "draft"
+      },
+      "policy": {
+        "confidentialityBoundary": "matrix-room",
+        "e2eeRequired": false,
+        "attachmentBytesRequireSeparateGrant": true
+      },
+      "bindings": {
+        "context": [],
+        "flows": []
+      },
+      "extensions": {
+        "qi.search.tags": []
+      },
+      "provenance": {
+        "basis": "explicit",
+        "acceptance": "proposed",
+        "sourceEventIds": ["$root"],
+        "createdBy": "@alice:example.org",
+        "createdAt": "2026-10-18T00:00:00.000Z"
+      }
+    },
+    "state_key": "ixo:topic:019c8e56-9d28-7c9b-b981-7f8298c96c30"
+  }
+}

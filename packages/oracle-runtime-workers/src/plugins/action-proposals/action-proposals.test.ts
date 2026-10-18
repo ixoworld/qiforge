@@ -1,3 +1,4 @@
+import type { TopicActionProposal } from '@ixo/ixo-transaction/topic-proposals';
 import { HumanMessage } from '@langchain/core/messages';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -236,4 +237,99 @@ describe('validated conversational actions', () => {
     expect(parseReplyPlan(JSON.stringify(plan))).toEqual(plan);
     expect(planText(plan)).toContain(result.action.url);
   });
+});
+
+describe('conversational topic capability', () => {
+  const candidate = {
+    action: 'create_topic',
+    network: 'testnet',
+    roomId: '!room:test',
+    title: 'Harvest',
+    participants: [OWNER],
+    roles: [],
+    tags: [],
+  };
+  const evidence = `Create topic Harvest in !room:test with ${OWNER} on testnet`;
+  it('stays disabled when transfers alone are enabled', async () => {
+    const { ctx, evaluate } = context(evidence);
+    const prepareTopic = vi.fn();
+    ctx.actionProposals!.prepareTopic = prepareTopic;
+    expect((await prepareAction(candidate, ctx)).status).toBe(
+      'clarification_required',
+    );
+    expect(evaluate).not.toHaveBeenCalled();
+    expect(prepareTopic).not.toHaveBeenCalled();
+  });
+  it('clarifies provider failure without preparing any topic', async () => {
+    const { ctx } = context(evidence);
+    ctx.config.ACTION_TOPIC_PROPOSALS_ENABLED = 'true';
+    const prepareTopic = vi.fn();
+    ctx.actionProposals!.prepareTopic = prepareTopic;
+    ctx.decisions.evaluate = vi.fn(async () => {
+      throw new Error('Provider timeout');
+    });
+    expect((await prepareAction(candidate, ctx)).status).toBe(
+      'clarification_required',
+    );
+    expect(prepareTopic).not.toHaveBeenCalled();
+  });
+  it('requires explicit topic title and identities in conversation evidence', async () => {
+    const { ctx } = context('Make something for me');
+    ctx.config.ACTION_TOPIC_PROPOSALS_ENABLED = 'true';
+    const prepareTopic = vi.fn();
+    ctx.actionProposals!.prepareTopic = prepareTopic;
+    expect((await prepareAction(candidate, ctx)).status).toBe(
+      'clarification_required',
+    );
+    expect(prepareTopic).not.toHaveBeenCalled();
+  });
+});
+
+it('resolves explicit this-chat and me references from authenticated context only', async () => {
+  const { ctx, evaluate } = context(
+    'Create discussion Harvest in this chat for me on testnet.',
+  );
+  ctx.config.ACTION_TOPIC_PROPOSALS_ENABLED = 'true';
+  ctx.session.roomId = '!room:test';
+  const { subject } = await import('../../action-proposals/fixtures/topic');
+  const { digestTopicProposal } =
+    await import('@ixo/ixo-transaction/topic-proposals');
+  const prepareTopic = vi.fn(async (): Promise<TopicActionProposal> => {
+    const s = await subject();
+    return {
+      ...s,
+      digest: await digestTopicProposal(s),
+      lifecycle: {
+        status: 'prepared',
+        steps: [
+          { step: 'anchor', status: 'pending' },
+          { step: 'body', status: 'pending' },
+          { step: 'operation', status: 'pending' },
+          { step: 'snapshot', status: 'pending' },
+        ],
+      },
+    };
+  });
+  ctx.actionProposals!.prepareTopic = prepareTopic;
+  const args = {
+    action: 'create_topic',
+    network: 'testnet',
+    roomId: '!room:test',
+    title: 'Harvest',
+    participants: [OWNER],
+    roles: [],
+    tags: [],
+  };
+  expect((await prepareAction(args, ctx)).status).toBe('prepared');
+  expect(prepareTopic).toHaveBeenCalledOnce();
+  expect(evaluate).toHaveBeenCalledWith(
+    expect.objectContaining({ name: 'companion.topic-action-intent' }),
+    expect.objectContaining({
+      contextBindings: { roomId: '!room:test', ownerDid: OWNER },
+    }),
+  );
+  expect(
+    (await prepareAction({ ...args, roomId: '!other:test' }, ctx)).status,
+  ).toBe('clarification_required');
+  expect(prepareTopic).toHaveBeenCalledOnce();
 });

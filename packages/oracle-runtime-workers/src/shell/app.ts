@@ -1,8 +1,13 @@
 import {
+  ActionProposalWireRpcSchema,
+  TopicReceiptReferencesSchema,
+  BeginTopicStepSchema,
+  BeginTopicStepResultSchema,
+} from '@ixo/ixo-transaction/topic-proposals';
+import {
   ActionProposalClaimSchema,
   ActionProposalIdSchema,
   ActionProposalReconcileSchema,
-  ActionProposalRpcSchema,
 } from '@ixo/ixo-transaction/action-proposals';
 import { ActionProposalConflict } from '../action-proposals/store';
 import {
@@ -563,7 +568,7 @@ export function createShell(
       parsed.data,
     );
     if (!proposal) return c.json({ error: 'Proposal not found' }, 404);
-    const result = ActionProposalRpcSchema.parse(JSON.parse(proposal));
+    const result = ActionProposalWireRpcSchema.parse(JSON.parse(proposal));
     return result.ok
       ? c.json({ proposal: result.proposal })
       : c.json({ error: result.error }, 409);
@@ -579,7 +584,10 @@ export function createShell(
         const body = await c.req.json().catch(() => null);
         const parsed = (
           operation === 'reconcile'
-            ? ActionProposalReconcileSchema
+            ? z.union([
+                ActionProposalReconcileSchema,
+                TopicReceiptReferencesSchema,
+              ])
             : ActionProposalClaimSchema
         ).safeParse(body);
         if (!id.success || !parsed.success)
@@ -588,10 +596,15 @@ export function createShell(
         try {
           const command =
             operation === 'reconcile'
-              ? {
-                  kind: operation,
-                  ...ActionProposalReconcileSchema.parse(parsed.data),
-                }
+              ? 'v' in parsed.data
+                ? {
+                    kind: 'topic-reconcile' as const,
+                    input: TopicReceiptReferencesSchema.parse(parsed.data),
+                  }
+                : {
+                    kind: operation,
+                    ...ActionProposalReconcileSchema.parse(parsed.data),
+                  }
               : {
                   kind: operation,
                   ...ActionProposalClaimSchema.parse(parsed.data),
@@ -601,7 +614,9 @@ export function createShell(
             identity.userDid,
           ).actionProposal(identity, id.data, command);
           if (!proposal) return c.json({ error: 'Proposal not found' }, 404);
-          const result = ActionProposalRpcSchema.parse(JSON.parse(proposal));
+          const result = ActionProposalWireRpcSchema.parse(
+            JSON.parse(proposal),
+          );
           return result.ok
             ? c.json({ proposal: result.proposal })
             : c.json({ error: result.error }, 409);
@@ -616,6 +631,37 @@ export function createShell(
       },
     );
   }
+
+  app.post(
+    '/action-proposals/:proposalId/begin-step',
+    limitBody(4096),
+    async (c) => {
+      c.header('Cache-Control', 'private, no-store');
+      c.header('Vary', 'Authorization');
+      const id = ActionProposalIdSchema.safeParse(c.req.param('proposalId'));
+      const body = BeginTopicStepSchema.safeParse(
+        await c.req.json().catch(() => null),
+      );
+      if (!id.success || !body.success)
+        return c.json({ error: 'Invalid topic step command' }, 400);
+      const identity = identityOf(c.get('auth'), c.req.raw.headers);
+      const raw = await userStub(c.env, identity.userDid).beginTopicStep(
+        identity,
+        id.data,
+        body.data,
+      );
+      if (!raw) return c.json({ error: 'Proposal not found' }, 404);
+      const response = z
+        .discriminatedUnion('ok', [
+          z.object({ ok: z.literal(true), result: BeginTopicStepResultSchema }),
+          z.object({ ok: z.literal(false), error: z.string() }),
+        ])
+        .parse(JSON.parse(raw));
+      return response.ok
+        ? c.json(response.result)
+        : c.json({ error: response.error }, 409);
+    },
+  );
 
   // --- sessions ----------------------------------------------------------------
   app.post('/sessions', async (c) => {
