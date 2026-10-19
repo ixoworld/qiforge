@@ -114,6 +114,7 @@ lifetime are in [operations](docs/operations.md).
 | [frontend-bridge](docs/frontend-bridge.md) | Browser tools and AG-UI actions over the socket: one invocation, one socket, unknown outcomes |
 | [pod-creator](docs/pod-creator.md)         | The POD Creator plugin: roles, state in `ctx.kv`, the create path and its launch gate         |
 | [ixo-transaction](docs/ixo-transaction.md) | The opt-in wallet-signing plugin: chain ids, signing outcomes, the mainnet receipt rule       |
+| [oracle-payments](docs/oracle-payments.md) | Paid services: support/work modes, the contract gate, escrowed claims, `ctx.chain`            |
 | [testing](docs/testing.md)                 | Unit, harness e2e, the devnet feature matrix, stress                                          |
 | [load-tests](docs/load-tests.md)           | Measurements and the findings that shaped the gateway                                         |
 
@@ -142,8 +143,10 @@ lifetime are in [operations](docs/operations.md).
 - Open: the memory engine's recall ranking on accounts with a long history;
   the storage cost of task-holding users at scale (R2 page tier, see
   [architecture](docs/architecture.md#storage-cost-planning)).
-- Not ported on purpose: the Slack transport and the commerce lane — see
-  [node-parity](docs/node-parity.md#not-ported). Matrix group chats were
+- Not ported on purpose: the Slack transport — see
+  [node-parity](docs/node-parity.md#not-ported). The commerce lane was ported
+  in October 2026 as the opt-in `OraclePaymentsPlugin`
+  ([oracle-payments](docs/oracle-payments.md)). Matrix group chats were
   ported in September 2026 behind `MATRIX_GROUP_ROOMS=gate` (the gate and
   channel memory run in the gateway; by default the bot stays silent in
   group rooms, see [operations](docs/operations.md#rooms-group-chats)).

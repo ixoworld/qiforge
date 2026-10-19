@@ -43,6 +43,7 @@ export * from './portal';
 export * from './agui';
 export * from './ixo-transaction';
 export * from './pod-creator';
+export * from './oracle-payments';
 
 export const memoryPlugin = new MemoryPlugin();
 export const sandboxPlugin = new SandboxPlugin();

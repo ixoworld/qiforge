@@ -46,14 +46,22 @@
       // One instance per oracle: the Matrix bot identity — E2EE crypto store,
       // /sync loop, room→user routing, media owner-copy upload/download.
       { "name": "MATRIX_GATEWAY", "class_name": "MatrixGatewayDO" },
+      // One instance per signer address: the oracle account's sequence keeper
+      // (`@ixo/impactxclient-sdk/cloudflare`). With ORACLE_SECP_MNEMONIC it
+      // turns on `ctx.chain` — the oracle-payments plugin signs through it.
+      { "name": "SEQUENCE_MANAGER", "class_name": "SequenceManagerDO" },
     ],
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["UserOracleDO", "MatrixGatewayDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["SequenceManagerDO"] },
   ],
   // Non-secret config. Secrets (OPEN_ROUTER_API_KEY, MATRIX_ORACLE_ADMIN_PASSWORD,
   // MATRIX_RECOVERY_PHRASE, ...) go in `.dev.vars` locally / `wrangler secret put` in prod.
   "vars": {
+    // Read by SequenceManagerDO itself: minimum gap between two sequence
+    // allocations from the oracle account.
+    "IXO_CLIENT_SEQUENCE_MIN_DELAY_MS": "1000",
     "ORACLE_NAME": "QiForge Workers Example",
     "NETWORK": "devnet",
     // LOCAL DEV ONLY: the testing harness has no VFS worker, so this example

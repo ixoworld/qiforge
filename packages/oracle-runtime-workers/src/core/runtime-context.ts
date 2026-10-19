@@ -33,6 +33,8 @@ import type {
   UcanDelegation,
   UserContextData,
   UserKvSurface,
+  ChainSigningSurface,
+  CommerceContext,
 } from '../plugin-api/types';
 import { UcanMintUnavailableError } from '../plugin-api/ucan-errors';
 import { NOOP_LOGGER, sweepExpired } from './utils';
@@ -195,6 +197,8 @@ export interface AmbientServices {
   preferences?: import('../plugin-api/types').UserPreferencesSurface;
   /** Host key-value rows in the current user's own database, when provided. */
   kv?: UserKvSurface;
+  /** The oracle's chain signer (`ctx.chain`), when the host has one. */
+  chain?: ChainSigningSurface;
   /** Host bridge to the user's browser (realtime channel), when provided. */
   frontend?: import('../plugin-api/types').FrontendCallSurface;
   /** Host attachment access for the current session, when provided. */
@@ -331,6 +335,8 @@ export interface RunConfigContext {
    * read it — same narrow marker the Node runtime's agent builder writes.
    */
   byo?: { provider: string; active: boolean };
+  /** This turn's commerce routing (`TurnScope.commerce`), surfaced as `ctx.commerce`. */
+  commerce?: CommerceContext;
 }
 
 /**
@@ -522,6 +528,10 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
     ...(ambient.tasks ? { tasks: ambient.tasks } : {}),
     ...(ambient.preferences ? { preferences: ambient.preferences } : {}),
     ...(ambient.kv ? { kv: ambient.kv } : {}),
+    ...(ambient.chain ? { chain: ambient.chain } : {}),
+    ...(runConfig.context.commerce
+      ? { commerce: runConfig.context.commerce }
+      : {}),
     ...(ambient.frontend ? { frontend: ambient.frontend } : {}),
     ...(ambient.attachments ? { attachments: ambient.attachments } : {}),
     ...(ambient.onTurnEnd ? { onTurnEnd: ambient.onTurnEnd } : {}),
@@ -730,5 +740,6 @@ export function createNoopAmbient(
     logger: overrides.logger ?? NOOP_LOGGER,
     ...(overrides.decisions ? { decisions: overrides.decisions } : {}),
     ...(overrides.kv ? { kv: overrides.kv } : {}),
+    ...(overrides.chain ? { chain: overrides.chain } : {}),
   };
 }

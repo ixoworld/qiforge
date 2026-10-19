@@ -53,6 +53,14 @@ export {
 } from './owner-store/ixo-vfs-store';
 export { MatrixMediaOwnerStore } from './owner-store/matrix-media-store';
 export { MatrixGatewayDO } from './matrix/gateway-do';
+/**
+ * The IXO SDK's per-signer sequence keeper, re-exported so a host binds it as
+ * `SEQUENCE_MANAGER` (Cloudflare requires the class on the Worker's own
+ * exports). Turns on `ctx.chain` together with `ORACLE_SECP_MNEMONIC`.
+ */
+export { SequenceManagerDO } from '@ixo/impactxclient-sdk/cloudflare';
+/** Claim message builders for plugins that sign through `ctx.chain`. */
+export { claimIntentExec, submitClaimExec, type Coin } from './chain';
 export {
   createUserOracleDO,
   type OracleWorkerHooks,

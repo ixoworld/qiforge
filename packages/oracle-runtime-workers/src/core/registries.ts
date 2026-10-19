@@ -9,6 +9,7 @@ import type {
   PluginTool,
   RuntimeContext,
   SharedAccessors,
+  TurnScope,
 } from '../plugin-api/types';
 import {
   mergeManifestOverride,
@@ -156,6 +157,46 @@ export class ToolRegistry {
     }
     this.bootCache = out;
     return out;
+  }
+
+  /**
+   * Run every plugin's `getTurnScope(rtCtx)` and merge the answers: the first
+   * `commerce` wins (one commerce plugin per oracle), `allowPlugins` lists
+   * intersect, overlays concatenate in registration order. A hook that throws
+   * fails CLOSED — the turn is restricted to that plugin's own tools — since
+   * a scope exists to take capability away.
+   */
+  async collectTurnScope(rtCtx: RuntimeContext): Promise<TurnScope> {
+    const scopes = await Promise.all(
+      this.plugins.map(async (plugin): Promise<TurnScope | undefined> => {
+        if (!plugin.getTurnScope) return undefined;
+        try {
+          return await plugin.getTurnScope(rtCtx);
+        } catch (error) {
+          rtCtx.logger.error(
+            `${LOG_PREFIX} plugin "${plugin.name}" getTurnScope failed — this turn is restricted to its own tools: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          return { allowPlugins: [plugin.name] };
+        }
+      }),
+    );
+    const merged: TurnScope = {};
+    const overlays: string[] = [];
+    for (const scope of scopes) {
+      if (!scope) continue;
+      if (scope.commerce && !merged.commerce) merged.commerce = scope.commerce;
+      const allow = scope.allowPlugins;
+      if (allow) {
+        merged.allowPlugins = merged.allowPlugins
+          ? merged.allowPlugins.filter((name) => allow.includes(name))
+          : [...allow];
+      }
+      if (scope.promptOverlay) overlays.push(scope.promptOverlay);
+    }
+    if (overlays.length > 0) merged.promptOverlay = overlays.join('\n\n');
+    return merged;
   }
 
   /**
