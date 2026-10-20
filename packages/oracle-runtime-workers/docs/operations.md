@@ -1332,15 +1332,20 @@ The constants named here are listed in
   (`ctx.secrets.getAll()`).
 - **Memory.** `memory-engine__add_oracle_knowledge` is in the default tool
   surface, so every user's agent lists it, and the Memory Engine decides who
-  may use it: the call is refused (`Forbidden: User <did> does not have
-access to domain <oracle did> …`) unless the calling user's DID is a
-  `controller` or `owner` of an entity whose linked entities include the
-  oracle DID (a Blocksync lookup the engine caches for 5 min and answers
-  with a refusal while Blocksync is unreachable), and refused without
+  may use it: the call is refused (`Forbidden: …`) unless the calling user is
+  a domain member of an entity whose linked entities include the oracle DID.
+  From memory engine 1.5.0 a domain member is a `controller` or the `owner`
+  of that entity, the `id` of a `linkedEntity` with `service: matrix` and
+  `relationship: admin` (not `support`), or a member with positive voting
+  power of a DAO group (`did:ixo:wasm:…`) among those; legacy `did:x:zQ3…`
+  keys count as their `did:ixo:<address>` account. Engine 1.4.x admitted
+  controllers and the owner only. The engine caches the member set for
+  5 min and refuses while Blocksync is unreachable and nothing cached is
+  usable. The call is also refused without
   `confirmed_insertion_from_user: true`. The agent has to confirm the scope
   with the user first: `public` knowledge is read by every user of the
-  oracle, `private` by its controllers and owners only. A fork that does not
-  want the tool passes `selectedTools` without it.
+  oracle, `private` by its domain members only. A fork that does not want
+  the tool passes `selectedTools` without it.
 - **MCP call timeouts.** Sandbox, memory-engine and Firecrawl tools are
   MCP tools; each call carries its timeout as the MCP request's own
   (`metadata.timeoutMs`, which the MCP SDK clears when the response

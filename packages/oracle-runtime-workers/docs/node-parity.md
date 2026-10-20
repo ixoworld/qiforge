@@ -232,9 +232,10 @@ runtime since then exist only here; they are listed under
   oracle-knowledge write to forks that passed `selectedTools`; no deployed
   oracle did, so an oracle's controllers had no way to grow its shared
   knowledge from chat. The Workers default surface includes the tool. The
-  Memory Engine, not the runtime, gates it: a caller that is not a
-  controller or owner of an entity linked to the oracle DID is refused on
-  chain, and the tool needs the user's explicit confirmation. See
+  Memory Engine, not the runtime, gates it: a caller that is not a domain
+  member of an entity linked to the oracle DID (controller, owner, `matrix`
+  / `admin` linked entity, or a member of their DAO groups; engine 1.5.0) is
+  refused on chain, and the tool needs the user's explicit confirmation. See
   [operations](operations.md#bundled-plugins-what-they-refuse).
 - **Anonymous response feedback.** Ported from the Node implementation
   proposed in qiforge pull request 224 (never merged into the Node runtime).
