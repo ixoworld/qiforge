@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import type { ActionProposalTestDO } from './test-do';
 import { OWNER, NOW, proposalSubject } from './fixtures/proposal';
 declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace -- augmenting the ambient `Cloudflare.Env` needs namespace syntax
   namespace Cloudflare {
     interface Env {
       ACTION_PROPOSAL_TEST: DurableObjectNamespace<ActionProposalTestDO>;
