@@ -240,3 +240,18 @@ Portal pins SDK 1.4.0.
   `src/hooks/use-websocket-events/use-websocket-events.test.ts`.
 - Devnet matrix, step `realtime: a browser tool call runs on exactly one of
 two tabs of the session, and /health advertises the frontend bridge`.
+
+### Questions and approval requests
+
+`ask_user_question`, `propose_domain_creation`, `write_domain_files`, and
+`publish_recipe_release` are non-repeatable writes for the existing per-turn
+repetition guard. An identical successful request runs once, including when
+its result is `awaiting_answer` or `awaiting_approval`. Ordinary navigation
+steps and reads keep their repeatable behaviour.
+
+The Portal must return a pending result promptly, then deliver the person's
+answer or approval outcome as a later user message. A human decision is not
+held open inside the 15-second browser call. A later user message starts a new
+turn; the guard does not prevent a deliberate retry or a changed-input repair.
+The Portal remains responsible for request-key idempotency, validation before
+approval, and checking that the approved content is still current at signing.
