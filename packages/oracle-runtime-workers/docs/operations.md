@@ -1335,7 +1335,6 @@ access to domain <oracle did> …`) unless the calling user's DID is a
   oracle, `private` by its controllers and owners only. A fork that does not
   want the tool passes `selectedTools` without it.
 - **MCP call timeouts.** Sandbox, memory-engine and Firecrawl tools are
-
   MCP tools; each call carries its timeout as the MCP request's own
   (`metadata.timeoutMs`, which the MCP SDK clears when the response
   arrives; without it the SDK cuts a call at 60 s): sandbox 180 s
@@ -1344,7 +1343,6 @@ access to domain <oracle did> …`) unless the calling user's DID is a
   timer (`withCallTimeout`), which closes the client when it fires. No
   LangChain tool timeout is ever set (see the workerd rules in
   [architecture](architecture.md#rules-of-the-road-on-workerd)).
-
 - **Composio** tools are not MCP tools and take no signal: each call is
   raced against 190 s (`COMPOSIO_TOOL_TIMEOUT_MS`) and the turn's abort,
   and the request is abandoned, not cancelled. The Composio client itself

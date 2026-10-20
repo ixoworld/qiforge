@@ -237,7 +237,6 @@ runtime since then exist only here; they are listed under
   chain, and the tool needs the user's explicit confirmation. See
   [operations](operations.md#bundled-plugins-what-they-refuse).
 - **Anonymous response feedback.** Ported from the Node implementation
-
   proposed in qiforge pull request 224 (never merged into the Node runtime).
   One feedback per user per Agent reply:
   the user object keeps a marker per message, a replay of the delivered
@@ -259,7 +258,6 @@ runtime since then exist only here; they are listed under
   release or commit shape (Node: any tag-like or build-like string). Linear
   retries back off on 5xx; only a rate limit waits for Linear's reset
   headers (Node read them on every failure and so never retried).
-
 - **POD Creator state.** Node held blueprints and create sessions in process
   memory on the plugin instance (lost on restart); Workers keeps them in the
   user's own SQLite through `ctx.kv`, bounded per user with the same limits,

@@ -458,7 +458,6 @@ function adaptMcpTool(mcpTool: UpstreamMcpTool): PluginTool {
  * Fetch the upstream Memory Engine MCP tools for this request and return them
  * as `PluginTool[]`. Filtered by `selectedTools` so forks can scope the
  * surface (e.g. drop `clear`, add `delete_edge`).
-
  *
  * Returns `[]` when the factory cannot mint auth — the agent then sees no
  * memory tools rather than getting a half-built request to upstream.

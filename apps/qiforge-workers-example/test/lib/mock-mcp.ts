@@ -167,7 +167,6 @@ function buildMcpServer(state: MockMcpState): McpServer {
       );
     },
   );
-
   server.registerTool(
     'delete_episode',
     {

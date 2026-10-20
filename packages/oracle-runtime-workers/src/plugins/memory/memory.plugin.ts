@@ -41,7 +41,6 @@ const manifest: PluginManifest = {
     'Anything the user asked you to forget or framed as temporary.',
     'Oracle knowledge for something about one user: the shared knowledge is only for what every user of this oracle should know.',
   ],
-
   tags: ['memory', 'recall', 'artifacts', 'personalization'],
   category: 'memory',
   visibility: 'always',
@@ -59,7 +58,6 @@ export interface MemoryPluginOptions {
    * Filter the upstream tool surface. Defaults to {@link DEFAULT_MEMORY_TOOLS}
    * (search + add + add-oracle-knowledge + delete-episode + clear). Pass an
    * explicit list to drop one of them or to expose `delete_edge`.
-
    */
   selectedTools?: readonly string[];
 }
