@@ -151,6 +151,13 @@ runtime since then exist only here; they are listed under
   the watermark is the same `last_processed_count` column. A second trigger
   matches Node's `WsService.removeClientConnection`: the last authenticated
   socket of a session going away.
+- **First-turn user context**: the six memory slots (`identity`, `work`,
+  `goals`, `interests`, `relationships`, `recent`) are fetched with one
+  `POST /search-enhanced-batch` (the same six queries, limits and filters as
+  Node, `recent` limited to the last 90 days), keyed by room in a 5-minute
+  cache, awaited for at most 3 s on a thread with no checkpointed context,
+  and stale-while-revalidate: later turns of a thread never wait and never
+  adopt a refreshed answer. The differences are under the divergences below.
 - **Per-room secrets**: the JWE scheme byte-compatible with
   `oracles-chain-client` (`ECDH-ES+A256KW` + `A256GCM`, PIN-locked account
   room key), served to plugins through the same secrets surface
@@ -186,6 +193,40 @@ runtime since then exist only here; they are listed under
 
 ## Deliberate divergences
 
+- **First-turn user context.** What differs from Node (the identical part is
+  listed above):
+  - Matrix group rooms never prefetch. The reply is posted to every member
+    and the runtime already refuses direct memory reads there. The Node
+    fetcher has no such rule.
+  - A thread whose first contact got nothing (timeout, failure, skip) is
+    still "first contact" and tries again on its next turn, where a cache
+    hit or a negative-cache skip answers at once. Once a thread holds a
+    context, later turns only warm the room's cache for the next session
+    (as on Node).
+  - A request that fails (HTTP error, network error, abort, or every slot
+    failing) is negative-cached for 60 s and the room is skipped; Node cached
+    an empty context for 5 minutes. A missing delegation is not cached: the
+    next turn checks again. Node negative-cached a failed UCAN mint for 60 s;
+    Workers checks the delegation before any request and skips without one.
+  - An answer with no memories is cached for 30 s only (the cache is
+    otherwise 5 min), a memory write (`add_memory`, `delete_episode`,
+    `delete_edge`, `clear`, `add_oracle_knowledge`) and a finished history upload
+    invalidate the room's entry; Node had neither.
+  - Stored slots are trimmed to what the prompt renders, every string is
+    capped at 400 characters and the whole context at 16 KB; Node
+    checkpoints the engine's whole response.
+  - The cap is configurable (`USER_CONTEXT_PREFETCH_CAP_MS`, 0 to 30000),
+    `USER_CONTEXT_PREFETCH=off` turns the feature off, and the wait ends at
+    once when the turn is aborted. The cache lives in the user's object (LRU
+    of 64 rooms, lost on eviction), not in a process-wide cache.
+  - The "Recalling your memories..." note is a `router.update` step
+    (`Recalling your memories…`), sent only to Portal turns that wait past
+    300 ms on first contact; Node sent a reasoning chunk. The client SDK
+    ignores `router.update` frames today, so nothing is shown until it
+    renders them.
+  - The memory block in the prompt carries a one-line framing note (context,
+    not instructions).
+    See [configuration](configuration.md#first-turn-memory-prefetch).
 - **Anonymous response feedback.** Ported from the Node implementation
   proposed in qiforge pull request 224 (never merged into the Node runtime).
   One feedback per user per Agent reply:

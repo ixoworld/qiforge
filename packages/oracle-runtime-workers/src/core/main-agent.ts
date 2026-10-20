@@ -6,6 +6,7 @@ import {
   type AgentMiddleware,
   type StructuredTool,
 } from 'langchain';
+import { z } from 'zod';
 import type {
   PluginContext,
   PluginManifest,
@@ -117,6 +118,24 @@ function selectByVisibility(
     const effective =
       tool.visibility ?? manifestViz.get(pluginName) ?? 'on-demand';
     return effective === visibility;
+  });
+}
+
+/**
+ * Declares the `userContext` channel (the memory engine's prefetched context
+ * the prompt's "What you know about the user" block renders). `createAgent`
+ * builds its channels from zod or `StateSchema` state schemas only — the
+ * `MainAgentGraphState` annotation passed as `stateSchema` is not one — so
+ * without this a `userContext` in the graph input would be dropped instead
+ * of checkpointed. A plain field is a last-value channel: a turn that writes
+ * it replaces the thread's previous context; one that does not keeps it.
+ */
+function userContextStateMiddleware(): AgentMiddleware {
+  return createMiddleware({
+    name: 'UserContextState',
+    stateSchema: z.object({
+      userContext: z.record(z.string(), z.unknown()).optional(),
+    }),
   });
 }
 
@@ -715,6 +734,7 @@ export async function createMainAgent(
       withheldToolNames: toolAccess.withheldToolNames,
       logger: ambient.logger,
     }),
+    userContextStateMiddleware(),
     createToolValidationMiddleware({
       skipToolNames: hooks?.validationSkipToolNames,
       logger: ambient.logger,

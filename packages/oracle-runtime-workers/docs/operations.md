@@ -74,23 +74,23 @@ addressed; unset, any authenticated caller may use them. Set it wherever
 `ORACLE_DEBUG_ROUTES=true` is not a private test deployment (see
 [configuration](configuration.md#ops-and-misc)).
 
-| Route                                                                          | Purpose                                                                                                                                                                                                                          |
-| ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /debug/storage`, `POST /debug/storage/flush`, `POST /debug/storage/reset` | The caller's working copy: sizes, generations, flush state, chunk cache, the R2 page tier (`tier`); force a flush (an evicted object boots first); wipe and reload (an object that never booted is booted for the caller first). |
-| `POST /debug/storage/tier-flush`                                               | Run one R2 page-tier eviction pass now; body `{ "force": true }` evicts every clean chunk regardless of recency, `{ "maxSegments": n }` caps the pass.                                                                           |
-| `GET /debug/sessions/:id`                                                      | Raw session row (`lastProcessedCount` included) plus `threadMessages` / `summaryMessages` / `toolMessages` — whether the thread's agent context was condensed.                                                                   |
-| `GET /debug/tasks`                                                             | The caller's task records, the open (unfinished) runs and the object's current alarm.                                                                                                                                            |
-| `GET /debug/runs`                                                              | Recent durable runs with their tool marks, segment counts, attempts and live state ([durable runs](#turns-durable-runs)).                                                                                                        |
-| `GET /debug/context?model=<id>&session=<id>`                                   | The context-window resolution and derived thresholds for a model; with `session`, that session's context counters ([context budgets](#turns-context-budgets)).                                                                   |
-| `GET /debug/realtime`                                                          | Sockets, heartbeat deadline, pending browser calls, live timers with creation stacks.                                                                                                                                            |
-| `GET /debug/delegation`, `GET /debug/memory-schema`                            | What header-less turns mint from; the memory engine's tool schema as delivered.                                                                                                                                                  |
-| `POST /debug/matrix/restart`, `POST /debug/matrix/stop`                        | Gateway stop / restart.                                                                                                                                                                                                          |
-| `POST /debug/matrix/rotate-device`                                             | Log the bot in as a new device (old one retired).                                                                                                                                                                                |
-| `GET /debug/matrix/outbox`                                                     | Pending durable sends without bodies (thread id, sizes, attempts).                                                                                                                                                               |
-| `POST /debug/matrix/event`                                                     | Post `{ type, content, txnId? }` into the caller's own room; the same `txnId` twice returns the same event id. For transaction-id drills.                                                                                        |
-| `POST /debug/object/abort`                                                     | Reset the caller's user object the way a platform host drain does (in-flight turns die, storage survives). For reset-safety tests.                                                                                               |
-| `POST /debug/reauth-prompt/reset`                                              | Forget when the last `delegation_required` prompt was posted (the 6 h throttle), so a drill can trigger the next one.                                                                                                            |
-| `POST /debug/matrix/abort`                                                     | Reset the gateway object the same way (sync loop and in-flight turns die; outbox, inbox and crypto snapshot survive). For reset-safety tests.                                                                                    |
+| Route                                                                          | Purpose                                                                                                                                                                                                                                              |
+| ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /debug/storage`, `POST /debug/storage/flush`, `POST /debug/storage/reset` | The caller's working copy: sizes, generations, flush state, chunk cache, the R2 page tier (`tier`); force a flush (an evicted object boots first); wipe and reload (an object that never booted is booted for the caller first).                     |
+| `POST /debug/storage/tier-flush`                                               | Run one R2 page-tier eviction pass now; body `{ "force": true }` evicts every clean chunk regardless of recency, `{ "maxSegments": n }` caps the pass.                                                                                               |
+| `GET /debug/sessions/:id`                                                      | Raw session row (`lastProcessedCount` included) plus `threadMessages` / `summaryMessages` / `toolMessages` — whether the thread's agent context was condensed.                                                                                       |
+| `GET /debug/tasks`                                                             | The caller's task records, the open (unfinished) runs and the object's current alarm.                                                                                                                                                                |
+| `GET /debug/runs`                                                              | Recent durable runs with their tool marks, segment counts, attempts and live state ([durable runs](#turns-durable-runs)).                                                                                                                            |
+| `GET /debug/context?model=<id>&session=<id>`                                   | The context-window resolution and derived thresholds for a model; with `session`, that session's context counters ([context budgets](#turns-context-budgets)); always a `userContext` block ([user-context prefetch](#turns-user-context-prefetch)). |
+| `GET /debug/realtime`                                                          | Sockets, heartbeat deadline, pending browser calls, live timers with creation stacks.                                                                                                                                                                |
+| `GET /debug/delegation`, `GET /debug/memory-schema`                            | What header-less turns mint from; the memory engine's tool schema as delivered.                                                                                                                                                                      |
+| `POST /debug/matrix/restart`, `POST /debug/matrix/stop`                        | Gateway stop / restart.                                                                                                                                                                                                                              |
+| `POST /debug/matrix/rotate-device`                                             | Log the bot in as a new device (old one retired).                                                                                                                                                                                                    |
+| `GET /debug/matrix/outbox`                                                     | Pending durable sends without bodies (thread id, sizes, attempts).                                                                                                                                                                                   |
+| `POST /debug/matrix/event`                                                     | Post `{ type, content, txnId? }` into the caller's own room; the same `txnId` twice returns the same event id. For transaction-id drills.                                                                                                            |
+| `POST /debug/object/abort`                                                     | Reset the caller's user object the way a platform host drain does (in-flight turns die, storage survives). For reset-safety tests.                                                                                                                   |
+| `POST /debug/reauth-prompt/reset`                                              | Forget when the last `delegation_required` prompt was posted (the 6 h throttle), so a drill can trigger the next one.                                                                                                                                |
+| `POST /debug/matrix/abort`                                                     | Reset the gateway object the same way (sync loop and in-flight turns die; outbox, inbox and crypto snapshot survive). For reset-safety tests.                                                                                                        |
 
 ## The gateway
 
@@ -568,6 +568,82 @@ A → B`), prunes hard and retries once.
 - **Cost.** One `/models` fetch per isolate-hour (shared with prices); a KV
   read per model per boot; one row (or one R2 put plus an index row) per
   capped result, one delete at expiry. Pruning and guarding write nothing.
+
+### Turns: user-context prefetch
+
+The first turn of a conversation is pre-loaded with the user's memory: the
+object fetches the six context slots (`identity`, `work`, `goals`,
+`interests`, `relationships`, `recent`) from the memory engine with one
+`POST /search-enhanced-batch` and the prompt composer renders them, so the
+agent does not have to call `search_memory_engine` to know who it is talking
+to. Settings and the measured latencies are in
+[configuration](configuration.md#first-turn-memory-prefetch).
+
+- **Waiting.** A thread with no checkpointed `userContext` (first contact)
+  waits for the result for at most 3 s (`USER_CONTEXT_PREFETCH_CAP_MS`);
+  after that the turn runs without it and the request keeps going in the
+  background, so the room's cache has it for the next session. The thread
+  that missed it stays on first contact and asks again on its next turn (a
+  cache hit or a negative-cache skip answers at once). A thread that already
+  carries a checkpointed context never waits and never changes: its later
+  turns only refresh the room's cache (`refresh()`, a no-op while the cache
+  is fresh, and it records no `skipped` outcome), and the refreshed answer
+  reaches the user's next session. A cold engine space (the first request
+  after 120 s idle) costs about 2.2 s, so a user who comes back after a
+  pause can see the first answer delayed by that much, and a slower cold open
+  misses the first answer. An aborted turn stops waiting at once; its gather
+  continues in the background.
+- **Progress step.** A Portal turn that is still waiting 300 ms into first
+  contact sends a `router.update` frame with the step `Recalling your
+memories…`. The client SDK does not render `router.update` frames yet, so
+  users see nothing until it does; other surfaces (Matrix, Channels) get no
+  step.
+- **Group rooms** (a Matrix turn in a group room) never prefetch; the log
+  carries `[user-context] skipped: group room` once per turn.
+- **Cache life.** 5 minutes per room (`USER_CONTEXT_CACHE_TTL_MS`), but an
+  answer with no memories at all lives 30 s, so a user who has just started
+  using memory is not shown "nothing" for 5 minutes. The room's entry is
+  dropped (and any gather still running is detached from it) after a
+  successful `add_memory`, `delete_episode`, `delete_edge`, `clear` or
+  `add_oracle_knowledge` memory-engine tool call, and after a session-history upload to
+  the engine completes. The engine caches identical queries for 15 s and
+  cognifies asynchronously, so a gather right after a write can still come
+  back without it.
+- **Log lines** (prefix `[user-context]`, never user content):
+  `cache hit room=… age=…ms keys=N` (served from the room's cache, no
+  request), `fetched in N ms for room=… (identity=f12/e8/p3/c1, work=…,
+recent=missing)` (per slot: rendered fact, entity, episode and community
+  counts; `missing` is a slot the engine did not return or that failed),
+  `exceeded Nms cap for room=…; continuing in the background`,
+  `slot <label> failed (<status_code>)` (warn: one slot of the batch failed,
+  the others are used; the engine's detail text is not logged at this
+  level), `failed for room=…: <reason> (not retried for 60s)` and
+  `skipped: …` (no engine URL, no signing key, no invocation, a recent
+  failure, no room, group room, or `the delegation grants no ixo:memory
+memory/*`). A user with no `ixo:memory` delegation logs `skipped` on every
+  first turn and is not slowed. If every one of the six slots fails the
+  batch counts as `failed` (`every slot failed`), not as an empty answer.
+- **`GET /debug/context?session=<id>`** carries `userContext` for the
+  session's room (the user room when `session` is absent): `enabled`,
+  `room`, `cached`, `ageMs` (of the cached result), `inFlight`,
+  `lastOutcome` (`cached`, `fresh`, `timeout`, `failed` or `skipped`),
+  `lastReason` (with `failed` and `skipped`; for an HTTP failure
+  `memory engine answered <status>`, never the engine's body), `lastMs` and
+  `lastSlots` (the per-slot counts of the last fetch; present only while the
+  last outcome is `fresh`) and `lastAt`. `lastOutcome: timeout` right after
+  a first turn is the cap being hit, not an error. The block is always
+  present; `enabled` is true only when `USER_CONTEXT_PREFETCH` is not `off`
+  and `MEMORY_ENGINE_URL` is set (a task session or a missing delegation
+  does not change it; those turns just make no request).
+- **`failed` versus `skipped`.** `failed` is a request that went wrong (HTTP
+  error, network error, abort, a malformed answer, every slot failing); the
+  room is then skipped for 60 s (`lastOutcome: failed`, then `skipped` with
+  `recently-failed`) instead of paying the cap on every turn. `skipped`
+  makes no request at all.
+- **Stored size.** Every stored string is cut to 400 characters, and a
+  context over 16 KB loses episodes (then entity summaries) until it fits.
+  The prompt block is capped at 2000 characters, so normal data renders as
+  before.
 
 ### Turns: attachments
 
@@ -1453,6 +1529,12 @@ that into a fallback instead of a failed turn:
 that can handle the requested parameters` is the memory engine's own
   OpenRouter call, not this runtime; recall quality on an account with a
   long history is the engine's ranking.
+- The memory engine replays identical queries from a 15 s result cache, so
+  a new session opened right after another one of the same user is served
+  from the engine's cache and a memory stored in between may not appear in
+  its pre-loaded context; the object's own cache (5 min by default) has the
+  same effect for later sessions, and `search_memory_engine` always asks the
+  engine.
 - Optional MCP tool parameters lose their enums before the model sees them
   (`@langchain/mcp-adapters` simplifies `anyOf: [<real>, null]`);
   `GET /debug/memory-schema` shows the schema as delivered.

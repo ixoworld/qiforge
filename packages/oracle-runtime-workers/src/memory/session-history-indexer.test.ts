@@ -231,6 +231,26 @@ describe('SessionHistoryIndexer', () => {
     expect(h.processed).toEqual([]);
   });
 
+  it('reports the room after an accepted upload, never after a rejected one or a skip', async () => {
+    const indexed: string[] = [];
+    const ok = harness({ onIndexed: (roomId) => indexed.push(roomId) });
+    await expect(ok.indexer.process('s1')).resolves.toBe('processed');
+    expect(indexed).toEqual(['!room:x']);
+
+    indexed.length = 0;
+    const rejected = harness({
+      responses: [{ status: 500 }],
+      onIndexed: (roomId) => indexed.push(roomId),
+    });
+    await expect(rejected.indexer.process('s1')).resolves.toBe('failed');
+    const nothingNew = harness({
+      session: { title: 't', roomId: '!r', lastProcessedCount: 4 },
+      onIndexed: (roomId) => indexed.push(roomId),
+    });
+    await expect(nothingNew.indexer.process('s1')).resolves.toBe('skipped');
+    expect(indexed).toEqual([]);
+  });
+
   it('succeeds on a later attempt', async () => {
     const h = harness({ responses: [{ status: 502 }, { status: 200 }] });
     await expect(h.indexer.process('s1')).resolves.toBe('processed');

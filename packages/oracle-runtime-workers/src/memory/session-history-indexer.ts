@@ -68,6 +68,8 @@ export interface SessionHistoryIndexerDeps {
     ): Promise<string>;
   };
   speakerLabels(roomId: string): Promise<SpeakerLabels>;
+  /** Called after the engine accepted an upload for the room. */
+  onIndexed?(roomId: string): void;
   logger: Logger;
   fetchImpl?: typeof fetch;
   /** Test hooks. */
@@ -316,6 +318,7 @@ export class SessionHistoryIndexer {
           `memory engine rejected the conversation (${res.status}): ${text.slice(0, 200)}`,
         );
       }
+      deps.onIndexed?.(roomId);
     }
 
     const newCount = lastProcessedCount + newMessages.length;

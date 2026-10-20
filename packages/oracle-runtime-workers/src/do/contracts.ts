@@ -454,6 +454,31 @@ export interface SessionContextStatus {
   lastEventAt?: string;
 }
 
+/**
+ * The first-turn user-context prefetch for one room (`UserContextFetcher`):
+ * whether it runs here, the room's cache, and the last gather's outcome.
+ */
+export interface UserContextPrefetchStatus {
+  /** `USER_CONTEXT_PREFETCH` is on and `MEMORY_ENGINE_URL` is set. */
+  enabled: boolean;
+  /** The room asked about: the session's room, else the user's oracle room. */
+  room?: string;
+  cached: boolean;
+  /** Age of the cached answer. */
+  ageMs?: number;
+  /** A gather for the room is running right now. */
+  inFlight: boolean;
+  lastOutcome?: 'cached' | 'fresh' | 'timeout' | 'failed' | 'skipped';
+  /** Why the last outcome was `failed` or `skipped`. */
+  lastReason?: string;
+  /** Duration of the last `fresh` gather. */
+  lastMs?: number;
+  /** Per slot of the last `fresh` gather: `f12/e8/p3/c1` or `missing`. */
+  lastSlots?: Record<string, string>;
+  /** When the last outcome was recorded (ISO). */
+  lastAt?: string;
+}
+
 export interface ContextStatus {
   model: string;
   byoProvider?: string;
@@ -476,6 +501,8 @@ export interface ContextStatus {
   };
   /** Present when a session was asked for; null when that session is unknown. */
   session?: SessionContextStatus | null;
+  /** The user-context prefetch for the session's room (else the user's room). */
+  userContext: UserContextPrefetchStatus;
 }
 
 /**
