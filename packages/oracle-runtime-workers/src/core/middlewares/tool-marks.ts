@@ -130,7 +130,8 @@ export function toolEffectOf(tool: {
   return 'write';
 }
 
-function isErrorResult(output: unknown): boolean {
+/** Whether a tool call's output is an error result (`ToolMessage` status `error`). */
+export function isErrorResult(output: unknown): boolean {
   if (ToolMessage.isInstance(output)) return output.status === 'error';
   return false;
 }
