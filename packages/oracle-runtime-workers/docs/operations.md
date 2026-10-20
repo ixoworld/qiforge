@@ -598,8 +598,8 @@ to. Settings and the measured latencies are in
 memories…`. The client SDK does not render `router.update` frames yet, so
   users see nothing until it does; other surfaces (Matrix, Channels) get no
   step.
-- **Group rooms** (a Matrix turn in a group room) never prefetch; the log
-  carries `[user-context] skipped: group room` once per turn.
+- **Group rooms** (a Matrix turn in a group room) never prefetch; the
+  first-contact line reads `outcome=skipped reason=group-room`.
 - **Cache life.** 5 minutes per room (`USER_CONTEXT_CACHE_TTL_MS`), but an
   answer with no memories at all lives 30 s, so a user who has just started
   using memory is not shown "nothing" for 5 minutes. The room's entry is
@@ -610,9 +610,16 @@ memories…`. The client SDK does not render `router.update` frames yet, so
   cognifies asynchronously, so a gather right after a write can still come
   back without it.
 - **Log lines** (prefix `[user-context]`, never user content):
-  `first contact room=… session=… outcome=<cached|fresh|timeout|failed|skipped|aborted> waited=Nms`
+  `first contact room=… session=… outcome=<cached|fresh|timeout|failed|skipped|aborted> [reason=…] waited=Nms`
   (warn, once per thread: what its first-contact turn was given and how long
-  it waited; the one line to grep when reading logs at warn level and above),
+  it waited; the one line to grep when reading logs at warn level and above.
+  A first contact that fetches nothing prints it too, with `waited=0ms` and
+  the reason: `no-room`, `disabled` (`USER_CONTEXT_PREFETCH=off` or no
+  `MEMORY_ENGINE_URL`), `not-booted`, `group-room`, `no-memory-grant`, or the
+  fetcher's `no-signing-key`, `no-invocation`, `recently-failed`; a `failed`
+  outcome carries its reason the same way. Task-run and supplied-context
+  turns print nothing, and a thread that already holds a context prints
+  nothing on its later turns),
   `cache hit room=… age=…ms keys=N` (served from the room's cache, no
   request), `fetched in N ms for room=… (identity=f12/e8/p3/c1, work=…,
 recent=missing)` (per slot: rendered fact, entity, episode and community
@@ -624,12 +631,12 @@ recent=missing)` (per slot: rendered fact, entity, episode and community
   (warn: a gather was still unsettled 5 s past its own 30 s request timeout,
   so it was abandoned and a new one started; its late answer, if any, is
   dropped. It should not happen and is worth a look),
-  `failed for room=…: <reason> (not retried for 60s)` and
+  `failed for room=…: <reason> (not retried for 60s)` and the fetcher's own
   `skipped: …` (no engine URL, no signing key, no invocation, a recent
-  failure, no room, group room, or `the delegation grants no ixo:memory
-memory/*`). A user with no `ixo:memory` delegation logs `skipped` on every
-  first turn and is not slowed. If every one of the six slots fails the
-  batch counts as `failed` (`every slot failed`), not as an empty answer.
+  failure). A user with no `ixo:memory` delegation gets
+  `first contact … outcome=skipped reason=no-memory-grant` on every first
+  turn and is not slowed. If every one of the six slots fails the batch
+  counts as `failed` (`every slot failed`), not as an empty answer.
 - **`GET /debug/context?session=<id>`** carries `userContext` for the
   session's room (the user room when `session` is absent): `enabled`,
   `room`, `cached`, `ageMs` (of the cached result), `inFlight`,
