@@ -10,7 +10,10 @@ import {
   clearMemoryToolDefsCache,
   DEFAULT_MEMORY_TOOLS,
   MEMORY_ADD_MCP_NAME,
+  MEMORY_ADD_ORACLE_KNOWLEDGE_MCP_NAME,
+  MEMORY_DELETE_EDGE_MCP_NAME,
 } from './memory-tools';
+
 import { MemoryPlugin } from './memory.plugin';
 
 interface FakeUpstreamTool {
@@ -137,7 +140,14 @@ describe('MemoryPlugin (Workers port)', () => {
     expect(tools.map((t) => t.name).sort()).toEqual(
       [...DEFAULT_MEMORY_TOOLS].sort(),
     );
+    // The default surface carries the oracle-knowledge write (the engine
+    // gates it on chain) but not `delete_edge`.
+    expect(tools.map((t) => t.name)).toContain(
+      MEMORY_ADD_ORACLE_KNOWLEDGE_MCP_NAME,
+    );
+    expect(tools.map((t) => t.name)).not.toContain(MEMORY_DELETE_EDGE_MCP_NAME);
     // Descriptions + schemas pass through from upstream untouched.
+
     const add = tools.find((t) => t.name === MEMORY_ADD_MCP_NAME);
     expect(add?.description).toBe(`upstream ${MEMORY_ADD_MCP_NAME}`);
     const upstreamAdd = upstreamTools.find(

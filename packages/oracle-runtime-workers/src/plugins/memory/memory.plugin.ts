@@ -32,13 +32,16 @@ const manifest: PluginManifest = {
     'You create an artifact for the user (file, document, edit, generated content): record what it is, what it is for, and the structural choices you made.',
     'The user expresses satisfaction or dissatisfaction with something you produced: capture what worked or what did not — tone, length, structure, style — against that artifact entry.',
     'The user references something they told you before, or something you made before.',
+    'A controller or owner of this oracle asks you to store something every user of the oracle should know (a policy, a procedure, reference material): tell them it will be shared with every user of the oracle (or, for the private space, with its controllers and owners only), get their confirmation, then store it as oracle knowledge rather than as a memory about them.',
   ],
   whenNotToUse: [
     'Ephemeral conversation-only state (use the current message thread).',
     'Behavioral preferences about how to respond (call the user-preferences tool instead).',
     'Public web facts that are not specific to this user (use a web-search capability).',
     'Anything the user asked you to forget or framed as temporary.',
+    'Oracle knowledge for something about one user: the shared knowledge is only for what every user of this oracle should know.',
   ],
+
   tags: ['memory', 'recall', 'artifacts', 'personalization'],
   category: 'memory',
   visibility: 'always',
@@ -54,8 +57,9 @@ export interface MemoryPluginOptions {
   mcpFactory?: (memoryMcpUrl: string) => MemoryMcpFactory;
   /**
    * Filter the upstream tool surface. Defaults to {@link DEFAULT_MEMORY_TOOLS}
-   * (search + add + delete-episode + clear). Pass an explicit list to expose
-   * `add_oracle_knowledge`, `delete_edge`, etc.
+   * (search + add + add-oracle-knowledge + delete-episode + clear). Pass an
+   * explicit list to drop one of them or to expose `delete_edge`.
+
    */
   selectedTools?: readonly string[];
 }

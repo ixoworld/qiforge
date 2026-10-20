@@ -23,14 +23,21 @@ export const MEMORY_DELETE_EDGE_MCP_NAME = 'memory-engine__delete_edge';
 export const MEMORY_CLEAR_MCP_NAME = 'memory-engine__clear';
 
 /**
- * Default selection: search, add, delete-episode, and clear — the user must
- * always be able to ask for a full memory wipe, so the destructive `clear`
- * stays in the default set. Forks that need org-owner knowledge writes (or
- * want to drop `clear`) pass an explicit list via plugin options.
+ * Default selection: search, add, add-oracle-knowledge, delete-episode, and
+ * clear. The user must always be able to ask for a full memory wipe, so the
+ * destructive `clear` stays in the default set. `add_oracle_knowledge` is in
+ * the set so the controllers and owners of any oracle can grow its shared
+ * knowledge from chat without a per-oracle code change: the Memory Engine
+ * itself checks on chain that the caller controls or owns an entity linked to
+ * the oracle and refuses everyone else, so listing the tool for every user
+ * costs one tool description and grants nothing. Forks that want a different
+ * surface (drop `clear`, add `delete_edge`) pass an explicit list via plugin
+ * options.
  */
 export const DEFAULT_MEMORY_TOOLS = [
   MEMORY_SEARCH_MCP_NAME,
   MEMORY_ADD_MCP_NAME,
+  MEMORY_ADD_ORACLE_KNOWLEDGE_MCP_NAME,
   MEMORY_DELETE_EPISODE_MCP_NAME,
   MEMORY_CLEAR_MCP_NAME,
 ] as const;
@@ -450,7 +457,8 @@ function adaptMcpTool(mcpTool: UpstreamMcpTool): PluginTool {
 /**
  * Fetch the upstream Memory Engine MCP tools for this request and return them
  * as `PluginTool[]`. Filtered by `selectedTools` so forks can scope the
- * surface (e.g. drop `clear`, add `add_oracle_knowledge` for org-owner mode).
+ * surface (e.g. drop `clear`, add `delete_edge`).
+
  *
  * Returns `[]` when the factory cannot mint auth — the agent then sees no
  * memory tools rather than getting a half-built request to upstream.
