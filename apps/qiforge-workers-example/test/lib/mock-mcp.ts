@@ -58,6 +58,12 @@ export interface MockMcpState {
    */
   batchServesMemories: boolean;
   /**
+   * Delay before the batch endpoint answers, in ms (default 0). A drill sets
+   * it above the runtime's prefetch cap to prove the gather that outlives a
+   * turn still fills the room's cache for the next session.
+   */
+  batchDelayMs: number;
+  /**
    * Printed by `search_memory_engine` and never by the batch endpoint, so an
    * answer containing it came over the MCP wire even when a cached
    * pre-loaded context already carries the memory text.
@@ -280,6 +286,7 @@ export async function startMockMcpServer(port: number): Promise<MockMcpServer> {
     toolCalls: [],
     memories: [],
     batchServesMemories: true,
+    batchDelayMs: 0,
     lookupReference: `LOOKUP-${randomBytes(4).toString('hex')}`,
   };
 
@@ -301,6 +308,7 @@ export async function startMockMcpServer(port: number): Promise<MockMcpServer> {
         state.toolCalls.length = 0;
         state.memories.length = 0;
         state.batchServesMemories = true;
+        state.batchDelayMs = 0;
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
         return;
@@ -329,6 +337,9 @@ export async function startMockMcpServer(port: number): Promise<MockMcpServer> {
           return;
         }
         const last = queries.length - 1;
+        if (state.batchDelayMs > 0) {
+          await new Promise((r) => setTimeout(r, state.batchDelayMs));
+        }
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(
           JSON.stringify({
