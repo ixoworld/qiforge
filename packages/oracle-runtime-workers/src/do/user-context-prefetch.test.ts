@@ -822,11 +822,17 @@ describe('user-context prefetch in a user-object turn', () => {
   it('asks nothing without a memory grant in the delegation', async () => {
     const delegation = await delegationTo('sandbox');
     await withObject('user-context-no-grant', { delegation }, async (o) => {
+      const warn = vi.spyOn(console, 'warn');
       const first = await o.turn('s1', 'r1');
       expect(first.outcome.status).toBe('finished');
       // Neither the batch nor the did.json look-up that would precede it.
       expect(o.engine.requests).toEqual([]);
       expect(first.system).not.toContain(CONTEXT_HEADING);
+      // Skipped before any request, but still one first-contact line.
+      expect(firstContacts(warn.mock.calls, 's1')).toHaveLength(1);
+      expect(firstContacts(warn.mock.calls, 's1')[0]).toMatch(
+        / outcome=skipped reason=no-memory-grant waited=0ms$/,
+      );
       const status = await o.status('s1');
       expect(status).toMatchObject({ enabled: true, cached: false });
       expect(status.lastOutcome).toBeUndefined();
@@ -875,16 +881,24 @@ describe('user-context prefetch in a user-object turn', () => {
 
   it('asks nothing in a Matrix group room: the reply is posted to every member', async () => {
     await withObject('user-context-group-room', {}, async (o) => {
-      const log = vi.spyOn(console, 'log');
+      const warn = vi.spyOn(console, 'warn');
       const first = await o.turn('s-group', 'r1', { matrix: 'group' });
       expect(first.outcome.status).toBe('finished');
       expect(o.engine.batches).toEqual([]);
       expect(first.system).not.toContain(CONTEXT_HEADING);
+      // The skipped first contact still prints the one first-contact line
+      // (`firstContacts` keys on the direct room, so filter by hand here).
       expect(
-        log.mock.calls.filter(
-          ([line]) => line === '[user-context] skipped: group room',
-        ),
-      ).toHaveLength(1);
+        warn.mock.calls
+          .map(([line]) => line)
+          .filter(
+            (line): line is string =>
+              typeof line === 'string' &&
+              line.startsWith('[user-context] first contact '),
+          ),
+      ).toEqual([
+        `[user-context] first contact room=${GROUP_ROOM} session=s-group outcome=skipped reason=group-room waited=0ms`,
+      ]);
       expect(await o.status('s-group')).toMatchObject({
         room: GROUP_ROOM,
         cached: false,

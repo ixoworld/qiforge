@@ -3198,17 +3198,28 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       client: TurnRequest['client'];
       roomKind: TurnRequest['roomKind'];
     }): UserContextSettle | null {
-      // Task runs never get the user's memory (see `scheduleHistoryIndexing`).
-      if (!input.roomId || input.sessionId.startsWith(TASK_SESSION_PREFIX))
+      // A first contact that fetches nothing still prints the one
+      // first-contact line (see the settle step below), with its reason, so
+      // a warn-level reading of the logs accounts for every first turn.
+      const skipped = (reason: string): null => {
+        if (!hasUserContext(input.prior)) {
+          console.warn(
+            `[user-context] first contact room=${input.roomId ?? '-'} session=${input.sessionId} outcome=skipped reason=${reason} waited=0ms`,
+          );
+        }
         return null;
+      };
+      // Task runs never get the user's memory (see `scheduleHistoryIndexing`).
+      if (input.sessionId.startsWith(TASK_SESSION_PREFIX)) return null;
+      if (!input.roomId) return skipped('no-room');
       const settings = this.userContextSettings();
+      if (!settings) return skipped('disabled');
       const ambient = this.ambient;
-      if (!settings || !ambient) return null;
+      if (!ambient) return skipped('not-booted');
       // A group room's reply is posted to every member: one user's memory
       // must not be (as direct reads are not, see `admissionApplies`).
       if (input.client === 'matrix' && input.roomKind === 'group') {
-        console.log('[user-context] skipped: group room');
-        return null;
+        return skipped('group-room');
       }
       // Without a memory grant the gather could only fail at the mint: skip
       // it before any request (the engine's did.json included).
@@ -3219,10 +3230,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           MEMORY_CAPABILITY.action,
         )
       ) {
-        console.log(
-          `[user-context] skipped: the delegation grants no ${MEMORY_CAPABILITY.resource} ${MEMORY_CAPABILITY.action}`,
-        );
-        return null;
+        return skipped('no-memory-grant');
       }
       const fetcher = this.userContextFetcherFor(settings);
       const params: UserContextFetchParams = {
@@ -3265,8 +3273,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           // One line per first contact, at warn so it stands out when logs
           // are read at warn and above: what the turn was given and how
           // long it waited for it.
+          const reason =
+            outcome?.kind === 'skipped' || outcome?.kind === 'failed'
+              ? ` reason=${outcome.reason}`
+              : '';
           console.warn(
-            `[user-context] first contact room=${input.roomId} session=${input.sessionId} outcome=${outcome?.kind ?? 'aborted'} waited=${Date.now() - waitedFrom}ms`,
+            `[user-context] first contact room=${input.roomId} session=${input.sessionId} outcome=${outcome?.kind ?? 'aborted'}${reason} waited=${Date.now() - waitedFrom}ms`,
           );
           return outcome?.kind === 'cached' || outcome?.kind === 'fresh'
             ? withEverySlot(outcome.context)
