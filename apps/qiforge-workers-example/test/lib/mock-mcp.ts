@@ -128,6 +128,45 @@ function buildMcpServer(state: MockMcpState): McpServer {
       return text('Memory stored.');
     },
   );
+  // In the runtime's default tool surface since 0.21.0; the real engine
+  // refuses a caller who is not a controller or owner of the oracle's
+  // entity. The mock records the call and refuses the same way without the
+  // confirmation flag, so a drill can tell a stored write from a refused one.
+  server.registerTool(
+    'add_oracle_knowledge',
+    {
+      description:
+        'Store knowledge shared with every user of this oracle. Needs the user to confirm the scope first.',
+      inputSchema: {
+        name: z.string().describe('Short title of the knowledge.'),
+        content: z.string().describe('The knowledge text to store.'),
+        confirmed_insertion_from_user: z
+          .boolean()
+          .describe('The user confirmed the knowledge may be shared.'),
+        knowledge_space_type: z
+          .enum(['public', 'private'])
+          .describe(
+            'public: every user of the oracle; private: its controllers and owners.',
+          ),
+      },
+    },
+    (args: {
+      name: string;
+      content: string;
+      confirmed_insertion_from_user: boolean;
+      knowledge_space_type: 'public' | 'private';
+    }) => {
+      state.toolCalls.push({ tool: 'add_oracle_knowledge', args });
+      if (!args.confirmed_insertion_from_user) {
+        return text(
+          'Oracle knowledge addition requires explicit user confirmation.',
+        );
+      }
+      return text(
+        `Oracle knowledge "${args.name}" added to shared knowledge space`,
+      );
+    },
+  );
   server.registerTool(
     'delete_episode',
     {

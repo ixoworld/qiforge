@@ -1323,6 +1323,17 @@ The constants named here are listed in
   `sandbox_write_blob` reports `success: false` for a failed write. A
   sandbox connect reads the user's secrets with one room-state read
   (`ctx.secrets.getAll()`).
+- **Memory.** `memory-engine__add_oracle_knowledge` is in the default tool
+  surface, so every user's agent lists it, and the Memory Engine decides who
+  may use it: the call is refused (`Forbidden: User <did> does not have
+access to domain <oracle did> …`) unless the calling user's DID is a
+  `controller` or `owner` of an entity whose linked entities include the
+  oracle DID (a Blocksync lookup the engine caches for 5 min and answers
+  with a refusal while Blocksync is unreachable), and refused without
+  `confirmed_insertion_from_user: true`. The agent has to confirm the scope
+  with the user first: `public` knowledge is read by every user of the
+  oracle, `private` by its controllers and owners only. A fork that does not
+  want the tool passes `selectedTools` without it.
 - **MCP call timeouts.** Sandbox, memory-engine and Firecrawl tools are
   MCP tools; each call carries its timeout as the MCP request's own
   (`metadata.timeoutMs`, which the MCP SDK clears when the response

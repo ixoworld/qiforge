@@ -227,6 +227,15 @@ runtime since then exist only here; they are listed under
   - The memory block in the prompt carries a one-line framing note (context,
     not instructions).
     See [configuration](configuration.md#first-turn-memory-prefetch).
+- **`add_oracle_knowledge` is a default memory tool.** Node's memory plugin
+  listed search, add, delete-episode and clear by default and left the
+  oracle-knowledge write to forks that passed `selectedTools`; no deployed
+  oracle did, so an oracle's controllers had no way to grow its shared
+  knowledge from chat. The Workers default surface includes the tool. The
+  Memory Engine, not the runtime, gates it: a caller that is not a
+  controller or owner of an entity linked to the oracle DID is refused on
+  chain, and the tool needs the user's explicit confirmation. See
+  [operations](operations.md#bundled-plugins-what-they-refuse).
 - **Anonymous response feedback.** Ported from the Node implementation
   proposed in qiforge pull request 224 (never merged into the Node runtime).
   One feedback per user per Agent reply:
