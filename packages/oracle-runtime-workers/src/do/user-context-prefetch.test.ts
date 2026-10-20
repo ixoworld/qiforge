@@ -81,6 +81,18 @@ afterEach(() => {
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/** The `[user-context] first contact` warn lines logged for `sessionId`. */
+const firstContacts = (warnCalls: unknown[][], sessionId: string): string[] =>
+  warnCalls
+    .map(([line]) => line)
+    .filter(
+      (line): line is string =>
+        typeof line === 'string' &&
+        line.startsWith(
+          `[user-context] first contact room=${ROOM} session=${sessionId} `,
+        ),
+    );
+
 // ── The memory engine ───────────────────────────────────────────────────────
 
 interface EngineRequest {
@@ -590,8 +602,12 @@ const label = (slot: UserContextSlot) => `**${CONTEXT_SECTION_LABELS[slot]}**`;
 describe('user-context prefetch in a user-object turn', () => {
   it('waits on a first turn and puts what the engine knows in the prompt and the checkpoint', async () => {
     await withObject('user-context-first-turn', {}, async (o) => {
+      const warn = vi.spyOn(console, 'warn');
       const first = await o.turn('s1', 'r1');
       expect(first.outcome.status).toBe('finished');
+      const [contact, ...more] = firstContacts(warn.mock.calls, 's1');
+      expect(more).toEqual([]);
+      expect(contact).toMatch(/ outcome=fresh waited=\d+ms$/);
 
       // One batch, authenticated with a UCAN minted from the delegation.
       expect(o.engine.batches).toHaveLength(1);
@@ -655,6 +671,7 @@ describe('user-context prefetch in a user-object turn', () => {
       'user-context-later-turns',
       { env: { USER_CONTEXT_CACHE_TTL_MS: 1000 } },
       async (o) => {
+        const warn = vi.spyOn(console, 'warn');
         await o.turn('s1', 'r1');
         expect(o.engine.batches).toHaveLength(1);
         const firstContext = await o.checkpointedContext('s1');
@@ -696,6 +713,10 @@ describe('user-context prefetch in a user-object turn', () => {
         expect(fourth.system).toContain(factLine(FAVOURITE_SEA));
         expect(fourth.system).not.toContain(LEARNING);
         expect(await o.checkpointedContext('s1')).toEqual(firstContext);
+        // Four turns, one first contact: later turns log no such line.
+        const [contact, ...more] = firstContacts(warn.mock.calls, 's1');
+        expect(more).toEqual([]);
+        expect(contact).toMatch(/ outcome=fresh waited=\d+ms$/);
 
         // The next session's first turn starts from the refreshed answer.
         const next = await o.turn('s2', 'r5');
@@ -706,6 +727,10 @@ describe('user-context prefetch in a user-object turn', () => {
         expect(next.system).not.toContain(FAVOURITE_SEA);
         expect(next.system).not.toContain(WORKS_AT);
         expect(await o.status('s2')).toMatchObject({ lastOutcome: 'cached' });
+        expect(firstContacts(warn.mock.calls, 's2')).toEqual([
+          expect.stringMatching(/ outcome=cached waited=\d+ms$/),
+        ]);
+        expect(firstContacts(warn.mock.calls, 's1')).toHaveLength(1);
         expect(await o.checkpointedContext('s2')).toMatchObject({
           identity: {},
           work: {},
@@ -722,10 +747,18 @@ describe('user-context prefetch in a user-object turn', () => {
       'user-context-slow-engine',
       { env: { USER_CONTEXT_PREFETCH_CAP_MS: 800 } },
       async (o) => {
+        const warn = vi.spyOn(console, 'warn');
         const first = await o.turn('s1', 'r1');
         expect(first.outcome.status).toBe('finished');
         expect(first.elapsedMs).toBeGreaterThanOrEqual(800);
         expect(first.elapsedMs).toBeLessThan(5000);
+        const [contact, ...more] = firstContacts(warn.mock.calls, 's1');
+        expect(more).toEqual([]);
+        const waited = Number(
+          /^.* outcome=timeout waited=(\d+)ms$/.exec(contact ?? '')?.[1],
+        );
+        expect(waited).toBeGreaterThanOrEqual(800);
+        expect(waited).toBeLessThan(5000);
         expect(first.system).not.toContain(CONTEXT_HEADING);
         // Waiting past the grace is reported to the Portal.
         expect(first.steps).toContain(PROGRESS_STEP);
@@ -746,6 +779,10 @@ describe('user-context prefetch in a user-object turn', () => {
         expect(next.system).toContain(factLine(FAVOURITE_SEA));
         expect(next.steps).not.toContain(PROGRESS_STEP);
         expect(await o.status('s2')).toMatchObject({ lastOutcome: 'cached' });
+        expect(firstContacts(warn.mock.calls, 's2')).toEqual([
+          expect.stringMatching(/ outcome=cached waited=\d+ms$/),
+        ]);
+        expect(firstContacts(warn.mock.calls, 's1')).toHaveLength(1);
       },
       engine,
     );

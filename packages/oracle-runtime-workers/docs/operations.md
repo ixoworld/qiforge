@@ -610,6 +610,9 @@ memories…`. The client SDK does not render `router.update` frames yet, so
   cognifies asynchronously, so a gather right after a write can still come
   back without it.
 - **Log lines** (prefix `[user-context]`, never user content):
+  `first contact room=… session=… outcome=<cached|fresh|timeout|failed|skipped|aborted> waited=Nms`
+  (warn, once per thread: what its first-contact turn was given and how long
+  it waited; the one line to grep when reading logs at warn level and above),
   `cache hit room=… age=…ms keys=N` (served from the room's cache, no
   request), `fetched in N ms for room=… (identity=f12/e8/p3/c1, work=…,
 recent=missing)` (per slot: rendered fact, entity, episode and community
@@ -617,7 +620,11 @@ recent=missing)` (per slot: rendered fact, entity, episode and community
   `exceeded Nms cap for room=…; continuing in the background`,
   `slot <label> failed (<status_code>)` (warn: one slot of the batch failed,
   the others are used; the engine's detail text is not logged at this
-  level), `failed for room=…: <reason> (not retried for 60s)` and
+  level), `gather for room=… unsettled after Nms; starting a new one`
+  (warn: a gather was still unsettled 5 s past its own 30 s request timeout,
+  so it was abandoned and a new one started; its late answer, if any, is
+  dropped. It should not happen and is worth a look),
+  `failed for room=…: <reason> (not retried for 60s)` and
   `skipped: …` (no engine URL, no signing key, no invocation, a recent
   failure, no room, group room, or `the delegation grants no ixo:memory
 memory/*`). A user with no `ixo:memory` delegation logs `skipped` on every

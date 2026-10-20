@@ -557,7 +557,17 @@ type GatherResult = Extract<
 
 interface InFlightGather {
   promise: Promise<GatherResult>;
+  /** `now()` when the gather started; a gather older than its request timeout plus grace is treated as lost. */
+  startedAt: number;
 }
+
+/**
+ * Grace past `requestTimeoutMs` before an unsettled gather is given up on.
+ * A gather settles within its request timeout; one that has not after this
+ * long never will (its request context is gone), and a room must not keep
+ * joining it.
+ */
+const STALE_GATHER_GRACE_MS = 5_000;
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -769,7 +779,18 @@ export class UserContextFetcher {
     }
 
     const existing = this.inFlight.get(roomId);
-    if (existing) return existing;
+    if (existing) {
+      const ageMs = this.now() - existing.startedAt;
+      if (ageMs <= this.requestTimeoutMs + STALE_GATHER_GRACE_MS) {
+        return existing;
+      }
+      // Lost: never settled within its own timeout. Detach it (a late
+      // settle must not repopulate the room) and gather again.
+      logger.warn(
+        `[user-context] gather for room=${roomId} unsettled after ${ageMs}ms; starting a new one`,
+      );
+      this.inFlight.delete(roomId);
+    }
 
     if (this.recentlyFailed(roomId)) {
       logger.log(
@@ -785,6 +806,7 @@ export class UserContextFetcher {
     }
 
     const entry: InFlightGather = {
+      startedAt: this.now(),
       promise: this.gather(engineUrl, roomId).then(
         (result) => this.settle(roomId, entry, result),
         (err: unknown) =>

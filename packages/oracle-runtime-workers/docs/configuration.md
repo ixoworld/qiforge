@@ -805,7 +805,9 @@ overlaps the preferences read, attachment handling and the capability router
   the background, so a gather that outlives the cap, or a refreshed answer,
   reaches the user's next session (within `USER_CONTEXT_CACHE_TTL_MS`), not
   the running thread. A thread that got nothing on first contact (timeout,
-  failure, skip) asks again on its next turn.
+  failure, skip) asks again on its next turn. A gather still unsettled 5 s
+  past its request timeout (30 s) is abandoned: the next turn starts a new
+  one instead of joining it, and the abandoned one's late answer is dropped.
 - **Cache.** Per room, at most 64 rooms per object, lost when the object is
   evicted. An answer with memories lives `USER_CONTEXT_CACHE_TTL_MS`; an
   answer with none (valid, "no memory yet") lives 30 s so a first memory

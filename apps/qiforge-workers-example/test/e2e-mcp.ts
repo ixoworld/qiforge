@@ -52,9 +52,12 @@ const MOCK_MCP_PORT = Number(process.env.MOCK_MCP_PORT ?? 34675);
 interface UserContextDebug {
   enabled: boolean;
   room?: string;
+  cached?: boolean;
   lastOutcome?: string;
   lastSlots?: Record<string, string>;
 }
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -72,6 +75,7 @@ function parseUserContextDebug(body: unknown): UserContextDebug {
   return {
     enabled: block.enabled,
     ...(typeof block.room === 'string' ? { room: block.room } : {}),
+    ...(typeof block.cached === 'boolean' ? { cached: block.cached } : {}),
     ...(typeof block.lastOutcome === 'string'
       ? { lastOutcome: block.lastOutcome }
       : {}),
@@ -128,6 +132,17 @@ async function main(): Promise<void> {
       { can: 'memory/*', with: 'ixo:memory' },
     ]);
     const client = new ChatClient(oracle.url, { invocation, delegation });
+    /** The `userContext` block of `GET /debug/context` for one session. */
+    const readUserContextDebug = async (
+      sid: string,
+    ): Promise<UserContextDebug> => {
+      const res = await fetch(
+        `${oracle.url}/debug/context?session=${encodeURIComponent(sid)}`,
+        { headers: client.headers() },
+      );
+      assert.equal(res.status, 200, await res.clone().text());
+      return parseUserContextDebug(await res.json());
+    };
 
     // Every memory-engine call carries the user↔oracle room (`x-room-id`);
     // the prefetch is skipped without one. In production the rooms
@@ -249,12 +264,7 @@ async function main(): Promise<void> {
         assert.equal(r.status, 200, `status ${r.status}: ${r.text}`);
 
         // Read the prefetch status first: it says what the turn was given.
-        const res = await fetch(
-          `${oracle.url}/debug/context?session=${encodeURIComponent(preloaded)}`,
-          { headers: client.headers() },
-        );
-        assert.equal(res.status, 200, await res.clone().text());
-        const userContext = parseUserContextDebug(await res.json());
+        const userContext = await readUserContextDebug(preloaded);
         assert.match(
           r.text,
           /Aegean/i,
@@ -300,6 +310,73 @@ async function main(): Promise<void> {
           'f2/e0/p0/c0',
           `lastSlots: ${JSON.stringify(userContext.lastSlots)}`,
         );
+      },
+    );
+
+    await step(
+      'a gather slower than the cap still fills the room for the next session',
+      async () => {
+        // A third memory write drops the room's cache; the engine then
+        // answers slower than the 3 s cap, so this first contact goes
+        // without the block and the gather finishes in the background.
+        const w = await client.stream(
+          sessionId,
+          'Store this fact in your long-term memory using your memory tool: ' +
+            '"My favourite river is the Danube." ' +
+            'After the memory tool reports success, reply with exactly: SAVED',
+        );
+        assert.match(w.text, /SAVED/i, `expected SAVED in "${w.text}"`);
+        const batchRequests = () =>
+          mock.state.requests.filter(
+            (q) => q.pathname === '/search-enhanced-batch',
+          ).length;
+        mock.state.batchDelayMs = 5000;
+        try {
+          const before = batchRequests();
+          const slow = await client.createSession();
+          const r = await client.stream(
+            slow,
+            'Without using any tool, what is my favourite river? ' +
+              'Reply with only its name.',
+          );
+          assert.equal(r.status, 200, `status ${r.status}: ${r.text}`);
+          const during = await readUserContextDebug(slow);
+          assert.equal(
+            during.lastOutcome,
+            'timeout',
+            `expected the cap to win: ${JSON.stringify(during)}`,
+          );
+          assert.equal(batchRequests() - before, 1, 'one gather was started');
+
+          // Past the mock's delay the background gather has landed.
+          await sleep(5000 + 2500);
+          const after = await readUserContextDebug(slow);
+          assert.equal(
+            after.lastOutcome,
+            'fresh',
+            `the late gather did not settle: ${JSON.stringify(after)}`,
+          );
+          assert.equal(after.cached, true, JSON.stringify(after));
+        } finally {
+          mock.state.batchDelayMs = 0;
+        }
+
+        // The next session is served from that cache: no new request.
+        const before = batchRequests();
+        const next = await client.createSession();
+        const r = await client.stream(
+          next,
+          'Without using any tool, what is my favourite river? ' +
+            'Reply with only its name.',
+        );
+        const status = await readUserContextDebug(next);
+        assert.match(
+          r.text,
+          /Danube/i,
+          `expected Danube in "${r.text}" (prefetch: ${JSON.stringify(status)})`,
+        );
+        assert.equal(status.lastOutcome, 'cached', JSON.stringify(status));
+        assert.equal(batchRequests() - before, 0, 'served from the cache');
       },
     );
 

@@ -3253,6 +3253,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       keepGathering();
       return async (onSlow, signal) => {
         if (signal.aborted) return undefined;
+        const waitedFrom = Date.now();
         const timer = setTimeout(onSlow, USER_CONTEXT_PROGRESS_GRACE_MS);
         let onAbort: (() => void) | undefined;
         const aborted = new Promise<undefined>((resolve) => {
@@ -3261,6 +3262,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         });
         try {
           const outcome = await Promise.race([pending, aborted]);
+          // One line per first contact, at warn so it stands out when logs
+          // are read at warn and above: what the turn was given and how
+          // long it waited for it.
+          console.warn(
+            `[user-context] first contact room=${input.roomId} session=${input.sessionId} outcome=${outcome?.kind ?? 'aborted'} waited=${Date.now() - waitedFrom}ms`,
+          );
           return outcome?.kind === 'cached' || outcome?.kind === 'fresh'
             ? withEverySlot(outcome.context)
             : undefined;
