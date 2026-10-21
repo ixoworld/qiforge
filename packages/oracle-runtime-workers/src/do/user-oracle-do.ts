@@ -25,10 +25,6 @@ import {
 import type { ChannelTurnResponse } from '../channels/contract';
 import { refreshActionProposal } from '../action-proposals/reconcile';
 import { assertActionProposalPolicy } from '../action-proposals/policy';
-import {
-  chainIdConfigSchema,
-  chainIdsFromConfig,
-} from '../plugins/ixo-transaction/chain-ids';
 import { actionOutcome } from '@ixo/ixo-transaction/action-proposals';
 import {
   ActionProposalConflict,
@@ -380,6 +376,31 @@ import {
   WorkersUcanService,
 } from './ucan-service';
 import type { UcanDelegation, UserContextData } from '../plugin-api/types';
+
+/**
+ * A topic command's refusal, for the shell: a `conflict` is the card or an
+ * authority it was sealed on having changed (the Portal re-reads and
+ * retries), `unavailable` is a room, DID or chain read that failed and may
+ * succeed later. Anything else is a bug and surfaces as one.
+ */
+function topicRefusal(
+  error: unknown,
+  id: string,
+): { ok: false; kind: 'conflict' | 'unavailable'; error: string } {
+  if (error instanceof ActionProposalConflict)
+    return { ok: false, kind: 'conflict', error: error.message };
+  if (error instanceof Error) {
+    console.warn(
+      `[topic-actions] ${id} authority unavailable: ${error.name}: ${error.message}`,
+    );
+    return {
+      ok: false,
+      kind: 'unavailable',
+      error: 'Topic authority is unavailable',
+    };
+  }
+  throw error;
+}
 
 /** What one attempt's agent build reads from the request body. */
 type TurnBuildBody = Pick<
@@ -3207,32 +3228,46 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.markDirty();
       return p;
     }
+    /** Both switches: topic cards may be claimed and their steps permitted. */
+    private topicExecutionEnabled(): boolean {
+      return (
+        this.env.ACTION_PROPOSALS_ENABLED === 'true' &&
+        this.env.ACTION_TOPIC_PROPOSALS_ENABLED === 'true'
+      );
+    }
     async beginTopicStep(
       identity: TurnIdentity,
       id: string,
       input: BeginTopicStep,
     ): Promise<string | null> {
       await this.ready(identity);
+      // Switching the feature off stops new permits; reads, reconciliation
+      // and receipts of cards already in flight keep working.
+      if (!this.topicExecutionEnabled())
+        return JSON.stringify(
+          topicRefusal(
+            new ActionProposalConflict('Topic action execution is disabled'),
+            id,
+          ),
+        );
       try {
-        const proposal = await this.topicProposals!.get(identity.userDid, id);
+        const store = this.topicProposals!;
+        const proposal = await store.get(identity.userDid, id);
         if (!proposal) return null;
+        // The local refusals first (not claimed, expired, out of order,
+        // another executor); the ten second authority read only for a step
+        // that could actually start.
+        await store.assertBeginnable(identity.userDid, id, input);
         await assertTopicDependencies(
           proposal,
           this.topicVerificationContext(proposal),
         );
         const effect = await topicExpectedEffect(proposal, input.step);
-        const result = await this.topicProposals!.begin(
-          identity.userDid,
-          id,
-          input,
-          effect,
-        );
+        const result = await store.begin(identity.userDid, id, input, effect);
         this.markDirty();
         return result ? JSON.stringify({ ok: true, result }) : null;
       } catch (error) {
-        if (error instanceof ActionProposalConflict || error instanceof Error)
-          return JSON.stringify({ ok: false, error: error.message });
-        throw error;
+        return JSON.stringify(topicRefusal(error, id));
       }
     }
 
@@ -3306,10 +3341,35 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         if (refreshed.attempted) this.markDirty();
       }
       if ((await store.prune(this.userDid)) > 0) this.markDirty();
+      // Topic cards with started steps the room or chain has not confirmed
+      // yet: reconcile their recorded references on the same cooldown.
+      const topics = this.topicProposals;
+      if (topics) {
+        for (const proposal of await topics.dueVerifications(this.userDid)) {
+          const refs = await topics.references(this.userDid, proposal.id);
+          if (
+            !refs.length ||
+            !(await topics.claimVerification(this.userDid, proposal.id))
+          )
+            continue;
+          await reconcileTopicReferences(
+            topics,
+            proposal,
+            { v: 2, references: refs },
+            this.topicVerificationContext(proposal),
+            true,
+          );
+          this.markDirty();
+        }
+        if ((await topics.prune(this.userDid)) > 0) this.markDirty();
+      }
       const receiptAt = await this.mirrorActionReceipts();
-      const verifyAt = await store.nextVerificationAt(this.userDid);
-      if (receiptAt === undefined) return verifyAt;
-      return verifyAt === undefined ? receiptAt : Math.min(receiptAt, verifyAt);
+      const deadlines = [
+        receiptAt,
+        await store.nextVerificationAt(this.userDid),
+        topics ? await topics.nextVerificationAt(this.userDid) : undefined,
+      ].filter((d): d is number => d !== undefined);
+      return deadlines.length ? Math.min(...deadlines) : undefined;
     }
 
     private async mirrorActionReceipts(): Promise<number | undefined> {
@@ -3413,9 +3473,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         | { kind: 'topic-reconcile'; input: TopicReceiptReferences },
     ): Promise<string | null> {
       await this.ready(identity);
-      try {
-        const topic = await this.topicProposals!.get(identity.userDid, id);
-        if (topic) {
+      const topic = await this.topicProposals!.get(identity.userDid, id);
+      if (topic) {
+        try {
           let result = topic;
           let topicAttempted = false;
           const verification = {
@@ -3436,11 +3496,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               throw new ActionProposalConflict(
                 'Topic reconciliation requires references',
               );
-            if (command.kind === 'claim')
+            if (command.kind === 'claim') {
+              if (!this.topicExecutionEnabled())
+                throw new ActionProposalConflict(
+                  'Topic action execution is disabled',
+                );
               await assertTopicDependencies(
                 topic,
                 this.topicVerificationContext(topic),
               );
+            }
             result = (await this.topicProposals!.transition(
               identity.userDid,
               id,
@@ -3465,7 +3530,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             await this.requestHousekeeping(Date.now() + 1000);
           }
           return JSON.stringify({ ok: true, proposal: result });
+        } catch (error) {
+          return JSON.stringify(topicRefusal(error, id));
         }
+      }
+      try {
         if (command?.kind === 'topic-reconcile') return null;
         let result = command
           ? await this.actionProposals!.transition(
@@ -3490,7 +3559,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         return result ? JSON.stringify({ ok: true, proposal: result }) : null;
       } catch (error) {
         if (error instanceof ActionProposalConflict)
-          return JSON.stringify({ ok: false, error: error.message });
+          return JSON.stringify({
+            ok: false,
+            kind: 'conflict',
+            error: error.message,
+          });
         throw error;
       }
     }

@@ -214,5 +214,5 @@ it('verifies exact ordered topic grant bytes, memo and real nonzero chain outcom
       'https://rpc.test',
       fetcher,
     ),
-  ).rejects.toThrow('subject mismatch');
+  ).rejects.toThrow('memo mismatch');
 });

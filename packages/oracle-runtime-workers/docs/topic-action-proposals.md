@@ -1,8 +1,23 @@
 # Durable conversational topic actions
 
-ORA-809 extends the existing action proposal flow with standard discussion draft creation and claim-access grants. Existing transfer proposals retain v1 schemas and digests. Topic proposals use v2 and the `action-proposal/v2` digest namespace.
+ORA-809 extends the [action proposal](action-proposals.md) flow with standard discussion draft creation and claim-access grants. Existing transfer proposals retain v1 schemas and digests. Topic proposals use v2 and the `action-proposal/v2` digest namespace.
 
-Both `ACTION_PROPOSALS_ENABLED` and `ACTION_TOPIC_PROPOSALS_ENABLED` must be `true` to prepare a topic action. Both default to `false`. Keep them disabled until IXO-5618 records the real end-to-end acceptance evidence. Disabling preparation preserves authenticated reads, reconciliation and receipts for existing proposals. This source change does not deploy or activate a capability.
+Both `ACTION_PROPOSALS_ENABLED` and `ACTION_TOPIC_PROPOSALS_ENABLED` must be `true` to prepare a topic action, to claim one and to permit its steps. Both default to `false`; `validateEnv` refuses the topic switch without the base switch. Keep them disabled until IXO-5618 records the real end-to-end acceptance evidence. Switching them off stops new cards, claims and permits; authenticated reads, reconciliation and receipts for cards already in flight keep working. This source change does not deploy or activate a capability.
+
+## Rules the owner object enforces
+
+- **Two windows.** The card's 15-minute expiry bounds the _first_ step only. Once a step has started, the remaining steps may start until **one hour after the claim** (`TOPIC_EXECUTION_WINDOW_MS`), so a topic whose anchor and body were posted at minute fourteen still gets its operation and snapshot instead of being left half-created. After the window the card stays `unknown` with its partial references listed; the owner can revoke it.
+- **A permit is retried, not burned.** `begin-step` for a step that is started, has no reference recorded yet and names the same executor returns the _same_ frozen permit (same effect, same transaction id, so a repeated send is a no-op at the homeserver). A failed Portal pre-check or a wallet cancel therefore does not lock the step until expiry. A step with a reference recorded answers `already_started`.
+- **Local before remote.** Not claimed, expired, out of order, another executor, a concurrent grant: refused from the journal in milliseconds. Only a step that could actually start pays for the ten-second authority read.
+- **One grant in flight per account.** A second card granting the same account the same role on the same collection is refused (`Another grant for this account is still in progress`) while the first has a started, unconfirmed grant step; otherwise the two would overwrite each other on chain while both receipts said granted.
+- **Grant expiry is the authorization's.** `MsgGrantEntityAccountAuthz` carries one expiry for every constraint in it. Merging a new constraint into an existing grant is allowed only when the requested expiry is the existing one; a grant with no expiry on chain, or another date, is refused with the date in the message. The owner either asks for the same expiry or revokes first.
+- **Fingerprints cover authority, not activity.** The topic dependency digests the authority chain head and the pinned body (a new contract operation changes it); the room dependencies digest each policy event's content and the owner's membership _value_ (not avatar or display name, not event ids). Replies in the topic thread do not block a claim.
+- **409 or 503.** A changed card or authority (`Proposal changed`, `Room authority changed`, `Topic or chain authority changed`, …) is a `409 { error }` the Portal shows and retries after a re-read. A room, DID or chain read that failed is a `503 { error: 'Topic authority is unavailable' }` to retry later; the reason is logged (`[topic-actions] <id> authority unavailable: …`), never sent.
+- **Background reconciliation and receipts** follow the transfer cards' schedule ([action-proposals](action-proposals.md#background-verification-and-receipts)): recorded references are re-verified from the alarm with a doubling cooldown, receipts back off and are abandoned or quarantined, finished cards are pruned after 90 days.
+
+## Running on Workers
+
+`@ixo/topic-protocol` builds its JSON-schema validators with Ajv, which generates code from strings; Cloudflare Workers forbid that, and `1.0.0-rc.7` compiles at module load, so a Worker bundling it fails at boot. The runtime requires a release with precompiled validators; `src/core/topic-protocol-runtime.test.ts` scans the pinned package's `dist` for Ajv and `new Function` and fails the suite on a build that would not run.
 
 ## Authority and execution
 

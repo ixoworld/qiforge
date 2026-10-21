@@ -1,5 +1,5 @@
 import {
-  ActionProposalWireRpcSchema,
+  ActionProposalWireSchema,
   TopicReceiptReferencesSchema,
   BeginTopicStepSchema,
   BeginTopicStepResultSchema,
@@ -557,6 +557,21 @@ export function createShell(
     return next();
   });
 
+  // What the owner object answers a proposal command with: the card; a
+  // conflict (the card or the authority it was sealed on changed: the Portal
+  // re-reads and retries, 409); or an authority read that failed and may
+  // succeed later (503, with a generic message).
+  const ProposalReply = z.discriminatedUnion('ok', [
+    z.object({ ok: z.literal(true), proposal: ActionProposalWireSchema }),
+    z.object({
+      ok: z.literal(false),
+      error: z.string(),
+      kind: z.enum(['conflict', 'unavailable']).default('conflict'),
+    }),
+  ]);
+  const refusalStatus = (kind: 'conflict' | 'unavailable') =>
+    kind === 'unavailable' ? 503 : 409;
+
   app.get('/action-proposals/:proposalId', async (c) => {
     c.header('Cache-Control', 'private, no-store');
     c.header('Vary', 'Authorization');
@@ -568,10 +583,10 @@ export function createShell(
       parsed.data,
     );
     if (!proposal) return c.json({ error: 'Proposal not found' }, 404);
-    const result = ActionProposalWireRpcSchema.parse(JSON.parse(proposal));
+    const result = ProposalReply.parse(JSON.parse(proposal));
     return result.ok
       ? c.json({ proposal: result.proposal })
-      : c.json({ error: result.error }, 409);
+      : c.json({ error: result.error }, refusalStatus(result.kind));
   });
   for (const operation of ['claim', 'reject', 'revoke', 'reconcile'] as const) {
     app.post(
@@ -614,12 +629,10 @@ export function createShell(
             identity.userDid,
           ).actionProposal(identity, id.data, command);
           if (!proposal) return c.json({ error: 'Proposal not found' }, 404);
-          const result = ActionProposalWireRpcSchema.parse(
-            JSON.parse(proposal),
-          );
+          const result = ProposalReply.parse(JSON.parse(proposal));
           return result.ok
             ? c.json({ proposal: result.proposal })
-            : c.json({ error: result.error }, 409);
+            : c.json({ error: result.error }, refusalStatus(result.kind));
         } catch (error) {
           if (
             error instanceof ActionProposalConflict ||
@@ -654,12 +667,16 @@ export function createShell(
       const response = z
         .discriminatedUnion('ok', [
           z.object({ ok: z.literal(true), result: BeginTopicStepResultSchema }),
-          z.object({ ok: z.literal(false), error: z.string() }),
+          z.object({
+            ok: z.literal(false),
+            error: z.string(),
+            kind: z.enum(['conflict', 'unavailable']).default('conflict'),
+          }),
         ])
         .parse(JSON.parse(raw));
       return response.ok
         ? c.json(response.result)
-        : c.json({ error: response.error }, 409);
+        : c.json({ error: response.error }, refusalStatus(response.kind));
     },
   );
 

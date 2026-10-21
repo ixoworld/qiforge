@@ -254,6 +254,53 @@ describe('durable canonical action receipts', () => {
     });
   });
 
+  it('answers topic step requests with the switch, the local checks and then the authority read', async () => {
+    await withReceipts('topic-begin-kinds', async (h) => {
+      const topics = h.topics();
+      const p = await topics.create(await topicSubject());
+      const input = { digest: p.digest, step: 'anchor' as const, executor };
+      const begin = async () =>
+        JSON.parse(
+          (await call<string | null>(
+            h.host,
+            'beginTopicStep',
+            { userDid: OWNER },
+            p.id,
+            input,
+          ))!,
+        );
+      Object.assign(h.host, { ready: async () => undefined });
+      // Both switches off: a conflict, no reads.
+      expect(await begin()).toEqual({
+        ok: false,
+        kind: 'conflict',
+        error: 'Topic action execution is disabled',
+      });
+      Object.assign(h.host, {
+        env: {
+          ACTION_PROPOSALS_ENABLED: 'true',
+          ACTION_TOPIC_PROPOSALS_ENABLED: 'true',
+        },
+      });
+      // Not claimed: refused locally before any authority read (the host
+      // has no gateway at all, so a remote read would not be a conflict).
+      expect(await begin()).toEqual({
+        ok: false,
+        kind: 'conflict',
+        error: 'Proposal was not claimed',
+      });
+      await topics.transition(OWNER, p.id, 'claim', p.digest);
+      // Claimed, but no DID resolver configured: the authority read fails,
+      // and the Portal is told to retry later rather than that it conflicted.
+      expect(await begin()).toEqual({
+        ok: false,
+        kind: 'unavailable',
+        error: 'Topic authority is unavailable',
+      });
+      expect(h.send).not.toHaveBeenCalled();
+    });
+  });
+
   it('quarantines a receipt whose card no longer verifies instead of retrying it for ever', async () => {
     await withReceipts('receipt-quarantine', async (h) => {
       const bad = await h.prepare(1);

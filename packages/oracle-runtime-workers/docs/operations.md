@@ -1569,6 +1569,13 @@ prepared in direct chats only`, chain id or signer mismatch) show the
 - The alarm tick is guarded: an action-card failure logs
   `[user-do] action proposal tick failed …` and re-arms in a minute without
   touching runs, flush, tasks or eviction.
+- **Topic cards** (`ACTION_TOPIC_PROPOSALS_ENABLED`): a claim or step
+  request answers `409` when the card or the authority it was sealed on
+  changed, and `503 Topic authority is unavailable` when a room, DID or
+  chain read failed (reason in `[topic-actions] <id> authority
+unavailable: …`). Steps may start until an hour after the claim; a
+  started step with no reference is re-permitted to the same executor.
+  See [topic-action-proposals](topic-action-proposals.md).
 
 ## Known limits
 

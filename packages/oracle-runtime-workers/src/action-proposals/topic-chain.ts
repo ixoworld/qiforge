@@ -205,9 +205,24 @@ export class TopicChainReader {
     const grant = response.grants[0];
     if (grant?.authorization && grant.authorization.typeUrl !== typeUrl)
       throw new Error('Authorization role mismatch');
+    // The grant's expiry on chain covers every constraint in it; the grant
+    // builder refuses to merge into it under another expiry.
+    const expiresAt = (() => {
+      if (!grant?.expiration) return null;
+      const seconds = Number(grant.expiration.seconds.toString());
+      if (!Number.isSafeInteger(seconds))
+        throw new Error('Invalid grant expiration');
+      return new Date(
+        seconds * 1000 + grant.expiration.nanos / 1e6,
+      ).toISOString();
+    })();
     return {
       existing: grant?.authorization
-        ? { typeUrl, valueBase64: encode64(grant.authorization.value) }
+        ? {
+            typeUrl,
+            valueBase64: encode64(grant.authorization.value),
+            expiresAt,
+          }
         : undefined,
       dependency: {
         kind: 'authorization' as const,

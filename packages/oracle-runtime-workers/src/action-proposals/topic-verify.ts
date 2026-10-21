@@ -18,6 +18,7 @@ import {
   digestTopicProposalEffect,
   type TopicProposalStore,
 } from './topic-store';
+import { ActionProposalConflict } from './store';
 import { verifyTopicGrantTransaction } from './verify';
 export type TopicVerificationContext = {
   reader: TopicMatrixReader;
@@ -69,20 +70,18 @@ async function assertTopicDependenciesWithinBudget(
     action.collectionId,
     action.signerAddress,
   );
+  // One authorization query per grant, all at once: the ten second budget
+  // has to cover the topic history and the collection reads as well.
+  const authorizations = await Promise.all(
+    action.grants.map((grant) =>
+      chain.authorization(action.adminAddress, grant.address, grant.role),
+    ),
+  );
   const current: TopicActionProposal['action']['dependencies'] = [
     ...topic.dependencies,
     ...collection.dependencies,
+    ...authorizations.map((a) => a.dependency),
   ];
-  for (const grant of action.grants)
-    current.push(
-      (
-        await chain.authorization(
-          action.adminAddress,
-          grant.address,
-          grant.role,
-        )
-      ).dependency,
-    );
   for (const dep of action.dependencies.filter((d) => d.kind !== 'matrix'))
     if (
       !current.some(
@@ -90,7 +89,9 @@ async function assertTopicDependenciesWithinBudget(
           d.kind === dep.kind && d.key === dep.key && d.digest === dep.digest,
       )
     )
-      throw new Error('Topic or chain authority changed');
+      // A fact the card was sealed on moved: a conflict the Portal can show
+      // and retry after a re-read, not a server fault.
+      throw new ActionProposalConflict('Topic or chain authority changed');
 }
 export async function verifyTopicReference(
   proposal: TopicActionProposal,

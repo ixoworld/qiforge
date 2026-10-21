@@ -5,8 +5,8 @@ import {
   BeginTopicStepResultSchema,
   type TopicStepId,
 } from '@ixo/ixo-transaction/topic-proposals';
-import { OWNER } from './fixtures/proposal';
-import { actor, executor, subject } from './fixtures/topic';
+import { NOW, OWNER } from './fixtures/proposal';
+import { actor, executor, grantSubject, subject } from './fixtures/topic';
 const stub = (name: string) =>
   env.ACTION_PROPOSAL_TEST.get(
     env.ACTION_PROPOSAL_TEST.idFromName(`topic-${name}`),
@@ -27,6 +27,9 @@ describe('durable topic effect journal', () => {
       step: 'anchor',
       executor,
     });
+    // The same owner from two devices gets ONE frozen permit, re-issued:
+    // identical effect and transaction id, so a second send is a no-op at
+    // the homeserver, and a device whose pre-check failed can try again.
     const starts = await Promise.all([
       s.topicBegin(OWNER, p.id, input),
       s.topicBegin(OWNER, p.id, input),
@@ -34,8 +37,24 @@ describe('durable topic effect journal', () => {
     const results = starts.map((r) =>
       BeginTopicStepResultSchema.parse(JSON.parse(r!)),
     );
-    expect(results.filter((r) => r.status === 'permitted')).toHaveLength(1);
+    expect(results.map((r) => r.status)).toEqual(['permitted', 'permitted']);
+    expect(results[0]).toEqual(results[1]);
     await s.reopen();
+    const again = BeginTopicStepResultSchema.parse(
+      JSON.parse((await s.topicBegin(OWNER, p.id, input))!),
+    );
+    expect(again).toEqual(results[0]);
+    // Once a reference is recorded the step is spoken for: no new permit.
+    await s.topicReconcile(
+      OWNER,
+      p.id,
+      JSON.stringify({
+        v: 2,
+        references: [{ kind: 'matrix', step: 'anchor', eventId: '$pending' }],
+      }),
+      '{}',
+      '[]',
+    );
     const duplicate = BeginTopicStepResultSchema.parse(
       JSON.parse((await s.topicBegin(OWNER, p.id, input))!),
     );
@@ -164,6 +183,85 @@ describe('durable topic effect journal', () => {
         ))!,
       ).error,
     ).toBeDefined();
+  });
+  it('bounds the first step by the card expiry and the rest by the execution window', async () => {
+    const s = stub('window');
+    const p = parse(await s.topicCreate(JSON.stringify(await subject())));
+    await s.topicTransition(OWNER, p.id, 'claim', p.digest);
+    const begin = (step: TopicStepId) =>
+      s.topicBegin(
+        OWNER,
+        p.id,
+        JSON.stringify({ digest: p.digest, step, executor }),
+      );
+    // Nothing started by minute fifteen: the card is expired.
+    await s.setNow(NOW + 15 * 60_000);
+    expect(JSON.parse((await begin('anchor'))!).error).toContain('expired');
+    // Started in time: the anchor is posted and verified at minute fourteen...
+    await s.setNow(NOW + 14 * 60_000);
+    const anchor = BeginTopicStepResultSchema.parse(
+      JSON.parse((await begin('anchor'))!),
+    );
+    if (anchor.status !== 'permitted' || anchor.permit.effect.kind !== 'matrix')
+      throw new Error('Missing permit');
+    const e = anchor.permit.effect;
+    await s.topicReconcile(
+      OWNER,
+      p.id,
+      JSON.stringify({
+        v: 2,
+        references: [{ kind: 'matrix', step: 'anchor', eventId: '$anchor' }],
+      }),
+      JSON.stringify({
+        $anchor: {
+          event_id: '$anchor',
+          type: e.eventType,
+          sender: e.sender,
+          room_id: e.roomId,
+          content: e.content,
+        },
+      }),
+      '[]',
+    );
+    // ...so the body may still start after the card expiry: the topic is
+    // not left half-created at minute fifteen.
+    await s.setNow(NOW + 20 * 60_000);
+    expect(
+      BeginTopicStepResultSchema.parse(JSON.parse((await begin('body'))!))
+        .status,
+    ).toBe('permitted');
+    // The execution window (an hour from the claim) is the hard stop.
+    await s.setNow(NOW + 61 * 60_000);
+    expect(JSON.parse((await begin('body'))!).error).toContain(
+      'Execution window closed',
+    );
+  });
+  it('refuses a second grant card while another for the same account is still in progress', async () => {
+    const s = stub('concurrent-grants');
+    const first = parse(await s.topicCreate(JSON.stringify(grantSubject())));
+    const second = parse(
+      await s.topicCreate(JSON.stringify(grantSubject({ runId: 'run-2' }))),
+    );
+    for (const p of [first, second])
+      await s.topicTransition(OWNER, p.id, 'claim', p.digest);
+    const begin = (p: typeof first) =>
+      s.topicBegin(
+        OWNER,
+        p.id,
+        JSON.stringify({ digest: p.digest, step: 'grant', executor }),
+      );
+    expect(
+      BeginTopicStepResultSchema.parse(JSON.parse((await begin(first))!))
+        .status,
+    ).toBe('permitted');
+    expect(JSON.parse((await begin(second))!).error).toContain(
+      'still in progress',
+    );
+    // The same owner retrying the first card gets its permit back.
+    expect(
+      BeginTopicStepResultSchema.parse(JSON.parse((await begin(first))!))
+        .status,
+    ).toBe('permitted');
   });
   it('revocation blocks untouched effects and retains read-only recovery of started effects', async () => {
     const s = stub('revoke');

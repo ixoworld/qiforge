@@ -1244,13 +1244,23 @@ export class MatrixGatewayDO
       );
       if (response.oversized || !response.json)
         throw new Error('Topic history exceeds verification bounds');
-      for (const event of response.json.chunk) {
+      // Each event is fetched and decrypted on its own; eight at a time
+      // keeps a 60-event topic inside the caller's budget without flooding
+      // the homeserver from this one shared object.
+      const { chunk } = response.json;
+      for (let i = 0; i < chunk.length; i += 8) {
         if (Date.now() >= deadline)
           throw new Error('Topic history verification timed out');
-        if (!event.event_id) throw new Error('Topic history event has no ID');
-        const value = await this.getTopicEvent(roomId, event.event_id);
-        if (!value) throw new Error('Topic history is incomplete');
-        events.push(JSON.parse(value));
+        const values = await Promise.all(
+          chunk.slice(i, i + 8).map(async (event) => {
+            if (!event.event_id)
+              throw new Error('Topic history event has no ID');
+            const value = await this.getTopicEvent(roomId, event.event_id);
+            if (!value) throw new Error('Topic history is incomplete');
+            return JSON.parse(value) as unknown;
+          }),
+        );
+        events.push(...values);
       }
       if (!response.json.next_batch) return JSON.stringify(events);
       from = response.json.next_batch;

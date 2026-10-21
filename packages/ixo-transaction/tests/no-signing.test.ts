@@ -81,8 +81,9 @@ describe('the module specifier scan', () => {
 
 describe('no signing capability on the oracle side', () => {
   it('declares only validation, protocol and protobuf dependencies at runtime', () => {
+    // The chain SDK is the consumer's (peer + dev here): one copy of its
+    // codegen per bundle, not two.
     expect(Object.keys(readManifest().dependencies ?? {}).sort()).toEqual([
-      '@ixo/impactxclient-sdk',
       '@ixo/topic-protocol',
       '@scure/base',
       'protobufjs',

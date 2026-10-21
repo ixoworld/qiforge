@@ -205,7 +205,6 @@ async function prepareTopicSubjectWithinBudget(
     ...topic.dependencies,
     ...collection.dependencies,
   ];
-  const grants = [];
   const unique = new Set<string>();
   for (const requested of candidate.grants) {
     const key = `${requested.did}:${requested.role}`;
@@ -216,14 +215,25 @@ async function prepareTopicSubjectWithinBudget(
       Date.parse(requested.expiresAt) > now + 3 * 365 * 86400000
     )
       throw new Error('Grant expiry must be within three years');
-    const grantee = await resolveTopicIdentity(
-      requested.did,
-      ctx.blocksync,
-      ctx.fetcher,
-    );
-    const address = IxoAddressSchema.parse(
-      requested.did.replace(/^did:ixo:/, ''),
-    );
+    if (requested.beforeDate && Date.parse(requested.beforeDate) <= now)
+      throw new Error('Evaluator beforeDate must be in the future');
+  }
+  // Each grant needs a DID lookup and a chain query; they are independent,
+  // so they run together inside the read budget instead of one after another.
+  const resolved = await Promise.all(
+    candidate.grants.map(async (requested) => {
+      const address = IxoAddressSchema.parse(
+        requested.did.replace(/^did:ixo:/, ''),
+      );
+      const [grantee, authorization] = await Promise.all([
+        resolveTopicIdentity(requested.did, ctx.blocksync, ctx.fetcher),
+        chain.authorization(collection.adminAddress, address, requested.role),
+      ]);
+      return { requested, address, grantee, authorization };
+    }),
+  );
+  const grants = [];
+  for (const { requested, address, grantee, authorization } of resolved) {
     const roleId = requested.role === 'submit' ? 'worker' : 'evaluator';
     if (
       !topic.body.roles.some(
@@ -235,11 +245,6 @@ async function prepareTopicSubjectWithinBudget(
       throw new Error(
         'The grant recipient must hold the explicit claim role in the authenticated topic body',
       );
-    const authorization = await chain.authorization(
-      collection.adminAddress,
-      address,
-      requested.role,
-    );
     dependencies.push(authorization.dependency);
     const message = buildTopicGrant({
       role: requested.role,

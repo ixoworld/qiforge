@@ -149,6 +149,10 @@ export async function prepareAction(
   )
     return clarify('The trusted Portal review origin is invalid.');
   const args = parsed.data;
+  if (args.network === 'mainnet')
+    return clarify(
+      'Mainnet action proposals are disabled. Use testnet or devnet.',
+    );
   if (args.action === 'create_topic' || args.action === 'grant_topic_access') {
     if (
       ctx.config.ACTION_TOPIC_PROPOSALS_ENABLED !== 'true' ||
@@ -157,17 +161,12 @@ export async function prepareAction(
       return clarify('Topic action preparation is not enabled.');
     if (!ctx.toolCallId || !ctx.session.runId)
       return clarify('An originating run and invocation are required.');
-    const evidence = ctx.history.messages
-      .filter((m) => m.type === 'human')
-      .slice(-8)
-      .map((m) => contentToText(m.content).slice(0, 4000));
+    // Same evidence rules as a transfer: the user's own words, time note
+    // stripped, every value as a whole token (a DID, room, topic id, tag,
+    // quota or date inside a longer one is not evidence).
+    const evidence = userEvidence(ctx.history.messages);
     const message = evidence.at(-1) ?? '';
-    if (
-      !message ||
-      /\b(don't|do not|never|not yet|what if|suppose|hypothetically)\b/i.test(
-        message,
-      )
-    )
+    if (!message || NEGATION.test(message))
       return clarify('Please explicitly request this topic action when ready.');
     const text = evidence.join('\n');
     const contextual = (value: string) =>
@@ -192,7 +191,11 @@ export async function prepareAction(
               ...(g.beforeDate ? [g.beforeDate] : []),
             ]),
           ];
-    if (required.some((value) => !text.includes(value) && !contextual(value)))
+    if (
+      required.some(
+        (value) => !mentionsToken(text, value) && !contextual(value),
+      )
+    )
       return clarify(
         'Every title, identity, room, quota and absolute expiry must be supported by user evidence.',
       );
@@ -249,16 +252,17 @@ export async function prepareAction(
           url: new URL(`/a/${proposal.id}`, url.origin).href,
         }),
       };
-    } catch {
+    } catch (error) {
+      console.warn(
+        `[action-proposals] topic preparation refused: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`,
+      );
       return clarify(
-        'Topic authority or validated interpretation is unavailable. Please review the exact inputs in Portal.',
+        error instanceof ActionProposalConflict
+          ? error.message
+          : 'Topic authority or validated interpretation is unavailable. Please review the exact inputs in Portal.',
       );
     }
   }
-  if (args.network === 'mainnet')
-    return clarify(
-      'Mainnet action proposals are disabled. Use testnet or devnet.',
-    );
   const signer = IxoAddressSchema.safeParse(
     ctx.user.did.replace(/^did:ixo:/, ''),
   );

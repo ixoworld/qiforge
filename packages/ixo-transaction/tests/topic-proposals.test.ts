@@ -176,6 +176,7 @@ describe('exact owner grants', () => {
       role: 'submit',
       existing: {
         typeUrl: '/ixo.claims.v1beta1.SubmitClaimAuthorization',
+        expiresAt: common.expiresAt,
         valueBase64: Buffer.from(
           SubmitClaimAuthorization.encode(
             prior,
@@ -227,6 +228,7 @@ describe('exact owner grants', () => {
       beforeDate: '2027-09-18T10:00:00.000Z',
       existing: {
         typeUrl: '/ixo.claims.v1beta1.EvaluateClaimAuthorization',
+        expiresAt: common.expiresAt,
         valueBase64: Buffer.from(
           EvaluateClaimAuthorization.encode(
             prior,
@@ -266,6 +268,7 @@ describe('exact owner grants', () => {
         role: 'submit',
         existing: {
           typeUrl: '/ixo.claims.v1beta1.SubmitClaimAuthorization',
+          expiresAt: '2027-10-18T10:00:00.000Z',
           valueBase64: '////',
         },
       }),
@@ -291,6 +294,51 @@ it('rejects digest-consistent but mismatched declared participants at the bounda
   ).rejects.toThrow('participant');
 });
 
+it('refuses to merge into a grant that expires at another time, or never', () => {
+  const prior = SubmitClaimAuthorization.fromPartial({
+    admin,
+    constraints: [
+      SubmitClaimConstraints.fromJSON({
+        collectionId: 'other',
+        agentQuota: '9',
+      }),
+    ],
+  });
+  const existing = {
+    typeUrl: '/ixo.claims.v1beta1.SubmitClaimAuthorization' as const,
+    valueBase64: Buffer.from(
+      SubmitClaimAuthorization.encode(prior, new protobuf.Writer()).finish(),
+    ).toString('base64'),
+  };
+  const request = {
+    role: 'submit' as const,
+    ownerAddress: owner,
+    entityDid: 'did:ixo:entity:123',
+    adminAddress: admin,
+    granteeAddress: grantee,
+    collectionId: 'target',
+    agentQuota: '7',
+    expiresAt: '2027-10-18T10:00:00.000Z',
+  };
+  // The chain keeps one expiry per authorization: re-granting the merged
+  // constraints under a new date would move the `other` collection's too.
+  expect(() =>
+    buildTopicGrant({
+      ...request,
+      existing: { ...existing, expiresAt: '2026-12-01T00:00:00.000Z' },
+    }),
+  ).toThrow('expires at 2026-12-01T00:00:00.000Z');
+  expect(() =>
+    buildTopicGrant({ ...request, existing: { ...existing, expiresAt: null } }),
+  ).toThrow('no expiry');
+  // The same instant in another spelling is the same expiry.
+  expect(() =>
+    buildTopicGrant({
+      ...request,
+      existing: { ...existing, expiresAt: '2027-10-18T10:00:00Z' },
+    }),
+  ).not.toThrow();
+});
 it('preserves same-collection member and claim-specific constraints when replacing a collection-wide grant', () => {
   const common = {
     ownerAddress: owner,
@@ -316,6 +364,7 @@ it('preserves same-collection member and claim-specific constraints when replaci
     role: 'submit',
     existing: {
       typeUrl: '/ixo.claims.v1beta1.SubmitClaimAuthorization',
+      expiresAt: common.expiresAt,
       valueBase64: Buffer.from(
         SubmitClaimAuthorization.encode(submit, new protobuf.Writer()).finish(),
       ).toString('base64'),
@@ -342,6 +391,7 @@ it('preserves same-collection member and claim-specific constraints when replaci
     beforeDate: '2027-10-17T10:00:00.000Z',
     existing: {
       typeUrl: '/ixo.claims.v1beta1.EvaluateClaimAuthorization',
+      expiresAt: common.expiresAt,
       valueBase64: Buffer.from(
         EvaluateClaimAuthorization.encode(
           evaluate,
