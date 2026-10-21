@@ -31,7 +31,12 @@ export async function refreshActionProposal(
         )) ?? proposal,
       attempted: true,
     };
-  } catch {
+  } catch (error) {
+    // Indexing lag, an RPC outage and a byte mismatch all leave the card
+    // `unknown`; the reason is for the operator, never for the user.
+    console.warn(
+      `[action-proposals] verification of ${proposal.id} pending: ${error instanceof Error ? error.message : String(error)}`,
+    );
     return { proposal, attempted: true };
   }
 }

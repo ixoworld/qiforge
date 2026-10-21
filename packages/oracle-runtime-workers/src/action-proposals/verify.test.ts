@@ -11,7 +11,7 @@ import {
 } from '@ixo/ixo-transaction/action-proposals';
 import { proposalSubject } from './fixtures/proposal';
 import { verifyActionTransaction } from './verify';
-async function fixture() {
+async function fixture(memo?: string) {
   const subject = proposalSubject();
   const proposal: ActionProposal = {
     ...subject,
@@ -26,7 +26,7 @@ async function fixture() {
   const body = TxBody.encode(
     TxBody.fromPartial({
       messages: [{ typeUrl: msg.typeUrl, value }],
-      memo: '',
+      memo: memo ?? proposal.id,
     }),
     new protobuf.Writer(),
   ).finish();
@@ -47,15 +47,13 @@ async function fixture() {
   const base64 = btoa(
     Array.from(bytes, (b) => String.fromCharCode(b)).join(''),
   );
-  const fetcher = vi
-    .fn<typeof fetch>()
-    .mockImplementation(async (input) =>
-      String(input).includes('/status')
-        ? Response.json({ result: { node_info: { network: 'pandora-8' } } })
-        : Response.json({
-            result: { hash, height: '42', tx: base64, tx_result: { code: 0 } },
-          }),
-    );
+  const fetcher = vi.fn<typeof fetch>().mockImplementation(async (input) =>
+    String(input).includes('/status')
+      ? Response.json({ result: { node_info: { network: 'pandora-8' } } })
+      : Response.json({
+          result: { hash, height: '42', tx: base64, tx_result: { code: 0 } },
+        }),
+  );
   return { proposal, hash, fetcher };
 }
 describe('chain verified action outcomes', () => {
@@ -84,6 +82,15 @@ describe('chain verified action outcomes', () => {
     );
     expect(String(fetcher.mock.calls[1]![0])).toContain('/rpc/tx?hash=');
   });
+  it.each(['', 'ap_00000000-0000-4000-8000-000000000000'])(
+    'rejects a transaction whose memo is not this card (%j)',
+    async (memo) => {
+      const { proposal, hash, fetcher } = await fixture(memo);
+      await expect(
+        verifyActionTransaction(proposal, hash, 'https://rpc.test', fetcher),
+      ).rejects.toThrow('memo mismatch');
+    },
+  );
   it('rejects a different transaction and never trusts an asserted success', async () => {
     const { proposal, hash, fetcher } = await fixture();
     await expect(

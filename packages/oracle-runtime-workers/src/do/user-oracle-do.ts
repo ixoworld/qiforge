@@ -1,5 +1,10 @@
 import type { ChannelTurnResponse } from '../channels/contract';
 import { refreshActionProposal } from '../action-proposals/reconcile';
+import { assertActionProposalPolicy } from '../action-proposals/policy';
+import {
+  chainIdConfigSchema,
+  chainIdsFromConfig,
+} from '../plugins/ixo-transaction/chain-ids';
 import { actionOutcome } from '@ixo/ixo-transaction/action-proposals';
 import {
   ActionProposalConflict,
@@ -2368,8 +2373,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
       const now = Date.now();
       const deadlines: number[] = [];
-      const receiptDeadline = await this.mirrorActionReceipts();
-      if (receiptDeadline !== undefined) deadlines.push(receiptDeadline);
 
       // Durable runs: start the recovery attempts that are due (the boot
       // above may have just scheduled them), then keep the alarm inside the
@@ -2387,6 +2390,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         const nextRecovery = this.runs.nextRecoveryAt();
         if (nextRecovery !== null)
           deadlines.push(Math.max(nextRecovery, now + 1000));
+      }
+
+      // Action cards: look up recorded transactions the chain has not
+      // confirmed yet, post the receipts that are due, drop old cards. One
+      // bad row here must not stop the flush, the tasks or the eviction
+      // below, so the tick is guarded like its neighbours.
+      try {
+        const actionAt = await this.tickActionProposals();
+        if (actionAt !== undefined)
+          deadlines.push(Math.max(actionAt, now + 1000));
+      } catch (err) {
+        console.error(
+          `[user-do] action proposal tick failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        deadlines.push(now + 60_000);
       }
 
       // The last real request, stored for the next instance before anything
@@ -3047,11 +3065,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private async prepareActionProposal(
       subject: ActionProposalSubject,
     ): Promise<ActionProposal> {
-      if (
-        this.env.ACTION_PROPOSALS_ENABLED !== 'true' ||
-        subject.ownerDid !== this.userDid
-      )
+      const userDid = this.userDid;
+      if (this.env.ACTION_PROPOSALS_ENABLED !== 'true' || !userDid)
         throw new Error('Action proposal preparation unavailable');
+      // The owner object's own policy, whichever plugin prepared the card:
+      // this owner signs from their own account, off mainnet, on the chain
+      // configured for the network, within the expiry window.
+      assertActionProposalPolicy(subject, {
+        ownerDid: userDid,
+        chainIds: chainIdsFromConfig(chainIdConfigSchema.parse(this.env)),
+      });
       const record = await this.runStore!.get(subject.origin.runId);
       if (!record) throw new Error('Action proposal origin unavailable');
       const request = (JSON.parse(record.request) as StoredRunRequest).turn;
@@ -3060,6 +3083,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         request.sessionId !== subject.origin.sessionId
       )
         throw new Error('Action proposal origin mismatch');
+      // A card names one person's wallet; a group room would show its link
+      // and its receipt to everyone in the room.
+      if (request.client === 'matrix' && request.roomKind === 'group')
+        throw new ActionProposalConflict(
+          'Action cards are prepared in direct chats only',
+        );
       let origin = null;
       if (request.sessionId.startsWith('$')) {
         const roomId =
@@ -3082,6 +3111,31 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const proposal = await this.actionProposals!.create(subject, origin);
       this.markDirty();
       return proposal;
+    }
+
+    /**
+     * The alarm's share of action cards: at most two chain lookups for
+     * cards whose transaction is recorded but unconfirmed (so a card the
+     * user signed and walked away from still gets its receipt once the
+     * chain has indexed it), the receipts due now, and the retention sweep.
+     * Returns the earliest moment any of it is due again.
+     */
+    private async tickActionProposals(): Promise<number | undefined> {
+      if (!this.userDid || !this.actionProposals) return undefined;
+      const store = this.actionProposals;
+      for (const proposal of await store.dueVerifications(this.userDid)) {
+        const refreshed = await refreshActionProposal(
+          store,
+          proposal,
+          this.actionProposalRpc(proposal),
+        );
+        if (refreshed.attempted) this.markDirty();
+      }
+      if ((await store.prune(this.userDid)) > 0) this.markDirty();
+      const receiptAt = await this.mirrorActionReceipts();
+      const verifyAt = await store.nextVerificationAt(this.userDid);
+      if (receiptAt === undefined) return verifyAt;
+      return verifyAt === undefined ? receiptAt : Math.min(receiptAt, verifyAt);
     }
 
     private async mirrorActionReceipts(): Promise<number | undefined> {

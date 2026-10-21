@@ -16,11 +16,17 @@ import type {
   PluginTool,
   RuntimeContext,
 } from '../../plugin-api/types';
-import { contentToText } from '../../do/transcript';
+import { ActionProposalConflict } from '../../action-proposals/store';
 import {
   chainIdConfigSchema,
   chainIdsFromConfig,
 } from '../ixo-transaction/chain-ids';
+import {
+  mentionsAmount,
+  mentionsToken,
+  NEGATION,
+  userEvidence,
+} from './evidence';
 
 const network = z.enum(['devnet', 'testnet', 'mainnet']);
 const amount = z
@@ -131,35 +137,34 @@ export async function prepareAction(
     return clarify('Provide a verified recipient address and exact amount.');
   if (!ctx.toolCallId || !ctx.session.runId)
     return clarify('The action requires an originating run and invocation.');
-  const evidence = ctx.history.messages
-    .filter((m) => m.type === 'human')
-    .slice(-8)
-    .map((m) => contentToText(m.content).slice(0, 4000));
+  // The user's own words decide what the card may say: the recipient as a
+  // whole address, the amount with its unit beside it. The model is asked
+  // about intent only after these deterministic checks pass.
+  const evidence = userEvidence(ctx.history.messages);
   const message = evidence.at(-1) ?? '';
   const evidenceText = evidence.join('\n');
-  if (
-    /\b(don't|do not|never|not yet|what if|suppose|hypothetically)\b/i.test(
-      message,
-    )
-  )
+  if (!message || NEGATION.test(message))
     return clarify(
       'Please request the transfer explicitly when you are ready.',
     );
-  if (
-    !evidenceText.includes(recipient.data) ||
-    !new RegExp(
-      `(^|[^0-9.])${args.amount.replace('.', '\\.')}([^0-9.]|$)`,
-    ).test(evidenceText)
-  )
+  if (!mentionsToken(evidenceText, recipient.data))
     return clarify(
-      'The recipient and amount must be supported by the conversation evidence.',
+      'The recipient address must be supported by the conversation evidence.',
+    );
+  const units =
+    args.action === 'transfer'
+      ? [args.unit]
+      : ['credits', 'credit', 'tokens', 'token', args.tokenId];
+  if (!mentionsAmount(evidenceText, args.amount, units))
+    return clarify(
+      args.action === 'transfer'
+        ? 'The amount with its unit (IXO or uixo) must be supported by the conversation evidence.'
+        : 'The number of credits must be supported by the conversation evidence.',
     );
   let command: string;
   let value: Record<string, unknown>;
   let title: string;
   if (args.action === 'transfer') {
-    if (!args.unit || !new RegExp(`\\b${args.unit}\\b`, 'i').test(evidenceText))
-      return clarify('Specify whether the amount is IXO or uixo.');
     const [whole = '0', fraction = ''] = args.amount.split('.');
     if (args.unit === 'uixo' && fraction)
       return clarify('uixo amounts must be whole numbers.');
@@ -177,8 +182,7 @@ export async function prepareAction(
     title = `Send ${args.amount} ${args.unit}`;
   } else {
     if (
-      !args.tokenId ||
-      !evidenceText.includes(args.tokenId) ||
+      !mentionsToken(evidenceText, args.tokenId) ||
       args.amount.includes('.') ||
       BigInt(args.amount) <= 0n
     )
@@ -197,6 +201,9 @@ export async function prepareAction(
     { command, network: args.network, value },
     { requireRiskConfirmation: false },
   );
+  // The card's id is the transaction memo: the owner signs it along with the
+  // transfer, and chain verification accepts no transaction without it.
+  const id = `ap_${crypto.randomUUID()}`;
   const inputs = SignTransactionActionArgsSchema.parse(
     JSON.parse(
       JSON.stringify({
@@ -206,6 +213,7 @@ export async function prepareAction(
           args.network
         ],
         messages: [draft.message],
+        memo: id,
         intent: draft.intent,
         risks: draft.risks,
         riskLevel: draft.riskLevel,
@@ -217,9 +225,17 @@ export async function prepareAction(
     const verdict = await ctx.decisions.evaluate(ACTION_INTENT_DECISION, {
       message,
       evidence,
-      candidate: z
-        .json()
-        .parse({ action: args.action, network: args.network, inputs }),
+      // The user's own figures beside the atomic ones the message carries,
+      // so the classifier can match `1.5 IXO` to `1500000 uixo`.
+      candidate: z.json().parse({
+        action: args.action,
+        network: args.network,
+        requested:
+          args.action === 'transfer'
+            ? { amount: args.amount, unit: args.unit }
+            : { amount: args.amount, tokenId: args.tokenId },
+        inputs,
+      }),
     });
     const answer = verdict.answers.intent;
     if (
@@ -244,7 +260,7 @@ export async function prepareAction(
     ).join('');
     const proposal = await ctx.actionProposals.create({
       v: 1,
-      id: `ap_${crypto.randomUUID()}`,
+      id,
       ownerDid: ctx.user.did,
       title,
       origin: {
@@ -279,9 +295,17 @@ export async function prepareAction(
         digest: proposal.digest,
       }),
     };
-  } catch {
+  } catch (error) {
+    // Provider outages, store conflicts and policy refusals all end in a
+    // clarification; the operator sees which one in the log, and the user
+    // sees the policy's own words when the owner object refused the card.
+    console.warn(
+      `[action-proposals] preparation refused: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`,
+    );
     return clarify(
-      'Intent validation or durable preparation is unavailable. Please retry after clarifying the request.',
+      error instanceof ActionProposalConflict
+        ? error.message
+        : 'Intent validation or durable preparation is unavailable. Please retry after clarifying the request.',
     );
   }
 }

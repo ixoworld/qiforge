@@ -78,10 +78,10 @@ export async function verifyActionTransaction(
   if (raw.signatures.length === 0) throw new Error('Unsigned transaction');
   const body = TxBody.decode(raw.bodyBytes);
   const inputs = proposal.action.inputs;
-  if (
-    body.memo !== (inputs.memo ?? '') ||
-    body.messages.length !== inputs.messages.length
-  )
+  // The memo is the card's id: a transaction signed for another card, or
+  // with no card at all, never verifies this one.
+  if (body.memo !== proposal.id) throw new Error('Transaction memo mismatch');
+  if (body.messages.length !== inputs.messages.length)
     throw new Error('Transaction subject mismatch');
   for (let i = 0; i < inputs.messages.length; i++) {
     const expected = inputs.messages[i]!;

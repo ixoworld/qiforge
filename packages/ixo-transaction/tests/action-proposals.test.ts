@@ -40,6 +40,7 @@ function subject(): ActionProposalSubject {
         network: 'testnet',
         chainId: 'pandora-8',
         messages: [draft.message],
+        memo: 'ap_01234567-0123-4123-8123-0123456789ab',
         intent: draft.intent,
         risks: draft.risks,
         riskLevel: draft.riskLevel,
@@ -127,6 +128,25 @@ describe('portable action proposal contract', () => {
         title: 'Send another amount',
       }),
     ).rejects.toThrow('changed after authorization');
+  });
+  it('pins the signed memo to the card id', () => {
+    const s = subject();
+    for (const memo of [
+      undefined,
+      '',
+      'ap_01234567-0123-4123-8123-0123456789ac',
+    ])
+      expect(() =>
+        ActionProposalSchema.parse({
+          ...s,
+          digest: 'a'.repeat(64),
+          lifecycle: { status: 'prepared' },
+          action: {
+            ...s.action,
+            inputs: { ...s.action.inputs, memo },
+          },
+        }),
+      ).toThrow('memo must carry the proposal ID');
   });
   it('rejects signer, target, network, schema and expiry inconsistencies', () => {
     const s = subject();

@@ -340,6 +340,19 @@ example) per address; declare the dedicated binding to get the Node runtime's
 | `USER_CONTEXT_PREFETCH_CAP_MS` | How long a first turn waits for the prefetch. Default `3000`, `0` to `30000`. `0` never waits: the gather runs in the background and the turn uses the room's cached answer if there is one, otherwise none.                                                                                                    |
 | `USER_CONTEXT_CACHE_TTL_MS`    | How long a room's result is reused by later sessions. Default `300000` (5 min), `1000` to `3600000`.                                                                                                                                                                                                            |
 
+### Action proposals
+
+Validated action cards ([action-proposals](action-proposals.md)): a transfer
+prepared from a conversation, signed by the owner in the Portal, verified on
+chain. Off by default; `validateEnv` refuses the Worker when the feature is on
+without its origin and RPC, or with an unsafe URL.
+
+| Variable                                              | Meaning                                                                                                                                                                                             |
+| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ACTION_PROPOSALS_ENABLED`                            | `'true'` lets `prepare_action` prepare cards. Default `'false'`; reads, reconciliation, outcome polling and receipts work regardless.                                                               |
+| `ACTION_PROPOSALS_PORTAL_ORIGIN`                      | The trusted Portal origin for `/a/<id>` links: `https`, host only, no path. Required when enabled.                                                                                                  |
+| `ACTION_PROPOSALS_RPC_DEVNET`, `_TESTNET`, `_MAINNET` | Chain RPC base URL per network for verification: `https`, no credentials, query or fragment (a `/rpc/` path is fine). Devnet or testnet required when enabled; mainnet cards are refused by policy. |
+
 ### Ops and misc
 
 | Variable                     | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
