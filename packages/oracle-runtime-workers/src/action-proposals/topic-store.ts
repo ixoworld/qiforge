@@ -364,11 +364,14 @@ export class TopicProposalStore {
     // A claimed or unknown card always carries `claimedAt`; the check is one
     // with the status check and narrows the type.
     if (
-      p.lifecycle.executionBlockedAt ||
       !['claimed', 'unknown'].includes(p.lifecycle.status) ||
       !p.lifecycle.claimedAt
     )
       throw new ActionProposalConflict('Proposal was not claimed');
+    // A revoked card fails the status check above; an `unknown` card that is
+    // blocked is one whose memo-bound transaction went wrong (`blockExecution`).
+    if (p.lifecycle.executionBlockedAt)
+      throw new ActionProposalConflict('Execution is blocked');
     const now = this.now();
     // An effect may exist in the world once a step has a reference or is
     // verified; until then the card's own expiry bounds every attempt to
@@ -667,6 +670,34 @@ export class TopicProposalStore {
       console.warn(
         `[topic-actions] ${id} ${reference.step} reference set aside: the verifier proved it is another transaction`,
       );
+  }
+  /**
+   * A transaction carrying this card's memo but other messages is an effect
+   * the owner bound to the card that went wrong. It is NOT set aside: the
+   * hash stays listed for the owner, execution is blocked so the step is
+   * never re-permitted over it, and verification stops. The card stays
+   * `unknown`; the owner revokes it and prepares another.
+   */
+  async blockExecution(owner: string, id: string, reason: string) {
+    const blocked = await this.db.transaction(async () => {
+      const p = await this.get(owner, id);
+      if (!p || p.lifecycle.executionBlockedAt) return false;
+      await this.writeLifecycle(
+        owner,
+        id,
+        TopicProposalV2Schema.shape.lifecycle.parse({
+          ...p.lifecycle,
+          executionBlockedAt: new Date(this.now()).toISOString(),
+        }),
+      );
+      await this.db.run(
+        `UPDATE topic_action_proposals SET verify_attempts=? WHERE owner_did=? AND id=?`,
+        [VERIFY_MAX_ATTEMPTS, owner, id],
+      );
+      return true;
+    });
+    if (blocked)
+      console.error(`[topic-actions] ${id} execution blocked: ${reason}`);
   }
   async verifyStep(
     owner: string,
