@@ -73,8 +73,15 @@ export class TopicProposalStore {
       `CREATE INDEX IF NOT EXISTS topic_action_proposals_status ON topic_action_proposals(owner_did,status,verify_after)`,
     );
     await this.db.run(
-      `CREATE TABLE IF NOT EXISTS topic_action_steps(proposal_id TEXT NOT NULL,step TEXT NOT NULL,status TEXT NOT NULL,expected TEXT,expected_digest TEXT,executor TEXT,started_at TEXT,reference TEXT,receipt TEXT, PRIMARY KEY(proposal_id,step))`,
+      `CREATE TABLE IF NOT EXISTS topic_action_steps(proposal_id TEXT NOT NULL,step TEXT NOT NULL,status TEXT NOT NULL,expected TEXT,expected_digest TEXT,executor TEXT,started_at TEXT,reference TEXT,reference_rejected TEXT,receipt TEXT, PRIMARY KEY(proposal_id,step))`,
     );
+    const steps = await this.db.exec<{ name: string }>(
+      `PRAGMA table_info(topic_action_steps)`,
+    );
+    if (!steps.some((c) => c.name === 'reference_rejected'))
+      await this.db.run(
+        `ALTER TABLE topic_action_steps ADD COLUMN reference_rejected TEXT`,
+      );
   }
   /** Every lifecycle write keeps the indexed `status` column in step with the JSON. */
   private async writeLifecycle(
@@ -237,18 +244,28 @@ export class TopicProposalStore {
         const p = await this.get(owner, row.id);
         if (p) proposals.push(p);
       } catch (error) {
-        // A row this build cannot read drops out of the schedule instead of
-        // failing the alarm every tick.
-        await this.db.run(
-          `UPDATE topic_action_proposals SET verify_attempts=? WHERE owner_did=? AND id=?`,
-          [VERIFY_MAX_ATTEMPTS, owner, row.id],
-        );
-        console.error(
-          `[topic-actions] verification of ${row.id} quarantined: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        await this.quarantineVerification(owner, row.id, error);
       }
     }
     return proposals;
+  }
+  /**
+   * A card whose row, or whose reference row, this build cannot read drops
+   * out of the verification schedule instead of failing the alarm every
+   * tick; its receipt and its place in the grant lock are unaffected.
+   */
+  async quarantineVerification(
+    owner: string,
+    id: string,
+    error: unknown,
+  ): Promise<void> {
+    await this.db.run(
+      `UPDATE topic_action_proposals SET verify_attempts=? WHERE owner_did=? AND id=?`,
+      [VERIFY_MAX_ATTEMPTS, owner, id],
+    );
+    console.error(
+      `[topic-actions] verification of ${id} quarantined: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
   async nextVerificationAt(owner: string): Promise<number | undefined> {
     const row = await this.db.get<{ due: number | null }>(
@@ -344,14 +361,15 @@ export class TopicProposalStore {
   ): Promise<TopicActionProposal['lifecycle']['steps'][number]> {
     if (p.digest !== input.digest)
       throw new ActionProposalConflict('Proposal changed');
+    // A claimed or unknown card always carries `claimedAt`; the check is one
+    // with the status check and narrows the type.
     if (
       p.lifecycle.executionBlockedAt ||
-      !['claimed', 'unknown'].includes(p.lifecycle.status)
+      !['claimed', 'unknown'].includes(p.lifecycle.status) ||
+      !p.lifecycle.claimedAt
     )
       throw new ActionProposalConflict('Proposal was not claimed');
     const now = this.now();
-    if (!p.lifecycle.claimedAt)
-      throw new ActionProposalConflict('Proposal was not claimed');
     // An effect may exist in the world once a step has a reference or is
     // verified; until then the card's own expiry bounds every attempt to
     // start, a permitted-but-never-sent first step included.
@@ -416,6 +434,10 @@ export class TopicProposalStore {
           JSON.parse(row.lifecycle),
         ).claimedAt;
       } catch (error) {
+        // A holder this build cannot read does NOT hold the lock: it can no
+        // longer be reconciled or receipted either, and holding would block
+        // every grant for that account until retention prunes it. The
+        // choice is logged so an operator can see which card it was.
         console.warn(
           `[topic-actions] grant lock skips unreadable card ${row.id}: ${error instanceof Error ? error.message : String(error)}`,
         );
@@ -582,21 +604,69 @@ export class TopicProposalStore {
         status: string;
         expected: string | null;
         reference: string | null;
+        reference_rejected: string | null;
       }>(
-        `SELECT status,expected,reference FROM topic_action_steps WHERE proposal_id=? AND step=?`,
+        `SELECT status,expected,reference,reference_rejected FROM topic_action_steps WHERE proposal_id=? AND step=?`,
         [id, reference.step],
       );
       if (!row || row.status === 'pending' || !row.expected)
         throw new ActionProposalConflict('Step was not started');
-      const serialized = JSON.stringify(reference);
-      if (row.reference && row.reference !== serialized)
-        throw new ActionProposalConflict('Step reference already recorded');
-      await this.db.run(
-        `UPDATE topic_action_steps SET reference=? WHERE proposal_id=? AND step=?`,
-        [serialized, id, reference.step],
-      );
+      const same = (stored: string) =>
+        canonicalizeIxoJson(JSON.parse(stored)) ===
+        canonicalizeIxoJson(reference);
+      if (row.reference) {
+        if (!same(row.reference))
+          throw new ActionProposalConflict('Step reference already recorded');
+      } else {
+        if (row.reference_rejected && same(row.reference_rejected))
+          throw new ActionProposalConflict('Step reference was rejected');
+        await this.db.run(
+          `UPDATE topic_action_steps SET reference=? WHERE proposal_id=? AND step=?`,
+          [JSON.stringify(reference), id, reference.step],
+        );
+        // A reference just recorded gets a fresh verification schedule, the
+        // attempts an earlier step or a rejected reference spent included.
+        await this.db.run(
+          `UPDATE topic_action_proposals SET verify_after=?,verify_attempts=0 WHERE owner_did=? AND id=?`,
+          [this.now(), owner, id],
+        );
+      }
       return ExpectedTopicEffectSchema.parse(JSON.parse(row.expected));
     });
+  }
+  /**
+   * A recorded reference the verifier proved is another transaction is set
+   * aside: the step stays started with no reference (so it is no longer
+   * scheduled and the grant lock follows the execution window), the owner
+   * may record the right one, and the rejected one is refused again.
+   */
+  async rejectReference(
+    owner: string,
+    id: string,
+    reference: TopicReceiptReferences['references'][number],
+  ): Promise<void> {
+    const rejected = await this.db.transaction(async () => {
+      if (!(await this.get(owner, id))) return false;
+      const row = await this.db.get<{ reference: string | null }>(
+        `SELECT reference FROM topic_action_steps WHERE proposal_id=? AND step=? AND status='started'`,
+        [id, reference.step],
+      );
+      if (
+        !row?.reference ||
+        canonicalizeIxoJson(JSON.parse(row.reference)) !==
+          canonicalizeIxoJson(reference)
+      )
+        return false;
+      await this.db.run(
+        `UPDATE topic_action_steps SET reference=NULL,reference_rejected=? WHERE proposal_id=? AND step=?`,
+        [row.reference, id, reference.step],
+      );
+      return true;
+    });
+    if (rejected)
+      console.warn(
+        `[topic-actions] ${id} ${reference.step} reference set aside: the verifier proved it is another transaction`,
+      );
   }
   async verifyStep(
     owner: string,

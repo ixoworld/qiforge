@@ -263,9 +263,12 @@ async function prepareTopicSubjectWithinBudget(
       });
     } catch (error) {
       // The builder's refusals (an existing grant under another expiry, an
-      // evaluator date outside the grant) are the owner's to read.
+      // evaluator date outside the grant) are the owner's to read; a shape
+      // it rejects is not.
       throw new ActionProposalConflict(
-        error instanceof Error ? error.message : 'Grant cannot be built',
+        error instanceof Error && !(error instanceof z.ZodError)
+          ? error.message
+          : 'Grant cannot be built',
       );
     }
     grants.push({ grantee, address, role: requested.role, message });

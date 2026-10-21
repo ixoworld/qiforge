@@ -1,4 +1,4 @@
-import { TopicReadUnavailable } from './topic-errors';
+import { TopicReadUnavailable, typedTopicError } from './topic-errors';
 import type { TopicMatrixReader } from './topic-matrix';
 export async function withTopicReadBudget<T>(
   reader: TopicMatrixReader,
@@ -52,6 +52,10 @@ export async function withTopicReadBudget<T>(
   };
   try {
     return await Promise.race([run(bounded, fetchBounded), deadline]);
+  } catch (error) {
+    // The budget is where every authority read ends: whatever leaves it is
+    // a conflict, unavailable, or a bug.
+    throw typedTopicError(error);
   } finally {
     if (timer) clearTimeout(timer);
     controller.abort();

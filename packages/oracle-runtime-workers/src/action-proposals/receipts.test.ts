@@ -8,6 +8,7 @@ import type { ActionProposal } from '@ixo/ixo-transaction/action-proposals';
 import { createRuntimeCore } from '../core';
 import { makeEnv } from '../core/test-fixtures';
 import type { TurnRequest } from '../do/contracts';
+import type { ChannelTurnResponse } from '../channels/contract';
 import { RoomMirror, type MirrorSend } from '../do/room-mirror';
 import { RunStore } from '../do/run-store';
 import { storedRunRequest } from '../do/run-request';
@@ -162,6 +163,12 @@ async function harness(state: DurableObjectState) {
     async corruptSubject(id: string) {
       await db.run(
         `UPDATE action_proposals SET subject=json_set(subject,'$.title','Tampered') WHERE id=?`,
+        [id],
+      );
+    },
+    async corruptTopicReference(id: string) {
+      await db.run(
+        `UPDATE topic_action_steps SET reference='{"kind":"forged"}' WHERE proposal_id=?`,
         [id],
       );
     },
@@ -353,6 +360,111 @@ describe('durable canonical action receipts', () => {
         error: 'Topic authority is unavailable',
       });
       expect(h.send).not.toHaveBeenCalled();
+      // An unknown card is not found whatever the switches say.
+      Object.assign(h.host, { env: {} });
+      expect(
+        await call(
+          h.host,
+          'beginTopicStep',
+          { userDid: OWNER },
+          'ap_00000000-0000-4000-8000-000000000404',
+          input,
+        ),
+      ).toBeNull();
+      Object.assign(h.host, {
+        env: {
+          ACTION_PROPOSALS_ENABLED: 'true',
+          ACTION_TOPIC_PROPOSALS_ENABLED: 'true',
+        },
+      });
+      // A step whose reference is recorded is already started, answered
+      // from the journal: the host still has no resolver, so an authority
+      // read would have been refused as unavailable.
+      await topics.begin(
+        OWNER,
+        p.id,
+        input,
+        await topicExpectedEffect(p, 'anchor'),
+      );
+      await topics.recordReference(OWNER, p.id, {
+        kind: 'matrix',
+        step: 'anchor',
+        eventId: '$sent',
+      });
+      expect(await begin()).toEqual({
+        ok: true,
+        result: {
+          status: 'already_started',
+          proposal: expect.objectContaining({ id: p.id }),
+        },
+      });
+      // No topic store at all (it failed to open): retry later, not a conflict.
+      Object.assign(h.host, { topicProposals: null });
+      expect(await begin()).toEqual({
+        ok: false,
+        kind: 'unavailable',
+        error: 'Topic authority is unavailable',
+      });
+    });
+  });
+
+  it('serves transfer cards, turn outcomes and the alarm when the topic store failed to open', async () => {
+    await withReceipts('topic-store-missing', async (h) => {
+      const proposal = await h.prepare(1);
+      await h.verify(proposal);
+      Object.assign(h.host, {
+        topicProposals: null,
+        ready: async () => undefined,
+      });
+      const read = JSON.parse(
+        (await call<string | null>(
+          h.host,
+          'actionProposal',
+          { userDid: OWNER },
+          proposal.id,
+        ))!,
+      );
+      expect(read.proposal.lifecycle.status).toBe('succeeded');
+      const outcomes = await call<ChannelTurnResponse>(
+        h.host,
+        'withActionOutcomes',
+        OWNER,
+        {
+          requestId: 'request-1',
+          runId: 'run-1',
+          sessionId: '$thread-1',
+          status: 'finished',
+        },
+      );
+      expect(outcomes.actionOutcomes).toHaveLength(1);
+      expect(await call(h.host, 'tickActionProposals')).toBeUndefined();
+      expect(h.send).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('quarantines a topic card whose recorded reference no longer parses instead of ticking every second', async () => {
+    await withReceipts('topic-tick-quarantine', async (h) => {
+      const topics = h.topics();
+      const p = await topics.create(await topicSubject());
+      await topics.transition(OWNER, p.id, 'claim', p.digest);
+      const input = { digest: p.digest, step: 'anchor' as const, executor };
+      await topics.begin(
+        OWNER,
+        p.id,
+        input,
+        await topicExpectedEffect(p, 'anchor'),
+      );
+      await topics.recordReference(OWNER, p.id, {
+        kind: 'matrix',
+        step: 'anchor',
+        eventId: '$sent',
+      });
+      expect(await topics.nextVerificationAt(OWNER)).toBe(NOW);
+      await h.corruptTopicReference(p.id);
+      // The attempt is spent, the row quarantined, nothing scheduled again.
+      expect(await call(h.host, 'tickActionProposals')).toBeUndefined();
+      expect(await topics.nextVerificationAt(OWNER)).toBeUndefined();
+      expect(await topics.dueVerifications(OWNER)).toEqual([]);
     });
   });
 

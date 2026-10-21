@@ -309,6 +309,81 @@ describe('durable topic effect journal', () => {
       JSON.parse((await s.topicBegin(OWNER, p.id, input))!).error,
     ).toContain('expired');
   });
+  it('rebuilds the pre-release topic tables instead of failing every request', async () => {
+    const s = stub('legacy-shape');
+    await s.topicLegacyTable();
+    const p = parse(await s.topicCreate(JSON.stringify(await subject())));
+    expect(parse(await s.topicGet(OWNER, p.id))).toEqual(p);
+    expect(
+      JSON.parse(
+        await s.topicGet(
+          'did:ixo:legacy',
+          'ap_00000000-0000-4000-8000-00000000dead',
+        ),
+      ),
+    ).toBeNull();
+    await s.reopen();
+    expect(parse(await s.topicGet(OWNER, p.id))).toEqual(p);
+  });
+  it('lets the owner replace a grant reference the verifier proved is another transaction', async () => {
+    const s = stub('wrong-grant-hash');
+    const p = parse(await s.topicCreate(JSON.stringify(grantSubject())));
+    await s.topicTransition(OWNER, p.id, 'claim', p.digest);
+    const begin = async () =>
+      BeginTopicStepResultSchema.parse(
+        JSON.parse(
+          (await s.topicBegin(
+            OWNER,
+            p.id,
+            JSON.stringify({ digest: p.digest, step: 'grant', executor }),
+          ))!,
+        ),
+      ).status;
+    expect(await begin()).toBe('permitted');
+    const wrong = 'A'.repeat(64);
+    const right = 'B'.repeat(64);
+    const reconcile = (hash: string, tx: unknown) =>
+      s.topicReconcile(
+        OWNER,
+        p.id,
+        JSON.stringify({
+          v: 2,
+          references: [{ kind: 'chain', step: 'grant', transactionHash: hash }],
+        }),
+        '{}',
+        '[]',
+        JSON.stringify({ network: 'pandora-8', tx }),
+      );
+    // The chain has a transaction under that hash whose bytes hash
+    // differently: another transaction, not one still to be indexed.
+    const other = {
+      result: {
+        hash: wrong,
+        height: '12',
+        tx: btoa('not this card'),
+        tx_result: { code: 0 },
+      },
+    };
+    let current = parse(await reconcile(wrong, other));
+    expect(current.lifecycle.status).toBe('unknown');
+    expect(JSON.parse(await s.topicReferences(OWNER, p.id))).toEqual([]);
+    // The executor gets its permit back to sign the right transaction; the
+    // rejected hash is refused for good.
+    expect(await begin()).toBe('permitted');
+    expect(JSON.parse((await reconcile(wrong, other))!).error).toBe(
+      'Step reference was rejected',
+    );
+    // The right hash, not indexed yet: recorded and back on the schedule.
+    current = parse(await reconcile(right, null));
+    expect(current.lifecycle.steps[0]).toMatchObject({
+      step: 'grant',
+      status: 'started',
+    });
+    expect(JSON.parse(await s.topicReferences(OWNER, p.id))).toEqual([
+      { kind: 'chain', step: 'grant', transactionHash: right },
+    ]);
+    expect(await begin()).toBe('already_started');
+  });
   it('holds the grant lock by the other step, not the other card', async () => {
     const s = stub('grant-lock');
     const begin = (p: { id: string; digest: string }) =>

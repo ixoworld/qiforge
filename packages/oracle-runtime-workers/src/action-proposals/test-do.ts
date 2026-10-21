@@ -88,6 +88,19 @@ export class ActionProposalTestDO extends DurableObject {
     await store.setup();
     return store;
   }
+  /** The branch's first, unreleased topic table shape with one card in it, before any store opens. */
+  async topicLegacyTable() {
+    const db = await this.database();
+    await db.run(
+      `CREATE TABLE IF NOT EXISTS topic_action_proposals(id TEXT PRIMARY KEY,owner_did TEXT NOT NULL,invocation_id TEXT NOT NULL,subject TEXT NOT NULL,digest TEXT NOT NULL,lifecycle TEXT NOT NULL,origin TEXT,receipt_state TEXT NOT NULL DEFAULT 'waiting',next_attempt INTEGER NOT NULL DEFAULT 0, UNIQUE(owner_did,invocation_id))`,
+    );
+    await db.run(
+      `CREATE TABLE IF NOT EXISTS topic_action_steps(proposal_id TEXT NOT NULL,step TEXT NOT NULL,status TEXT NOT NULL,expected TEXT,expected_digest TEXT,executor TEXT,started_at TEXT,reference TEXT,receipt TEXT, PRIMARY KEY(proposal_id,step))`,
+    );
+    await db.run(
+      `INSERT INTO topic_action_proposals(id,owner_did,invocation_id,subject,digest,lifecycle) VALUES ('ap_00000000-0000-4000-8000-00000000dead','did:ixo:legacy','run:call','{}','d','{"status":"prepared"}')`,
+    );
+  }
   async topicCreate(raw: string) {
     return JSON.stringify(
       await (
@@ -151,40 +164,65 @@ export class ActionProposalTestDO extends DurableObject {
       });
     }
   }
+  /**
+   * Reconciles against a fake room (`events` by id, `state` as the room
+   * state) and, when `chain` is given, a fake RPC whose `/status` names
+   * `chain.network` and whose `/tx` answers `chain.tx` (404 when null).
+   */
   async topicReconcile(
     owner: string,
     id: string,
     input: string,
     events: string,
     state: string,
+    chain?: string,
   ) {
     const store = await this.topics();
     const p = await store.get(owner, id);
     if (!p) return null;
     const values = JSON.parse(events);
-    return JSON.stringify(
-      await reconcileTopicReferences(
-        store,
-        p,
-        TopicReceiptReferencesSchema.parse(JSON.parse(input)),
-        {
-          reader: {
-            state: async () => JSON.parse(state),
-            event: async (_room, id) => values[id],
-            history: async () =>
-              Object.values(values).filter(
-                (value) =>
-                  typeof value === 'object' &&
-                  value !== null &&
-                  'type' in value &&
-                  value.type === 'ixo.topic.operation',
-              ),
+    const rpc = chain
+      ? (JSON.parse(chain) as { network: string; tx: unknown | null })
+      : undefined;
+    const fetcher: typeof fetch = async (request) =>
+      String(request).includes('/status')
+        ? Response.json({ result: { node_info: { network: rpc?.network } } })
+        : rpc?.tx
+          ? Response.json(rpc.tx)
+          : new Response('', { status: 404 });
+    try {
+      return JSON.stringify(
+        await reconcileTopicReferences(
+          store,
+          p,
+          TopicReceiptReferencesSchema.parse(JSON.parse(input)),
+          {
+            reader: {
+              state: async () => JSON.parse(state),
+              event: async (_room, id) => values[id],
+              history: async () =>
+                Object.values(values).filter(
+                  (value) =>
+                    typeof value === 'object' &&
+                    value !== null &&
+                    'type' in value &&
+                    value.type === 'ixo.topic.operation',
+                ),
+            },
+            blocksync: undefined,
+            rpc: rpc ? 'https://rpc.test/rpc/' : undefined,
+            ...(rpc ? { fetcher } : {}),
           },
-          blocksync: undefined,
-          rpc: undefined,
-        },
-      ),
-    );
+        ),
+      );
+    } catch (error) {
+      return JSON.stringify({
+        error: error instanceof Error ? error.message : 'Failed',
+      });
+    }
+  }
+  async topicReferences(owner: string, id: string) {
+    return JSON.stringify(await (await this.topics()).references(owner, id));
   }
   async due(owner: string) {
     return (await (await this.proposals()).dueVerifications(owner)).map(

@@ -18,7 +18,7 @@ import {
   digestTopicProposalEffect,
   type TopicProposalStore,
 } from './topic-store';
-import { ActionProposalConflict } from './store';
+import { ActionProposalConflict, TRANSACTION_REJECTIONS } from './store';
 import { TopicReadUnavailable } from './topic-errors';
 import { verifyTopicGrantTransaction } from './verify';
 export type TopicVerificationContext = {
@@ -57,8 +57,13 @@ async function assertTopicDependenciesWithinBudget(
     try {
       await assertCreatePlanUnchanged(proposal.action.plan);
     } catch (error) {
+      // The plan builder's own refusals describe the plan's internals; what
+      // the owner is told is that the reviewed plan no longer builds the same.
+      console.warn(
+        `[topic-actions] ${proposal.id} creation plan check: ${error instanceof Error ? error.message : String(error)}`,
+      );
       throw new ActionProposalConflict(
-        error instanceof Error ? error.message : 'The creation plan changed',
+        'The reviewed topic creation plan changed',
       );
     }
     return;
@@ -238,7 +243,17 @@ async function reconcileWithinBudget(
         reference.step,
         receipt,
       );
-    } catch {
+    } catch (error) {
+      // A chain reference the verifier PROVED is another transaction (the
+      // bytes hash differently, another card's memo, other messages) is set
+      // aside so the owner can record the right one; a read that failed or
+      // a transaction not indexed yet is simply retried on the cooldown.
+      if (
+        reference.kind === 'chain' &&
+        error instanceof Error &&
+        TRANSACTION_REJECTIONS.has(error.message)
+      )
+        await store.rejectReference(p.ownerDid, p.id, reference);
       current = (await store.get(p.ownerDid, p.id)) ?? current;
     }
   }
