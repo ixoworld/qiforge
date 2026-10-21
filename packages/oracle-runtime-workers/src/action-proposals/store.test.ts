@@ -239,6 +239,31 @@ describe('durable action proposals', () => {
         transactionHash: right.hash,
       }),
     ).rejects.toThrow('already recorded');
+    // A node answering with bytes that do not hash to the hash asked for is
+    // a faulty node, not a proof: the recorded hash stays final.
+    const faulty = JSON.stringify({
+      result: {
+        hash: wrong.hash,
+        height: '42',
+        tx: btoa('garbage'),
+        tx_result: { code: 0 },
+      },
+    });
+    expect((await s.refresh(OWNER, p.id, faulty))?.lifecycle.status).toBe(
+      'unknown',
+    );
+    await expect(
+      s.transition(OWNER, p.id, {
+        kind: 'reconcile',
+        transactionHash: right.hash,
+      }),
+    ).rejects.toThrow('already recorded');
+    // An unknown card that is not blocked cannot be revoked.
+    await expect(
+      s.transition(OWNER, p.id, { kind: 'revoke', digest: p.digest }),
+    ).rejects.toThrow('already consumed');
+    // The faulty answer spent the cooldown slot; the next look-up waits.
+    await s.setNow(NOW + 31_000);
     expect((await s.refresh(OWNER, p.id, wrong.json))?.lifecycle.status).toBe(
       'unknown',
     );
@@ -288,6 +313,20 @@ describe('durable action proposals', () => {
     expect((await s.refresh(OWNER, p.id, right.json))?.lifecycle).toMatchObject(
       { status: 'unknown', transactionHash: tampered.hash },
     );
+    // Asking about the listed hash again returns the card (Portal recovery);
+    // revoking is the one command the blocked card still takes.
+    expect(
+      (
+        await s.transition(OWNER, p.id, {
+          kind: 'reconcile',
+          transactionHash: tampered.hash,
+        })
+      )?.lifecycle.status,
+    ).toBe('unknown');
+    expect(
+      (await s.transition(OWNER, p.id, { kind: 'revoke', digest: p.digest }))
+        ?.lifecycle,
+    ).toMatchObject({ status: 'revoked' });
   });
   it('drops finished cards after the retention window and keeps open ones', async () => {
     const s = stub('retention');

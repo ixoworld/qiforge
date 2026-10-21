@@ -258,9 +258,9 @@ async function reconcileWithinBudget(
           // and the card is blocked, never re-permitted over it.
           await store.blockExecution(p.ownerDid, p.id, error.message);
         else if (TRANSACTION_REJECTIONS.has(error.message))
-          // Provably another transaction (the bytes hash differently, or it
-          // carries another card's memo or none): set aside so the owner can
-          // record the right one.
+          // Provably another transaction (the chain holds it under another
+          // card's memo or none): set aside so the owner can record the
+          // right one.
           await store.rejectReference(p.ownerDid, p.id, reference);
       }
       // A read that failed or a transaction not indexed yet is retried on

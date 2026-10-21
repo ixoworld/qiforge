@@ -145,7 +145,8 @@ export const ActionProposalLifecycleSchema = z.discriminatedUnion('status', [
      * Set when the recorded transaction carries this card's memo but other
      * messages: an effect the owner bound to the card that went wrong. The
      * hash stays listed, no other hash may replace it and verification has
-     * stopped; the card stays `unknown` and the owner prepares another.
+     * stopped; the card stays `unknown` until the owner revokes it (the one
+     * command a blocked card still takes) and prepares another.
      */
     executionBlockedAt: timestamp.optional(),
   }),

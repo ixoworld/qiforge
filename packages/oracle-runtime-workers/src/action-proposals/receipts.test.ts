@@ -2,6 +2,11 @@ import { subject as topicSubject, executor } from './fixtures/topic';
 import { topicExpectedEffect } from './topic-effects';
 import { verifyTopicReference } from './topic-verify';
 import { TopicProposalStore } from './topic-store';
+import { TopicReadUnavailable, typedTopicError } from './topic-errors';
+import { readTopicEvent, resolveTopicIdentity } from './topic-matrix';
+import { TopicChainReader } from './topic-chain';
+import { TopicProtocolError } from '@ixo/topic-protocol';
+import { ZodError } from 'zod';
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
 import type { ActionProposal } from '@ixo/ixo-transaction/action-proposals';
@@ -15,7 +20,7 @@ import { storedRunRequest } from '../do/run-request';
 import { createUserOracleDO } from '../do/user-oracle-do';
 import { DoSqliteDatabase } from '../sqlite/database';
 import { NOW, OWNER, RECIPIENT, proposalSubject } from './fixtures/proposal';
-import { ActionProposalStore } from './store';
+import { ActionProposalConflict, ActionProposalStore } from './store';
 
 async function call<T>(
   host: object,
@@ -471,14 +476,63 @@ describe('durable canonical action receipts', () => {
     });
   });
 
+  it('types authority read failures: rejected content is a conflict, a failed read is unavailable', async () => {
+    expect(
+      typedTopicError(
+        new TopicProtocolError('CONTRACT_VALIDATION_FAILED', 'bad body'),
+      ),
+    ).toBeInstanceOf(ActionProposalConflict);
+    expect(typedTopicError(new ZodError([]))).toBeInstanceOf(
+      ActionProposalConflict,
+    );
+    expect(typedTopicError(new SyntaxError('not json'))).toBeInstanceOf(
+      TopicReadUnavailable,
+    );
+    expect(typedTopicError(new TypeError('fetch failed'))).toBeInstanceOf(
+      TopicReadUnavailable,
+    );
+    expect(() => typedTopicError(new Error('a bug'))).toThrow('a bug');
+    // An event the gateway cannot hand over yet.
+    await expect(
+      readTopicEvent(
+        {
+          state: async () => [],
+          event: async () => null,
+          history: async () => [],
+        },
+        '!room:mx.test',
+        '$pending',
+      ),
+    ).rejects.toBeInstanceOf(TopicReadUnavailable);
+    // A GraphQL error envelope from the DID resolver.
+    const envelope: typeof fetch = async () =>
+      Response.json({ data: null, errors: [{ message: 'boom' }] });
+    await expect(
+      resolveTopicIdentity(OWNER, 'https://blocksync.test/graphql', envelope),
+    ).rejects.toBeInstanceOf(TopicReadUnavailable);
+    // A node answer the chain reader does not understand.
+    const node: typeof fetch = async () =>
+      Response.json({ jsonrpc: '2.0', error: { code: -32601 } });
+    await expect(
+      new TopicChainReader('https://rpc.test', 'pandora-8', node).checkChain(),
+    ).rejects.toBeInstanceOf(TopicReadUnavailable);
+  });
+
   it('serves topic cards, turn outcomes and the alarm when the transfer store failed to open', async () => {
     await withReceipts('transfer-store-missing', async (h) => {
       const topics = h.topics();
       const p = await topics.create(await topicSubject());
-      Object.assign(h.host, {
-        actionProposals: null,
-        ready: async () => undefined,
-      });
+      Object.assign(h.host, { ready: async () => undefined });
+      // Both stores up: an id neither knows is simply not found.
+      expect(
+        await call(
+          h.host,
+          'actionProposal',
+          { userDid: OWNER },
+          'ap_00000000-0000-4000-8000-000000000404',
+        ),
+      ).toBeNull();
+      Object.assign(h.host, { actionProposals: null });
       expect(
         JSON.parse(
           (await call<string | null>(

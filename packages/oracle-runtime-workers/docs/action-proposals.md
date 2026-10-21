@@ -132,9 +132,13 @@ already recorded` is refused only while the recorded hash is unproven) and
   it gets a fresh schedule. A transaction that carries **this card's memo but
   other messages** is the owner's card-bound effect gone wrong: the card gets
   `lifecycle.executionBlockedAt`, the hash stays listed and may not be
-  replaced (`Execution is blocked`), verification stops and the card stays
-  `unknown`; the owner prepares another. The reason is logged
-  (`[action-proposals] <id> execution blocked: …`), never sent. Bytes that
+  replaced (`Execution is blocked`; asking about the same hash again returns
+  the card), verification stops and the card stays `unknown` until the owner
+  revokes it (the one command a blocked card still takes) and prepares
+  another. The reason is logged (`[action-proposals] <id> execution
+blocked: …`), never sent. Both proofs are guarded on the hash they were
+  made for, so a verification still in flight for a replaced hash cannot
+  mark its successor. Bytes that
   do not hash to the hash asked for are a faulty node's answer, not a proof
   about the card: logged and retried like an outage.
 - **Receipts**: a verified card whose turn came from a Matrix thread or a
