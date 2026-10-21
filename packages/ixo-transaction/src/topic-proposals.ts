@@ -21,18 +21,25 @@ export const TopicStepIdSchema = z.enum([
   'grant',
 ]);
 export type TopicStepId = z.infer<typeof TopicStepIdSchema>;
-export const TopicExecutorSchema = z.strictObject({
+/** The Matrix identity a step's event is sent from, as step records and permits carry it. */
+export const TopicExecutorIdentitySchema = z.strictObject({
   matrixUserId: z
     .string()
     .regex(/^@[^:]+:.+$/)
     .max(512),
   homeserver: z.string().max(255),
-  /**
-   * The Matrix device that will send the step's event. A step permit is
-   * re-issued only to the executor that holds it, this field included: the
-   * homeserver deduplicates a transaction id per device, so another device
-   * resending the same effect would post it twice.
-   */
+});
+export type TopicExecutorIdentity = z.infer<typeof TopicExecutorIdentitySchema>;
+/**
+ * The executor as a begin-step REQUEST names it: the identity plus the
+ * Matrix device that will send the step's event. A step permit is re-issued
+ * only to the executor that holds it, device included (the homeserver
+ * deduplicates a transaction id per device, so another device resending
+ * the same effect would post it twice). The device is compared, never
+ * echoed: records and permits carry the identity alone.
+ */
+export const TopicExecutorSchema = z.strictObject({
+  ...TopicExecutorIdentitySchema.shape,
   deviceId: z.string().min(1).max(255).optional(),
 });
 export type TopicExecutor = z.infer<typeof TopicExecutorSchema>;
@@ -137,7 +144,7 @@ export const TopicStepRecordSchema = z.discriminatedUnion('status', [
     status: z.enum(['started', 'unknown']),
     startedAt: instant,
     expectedDigest: ActionProposalDigestSchema,
-    executor: TopicExecutorSchema,
+    executor: TopicExecutorIdentitySchema,
   }),
   z.strictObject({
     step: TopicStepIdSchema,
@@ -183,7 +190,7 @@ export const TopicLifecycleSchema = z
 export const TopicIdentitySchema = z
   .strictObject({
     did: z.string().startsWith('did:ixo:'),
-    ...TopicExecutorSchema.shape,
+    ...TopicExecutorIdentitySchema.shape,
     bindingDigest: ActionProposalDigestSchema,
   })
   .superRefine((identity, ctx) => {
@@ -364,7 +371,7 @@ export const TopicStepPermitSchema = z.strictObject({
   proposalId: ActionProposalIdSchema,
   digest: ActionProposalDigestSchema,
   step: TopicStepIdSchema,
-  executor: TopicExecutorSchema,
+  executor: TopicExecutorIdentitySchema,
   expectedDigest: ActionProposalDigestSchema,
   effect: ExpectedTopicEffectSchema,
 });

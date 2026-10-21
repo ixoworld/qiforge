@@ -379,6 +379,17 @@ import {
 import type { UcanDelegation, UserContextData } from '../plugin-api/types';
 
 /**
+ * The gateway's topic read errors that describe what the homeserver
+ * returned rather than a read that failed (`MatrixGatewayDO.getTopicEvent`
+ * / `getTopicHistory`).
+ */
+const GATEWAY_TOPIC_FACTS = new Set([
+  'Topic event room binding mismatch',
+  'Topic history event room binding mismatch',
+  'Topic history event has no ID',
+]);
+
+/**
  * A topic command's refusal, for the shell: a `conflict` is the card or an
  * authority it was sealed on having changed (the Portal re-reads and
  * retries), `unavailable` is a room, DID or chain read that failed and may
@@ -2995,32 +3006,38 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         attempted ||= refreshed.attempted;
         actionOutcomes.push(actionOutcome(refreshed.proposal));
       }
-      for (const proposal of await this.topicProposals!.forRun(
-        ownerDid,
-        result.sessionId,
-        result.runId,
-      )) {
-        const refs = await this.topicProposals!.references(
+      const topics = this.topicProposals;
+      if (topics)
+        for (const proposal of await topics.forRun(
           ownerDid,
-          proposal.id,
-        );
-        let refreshed = proposal;
-        if (
-          !attempted &&
-          refs.length &&
-          (await this.topicProposals!.claimVerification(ownerDid, proposal.id))
-        ) {
-          attempted = true;
-          refreshed = await reconcileTopicReferences(
-            this.topicProposals!,
-            proposal,
-            { v: 2, references: refs },
-            this.topicVerificationContext(proposal),
-            true,
-          );
+          result.sessionId,
+          result.runId,
+        )) {
+          let refreshed = proposal;
+          // A card whose reference row this build cannot read is reported as
+          // it stands and taken off the verification schedule; the turn
+          // result is not failed over it.
+          try {
+            const refs = await topics.references(ownerDid, proposal.id);
+            if (
+              !attempted &&
+              refs.length &&
+              (await topics.claimVerification(ownerDid, proposal.id))
+            ) {
+              attempted = true;
+              refreshed = await reconcileTopicReferences(
+                topics,
+                proposal,
+                { v: 2, references: refs },
+                this.topicVerificationContext(proposal),
+                true,
+              );
+            }
+          } catch (error) {
+            await topics.quarantineVerification(ownerDid, proposal.id, error);
+          }
+          actionOutcomes.push(topicActionOutcome(refreshed));
         }
-        actionOutcomes.push(topicActionOutcome(refreshed));
-      }
       if (attempted) {
         this.markDirty();
         await this.requestHousekeeping(Date.now() + 1000);
@@ -3160,16 +3177,20 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private topicVerificationContext(
       proposal: TopicActionProposal,
     ): TopicVerificationContext {
-      // The gateway's refusals (oversized state, timed-out history, a room
-      // it cannot read) arrive as plain errors over the stub; they are reads
-      // that failed, not facts about the card.
+      // The gateway's errors arrive as plain errors over the stub. Most are
+      // reads that failed (oversized state, timed-out history, a room it
+      // cannot read, an event it cannot decrypt yet); the few that describe
+      // what the homeserver returned (an event bound to another room, an
+      // event without an id) are facts about the reference.
       const read = async <T>(run: () => Promise<T>): Promise<T> => {
         try {
           return await run();
         } catch (error) {
-          throw new TopicReadUnavailable(
-            error instanceof Error ? error.message : String(error),
-          );
+          const message =
+            error instanceof Error ? error.message : String(error);
+          throw GATEWAY_TOPIC_FACTS.has(message)
+            ? new ActionProposalConflict(message)
+            : new TopicReadUnavailable(message);
         }
       };
       return {
@@ -3194,10 +3215,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       origin: TopicProposalSubject['origin'];
       evidenceRefs: string[];
     }): Promise<TopicActionProposal> {
+      const topics = this.topicProposals;
       if (
         this.env.ACTION_PROPOSALS_ENABLED !== 'true' ||
         this.env.ACTION_TOPIC_PROPOSALS_ENABLED !== 'true' ||
-        !this.userDid
+        !this.userDid ||
+        !topics
       )
         throw new Error('Topic preparation unavailable');
       const record = await this.runStore!.get(input.origin.runId);
@@ -3209,7 +3232,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       )
         throw new Error('Topic origin mismatch');
       const candidateDigest = await digestTopicProposalEffect(input.candidate);
-      const prior = await this.topicProposals!.replayPreparation(
+      const prior = await topics.replayPreparation(
         this.userDid,
         input.origin,
         input.candidate,
@@ -3257,7 +3280,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               ...(request.channel ? { channel: request.channel } : {}),
             }
           : null;
-      const p = await this.topicProposals!.create(subject, origin);
+      const p = await topics.create(subject, origin);
       this.markDirty();
       return p;
     }
@@ -3414,20 +3437,29 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         // transfer receipts below.
         try {
           for (const proposal of await topics.dueVerifications(this.userDid)) {
-            const refs = await topics.references(this.userDid, proposal.id);
-            if (
-              !refs.length ||
-              !(await topics.claimVerification(this.userDid, proposal.id))
-            )
+            // The attempt is spent before the references are read: a
+            // reference row this build cannot parse is quarantined, not
+            // retried every second.
+            if (!(await topics.claimVerification(this.userDid, proposal.id)))
               continue;
-            await reconcileTopicReferences(
-              topics,
-              proposal,
-              { v: 2, references: refs },
-              this.topicVerificationContext(proposal),
-              true,
-            );
             this.markDirty();
+            try {
+              const refs = await topics.references(this.userDid, proposal.id);
+              if (refs.length)
+                await reconcileTopicReferences(
+                  topics,
+                  proposal,
+                  { v: 2, references: refs },
+                  this.topicVerificationContext(proposal),
+                  true,
+                );
+            } catch (error) {
+              await topics.quarantineVerification(
+                this.userDid,
+                proposal.id,
+                error,
+              );
+            }
           }
           if ((await topics.prune(this.userDid)) > 0) this.markDirty();
         } catch (err) {
@@ -3484,44 +3516,42 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           );
         }
       }
-      for (const {
-        proposal,
-        origin,
-      } of await this.topicProposals!.takeReceipts(this.userDid)) {
-        try {
-          const receipt = proposal.lifecycle.receipt;
-          if (!receipt) continue;
-          const text =
-            receipt.kind === 'topic-created'
-              ? `${proposal.title} created. Room ${receipt.roomId}. Topic ${receipt.topicId}. Root ${receipt.rootEventId}.`
-              : `${proposal.title} ${receipt.kind === 'topic-access-granted' ? 'confirmed' : 'failed'} on chain. Transaction ${receipt.transactionHash}. Block ${receipt.height}. Code ${receipt.code}.`;
-          await this.replayToRoom(
-            {
-              ...origin,
-              identity: { userDid: proposal.ownerDid },
-              message: '',
-              requestId: `action-receipt:${proposal.id}:${proposal.digest}`,
-            },
-            text,
-            'oracle',
-            true,
-          );
-          await this.topicProposals!.receiptMirrored(
-            proposal.ownerDid,
-            proposal.id,
-          );
-          this.markDirty();
-        } catch (error) {
-          console.warn(
-            '[topic-actions] receipt mirror pending',
-            error instanceof Error ? error.message : 'mirror failed',
-          );
+      const topics = this.topicProposals;
+      if (topics)
+        for (const { proposal, origin } of await topics.takeReceipts(
+          this.userDid,
+        )) {
+          try {
+            const receipt = proposal.lifecycle.receipt;
+            if (!receipt) continue;
+            const text =
+              receipt.kind === 'topic-created'
+                ? `${proposal.title} created. Room ${receipt.roomId}. Topic ${receipt.topicId}. Root ${receipt.rootEventId}.`
+                : `${proposal.title} ${receipt.kind === 'topic-access-granted' ? 'confirmed' : 'failed'} on chain. Transaction ${receipt.transactionHash}. Block ${receipt.height}. Code ${receipt.code}.`;
+            await this.replayToRoom(
+              {
+                ...origin,
+                identity: { userDid: proposal.ownerDid },
+                message: '',
+                requestId: `action-receipt:${proposal.id}:${proposal.digest}`,
+              },
+              text,
+              'oracle',
+              true,
+            );
+            await topics.receiptMirrored(proposal.ownerDid, proposal.id);
+            this.markDirty();
+          } catch (error) {
+            console.warn(
+              '[topic-actions] receipt mirror pending',
+              error instanceof Error ? error.message : 'mirror failed',
+            );
+          }
         }
-      }
       const due = await this.actionProposals.nextReceiptAttempt(this.userDid);
-      const topicDue = await this.topicProposals!.nextReceiptAttempt(
-        this.userDid,
-      );
+      const topicDue = topics
+        ? await topics.nextReceiptAttempt(this.userDid)
+        : undefined;
       return due === undefined
         ? topicDue
         : topicDue === undefined
@@ -3542,10 +3572,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         | { kind: 'topic-reconcile'; input: TopicReceiptReferences },
     ): Promise<string | null> {
       await this.ready(identity);
-      const topic = this.topicProposals
-        ? await this.topicProposals.get(identity.userDid, id)
-        : null;
-      if (topic) {
+      const topics = this.topicProposals;
+      const topic = topics ? await topics.get(identity.userDid, id) : null;
+      if (topics && topic) {
         try {
           let result = topic;
           let topicAttempted = false;
@@ -3557,7 +3586,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           };
           if (command?.kind === 'topic-reconcile')
             result = await reconcileTopicReferences(
-              this.topicProposals!,
+              topics,
               topic,
               command.input,
               verification,
@@ -3577,7 +3606,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                 this.topicVerificationContext(topic),
               );
             }
-            const next = await this.topicProposals!.transition(
+            const next = await topics.transition(
               identity.userDid,
               id,
               command.kind,
@@ -3586,13 +3615,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             if (!next) return null;
             result = next;
           } else {
-            const refs = await this.topicProposals!.references(
-              identity.userDid,
-              id,
-            );
+            const refs = await topics.references(identity.userDid, id);
             if (refs.length)
               result = await reconcileTopicReferences(
-                this.topicProposals!,
+                topics,
                 topic,
                 { v: 2, references: refs },
                 verification,
