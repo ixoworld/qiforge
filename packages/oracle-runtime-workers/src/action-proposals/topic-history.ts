@@ -233,20 +233,15 @@ export async function readTopicAuthority(
   return {
     authority,
     body,
+    // The fingerprint is the authority chain's head and the pinned body: a
+    // new contract operation changes `authority.revision`, while ordinary
+    // activity in the topic thread (a reply, a reaction) does not block the
+    // owner's claim.
     dependencies: [
       {
         kind: 'topic' as const,
         key: topicId,
-        digest: await digestTopicProposalEffect({
-          authority,
-          body,
-          history: history.map((e) => ({
-            event_id: e.event_id,
-            sender: e.sender,
-            type: e.type,
-            content: e.content,
-          })),
-        }),
+        digest: await digestTopicProposalEffect({ authority, body }),
       },
     ],
   };

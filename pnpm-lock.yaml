@@ -381,9 +381,6 @@ importers:
 
   packages/ixo-transaction:
     dependencies:
-      '@ixo/impactxclient-sdk':
-        specifier: 3.0.0
-        version: 3.0.0
       '@ixo/topic-protocol':
         specifier: 1.0.0-rc.7
         version: 1.0.0-rc.7
@@ -397,6 +394,9 @@ importers:
         specifier: ^4.4.3
         version: 4.4.3
     devDependencies:
+      '@ixo/impactxclient-sdk':
+        specifier: 3.0.0
+        version: 3.0.0
       '@ixo/oracles-client-sdk':
         specifier: workspace:*
         version: link:../oracles-client-sdk

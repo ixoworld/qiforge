@@ -12,6 +12,10 @@ import {
   MAX_ARTIFACT_SWEEP_INTERVAL_HOURS,
   MAX_ARTIFACT_TTL_DAYS,
 } from '../artifacts/config';
+import {
+  USER_CONTEXT_BLOCKING_CAP_MS_DEFAULT,
+  USER_CONTEXT_CACHE_TTL_MS_DEFAULT,
+} from '../memory/user-context-fetcher';
 
 /**
  * Tier-0 (core) environment for the Workers runtime. Mirrors
@@ -65,13 +69,56 @@ const secureUrlSchema = z.string().refine((raw) => isSecureUrl(raw), {
   message: 'must be an https URL (http only on localhost)',
 });
 
+/**
+ * An https base URL for a chain RPC (a path such as `/rpc/` is fine): no
+ * credentials, query or fragment, which the verifier would refuse at the
+ * first lookup otherwise.
+ */
+const rpcOriginSchema = z.string().refine(
+  (raw) => {
+    try {
+      const url = new URL(raw);
+      return (
+        url.protocol === 'https:' &&
+        !url.username &&
+        !url.password &&
+        !url.search &&
+        !url.hash
+      );
+    } catch {
+      return false;
+    }
+  },
+  { message: 'must be an https URL without credentials, query or fragment' },
+);
+/** The Portal origin action links point at: https, host only. */
+const portalOriginSchema = z.string().refine(
+  (raw) => {
+    try {
+      const url = new URL(raw);
+      return (
+        url.protocol === 'https:' &&
+        url.pathname === '/' &&
+        !url.username &&
+        !url.password &&
+        !url.search &&
+        !url.hash
+      );
+    } catch {
+      return false;
+    }
+  },
+  { message: 'must be an https origin with no path, query or fragment' },
+);
+
 export const baseEnvSchema = z.object({
-  ACTION_PROPOSALS_RPC_TESTNET: z.url().optional(),
-  ACTION_PROPOSALS_RPC_DEVNET: z.url().optional(),
-  ACTION_PROPOSALS_RPC_MAINNET: z.url().optional(),
+  // --- action proposals (src/action-proposals, docs/action-proposals.md) ---
+  ACTION_PROPOSALS_RPC_TESTNET: rpcOriginSchema.optional(),
+  ACTION_PROPOSALS_RPC_DEVNET: rpcOriginSchema.optional(),
+  ACTION_PROPOSALS_RPC_MAINNET: rpcOriginSchema.optional(),
   ACTION_PROPOSALS_ENABLED: z.enum(['true', 'false']).default('false'),
   ACTION_TOPIC_PROPOSALS_ENABLED: z.enum(['true', 'false']).default('false'),
-  ACTION_PROPOSALS_PORTAL_ORIGIN: z.url().optional(),
+  ACTION_PROPOSALS_PORTAL_ORIGIN: portalOriginSchema.optional(),
   // --- identity -----------------------------------------------------------
   ORACLE_NAME: z.string().min(1),
   /** UCAN audience — the DID users address invocations/delegations to. */
@@ -298,6 +345,34 @@ export const baseEnvSchema = z.object({
     .max(MAX_ARTIFACT_SWEEP_INTERVAL_HOURS)
     .optional(),
 
+  // --- memory prefetch (src/memory/user-context-fetcher.ts) ----------------
+  /**
+   * First-turn user-context prefetch: the six memory-engine queries
+   * (identity, work, goals, interests, relationships, recent) that fill the
+   * prompt's memory-context block. Only runs where `MEMORY_ENGINE_URL` is
+   * set. `off` disables the prefetch; the memory tools keep working.
+   */
+  USER_CONTEXT_PREFETCH: z.enum(['on', 'off']).default('on'),
+  /**
+   * How long a first turn waits for the prefetch (ms) before the model call
+   * goes ahead without it; the request keeps running and warms the cache.
+   * `0` never waits: the prefetch always runs in the background and the
+   * turn uses what is cached or checkpointed.
+   */
+  USER_CONTEXT_PREFETCH_CAP_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(30_000)
+    .default(USER_CONTEXT_BLOCKING_CAP_MS_DEFAULT),
+  /** How long a room's prefetched context is reused (ms). */
+  USER_CONTEXT_CACHE_TTL_MS: z.coerce
+    .number()
+    .int()
+    .min(1_000)
+    .max(3_600_000)
+    .default(USER_CONTEXT_CACHE_TTL_MS_DEFAULT),
+
   // --- misc ---------------------------------------------------------------
   LOG_LEVEL: z.string().default('info'),
   CORS_ORIGIN: z.string().default('*'),
@@ -410,11 +485,10 @@ export function validateEnv(
 ): ValidateEnvResult {
   const result = schema.safeParse(env);
   if (result.success) {
-    return {
-      valid: true,
-      config: result.data,
-      errors: [],
-    };
+    const errors = actionProposalEnvErrors(result.data);
+    return errors.length
+      ? { valid: false, config: {}, errors }
+      : { valid: true, config: result.data, errors: [] };
   }
 
   const errors: ValidateEnvError[] = result.error.issues.map((issue) => {
@@ -425,4 +499,40 @@ export function validateEnv(
   });
 
   return { valid: false, config: {}, errors };
+}
+
+/**
+ * Switching action proposals on without the settings they run on is a
+ * configuration error, not a runtime clarification: a card could be
+ * prepared with no link to review it at, or signed and never verified.
+ */
+function actionProposalEnvErrors(
+  config: Record<string, unknown>,
+): ValidateEnvError[] {
+  const errors: ValidateEnvError[] = [];
+  const enabled = config['ACTION_PROPOSALS_ENABLED'] === 'true';
+  if (enabled && !config['ACTION_PROPOSALS_PORTAL_ORIGIN'])
+    errors.push({
+      plugin: 'core',
+      field: 'ACTION_PROPOSALS_PORTAL_ORIGIN',
+      message: 'required when ACTION_PROPOSALS_ENABLED is true',
+    });
+  if (
+    enabled &&
+    !config['ACTION_PROPOSALS_RPC_DEVNET'] &&
+    !config['ACTION_PROPOSALS_RPC_TESTNET']
+  )
+    errors.push({
+      plugin: 'core',
+      field: 'ACTION_PROPOSALS_RPC_TESTNET',
+      message:
+        'ACTION_PROPOSALS_RPC_DEVNET or ACTION_PROPOSALS_RPC_TESTNET is required when ACTION_PROPOSALS_ENABLED is true',
+    });
+  if (config['ACTION_TOPIC_PROPOSALS_ENABLED'] === 'true' && !enabled)
+    errors.push({
+      plugin: 'core',
+      field: 'ACTION_TOPIC_PROPOSALS_ENABLED',
+      message: 'requires ACTION_PROPOSALS_ENABLED=true',
+    });
+  return errors;
 }

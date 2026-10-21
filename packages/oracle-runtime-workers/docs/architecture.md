@@ -87,6 +87,20 @@ transcripts), session titles and memory indexing read the message through
 note off again. A supplied-context task's input gets no note, so it stays
 exactly as supplied.
 
+**First-turn user context.** When the memory engine is configured, a
+conversation's first turn is pre-loaded with the user's memory: the object
+starts one `POST /search-enhanced-batch` as soon as the turn's room is known
+(`UserContextFetcher`, `src/memory/user-context-fetcher.ts`), so it overlaps
+the preferences read, the attachments and the capability router (request
+admission runs before the build and is not part of that overlap), and awaits
+it for at most `USER_CONTEXT_PREFETCH_CAP_MS`. The result is written to the
+thread's `userContext` channel once, on first contact, and rendered by the
+prompt composer. A thread's context is stable for the thread's life: later
+turns never wait and never adopt a cached or refreshed answer, they only
+refresh the room's cache in the background, which the next session of the
+user benefits from. Matrix group rooms never prefetch (the reply goes to
+every member) ([configuration](configuration.md#first-turn-memory-prefetch)).
+
 **Shared registries, per-turn data.** The tool and sub-agent registries are
 built once per isolate and shared by every turn of every user, so they hold
 no request-time data. A turn's request-time tools are returned to that turn

@@ -58,7 +58,7 @@ export async function verifyActionTransaction(
       if (!value) throw new Error('Unsupported message');
       return { typeUrl: expected.typeUrl, value };
     }),
-    proposal.action.inputs.memo ?? '',
+    proposal.id,
     transactionHash,
     rpcOrigin,
     fetcher,
@@ -128,7 +128,11 @@ async function verifyTransaction(
   const raw = TxRaw.decode(bytes);
   if (raw.signatures.length === 0) throw new Error('Unsigned transaction');
   const body = TxBody.decode(raw.bodyBytes);
-  if (body.memo !== memo || body.messages.length !== messages.length)
+  // The memo binds the transaction to its card (the card id for a transfer,
+  // the frozen topic memo for a grant): a transaction signed for another
+  // card, or with no card at all, never verifies this one.
+  if (body.memo !== memo) throw new Error('Transaction memo mismatch');
+  if (body.messages.length !== messages.length)
     throw new Error('Transaction subject mismatch');
   for (let i = 0; i < messages.length; i++) {
     const actual = body.messages[i]!;

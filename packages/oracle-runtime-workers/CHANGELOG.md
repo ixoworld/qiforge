@@ -1,5 +1,53 @@
 # @ixo/oracle-runtime-workers
 
+## 0.21.2
+
+### Patch Changes
+
+- [#375](https://github.com/ixoworld/qiforge/pull/375) [`f2f3bb8`](https://github.com/ixoworld/qiforge/commit/f2f3bb8063f5ff5b647ab757d8c5f5600ab31c31) Thanks [@ig-shaun](https://github.com/ig-shaun)! - Portal questions and approval requests (`ask_user_question`, `propose_domain_creation`, `write_domain_files`, `publish_recipe_release`) are non-repeatable writes for the per-turn repetition guard, so an identical pending human decision is issued once per turn instead of up to five times. Navigation and read browser tools stay repeatable.
+
+## 0.21.1
+
+### Patch Changes
+
+- [#372](https://github.com/ixoworld/qiforge/pull/372) [`05f89db`](https://github.com/ixoworld/qiforge/commit/05f89dbb5b3d48157c2f73e645628425647cfd3a) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - The first-contact prefetch line (`[user-context] first contact room=… session=… outcome=… waited=…ms`) is now printed for every first contact, including the ones that fetch nothing: a turn with no oracle room, the prefetch switched off or no `MEMORY_ENGINE_URL`, a Matrix group room, or a user whose delegation has no `ixo:memory` grant print `outcome=skipped reason=<no-room|disabled|not-booted|group-room|no-memory-grant> waited=0ms`; a `failed` or fetcher-level `skipped` outcome carries its reason the same way. The two info-level lines those cases printed before (`skipped: group room`, `skipped: the delegation grants no ixo:memory memory/*`) are replaced by it. Found on mainnet after 0.20.1, where the first turns after the deploy were users without a memory grant and showed no first-contact line at warn level. Task-run and supplied-context turns still print nothing.
+
+## 0.21.0
+
+### Minor Changes
+
+- [#370](https://github.com/ixoworld/qiforge/pull/370) [`2ba3670`](https://github.com/ixoworld/qiforge/commit/2ba36708570a613284369adcbd5e16ac8d86e5dc) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - The memory plugin's default tool selection now includes `memory-engine__add_oracle_knowledge`, so the controllers and owners of any oracle can grow its shared knowledge from chat ("save this as oracle knowledge") without a per-oracle code change. The Memory Engine, not the runtime, decides who may use it: a caller whose DID is not a `controller` or `owner` of an entity linked to the oracle DID is refused on chain, and the tool needs the user's explicit confirmation of the scope (`public`: every user of the oracle reads it; `private`: its controllers and owners only). OAuth callers of the engine never get the tool. A fork that wants the previous surface passes `selectedTools` without it. The plugin manifest tells the agent when to store oracle knowledge instead of a memory about the user.
+
+## 0.20.1
+
+### Patch Changes
+
+- [#368](https://github.com/ixoworld/qiforge/pull/368) [`8cd25f9`](https://github.com/ixoworld/qiforge/commit/8cd25f9e1534b63c6ed300cb66d9b75b74fde2ae) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - The user-context prefetch now logs one warn line per first contact, `[user-context] first contact room=<room> session=<session> outcome=<cached|fresh|timeout|failed|skipped|aborted> waited=<N>ms`: what the thread's first turn was given and how long it waited for it, the one line to read when logs are filtered to warn and above. It was added after a live testnet first turn: a cold engine gather took 4.8 s, filled the room's cache 1.8 s after the 3 s cap, and the user's next session got the block in 269 ms.
+
+  A gather that is still unsettled 5 s past its request timeout is abandoned instead of being joined by every later turn of the room: the next turn logs `[user-context] gather for room=<room> unsettled after <N>ms; starting a new one` and gathers again, and a late answer from the abandoned gather does not overwrite the room's cache.
+
+  The MCP end-to-end drill (`pnpm test:e2e:mcp`) now covers the slow-engine path: the mock's batch endpoint answers 5 s late, the first contact ends with `timeout`, the background gather fills the room's cache, and the next session's first turn is served from it.
+
+## 0.20.0
+
+### Minor Changes
+
+- [#366](https://github.com/ixoworld/qiforge/pull/366) [`a4ab77b`](https://github.com/ixoworld/qiforge/commit/a4ab77b9bd283119c4899e6c5f3c35b002919626) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - The first turn of a conversation is pre-loaded with the user's memory again, as on the Node runtime. `state.userContext` was read by the prompt composer but nothing filled it, so memory was recalled only when the agent called `search_memory_engine`. The user object now sends one `POST {MEMORY_ENGINE_URL}/search-enhanced-batch` with the six slot queries (`identity`, `work`, `goals`, `interests`, `relationships`, `recent`; the Node queries, limits and filters, including the 90-day window on `recent`), authorized with a per-user UCAN invocation for `ixo:memory` / `memory/*` and the oracle room in `x-room-id`. The result is stored trimmed to what the prompt renders (entity names, labels and summaries, fact text, episode content, community names and summaries), every stored string capped at 400 characters and the whole context at 16 KB, and appears in the system prompt as before under a one-line note that it is background, not instructions. The fetch starts as soon as the room is known, so it overlaps the preferences read, attachment handling and the capability router (request admission runs before the build and is not part of the overlap), and the turn waits for it at most `USER_CONTEXT_PREFETCH_CAP_MS`, stopping at once if the turn is aborted; a gather that outlives the cap keeps running in the background and warms the cache.
+
+  A thread's context is stable for the thread's life: it is written once, on the first turn that gets an answer, and later turns never wait for or adopt a cached or refreshed answer. They only refresh the room's cache in the background, which the user's next session benefits from. A thread that got nothing on its first turn (cap hit, failure, skip) asks again on its next turn. Results are cached per room for `USER_CONTEXT_CACHE_TTL_MS`, except an answer with no memories at all, which is cached for 30 s so a first memory shows up quickly. The room's cache entry is dropped after a successful memory write (`add_memory`, `delete_episode`, `delete_edge`, `clear`, `add_oracle_knowledge`) and after a session-history upload to the engine completes. The engine's own 15 s result cache and asynchronous cognify can still return a just-written memory late. A request that fails (HTTP error, network error, timeout, a malformed answer, or all six slots failing) is not cached as an empty result: the room is skipped for 60 s. A user without an `ixo:memory` delegation, an oracle without `MEMORY_ENGINE_URL`, supplied-context and task sessions, and Matrix group rooms (the reply goes to every member) make no request.
+
+  A Portal turn that is still waiting 300 ms into its first contact sends a `router.update` step, `Recalling your memories…`. The client SDK does not render `router.update` frames yet, so nothing is shown until it does.
+
+  New environment variables:
+
+  - `USER_CONTEXT_PREFETCH`: `on` (default) or `off`. `off` makes no prefetch; the memory tools still work.
+  - `USER_CONTEXT_PREFETCH_CAP_MS`: how long the first turn waits, default `3000`, 0 to 30000. `0` never waits: the gather runs in the background and the turn uses the room's cached answer if there is one.
+  - `USER_CONTEXT_CACHE_TTL_MS`: how long a room's result is reused, default `300000`, 1000 to 3600000.
+
+  Measured on devnet (engine 1.0.0-develop.8, a user space of 345 episodes plus the Companion's public knowledge, uncached, from inside the cluster): the six-query batch takes p50 439 ms and p95 550 ms (a space of 183 episodes: p50 362 ms); 648 ms p50 from outside over the public URL; a cold open after the engine evicted an idle space (120 s) takes 2.2 s. The 3 s default cap covers a warm engine with margin and a cold open narrowly; a slower one continues in the background and is served to the next session.
+
+  `GET /debug/context?session=<id>` gains a `userContext` block (`enabled`, `room`, `cached`, `ageMs`, `inFlight`, `lastOutcome`, `lastReason`, `lastMs`, `lastSlots`, `lastAt`); `lastMs` and `lastSlots` are present only while the last outcome is `fresh`, and `lastReason` (with `failed` and `skipped`) never carries an engine response body. The runtime logs `[user-context]` lines for cache hits, the per-slot counts of each fetch, cap overruns, skips and failures; never user content. Divergences from Node are listed in `docs/node-parity.md`.
+
 ## 0.19.0
 
 ### Minor Changes

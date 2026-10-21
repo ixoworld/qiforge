@@ -30,6 +30,9 @@ function stub(name: string) {
     refresh: async (...args: Parameters<typeof s.refresh>) =>
       parse(await s.refresh(...args)),
     outcomes: (...args: Parameters<typeof s.outcomes>) => s.outcomes(...args),
+    due: (owner: string) => s.due(owner),
+    nextVerification: (owner: string) => s.nextVerification(owner),
+    prune: (owner: string) => s.prune(owner),
     setNow: (now: number) => s.setNow(now),
     reopen: () => s.reopen(),
   };
@@ -88,8 +91,9 @@ describe('durable action proposals', () => {
     const s = stub('retry');
     const subject = proposalSubject();
     const p = await s.create(subject);
+    // The retried call mints a new id and memo for the same invocation.
     expect(
-      await s.create({ ...subject, id: `ap_${crypto.randomUUID()}` }),
+      await s.create(proposalSubject({ id: `ap_${crypto.randomUUID()}` })),
     ).toEqual(p);
     const next = await s.create(
       proposalSubject({
@@ -128,6 +132,93 @@ describe('durable action proposals', () => {
     await expect(
       s.transition(OWNER, p.id, { kind: 'claim', digest: p.digest }),
     ).rejects.toThrow('already consumed');
+  });
+  it('refuses a transaction hash another card of the owner already recorded', async () => {
+    const s = stub('one-tx-one-card');
+    const first = await s.create(proposalSubject());
+    const second = await s.create(
+      proposalSubject({
+        origin: {
+          sessionId: 'session-1',
+          runId: 'run-2',
+          invocationId: 'run-2:call-1',
+        },
+      }),
+    );
+    const hash = 'B'.repeat(64);
+    for (const p of [first, second])
+      await s.transition(OWNER, p.id, { kind: 'claim', digest: p.digest });
+    await s.transition(OWNER, first.id, {
+      kind: 'reconcile',
+      transactionHash: hash,
+    });
+    await expect(
+      s.transition(OWNER, second.id, {
+        kind: 'reconcile',
+        transactionHash: hash,
+      }),
+    ).rejects.toThrow('already recorded for another proposal');
+    expect(
+      (await s.transition(OWNER, second.id, { kind: 'reconcile' }))?.lifecycle,
+    ).toEqual({ status: 'unknown', claimedAt: expect.any(String) });
+  });
+  it('schedules background lookups with a doubling cooldown and gives up after the cap', async () => {
+    const s = stub('verify-backoff');
+    const p = await s.create(proposalSubject());
+    const tx = await indexedTransaction(p);
+    await s.transition(OWNER, p.id, { kind: 'claim', digest: p.digest });
+    expect(await s.due(OWNER)).toEqual([]);
+    expect(await s.nextVerification(OWNER)).toBeUndefined();
+    await s.transition(OWNER, p.id, {
+      kind: 'reconcile',
+      transactionHash: tx.hash,
+    });
+    expect(await s.due(OWNER)).toEqual([p.id]);
+    expect(await s.nextVerification(OWNER)).toBe(0);
+    let now = NOW;
+    const waits: number[] = [];
+    for (let attempt = 0; attempt < 10; attempt++) {
+      await s.setNow(now);
+      expect(await s.due(OWNER)).toEqual([p.id]);
+      await s.refresh(OWNER, p.id, null);
+      const next = await s.nextVerification(OWNER);
+      if (next === undefined) break;
+      waits.push(next - now);
+      expect(await s.due(OWNER)).toEqual([]);
+      now = next;
+    }
+    expect(waits).toEqual([
+      30_000, 60_000, 120_000, 240_000, 480_000, 600_000, 600_000, 600_000,
+      600_000,
+    ]);
+    expect(await s.nextVerification(OWNER)).toBeUndefined();
+    expect(await s.due(OWNER)).toEqual([]);
+    // A Portal reconcile still looks the transaction up once the cooldown
+    // has passed, however many attempts the alarm made.
+    await s.setNow(now + 600_000);
+    expect((await s.refresh(OWNER, p.id, tx.json))?.lifecycle.status).toBe(
+      'succeeded',
+    );
+  });
+  it('drops finished cards after the retention window and keeps open ones', async () => {
+    const s = stub('retention');
+    const done = await s.create(proposalSubject());
+    await s.transition(OWNER, done.id, { kind: 'reject', digest: done.digest });
+    const open = await s.create(
+      proposalSubject({
+        origin: {
+          sessionId: 'session-1',
+          runId: 'run-2',
+          invocationId: 'run-2:call-1',
+        },
+      }),
+    );
+    await s.transition(OWNER, open.id, { kind: 'claim', digest: open.digest });
+    expect(await s.prune(OWNER)).toBe(0);
+    await s.setNow(NOW + 91 * 24 * 60 * 60 * 1000);
+    expect(await s.prune(OWNER)).toBe(1);
+    expect(await s.get(OWNER, done.id)).toBeNull();
+    expect((await s.get(OWNER, open.id))?.lifecycle.status).toBe('claimed');
   });
   it('only emits verified outcomes for the original owner session and run', async () => {
     const s = stub('receipt');

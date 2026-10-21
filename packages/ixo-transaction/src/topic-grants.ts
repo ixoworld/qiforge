@@ -26,9 +26,17 @@ const quota = z
   .string()
   .regex(/^[1-9]\d*$/)
   .refine((s) => BigInt(s) <= 9223372036854775807n);
+/**
+ * The grant the chain already holds for this admin, grantee and role. Its
+ * expiry is the whole authorization's: merging a new constraint into it
+ * re-grants every constraint with the new expiry, so a merge is only allowed
+ * when the requested expiry is the existing one (`null` = no expiry on
+ * chain, which a dated grant would silently shorten).
+ */
 const Existing = z.strictObject({
   typeUrl: z.enum([Submit, Evaluate]),
   valueBase64: z.string().min(1).max(131072),
+  expiresAt: z.iso.datetime().nullable(),
 });
 export const BuildTopicGrantSchema = z.strictObject({
   role: z.enum(['submit', 'evaluate']),
@@ -134,6 +142,19 @@ export function buildTopicGrant(raw: z.infer<typeof BuildTopicGrantSchema>) {
     nested(typeUrl, bytes(p.existing.valueBase64)).admin !== p.adminAddress
   )
     throw new Error('Prior authorization admin mismatch');
+  if (p.existing) {
+    if (p.existing.expiresAt === null)
+      throw new Error(
+        'The existing grant for this account has no expiry; a dated grant would shorten it',
+      );
+    if (
+      new Date(p.existing.expiresAt).toISOString() !==
+      new Date(p.expiresAt).toISOString()
+    )
+      throw new Error(
+        `The existing grant for this account expires at ${p.existing.expiresAt}; request the same expiry so its other constraints keep it`,
+      );
+  }
   let encoded: Uint8Array;
   if (p.role === 'submit') {
     const prior = p.existing

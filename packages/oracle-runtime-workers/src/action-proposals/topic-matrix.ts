@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { boundedBytes } from '../core/domain-context/transport';
 import { digestTopicProposalEffect } from './topic-store';
+import { ActionProposalConflict } from './store';
 import type { TopicActionProposal } from '@ixo/ixo-transaction/topic-proposals';
 
 export const TopicMatrixEventSchema = z.object({
@@ -147,11 +148,22 @@ export async function readTopicRoom(
     power,
     ...(encryption ? [encryption] : []),
   ];
+  // Only the facts that carry authority are fingerprinted: the owner's
+  // membership value (not their avatar or display name) and each policy
+  // event's content (not the event id a re-send would change).
+  const authority = (e: TopicMatrixEvent) => ({
+    type: e.type,
+    state_key: e.state_key ?? '',
+    content:
+      e.type === 'm.room.member'
+        ? { membership: e.content.membership }
+        : e.content,
+  });
   const dependencies = await Promise.all(
     selected.map(async (e) => ({
       kind: 'matrix' as const,
       key: `${e.type}\0${e.state_key ?? ''}`,
-      digest: await digestTopicProposalEffect(e),
+      digest: await digestTopicProposalEffect(authority(e)),
     })),
   );
   if (!encryption)
@@ -178,7 +190,7 @@ export async function assertTopicRoomUnchanged(
     owner.matrixUserId !== proposal.action.owner.matrixUserId ||
     owner.homeserver !== proposal.action.owner.homeserver
   )
-    throw new Error('Owner Matrix identity changed');
+    throw new ActionProposalConflict('Owner Matrix identity changed');
   const current = await readTopicRoom(
     reader,
     proposal.action.roomId,
@@ -192,18 +204,23 @@ export async function assertTopicRoomUnchanged(
         (d) => d.key === dep.key && d.digest === dep.digest,
       )
     )
-      throw new Error('Room authority changed');
+      throw new ActionProposalConflict('Room authority changed');
   const people =
     proposal.action.name === 'create_topic'
       ? proposal.action.participants
       : proposal.action.grants.map((g) => g.grantee);
-  for (const person of people) {
-    const binding = await resolveTopicIdentity(person.did, blocksync, fetcher);
+  const bindings = await Promise.all(
+    people.map((person) =>
+      resolveTopicIdentity(person.did, blocksync, fetcher),
+    ),
+  );
+  people.forEach((person, i) => {
+    const binding = bindings[i]!;
     if (
       binding.bindingDigest !== person.bindingDigest ||
       binding.matrixUserId !== person.matrixUserId
     )
-      throw new Error('Participant identity changed');
-  }
+      throw new ActionProposalConflict('Participant identity changed');
+  });
   return current;
 }

@@ -11,7 +11,7 @@ import {
 } from '@ixo/ixo-transaction/action-proposals';
 import { proposalSubject } from './fixtures/proposal';
 import { verifyActionTransaction } from './verify';
-async function fixture() {
+async function fixture(memo?: string) {
   const subject = proposalSubject();
   const proposal: ActionProposal = {
     ...subject,
@@ -26,7 +26,7 @@ async function fixture() {
   const body = TxBody.encode(
     TxBody.fromPartial({
       messages: [{ typeUrl: msg.typeUrl, value }],
-      memo: '',
+      memo: memo ?? proposal.id,
     }),
     new protobuf.Writer(),
   ).finish();
@@ -82,6 +82,15 @@ describe('chain verified action outcomes', () => {
     );
     expect(String(fetcher.mock.calls[1]![0])).toContain('/rpc/tx?hash=');
   });
+  it.each(['', 'ap_00000000-0000-4000-8000-000000000000'])(
+    'rejects a transaction whose memo is not this card (%j)',
+    async (memo) => {
+      const { proposal, hash, fetcher } = await fixture(memo);
+      await expect(
+        verifyActionTransaction(proposal, hash, 'https://rpc.test', fetcher),
+      ).rejects.toThrow('memo mismatch');
+    },
+  );
   it('rejects a different transaction and never trusts an asserted success', async () => {
     const { proposal, hash, fetcher } = await fixture();
     await expect(
@@ -205,5 +214,5 @@ it('verifies exact ordered topic grant bytes, memo and real nonzero chain outcom
       'https://rpc.test',
       fetcher,
     ),
-  ).rejects.toThrow('subject mismatch');
+  ).rejects.toThrow('memo mismatch');
 });
