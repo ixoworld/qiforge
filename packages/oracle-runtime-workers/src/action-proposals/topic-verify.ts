@@ -18,7 +18,11 @@ import {
   digestTopicProposalEffect,
   type TopicProposalStore,
 } from './topic-store';
-import { ActionProposalConflict, TRANSACTION_REJECTIONS } from './store';
+import {
+  ActionProposalConflict,
+  TRANSACTION_CARD_BOUND_MISMATCH,
+  TRANSACTION_REJECTIONS,
+} from './store';
 import { TopicReadUnavailable } from './topic-errors';
 import { verifyTopicGrantTransaction } from './verify';
 export type TopicVerificationContext = {
@@ -245,7 +249,7 @@ async function reconcileWithinBudget(
       );
     } catch (error) {
       if (reference.kind === 'chain' && error instanceof Error) {
-        if (error.message === 'Transaction subject mismatch')
+        if (error.message === TRANSACTION_CARD_BOUND_MISMATCH)
           // The transaction carries THIS card's memo and other messages: an
           // effect the owner bound to the card went wrong. It stays listed
           // and the card is blocked, never re-permitted over it.

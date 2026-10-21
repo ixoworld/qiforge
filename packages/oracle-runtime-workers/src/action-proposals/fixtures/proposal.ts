@@ -9,6 +9,7 @@ export const RECIPIENT = 'ixo1qgpqyqszqgpqyqszqgpqyqszqgpqyqszuzefze';
 export const NOW = Date.parse('2026-10-18T10:00:00.000Z');
 export function proposalSubject(
   overrides: Partial<ActionProposalSubject> = {},
+  amount = '1500000',
 ): ActionProposalSubject {
   const draft = validateTransactionDraft({
     command: '/ixo bank send',
@@ -16,7 +17,7 @@ export function proposalSubject(
     value: {
       fromAddress: SIGNER,
       toAddress: RECIPIENT,
-      amount: [{ denom: 'uixo', amount: '1500000' }],
+      amount: [{ denom: 'uixo', amount }],
     },
   });
   const id = overrides.id ?? `ap_${crypto.randomUUID()}`;
