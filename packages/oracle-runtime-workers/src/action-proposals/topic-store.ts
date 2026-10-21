@@ -409,8 +409,12 @@ export class TopicProposalStore {
       let action: TopicProposalSubject['action'];
       let claimedAt: string | undefined;
       try {
-        action = TopicProposalSubjectSchema.parse(JSON.parse(row.subject)).action;
-        claimedAt = TopicLifecycleSchema.parse(JSON.parse(row.lifecycle)).claimedAt;
+        action = TopicProposalSubjectSchema.parse(
+          JSON.parse(row.subject),
+        ).action;
+        claimedAt = TopicLifecycleSchema.parse(
+          JSON.parse(row.lifecycle),
+        ).claimedAt;
       } catch (error) {
         console.warn(
           `[topic-actions] grant lock skips unreadable card ${row.id}: ${error instanceof Error ? error.message : String(error)}`,
@@ -441,6 +445,13 @@ export class TopicProposalStore {
     effect: ExpectedTopicEffect,
   ): Promise<BeginTopicStepResult | null> {
     const expectedDigest = await digestTopicEffect(effect);
+    // The device id binds the permit to its holder and is compared from the
+    // journal row only; what goes out in step records and permits is the
+    // identity every consumer's contract already knows.
+    const executor = {
+      matrixUserId: input.executor.matrixUserId,
+      homeserver: input.executor.homeserver,
+    };
     return this.db.transaction(async () => {
       const p = await this.get(owner, id);
       if (!p) return null;
@@ -474,7 +485,7 @@ export class TopicProposalStore {
               proposalId: id,
               digest: p.digest,
               step: input.step,
-              executor: input.executor,
+              executor,
               expectedDigest,
               effect: ExpectedTopicEffectSchema.parse(JSON.parse(row.expected)),
             },
@@ -487,7 +498,7 @@ export class TopicProposalStore {
         status: 'started' as const,
         startedAt,
         expectedDigest,
-        executor: input.executor,
+        executor,
       };
       const changed = await this.db.run(
         `UPDATE topic_action_steps SET status='started',expected=?,expected_digest=?,executor=?,started_at=? WHERE proposal_id=? AND step=? AND status='pending'`,
@@ -516,7 +527,7 @@ export class TopicProposalStore {
           proposalId: id,
           digest: p.digest,
           step: input.step,
-          executor: input.executor,
+          executor,
           expectedDigest,
           effect,
         },

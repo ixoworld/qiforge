@@ -250,16 +250,16 @@ async function prepareTopicSubjectWithinBudget(
     let message;
     try {
       message = buildTopicGrant({
-      role: requested.role,
-      ownerAddress: signerAddress,
-      entityDid: topic.body.claimBinding.entityDid,
-      adminAddress: collection.adminAddress,
-      granteeAddress: address,
-      collectionId: topic.body.claimBinding.collectionId,
-      agentQuota: requested.agentQuota,
-      expiresAt: requested.expiresAt,
-      ...(requested.beforeDate ? { beforeDate: requested.beforeDate } : {}),
-      ...(authorization.existing ? { existing: authorization.existing } : {}),
+        role: requested.role,
+        ownerAddress: signerAddress,
+        entityDid: topic.body.claimBinding.entityDid,
+        adminAddress: collection.adminAddress,
+        granteeAddress: address,
+        collectionId: topic.body.claimBinding.collectionId,
+        agentQuota: requested.agentQuota,
+        expiresAt: requested.expiresAt,
+        ...(requested.beforeDate ? { beforeDate: requested.beforeDate } : {}),
+        ...(authorization.existing ? { existing: authorization.existing } : {}),
       });
     } catch (error) {
       // The builder's refusals (an existing grant under another expiry, an

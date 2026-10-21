@@ -25,9 +25,9 @@ describe('durable topic effect journal', () => {
     const input = JSON.stringify({
       digest: p.digest,
       step: 'anchor',
-      executor,
+      executor: { ...executor, deviceId: 'DEVICEONE' },
     });
-    // The same owner from two devices gets ONE frozen permit, re-issued:
+    // The same owner from the same device gets ONE frozen permit, re-issued:
     // identical effect and transaction id, so a second send is a no-op at
     // the homeserver, and a device whose pre-check failed can try again.
     const starts = await Promise.all([
@@ -39,6 +39,10 @@ describe('durable topic effect journal', () => {
     );
     expect(results.map((r) => r.status)).toEqual(['permitted', 'permitted']);
     expect(results[0]).toEqual(results[1]);
+    // The device id binds the permit but is never echoed: consumers parse
+    // step records and permits with the identity-only executor.
+    if (results[0]!.status !== 'permitted') throw new Error('Missing permit');
+    expect(results[0]!.permit.executor).toEqual(executor);
     await s.reopen();
     const again = BeginTopicStepResultSchema.parse(
       JSON.parse((await s.topicBegin(OWNER, p.id, input))!),
@@ -60,6 +64,11 @@ describe('durable topic effect journal', () => {
       ),
     );
     expect(elsewhere.status).toBe('already_started');
+    if (elsewhere.status !== 'already_started') throw new Error('unreachable');
+    expect(elsewhere.proposal.lifecycle.steps[0]).toMatchObject({
+      status: 'started',
+      executor,
+    });
     // Once a reference is recorded the step is spoken for: no new permit.
     await s.topicReconcile(
       OWNER,
@@ -283,7 +292,11 @@ describe('durable topic effect journal', () => {
     const s = stub('never-sent');
     const p = parse(await s.topicCreate(JSON.stringify(await subject())));
     await s.topicTransition(OWNER, p.id, 'claim', p.digest);
-    const input = JSON.stringify({ digest: p.digest, step: 'anchor', executor });
+    const input = JSON.stringify({
+      digest: p.digest,
+      step: 'anchor',
+      executor,
+    });
     expect(
       BeginTopicStepResultSchema.parse(
         JSON.parse((await s.topicBegin(OWNER, p.id, input))!),
@@ -292,9 +305,9 @@ describe('durable topic effect journal', () => {
     // Permitted at minute zero, nothing posted: at minute sixteen the card
     // has expired like any other, the permit does not outlive it.
     await s.setNow(NOW + 16 * 60_000);
-    expect(JSON.parse((await s.topicBegin(OWNER, p.id, input))!).error).toContain(
-      'expired',
-    );
+    expect(
+      JSON.parse((await s.topicBegin(OWNER, p.id, input))!).error,
+    ).toContain('expired');
   });
   it('holds the grant lock by the other step, not the other card', async () => {
     const s = stub('grant-lock');

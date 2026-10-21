@@ -96,7 +96,8 @@ export async function readTopicAuthority(
   const stateEvent = stateEvents.find(
     (e) => e.type === 'ixo.topic.contract' && e.state_key === topicId,
   );
-  if (!stateEvent) throw new ActionProposalConflict('Canonical topic state is unavailable');
+  if (!stateEvent)
+    throw new ActionProposalConflict('Canonical topic state is unavailable');
   const state = State.parse(stateEvent.content);
   if (state.topicId !== topicId || state.anchor.roomId !== room)
     throw new ActionProposalConflict('Topic locator mismatch');
@@ -108,7 +109,9 @@ export async function readTopicAuthority(
     root.type !== 'm.room.message' ||
     root.room_id !== room
   )
-    throw new ActionProposalConflict('Only owner-authored topic history is supported');
+    throw new ActionProposalConflict(
+      'Only owner-authored topic history is supported',
+    );
   const history = z
     .array(TopicMatrixEventSchema)
     .max(256)
@@ -142,7 +145,9 @@ export async function readTopicAuthority(
           })
           .safeParse(event.content).success !== true
       )
-        throw new ActionProposalConflict('Topic operation root binding mismatch');
+        throw new ActionProposalConflict(
+          'Topic operation root binding mismatch',
+        );
       parseTopicOperationPayload(operation);
       return [{ event, operation }];
     });
@@ -188,7 +193,9 @@ export async function readTopicAuthority(
     state.contracts.proposed ?? state.contracts.effective,
   );
   if (canonicalizeIxoJson(selectedHead) !== canonicalizeIxoJson(ref))
-    throw new ActionProposalConflict('Projection body head differs from authenticated history');
+    throw new ActionProposalConflict(
+      'Projection body head differs from authenticated history',
+    );
   const bodyEvent = TopicMatrixEventSchema.parse(
     await reader.event(room, ref.bodyRef.eventId),
   );
