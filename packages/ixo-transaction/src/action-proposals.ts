@@ -107,6 +107,14 @@ export const ActionProposalSubjectSchema = z
         path: ['action', 'inputs', 'intent'],
         message: 'Intent must match the transfer',
       });
+    // The signed transaction carries the card's own id in its memo, so a
+    // transaction can only ever verify the one card it was signed for.
+    if (p.action.inputs.memo !== p.id)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['action', 'inputs', 'memo'],
+        message: 'The transaction memo must carry the proposal ID',
+      });
     if (Date.parse(p.expiresAt) <= Date.parse(p.createdAt))
       ctx.addIssue({
         code: 'custom',

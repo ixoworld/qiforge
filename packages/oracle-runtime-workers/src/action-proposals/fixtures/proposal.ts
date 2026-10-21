@@ -19,9 +19,10 @@ export function proposalSubject(
       amount: [{ denom: 'uixo', amount: '1500000' }],
     },
   });
+  const id = overrides.id ?? `ap_${crypto.randomUUID()}`;
   return {
     v: 1,
-    id: `ap_${crypto.randomUUID()}`,
+    id,
     ownerDid: OWNER,
     title: 'Send 1.5 IXO',
     origin: {
@@ -40,6 +41,7 @@ export function proposalSubject(
         network: 'testnet',
         chainId: 'pandora-8',
         messages: [draft.message],
+        memo: id,
         intent: draft.intent,
         risks: draft.risks,
         riskLevel: draft.riskLevel,

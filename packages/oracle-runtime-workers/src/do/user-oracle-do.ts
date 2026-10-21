@@ -24,6 +24,11 @@ import {
 } from '@ixo/ixo-transaction/topic-proposals';
 import type { ChannelTurnResponse } from '../channels/contract';
 import { refreshActionProposal } from '../action-proposals/reconcile';
+import { assertActionProposalPolicy } from '../action-proposals/policy';
+import {
+  chainIdConfigSchema,
+  chainIdsFromConfig,
+} from '../plugins/ixo-transaction/chain-ids';
 import { actionOutcome } from '@ixo/ixo-transaction/action-proposals';
 import {
   ActionProposalConflict,
@@ -227,6 +232,7 @@ import {
   type RunsStatus,
   type ContextStatus,
   type SessionContextStatus,
+  type UserContextPrefetchStatus,
   type RunSummary,
   type TurnIdentity,
   type TurnRequest,
@@ -265,6 +271,14 @@ import {
   type HistoryMessage,
   type IndexableSession,
 } from '../memory/session-history-indexer';
+import {
+  USER_CONTEXT_SLOTS,
+  UserContextFetcher,
+  type UserContextFetchOutcome,
+  type UserContextFetchParams,
+} from '../memory/user-context-fetcher';
+import { createUserContextInvalidationMiddleware } from '../memory/user-context-invalidation';
+import { MEMORY_CAPABILITY } from '../plugins/delegated-capabilities';
 import {
   createSseSubscriberStream,
   runTurnFrames,
@@ -365,7 +379,7 @@ import {
   resolveTurnDelegation,
   WorkersUcanService,
 } from './ucan-service';
-import type { UcanDelegation } from '../plugin-api/types';
+import type { UcanDelegation, UserContextData } from '../plugin-api/types';
 
 /** What one attempt's agent build reads from the request body. */
 type TurnBuildBody = Pick<
@@ -383,6 +397,56 @@ interface TurnBuildRun {
   continuation: string | null;
   /** Domain anchors the run started with (resumed attempts keep them). */
   domainPins?: DomainContextPins;
+  /** A `router.update` step for the run's client while the build waits. */
+  onProgress?: (step: string) => void;
+}
+
+/** Where the user-context prefetch runs: the engine and the `USER_CONTEXT_*` knobs. */
+interface UserContextSettings {
+  engineUrl: string;
+  capMs?: number;
+  cacheTtlMs?: number;
+}
+
+/**
+ * The second half of a first-contact prefetch: waits for the gather (at
+ * most the cap; calling `onSlow` once it has waited past the grace) and
+ * returns the context the thread takes, or `undefined` when there is none
+ * — no answer within the cap, a failure, a skip, or the turn was aborted
+ * (the gather then keeps running in the background).
+ */
+type UserContextSettle = (
+  onSlow: () => void,
+  signal: AbortSignal,
+) => Promise<UserContextData | undefined>;
+
+/** How long a first turn waits on the user-context prefetch before saying so. */
+const USER_CONTEXT_PROGRESS_GRACE_MS = 300;
+const USER_CONTEXT_PROGRESS_STEP = 'Recalling your memories…';
+
+/**
+ * A prefetched context with every slot present, a slot the engine did not
+ * return as an empty section (which renders nothing). The checkpointed
+ * value then marks a landed gather (see `hasUserContext`) even for a user
+ * with no memory yet, so the thread's later turns do not count as first
+ * contact; and the written value is the whole context under a merging
+ * reducer (the `MainAgentGraphState` annotation's) as well as under the
+ * last-value channel the agent declares (`userContextStateMiddleware`).
+ */
+function withEverySlot(context: UserContextData): UserContextData {
+  const out: UserContextData = { ...context };
+  for (const slot of USER_CONTEXT_SLOTS) out[slot] ??= {};
+  return out;
+}
+
+/** A checkpointed `userContext` a gather has written (not the channel's `{}` default). */
+function hasUserContext(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.keys(value).length > 0
+  );
 }
 
 /**
@@ -914,6 +978,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
     /** Session-history → memory-engine indexing (built lazily, see `scheduleHistoryIndexing`). */
     private historyIndexer: SessionHistoryIndexer | null = null;
+
+    /** First-turn user-context prefetch (built lazily, see `startUserContextPrefetch`). */
+    private userContextFetcher: UserContextFetcher | null = null;
 
     /**
      * Transcripts captured BEFORE a session is deleted, keyed by session id:
@@ -2335,8 +2402,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
       const now = Date.now();
       const deadlines: number[] = [];
-      const receiptDeadline = await this.mirrorActionReceipts();
-      if (receiptDeadline !== undefined) deadlines.push(receiptDeadline);
 
       // Durable runs: start the recovery attempts that are due (the boot
       // above may have just scheduled them), then keep the alarm inside the
@@ -2354,6 +2419,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         const nextRecovery = this.runs.nextRecoveryAt();
         if (nextRecovery !== null)
           deadlines.push(Math.max(nextRecovery, now + 1000));
+      }
+
+      // Action cards: look up recorded transactions the chain has not
+      // confirmed yet, post the receipts that are due, drop old cards. One
+      // bad row here must not stop the flush, the tasks or the eviction
+      // below, so the tick is guarded like its neighbours.
+      try {
+        const actionAt = await this.tickActionProposals();
+        if (actionAt !== undefined)
+          deadlines.push(Math.max(actionAt, now + 1000));
+      } catch (err) {
+        console.error(
+          `[user-do] action proposal tick failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        deadlines.push(now + 60_000);
       }
 
       // The last real request, stored for the next instance before anything
@@ -3159,11 +3239,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private async prepareActionProposal(
       subject: ActionProposalSubject,
     ): Promise<ActionProposal> {
-      if (
-        this.env.ACTION_PROPOSALS_ENABLED !== 'true' ||
-        subject.ownerDid !== this.userDid
-      )
+      const userDid = this.userDid;
+      if (this.env.ACTION_PROPOSALS_ENABLED !== 'true' || !userDid)
         throw new Error('Action proposal preparation unavailable');
+      // The owner object's own policy, whichever plugin prepared the card:
+      // this owner signs from their own account, off mainnet, on the chain
+      // configured for the network, within the expiry window.
+      assertActionProposalPolicy(subject, {
+        ownerDid: userDid,
+        chainIds: chainIdsFromConfig(chainIdConfigSchema.parse(this.env)),
+      });
       const record = await this.runStore!.get(subject.origin.runId);
       if (!record) throw new Error('Action proposal origin unavailable');
       const request = (JSON.parse(record.request) as StoredRunRequest).turn;
@@ -3172,6 +3257,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         request.sessionId !== subject.origin.sessionId
       )
         throw new Error('Action proposal origin mismatch');
+      // A card names one person's wallet; a group room would show its link
+      // and its receipt to everyone in the room.
+      if (request.client === 'matrix' && request.roomKind === 'group')
+        throw new ActionProposalConflict(
+          'Action cards are prepared in direct chats only',
+        );
       let origin = null;
       if (request.sessionId.startsWith('$')) {
         const roomId =
@@ -3194,6 +3285,31 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const proposal = await this.actionProposals!.create(subject, origin);
       this.markDirty();
       return proposal;
+    }
+
+    /**
+     * The alarm's share of action cards: at most two chain lookups for
+     * cards whose transaction is recorded but unconfirmed (so a card the
+     * user signed and walked away from still gets its receipt once the
+     * chain has indexed it), the receipts due now, and the retention sweep.
+     * Returns the earliest moment any of it is due again.
+     */
+    private async tickActionProposals(): Promise<number | undefined> {
+      if (!this.userDid || !this.actionProposals) return undefined;
+      const store = this.actionProposals;
+      for (const proposal of await store.dueVerifications(this.userDid)) {
+        const refreshed = await refreshActionProposal(
+          store,
+          proposal,
+          this.actionProposalRpc(proposal),
+        );
+        if (refreshed.attempted) this.markDirty();
+      }
+      if ((await store.prune(this.userDid)) > 0) this.markDirty();
+      const receiptAt = await this.mirrorActionReceipts();
+      const verifyAt = await store.nextVerificationAt(this.userDid);
+      if (receiptAt === undefined) return verifyAt;
+      return verifyAt === undefined ? receiptAt : Math.min(receiptAt, verifyAt);
     }
 
     private async mirrorActionReceipts(): Promise<number | undefined> {
@@ -3477,6 +3593,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           mintInvocation: (target, opts) =>
             ambient.ucan.mintInvocation(userDid, target, opts),
         },
+        // Newly indexed history changes what the prefetch would recall.
+        onIndexed: (roomId) => this.userContextFetcher?.invalidate(roomId),
         speakerLabels: async (roomId) => {
           const prefs = await this.preferences
             ?.get(roomId)
@@ -3507,6 +3625,214 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             }
           }),
       );
+    }
+
+    /**
+     * The user-context prefetch's settings, or null where it does not run:
+     * switched off (`USER_CONTEXT_PREFETCH=off`) or no memory engine.
+     */
+    private userContextSettings(): UserContextSettings | null {
+      const env = this.core.validatedEnv;
+      if (env['USER_CONTEXT_PREFETCH'] === 'off') return null;
+      const engineUrl = env['MEMORY_ENGINE_URL'];
+      if (typeof engineUrl !== 'string' || engineUrl.length === 0) return null;
+      const capMs = env['USER_CONTEXT_PREFETCH_CAP_MS'];
+      const cacheTtlMs = env['USER_CONTEXT_CACHE_TTL_MS'];
+      return {
+        engineUrl,
+        ...(typeof capMs === 'number' ? { capMs } : {}),
+        ...(typeof cacheTtlMs === 'number' ? { cacheTtlMs } : {}),
+      };
+    }
+
+    /** One fetcher per object: its cache outlives turns, sessions and resets. */
+    private userContextFetcherFor(
+      settings: UserContextSettings,
+    ): UserContextFetcher {
+      this.userContextFetcher ??= new UserContextFetcher(
+        {
+          memoryEngineUrl: settings.engineUrl,
+          oracleDid: this.env.ORACLE_DID,
+          // Looked up per call, not captured: a working-copy reset replaces
+          // the ambient services while a gather may still be running.
+          ucan: {
+            hasSigningKey: () => this.ambient?.ucan.hasSigningKey() ?? false,
+            resolveServiceDid: async (url) =>
+              (await this.ambient?.ucan.resolveServiceDid(url)) ?? null,
+            mintInvocation: async (target, opts) => {
+              const ambient = this.ambient;
+              const userDid = this.userDid;
+              if (!ambient || !userDid)
+                throw new Error('the user object is not booted');
+              return ambient.ucan.mintInvocation(userDid, target, opts);
+            },
+          },
+          logger: console,
+        },
+        {
+          ...(settings.capMs !== undefined
+            ? { blockingCapMs: settings.capMs }
+            : {}),
+          ...(settings.cacheTtlMs !== undefined
+            ? { cacheTtlMs: settings.cacheTtlMs }
+            : {}),
+        },
+      );
+      return this.userContextFetcher;
+    }
+
+    /**
+     * Start a turn's user-context prefetch — stale-while-revalidate, as the
+     * Node AgentBuilder does it. A thread's context is fixed on first
+     * contact: a thread whose checkpoint already holds a gathered context
+     * never waits and never takes a newer answer; it only refreshes the
+     * room's cache in the background (a no-op while the cache is fresh), so
+     * the NEXT session in the room starts from it. First contact — including
+     * a thread whose earlier first turn got nothing (timeout, failure, skip)
+     * — waits for the gather, at most the cap. Returns the step the build
+     * awaits right before the agent is built, or null where this turn
+     * writes no context. Nothing here throws; every gather is handed to
+     * `ctx.waitUntil`, so one that outlives the cap still fills the cache.
+     */
+    private startUserContextPrefetch(input: {
+      sessionId: string;
+      roomId: string | undefined;
+      userDid: string;
+      delegation: UcanDelegation;
+      prior: unknown;
+      client: TurnRequest['client'];
+      roomKind: TurnRequest['roomKind'];
+    }): UserContextSettle | null {
+      // A first contact that fetches nothing still prints the one
+      // first-contact line (see the settle step below), with its reason, so
+      // a warn-level reading of the logs accounts for every first turn.
+      const skipped = (reason: string): null => {
+        if (!hasUserContext(input.prior)) {
+          console.warn(
+            `[user-context] first contact room=${input.roomId ?? '-'} session=${input.sessionId} outcome=skipped reason=${reason} waited=0ms`,
+          );
+        }
+        return null;
+      };
+      // Task runs never get the user's memory (see `scheduleHistoryIndexing`).
+      if (input.sessionId.startsWith(TASK_SESSION_PREFIX)) return null;
+      if (!input.roomId) return skipped('no-room');
+      const settings = this.userContextSettings();
+      if (!settings) return skipped('disabled');
+      const ambient = this.ambient;
+      if (!ambient) return skipped('not-booted');
+      // A group room's reply is posted to every member: one user's memory
+      // must not be (as direct reads are not, see `admissionApplies`).
+      if (input.client === 'matrix' && input.roomKind === 'group') {
+        return skipped('group-room');
+      }
+      // Without a memory grant the gather could only fail at the mint: skip
+      // it before any request (the engine's did.json included).
+      if (
+        !ambient.ucan.hasCapability(
+          input.delegation,
+          MEMORY_CAPABILITY.resource,
+          MEMORY_CAPABILITY.action,
+        )
+      ) {
+        return skipped('no-memory-grant');
+      }
+      const fetcher = this.userContextFetcherFor(settings);
+      const params: UserContextFetchParams = {
+        roomId: input.roomId,
+        userDid: input.userDid,
+        sessionId: input.sessionId,
+      };
+      const keepGathering = (): void =>
+        this.ctx.waitUntil(
+          fetcher.refresh(params).catch((err: unknown) => {
+            console.warn(
+              `[user-context] background refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }),
+        );
+      if (hasUserContext(input.prior)) {
+        keepGathering();
+        return null;
+      }
+      const pending = fetcher
+        .fetch(params)
+        .catch((err: unknown): UserContextFetchOutcome => {
+          const reason = err instanceof Error ? err.message : String(err);
+          console.warn(`[user-context] failed: ${reason}`);
+          return { kind: 'failed', reason };
+        });
+      // Joins the gather `fetch` started (a no-op on a cache hit).
+      keepGathering();
+      return async (onSlow, signal) => {
+        if (signal.aborted) return undefined;
+        const waitedFrom = Date.now();
+        const timer = setTimeout(onSlow, USER_CONTEXT_PROGRESS_GRACE_MS);
+        let onAbort: (() => void) | undefined;
+        const aborted = new Promise<undefined>((resolve) => {
+          onAbort = () => resolve(undefined);
+          signal.addEventListener('abort', onAbort, { once: true });
+        });
+        try {
+          const outcome = await Promise.race([pending, aborted]);
+          // One line per first contact, at warn so it stands out when logs
+          // are read at warn and above: what the turn was given and how
+          // long it waited for it.
+          const reason =
+            outcome?.kind === 'skipped' || outcome?.kind === 'failed'
+              ? ` reason=${outcome.reason}`
+              : '';
+          console.warn(
+            `[user-context] first contact room=${input.roomId} session=${input.sessionId} outcome=${outcome?.kind ?? 'aborted'}${reason} waited=${Date.now() - waitedFrom}ms`,
+          );
+          return outcome?.kind === 'cached' || outcome?.kind === 'fresh'
+            ? withEverySlot(outcome.context)
+            : undefined;
+        } finally {
+          clearTimeout(timer);
+          if (onAbort) signal.removeEventListener('abort', onAbort);
+        }
+      };
+    }
+
+    /** `GET /debug/context` — the prefetch for a session's room, else the user's room. */
+    private async userContextPrefetchStatus(
+      sessionId: string | undefined,
+    ): Promise<UserContextPrefetchStatus> {
+      const userDid = this.userDid;
+      const sessionRoom = sessionId
+        ? (this.sessionRooms.get(sessionId) ??
+          (await this.sessions?.getSession(sessionId))?.roomId)
+        : undefined;
+      const room =
+        sessionRoom ??
+        this.mainRoomId ??
+        (userDid
+          ? (await this.gateway.resolveUserRoom(userDid).catch(() => null))
+              ?.roomId
+          : undefined);
+      const status =
+        room && this.userContextFetcher
+          ? this.userContextFetcher.status(room)
+          : undefined;
+      const last = status?.lastOutcome;
+      return {
+        enabled: this.userContextSettings() !== null,
+        ...(room ? { room } : {}),
+        cached: status?.cached ?? false,
+        ...(status?.ageMs !== undefined ? { ageMs: status.ageMs } : {}),
+        inFlight: status?.inFlight ?? false,
+        ...(last ? { lastOutcome: last.kind } : {}),
+        ...(last?.kind === 'failed' || last?.kind === 'skipped'
+          ? { lastReason: last.reason }
+          : {}),
+        ...(last?.kind === 'fresh'
+          ? { lastMs: last.ms, lastSlots: last.slots }
+          : {}),
+        ...(status?.lastAt !== undefined
+          ? { lastAt: new Date(status.lastAt).toISOString() }
+          : {}),
+      };
     }
 
     async listMessages(
@@ -4905,6 +5231,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           resumed: !freshInput,
           continuation: freshInput ? null : live.continuation,
           ...(stored.domainPins ? { domainPins: stored.domainPins } : {}),
+          // The Portal shows `router.update` steps (as it shows "Queued…");
+          // chat surfaces have no place for one.
+          ...(req.client === 'portal'
+            ? {
+                onProgress: (step: string) => {
+                  if (live.buffer.isClosed) return;
+                  live.buffer.push('router.update', {
+                    step,
+                    sessionId: req.sessionId,
+                    requestId: req.requestId,
+                    runId: live.runId,
+                  });
+                },
+              }
+            : {}),
         },
       );
       const sessionId = req.sessionId;
@@ -5296,6 +5637,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         ...(sessionId
           ? { session: await this.sessionContextStatus(sessionId) }
           : {}),
+        userContext: await this.userContextPrefetchStatus(sessionId),
       };
     }
 
@@ -5796,6 +6138,29 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       }
       if (sessionRoomId) this.sessionRooms.set(req.sessionId, sessionRoomId);
 
+      // The delegation the whole turn reads: the prefetch's memory grant
+      // here, the router's candidates and every capability check of the
+      // build and its tools below.
+      const ucanDelegation = await this.turnDelegation(req.identity);
+      const existing = await saver.getTupleWithoutMessages({
+        configurable: { thread_id: req.sessionId },
+      });
+      const priorState = existing?.checkpoint.channel_values ?? {};
+      // What the memory engine knows about the user, for the prompt's
+      // context block: started now so the round-trip overlaps the rest of
+      // the build, settled right before the agent is built.
+      const settleUserContext = suppliedContextOnly
+        ? null
+        : this.startUserContextPrefetch({
+            sessionId: req.sessionId,
+            roomId: sessionRoomId,
+            userDid: req.identity.userDid,
+            delegation: ucanDelegation,
+            prior: priorState.userContext,
+            client: req.client,
+            roomKind: req.roomKind,
+          });
+
       // A Matrix turn with no usable delegation: ask the web app to open its
       // "authorize for Matrix" modal (throttled per user, best-effort) — the
       // Node AgentBuilder's `maybePromptReauth`.
@@ -5876,10 +6241,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             signal: abortController.signal,
           });
 
-      const existing = await saver.getTupleWithoutMessages({
-        configurable: { thread_id: req.sessionId },
-      });
-      const priorState = existing?.checkpoint.channel_values ?? {};
       // Request metadata (editor room, space, session run, entity) → state,
       // by the Node agent-builder's rules (see turn-metadata.ts).
       const meta = parseTurnMetadata(
@@ -5912,9 +6273,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             client: req.client,
             env: langsmithEnvFromWorkerEnv(this.env),
           });
-      // The delegation the whole turn reads: the router's candidates here,
-      // every capability check of the build and its tools below.
-      const ucanDelegation = await this.turnDelegation(req.identity);
       const preloadedPlugins =
         !suppliedContextOnly && this.capabilityRouter
           ? await this.capabilityRouter({
@@ -6048,6 +6406,17 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // which is a tool result to the main agent. Wrapped tools are capped
       // inside the wrapper (already under the cap by the time it runs).
       const capMiddleware = createResultCapMiddleware(resultCap);
+      // A successful memory write drops the room's prefetched context, so
+      // the next session gathers again (this thread keeps its own).
+      const userContextInvalidation =
+        sessionRoomId && this.userContextSettings()
+          ? createUserContextInvalidationMiddleware({
+              roomId: sessionRoomId,
+              invalidate: (roomId) =>
+                this.userContextFetcher?.invalidate(roomId),
+              logger: console,
+            })
+          : null;
 
       // Chat delivery: a channel or Matrix turn replies as short messages and
       // may hand long content to `create_artifact` (bound only when artefact
@@ -6073,6 +6442,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             },
           ]
         : [];
+
+      // The prefetched user context on first contact (bounded by the cap and
+      // the turn's abort); a wait past the grace tells a Portal client what
+      // it waits on.
+      const userContext = settleUserContext
+        ? await settleUserContext(
+            () => run.onProgress?.(USER_CONTEXT_PROGRESS_STEP),
+            abortController.signal,
+          )
+        : undefined;
 
       const built = await createMainAgent({
         executionProfile: req.executionProfile,
@@ -6111,7 +6490,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             : [],
           // Applied to the main agent AND every sub-agent: a sub-agent's
           // own tool calls are marked and capped too.
-          toolMiddlewares: [marksMiddleware, capMiddleware],
+          toolMiddlewares: [
+            marksMiddleware,
+            capMiddleware,
+            ...(userContextInvalidation ? [userContextInvalidation] : []),
+          ],
           // Budget, scheduling and write claims, innermost around each tool
           // call (main agent and sub-agents alike).
           toolExecution: executionMiddleware,
@@ -6160,6 +6543,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         state: {
           ...(suppliedContextOnly ? {} : priorState),
           userPreferences,
+          ...(userContext ? { userContext } : {}),
           ...metadataBuildState(meta, priorMeta),
           // The client-declared surface: the portal and AG-UI plugins turn
           // these into tools at build time (`getRequestTools` reads
@@ -6243,6 +6627,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         ],
         config: { did: req.identity.userDid },
         client: req.client,
+        // First contact's gathered context is checkpointed with the turn,
+        // every slot present; later turns write nothing and keep it.
+        ...(userContext ? { userContext } : {}),
         ...metadataGraphInput(meta, priorMeta),
         ...surface.input,
       };

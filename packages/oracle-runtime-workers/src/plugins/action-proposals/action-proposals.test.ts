@@ -6,7 +6,12 @@ import {
   digestActionProposal,
   type ActionProposalSubject,
 } from '@ixo/ixo-transaction/action-proposals';
+import { ActionProposalConflict } from '../../action-proposals/store';
 import { makeRuntimeContext } from '../../core/test-fixtures';
+import {
+  TURN_TIME_NOTE_KWARG,
+  withTurnTimeNote,
+} from '../../core/turn-time-note';
 import {
   prepareAction,
   ActionProposalsPlugin,
@@ -23,6 +28,13 @@ const args = {
   recipient: RECIPIENT,
   amount: '1.5',
   unit: 'IXO',
+};
+const credit = {
+  action: 'transfer_credit',
+  network: 'testnet',
+  recipient: RECIPIENT,
+  amount: '10',
+  tokenId: 'CARBON-1',
 };
 function context(message = `Send 1.5 IXO to ${RECIPIENT} on testnet`) {
   const create = vi.fn(async (subject: ActionProposalSubject) => ({
@@ -79,7 +91,6 @@ describe('validated conversational actions', () => {
     const { ctx, create, evaluate } = context();
     const result = await prepareAction(args, ctx);
     expect(result.status).toBe('prepared');
-    expect(evaluate).toHaveBeenCalledOnce();
     expect(create).toHaveBeenCalledOnce();
     const subject = create.mock.calls[0]![0];
     expect(subject.action.inputs.messages).toEqual([
@@ -97,6 +108,17 @@ describe('validated conversational actions', () => {
       runId: 'run-1',
       invocationId: 'run-1:call-1',
     });
+    // The memo the owner signs is the card's id; the classifier sees the
+    // user's own figures next to the atomic ones.
+    expect(subject.action.inputs.memo).toBe(subject.id);
+    expect(evaluate).toHaveBeenCalledExactlyOnceWith(
+      ACTION_INTENT_DECISION,
+      expect.objectContaining({
+        candidate: expect.objectContaining({
+          requested: { amount: '1.5', unit: 'IXO' },
+        }),
+      }),
+    );
     expect(subject.expiresAt).not.toEqual(subject.createdAt);
     const stored = await create.mock.results[0]!.value;
     expect(await assertActionProposalUnchanged(stored)).toEqual(stored);
@@ -109,12 +131,95 @@ describe('validated conversational actions', () => {
     `What if I send 1.5 IXO to ${RECIPIENT} on testnet`,
     'Send some tokens',
     'Send 1.5 IXO on testnet',
+    // The figure without its unit, the unit a million times off, the figure
+    // inside a longer number, and a prefix of the address are not evidence.
+    `Send 1.5 to ${RECIPIENT} on testnet, in IXO please`,
+    `Send 1.5 uixo to ${RECIPIENT} from my IXO wallet on testnet`,
+    `Send 11.5 IXO to ${RECIPIENT} on testnet`,
+    `Send 1.5 IXO to ${RECIPIENT}abc on testnet`,
   ])('clarifies unsupported evidence %s', async (message) => {
-    const { ctx, create } = context(message);
+    const { ctx, create, evaluate } = context(message);
     expect((await prepareAction(args, ctx)).status).toBe(
       'clarification_required',
     );
+    expect(evaluate).not.toHaveBeenCalled();
     expect(create).not.toHaveBeenCalled();
+  });
+  it('never reads the turn time note as evidence', async () => {
+    const note = 'Current time: Saturday, 2026-10-03 14:05 (Europe/Berlin)';
+    const { ctx, create, evaluate } = context();
+    ctx.history.messages = [
+      new HumanMessage({
+        content: withTurnTimeNote(
+          `Send 14 IXO to ${RECIPIENT} on testnet`,
+          note,
+        ),
+        additional_kwargs: { [TURN_TIME_NOTE_KWARG]: note },
+      }),
+    ];
+    expect((await prepareAction({ ...args, amount: '14' }, ctx)).status).toBe(
+      'prepared',
+    );
+    expect(evaluate).toHaveBeenCalledWith(
+      ACTION_INTENT_DECISION,
+      expect.objectContaining({
+        message: `Send 14 IXO to ${RECIPIENT} on testnet`,
+      }),
+    );
+    // A clock time is not an amount, even for a build that leaves the note in.
+    ctx.history.messages = [
+      new HumanMessage({
+        content: withTurnTimeNote(`Send IXO to ${RECIPIENT} on testnet`, note),
+        additional_kwargs: { [TURN_TIME_NOTE_KWARG]: note },
+      }),
+    ];
+    expect((await prepareAction({ ...args, amount: '14' }, ctx)).status).toBe(
+      'clarification_required',
+    );
+    expect(create).toHaveBeenCalledOnce();
+  });
+  it.each([
+    `Transfer 10 CARBON-1 credits to ${RECIPIENT} on testnet`,
+    `Transfer 10 CARBON-1 to ${RECIPIENT} on testnet`,
+  ])('prepares a credit transfer from %s', async (message) => {
+    const { ctx, create } = context(message);
+    expect((await prepareAction(credit, ctx)).status).toBe('prepared');
+    expect(create.mock.calls[0]![0].action.inputs.messages[0]!.value).toEqual({
+      owner: OWNER.slice(8),
+      recipient: RECIPIENT,
+      tokens: [{ id: 'CARBON-1', amount: '10' }],
+    });
+  });
+  it.each([
+    `Transfer 10 CARBON-10 credits to ${RECIPIENT} on testnet`,
+    `Transfer 100 CARBON-1 credits to ${RECIPIENT} on testnet`,
+    `Transfer ten CARBON-1 credits to ${RECIPIENT} on testnet`,
+  ])(
+    'clarifies credit evidence without the exact token and count %s',
+    async (message) => {
+      const { ctx, create, evaluate } = context(message);
+      expect((await prepareAction(credit, ctx)).status).toBe(
+        'clarification_required',
+      );
+      expect(evaluate).not.toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+    },
+  );
+  it('tells the user the owner object policy that refused the card', async () => {
+    const { ctx } = context();
+    ctx.actionProposals = {
+      create: vi
+        .fn()
+        .mockRejectedValue(
+          new ActionProposalConflict(
+            'Action cards are prepared in direct chats only',
+          ),
+        ),
+    };
+    expect(await prepareAction(args, ctx)).toEqual({
+      status: 'clarification_required',
+      reason: 'Action cards are prepared in direct chats only',
+    });
   });
   it('accepts a current confirmation with exact prior user evidence in the same session', async () => {
     const { ctx, create, evaluate } = context('Yes, send it on testnet.');

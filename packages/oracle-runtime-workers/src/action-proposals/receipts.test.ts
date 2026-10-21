@@ -79,7 +79,11 @@ async function harness(state: DurableObjectState) {
     host,
     topics: () => topicStore,
     send,
-    async prepare(index: number, sessionId = `$thread-${index}`) {
+    async prepare(
+      index: number,
+      sessionId = `$thread-${index}`,
+      turn: Partial<TurnRequest> = {},
+    ) {
       const subject = proposalSubject({
         id: `ap_00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
         origin: {
@@ -100,6 +104,7 @@ async function harness(state: DurableObjectState) {
           bindingId: 'chb_original',
           remoteMessageRef: `hmac:${'a'.repeat(64)}`,
         },
+        ...turn,
       };
       await runStore.create({
         runId: subject.origin.runId,
@@ -114,7 +119,8 @@ async function harness(state: DurableObjectState) {
       return call<ActionProposal>(host, 'prepareActionProposal', subject);
     },
     async verify(proposal: ActionProposal) {
-      const hash = 'A'.repeat(64);
+      // One transaction per card: the hash is unique to the proposal.
+      const hash = 'A'.repeat(52) + proposal.id.slice(-12);
       await store.transition(OWNER, proposal.id, {
         kind: 'claim',
         digest: proposal.digest,
@@ -141,12 +147,19 @@ async function harness(state: DurableObjectState) {
       return Boolean(await runStore.get(id));
     },
     async receiptState(id: string) {
-      return (
-        await db.get<{ state: string }>(
-          'SELECT state FROM action_proposal_receipts WHERE proposal_id=?',
-          [id],
-        )
-      )?.state;
+      return (await this.receiptRow(id))?.state;
+    },
+    async receiptRow(id: string) {
+      return db.get<{ state: string; next_attempt: number; attempts: number }>(
+        'SELECT state,next_attempt,attempts FROM action_proposal_receipts WHERE proposal_id=?',
+        [id],
+      );
+    },
+    async corruptSubject(id: string) {
+      await db.run(
+        `UPDATE action_proposals SET subject=json_set(subject,'$.title','Tampered') WHERE id=?`,
+        [id],
+      );
     },
     async restart() {
       await db.close();
@@ -209,6 +222,76 @@ describe('durable canonical action receipts', () => {
       await h.restart();
       expect(await h.drain()).toBeUndefined();
       expect(h.send).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('refuses a card asked for in a group room and enforces the owner policy', async () => {
+    await withReceipts('receipt-policy', async (h) => {
+      await expect(
+        h.prepare(1, '$group-thread', {
+          client: 'matrix',
+          roomKind: 'group',
+          channel: undefined,
+        }),
+      ).rejects.toThrow('direct chats only');
+      await expect(
+        call(h.host, 'prepareActionProposal', {
+          ...proposalSubject({
+            origin: {
+              sessionId: '$thread-2',
+              runId: 'run-2',
+              invocationId: 'run-2:call',
+            },
+          }),
+          action: {
+            ...proposalSubject().action,
+            network: 'mainnet',
+            chainId: 'ixo-5',
+          },
+        }),
+      ).rejects.toThrow('Mainnet action proposals are disabled');
+      expect(h.send).not.toHaveBeenCalled();
+    });
+  });
+
+  it('quarantines a receipt whose card no longer verifies instead of retrying it for ever', async () => {
+    await withReceipts('receipt-quarantine', async (h) => {
+      const bad = await h.prepare(1);
+      await h.verify(bad);
+      const good = await h.prepare(2);
+      await h.verify(good);
+      await h.corruptSubject(bad.id);
+      expect(await h.drain()).toBeUndefined();
+      expect(h.send).toHaveBeenCalledTimes(1);
+      expect(h.send.mock.calls[0]?.[0].threadId).toBe('$thread-2');
+      expect(await h.receiptState(bad.id)).toBe('quarantined');
+      expect(await h.receiptState(good.id)).toBe('delivered');
+    });
+  });
+
+  it('backs off a failing receipt exponentially and abandons it after the cap', async () => {
+    await withReceipts('receipt-backoff', async (h) => {
+      const proposal = await h.prepare(1);
+      await h.verify(proposal);
+      h.send.mockRejectedValue(new Error('room refuses the oracle'));
+      let now = NOW;
+      const waits: number[] = [];
+      for (let attempt = 0; attempt < 20; attempt++) {
+        h.setNow(now);
+        const next = await h.drain();
+        if (next === undefined) break;
+        waits.push(next - now);
+        now = next;
+      }
+      expect(waits).toEqual([
+        30_000, 60_000, 120_000, 240_000, 480_000, 960_000, 1_920_000,
+        3_600_000, 3_600_000, 3_600_000, 3_600_000,
+      ]);
+      expect(await h.receiptRow(proposal.id)).toMatchObject({
+        state: 'abandoned',
+        attempts: 12,
+      });
+      expect(h.send).toHaveBeenCalledTimes(12);
     });
   });
 

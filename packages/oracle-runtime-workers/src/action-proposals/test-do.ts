@@ -167,6 +167,17 @@ export class ActionProposalTestDO extends DurableObject {
       ),
     );
   }
+  async due(owner: string) {
+    return (await (await this.proposals()).dueVerifications(owner)).map(
+      (p) => p.id,
+    );
+  }
+  async nextVerification(owner: string) {
+    return (await this.proposals()).nextVerificationAt(owner);
+  }
+  async prune(owner: string) {
+    return (await this.proposals()).prune(owner);
+  }
   async setNow(now: number) {
     this.now = now;
   }
