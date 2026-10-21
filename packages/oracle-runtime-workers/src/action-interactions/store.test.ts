@@ -459,3 +459,381 @@ describe('private interaction drafts on Workers', () => {
     ).toMatchObject({ code: 'expired' });
   });
 });
+
+describe('additional action card owners', () => {
+  function approval(
+    family: 'plugin' | 'domain-write' | 'recipe-release' = 'plugin',
+  ): PrepareInteraction {
+    return {
+      ...prepare(),
+      owner: {
+        kind: 'approval',
+        family,
+        requestKey: crypto.randomUUID(),
+        accountDid: alice,
+      },
+      values: { request: { action: 'install', pluginId: 'example' } },
+    };
+  }
+  it('makes approval requests immutable and consumes exact review bindings once', async () => {
+    const stub = env.ACTION_INTERACTIONS_TEST.getByName('approval-immutable');
+    const input = approval();
+    const initial = unwrap(
+      await command(stub, alice, { kind: 'prepare', input }),
+    ).interaction;
+    for (const source of ['agent', 'user'] satisfies ('agent' | 'user')[])
+      expect(
+        await command(stub, alice, {
+          kind: 'update',
+          id: initial.id,
+          input: {
+            version: 1,
+            kind: 'update',
+            source,
+            requestId: crypto.randomUUID(),
+            sessionId: initial.sessionId,
+            expectedRevision: 1,
+            patch: { request: { action: 'different' } },
+          },
+        }),
+      ).toMatchObject({ ok: false, code: 'immutable_request' });
+    expect(
+      await command(stub, alice, {
+        kind: 'prepare',
+        input: {
+          ...input,
+          requestId: crypto.randomUUID(),
+          values: { request: { action: 'different' } },
+        },
+      }),
+    ).toMatchObject({ ok: false, code: 'request_conflict' });
+    const reserved = unwrap(
+      await command(stub, alice, {
+        kind: 'reserve',
+        id: initial.id,
+        input: {
+          version: 1,
+          requestId: crypto.randomUUID(),
+          sessionId: initial.sessionId,
+          expectedRevision: 1,
+          valuesDigest: await interactionValuesDigest(initial.values),
+        },
+      }),
+    ).interaction;
+    const binding = {
+      version: 1,
+      owner: initial.owner,
+      cardRef: initial.id,
+      operationKey: reserved.reservation?.operationKey,
+      valuesDigest: reserved.reservation?.valuesDigest,
+    };
+    expect(
+      JSON.parse(
+        await stub.dispatch(
+          alice,
+          JSON.stringify({ ...binding, valuesDigest: '0'.repeat(64) }),
+        ),
+      ),
+    ).toMatchObject({ ok: false, code: 'review_required' });
+    expect(
+      JSON.parse(await stub.dispatch(alice, JSON.stringify(binding))),
+    ).toMatchObject({ ok: true, result: { managed: true } });
+    expect(
+      JSON.parse(await stub.dispatch(alice, JSON.stringify(binding))),
+    ).toMatchObject({ ok: false, code: 'dispatch_consumed' });
+    const operationKey = reserved.reservation?.operationKey;
+    if (!operationKey) throw new Error('Missing reservation');
+    const receipt = {
+      files: [
+        { path: 'one.md', status: 'written' },
+        { path: 'two.md', status: 'failed' },
+      ],
+    };
+    const partial = unwrap(
+      await command(stub, alice, {
+        kind: 'observe',
+        id: initial.id,
+        input: {
+          version: 1,
+          requestId: crypto.randomUUID(),
+          sessionId: initial.sessionId,
+          expectedRevision: 2,
+          operationKey,
+          outcome: 'partial',
+          ownerExecutionRef: 'domain-write:one',
+          receipt,
+        },
+      }),
+    ).interaction;
+    expect(
+      await command(stub, alice, {
+        kind: 'observe',
+        id: initial.id,
+        input: {
+          version: 1,
+          requestId: crypto.randomUUID(),
+          sessionId: initial.sessionId,
+          expectedRevision: 3,
+          operationKey,
+          outcome: 'partial',
+          ownerExecutionRef: 'domain-write:one',
+          receipt: { files: [] },
+        },
+      }),
+    ).toMatchObject({ ok: false, code: 'receipt_conflict' });
+    expect(partial).toMatchObject({ status: 'partial', receipt });
+    expect(
+      unwrap(await read(stub, alice, initial.id, initial.sessionId)),
+    ).toEqual(partial);
+    expect(
+      await command(stub, alice, {
+        kind: 'reserve',
+        id: initial.id,
+        input: {
+          version: 1,
+          requestId: crypto.randomUUID(),
+          sessionId: initial.sessionId,
+          expectedRevision: 3,
+          valuesDigest: await interactionValuesDigest(initial.values),
+        },
+      }),
+    ).toMatchObject({ ok: false, code: 'not_dispatchable' });
+  });
+  it('requires a managed approval, but permits an unmanaged bid and binds claim-block collections separately', async () => {
+    const stub = env.ACTION_INTERACTIONS_TEST.getByName('owner-families');
+    expect(
+      JSON.parse(
+        await stub.dispatch(
+          alice,
+          JSON.stringify({ version: 1, owner: approval().owner }),
+        ),
+      ),
+    ).toMatchObject({ ok: false, code: 'review_required' });
+    const claim = prepare().owner;
+    if (claim.kind !== 'flow-claim') throw new Error('Claim fixture');
+    const bid = { ...claim, kind: 'flow-bid', roleId: 'service_agent' };
+    expect(
+      JSON.parse(
+        await stub.dispatch(alice, JSON.stringify({ version: 1, owner: bid })),
+      ),
+    ).toMatchObject({ ok: true, result: { managed: false } });
+    const first = unwrap(
+      await command(stub, alice, {
+        kind: 'prepare',
+        input: { ...prepare(), owner: { ...claim, kind: 'flow-claim-block' } },
+      }),
+    ).interaction;
+    const second = unwrap(
+      await command(stub, alice, {
+        kind: 'prepare',
+        input: {
+          ...prepare(),
+          owner: { ...claim, kind: 'flow-claim-block', collectionId: 'second' },
+        },
+      }),
+    ).interaction;
+    expect(first.id).not.toEqual(second.id);
+  });
+  it('stores a 1MiB UTF8 domain-write request in private chunks and enforces byte limits for other owners', async () => {
+    const stub = env.ACTION_INTERACTIONS_TEST.getByName('large-domain-write');
+    const request = {
+      files: [{ path: 'unicode.md', content: '😀'.repeat(262144) }],
+    };
+    const input = { ...approval('domain-write'), values: { request } };
+    const initial = unwrap(
+      await command(stub, alice, { kind: 'prepare', input }),
+    ).interaction;
+    const references = JSON.parse(
+      await stub.references(alice, initial.sessionId),
+    );
+    expect(references).toMatchObject([{ id: initial.id, owner: input.owner }]);
+    expect(references[0]).not.toHaveProperty('values');
+
+    expect(
+      unwrap(await read(stub, alice, initial.id, initial.sessionId)).values,
+    ).toEqual({ request });
+    const reserved = unwrap(
+      await command(stub, alice, {
+        kind: 'reserve',
+        id: initial.id,
+        input: {
+          version: 1,
+          requestId: crypto.randomUUID(),
+          sessionId: initial.sessionId,
+          expectedRevision: 1,
+          valuesDigest: await interactionValuesDigest(initial.values),
+        },
+      }),
+    ).interaction;
+    expect(reserved.values).toEqual({ request });
+    expect(
+      await command(stub, alice, {
+        kind: 'prepare',
+        input: { ...approval('plugin'), values: { request } },
+      }),
+    ).toMatchObject({ ok: false, code: 'too_large' });
+    expect(
+      await command(stub, alice, {
+        kind: 'prepare',
+        input: {
+          ...approval('domain-write'),
+          values: { request: { content: '😀'.repeat(530000) } },
+        },
+      }),
+    ).toMatchObject({ ok: false, code: 'too_large' });
+    expect(
+      await command(stub, alice, {
+        kind: 'prepare',
+        input: { ...prepare(), values: { content: '😀'.repeat(17000) } },
+      }),
+    ).toMatchObject({ ok: false, code: 'too_large' });
+  });
+});
+
+it('checkpoints partial effects durably and reconciles once without releasing dispatch', async () => {
+  const stub = env.ACTION_INTERACTIONS_TEST.getByName('partial-checkpoint');
+  const input: PrepareInteraction = {
+    ...prepare(),
+    owner: {
+      kind: 'approval',
+      family: 'domain-write',
+      requestKey: 'checkpoint',
+      accountDid: alice,
+    },
+    values: { request: { files: ['one', 'two'] } },
+  };
+  const initial = unwrap(
+    await command(stub, alice, { kind: 'prepare', input }),
+  ).interaction;
+  const reserved = unwrap(
+    await command(stub, alice, {
+      kind: 'reserve',
+      id: initial.id,
+      input: {
+        version: 1,
+        requestId: crypto.randomUUID(),
+        sessionId: initial.sessionId,
+        expectedRevision: 1,
+        valuesDigest: await interactionValuesDigest(initial.values),
+      },
+    }),
+  ).interaction;
+  const operationKey = reserved.reservation?.operationKey;
+  if (!operationKey) throw new Error('Missing reservation');
+  const first = { files: [{ path: 'one', status: 'written' }] };
+  unwrap(
+    await command(stub, alice, {
+      kind: 'observe',
+      id: initial.id,
+      input: {
+        version: 1,
+        requestId: crypto.randomUUID(),
+        sessionId: initial.sessionId,
+        expectedRevision: 2,
+        operationKey,
+        outcome: 'partial',
+        ownerExecutionRef: 'checkpoint',
+        receipt: first,
+      },
+    }),
+  );
+  expect(
+    unwrap(await read(stub, alice, initial.id, initial.sessionId)),
+  ).toMatchObject({ status: 'partial', receipt: first });
+  const receipt = {
+    files: [...first.files, { path: 'two', status: 'written' }],
+  };
+  const final = unwrap(
+    await command(stub, alice, {
+      kind: 'observe',
+      id: initial.id,
+      input: {
+        version: 1,
+        requestId: crypto.randomUUID(),
+        sessionId: initial.sessionId,
+        expectedRevision: 3,
+        operationKey,
+        outcome: 'reported',
+        ownerExecutionRef: 'checkpoint',
+        receipt,
+      },
+    }),
+  ).interaction;
+  expect(final).toMatchObject({ status: 'observed', receipt, revision: 4 });
+});
+
+it('rejects competing checkpoint writers and reconciles a lost acknowledgment by reading the current record', async () => {
+  const stub = env.ACTION_INTERACTIONS_TEST.getByName('checkpoint-cas');
+  const input: PrepareInteraction = {
+    ...prepare(),
+    owner: {
+      kind: 'approval',
+      family: 'recipe-release',
+      requestKey: 'recipe',
+      accountDid: alice,
+    },
+    values: { request: { recipeId: 'recipe' } },
+  };
+  const initial = unwrap(
+    await command(stub, alice, { kind: 'prepare', input }),
+  ).interaction;
+  const reserved = unwrap(
+    await command(stub, alice, {
+      kind: 'reserve',
+      id: initial.id,
+      input: {
+        version: 1,
+        requestId: crypto.randomUUID(),
+        sessionId: initial.sessionId,
+        expectedRevision: 1,
+        valuesDigest: await interactionValuesDigest(initial.values),
+      },
+    }),
+  ).interaction;
+  const operationKey = reserved.reservation?.operationKey;
+  if (!operationKey) throw new Error('Missing reservation');
+  const results = await Promise.all(
+    ['shape-created', 'conflicting-shape'].map((phase) =>
+      command(stub, alice, {
+        kind: 'observe',
+        id: initial.id,
+        input: {
+          version: 1,
+          requestId: crypto.randomUUID(),
+          sessionId: initial.sessionId,
+          expectedRevision: 2,
+          operationKey,
+          outcome: 'partial',
+          ownerExecutionRef: 'recipe',
+          receipt: { events: [{ phase }] },
+        },
+      }),
+    ),
+  );
+  expect(results.filter((result) => result.ok)).toHaveLength(1);
+  expect(results.filter((result) => !result.ok)).toEqual([
+    { ok: false, code: 'stale_revision' },
+  ]);
+  const recovered = unwrap(
+    await read(stub, alice, initial.id, initial.sessionId),
+  );
+  expect(recovered).toMatchObject({
+    revision: 3,
+    status: 'partial',
+    receipt: { events: [{ phase: expect.any(String) }] },
+  });
+  expect(
+    JSON.parse(
+      await stub.dispatch(
+        alice,
+        JSON.stringify({
+          version: 1,
+          owner: initial.owner,
+          cardRef: initial.id,
+          operationKey,
+          valuesDigest: reserved.reservation?.valuesDigest,
+        }),
+      ),
+    ),
+  ).toMatchObject({ ok: false, code: 'review_required' });
+});

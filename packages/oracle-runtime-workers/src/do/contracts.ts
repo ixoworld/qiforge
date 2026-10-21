@@ -1,4 +1,7 @@
-import type { CheckClaimDispatch } from '@ixo/action-interactions';
+import type {
+  CheckClaimDispatch,
+  CheckDispatch,
+} from '@ixo/action-interactions';
 import type {
   InteractionCommand,
   InteractionOutcome,
@@ -694,6 +697,15 @@ export interface StorageStatus {
  * piped straight to the client.
  */
 export interface UserOracleObject extends Rpc.DurableObjectBranded {
+  readActionInteractionTask(
+    identity: TurnIdentity,
+    sessionId: string,
+    taskId: string,
+  ): Promise<InteractionOutcome<string>>;
+  checkDispatch(
+    identity: TurnIdentity,
+    input: CheckDispatch,
+  ): Promise<InteractionOutcome<string>>;
   checkClaimDispatch(
     identity: TurnIdentity,
     input: CheckClaimDispatch,
@@ -706,6 +718,7 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
     identity: TurnIdentity,
     sessionId: string,
     id?: string,
+    references?: boolean,
   ): Promise<InteractionOutcome<string>>;
   topicDeliverable(
     identity: TurnIdentity,

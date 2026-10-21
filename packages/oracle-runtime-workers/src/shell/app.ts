@@ -1,6 +1,7 @@
 import {
   ActionInteractionError,
   CheckClaimDispatchSchema,
+  CheckDispatchSchema,
 } from '@ixo/action-interactions';
 import { ZodError } from 'zod';
 import { parseInteractionCommand } from '../action-interactions/routes';
@@ -392,8 +393,24 @@ export function createShell(
         ? {
             actionInteractions: {
               version: 1,
-              owners: ['flow-claim', 'question', 'artifact'],
-              operations: ['prepare', 'read', 'update', 'reserve', 'observe'],
+              owners: [
+                'flow-claim',
+                'flow-claim-block',
+                'flow-bid',
+                'approval',
+                'task',
+                'question',
+                'artifact',
+              ],
+              operations: [
+                'prepare',
+                'read',
+                'update',
+                'reserve',
+                'observe',
+                'dispatch',
+                'read-task',
+              ],
             },
           }
         : {}),
@@ -563,7 +580,8 @@ export function createShell(
   app.use('/action-interactions*', async (c, next) => {
     if (
       c.env.ACTION_INTERACTIONS_ENABLED !== 'true' &&
-      c.req.path !== '/action-interactions/claim-dispatch'
+      c.req.path !== '/action-interactions/claim-dispatch' &&
+      c.req.path !== '/action-interactions/dispatch'
     )
       return c.json(
         { code: 'unavailable', message: 'Action interactions are disabled' },
@@ -579,7 +597,54 @@ export function createShell(
       );
     return next();
   });
-  app.use('/action-interactions*', bodyLimit({ maxSize: 96 * 1024 }));
+  app.use('/action-interactions*', bodyLimit({ maxSize: 2 * 1024 * 1024 }));
+  app.get('/action-interactions/tasks/:taskId', async (c) => {
+    const sessionId = c.req.query('sessionId');
+    if (!sessionId)
+      return c.json(
+        { code: 'invalid_request', message: 'sessionId is required' },
+        400,
+      );
+    const identity = identityOf(c.get('auth'), c.req.raw.headers);
+    const result = await userStub(
+      c.env,
+      identity.userDid,
+    ).readActionInteractionTask(identity, sessionId, c.req.param('taskId'));
+    if (result.ok)
+      return new Response(result.value, {
+        headers: {
+          'content-type': 'application/json',
+          'cache-control': 'no-store',
+        },
+      });
+    return c.json({ code: result.code, message: result.message }, 404);
+  });
+  app.post('/action-interactions/dispatch', async (c) => {
+    const parsed = CheckDispatchSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success)
+      return c.json(
+        { code: 'invalid_request', message: 'Invalid dispatch binding' },
+        400,
+      );
+    const identity = identityOf(c.get('auth'), c.req.raw.headers);
+    const result = await userStub(c.env, identity.userDid).checkDispatch(
+      identity,
+      parsed.data,
+    );
+    if (result.ok)
+      return new Response(result.value, {
+        headers: {
+          'content-type': 'application/json',
+          'cache-control': 'no-store',
+        },
+      });
+    return c.json(
+      { code: result.code, message: result.message },
+      result.status === 403 ? 403 : 409,
+    );
+  });
   app.post('/action-interactions/claim-dispatch', async (c) => {
     const parsed = CheckClaimDispatchSchema.safeParse(
       await c.req.json().catch(() => null),
@@ -628,6 +693,7 @@ export function createShell(
             identity,
             sessionId,
             c.req.param('id'),
+            c.req.query('view') === 'references',
           );
           if (result.ok)
             return new Response(result.value, {
@@ -638,7 +704,7 @@ export function createShell(
             });
           return c.json(
             { code: result.code, message: result.message },
-            result.status === 404 ? 404 : 409,
+            result.status === 404 ? 404 : result.status === 413 ? 413 : 409,
           );
         }
         const command = await parseInteractionCommand(

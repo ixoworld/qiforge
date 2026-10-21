@@ -98,3 +98,39 @@ describe('portable interaction contract', () => {
     });
   });
 });
+
+it('validates bound P3 owners and backward-compatible observation receipts', async () => {
+  const { CheckDispatchSchema, ObserveInteractionSchema } =
+    await import('./index');
+  const owner = {
+    kind: 'approval',
+    family: 'domain-write',
+    requestKey: 'write-one',
+    accountDid: 'did:ixo:alice',
+  };
+  expect(CheckDispatchSchema.safeParse({ version: 1, owner }).success).toBe(
+    true,
+  );
+  expect(
+    CheckDispatchSchema.safeParse({
+      version: 1,
+      owner,
+      cardRef: crypto.randomUUID(),
+    }).success,
+  ).toBe(false);
+  const observation = {
+    version: 1,
+    requestId: crypto.randomUUID(),
+    sessionId: 'session',
+    expectedRevision: 2,
+    operationKey: crypto.randomUUID(),
+    outcome: 'partial',
+    ownerExecutionRef: 'write-one',
+    receipt: { files: [{ path: 'one.md', status: 'written' }] },
+  };
+  expect(ObserveInteractionSchema.parse(observation)).toEqual(observation);
+  expect(
+    ObserveInteractionSchema.safeParse({ ...observation, outcome: 'complete' })
+      .success,
+  ).toBe(false);
+});

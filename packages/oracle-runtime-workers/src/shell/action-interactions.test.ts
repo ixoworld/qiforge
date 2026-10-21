@@ -28,18 +28,40 @@ function fixture(enabled = 'true') {
     code: 'review_required',
     message: 'Managed draft exists',
   }));
+  const checkDispatch = vi.fn(async () => ({
+    ok: false,
+    status: 409,
+    code: 'review_required',
+    message: 'Managed draft exists',
+  }));
+  const readActionInteractionTask = vi.fn(async () => ({
+    ok: true,
+    value: JSON.stringify({
+      task: {
+        ok: true,
+        taskId: 'task-one',
+        title: 'Existing',
+        status: 'active',
+        awaitingApprovalSince: '2026-10-21T00:00:00Z',
+      },
+    }),
+  }));
   const readActionInteraction = vi.fn(async () => ({ ok: true, value: '[]' }));
   const idFromName = vi.fn((name: string) => name);
   const get = vi.fn(() => ({
     actionInteraction,
     readActionInteraction,
     checkClaimDispatch,
+    checkDispatch,
+    readActionInteractionTask,
   }));
   return {
     app: createShell(),
     actionInteraction,
     readActionInteraction,
     checkClaimDispatch,
+    checkDispatch,
+    readActionInteractionTask,
     idFromName,
     get,
     bindings: {
@@ -62,7 +84,15 @@ describe('interaction HTTP authority and structural boundary', () => {
     expect(await advertised.json()).toMatchObject({
       actionInteractions: {
         version: 1,
-        owners: ['flow-claim', 'question', 'artifact'],
+        owners: [
+          'flow-claim',
+          'flow-claim-block',
+          'flow-bid',
+          'approval',
+          'task',
+          'question',
+          'artifact',
+        ],
       },
     });
     const disabled = fixture('false');
@@ -145,6 +175,7 @@ describe('interaction HTTP authority and structural boundary', () => {
       expect.objectContaining({ userDid: user.did }),
       '$session',
       undefined,
+      false,
     );
     const bad = await f.app.request(
       '/action-interactions',
@@ -189,4 +220,68 @@ describe('interaction HTTP authority and structural boundary', () => {
       message: 'changed',
     });
   });
+});
+
+it('keeps generic dispatch fail-closed when preparation is disabled', async () => {
+  const f = fixture('false');
+  const input = {
+    version: 1,
+    owner: {
+      kind: 'approval',
+      family: 'plugin',
+      requestKey: 'install-one',
+      accountDid: user.did,
+    },
+  };
+  const response = await f.app.request(
+    '/action-interactions/dispatch',
+    {
+      method: 'POST',
+      headers: await authHeaders(),
+      body: JSON.stringify(input),
+    },
+    f.bindings,
+  );
+  expect(response.status).toBe(409);
+  expect(await response.json()).toMatchObject({ code: 'review_required' });
+  expect(f.checkDispatch).toHaveBeenCalledWith(
+    expect.objectContaining({ userDid: user.did }),
+    input,
+  );
+});
+it('reads current task owner through the authenticated user and requires a session', async () => {
+  const f = fixture();
+  const response = await f.app.request(
+    '/action-interactions/tasks/task-one?sessionId=%24session',
+    { headers: await authHeaders() },
+    f.bindings,
+  );
+  expect(response.status).toBe(200);
+  expect(response.headers.get('cache-control')).toBe('no-store');
+  expect(await response.json()).toMatchObject({
+    task: { taskId: 'task-one', awaitingApprovalSince: '2026-10-21T00:00:00Z' },
+  });
+  expect(f.readActionInteractionTask).toHaveBeenCalledWith(
+    expect.objectContaining({ userDid: user.did }),
+    '$session',
+    'task-one',
+  );
+  expect(
+    (
+      await f.app.request(
+        '/action-interactions/tasks/task-one',
+        { headers: await authHeaders() },
+        f.bindings,
+      )
+    ).status,
+  ).toBe(400);
+  expect(
+    (
+      await f.app.request(
+        '/action-interactions/tasks/task-one?sessionId=x',
+        {},
+        f.bindings,
+      )
+    ).status,
+  ).toBe(401);
 });

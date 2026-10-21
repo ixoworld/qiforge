@@ -18,7 +18,7 @@ import {
   lastHumanText,
   userDidFromContext,
 } from './middleware';
-import { createTaskTools } from './tasks-tools';
+import { createTaskTools, taskCardSummary } from './tasks-tools';
 import {
   createTasksPlugin,
   TaskSurfaceRegistry,
@@ -689,4 +689,34 @@ describe('per-user surfaces (one plugin instance serves every user object of the
     await turn.end();
     expect(registry.size).toBe(0);
   });
+});
+
+it('shares safe current task summaries with cards without exposing restricted source or result', () => {
+  const record = makeRecord(
+    {
+      title: 'Private task',
+      intent: 'restricted source',
+      schedule: { kind: 'once', at: '2027-01-01T00:00:00Z' },
+    },
+    {
+      executionProfile: 'supplied-context-markdown',
+      pendingApprovalAt: '2026-10-21T00:00:00Z',
+      lastResult: {
+        ok: true,
+        summary: 'restricted result',
+        at: '2026-10-21T00:00:00Z',
+      },
+    },
+  );
+  const summary = taskCardSummary(record);
+  expect(summary).toMatchObject({
+    taskId: record.id,
+    awaitingApprovalSince: record.pendingApprovalAt,
+    restricted: true,
+    lastResult: { ok: true, at: record.lastResult?.at },
+  });
+  expect(summary).not.toHaveProperty('intent');
+  expect(summary.lastResult).not.toHaveProperty('summary');
+  expect(JSON.stringify(summary)).not.toContain('restricted source');
+  expect(JSON.stringify(summary)).not.toContain('restricted result');
 });

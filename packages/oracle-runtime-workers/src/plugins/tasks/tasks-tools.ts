@@ -100,6 +100,25 @@ function summarizeRecord(record: OracleTaskRecord): Record<string, unknown> {
   };
 }
 
+/** Current owner summary shared by get_task and private card readback. */
+export function taskCardSummary(
+  record: OracleTaskRecord,
+): Record<string, unknown> {
+  return {
+    ok: true,
+    ...summarizeRecord(record),
+    ...(record.executionProfile
+      ? { note: RESTRICTED_TASK_NOTE }
+      : { intent: record.intent }),
+    lastRunAt: record.lastRunAt ?? null,
+    lastResult:
+      record.executionProfile && record.lastResult
+        ? { ok: record.lastResult.ok, at: record.lastResult.at }
+        : (record.lastResult ?? null),
+    consecutiveFailures: record.consecutiveFailures,
+  };
+}
+
 function failure(err: unknown): { ok: false; error: string } {
   return {
     ok: false,
@@ -247,26 +266,7 @@ function getTask(): PluginTool {
       try {
         const record = await tasks.get(taskId);
         if (!record) return { ok: false, error: 'Task not found.' };
-        if (record.executionProfile) {
-          return {
-            ok: true,
-            ...summarizeRecord(record),
-            lastRunAt: record.lastRunAt ?? null,
-            lastResult: record.lastResult
-              ? { ok: record.lastResult.ok, at: record.lastResult.at }
-              : null,
-            consecutiveFailures: record.consecutiveFailures,
-            note: RESTRICTED_TASK_NOTE,
-          };
-        }
-        return {
-          ok: true,
-          ...summarizeRecord(record),
-          intent: record.intent,
-          lastRunAt: record.lastRunAt ?? null,
-          lastResult: record.lastResult ?? null,
-          consecutiveFailures: record.consecutiveFailures,
-        };
+        return taskCardSummary(record);
       } catch (err) {
         return failure(err);
       }
