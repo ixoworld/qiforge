@@ -62,6 +62,40 @@ function harness(answer: (params: FrontendCallParams) => unknown) {
 }
 
 describe('Portal browser tools over the frontend bridge', () => {
+  it.each([
+    'ask_user_question',
+    'propose_domain_creation',
+    'write_domain_files',
+    'publish_recipe_release',
+  ])('caps an identical pending %s request as a write', async (name) => {
+    const pending = {
+      status:
+        name === 'ask_user_question' ? 'awaiting_answer' : 'awaiting_approval',
+      requestKey: 'recipe_decision',
+    };
+    const { ctx, calls } = harness(() => pending);
+    const browserTool = buildBrowserTool({
+      name,
+      description: 'Wait for the person',
+      schema,
+    });
+    expect(browserTool?.repeatable).toBe(false);
+    expect(browserTool?.effect).toBe('write');
+    expect(await browserTool!.handler({ note: 'recipe' }, ctx)).toEqual(
+      pending,
+    );
+    expect(calls[0]?.timeoutMs).toBe(BROWSER_TOOL_TIMEOUT_MS);
+  });
+
+  it('keeps repeatable browser navigation and reads available', () => {
+    for (const name of ['scroll_page', 'click', 'read_topic']) {
+      expect(
+        buildBrowserTool({ name, description: 'Browser action', schema })
+          ?.repeatable,
+      ).toBe(true);
+    }
+  });
+
   it('keeps the first descriptor of a browser tool declared twice', () => {
     const first = { name: 'mutate_topic', description: 'first', schema };
     expect(
