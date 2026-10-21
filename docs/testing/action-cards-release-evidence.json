@@ -1,18 +1,19 @@
 {
   "schemaVersion": 1,
   "issue": "IXO-5618",
-  "observedAt": "2026-10-18",
+  "observedAt": "2026-10-21",
   "preparation": {
     "ACTION_PROPOSALS_ENABLED": false,
     "ACTION_TOPIC_PROPOSALS_ENABLED": false
   },
   "sources": {
     "runtime": "16fe4e65f97d57c064e6615e18dfe4ea7527bf25",
-    "runtimeBase": "2ddc380ba8adc2e815eff86d221b31791da829dd",
-    "upstreamMain": "baec324161c0f3be5d284e28ee3272e261102a3c",
+    "runtimeBase": "cd2f36730f59ec91aaa961fed98013b1b832239f",
+    "upstreamMain": "be439432bf59cb757673b61cb59bd77e3160b12b",
     "portal": "ded28cdb48482872fd73a790292a8e27c0b46725",
     "gateway": "c7564b573cb4d220b335f11084894658e40af901",
-    "companionBase": "cc151dafdbd2e4534eb01e3ca426ee5d371ebcf9"
+    "companionBase": "cc151dafdbd2e4534eb01e3ca426ee5d371ebcf9",
+    "runtimeTransferBase": "44f8c36509cc85319e1bb882f74886959749381f"
   },
   "plannedReleases": [
     {
@@ -27,7 +28,7 @@
     },
     {
       "name": "@ixo/oracle-runtime-workers",
-      "version": "0.20.0",
+      "version": "0.22.0",
       "status": "unpublished"
     },
     {
@@ -80,6 +81,12 @@
       "lockfile": "not regenerated; waits for package publication",
       "config": "devnet; openrouter-jev; both preparation flags false; proposed Portal origin requires operator review",
       "adoptionPatchSha256": "6f930189030785412cd6e928ac20b124f43dc546b76a6af5c80c44e983d2d8b8"
+    },
+    "reviewFixes": {
+      "date": "2026-10-21",
+      "transferBranchHead": "44f8c36509cc85319e1bb882f74886959749381f",
+      "topicBranchHead": "cd2f36730f59ec91aaa961fed98013b1b832239f",
+      "summary": "Review blockers fixed on the PR branches: memo-bound chain verification and one hash per card; owner-object card policy; whole-token evidence rules; guarded alarm with background re-verification, receipt backoff, quarantine and retention; boot validation of ACTION_PROPOSALS_*; topic execution window and permit re-issue; grant merges only under the existing expiry; concurrent grant refusal; 409 vs 503; authority-only fingerprints; parallel grant and history reads."
     }
   },
   "providerEvidence": {
@@ -153,6 +160,11 @@
       "id": "disable-and-recover",
       "status": "open",
       "needs": "Authenticated reads, reconciliation and receipt access with preparation disabled on deployed candidate"
+    },
+    {
+      "id": "topic-protocol-workers",
+      "status": "open",
+      "needs": "Pin @ixo/topic-protocol 1.0.0-rc.8 (precompiled validators, ixoworld/topic-protocol PR 37) once it is published; packages/oracle-runtime-workers/src/core/topic-protocol-runtime.test.ts must pass. rc.7 compiles validators with Ajv at module load and fails a Worker at boot."
     }
   ]
 }
