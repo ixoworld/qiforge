@@ -56,14 +56,13 @@ const backoff = (base: number, max: number, attempts: number) =>
 
 /** The verifier's answers that prove a recorded hash is not this card's transaction. */
 /**
- * The verifier's proofs that a recorded hash is ANOTHER transaction (the
- * bytes hash differently, or it carries another card's memo or none): the
- * owner may replace it.
+ * The verifier's proof that a recorded hash is ANOTHER transaction (the
+ * chain holds it, signed under another card's memo or none): the owner may
+ * replace it. A hash mismatch is not in it: an honest node answers
+ * `/tx?hash=` with bytes that hash to the hash asked for, so that one is a
+ * faulty RPC, retried like any other read failure.
  */
-export const TRANSACTION_REJECTIONS = new Set([
-  'Transaction memo mismatch',
-  'Transaction hash mismatch',
-]);
+export const TRANSACTION_REJECTIONS = new Set(['Transaction memo mismatch']);
 /**
  * The verifier's proof that the recorded transaction carries THIS card's
  * memo but other messages: an effect the owner bound to the card that went
@@ -361,9 +360,8 @@ export class ActionProposalStore {
   }
   /**
    * The verifier proved the recorded hash is another transaction (another
-   * card's memo or none, bytes that do not hash to it): the owner may record
-   * the right one with a later reconcile instead of the card staying
-   * `unknown` for ever.
+   * card's memo or none): the owner may record the right one with a later
+   * reconcile instead of the card staying `unknown` for ever.
    */
   async markTransactionRejected(ownerDid: string, id: string): Promise<void> {
     await this.db.run(
