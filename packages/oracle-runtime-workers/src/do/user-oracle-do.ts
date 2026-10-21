@@ -3218,16 +3218,24 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             : new TopicReadUnavailable(message);
         }
       };
+      // Room state and history are lists of events; anything else from the
+      // gateway is a read that failed, not content for the contract to judge.
+      const readList = (raw: string): unknown[] => {
+        const value: unknown = JSON.parse(raw);
+        if (!Array.isArray(value))
+          throw new TopicReadUnavailable('Topic read is not a list of events');
+        return value;
+      };
       return {
         reader: {
           state: async (room) =>
-            JSON.parse(await read(() => this.gateway.getTopicRoomState(room))),
+            readList(await read(() => this.gateway.getTopicRoomState(room))),
           event: async (room, id) => {
             const raw = await read(() => this.gateway.getTopicEvent(room, id));
             return raw ? JSON.parse(raw) : null;
           },
           history: async (room, root) =>
-            JSON.parse(
+            readList(
               await read(() => this.gateway.getTopicHistory(room, root)),
             ),
         },

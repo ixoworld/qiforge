@@ -40,11 +40,21 @@ export function typedTopicError(
     error instanceof TopicReadUnavailable
   )
     return error;
-  if (error instanceof TopicProtocolError) {
+  if (
+    error instanceof TopicProtocolError ||
+    (error instanceof Error && error.name === 'TopicProtocolError')
+  ) {
     // A contract body or operation in the room that the topic protocol
-    // itself rejects: a fact about the authority, reported by its code.
+    // itself rejects: a fact about the authority, reported by its code. The
+    // name check covers a second copy of the package in the bundle.
+    const code =
+      error instanceof TopicProtocolError
+        ? error.code
+        : 'code' in error
+          ? String(error.code)
+          : 'unknown';
     console.warn(
-      `[topic-actions] authority content rejected by the topic protocol: ${error.code}`,
+      `[topic-actions] authority content rejected by the topic protocol: ${code}`,
     );
     return new ActionProposalConflict('Topic authority content is malformed');
   }
