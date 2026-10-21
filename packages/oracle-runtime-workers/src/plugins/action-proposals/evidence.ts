@@ -48,8 +48,9 @@ export function mentionsToken(text: string, value: string): boolean {
 /**
  * The amount with one of its units right beside it (`1.5 IXO`, `1.5IXO`,
  * `1500000 uixo`, `10 credits`, `10 CARBON-1`). A bare number is not
- * evidence: `14` in a clock time, `10` inside `CARBON-10` or `10.5`, and
- * `5 uixo` for a request of 5 IXO all fail here.
+ * evidence: `14` in a clock time, `10` inside `CARBON-10` or `10.5`, `5 uixo`
+ * for a request of 5 IXO, and the tail of a grouped or divided number
+ * (`1 500 IXO`, `1'500 IXO`, `1/5 IXO`, `1:5 IXO`) all fail here.
  */
 export function mentionsAmount(
   text: string,
@@ -57,8 +58,10 @@ export function mentionsAmount(
   units: readonly string[],
 ): boolean {
   const unit = units.map(escape).join('|');
+  // Not glued to a word character, and not preceded by a digit or a number
+  // separator with any run of whitespace in between (`1  500`, `1 ,500`).
   return new RegExp(
-    `(?<![\\w.,-])${escape(amount)}\\s*(?:${unit})(?![\\w-])`,
+    `(?<!\\w)(?<![\\d.,'’/:-]\\s*)${escape(amount)}\\s*(?:${unit})(?![\\w-])`,
     'i',
   ).test(text);
 }

@@ -166,7 +166,8 @@ describe('validated conversational actions', () => {
         message: `Send 14 IXO to ${RECIPIENT} on testnet`,
       }),
     );
-    // A clock time is not an amount, even for a build that leaves the note in.
+    // A clock time is not an amount: without a unit beside it no digit
+    // counts, note or no note.
     ctx.history.messages = [
       new HumanMessage({
         content: withTurnTimeNote(`Send IXO to ${RECIPIENT} on testnet`, note),
@@ -199,6 +200,28 @@ describe('validated conversational actions', () => {
     async (message) => {
       const { ctx, create, evaluate } = context(message);
       expect((await prepareAction(credit, ctx)).status).toBe(
+        'clarification_required',
+      );
+      expect(evaluate).not.toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    [`Send 1 500 IXO to ${RECIPIENT} on testnet`, '500'],
+    [`Send 1'500 IXO to ${RECIPIENT} on testnet`, '500'],
+    [`Send 1/5 IXO to ${RECIPIENT} on testnet`, '5'],
+    [`Send 1:5 IXO to ${RECIPIENT} on testnet`, '5'],
+    [`Send 1  500 IXO to ${RECIPIENT} on testnet`, '500'],
+    [`Send 1 ,500 IXO to ${RECIPIENT} on testnet`, '500'],
+    [
+      `Send 1${String.fromCharCode(0xa0)}500 IXO to ${RECIPIENT} on testnet`,
+      '500',
+    ],
+  ])(
+    'never reads the tail of a grouped or divided number as the amount (%s)',
+    async (message, amount) => {
+      const { ctx, create, evaluate } = context(message);
+      expect((await prepareAction({ ...args, amount }, ctx)).status).toBe(
         'clarification_required',
       );
       expect(evaluate).not.toHaveBeenCalled();

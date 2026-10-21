@@ -2,6 +2,7 @@ import { canonicalizeIxoJson } from '@ixo/ixo-transaction/action-proposals';
 import {
   digestTopicEffect,
   ExpectedTopicEffectSchema,
+  TopicLifecycleSchema,
   TopicProposalSubjectSchema,
   TopicProposalV2Schema,
   TopicReceiptReferencesSchema,
@@ -47,6 +48,21 @@ export class TopicProposalStore {
     private readonly now = Date.now,
   ) {}
   async setup(): Promise<void> {
+    // The unreleased first shape of these tables (no status, session, run or
+    // attempt columns) exists only where a pre-release build of the branch
+    // ran; it is rebuilt rather than migrated, and the fact logged, so an
+    // object holding it boots instead of failing every request on the
+    // index below.
+    const columns = await this.db.exec<{ name: string }>(
+      `PRAGMA table_info(topic_action_proposals)`,
+    );
+    if (columns.length && !columns.some((c) => c.name === 'session_id')) {
+      console.warn(
+        '[topic-actions] rebuilding pre-release topic_action_proposals tables',
+      );
+      await this.db.run(`DROP TABLE IF EXISTS topic_action_steps`);
+      await this.db.run(`DROP TABLE IF EXISTS topic_action_proposals`);
+    }
     await this.db.run(
       `CREATE TABLE IF NOT EXISTS topic_action_proposals(id TEXT PRIMARY KEY,owner_did TEXT NOT NULL,invocation_id TEXT NOT NULL,session_id TEXT NOT NULL,run_id TEXT NOT NULL,subject TEXT NOT NULL,digest TEXT NOT NULL,lifecycle TEXT NOT NULL,status TEXT NOT NULL,origin TEXT,receipt_state TEXT NOT NULL DEFAULT 'waiting',receipt_attempts INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL DEFAULT 0,verify_after INTEGER NOT NULL DEFAULT 0,verify_attempts INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL, UNIQUE(owner_did,invocation_id))`,
     );
@@ -209,16 +225,34 @@ export class TopicProposalStore {
     owner: string,
     limit = 2,
   ): Promise<TopicActionProposal[]> {
+    // A revoked card's started step may still land: its reference is
+    // reconciled too, so the effect is receipted and the grant lock released.
     const rows = await this.db.exec<{ id: string }>(
-      `SELECT DISTINCT p.id FROM topic_action_proposals p JOIN topic_action_steps s ON s.proposal_id=p.id WHERE p.owner_did=? AND p.status='unknown' AND p.verify_after<=? AND p.verify_attempts<? AND s.reference IS NOT NULL AND s.status!='verified' ORDER BY p.verify_after,p.id LIMIT ?`,
+      `SELECT DISTINCT p.id FROM topic_action_proposals p JOIN topic_action_steps s ON s.proposal_id=p.id WHERE p.owner_did=? AND p.status IN ('unknown','revoked') AND p.verify_after<=? AND p.verify_attempts<? AND s.reference IS NOT NULL AND s.status!='verified' ORDER BY p.verify_after,p.id LIMIT ?`,
       [owner, this.now(), VERIFY_MAX_ATTEMPTS, limit],
     );
-    const values = await Promise.all(rows.map((r) => this.get(owner, r.id)));
-    return values.filter((p): p is TopicActionProposal => p !== null);
+    const proposals: TopicActionProposal[] = [];
+    for (const row of rows) {
+      try {
+        const p = await this.get(owner, row.id);
+        if (p) proposals.push(p);
+      } catch (error) {
+        // A row this build cannot read drops out of the schedule instead of
+        // failing the alarm every tick.
+        await this.db.run(
+          `UPDATE topic_action_proposals SET verify_attempts=? WHERE owner_did=? AND id=?`,
+          [VERIFY_MAX_ATTEMPTS, owner, row.id],
+        );
+        console.error(
+          `[topic-actions] verification of ${row.id} quarantined: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    return proposals;
   }
   async nextVerificationAt(owner: string): Promise<number | undefined> {
     const row = await this.db.get<{ due: number | null }>(
-      `SELECT MIN(p.verify_after) AS due FROM topic_action_proposals p JOIN topic_action_steps s ON s.proposal_id=p.id WHERE p.owner_did=? AND p.status='unknown' AND p.verify_attempts<? AND s.reference IS NOT NULL AND s.status!='verified'`,
+      `SELECT MIN(p.verify_after) AS due FROM topic_action_proposals p JOIN topic_action_steps s ON s.proposal_id=p.id WHERE p.owner_did=? AND p.status IN ('unknown','revoked') AND p.verify_attempts<? AND s.reference IS NOT NULL AND s.status!='verified'`,
       [owner, VERIFY_MAX_ATTEMPTS],
     );
     return row?.due ?? undefined;
@@ -316,12 +350,20 @@ export class TopicProposalStore {
     )
       throw new ActionProposalConflict('Proposal was not claimed');
     const now = this.now();
-    const started = p.lifecycle.steps.some((s) => s.status !== 'pending');
+    if (!p.lifecycle.claimedAt)
+      throw new ActionProposalConflict('Proposal was not claimed');
+    // An effect may exist in the world once a step has a reference or is
+    // verified; until then the card's own expiry bounds every attempt to
+    // start, a permitted-but-never-sent first step included.
+    const effects = await this.db.get<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM topic_action_steps WHERE proposal_id=? AND (reference IS NOT NULL OR status='verified')`,
+      [p.id],
+    );
+    const started = (effects?.n ?? 0) > 0;
     if (!started && Date.parse(p.expiresAt) <= now)
       throw new ActionProposalConflict('Proposal expired');
     if (
       started &&
-      p.lifecycle.claimedAt &&
       Date.parse(p.lifecycle.claimedAt) + TOPIC_EXECUTION_WINDOW_MS <= now
     )
       throw new ActionProposalConflict('Execution window closed');
@@ -338,9 +380,13 @@ export class TopicProposalStore {
     return p.lifecycle.steps[index]!;
   }
   /**
-   * Two cards granting the same account on the same collection, both
-   * started and neither confirmed, would overwrite each other on chain
-   * while both receipts said "granted".
+   * Two cards granting the same account the same role under the same admin,
+   * both started and neither confirmed, would overwrite each other on chain
+   * while both receipts said "granted". The lock follows the other card's
+   * grant STEP, not its status: it holds while that step may still be
+   * broadcast (no reference yet, inside its holder's execution window) or
+   * may still land (a reference recorded, verification not given up), a
+   * revoked card included.
    */
   private async assertNoConcurrentGrant(p: TopicActionProposal): Promise<void> {
     if (p.action.name !== 'grant_topic_access') return;
@@ -348,22 +394,43 @@ export class TopicProposalStore {
     const keys = new Set(
       p.action.grants.map((g) => `${admin}\0${g.address}\0${g.role}`),
     );
-    const rows = await this.db.exec<{ subject: string }>(
-      `SELECT p.subject FROM topic_action_proposals p JOIN topic_action_steps s ON s.proposal_id=p.id WHERE p.owner_did=? AND p.id<>? AND p.status IN ('claimed','unknown') AND s.step='grant' AND s.status='started'`,
+    const now = this.now();
+    const rows = await this.db.exec<{
+      id: string;
+      subject: string;
+      lifecycle: string;
+      verify_attempts: number;
+      reference: string | null;
+    }>(
+      `SELECT p.id,p.subject,p.lifecycle,p.verify_attempts,s.reference FROM topic_action_proposals p JOIN topic_action_steps s ON s.proposal_id=p.id WHERE p.owner_did=? AND p.id<>? AND s.step='grant' AND s.status='started'`,
       [p.ownerDid, p.id],
     );
     for (const row of rows) {
-      const action = TopicProposalSubjectSchema.parse(
-        JSON.parse(row.subject),
-      ).action;
+      let action: TopicProposalSubject['action'];
+      let claimedAt: string | undefined;
+      try {
+        action = TopicProposalSubjectSchema.parse(JSON.parse(row.subject)).action;
+        claimedAt = TopicLifecycleSchema.parse(JSON.parse(row.lifecycle)).claimedAt;
+      } catch (error) {
+        console.warn(
+          `[topic-actions] grant lock skips unreadable card ${row.id}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        continue;
+      }
       if (action.name !== 'grant_topic_access') continue;
       if (
-        action.grants.some((g) =>
+        !action.grants.some((g) =>
           keys.has(`${action.adminAddress}\0${g.address}\0${g.role}`),
         )
       )
+        continue;
+      const holds = row.reference
+        ? row.verify_attempts < VERIFY_MAX_ATTEMPTS
+        : !!claimedAt &&
+          Date.parse(claimedAt) + TOPIC_EXECUTION_WINDOW_MS > now;
+      if (holds)
         throw new ActionProposalConflict(
-          'Another grant for this account is still in progress',
+          `Another grant for this account is still in progress (${row.id})`,
         );
     }
   }

@@ -1,3 +1,4 @@
+import { TopicReadUnavailable } from './topic-errors';
 import type { TopicMatrixReader } from './topic-matrix';
 export async function withTopicReadBudget<T>(
   reader: TopicMatrixReader,
@@ -9,12 +10,16 @@ export async function withTopicReadBudget<T>(
   const deadline = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
       controller.abort();
-      reject(new Error('Topic verification exceeded the ten second budget'));
+      reject(
+        new TopicReadUnavailable(
+          'Topic verification exceeded the ten second budget',
+        ),
+      );
     }, 10000);
   });
   const active = () => {
     if (controller.signal.aborted)
-      throw new Error('Topic verification budget expired');
+      throw new TopicReadUnavailable('Topic verification budget expired');
   };
   const bounded: TopicMatrixReader = {
     state: async (room) => {

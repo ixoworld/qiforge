@@ -16,6 +16,7 @@ import {
 import { readTopicAuthority } from './topic-history';
 import { TopicChainReader } from './topic-chain';
 import { digestTopicProposalEffect } from './topic-store';
+import { ActionProposalConflict } from './store';
 const network = z.enum(['devnet', 'testnet', 'mainnet']);
 const did = z.string().startsWith('did:ixo:').max(256);
 export const TopicCandidateSchema = z.discriminatedUnion('action', [
@@ -246,7 +247,9 @@ async function prepareTopicSubjectWithinBudget(
         'The grant recipient must hold the explicit claim role in the authenticated topic body',
       );
     dependencies.push(authorization.dependency);
-    const message = buildTopicGrant({
+    let message;
+    try {
+      message = buildTopicGrant({
       role: requested.role,
       ownerAddress: signerAddress,
       entityDid: topic.body.claimBinding.entityDid,
@@ -257,7 +260,14 @@ async function prepareTopicSubjectWithinBudget(
       expiresAt: requested.expiresAt,
       ...(requested.beforeDate ? { beforeDate: requested.beforeDate } : {}),
       ...(authorization.existing ? { existing: authorization.existing } : {}),
-    });
+      });
+    } catch (error) {
+      // The builder's refusals (an existing grant under another expiry, an
+      // evaluator date outside the grant) are the owner's to read.
+      throw new ActionProposalConflict(
+        error instanceof Error ? error.message : 'Grant cannot be built',
+      );
+    }
     grants.push({ grantee, address, role: requested.role, message });
   }
   return TopicProposalSubjectSchema.parse({

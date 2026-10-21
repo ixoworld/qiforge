@@ -8,6 +8,7 @@ import { canonicalizeIxoJson } from '@ixo/ixo-transaction/action-proposals';
 import type { TopicMatrixReader } from './topic-matrix';
 import { TopicMatrixEventSchema } from './topic-matrix';
 import { digestTopicProposalEffect } from './topic-store';
+import { ActionProposalConflict } from './store';
 
 const State = z.object({
   version: z.literal(4),
@@ -95,10 +96,10 @@ export async function readTopicAuthority(
   const stateEvent = stateEvents.find(
     (e) => e.type === 'ixo.topic.contract' && e.state_key === topicId,
   );
-  if (!stateEvent) throw new Error('Canonical topic state is unavailable');
+  if (!stateEvent) throw new ActionProposalConflict('Canonical topic state is unavailable');
   const state = State.parse(stateEvent.content);
   if (state.topicId !== topicId || state.anchor.roomId !== room)
-    throw new Error('Topic locator mismatch');
+    throw new ActionProposalConflict('Topic locator mismatch');
   const root = TopicMatrixEventSchema.parse(
     await reader.event(room, state.anchor.rootEventId),
   );
@@ -107,7 +108,7 @@ export async function readTopicAuthority(
     root.type !== 'm.room.message' ||
     root.room_id !== room
   )
-    throw new Error('Only owner-authored topic history is supported');
+    throw new ActionProposalConflict('Only owner-authored topic history is supported');
   const history = z
     .array(TopicMatrixEventSchema)
     .max(256)
@@ -141,7 +142,7 @@ export async function readTopicAuthority(
           })
           .safeParse(event.content).success !== true
       )
-        throw new Error('Topic operation root binding mismatch');
+        throw new ActionProposalConflict('Topic operation root binding mismatch');
       parseTopicOperationPayload(operation);
       return [{ event, operation }];
     });
@@ -153,24 +154,24 @@ export async function readTopicAuthority(
       (e) => e.operation?.previousRevision === prior,
     );
     if (next.length !== 1)
-      throw new Error('Topic history is incomplete or forked');
+      throw new ActionProposalConflict('Topic history is incomplete or forked');
     const entry = next[0]!;
     const op = entry.operation;
     if (entry.event.sender !== owner || op.actor !== owner)
-      throw new Error(
+      throw new ActionProposalConflict(
         'Delegated contract mutation requires an unsupported authority proof',
       );
     if (
       op.payload.previousRevision !== prior &&
       op.payload.topicPreviousRevision !== prior
     )
-      throw new Error('Topic operation revision mismatch');
+      throw new ActionProposalConflict('Topic operation revision mismatch');
     prior = op.operationId;
     selected = entry;
     remaining.splice(remaining.indexOf(entry), 1);
   }
   if (!selected?.operation || prior !== state.projection.contractRevision)
-    throw new Error(
+    throw new ActionProposalConflict(
       'Topic projection is not backed by complete contract history',
     );
   const ref = Ref.parse(
@@ -182,12 +183,12 @@ export async function readTopicAuthority(
     ref.bodyRef.roomId !== room ||
     ref.bodyRef.contentHash !== ref.bodyHash
   )
-    throw new Error('Pinned body reference mismatch');
+    throw new ActionProposalConflict('Pinned body reference mismatch');
   const selectedHead = Ref.parse(
     state.contracts.proposed ?? state.contracts.effective,
   );
   if (canonicalizeIxoJson(selectedHead) !== canonicalizeIxoJson(ref))
-    throw new Error('Projection body head differs from authenticated history');
+    throw new ActionProposalConflict('Projection body head differs from authenticated history');
   const bodyEvent = TopicMatrixEventSchema.parse(
     await reader.event(room, ref.bodyRef.eventId),
   );
@@ -199,7 +200,7 @@ export async function readTopicAuthority(
       .object({ 'm.relates_to': z.object({ event_id: z.string() }) })
       .parse(bodyEvent.content)['m.relates_to'].event_id !== root.event_id
   )
-    throw new Error('Pinned body sender mismatch');
+    throw new ActionProposalConflict('Pinned body sender mismatch');
   const body = Body.parse(bodyEvent.content.contract);
   assertContract('topic-contract-body', body);
   const bodyHash = `sha256:${await digestTopicProposalEffect(bodyEvent.content.contract)}`;
@@ -208,7 +209,7 @@ export async function readTopicAuthority(
     body.revision !== prior ||
     body.authoredBy !== owner
   )
-    throw new Error('Pinned body integrity mismatch');
+    throw new ActionProposalConflict('Pinned body integrity mismatch');
   const shape = resolveEffectiveTopicShape({
     baseRecipe: body.baseRecipe,
     kind: body.kindRef.kind,
@@ -220,7 +221,7 @@ export async function readTopicAuthority(
     canonicalizeIxoJson(shape.sources) !==
       canonicalizeIxoJson(body.shapeSources)
   )
-    throw new Error('Pinned shape is unsupported or changed');
+    throw new ActionProposalConflict('Pinned shape is unsupported or changed');
   const authority = {
     rootEventId: root.event_id,
     contractBodyEventId: bodyEvent.event_id,
@@ -230,6 +231,9 @@ export async function readTopicAuthority(
     revision: prior,
     shapeDigest: shape.digest,
   };
+  // The state event is re-emitted by ordinary projection activity; the
+  // contract head it points at is what carries authority.
+  const { stateEventId: _state, ...pinned } = authority;
   return {
     authority,
     body,
@@ -241,7 +245,7 @@ export async function readTopicAuthority(
       {
         kind: 'topic' as const,
         key: topicId,
-        digest: await digestTopicProposalEffect({ authority, body }),
+        digest: await digestTopicProposalEffect({ authority: pinned, body }),
       },
     ],
   };

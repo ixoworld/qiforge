@@ -44,6 +44,22 @@ describe('durable topic effect journal', () => {
       JSON.parse((await s.topicBegin(OWNER, p.id, input))!),
     );
     expect(again).toEqual(results[0]);
+    // Another device of the same owner is not the holder: the homeserver
+    // deduplicates a transaction id per device, so it gets no permit.
+    const elsewhere = BeginTopicStepResultSchema.parse(
+      JSON.parse(
+        (await s.topicBegin(
+          OWNER,
+          p.id,
+          JSON.stringify({
+            digest: p.digest,
+            step: 'anchor',
+            executor: { ...executor, deviceId: 'OTHERDEVICE' },
+          }),
+        ))!,
+      ),
+    );
+    expect(elsewhere.status).toBe('already_started');
     // Once a reference is recorded the step is spoken for: no new permit.
     await s.topicReconcile(
       OWNER,
@@ -262,6 +278,73 @@ describe('durable topic effect journal', () => {
       BeginTopicStepResultSchema.parse(JSON.parse((await begin(first))!))
         .status,
     ).toBe('permitted');
+  });
+  it('keeps the card expiry on a permitted step that was never sent', async () => {
+    const s = stub('never-sent');
+    const p = parse(await s.topicCreate(JSON.stringify(await subject())));
+    await s.topicTransition(OWNER, p.id, 'claim', p.digest);
+    const input = JSON.stringify({ digest: p.digest, step: 'anchor', executor });
+    expect(
+      BeginTopicStepResultSchema.parse(
+        JSON.parse((await s.topicBegin(OWNER, p.id, input))!),
+      ).status,
+    ).toBe('permitted');
+    // Permitted at minute zero, nothing posted: at minute sixteen the card
+    // has expired like any other, the permit does not outlive it.
+    await s.setNow(NOW + 16 * 60_000);
+    expect(JSON.parse((await s.topicBegin(OWNER, p.id, input))!).error).toContain(
+      'expired',
+    );
+  });
+  it('holds the grant lock by the other step, not the other card', async () => {
+    const s = stub('grant-lock');
+    const begin = (p: { id: string; digest: string }) =>
+      s.topicBegin(
+        OWNER,
+        p.id,
+        JSON.stringify({ digest: p.digest, step: 'grant', executor }),
+      );
+    // A: permitted, never broadcast. Its lock lasts its execution window.
+    const a = parse(await s.topicCreate(JSON.stringify(grantSubject())));
+    await s.topicTransition(OWNER, a.id, 'claim', a.digest);
+    expect(
+      BeginTopicStepResultSchema.parse(JSON.parse((await begin(a))!)).status,
+    ).toBe('permitted');
+    await s.setNow(NOW + 61 * 60_000);
+    const late = NOW + 61 * 60_000;
+    const b = parse(
+      await s.topicCreate(
+        JSON.stringify(grantSubject({ runId: 'run-b' }, late)),
+      ),
+    );
+    await s.topicTransition(OWNER, b.id, 'claim', b.digest);
+    expect(
+      BeginTopicStepResultSchema.parse(JSON.parse((await begin(b))!)).status,
+    ).toBe('permitted');
+    // B records a hash and is then revoked: the hash may still land, so the
+    // lock holds for C until verification gives up, revoked or not.
+    await s.topicReconcile(
+      OWNER,
+      b.id,
+      JSON.stringify({
+        v: 2,
+        references: [
+          { kind: 'chain', step: 'grant', transactionHash: 'F'.repeat(64) },
+        ],
+      }),
+      '{}',
+      '[]',
+    );
+    await s.topicTransition(OWNER, b.id, 'revoke', b.digest);
+    const c = parse(
+      await s.topicCreate(
+        JSON.stringify(grantSubject({ runId: 'run-c' }, late)),
+      ),
+    );
+    await s.topicTransition(OWNER, c.id, 'claim', c.digest);
+    expect(JSON.parse((await begin(c))!).error).toContain(
+      `still in progress (${b.id})`,
+    );
   });
   it('revocation blocks untouched effects and retains read-only recovery of started effects', async () => {
     const s = stub('revoke');

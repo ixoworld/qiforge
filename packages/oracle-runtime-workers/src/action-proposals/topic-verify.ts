@@ -19,6 +19,7 @@ import {
   type TopicProposalStore,
 } from './topic-store';
 import { ActionProposalConflict } from './store';
+import { TopicReadUnavailable } from './topic-errors';
 import { verifyTopicGrantTransaction } from './verify';
 export type TopicVerificationContext = {
   reader: TopicMatrixReader;
@@ -53,10 +54,17 @@ async function assertTopicDependenciesWithinBudget(
     ctx.fetcher,
   );
   if (proposal.action.name === 'create_topic') {
-    await assertCreatePlanUnchanged(proposal.action.plan);
+    try {
+      await assertCreatePlanUnchanged(proposal.action.plan);
+    } catch (error) {
+      throw new ActionProposalConflict(
+        error instanceof Error ? error.message : 'The creation plan changed',
+      );
+    }
     return;
   }
-  if (!ctx.rpc) throw new Error('Trusted chain endpoint unavailable');
+  if (!ctx.rpc)
+    throw new TopicReadUnavailable('Trusted chain endpoint unavailable');
   const action = proposal.action;
   const topic = await readTopicAuthority(
     ctx.reader,
@@ -101,7 +109,7 @@ export async function verifyTopicReference(
 ) {
   if (effect.kind === 'chain') {
     if (reference.kind !== 'chain' || !ctx.rpc)
-      throw new Error('Expected a chain reference');
+      throw new ActionProposalConflict('Expected a chain reference');
     const verified = await verifyTopicGrantTransaction(
       effect,
       reference.transactionHash,
@@ -116,7 +124,7 @@ export async function verifyTopicReference(
     };
   }
   if (reference.kind !== 'matrix')
-    throw new Error('Expected a Matrix reference');
+    throw new ActionProposalConflict('Expected a Matrix reference');
   const event = TopicMatrixEventSchema.parse(
     await ctx.reader.event(effect.roomId, reference.eventId),
   );
@@ -128,7 +136,9 @@ export async function verifyTopicReference(
     event.state_key !== effect.stateKey ||
     canonicalizeIxoJson(event.content) !== canonicalizeIxoJson(effect.content)
   )
-    throw new Error('Matrix receipt does not match the reviewed effect');
+    throw new ActionProposalConflict(
+      'Matrix receipt does not match the reviewed effect',
+    );
   if (reference.step === 'snapshot') {
     const state = await ctx.reader.state(effect.roomId);
     const { z } = await import('zod');
@@ -141,7 +151,9 @@ export async function verifyTopicReference(
           e.type === effect.eventType,
       )
     )
-      throw new Error('Topic snapshot was replaced before verification');
+      throw new ActionProposalConflict(
+        'Topic snapshot was replaced before verification',
+      );
     if (proposal.action.name === 'create_topic') {
       const current = await readTopicAuthority(
         ctx.reader,
@@ -154,7 +166,9 @@ export async function verifyTopicReference(
           proposal.action.plan.identity.operationId ||
         current.authority.contractBodyHash !== proposal.action.plan.bodyHash
       )
-        throw new Error('Created topic is not canonically readable');
+        throw new ActionProposalConflict(
+          'Created topic is not canonically readable',
+        );
     }
   }
   return {

@@ -20,12 +20,12 @@ drafts, claim-access grants) are the separately switched v2 contract in
 
 ## Settings
 
-| Variable                                                | Meaning                                                                                                                                                                                                                                                             |
-| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ACTION_PROPOSALS_ENABLED`                              | `'true'` lets the `prepare_action` tool prepare cards. Default `'false'`.                                                                                                                                                                                           |
-| `ACTION_PROPOSALS_PORTAL_ORIGIN`                        | The trusted Portal origin the `/a/<id>` links point at: `https`, host only. Required when the feature is on; boot refuses the Worker otherwise.                                                                                                                     |
-| `ACTION_PROPOSALS_RPC_DEVNET`, `…_TESTNET`, `…_MAINNET` | The chain RPC the verifier reads (`https`, no credentials, query or fragment; a base path such as `/rpc/` is fine). At least one of devnet or testnet is required when the feature is on. A card for a network with no RPC stays `unknown` until one is configured. |
-| `IXO_TRANSACTION_CHAIN_ID_*`                            | Shared with the wallet-signing plugins ([ixo-transaction](ixo-transaction.md)): the chain id a card for each network must name.                                                                                                                                     |
+| Variable                                                | Meaning                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ACTION_PROPOSALS_ENABLED`                              | `'true'` lets the `prepare_action` tool prepare cards. Default `'false'`.                                                                                                                                                                                                                                                                                                  |
+| `ACTION_PROPOSALS_PORTAL_ORIGIN`                        | The trusted Portal origin the `/a/<id>` links point at: `https`, host only. Required when the feature is on; boot refuses the Worker otherwise.                                                                                                                                                                                                                            |
+| `ACTION_PROPOSALS_RPC_DEVNET`, `…_TESTNET`, `…_MAINNET` | The chain RPC the verifier reads (`https`, no credentials, query or fragment; a base path such as `/rpc/` is fine). At least one of devnet or testnet is required when the feature is on. A card for a network with no RPC is refused at preparation; if the RPC is removed later, the alarm spends that card's verification attempts on the cooldown and stops after ten. |
+| `IXO_TRANSACTION_CHAIN_ID_*`                            | Shared with the wallet-signing plugins ([ixo-transaction](ixo-transaction.md)): the chain id a card for each network must name.                                                                                                                                                                                                                                            |
 
 `validateEnv` checks the three rules above at boot (`src/core/env.ts`), so a
 misconfigured feature fails the deploy, not the first user.
@@ -70,6 +70,12 @@ anything:
   `CARBON-10`);
 - the latest message is not negated, hypothetical or quoted.
 
+These checks are co-occurrence, not binding: the address, the amount with
+its unit and the token id are each looked for anywhere in those messages, so
+a balance mentioned two turns ago can satisfy a later request's amount. The
+Decision below is the second gate for that, and the owner reads the sealed
+card before signing.
+
 Only then is the Decision asked whether the latest message requests exactly
 this action; it sees the user's own figures (`requested: { amount, unit }`)
 beside the atomic ones in the message, and must answer `requested` with
@@ -109,8 +115,9 @@ locator for the Portal and grants nothing.
 ## Background verification and receipts
 
 The owner object's alarm (`tickActionProposals` in `user-oracle-do.ts`)
-does three things, guarded so one bad row never stops the flush, the tasks
-or the eviction:
+does three things. The tick is guarded and rows this build cannot read are
+quarantined on first sight, so one bad row neither stops the flush, the tasks
+and the eviction nor fails the tick again a minute later:
 
 - **Verification**: at most two chain lookups per tick for cards that are
   `unknown` with a recorded hash, so a card the owner signed and then
@@ -122,7 +129,7 @@ or the eviction:
   channel is receipted into that thread (`<title> confirmed on chain.
 Transaction … Block … Code …`) with a stable transaction id, at most four
   per tick. A failed post is retried with the same doubling cooldown up to an
-  hour apart and **abandoned** after twelve attempts (roughly seven hours);
+  hour apart and **abandoned** after twelve attempts (about five hours);
   a receipt row whose card no longer parses or verifies is **quarantined**
   and logged (`[action-proposals] receipt <id> quarantined: …`). Cards from
   Portal-local sessions have no room and are marked `unavailable`.
