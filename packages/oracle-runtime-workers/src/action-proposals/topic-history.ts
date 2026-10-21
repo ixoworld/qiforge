@@ -6,7 +6,7 @@ import {
 import { z } from 'zod';
 import { canonicalizeIxoJson } from '@ixo/ixo-transaction/action-proposals';
 import type { TopicMatrixReader } from './topic-matrix';
-import { TopicMatrixEventSchema } from './topic-matrix';
+import { TopicMatrixEventSchema, readTopicEvent } from './topic-matrix';
 import { digestTopicProposalEffect } from './topic-store';
 import { ActionProposalConflict } from './store';
 
@@ -101,9 +101,7 @@ export async function readTopicAuthority(
   const state = State.parse(stateEvent.content);
   if (state.topicId !== topicId || state.anchor.roomId !== room)
     throw new ActionProposalConflict('Topic locator mismatch');
-  const root = TopicMatrixEventSchema.parse(
-    await reader.event(room, state.anchor.rootEventId),
-  );
+  const root = await readTopicEvent(reader, room, state.anchor.rootEventId);
   if (
     root.sender !== owner ||
     root.type !== 'm.room.message' ||
@@ -196,9 +194,7 @@ export async function readTopicAuthority(
     throw new ActionProposalConflict(
       'Projection body head differs from authenticated history',
     );
-  const bodyEvent = TopicMatrixEventSchema.parse(
-    await reader.event(room, ref.bodyRef.eventId),
-  );
+  const bodyEvent = await readTopicEvent(reader, room, ref.bodyRef.eventId);
   if (
     bodyEvent.sender !== owner ||
     bodyEvent.room_id !== room ||

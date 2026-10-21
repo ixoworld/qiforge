@@ -1577,6 +1577,18 @@ prepared in direct chats only`, chain id or signer mismatch) show the
   chain read failed (reason in `[topic-actions] <id> authority
 unavailable: …`). Steps may start until an hour after the claim; a
   started step with no reference is re-permitted to the same executor.
+  Other lines to know: `[topic-actions] authority content rejected …`
+  (room or chain content the contract refused, answered 409),
+  `[topic-actions] <id> <step> reference set aside …` (a hash proved to
+  be another card's transaction; the owner may record the right one),
+  `[topic-actions] <id> execution blocked: …` (a transaction with the
+  card's memo and other messages; the card stays `unknown` with the hash
+  listed and the owner should revoke it), `[topic-actions] verification of
+<id> quarantined: …` (a row this build cannot read; it leaves the
+  schedule), `[topic-actions] rebuilding pre-release … tables` (a
+  pre-release shape found at boot). A store that fails to open is logged
+  at boot and its routes answer `503` (`Action cards are unavailable` for
+  transfers) while the other store keeps working.
   See [topic-action-proposals](topic-action-proposals.md).
 
 ## Known limits

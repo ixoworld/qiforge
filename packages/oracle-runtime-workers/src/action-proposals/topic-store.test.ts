@@ -18,6 +18,46 @@ const stub = (name: string) =>
   );
 const parse = (raw: string | null) =>
   TopicProposalV2Schema.parse(JSON.parse(raw!));
+/**
+ * A signed transaction as a node would index it: `hash` is the real hash of
+ * the bytes, `tx` the `/tx` answer. Plain writers, as in verify.test.ts:
+ * workerd's Buffer polyfill breaks protobufjs's BufferWriter on strings of
+ * 40 characters or more.
+ */
+async function encodedTransaction(
+  memo: string,
+  messages = [{ typeUrl: '/other.Msg', value: new Uint8Array([1]) }],
+) {
+  const body = TxBody.encode(
+    TxBody.fromPartial({ memo, messages }),
+    new protobuf.Writer(),
+  ).finish();
+  const bytes = TxRaw.encode(
+    TxRaw.fromPartial({
+      bodyBytes: body,
+      authInfoBytes: new Uint8Array(),
+      signatures: [new Uint8Array([1])],
+    }),
+    new protobuf.Writer(),
+  ).finish();
+  const hash = Array.from(
+    new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
+    (b) => b.toString(16).padStart(2, '0'),
+  )
+    .join('')
+    .toUpperCase();
+  return {
+    hash,
+    tx: {
+      result: {
+        hash,
+        height: '12',
+        tx: btoa(String.fromCharCode(...bytes)),
+        tx_result: { code: 0 },
+      },
+    },
+  };
+}
 describe('durable topic effect journal', () => {
   it('allows one claim and one effect permit across simultaneous devices and restarts', async () => {
     const s = stub('race');
@@ -332,6 +372,9 @@ describe('durable topic effect journal', () => {
   });
   it('lets the owner replace a grant reference the verifier proved is another transaction', async () => {
     const s = stub('wrong-grant-hash');
+    // The steps table as first shipped, without `reference_rejected`: the
+    // store adds the column on open.
+    await s.topicLegacySteps();
     const p = parse(await s.topicCreate(JSON.stringify(grantSubject())));
     await s.topicTransition(OWNER, p.id, 'claim', p.digest);
     const begin = async () =>
@@ -345,8 +388,6 @@ describe('durable topic effect journal', () => {
         ),
       ).status;
     expect(await begin()).toBe('permitted');
-    const wrong = 'A'.repeat(64);
-    const right = 'B'.repeat(64);
     const reconcile = (hash: string, tx: unknown) =>
       s.topicReconcile(
         OWNER,
@@ -359,27 +400,31 @@ describe('durable topic effect journal', () => {
         '[]',
         JSON.stringify({ network: 'pandora-8', tx }),
       );
-    // The chain has a transaction under that hash whose bytes hash
-    // differently: another transaction, not one still to be indexed.
-    const other = {
-      result: {
-        hash: wrong,
-        height: '12',
-        tx: btoa('not this card'),
-        tx_result: { code: 0 },
-      },
-    };
-    let current = parse(await reconcile(wrong, other));
+    // The chain holds that transaction, signed under ANOTHER card's memo:
+    // provably not this card's, not one still to be indexed.
+    const other = await encodedTransaction('Qi topic access ap_other');
+    let current = parse(await reconcile(other.hash, other.tx));
     expect(current.lifecycle.status).toBe('unknown');
     expect(JSON.parse(await s.topicReferences(OWNER, p.id))).toEqual([]);
     // The executor gets its permit back to sign the right transaction; the
     // rejected hash is refused for good.
     expect(await begin()).toBe('permitted');
-    expect(JSON.parse((await reconcile(wrong, other))!).error).toBe(
+    expect(JSON.parse((await reconcile(other.hash, other.tx))!).error).toBe(
       'Step reference was rejected',
     );
-    // The right hash, not indexed yet: recorded and back on the schedule.
-    current = parse(await reconcile(right, null));
+    // A node answering with bytes that hash differently is a faulty node,
+    // not a proof about the card: the reference stays and is retried.
+    const right = 'B'.repeat(64);
+    current = parse(
+      await reconcile(right, {
+        result: {
+          hash: right,
+          height: '12',
+          tx: btoa('garbage'),
+          tx_result: { code: 0 },
+        },
+      }),
+    );
     expect(current.lifecycle.steps[0]).toMatchObject({
       step: 'grant',
       status: 'started',
@@ -409,29 +454,7 @@ describe('durable topic effect journal', () => {
       throw new Error('Missing chain permit');
     // The owner signed a transaction with the card's memo and a message
     // the card never proposed, and reports its real hash.
-    // Plain writers, as in verify.test.ts: workerd's Buffer polyfill breaks
-    // protobufjs's BufferWriter on strings of 40 characters or more.
-    const body = TxBody.encode(
-      TxBody.fromPartial({
-        memo: permitted.permit.effect.memo,
-        messages: [{ typeUrl: '/other.Msg', value: new Uint8Array([1]) }],
-      }),
-      new protobuf.Writer(),
-    ).finish();
-    const bytes = TxRaw.encode(
-      TxRaw.fromPartial({
-        bodyBytes: body,
-        authInfoBytes: new Uint8Array(),
-        signatures: [new Uint8Array([1])],
-      }),
-      new protobuf.Writer(),
-    ).finish();
-    const hash = Array.from(
-      new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
-      (b) => b.toString(16).padStart(2, '0'),
-    )
-      .join('')
-      .toUpperCase();
+    const { hash, tx } = await encodedTransaction(permitted.permit.effect.memo);
     const blocked = parse(
       await s.topicReconcile(
         OWNER,
@@ -442,17 +465,7 @@ describe('durable topic effect journal', () => {
         }),
         '{}',
         '[]',
-        JSON.stringify({
-          network: 'pandora-8',
-          tx: {
-            result: {
-              hash,
-              height: '12',
-              tx: btoa(String.fromCharCode(...bytes)),
-              tx_result: { code: 0 },
-            },
-          },
-        }),
+        JSON.stringify({ network: 'pandora-8', tx }),
       ),
     );
     // Not set aside: the hash stays listed, the card is blocked, unknown.

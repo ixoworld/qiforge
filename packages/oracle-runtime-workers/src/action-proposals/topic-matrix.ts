@@ -59,10 +59,15 @@ export async function resolveTopicIdentity(
     signal: AbortSignal.timeout(5000),
   });
   if (!response.ok) throw new TopicReadUnavailable('DID lookup unavailable');
-  const raw = DidResponse.parse(
+  const envelope = DidResponse.safeParse(
     JSON.parse(new TextDecoder().decode(await boundedBytes(response, 65536))),
   );
-  if (raw.errors?.length || raw.data.iids.nodes.length !== 1)
+  // A GraphQL error envelope (`data: null`, `errors`) is the resolver
+  // failing, not a fact about the DID.
+  if (!envelope.success || envelope.data.errors?.length)
+    throw new TopicReadUnavailable('DID lookup unavailable');
+  const raw = envelope.data;
+  if (raw.data.iids.nodes.length !== 1)
     throw new ActionProposalConflict('Identity is not indexed');
   const record = raw.data.iids.nodes[0]!;
   if (record.id !== did)
@@ -94,6 +99,21 @@ export async function resolveTopicIdentity(
       service: services[0],
     }),
   };
+}
+/**
+ * One event, parsed. An event the gateway cannot hand over (not decrypted
+ * yet, not found) comes back empty: a read that failed, not a fact about the
+ * card.
+ */
+export async function readTopicEvent(
+  reader: TopicMatrixReader,
+  room: string,
+  eventId: string,
+) {
+  const raw = await reader.event(room, eventId);
+  if (raw === null || raw === undefined)
+    throw new TopicReadUnavailable('Topic event is not readable');
+  return TopicMatrixEventSchema.parse(raw);
 }
 export async function readTopicRoom(
   reader: TopicMatrixReader,

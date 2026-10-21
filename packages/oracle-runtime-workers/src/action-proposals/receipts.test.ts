@@ -439,6 +439,84 @@ describe('durable canonical action receipts', () => {
       expect(outcomes.actionOutcomes).toHaveLength(1);
       expect(await call(h.host, 'tickActionProposals')).toBeUndefined();
       expect(h.send).toHaveBeenCalledTimes(1);
+      // An id the transfer store does not know may be a topic card: the
+      // Portal is told to retry, not that the card is gone.
+      const unavailable = {
+        ok: false,
+        kind: 'unavailable',
+        error: 'Topic authority is unavailable',
+      };
+      const missing = 'ap_00000000-0000-4000-8000-000000000404';
+      expect(
+        JSON.parse(
+          (await call<string | null>(
+            h.host,
+            'actionProposal',
+            { userDid: OWNER },
+            missing,
+          ))!,
+        ),
+      ).toEqual(unavailable);
+      expect(
+        JSON.parse(
+          (await call<string | null>(
+            h.host,
+            'actionProposal',
+            { userDid: OWNER },
+            proposal.id,
+            { kind: 'topic-reconcile', input: { v: 2, references: [] } },
+          ))!,
+        ),
+      ).toEqual(unavailable);
+    });
+  });
+
+  it('serves topic cards, turn outcomes and the alarm when the transfer store failed to open', async () => {
+    await withReceipts('transfer-store-missing', async (h) => {
+      const topics = h.topics();
+      const p = await topics.create(await topicSubject());
+      Object.assign(h.host, {
+        actionProposals: null,
+        ready: async () => undefined,
+      });
+      expect(
+        JSON.parse(
+          (await call<string | null>(
+            h.host,
+            'actionProposal',
+            { userDid: OWNER },
+            p.id,
+          ))!,
+        ),
+      ).toEqual({ ok: true, proposal: expect.objectContaining({ id: p.id }) });
+      const outcomes = await call<ChannelTurnResponse>(
+        h.host,
+        'withActionOutcomes',
+        OWNER,
+        {
+          requestId: 'request-1',
+          runId: p.origin.runId,
+          sessionId: p.origin.sessionId,
+          status: 'finished',
+        },
+      );
+      expect(outcomes.actionOutcomes).toHaveLength(1);
+      expect(await call(h.host, 'tickActionProposals')).toBeUndefined();
+      // A transfer card's id is unavailable, not gone, while its store is down.
+      expect(
+        JSON.parse(
+          (await call<string | null>(
+            h.host,
+            'actionProposal',
+            { userDid: OWNER },
+            'ap_00000000-0000-4000-8000-000000000001',
+          ))!,
+        ),
+      ).toEqual({
+        ok: false,
+        kind: 'unavailable',
+        error: 'Action cards are unavailable',
+      });
     });
   });
 

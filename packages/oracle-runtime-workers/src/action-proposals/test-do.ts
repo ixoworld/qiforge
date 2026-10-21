@@ -101,6 +101,13 @@ export class ActionProposalTestDO extends DurableObject {
       `INSERT INTO topic_action_proposals(id,owner_did,invocation_id,subject,digest,lifecycle) VALUES ('ap_00000000-0000-4000-8000-00000000dead','did:ixo:legacy','run:call','{}','d','{"status":"prepared"}')`,
     );
   }
+  /** The steps table as the branch first shipped it, without `reference_rejected`, before any store opens. */
+  async topicLegacySteps() {
+    const db = await this.database();
+    await db.run(
+      `CREATE TABLE IF NOT EXISTS topic_action_steps(proposal_id TEXT NOT NULL,step TEXT NOT NULL,status TEXT NOT NULL,expected TEXT,expected_digest TEXT,executor TEXT,started_at TEXT,reference TEXT,receipt TEXT, PRIMARY KEY(proposal_id,step))`,
+    );
+  }
   async topicCreate(raw: string) {
     return JSON.stringify(
       await (

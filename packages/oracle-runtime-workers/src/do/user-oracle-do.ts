@@ -390,6 +390,23 @@ const GATEWAY_TOPIC_FACTS = new Set([
 ]);
 
 /**
+ * The transfer card store failed to open for this owner: every transfer
+ * route is told to retry later, with the reason in the log.
+ */
+function storeUnavailable(id: string): {
+  ok: false;
+  kind: 'unavailable';
+  error: string;
+} {
+  console.warn(`[action-proposals] ${id} refused: card store unavailable`);
+  return {
+    ok: false,
+    kind: 'unavailable',
+    error: 'Action cards are unavailable',
+  };
+}
+
+/**
  * A topic command's refusal, for the shell: a `conflict` is the card or an
  * authority it was sealed on having changed (the Portal re-reads and
  * retries), `unavailable` is a room, DID or chain read that failed and may
@@ -2986,33 +3003,40 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       ownerDid: string,
       result: ChannelTurnResponse,
     ): Promise<ChannelTurnResponse> {
-      if (result.status !== 'finished' || !this.actionProposals) return result;
-      const proposals = await this.actionProposals.forRun(
-        ownerDid,
-        result.sessionId,
-        result.runId,
-      );
+      if (result.status !== 'finished') return result;
       const actionOutcomes = [];
       let attempted = false;
-      for (const proposal of proposals) {
-        const refreshed: Awaited<ReturnType<typeof refreshActionProposal>> =
-          attempted
-            ? { proposal, attempted: false }
-            : await refreshActionProposal(
-                this.actionProposals,
-                proposal,
-                this.actionProposalRpc(proposal),
-              );
-        attempted ||= refreshed.attempted;
-        actionOutcomes.push(actionOutcome(refreshed.proposal));
-      }
-      const topics = this.topicProposals;
-      if (topics)
-        for (const proposal of await topics.forRun(
+      // Each store on its own: the other one failing to open must not hide
+      // this one's cards from the poll.
+      const store = this.actionProposals;
+      if (store)
+        for (const proposal of await store.forRun(
           ownerDid,
           result.sessionId,
           result.runId,
         )) {
+          const refreshed: Awaited<ReturnType<typeof refreshActionProposal>> =
+            attempted
+              ? { proposal, attempted: false }
+              : await refreshActionProposal(
+                  store,
+                  proposal,
+                  this.actionProposalRpc(proposal),
+                );
+          attempted ||= refreshed.attempted;
+          actionOutcomes.push(actionOutcome(refreshed.proposal));
+        }
+      const topics = this.topicProposals;
+      if (topics) {
+        let cards: TopicActionProposal[] = [];
+        try {
+          cards = await topics.forRun(ownerDid, result.sessionId, result.runId);
+        } catch (error) {
+          console.error(
+            `[topic-actions] cards of run ${result.runId} unreadable: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        for (const proposal of cards) {
           let refreshed = proposal;
           // A card whose reference row this build cannot read is reported as
           // it stands and taken off the verification schedule; the turn
@@ -3038,6 +3062,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           }
           actionOutcomes.push(topicActionOutcome(refreshed));
         }
+      }
       if (attempted) {
         this.markDirty();
         await this.requestHousekeeping(Date.now() + 1000);
@@ -3418,17 +3443,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * Returns the earliest moment any of it is due again.
      */
     private async tickActionProposals(): Promise<number | undefined> {
-      if (!this.userDid || !this.actionProposals) return undefined;
+      if (!this.userDid) return undefined;
+      // Each store on its own: the other one failing to open must not stop
+      // this one's verifications, receipts or retention.
       const store = this.actionProposals;
-      for (const proposal of await store.dueVerifications(this.userDid)) {
-        const refreshed = await refreshActionProposal(
-          store,
-          proposal,
-          this.actionProposalRpc(proposal),
-        );
-        if (refreshed.attempted) this.markDirty();
+      if (store) {
+        for (const proposal of await store.dueVerifications(this.userDid)) {
+          const refreshed = await refreshActionProposal(
+            store,
+            proposal,
+            this.actionProposalRpc(proposal),
+          );
+          if (refreshed.attempted) this.markDirty();
+        }
+        if ((await store.prune(this.userDid)) > 0) this.markDirty();
       }
-      if ((await store.prune(this.userDid)) > 0) this.markDirty();
       // Topic cards with started steps the room or chain has not confirmed
       // yet: reconcile their recorded references on the same cooldown.
       const topics = this.topicProposals;
@@ -3471,21 +3500,23 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const receiptAt = await this.mirrorActionReceipts();
       const deadlines = [
         receiptAt,
-        await store.nextVerificationAt(this.userDid),
+        store ? await store.nextVerificationAt(this.userDid) : undefined,
         topics ? await topics.nextVerificationAt(this.userDid) : undefined,
       ].filter((d): d is number => d !== undefined);
       return deadlines.length ? Math.min(...deadlines) : undefined;
     }
 
     private async mirrorActionReceipts(): Promise<number | undefined> {
-      if (!this.userDid || !this.actionProposals) return undefined;
-      const receipts = await this.actionProposals.takeReceipts(this.userDid);
+      if (!this.userDid) return undefined;
+      const store = this.actionProposals;
+      const receipts = store ? await store.takeReceipts(this.userDid) : [];
       if (receipts.length) this.markDirty();
       for (const { proposal, origin } of receipts) {
         try {
           if (
-            proposal.lifecycle.status !== 'succeeded' &&
-            proposal.lifecycle.status !== 'failed'
+            !store ||
+            (proposal.lifecycle.status !== 'succeeded' &&
+              proposal.lifecycle.status !== 'failed')
           )
             continue;
           const status =
@@ -3504,10 +3535,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             'oracle',
             true,
           );
-          await this.actionProposals.receiptMirrored(
-            proposal.ownerDid,
-            proposal.id,
-          );
+          await store.receiptMirrored(proposal.ownerDid, proposal.id);
           this.markDirty();
         } catch (error) {
           console.warn(
@@ -3548,7 +3576,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             );
           }
         }
-      const due = await this.actionProposals.nextReceiptAttempt(this.userDid);
+      const due = store
+        ? await store.nextReceiptAttempt(this.userDid)
+        : undefined;
       const topicDue = topics
         ? await topics.nextReceiptAttempt(this.userDid)
         : undefined;
@@ -3633,9 +3663,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           return JSON.stringify(topicRefusal(error, id));
         }
       }
-      const store = this.requireActionProposals();
+      // Without the topic store an id the transfer store does not know may
+      // be a topic card: the Portal is told to retry, not that the card is
+      // gone. Without the transfer store, the same for the other side.
+      const unknownCard = () =>
+        topics
+          ? null
+          : JSON.stringify(
+              topicRefusal(
+                new TopicReadUnavailable('topic store unavailable'),
+                id,
+              ),
+            );
+      if (command?.kind === 'topic-reconcile') return unknownCard();
+      const store = this.actionProposals;
+      if (!store) return JSON.stringify(storeUnavailable(id));
       try {
-        if (command?.kind === 'topic-reconcile') return null;
         let result = command
           ? await store.transition(identity.userDid, id, command)
           : await store.get(identity.userDid, id);
@@ -3652,7 +3695,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             await this.requestHousekeeping(Date.now() + 1000);
           }
         }
-        return result ? JSON.stringify({ ok: true, proposal: result }) : null;
+        return result
+          ? JSON.stringify({ ok: true, proposal: result })
+          : unknownCard();
       } catch (error) {
         if (error instanceof ActionProposalConflict)
           return JSON.stringify({
