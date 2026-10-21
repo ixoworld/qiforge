@@ -337,6 +337,15 @@ export class ActionInteractionStore {
       let record: Interaction;
       if (command.kind === 'prepare') {
         const input = command.input;
+        if (
+          input.owner.kind === 'owner-reference' &&
+          Object.keys(input.values).length !== 0
+        )
+          throw new ActionInteractionError(
+            400,
+            'reference_values_forbidden',
+            'Owner references contain locators only',
+          );
         const ownerKey = await ownerStorageKey(input.owner, input.sessionId);
         const existingId = await tx.get<string>(ownerKey);
         if (existingId) {
@@ -397,6 +406,12 @@ export class ActionInteractionStore {
         await tx.put(ownerKey, record.id);
       } else {
         record = await this.readFrom(tx, command.id, command.input.sessionId);
+        if (record.owner.kind === 'owner-reference')
+          throw new ActionInteractionError(
+            409,
+            'reference_read_only',
+            'Native owners retain draft, decision and execution authority',
+          );
         if (record.expiresAt <= this.now())
           throw new ActionInteractionError(
             410,

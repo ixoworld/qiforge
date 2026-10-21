@@ -5,9 +5,49 @@ import {
   PrepareInteractionSchema,
   UpdateInteractionSchema,
   createActionInteractionsClient,
+  CheckDispatchSchema,
+  OwnerReferenceLocatorSchema,
 } from './index.js';
 
 describe('portable interaction contract', () => {
+  it('accepts strict native locators without granting an executable owner', () => {
+    const locator = {
+      family: 'matrix-flow-input',
+      roomId: '!room',
+      eventId: '$event',
+      revision: 'digest',
+    };
+    const owner = {
+      kind: 'owner-reference',
+      accountDid: 'did:ixo:alice',
+      locator,
+    };
+    expect(OwnerReferenceLocatorSchema.safeParse(locator).success).toBe(true);
+    expect(
+      OwnerReferenceLocatorSchema.safeParse({ ...locator, trusted: true })
+        .success,
+    ).toBe(false);
+    expect(
+      OwnerReferenceLocatorSchema.safeParse({ ...locator, eventId: '' })
+        .success,
+    ).toBe(false);
+    expect(
+      OwnerReferenceLocatorSchema.safeParse({ ...locator, family: 'unknown' })
+        .success,
+    ).toBe(false);
+    expect(
+      PrepareInteractionSchema.safeParse({
+        version: 1,
+        requestId: crypto.randomUUID(),
+        sessionId: 'session',
+        owner,
+        values: {},
+      }).success,
+    ).toBe(true);
+    expect(CheckDispatchSchema.safeParse({ version: 1, owner }).success).toBe(
+      false,
+    );
+  });
   it('canonicalizes keys while preserving arrays and hashes reviewed values', async () => {
     expect(canonicalJson({ z: 1, a: { b: 2, a: 3 } })).toBe(
       '{"a":{"a":3,"b":2},"z":1}',

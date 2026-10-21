@@ -397,6 +397,7 @@ export function createShell(
                 'flow-claim',
                 'flow-claim-block',
                 'flow-bid',
+                'owner-reference',
                 'approval',
                 'task',
                 'question',

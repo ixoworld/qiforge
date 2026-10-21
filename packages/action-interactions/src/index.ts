@@ -29,6 +29,58 @@ const approvalOwner = z.strictObject({
   requestKey: text,
   accountDid: text,
 });
+/** Locators only. The native owner revalidates access, revision and every human action. */
+export const OwnerReferenceLocatorSchema = z.discriminatedUnion('family', [
+  z.strictObject({
+    family: z.enum([
+      'matrix-flow-input',
+      'matrix-evaluation-review',
+      'matrix-commerce',
+    ]),
+    roomId: text,
+    eventId: text,
+    revision: text,
+    threadRootEventId: text.optional(),
+  }),
+  z.strictObject({
+    family: z.enum(['topic-proposal', 'topic-outcome', 'topic-review']),
+    roomId: text,
+    topicId: text,
+    threadRootEventId: text,
+    eventId: text,
+    revision: text,
+  }),
+  z.strictObject({
+    family: z.literal('flow-detail'),
+    roomId: text,
+    flowId: text,
+    runId: text,
+    stepId: text,
+    actionType: text,
+    revision: text,
+    selection: z
+      .strictObject({
+        kind: z.literal('claim'),
+        claimId: text,
+        collectionId: text,
+        resultDigest: text.optional(),
+      })
+      .optional(),
+  }),
+  z.strictObject({
+    family: z.literal('workbench-proposal'),
+    entityDid: text,
+    formId: text,
+    baseContentHash: text,
+    proposalDigest: text,
+  }),
+]);
+export type OwnerReferenceLocator = z.infer<typeof OwnerReferenceLocatorSchema>;
+const ownerReference = z.strictObject({
+  kind: z.literal('owner-reference'),
+  accountDid: text,
+  locator: OwnerReferenceLocatorSchema,
+});
 export const DispatchOwnerSchema = z.discriminatedUnion('kind', [
   claimOwner,
   claimBlockOwner,
@@ -40,6 +92,7 @@ export const InteractionOwnerSchema = z.discriminatedUnion('kind', [
   claimBlockOwner,
   bidOwner,
   approvalOwner,
+  ownerReference,
   z.strictObject({ kind: z.literal('task'), taskId: text }),
   z.strictObject({ kind: z.literal('question'), requestId: text }),
   z.strictObject({ kind: z.literal('artifact'), artifactId: text }),
