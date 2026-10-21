@@ -73,6 +73,107 @@ function unwrap<T>(value: { ok: boolean; result?: T; code?: string }): T {
 }
 
 describe('private interaction drafts on Workers', () => {
+  it('persists immutable account/session locators and refuses every native mutation', async () => {
+    const stub = env.ACTION_INTERACTIONS_TEST.getByName('native-reference');
+    const owner = {
+      kind: 'owner-reference',
+      accountDid: alice,
+      locator: {
+        family: 'topic-proposal',
+        roomId: '!room',
+        topicId: 'topic',
+        threadRootEventId: '$root',
+        eventId: '$event',
+        revision: 'digest',
+      },
+    } satisfies PrepareInteraction['owner'];
+    const input = { ...prepare(), owner, values: {} };
+    const record = unwrap(
+      await command(stub, alice, { kind: 'prepare', input }),
+    ).interaction;
+    expect(
+      unwrap(await read(stub, alice, record.id, input.sessionId)).owner,
+    ).toEqual(owner);
+    expect(await read(stub, alice, record.id, 'other-session')).toMatchObject({
+      ok: false,
+      code: 'not_found',
+    });
+    expect(
+      await command(stub, alice, {
+        kind: 'prepare',
+        input: {
+          ...input,
+          requestId: crypto.randomUUID(),
+          values: { decision: true },
+        },
+      }),
+    ).toMatchObject({ ok: false, code: 'reference_values_forbidden' });
+    expect(
+      await command(stub, alice, {
+        kind: 'prepare',
+        input: {
+          ...input,
+          requestId: crypto.randomUUID(),
+          owner: { ...owner, accountDid: 'did:ixo:bob' },
+        },
+      }),
+    ).toMatchObject({ ok: false, code: 'account_mismatch' });
+    const common = {
+      version: 1 as const,
+      sessionId: input.sessionId,
+      requestId: crypto.randomUUID(),
+      expectedRevision: record.revision,
+    };
+    expect(
+      await command(stub, alice, {
+        kind: 'update',
+        id: record.id,
+        input: { ...common, kind: 'update', source: 'user', patch: {} },
+      }),
+    ).toMatchObject({ ok: false, code: 'reference_read_only' });
+    expect(
+      await command(stub, alice, {
+        kind: 'update',
+        id: record.id,
+        input: { ...common, kind: 'cancel' },
+      }),
+    ).toMatchObject({ ok: false, code: 'reference_read_only' });
+    expect(
+      await command(stub, alice, {
+        kind: 'reserve',
+        id: record.id,
+        input: { ...common, valuesDigest: await interactionValuesDigest({}) },
+      }),
+    ).toMatchObject({ ok: false, code: 'reference_read_only' });
+    expect(
+      await command(stub, alice, {
+        kind: 'observe',
+        id: record.id,
+        input: {
+          ...common,
+          operationKey: crypto.randomUUID(),
+          outcome: 'unknown',
+        },
+      }),
+    ).toMatchObject({ ok: false, code: 'reference_read_only' });
+    const changed = unwrap(
+      await command(stub, alice, {
+        kind: 'prepare',
+        input: {
+          ...input,
+          requestId: crypto.randomUUID(),
+          owner: {
+            ...owner,
+            locator: { ...owner.locator, revision: 'new-digest' },
+          },
+        },
+      }),
+    ).interaction;
+    expect(changed.id).not.toEqual(record.id);
+    expect(unwrap(await read(stub, alice, record.id, input.sessionId))).toEqual(
+      record,
+    );
+  });
   it('isolates users and sessions; rejects body account substitution and unknown protocol fields', async () => {
     const a = env.ACTION_INTERACTIONS_TEST.getByName('alice');
     const b = env.ACTION_INTERACTIONS_TEST.getByName('bob');
