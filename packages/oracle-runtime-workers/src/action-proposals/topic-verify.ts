@@ -244,16 +244,20 @@ async function reconcileWithinBudget(
         receipt,
       );
     } catch (error) {
-      // A chain reference the verifier PROVED is another transaction (the
-      // bytes hash differently, another card's memo, other messages) is set
-      // aside so the owner can record the right one; a read that failed or
-      // a transaction not indexed yet is simply retried on the cooldown.
-      if (
-        reference.kind === 'chain' &&
-        error instanceof Error &&
-        TRANSACTION_REJECTIONS.has(error.message)
-      )
-        await store.rejectReference(p.ownerDid, p.id, reference);
+      if (reference.kind === 'chain' && error instanceof Error) {
+        if (error.message === 'Transaction subject mismatch')
+          // The transaction carries THIS card's memo and other messages: an
+          // effect the owner bound to the card went wrong. It stays listed
+          // and the card is blocked, never re-permitted over it.
+          await store.blockExecution(p.ownerDid, p.id, error.message);
+        else if (TRANSACTION_REJECTIONS.has(error.message))
+          // Provably another transaction (the bytes hash differently, or it
+          // carries another card's memo or none): set aside so the owner can
+          // record the right one.
+          await store.rejectReference(p.ownerDid, p.id, reference);
+      }
+      // A read that failed or a transaction not indexed yet is retried on
+      // the cooldown.
       current = (await store.get(p.ownerDid, p.id)) ?? current;
     }
   }

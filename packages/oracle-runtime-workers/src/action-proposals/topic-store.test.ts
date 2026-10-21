@@ -5,6 +5,11 @@ import {
   BeginTopicStepResultSchema,
   type TopicStepId,
 } from '@ixo/ixo-transaction/topic-proposals';
+import protobuf from 'protobufjs/minimal.js';
+import {
+  TxBody,
+  TxRaw,
+} from '@ixo/impactxclient-sdk/module/codegen/cosmos/tx/v1beta1/tx.js';
 import { NOW, OWNER } from './fixtures/proposal';
 import { actor, executor, grantSubject, subject } from './fixtures/topic';
 const stub = (name: string) =>
@@ -383,6 +388,80 @@ describe('durable topic effect journal', () => {
       { kind: 'chain', step: 'grant', transactionHash: right },
     ]);
     expect(await begin()).toBe('already_started');
+  });
+  it('blocks a card whose memo-bound transaction carries other messages instead of re-permitting it', async () => {
+    const s = stub('memo-bound-mismatch');
+    const p = parse(await s.topicCreate(JSON.stringify(grantSubject())));
+    await s.topicTransition(OWNER, p.id, 'claim', p.digest);
+    const begin = () =>
+      s.topicBegin(
+        OWNER,
+        p.id,
+        JSON.stringify({ digest: p.digest, step: 'grant', executor }),
+      );
+    const permitted = BeginTopicStepResultSchema.parse(
+      JSON.parse((await begin())!),
+    );
+    if (
+      permitted.status !== 'permitted' ||
+      permitted.permit.effect.kind !== 'chain'
+    )
+      throw new Error('Missing chain permit');
+    // The owner signed a transaction with the card's memo and a message
+    // the card never proposed, and reports its real hash.
+    // Plain writers, as in verify.test.ts: workerd's Buffer polyfill breaks
+    // protobufjs's BufferWriter on strings of 40 characters or more.
+    const body = TxBody.encode(
+      TxBody.fromPartial({
+        memo: permitted.permit.effect.memo,
+        messages: [{ typeUrl: '/other.Msg', value: new Uint8Array([1]) }],
+      }),
+      new protobuf.Writer(),
+    ).finish();
+    const bytes = TxRaw.encode(
+      TxRaw.fromPartial({
+        bodyBytes: body,
+        authInfoBytes: new Uint8Array(),
+        signatures: [new Uint8Array([1])],
+      }),
+      new protobuf.Writer(),
+    ).finish();
+    const hash = Array.from(
+      new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
+      (b) => b.toString(16).padStart(2, '0'),
+    )
+      .join('')
+      .toUpperCase();
+    const blocked = parse(
+      await s.topicReconcile(
+        OWNER,
+        p.id,
+        JSON.stringify({
+          v: 2,
+          references: [{ kind: 'chain', step: 'grant', transactionHash: hash }],
+        }),
+        '{}',
+        '[]',
+        JSON.stringify({
+          network: 'pandora-8',
+          tx: {
+            result: {
+              hash,
+              height: '12',
+              tx: btoa(String.fromCharCode(...bytes)),
+              tx_result: { code: 0 },
+            },
+          },
+        }),
+      ),
+    );
+    // Not set aside: the hash stays listed, the card is blocked, unknown.
+    expect(blocked.lifecycle.status).toBe('unknown');
+    expect(blocked.lifecycle.executionBlockedAt).toBeDefined();
+    expect(JSON.parse(await s.topicReferences(OWNER, p.id))).toEqual([
+      { kind: 'chain', step: 'grant', transactionHash: hash },
+    ]);
+    expect(JSON.parse((await begin())!).error).toBe('Execution is blocked');
   });
   it('holds the grant lock by the other step, not the other card', async () => {
     const s = stub('grant-lock');
