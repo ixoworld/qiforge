@@ -211,6 +211,12 @@ describe('validated conversational actions', () => {
     [`Send 1'500 IXO to ${RECIPIENT} on testnet`, '500'],
     [`Send 1/5 IXO to ${RECIPIENT} on testnet`, '5'],
     [`Send 1:5 IXO to ${RECIPIENT} on testnet`, '5'],
+    [`Send 1  500 IXO to ${RECIPIENT} on testnet`, '500'],
+    [`Send 1 ,500 IXO to ${RECIPIENT} on testnet`, '500'],
+    [
+      `Send 1${String.fromCharCode(0xa0)}500 IXO to ${RECIPIENT} on testnet`,
+      '500',
+    ],
   ])(
     'never reads the tail of a grouped or divided number as the amount (%s)',
     async (message, amount) => {

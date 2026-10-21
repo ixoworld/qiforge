@@ -7,10 +7,11 @@ export const executor = { matrixUserId: actor, homeserver: 'https://mx.test' };
 /** A sealed claim-access grant card: the owner grants `RECIPIENT` submit access on one collection. */
 export function grantSubject(
   overrides: Partial<TopicProposalSubject['origin']> = {},
+  at = NOW,
 ): TopicProposalSubject {
   const id = `ap_${crypto.randomUUID()}`;
   const granteeDid = `did:ixo:${RECIPIENT}`;
-  const expiresAt = new Date(NOW + 365 * 86400000).toISOString();
+  const expiresAt = new Date(at + 365 * 86400000).toISOString();
   const message = buildTopicGrant({
     role: 'submit',
     ownerAddress: SIGNER,
@@ -70,8 +71,8 @@ export function grantSubject(
       dependencies: [{ kind: 'matrix', key: 'power', digest: 'b'.repeat(64) }],
     },
     evidenceRefs: ['source'],
-    createdAt: new Date(NOW).toISOString(),
-    expiresAt: new Date(NOW + 900000).toISOString(),
+    createdAt: new Date(at).toISOString(),
+    expiresAt: new Date(at + 900000).toISOString(),
   };
 }
 export async function subject(): Promise<TopicProposalSubject> {

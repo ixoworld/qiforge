@@ -67,9 +67,6 @@
     "react": ">=18.0.0"
   },
   "peerDependenciesMeta": {
-    "@ixo/impactxclient-sdk": {
-      "optional": true
-    },
     "@ixo/oracles-client-sdk": {
       "optional": true
     },

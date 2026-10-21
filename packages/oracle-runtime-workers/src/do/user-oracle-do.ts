@@ -25,6 +25,7 @@ import {
 import type { ChannelTurnResponse } from '../channels/contract';
 import { refreshActionProposal } from '../action-proposals/reconcile';
 import { assertActionProposalPolicy } from '../action-proposals/policy';
+import { TopicReadUnavailable } from '../action-proposals/topic-errors';
 import { actionOutcome } from '@ixo/ixo-transaction/action-proposals';
 import {
   ActionProposalConflict,
@@ -389,9 +390,9 @@ function topicRefusal(
 ): { ok: false; kind: 'conflict' | 'unavailable'; error: string } {
   if (error instanceof ActionProposalConflict)
     return { ok: false, kind: 'conflict', error: error.message };
-  if (error instanceof Error) {
+  if (error instanceof TopicReadUnavailable) {
     console.warn(
-      `[topic-actions] ${id} authority unavailable: ${error.name}: ${error.message}`,
+      `[topic-actions] ${id} authority unavailable: ${error.message}`,
     );
     return {
       ok: false,
@@ -3159,16 +3160,30 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private topicVerificationContext(
       proposal: TopicActionProposal,
     ): TopicVerificationContext {
+      // The gateway's refusals (oversized state, timed-out history, a room
+      // it cannot read) arrive as plain errors over the stub; they are reads
+      // that failed, not facts about the card.
+      const read = async <T>(run: () => Promise<T>): Promise<T> => {
+        try {
+          return await run();
+        } catch (error) {
+          throw new TopicReadUnavailable(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      };
       return {
         reader: {
           state: async (room) =>
-            JSON.parse(await this.gateway.getTopicRoomState(room)),
+            JSON.parse(await read(() => this.gateway.getTopicRoomState(room))),
           event: async (room, id) => {
-            const raw = await this.gateway.getTopicEvent(room, id);
+            const raw = await read(() => this.gateway.getTopicEvent(room, id));
             return raw ? JSON.parse(raw) : null;
           },
           history: async (room, root) =>
-            JSON.parse(await this.gateway.getTopicHistory(room, root)),
+            JSON.parse(
+              await read(() => this.gateway.getTopicHistory(room, root)),
+            ),
         },
         blocksync: this.env.BLOCKSYNC_GRAPHQL_URL,
         rpc: this.actionProposalRpc(proposal),
@@ -3259,23 +3274,29 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       input: BeginTopicStep,
     ): Promise<string | null> {
       await this.ready(identity);
-      // Switching the feature off stops new permits; reads, reconciliation
-      // and receipts of cards already in flight keep working.
-      if (!this.topicExecutionEnabled())
+      const store = this.topicProposals;
+      if (!store)
         return JSON.stringify(
-          topicRefusal(
-            new ActionProposalConflict('Topic action execution is disabled'),
-            id,
-          ),
+          topicRefusal(new TopicReadUnavailable('topic store unavailable'), id),
         );
       try {
-        const store = this.topicProposals!;
         const proposal = await store.get(identity.userDid, id);
         if (!proposal) return null;
+        // Switching the feature off stops new permits; reads, reconciliation
+        // and receipts of cards already in flight keep working.
+        if (!this.topicExecutionEnabled())
+          throw new ActionProposalConflict('Topic action execution is disabled');
         // The local refusals first (not claimed, expired, out of order,
         // another executor); the ten second authority read only for a step
         // that could actually start.
         await store.assertBeginnable(identity.userDid, id, input);
+        // A step whose reference is recorded is spoken for: no new permit,
+        // and no authority read to find that out.
+        if (await store.hasReference(identity.userDid, id, input.step))
+          return JSON.stringify({
+            ok: true,
+            result: { status: 'already_started', proposal },
+          });
         await assertTopicDependencies(
           proposal,
           this.topicVerificationContext(proposal),
@@ -3387,23 +3408,31 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // yet: reconcile their recorded references on the same cooldown.
       const topics = this.topicProposals;
       if (topics) {
-        for (const proposal of await topics.dueVerifications(this.userDid)) {
-          const refs = await topics.references(this.userDid, proposal.id);
-          if (
-            !refs.length ||
-            !(await topics.claimVerification(this.userDid, proposal.id))
-          )
-            continue;
-          await reconcileTopicReferences(
-            topics,
-            proposal,
-            { v: 2, references: refs },
-            this.topicVerificationContext(proposal),
-            true,
+        // Guarded on its own: a topic card's trouble must not hold up the
+        // transfer receipts below.
+        try {
+          for (const proposal of await topics.dueVerifications(this.userDid)) {
+            const refs = await topics.references(this.userDid, proposal.id);
+            if (
+              !refs.length ||
+              !(await topics.claimVerification(this.userDid, proposal.id))
+            )
+              continue;
+            await reconcileTopicReferences(
+              topics,
+              proposal,
+              { v: 2, references: refs },
+              this.topicVerificationContext(proposal),
+              true,
+            );
+            this.markDirty();
+          }
+          if ((await topics.prune(this.userDid)) > 0) this.markDirty();
+        } catch (err) {
+          console.error(
+            `[topic-actions] tick failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
           );
-          this.markDirty();
         }
-        if ((await topics.prune(this.userDid)) > 0) this.markDirty();
       }
       const receiptAt = await this.mirrorActionReceipts();
       const deadlines = [
@@ -3546,12 +3575,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                 this.topicVerificationContext(topic),
               );
             }
-            result = (await this.topicProposals!.transition(
+            const next = await this.topicProposals!.transition(
               identity.userDid,
               id,
               command.kind,
               command.digest,
-            ))!;
+            );
+            if (!next) return null;
+            result = next;
           } else {
             const refs = await this.topicProposals!.references(
               identity.userDid,

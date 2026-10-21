@@ -21,6 +21,8 @@ import {
 import { IxoAddressSchema } from '@ixo/ixo-transaction/action-proposals';
 import { boundedBytes } from '../core/domain-context/transport';
 import { digestTopicProposalEffect } from './topic-store';
+import { ActionProposalConflict } from './store';
+import { TopicReadUnavailable } from './topic-errors';
 const encode64 = (v: Uint8Array) =>
   btoa(Array.from(v, (c) => String.fromCharCode(c)).join(''));
 const decode64 = (v: string) =>
@@ -42,12 +44,12 @@ export class TopicChainReader {
       base.search ||
       base.hash
     )
-      throw new Error('Invalid trusted RPC');
+      throw new TopicReadUnavailable('Invalid trusted RPC');
     const res = await this.fetcher(
       new URL(path, `${base.href.replace(/\/$/, '')}/`),
       { redirect: 'error', signal: AbortSignal.timeout(10000) },
     );
-    if (!res.ok) throw new Error('Chain authority unavailable');
+    if (!res.ok) throw new TopicReadUnavailable('Chain authority unavailable');
     return JSON.parse(
       new TextDecoder().decode(await boundedBytes(res, 524288)),
     ) as unknown;
@@ -59,7 +61,7 @@ export class TopicChainReader {
       })
       .parse(await this.request('status'));
     if (s.result.node_info.network !== this.chainId)
-      throw new Error('Chain authority mismatch');
+      throw new TopicReadUnavailable('Chain authority mismatch');
   }
   private async query(path: string, data: Uint8Array) {
     const r = z
@@ -77,7 +79,8 @@ export class TopicChainReader {
           `abci_query?path=${encodeURIComponent(JSON.stringify(path))}&data=0x${hex(data)}&prove=false`,
         ),
       ).result.response;
-    if (r.code) throw new Error('Authoritative chain query failed');
+    if (r.code)
+      throw new TopicReadUnavailable('Authoritative chain query failed');
     return decode64(r.value);
   }
   async collection(
@@ -121,7 +124,9 @@ export class TopicChainReader {
       collection.admin !== admin.address ||
       !params?.nftContractAddress
     )
-      throw new Error('Entity collection and admin binding mismatch');
+      throw new ActionProposalConflict(
+        'Entity collection and admin binding mismatch',
+      );
     IxoAddressSchema.parse(admin.address);
     const smart = QuerySmartContractStateRequest.fromPartial({
       address: params.nftContractAddress,
@@ -144,7 +149,9 @@ export class TopicChainReader {
       .object({ owner: IxoAddressSchema })
       .parse(JSON.parse(new TextDecoder().decode(owner.data)));
     if (nft.owner !== signerAddress)
-      throw new Error('Signing account is not the entity NFT owner');
+      throw new ActionProposalConflict(
+        'Signing account is not the entity NFT owner',
+      );
     return {
       adminAddress: admin.address,
       dependencies: [
@@ -201,17 +208,19 @@ export class TopicChainReader {
       ),
     );
     if (response.pagination?.nextKey.length || response.grants.length > 1)
-      throw new Error('Authorization query exceeds exact single-grant bound');
+      throw new ActionProposalConflict(
+        'Authorization query exceeds exact single-grant bound',
+      );
     const grant = response.grants[0];
     if (grant?.authorization && grant.authorization.typeUrl !== typeUrl)
-      throw new Error('Authorization role mismatch');
+      throw new ActionProposalConflict('Authorization role mismatch');
     // The grant's expiry on chain covers every constraint in it; the grant
     // builder refuses to merge into it under another expiry.
     const expiresAt = (() => {
       if (!grant?.expiration) return null;
       const seconds = Number(grant.expiration.seconds.toString());
       if (!Number.isSafeInteger(seconds))
-        throw new Error('Invalid grant expiration');
+        throw new TopicReadUnavailable('Invalid grant expiration');
       return new Date(
         seconds * 1000 + grant.expiration.nanos / 1e6,
       ).toISOString();

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { boundedBytes } from '../core/domain-context/transport';
 import { digestTopicProposalEffect } from './topic-store';
 import { ActionProposalConflict } from './store';
+import { TopicReadUnavailable } from './topic-errors';
 import type { TopicActionProposal } from '@ixo/ixo-transaction/topic-proposals';
 
 export const TopicMatrixEventSchema = z.object({
@@ -41,10 +42,11 @@ export async function resolveTopicIdentity(
   blocksync: string | undefined,
   fetcher: typeof fetch = fetch,
 ) {
-  if (!blocksync) throw new Error('Trusted DID resolver is unavailable');
+  if (!blocksync)
+    throw new TopicReadUnavailable('Trusted DID resolver is unavailable');
   const endpoint = new URL(blocksync);
   if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password)
-    throw new Error('Invalid trusted DID endpoint');
+    throw new TopicReadUnavailable('Invalid trusted DID endpoint');
   const response = await fetcher(endpoint, {
     method: 'POST',
     redirect: 'error',
@@ -56,17 +58,20 @@ export async function resolveTopicIdentity(
     }),
     signal: AbortSignal.timeout(5000),
   });
-  if (!response.ok) throw new Error('DID lookup unavailable');
+  if (!response.ok) throw new TopicReadUnavailable('DID lookup unavailable');
   const raw = DidResponse.parse(
     JSON.parse(new TextDecoder().decode(await boundedBytes(response, 65536))),
   );
   if (raw.errors?.length || raw.data.iids.nodes.length !== 1)
-    throw new Error('Identity is not indexed');
+    throw new ActionProposalConflict('Identity is not indexed');
   const record = raw.data.iids.nodes[0]!;
-  if (record.id !== did) throw new Error('DID lookup mismatch');
+  if (record.id !== did)
+    throw new ActionProposalConflict('DID lookup mismatch');
   const services = record.service.filter((s) => s.type === 'MatrixHomeServer');
   if (services.length !== 1)
-    throw new Error('Exactly one Matrix homeserver is required');
+    throw new ActionProposalConflict(
+      'Exactly one Matrix homeserver is required',
+    );
   const url = new URL(services[0]!.serviceEndpoint);
   if (
     url.protocol !== 'https:' ||
@@ -77,7 +82,7 @@ export async function resolveTopicIdentity(
     url.pathname !== '/' ||
     url.port
   )
-    throw new Error('Invalid DID Matrix service');
+    throw new ActionProposalConflict('Invalid DID Matrix service');
   const homeserver = url.origin;
   const matrixUserId = `@${did.replaceAll(':', '-')}:${url.hostname}`;
   return {
@@ -103,7 +108,7 @@ export async function readTopicRoom(
     new Set(state.map((e) => `${e.type}\0${e.state_key ?? ''}`)).size !==
     state.length
   )
-    throw new Error('Room state has duplicate keys');
+    throw new TopicReadUnavailable('Room state has duplicate keys');
   const membership = state.find(
     (e) => e.type === 'm.room.member' && e.state_key === owner,
   );
@@ -117,7 +122,9 @@ export async function readTopicRoom(
     (e) => e.type === 'm.room.create' && e.state_key === '',
   );
   if (membership?.content.membership !== 'join' || !power || !creation)
-    throw new Error('Owner membership and room policy are unavailable');
+    throw new ActionProposalConflict(
+      'The owner is not a member of the room, or its policy is unreadable',
+    );
   const levels = z
     .object({
       users: z.record(z.string(), z.number()).default({}),
@@ -140,7 +147,9 @@ export async function readTopicRoom(
         ? levels.state_default
         : levels.events_default);
     if (level < required)
-      throw new Error('Owner cannot write the topic event types');
+      throw new ActionProposalConflict(
+        'Owner cannot write the topic event types',
+      );
   }
   const selected = [
     creation,
@@ -151,13 +160,35 @@ export async function readTopicRoom(
   // Only the facts that carry authority are fingerprinted: the owner's
   // membership value (not their avatar or display name) and each policy
   // event's content (not the event id a re-send would change).
+  const topicTypes = [
+    'm.room.message',
+    'ixo.topic.contract.body',
+    'ixo.topic.operation',
+    'ixo.topic.contract',
+  ];
   const authority = (e: TopicMatrixEvent) => ({
     type: e.type,
     state_key: e.state_key ?? '',
     content:
       e.type === 'm.room.member'
         ? { membership: e.content.membership }
-        : e.content,
+        : e.type === 'm.room.power_levels'
+          ? // Only the owner's level and the thresholds for the topic event
+            // types: another member's level changing is not this card's
+            // business.
+            {
+              owner: levels.users[owner] ?? levels.users_default,
+              events: Object.fromEntries(
+                topicTypes.map((type) => [
+                  type,
+                  levels.events[type] ??
+                    (type === 'ixo.topic.contract'
+                      ? levels.state_default
+                      : levels.events_default),
+                ]),
+              ),
+            }
+          : e.content,
   });
   const dependencies = await Promise.all(
     selected.map(async (e) => ({

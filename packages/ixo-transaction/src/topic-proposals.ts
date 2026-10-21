@@ -27,6 +27,13 @@ export const TopicExecutorSchema = z.strictObject({
     .regex(/^@[^:]+:.+$/)
     .max(512),
   homeserver: z.string().max(255),
+  /**
+   * The Matrix device that will send the step's event. A step permit is
+   * re-issued only to the executor that holds it, this field included: the
+   * homeserver deduplicates a transaction id per device, so another device
+   * resending the same effect would post it twice.
+   */
+  deviceId: z.string().min(1).max(255).optional(),
 });
 export type TopicExecutor = z.infer<typeof TopicExecutorSchema>;
 export const VerifiedTopicEffectSchema = z.discriminatedUnion('kind', [

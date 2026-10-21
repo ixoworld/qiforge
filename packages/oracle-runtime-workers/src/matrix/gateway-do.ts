@@ -1235,7 +1235,7 @@ export class MatrixGatewayDO
       if (Date.now() >= deadline)
         throw new Error('Topic history verification timed out');
       const response = await this.fetchCapped<{
-        chunk: { event_id?: string }[];
+        chunk: { event_id?: string; room_id?: string; state_key?: string }[];
         next_batch?: string;
       }>(
         `/_matrix/client/v1/rooms/${encodeURIComponent(roomId)}/relations/${encodeURIComponent(root)}/m.reference`,
@@ -1244,7 +1244,8 @@ export class MatrixGatewayDO
       );
       if (response.oversized || !response.json)
         throw new Error('Topic history exceeds verification bounds');
-      // Each event is fetched and decrypted on its own; eight at a time
+      // The relations page already carries each event's room and state key;
+      // only the decryption read is needed per event, eight at a time, which
       // keeps a 60-event topic inside the caller's budget without flooding
       // the homeserver from this one shared object.
       const { chunk } = response.json;
@@ -1255,9 +1256,17 @@ export class MatrixGatewayDO
           chunk.slice(i, i + 8).map(async (event) => {
             if (!event.event_id)
               throw new Error('Topic history event has no ID');
-            const value = await this.getTopicEvent(roomId, event.event_id);
-            if (!value) throw new Error('Topic history is incomplete');
-            return JSON.parse(value) as unknown;
+            if (event.room_id !== undefined && event.room_id !== roomId)
+              throw new Error('Topic history event room binding mismatch');
+            const decrypted = await this.getEvent(roomId, event.event_id);
+            if (!decrypted) throw new Error('Topic history is incomplete');
+            return {
+              ...(JSON.parse(decrypted) as Record<string, unknown>),
+              ...(typeof event.state_key === 'string'
+                ? { state_key: event.state_key }
+                : {}),
+              room_id: roomId,
+            };
           }),
         );
         events.push(...values);

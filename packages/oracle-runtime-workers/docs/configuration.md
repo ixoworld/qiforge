@@ -347,11 +347,12 @@ prepared from a conversation, signed by the owner in the Portal, verified on
 chain. Off by default; `validateEnv` refuses the Worker when the feature is on
 without its origin and RPC, or with an unsafe URL.
 
-| Variable                                              | Meaning                                                                                                                                                                                             |
-| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ACTION_PROPOSALS_ENABLED`                            | `'true'` lets `prepare_action` prepare cards. Default `'false'`; reads, reconciliation, outcome polling and receipts work regardless.                                                               |
-| `ACTION_PROPOSALS_PORTAL_ORIGIN`                      | The trusted Portal origin for `/a/<id>` links: `https`, host only, no path. Required when enabled.                                                                                                  |
-| `ACTION_PROPOSALS_RPC_DEVNET`, `_TESTNET`, `_MAINNET` | Chain RPC base URL per network for verification: `https`, no credentials, query or fragment (a `/rpc/` path is fine). Devnet or testnet required when enabled; mainnet cards are refused by policy. |
+| Variable                                              | Meaning                                                                                                                                                                                                                |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ACTION_PROPOSALS_ENABLED`                            | `'true'` lets `prepare_action` prepare cards. Default `'false'`; reads, reconciliation, outcome polling and receipts work regardless.                                                                                  |
+| `ACTION_PROPOSALS_PORTAL_ORIGIN`                      | The trusted Portal origin for `/a/<id>` links: `https`, host only, no path. Required when enabled.                                                                                                                     |
+| `ACTION_PROPOSALS_RPC_DEVNET`, `_TESTNET`, `_MAINNET` | Chain RPC base URL per network for verification: `https`, no credentials, query or fragment (a `/rpc/` path is fine). Devnet or testnet required when enabled; mainnet cards are refused by policy.                    |
+| `ACTION_TOPIC_PROPOSALS_ENABLED`                      | `'true'` adds the topic cards ([topic-action-proposals](topic-action-proposals.md)): discussion drafts and claim-access grants, their claims and step permits. Default `'false'`; requires `ACTION_PROPOSALS_ENABLED`. |
 
 ### Ops and misc
 
