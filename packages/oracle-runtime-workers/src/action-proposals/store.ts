@@ -363,10 +363,16 @@ export class ActionProposalStore {
    * card's memo or none): the owner may record the right one with a later
    * reconcile instead of the card staying `unknown` for ever.
    */
-  async markTransactionRejected(ownerDid: string, id: string): Promise<void> {
+  async markTransactionRejected(
+    ownerDid: string,
+    id: string,
+    transactionHash: string,
+  ): Promise<void> {
+    // Guarded on the hash: a verification still in flight for a hash the
+    // owner has since replaced must not reject its successor.
     await this.db.run(
-      `UPDATE action_proposals SET transaction_hash_rejected=1 WHERE owner_did=? AND id=? AND status='unknown'`,
-      [ownerDid, id],
+      `UPDATE action_proposals SET transaction_hash_rejected=1 WHERE owner_did=? AND id=? AND status='unknown' AND transaction_hash=?`,
+      [ownerDid, id, transactionHash],
     );
   }
   /**
@@ -380,12 +386,14 @@ export class ActionProposalStore {
     ownerDid: string,
     id: string,
     reason: string,
+    transactionHash: string,
   ): Promise<void> {
     const blocked = await this.db.transaction(async () => {
       const p = await this.get(ownerDid, id);
       if (
         !p ||
         p.lifecycle.status !== 'unknown' ||
+        p.lifecycle.transactionHash !== transactionHash ||
         p.lifecycle.executionBlockedAt
       )
         return false;
@@ -525,8 +533,20 @@ export class ActionProposalStore {
           p.lifecycle.status !== 'unknown'
         )
           throw new ActionProposalConflict('Proposal was not claimed');
-        if (p.lifecycle.status === 'unknown' && p.lifecycle.executionBlockedAt)
+        if (
+          p.lifecycle.status === 'unknown' &&
+          p.lifecycle.executionBlockedAt
+        ) {
+          // The listed hash may be asked about again (Portal recovery); no
+          // other hash may take its place.
+          if (
+            !command.transactionHash ||
+            p.lifecycle.transactionHash ===
+              command.transactionHash.toUpperCase()
+          )
+            return p;
           throw new ActionProposalConflict('Execution is blocked');
+        }
         let replacing = false;
         if (
           p.lifecycle.status === 'unknown' &&
@@ -563,22 +583,32 @@ export class ActionProposalStore {
       } else {
         if (p.digest !== command.digest)
           throw new ActionProposalConflict('Confirmed values changed');
-        if (p.lifecycle.status !== 'prepared')
-          throw new ActionProposalConflict('Proposal is already consumed');
-        if (Date.parse(p.expiresAt) <= this.now())
-          throw new ActionProposalConflict('Proposal expired');
-        lifecycle =
-          command.kind === 'claim'
-            ? { status: 'claimed', claimedAt: at }
-            : {
-                status:
-                  command.kind === 'reject'
-                    ? 'rejected'
-                    : command.kind === 'revoke'
-                      ? 'revoked'
-                      : 'superseded',
-                endedAt: at,
-              };
+        if (
+          command.kind === 'revoke' &&
+          p.lifecycle.status === 'unknown' &&
+          p.lifecycle.executionBlockedAt
+        ) {
+          // A blocked card never confirms or fails: revoking it is the
+          // owner's way to close it, expiry or not.
+          lifecycle = { status: 'revoked', endedAt: at };
+        } else {
+          if (p.lifecycle.status !== 'prepared')
+            throw new ActionProposalConflict('Proposal is already consumed');
+          if (Date.parse(p.expiresAt) <= this.now())
+            throw new ActionProposalConflict('Proposal expired');
+          lifecycle =
+            command.kind === 'claim'
+              ? { status: 'claimed', claimedAt: at }
+              : {
+                  status:
+                    command.kind === 'reject'
+                      ? 'rejected'
+                      : command.kind === 'revoke'
+                        ? 'revoked'
+                        : 'superseded',
+                  endedAt: at,
+                };
+        }
       }
       await this.writeLifecycle(ownerDid, id, lifecycle);
       return { ...p, lifecycle };

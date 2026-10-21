@@ -1559,6 +1559,10 @@ prepared in direct chats only`, chain id or signer mismatch) show the
   `[action-proposals] verification of <id> pending: <reason>` (indexing lag,
   `Chain verification unavailable`, `Transaction memo mismatch`, …). After
   the tenth attempt the alarm stops; a Portal reconcile still verifies.
+  `[action-proposals] <id> execution blocked: Transaction subject mismatch`
+  means the recorded transaction carries the card's memo with other
+  messages: the card stays `unknown` with the hash listed and takes only a
+  revoke; the owner prepares another card.
 - **Receipts** into the originating Matrix thread or channel retry with the
   same cooldown up to an hour apart and are `abandoned` after twelve
   attempts; a row this build cannot read is `quarantined` with an error

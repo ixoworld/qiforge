@@ -56,9 +56,18 @@ export async function refreshActionProposal(
       `[action-proposals] verification of ${proposal.id} pending: ${message}`,
     );
     if (message === TRANSACTION_CARD_BOUND_MISMATCH)
-      await store.blockExecution(proposal.ownerDid, proposal.id, message);
+      await store.blockExecution(
+        proposal.ownerDid,
+        proposal.id,
+        message,
+        proposal.lifecycle.transactionHash,
+      );
     else if (TRANSACTION_REJECTIONS.has(message))
-      await store.markTransactionRejected(proposal.ownerDid, proposal.id);
+      await store.markTransactionRejected(
+        proposal.ownerDid,
+        proposal.id,
+        proposal.lifecycle.transactionHash,
+      );
     return {
       proposal: (await store.get(proposal.ownerDid, proposal.id)) ?? proposal,
       attempted: true,
