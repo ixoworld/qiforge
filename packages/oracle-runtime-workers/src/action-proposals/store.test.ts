@@ -255,6 +255,40 @@ describe('durable action proposals', () => {
       'succeeded',
     );
   });
+  it('blocks a card whose memo-bound transaction carries other messages instead of forgetting it', async () => {
+    const s = stub('memo-bound-mismatch');
+    const p = await s.create(proposalSubject());
+    // Signed with THIS card's memo, but for twice the amount: the owner's
+    // card-bound effect went wrong, which is not the same as a wrong hash.
+    const tampered = await indexedTransaction({
+      ...p,
+      action: proposalSubject({ id: p.id }, '3000000').action,
+    });
+    const right = await indexedTransaction(p);
+    await s.transition(OWNER, p.id, { kind: 'claim', digest: p.digest });
+    await s.transition(OWNER, p.id, {
+      kind: 'reconcile',
+      transactionHash: tampered.hash,
+    });
+    const blocked = await s.refresh(OWNER, p.id, tampered.json);
+    expect(blocked?.lifecycle).toMatchObject({
+      status: 'unknown',
+      transactionHash: tampered.hash,
+      executionBlockedAt: expect.any(String),
+    });
+    // The hash stays listed and may not be replaced; nothing is scheduled.
+    await expect(
+      s.transition(OWNER, p.id, {
+        kind: 'reconcile',
+        transactionHash: right.hash,
+      }),
+    ).rejects.toThrow('Execution is blocked');
+    expect(await s.due(OWNER)).toEqual([]);
+    expect(await s.nextVerification(OWNER)).toBeUndefined();
+    expect((await s.refresh(OWNER, p.id, right.json))?.lifecycle).toMatchObject(
+      { status: 'unknown', transactionHash: tampered.hash },
+    );
+  });
   it('drops finished cards after the retention window and keeps open ones', async () => {
     const s = stub('retention');
     const done = await s.create(proposalSubject());

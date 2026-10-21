@@ -55,11 +55,21 @@ const backoff = (base: number, max: number, attempts: number) =>
   Math.min(base * 2 ** attempts, max);
 
 /** The verifier's answers that prove a recorded hash is not this card's transaction. */
+/**
+ * The verifier's proofs that a recorded hash is ANOTHER transaction (the
+ * bytes hash differently, or it carries another card's memo or none): the
+ * owner may replace it.
+ */
 export const TRANSACTION_REJECTIONS = new Set([
   'Transaction memo mismatch',
-  'Transaction subject mismatch',
   'Transaction hash mismatch',
 ]);
+/**
+ * The verifier's proof that the recorded transaction carries THIS card's
+ * memo but other messages: an effect the owner bound to the card that went
+ * wrong. It is never set aside; the card is blocked instead.
+ */
+export const TRANSACTION_CARD_BOUND_MISMATCH = 'Transaction subject mismatch';
 
 export class ActionProposalStore {
   constructor(
@@ -350,9 +360,9 @@ export class ActionProposalStore {
     return proposals;
   }
   /**
-   * The verifier proved the recorded hash is another transaction (wrong
-   * memo, other messages, bytes that do not hash to it): the owner may
-   * record the right one with a later reconcile instead of the card staying
+   * The verifier proved the recorded hash is another transaction (another
+   * card's memo or none, bytes that do not hash to it): the owner may record
+   * the right one with a later reconcile instead of the card staying
    * `unknown` for ever.
    */
   async markTransactionRejected(ownerDid: string, id: string): Promise<void> {
@@ -360,6 +370,39 @@ export class ActionProposalStore {
       `UPDATE action_proposals SET transaction_hash_rejected=1 WHERE owner_did=? AND id=? AND status='unknown'`,
       [ownerDid, id],
     );
+  }
+  /**
+   * The recorded transaction carries this card's memo but other messages:
+   * an effect the owner bound to the card that went wrong. The hash stays
+   * listed and may not be replaced, verification stops, the card stays
+   * `unknown` with `executionBlockedAt`; the owner revokes it and prepares
+   * another.
+   */
+  async blockExecution(
+    ownerDid: string,
+    id: string,
+    reason: string,
+  ): Promise<void> {
+    const blocked = await this.db.transaction(async () => {
+      const p = await this.get(ownerDid, id);
+      if (
+        !p ||
+        p.lifecycle.status !== 'unknown' ||
+        p.lifecycle.executionBlockedAt
+      )
+        return false;
+      await this.writeLifecycle(ownerDid, id, {
+        ...p.lifecycle,
+        executionBlockedAt: new Date(this.now()).toISOString(),
+      });
+      await this.db.run(
+        `UPDATE action_proposals SET transaction_hash_rejected=0,verify_attempts=? WHERE owner_did=? AND id=?`,
+        [VERIFY_MAX_ATTEMPTS, ownerDid, id],
+      );
+      return true;
+    });
+    if (blocked)
+      console.error(`[action-proposals] ${id} execution blocked: ${reason}`);
   }
   /** When the alarm should next look a recorded transaction up, if ever. */
   async nextVerificationAt(ownerDid: string): Promise<number | undefined> {
@@ -484,6 +527,8 @@ export class ActionProposalStore {
           p.lifecycle.status !== 'unknown'
         )
           throw new ActionProposalConflict('Proposal was not claimed');
+        if (p.lifecycle.status === 'unknown' && p.lifecycle.executionBlockedAt)
+          throw new ActionProposalConflict('Execution is blocked');
         let replacing = false;
         if (
           p.lifecycle.status === 'unknown' &&
