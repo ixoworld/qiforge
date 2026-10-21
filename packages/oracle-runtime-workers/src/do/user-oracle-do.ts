@@ -3285,7 +3285,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         // Switching the feature off stops new permits; reads, reconciliation
         // and receipts of cards already in flight keep working.
         if (!this.topicExecutionEnabled())
-          throw new ActionProposalConflict('Topic action execution is disabled');
+          throw new ActionProposalConflict(
+            'Topic action execution is disabled',
+          );
         // The local refusals first (not claimed, expired, out of order,
         // another executor); the ten second authority read only for a step
         // that could actually start.

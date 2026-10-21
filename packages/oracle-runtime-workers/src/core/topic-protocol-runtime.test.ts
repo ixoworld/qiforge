@@ -42,7 +42,11 @@ describe('@ixo/topic-protocol on Workers', () => {
           '-e',
           probe,
         ],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 },
+        {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+          timeout: 60_000,
+        },
       );
     let output: string;
     try {
