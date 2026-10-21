@@ -141,6 +141,13 @@ export const ActionProposalLifecycleSchema = z.discriminatedUnion('status', [
       .string()
       .regex(/^[A-Fa-f0-9]{64}$/)
       .optional(),
+    /**
+     * Set when the recorded transaction carries this card's memo but other
+     * messages: an effect the owner bound to the card that went wrong. The
+     * hash stays listed, no other hash may replace it and verification has
+     * stopped; the card stays `unknown` and the owner prepares another.
+     */
+    executionBlockedAt: timestamp.optional(),
   }),
   z.strictObject({
     status: z.enum(['rejected', 'revoked', 'superseded']),

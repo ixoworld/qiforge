@@ -124,7 +124,17 @@ and the eviction nor fails the tick again a minute later:
   closed the browser on still gets confirmed once the chain has indexed
   it. The cooldown doubles from 30 s to 10 min and the alarm gives up after
   ten attempts (about an hour); a Portal reconcile still looks the hash up
-  once the cooldown has passed.
+  once the cooldown has passed. Two proofs end the wait early. A hash the
+  verifier proved is **another transaction** (its bytes hash differently, or
+  it carries another card's memo or none) is marked rejected: the owner may
+  record the right hash with a later reconcile (`Transaction reference
+already recorded` is refused only while the recorded hash is unproven) and
+  it gets a fresh schedule. A transaction that carries **this card's memo but
+  other messages** is the owner's card-bound effect gone wrong: the card gets
+  `lifecycle.executionBlockedAt`, the hash stays listed and may not be
+  replaced (`Execution is blocked`), verification stops and the card stays
+  `unknown`; the owner prepares another. The reason is logged
+  (`[action-proposals] <id> execution blocked: …`), never sent.
 - **Receipts**: a verified card whose turn came from a Matrix thread or a
   channel is receipted into that thread (`<title> confirmed on chain.
 Transaction … Block … Code …`) with a stable transaction id, at most four
