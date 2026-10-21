@@ -58,8 +58,10 @@ export function mentionsAmount(
   units: readonly string[],
 ): boolean {
   const unit = units.map(escape).join('|');
+  // Not glued to a word character, and not preceded by a digit or a number
+  // separator with any run of whitespace in between (`1  500`, `1 ,500`).
   return new RegExp(
-    `(?<![\\w.,'’/:-])(?<!\\d\\s)${escape(amount)}\\s*(?:${unit})(?![\\w-])`,
+    `(?<!\\w)(?<![\\d.,'’/:-]\\s*)${escape(amount)}\\s*(?:${unit})(?![\\w-])`,
     'i',
   ).test(text);
 }
