@@ -7,8 +7,9 @@ export type JsonValue = z.infer<typeof jsonValue>;
 const values = z.record(z.string().max(256), jsonValue);
 // Requests are strict: a field this version does not know is refused.
 // Stored records and responses are read with the same shapes but strip
-// unknown fields, so a record written by a newer runtime (or read by an
-// older client) still parses instead of failing a claim submission.
+// unknown fields, so an added field never breaks an older reader. Adding a
+// value to a closed list (`status`, `cancelReason`, an owner `kind`) is a
+// contract version change: an older reader refuses such a record.
 const claimOwnerShape = {
   kind: z.literal('flow-claim'),
   flowId: text,
@@ -206,12 +207,21 @@ export function createActionInteractionsClient(options: {
     // A body limit, gateway or platform error page may not be JSON.
     const body: unknown = await response.json().catch(() => null);
     if (!response.ok) {
+      // Interaction routes answer `{code, message}`; the shell's shared
+      // authentication (401) and rate limit (429) answer `{statusCode,
+      // message}`, so those get a code from their status.
       const error = z
-        .object({ code: z.string(), message: z.string() })
+        .object({ code: z.string().optional(), message: z.string() })
         .safeParse(body);
+      const fallbackCode =
+        response.status === 401
+          ? 'unauthorized'
+          : response.status === 429
+            ? 'rate_limited'
+            : 'request_failed';
       throw new ActionInteractionError(
         response.status,
-        error.success ? error.data.code : 'request_failed',
+        (error.success && error.data.code) || fallbackCode,
         error.success ? error.data.message : 'Interaction request failed',
       );
     }

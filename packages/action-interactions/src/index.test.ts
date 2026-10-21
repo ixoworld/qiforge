@@ -157,4 +157,22 @@ describe('portable interaction contract', () => {
     });
     expect((await mixed.list('$session')).map((r) => r.id)).toEqual([good.id]);
   });
+  it("codes the shell's own 401 and 429 bodies by status", async () => {
+    for (const [status, code] of [
+      [401, 'unauthorized'],
+      [429, 'rate_limited'],
+    ] as const) {
+      const client = createActionInteractionsClient({
+        baseUrl: 'https://oracle.example',
+        headers: async () => ({}),
+        fetch: async () =>
+          Response.json({ statusCode: status, message: 'nope' }, { status }),
+      });
+      await expect(client.list('$session')).rejects.toMatchObject({
+        status,
+        code,
+        message: 'nope',
+      });
+    }
+  });
 });

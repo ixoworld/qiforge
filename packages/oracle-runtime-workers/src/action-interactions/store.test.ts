@@ -911,4 +911,63 @@ describe('private interaction drafts on Workers', () => {
       }),
     ).toMatchObject({ code: 'expired' });
   });
+  it('refuses an unreadable record as a conflict and keeps it out of retention', async () => {
+    const stub = env.ACTION_INTERACTIONS_TEST.getByName('unreadable');
+    const input = prepare();
+    if (input.owner.kind !== 'flow-claim')
+      throw new Error('Expected claim owner');
+    const draft = unwrap(
+      await command(stub, alice, { kind: 'prepare', input }),
+    ).interaction;
+    await stub.corrupt(draft.id);
+    expect(
+      JSON.parse(
+        await stub.dispatch(
+          alice,
+          JSON.stringify({ version: 1, owner: input.owner }),
+        ),
+      ),
+    ).toMatchObject({ ok: false, code: 'record_unreadable' });
+    expect(await read(stub, alice, draft.id, input.sessionId)).toMatchObject({
+      ok: false,
+      code: 'record_unreadable',
+    });
+    expect(JSON.parse(await stub.list(alice, input.sessionId))).toEqual([]);
+    await stub.advance(40 * 24 * 60 * 60 * 1000);
+    expect(await stub.prune(alice)).toBe(1);
+    expect(await stub.prune(alice)).toBe(0);
+    expect(await stub.keys()).toContain(`interaction:${draft.id}`);
+  });
+
+  it('caps the drafts one chat holds and reports when retention is next due', async () => {
+    const stub = env.ACTION_INTERACTIONS_TEST.getByName('cap');
+    expect(await stub.nextRetentionAt(alice)).toBeNull();
+    const question = (n: number): PrepareInteraction => ({
+      version: 1,
+      requestId: crypto.randomUUID(),
+      sessionId: '$crowded',
+      owner: { kind: 'question', requestId: `q-${n}` },
+      values: {},
+    });
+    const first = unwrap(
+      await command(stub, alice, { kind: 'prepare', input: question(0) }),
+    ).interaction;
+    expect(await stub.nextRetentionAt(alice)).toBe(
+      first.expiresAt + 30 * 24 * 60 * 60 * 1000,
+    );
+    for (let n = 1; n < 200; n++)
+      unwrap(
+        await command(stub, alice, { kind: 'prepare', input: question(n) }),
+      );
+    expect(
+      await command(stub, alice, { kind: 'prepare', input: question(200) }),
+    ).toMatchObject({ code: 'too_many_drafts' });
+    // Another chat is unaffected.
+    expect(
+      await command(stub, alice, {
+        kind: 'prepare',
+        input: { ...question(201), sessionId: '$fresh' },
+      }),
+    ).toMatchObject({ ok: true });
+  });
 });

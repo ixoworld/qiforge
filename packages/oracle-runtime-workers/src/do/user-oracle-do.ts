@@ -488,6 +488,11 @@ const META_LEGACY_CLEARED = 'meta:legacyCleared';
  */
 const META_LEGACY_UNUSABLE = 'meta:legacyUnusable';
 const META_USER_DID = 'meta:userDid';
+/**
+ * Set when an evicted object keeps an alarm only for action-card draft
+ * retention; a boot clears it. The alarm then prunes on the bare object.
+ */
+const META_RETENTION_WAKE = 'meta:interactionRetentionWake';
 
 /** KV key of a session's context-guard counters (`GET /debug/context?session=`). */
 const contextStatsKey = (sessionId: string): string => `ctxstats:${sessionId}`;
@@ -1359,6 +1364,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         throw new Error(`Object bound to ${stored}, not ${userDid}`);
       if (!stored) await this.ctx.storage.put(META_USER_DID, userDid);
       this.userDid = userDid;
+      await this.ctx.storage.delete(META_RETENTION_WAKE);
 
       const env = this.env;
       // The gateway lazily starts on first use; make sure it is up before the
@@ -2299,6 +2305,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // exists once the object booted).
       const keepAliveAt = this.runs?.keepAliveDeadline(wakeAt) ?? null;
       const recoveryAt = this.runs?.nextRecoveryAt() ?? null;
+      // An evicted object (no working copy, no housekeeping deadline) with
+      // no socket is only woken for action-card draft retention: prune on
+      // the bare object instead of importing the owner copy, and re-arm.
+      if (
+        !this.db &&
+        nextPingAt === null &&
+        keepAliveAt === null &&
+        recoveryAt === null &&
+        (await this.ctx.storage.get<boolean>(META_RETENTION_WAKE)) === true
+      ) {
+        const next = await this.bareInteractionRetention();
+        if (next !== null) await this.requestAlarm(next);
+        else await this.ctx.storage.delete(META_RETENTION_WAKE);
+        return;
+      }
       if (this.runs && recoveryAt !== null && recoveryAt <= wakeAt + 1000) {
         // A store error here must not reject the alarm: the tick below (or
         // the re-arm) still has to run.
@@ -2536,12 +2557,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         });
         if (outcome === 'evicted') {
           await this.ctx.storage.delete(META_HOUSEKEEPING_AT);
+          // Action-card drafts outlive the working copy: their retention
+          // still needs a wake (handled on the bare object, see alarm()).
+          const retentionAt = await this.interactionRetentionAt();
           // An attached (idle) socket still needs its heartbeat rounds.
-          if (nextPingAt !== null) await this.requestAlarm(nextPingAt);
+          if (nextPingAt !== null)
+            await this.requestAlarm(
+              Math.min(nextPingAt, retentionAt ?? Infinity),
+            );
           // A request that waited on the wipe has booted the object afresh
           // and armed its own deadlines (a task Start's run): keep them.
-          else if (this.initPromise === null)
-            await this.ctx.storage.deleteAlarm();
+          else if (this.initPromise === null) {
+            if (retentionAt !== null) {
+              await this.ctx.storage.put(META_RETENTION_WAKE, true);
+              await this.requestAlarm(retentionAt);
+            } else await this.ctx.storage.deleteAlarm();
+          }
           return;
         }
         if (outcome === 'not-current') {
@@ -2722,6 +2753,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       });
     }
 
+    /**
+     * The draft store without a boot: the object is addressed by the
+     * caller's DID, and the stored binding is checked against it.
+     */
+    private async bareInteractionStore(identity: TurnIdentity) {
+      const bound =
+        this.userDid ?? (await this.ctx.storage.get<string>(META_USER_DID));
+      if (bound && bound !== identity.userDid)
+        throw new ActionInteractionError(404, 'not_found', 'Owner not found');
+      return new ActionInteractionStore(this.ctx.storage, {
+        oracleDid: this.env.ORACLE_DID,
+        userDid: identity.userDid,
+      });
+    }
+
     async checkClaimDispatch(
       identity: TurnIdentity,
       input: CheckClaimDispatch,
@@ -2731,16 +2777,43 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         // not boot the object (gateway, signer, SQLite, owner-copy import):
         // it only reads and writes a few keys. The object is addressed by
         // the caller's DID; the stored binding is checked without a boot.
-        const bound =
-          this.userDid ?? (await this.ctx.storage.get<string>(META_USER_DID));
-        if (bound && bound !== identity.userDid)
-          throw new ActionInteractionError(404, 'not_found', 'Owner not found');
-        const store = new ActionInteractionStore(this.ctx.storage, {
-          userDid: identity.userDid,
-          oracleDid: this.env.ORACLE_DID,
-        });
+        const store = await this.bareInteractionStore(identity);
         return JSON.stringify(await store.checkClaimDispatch(input));
       });
+    }
+
+    /** When stored action-card drafts next need retention, if any are kept. */
+    private async interactionRetentionAt(): Promise<number | null> {
+      const userDid =
+        this.userDid ?? (await this.ctx.storage.get<string>(META_USER_DID));
+      if (!userDid) return null;
+      return new ActionInteractionStore(this.ctx.storage, {
+        oracleDid: this.env.ORACLE_DID,
+        userDid,
+      })
+        .nextRetentionAt()
+        .catch(() => null);
+    }
+
+    /** One retention pass on an un-booted object; returns the next due time. */
+    private async bareInteractionRetention(): Promise<number | null> {
+      const userDid = await this.ctx.storage.get<string>(META_USER_DID);
+      if (!userDid) return null;
+      const store = new ActionInteractionStore(this.ctx.storage, {
+        oracleDid: this.env.ORACLE_DID,
+        userDid,
+      });
+      try {
+        await store.prune();
+      } catch (err) {
+        console.warn(
+          `[action-interactions] retention on an evicted object failed for ${userDid}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return Date.now() + 60 * 60 * 1000;
+      }
+      const next = await store.nextRetentionAt().catch(() => null);
+      // A backlog larger than one pass resumes a minute later.
+      return next === null ? null : Math.max(next, Date.now() + 60_000);
     }
 
     /** Drafts of a deleted chat, in bounded batches. */
@@ -2771,7 +2844,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       id?: string,
     ) {
       return interactionOutcome(async () => {
-        const store = await this.interactionStore(identity, sessionId);
+        // Card polls never boot the object or count as activity: they read a
+        // few keys, so an open card neither imports an evicted owner copy nor
+        // keeps an idle object alive. A deleted chat's drafts are deleted
+        // with it, so no session lookup is needed to hide them.
+        const store = await this.bareInteractionStore(identity);
         return JSON.stringify(
           await (id ? store.read(id, sessionId) : store.list(sessionId)),
         );

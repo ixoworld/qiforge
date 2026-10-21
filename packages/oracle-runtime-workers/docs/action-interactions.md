@@ -16,7 +16,10 @@ that the session still exists in that object. No body can select another user
 or oracle. The oracle DID comes from runtime configuration. Requests are parsed
 before a user object is addressed: only the shapes below exist, path ids must
 be UUIDs and `sessionId` is at most 512 characters; anything else is 404 or 400,
-and every refusal (including a body over 96 KiB) is JSON `{code, message}`.
+and every refusal of these routes (including a body over 96 KiB) is JSON
+`{code, message}`. The shell's shared authentication (401) and rate limit (429)
+answer `{statusCode, message}`; the client turns those into the codes
+`unauthorized` and `rate_limited`.
 Card reads (`GET`) are rate-limited in their own per-user bucket
 (`<oracle>|card-read|<user>` on the same binding), so cards left open on screen
 never use up the budget of chat turns and claim submissions.
@@ -41,7 +44,7 @@ whichever chat prepared it. Preparing it again:
 
 | Existing draft for the step                                      | Result                                                            |
 | ---------------------------------------------------------------- | ----------------------------------------------------------------- |
-| None, cancelled, expired, or reserved but never dispatched       | A new draft; the old one ends `cancelled`/`superseded`            |
+| None, cancelled, or expired (an expired reservation included)    | A new draft; the old one ends `cancelled`/`superseded`            |
 | Open in this chat, same collection and schema                    | The existing draft, `replayed: true`                              |
 | Open in this chat, collection or schema changed                  | A new draft for the new form; the old one is superseded           |
 | Open or being dispatched in another chat                         | 409 `target_in_use`                                               |
@@ -59,9 +62,11 @@ adapter must validate its actual SurveyJS schema and authorization before it
 reserves or dispatches. The personal store is not a collection authorization
 service. Claim owner fields are binding information, not proof of access.
 
-The app-wide existing claim executor calls `client.checkClaimDispatch` before each
-claim side effect, including forms reopened outside Companion. It supplies the
-actual Flow owner and the digest of executable answers.
+A host calls `client.checkClaimDispatch` before every claim side effect on a
+Flow claim step: the claim form (with or without a card, also when reopened
+outside Companion) and an agent-run execution of the same step. It supplies the
+actual Flow owner and the digest of executable answers. The check never boots
+the user object, so it is one small Durable Object call.
 
 - **The card** (`cardRef`, `operationKey`, `valuesDigest`) needs its exact
   unexpired `reserved` record with the reviewed schema, collection and digest.
@@ -120,10 +125,14 @@ Draft values have a 64 KiB bound and drafts expire for mutation after seven days
 Existing expired references remain historical and must be rendered noninteractive.
 Ended drafts carry `cancelReason`: `user` (cancelled by the person or agent),
 `superseded` (the step was submitted from the form, or a newer card replaced a
-stale one) or `not-submitted` (the executor refused before sending). Stored
-records and responses are parsed leniently (unknown fields are dropped), so a
-record written by a newer runtime never fails a read or a claim submission;
-request bodies stay strict. A session list leaves out a record it cannot read.
+stale or changed-form draft) or `not-submitted` (the executor refused before
+sending). Stored records and responses strip unknown fields, so an added field
+never breaks an older reader; request bodies stay strict. Adding a value to a
+closed list (`status`, `cancelReason`, an owner `kind`) is a contract version
+change. A record this version cannot read is answered with 409
+`record_unreadable` (never a 500, which the Portal would treat as "could not
+ask"), is left out of session lists, and is kept untouched by retention.
+A chat holds at most 200 drafts (409 `too_many_drafts`).
 
 Storage is the user object's key-value store, with three indexes so no request
 scans every record: one per session (lists read at most 50 keys and fetch the
@@ -136,7 +145,12 @@ service keeps its record, reservation and dispatch tombstone (they stop a
 duplicate claim) but loses its draft values (with a revision bump). Deleting a
 chat applies the same rules to its drafts at once. Values plus the user-edit
 list are limited to 64 KiB of UTF-8. The per-step form marks and dispatch
-tombstones are a few bytes each and are kept.
+tombstones are a few bytes each and are kept. Card reads and the dispatch
+check never boot the user object or count as activity, so open cards neither
+import an evicted owner copy nor keep an idle object alive. When an idle
+object's working copy is evicted, its alarm stays armed for the next draft
+retention (marked in storage, cleared by any boot) and that wake prunes on the
+bare object without importing the owner copy.
 Durable Object storage survives isolate reloads; it is separate from the
 Matrix/VFS SQLite owner backup and is not part of it.
 

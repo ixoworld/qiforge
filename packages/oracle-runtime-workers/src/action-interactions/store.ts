@@ -40,6 +40,12 @@ const TTL_MS = 7 * DAY_MS;
 const RETAIN_MS = 30 * DAY_MS;
 /** The newest records one session list returns. */
 const LIST_LIMIT = 50;
+/**
+ * Drafts one chat may hold before retention removes some. A question owner
+ * is keyed by its request id, so without a cap a runaway agent could write
+ * drafts as fast as the rate limit allows.
+ */
+const SESSION_DRAFT_LIMIT = 200;
 /** Records retention handles per prepare, so a prepare never pays for a backlog. */
 const PRUNE_BATCH = 16;
 /** Durable Object storage takes at most 128 keys per multi-key get, put or delete. */
@@ -209,7 +215,6 @@ export class ActionInteractionStore {
           'This claim step was submitted from the form; check the claims list before submitting again',
         );
       if (
-        !record ||
         canonicalJson(record.owner) !== canonicalJson(input.owner) ||
         record.status !== 'reserved' ||
         record.expiresAt <= this.now() ||
@@ -284,6 +289,19 @@ export class ActionInteractionStore {
     return due.size;
   }
 
+  /** When the oldest record becomes due for retention, or null when none is kept. */
+  async nextRetentionAt(): Promise<number | null> {
+    const first = await this.storage.list<string>({
+      prefix: EXPIRY_PREFIX,
+      limit: 1,
+    });
+    for (const key of first.keys()) {
+      const expiresAt = Number(key.slice(EXPIRY_PREFIX.length).split(':')[0]);
+      if (Number.isFinite(expiresAt)) return expiresAt + RETAIN_MS;
+    }
+    return null;
+  }
+
   /**
    * A deleted chat takes its drafts with it, by the same rules as
    * retention: a dispatched claim keeps only its tombstones. Bounded per
@@ -297,7 +315,7 @@ export class ActionInteractionStore {
     if (index.size === 0) return 0;
     await this.storage.transaction(async (tx) => {
       for (const [indexKey, id] of index) {
-        const record = await this.recordFrom(tx, id);
+        const record = await this.recordFrom(tx, id).catch(() => undefined);
         await this.forget(tx, id, record ? expiryIndexKey(record) : undefined);
         // A kept tombstone leaves the deleted chat's listing too.
         await tx.delete(indexKey);
@@ -313,18 +331,36 @@ export class ActionInteractionStore {
    */
   private async forget(tx: Storage, id: string, expiryKey?: string) {
     // Only prepare requests are indexed per record (edits keep their
-    // replay window on the record itself), so this list stays small.
-    const requests = await tx.list<string>({
-      prefix: `${REQUESTS_OF_PREFIX}${id}:`,
-      limit: 256,
-    });
-    const doomed = [
-      ...(expiryKey ? [expiryKey] : []),
-      `${RECENT_PREFIX}${id}`,
-      ...requests.keys(),
-      ...Array.from(requests.values(), (r) => `${REQUEST_PREFIX}${r}`),
-    ];
-    const record = await this.recordFrom(tx, id);
+    // replay window on the record itself), so these pages stay small.
+    for (;;) {
+      const requests = await tx.list<string>({
+        prefix: `${REQUESTS_OF_PREFIX}${id}:`,
+        limit: STORAGE_BATCH,
+      });
+      if (requests.size === 0) break;
+      await deleteKeys(tx, [
+        ...requests.keys(),
+        ...Array.from(requests.values(), (r) => `${REQUEST_PREFIX}${r}`),
+      ]);
+    }
+    const doomed = [...(expiryKey ? [expiryKey] : []), `${RECENT_PREFIX}${id}`];
+    let record: Interaction | undefined;
+    try {
+      record = await this.recordFrom(tx, id);
+    } catch (error) {
+      // An unreadable record is kept untouched (it may be what stops a
+      // duplicate claim) and leaves the retention queue, so one bad record
+      // never stalls the pass.
+      if (
+        error instanceof ActionInteractionError &&
+        error.code === 'record_unreadable'
+      ) {
+        console.warn(`[action-interactions] kept unreadable record ${id}`);
+        await deleteKeys(tx, doomed);
+        return;
+      }
+      throw error;
+    }
     if (record && (await this.ownerState(tx, record)) === 'blocked') {
       if (Object.keys(record.values).length || record.updatedByUser.length)
         await tx.put(`${PREFIX}${id}`, {
@@ -346,7 +382,19 @@ export class ActionInteractionStore {
     id: string,
   ): Promise<Interaction | undefined> {
     const raw = await storage.get<unknown>(`${PREFIX}${id}`);
-    return raw === undefined ? undefined : InteractionSchema.parse(raw);
+    if (raw === undefined) return undefined;
+    const record = InteractionSchema.safeParse(raw);
+    if (!record.success)
+      // A record this version cannot read (corrupt, or a value a newer
+      // runtime added to a closed list). Refused as a conflict, never a
+      // 500: the Portal treats a 5xx from the dispatch check as "could not
+      // ask" and would let a claim through.
+      throw new ActionInteractionError(
+        409,
+        'record_unreadable',
+        'This Companion draft cannot be read; check the claims list before submitting',
+      );
+    return record.data;
   }
 
   private async ownerState(
@@ -395,8 +443,7 @@ export class ActionInteractionStore {
     id: string,
     sessionId: string,
   ): Promise<Interaction> {
-    const raw = await storage.get<unknown>(`${PREFIX}${id}`);
-    const record = raw === undefined ? undefined : InteractionSchema.parse(raw);
+    const record = await this.recordFrom(storage, id);
     if (!record || record.sessionId !== sessionId)
       throw new ActionInteractionError(
         404,
@@ -536,6 +583,16 @@ export class ActionInteractionStore {
           // dispatch, so a fresh draft takes its place.
           await this.supersede(tx, existing);
         }
+        const inSession = await tx.list<string>({
+          prefix: `${SESSION_PREFIX}${await sha256Hex(input.sessionId)}:`,
+          limit: SESSION_DRAFT_LIMIT,
+        });
+        if (inSession.size >= SESSION_DRAFT_LIMIT)
+          throw new ActionInteractionError(
+            409,
+            'too_many_drafts',
+            `This chat already holds ${SESSION_DRAFT_LIMIT} Agent cards; start a new chat`,
+          );
         record = InteractionSchema.parse({
           version: 1,
           id: crypto.randomUUID(),
