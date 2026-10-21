@@ -3,6 +3,7 @@ import {
   canonicalJson,
   interactionValuesDigest,
   InteractionSchema,
+  InteractionReferenceSchema,
   type Interaction,
   type InteractionResult,
   type PrepareInteraction,
@@ -10,6 +11,8 @@ import {
   type ReserveInteraction,
   type ObserveInteraction,
   type CheckClaimDispatch,
+  type CheckDispatch,
+  type JsonValue,
 } from '@ixo/action-interactions';
 
 const PREFIX = 'interaction:';
@@ -45,8 +48,13 @@ async function ownerStorageKey(
   sessionId: string,
 ): Promise<string> {
   const binding =
-    owner.kind === 'flow-claim'
+    owner.kind === 'flow-claim' ||
+    owner.kind === 'flow-claim-block' ||
+    owner.kind === 'flow-bid'
       ? {
+          ...(owner.kind === 'flow-claim-block'
+            ? { collectionId: owner.collectionId }
+            : {}),
           kind: owner.kind,
           flowId: owner.flowId,
           runId: owner.runId,
@@ -59,13 +67,43 @@ async function ownerStorageKey(
     'SHA-256',
     new TextEncoder().encode(
       canonicalJson(
-        owner.kind === 'flow-claim'
+        owner.kind === 'flow-claim' ||
+          owner.kind === 'flow-claim-block' ||
+          owner.kind === 'flow-bid' ||
+          owner.kind === 'approval'
           ? { owner: binding }
           : { sessionId, owner: binding },
       ),
     ),
   );
   return `interaction-owner:${Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+}
+
+/** Receipt checkpoints may add facts, but cannot erase an acknowledged effect. */
+function extendsReceipt(
+  previous: JsonValue,
+  next: JsonValue | undefined,
+): boolean {
+  if (next === undefined) return false;
+  if (Array.isArray(previous))
+    return (
+      Array.isArray(next) &&
+      previous.every(
+        (value, index) =>
+          index < next.length && extendsReceipt(value, next[index]),
+      )
+    );
+  if (previous !== null && typeof previous === 'object')
+    return (
+      next !== null &&
+      typeof next === 'object' &&
+      !Array.isArray(next) &&
+      Object.entries(previous).every(
+        ([key, value]) =>
+          Object.hasOwn(next, key) && extendsReceipt(value, next[key]),
+      )
+    );
+  return previous === next;
 }
 
 /** Personal drafts only. Execution and verified receipts remain owned by Flow. */
@@ -77,8 +115,12 @@ export class ActionInteractionStore {
   ) {}
 
   /** A dispatch precondition, never an authorization grant or an executor. */
-  async checkClaimDispatch(
-    input: CheckClaimDispatch,
+  async checkClaimDispatch(input: CheckClaimDispatch) {
+    return this.checkDispatch(input);
+  }
+
+  async checkDispatch(
+    input: CheckDispatch,
   ): Promise<{ allowed: true; managed: boolean }> {
     if (input.owner.accountDid !== this.context.userDid)
       throw new ActionInteractionError(
@@ -90,7 +132,11 @@ export class ActionInteractionStore {
     return this.storage.transaction(async (tx) => {
       const id = await tx.get<string>(ownerKey);
       if (!id) {
-        if (input.cardRef || input.operationKey)
+        if (
+          input.owner.kind === 'approval' ||
+          input.cardRef ||
+          input.operationKey
+        )
           throw new ActionInteractionError(
             409,
             'review_required',
@@ -98,9 +144,7 @@ export class ActionInteractionStore {
           );
         return { allowed: true, managed: false };
       }
-      const raw = await tx.get<unknown>(`${PREFIX}${id}`);
-      const record =
-        raw === undefined ? undefined : InteractionSchema.parse(raw);
+      const record = await this.load(tx, id);
       if (
         !record ||
         canonicalJson(record.owner) !== canonicalJson(input.owner) ||
@@ -115,7 +159,7 @@ export class ActionInteractionStore {
         throw new ActionInteractionError(
           409,
           'review_required',
-          'This claim step has a managed draft; reopen and review its current operation',
+          'This action has a managed draft; reopen and review its current operation',
         );
       const consumedKey = `interaction-dispatch:${input.operationKey}`;
       if (await tx.get<boolean>(consumedKey))
@@ -133,14 +177,115 @@ export class ActionInteractionStore {
     return this.readFrom(this.storage, id, sessionId);
   }
 
-  async list(sessionId: string): Promise<Interaction[]> {
-    const records = await this.storage.list<Interaction>({
+  async listReferences(sessionId: string) {
+    const records = await this.storage.list<unknown>({
       prefix: PREFIX,
       limit: 1000,
     });
     return Array.from(records.values())
-      .map((value) => InteractionSchema.parse(value))
+      .map((value) => InteractionReferenceSchema.parse(value))
       .filter((record) => record.sessionId === sessionId);
+  }
+
+  async list(sessionId: string): Promise<Interaction[]> {
+    const records = await this.storage.list<unknown>({
+      prefix: PREFIX,
+      limit: 1000,
+    });
+    const result: Interaction[] = [];
+    let bytes = 0;
+    for (const [key, raw] of records) {
+      const metadata = InteractionSchema.parse(raw);
+      if (metadata.sessionId === sessionId) {
+        const record = await this.load(this.storage, key.slice(PREFIX.length));
+        if (record) {
+          bytes += new TextEncoder().encode(JSON.stringify(record)).byteLength;
+          if (bytes > 8 * 1024 * 1024)
+            throw new ActionInteractionError(
+              413,
+              'list_too_large',
+              'Use reference listing and read individual interactions',
+            );
+          result.push(record);
+        }
+      }
+    }
+    return result;
+  }
+
+  private async load(
+    storage: Pick<DurableObjectStorage, 'get'>,
+    id: string,
+  ): Promise<Interaction | undefined> {
+    const raw = await storage.get<unknown>(`${PREFIX}${id}`);
+    if (raw === undefined) return undefined;
+    const record = InteractionSchema.parse(raw);
+    const count = await storage.get<number>(`interaction-chunks:${id}`);
+    if (!count) return record;
+    const chunks: string[] = [];
+    for (let index = 0; index < count; index++) {
+      const chunk = await storage.get<string>(
+        `interaction-value:${id}:${index}`,
+      );
+      if (chunk === undefined)
+        throw new Error('Private interaction payload is incomplete');
+      chunks.push(chunk);
+    }
+    return InteractionSchema.parse({
+      ...record,
+      values: JSON.parse(chunks.join('')),
+    });
+  }
+
+  private async save(
+    storage: Pick<DurableObjectStorage, 'put'>,
+    record: Interaction,
+  ): Promise<void> {
+    const totalLimit =
+      record.owner.kind === 'approval' && record.owner.family === 'domain-write'
+        ? 2 * 1024 * 1024
+        : 96 * 1024;
+    if (
+      new TextEncoder().encode(JSON.stringify(record)).byteLength > totalLimit
+    )
+      throw new ActionInteractionError(
+        413,
+        'too_large',
+        'Interaction exceeds the owner record limit',
+      );
+    const payload = JSON.stringify(record.values);
+    if (
+      new TextEncoder().encode(JSON.stringify(record)).byteLength <=
+      96 * 1024
+    ) {
+      await storage.put(`${PREFIX}${record.id}`, record);
+      return;
+    }
+    // 24K UTF-16 units always encode below the 128KiB DO value ceiling.
+    const chunks = Math.ceil(payload.length / (24 * 1024));
+    for (let index = 0; index < chunks; index++)
+      await storage.put(
+        `interaction-value:${record.id}:${index}`,
+        payload.slice(index * 24 * 1024, (index + 1) * 24 * 1024),
+      );
+    await storage.put(`interaction-chunks:${record.id}`, chunks);
+    await storage.put(`${PREFIX}${record.id}`, { ...record, values: {} });
+  }
+
+  private checkSize(
+    values: Interaction['values'],
+    owner: Interaction['owner'],
+  ) {
+    const limit =
+      owner.kind === 'approval' && owner.family === 'domain-write'
+        ? 2 * 1024 * 1024 - 16 * 1024
+        : 64 * 1024;
+    if (new TextEncoder().encode(canonicalJson(values)).byteLength > limit)
+      throw new ActionInteractionError(
+        413,
+        'too_large',
+        'Draft values exceed the owner payload limit',
+      );
   }
 
   private async readFrom(
@@ -148,8 +293,7 @@ export class ActionInteractionStore {
     id: string,
     sessionId: string,
   ): Promise<Interaction> {
-    const raw = await storage.get<unknown>(`${PREFIX}${id}`);
-    const record = raw === undefined ? undefined : InteractionSchema.parse(raw);
+    const record = await this.load(storage, id);
     if (!record || record.sessionId !== sessionId)
       throw new ActionInteractionError(
         404,
@@ -203,11 +347,20 @@ export class ActionInteractionStore {
               'target_changed',
               'The owner contract changed; reopen through the Flow owner',
             );
+          if (
+            input.owner.kind === 'approval' &&
+            canonicalJson(existing.values) !== canonicalJson(input.values)
+          )
+            throw new ActionInteractionError(
+              409,
+              'request_conflict',
+              'Approval request identity already binds different values',
+            );
           await tx.put(requestKey, { fingerprint, id: existing.id });
           return { interaction: existing, replayed: true };
         }
         if (
-          input.owner.kind === 'flow-claim' &&
+          'accountDid' in input.owner &&
           input.owner.accountDid !== this.context.userDid
         )
           throw new ActionInteractionError(
@@ -215,11 +368,18 @@ export class ActionInteractionStore {
             'account_mismatch',
             'Claim account differs from authenticated user',
           );
-        if (canonicalJson(input.values).length > 64 * 1024)
+        this.checkSize(input.values, input.owner);
+        if (
+          input.owner.kind === 'approval' &&
+          (!input.values.request ||
+            typeof input.values.request !== 'object' ||
+            Array.isArray(input.values.request) ||
+            Object.keys(input.values).length !== 1)
+        )
           throw new ActionInteractionError(
-            413,
-            'too_large',
-            'Draft values exceed 64 KiB',
+            400,
+            'invalid_request',
+            'Approval values must contain exactly one request object',
           );
         record = InteractionSchema.parse({
           version: 1,
@@ -260,6 +420,12 @@ export class ActionInteractionStore {
             if (command.input.kind === 'cancel')
               record = { ...record, status: 'cancelled' };
             else {
+              if (record.owner.kind === 'approval')
+                throw new ActionInteractionError(
+                  409,
+                  'immutable_request',
+                  'Approval requests cannot be changed after preparation',
+                );
               const input = command.input;
               const patch = Object.fromEntries(
                 Object.entries(input.patch).filter(
@@ -275,12 +441,7 @@ export class ActionInteractionStore {
               );
               const merged = { ...record.values, ...patch };
               for (const name of removed) delete merged[name];
-              if (canonicalJson(merged).length > 64 * 1024)
-                throw new ActionInteractionError(
-                  413,
-                  'too_large',
-                  'Draft values exceed 64 KiB',
-                );
+              this.checkSize(merged, record.owner);
               record = {
                 ...record,
                 values: merged,
@@ -299,11 +460,19 @@ export class ActionInteractionStore {
             break;
           }
           case 'reserve': {
-            if (record.owner.kind !== 'flow-claim' || record.status !== 'draft')
+            if (
+              ![
+                'flow-claim',
+                'flow-claim-block',
+                'flow-bid',
+                'approval',
+              ].includes(record.owner.kind) ||
+              record.status !== 'draft'
+            )
               throw new ActionInteractionError(
                 409,
                 'not_dispatchable',
-                'Only an unreserved claim draft can be reserved',
+                'Only an unreserved executable draft can be reserved',
               );
             if (
               (await interactionValuesDigest(record.values)) !==
@@ -326,9 +495,32 @@ export class ActionInteractionStore {
           }
           case 'observe': {
             if (
+              record.receipt &&
+              command.input.receipt &&
+              !extendsReceipt(record.receipt, command.input.receipt)
+            )
+              throw new ActionInteractionError(
+                409,
+                'receipt_conflict',
+                'Receipt checkpoints cannot remove or change acknowledged effects',
+              );
+            if (
+              command.input.receipt &&
+              new TextEncoder().encode(canonicalJson(command.input.receipt))
+                .byteLength >
+                64 * 1024
+            )
+              throw new ActionInteractionError(
+                413,
+                'too_large',
+                'Receipt exceeds 64 KiB',
+              );
+            if (
               !record.reservation ||
               record.reservation.operationKey !== command.input.operationKey ||
-              !['reserved', 'outcome-unknown'].includes(record.status)
+              !['reserved', 'outcome-unknown', 'partial'].includes(
+                record.status,
+              )
             )
               throw new ActionInteractionError(
                 409,
@@ -337,10 +529,22 @@ export class ActionInteractionStore {
               );
             record =
               command.input.outcome === 'unknown'
-                ? { ...record, status: 'outcome-unknown' }
+                ? {
+                    ...record,
+                    status: 'outcome-unknown',
+                    ...(command.input.receipt
+                      ? { receipt: command.input.receipt }
+                      : {}),
+                  }
                 : {
                     ...record,
-                    status: 'observed',
+                    status:
+                      command.input.outcome === 'partial'
+                        ? 'partial'
+                        : 'observed',
+                    ...(command.input.receipt
+                      ? { receipt: command.input.receipt }
+                      : {}),
                     ownerExecutionRef: command.input.ownerExecutionRef,
                   };
             break;
@@ -352,7 +556,7 @@ export class ActionInteractionStore {
         interaction: record,
         replayed: false,
       };
-      await tx.put(`${PREFIX}${record.id}`, record);
+      await this.save(tx, record);
       await tx.put(requestKey, { fingerprint, id: record.id });
       return result;
     });

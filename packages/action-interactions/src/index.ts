@@ -15,8 +15,32 @@ const claimOwner = z.strictObject({
   network: text,
   accountDid: text,
 });
+const claimBlockOwner = claimOwner.extend({
+  kind: z.literal('flow-claim-block'),
+});
+const bidOwner = claimOwner.extend({
+  kind: z.literal('flow-bid'),
+  roleId: text,
+  groupId: text.optional(),
+});
+const approvalOwner = z.strictObject({
+  kind: z.literal('approval'),
+  family: z.enum(['plugin', 'domain-write', 'recipe-release']),
+  requestKey: text,
+  accountDid: text,
+});
+export const DispatchOwnerSchema = z.discriminatedUnion('kind', [
+  claimOwner,
+  claimBlockOwner,
+  bidOwner,
+  approvalOwner,
+]);
 export const InteractionOwnerSchema = z.discriminatedUnion('kind', [
   claimOwner,
+  claimBlockOwner,
+  bidOwner,
+  approvalOwner,
+  z.strictObject({ kind: z.literal('task'), taskId: text }),
   z.strictObject({ kind: z.literal('question'), requestId: text }),
   z.strictObject({ kind: z.literal('artifact'), artifactId: text }),
 ]);
@@ -60,12 +84,21 @@ export const ObserveInteractionSchema = z.discriminatedUnion('outcome', [
     ...mutation,
     operationKey: requestId,
     outcome: z.literal('unknown'),
+    receipt: values.optional(),
   }),
   z.strictObject({
     ...mutation,
     operationKey: requestId,
     outcome: z.literal('reported'),
     ownerExecutionRef: text,
+    receipt: values.optional(),
+  }),
+  z.strictObject({
+    ...mutation,
+    operationKey: requestId,
+    outcome: z.literal('partial'),
+    ownerExecutionRef: text,
+    receipt: values.optional(),
   }),
 ]);
 export const CheckClaimDispatchSchema = z
@@ -82,6 +115,21 @@ export const CheckClaimDispatchSchema = z
   .refine((input) => Boolean(input.cardRef) === Boolean(input.operationKey), {
     message: 'cardRef and operationKey must be supplied together',
   });
+export const CheckDispatchSchema = z
+  .strictObject({
+    version: z.literal(1),
+    owner: DispatchOwnerSchema,
+    cardRef: requestId.optional(),
+    operationKey: requestId.optional(),
+    valuesDigest: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+  })
+  .refine((input) => Boolean(input.cardRef) === Boolean(input.operationKey), {
+    message: 'cardRef and operationKey must be supplied together',
+  });
+export type CheckDispatch = z.infer<typeof CheckDispatchSchema>;
 export type CheckClaimDispatch = z.infer<typeof CheckClaimDispatchSchema>;
 export const ClaimDispatchResultSchema = z.strictObject({
   allowed: z.literal(true),
@@ -101,6 +149,7 @@ export const InteractionSchema = z.strictObject({
     'reserved',
     'outcome-unknown',
     'observed',
+    'partial',
     'cancelled',
   ]),
   createdAt: z.number().int(),
@@ -109,7 +158,14 @@ export const InteractionSchema = z.strictObject({
     .strictObject({ operationKey: requestId, valuesDigest: text })
     .optional(),
   ownerExecutionRef: text.optional(),
+  receipt: values.optional(),
 });
+export const InteractionReferenceSchema = InteractionSchema.omit({
+  values: true,
+  updatedByUser: true,
+  receipt: true,
+}).strip();
+export type InteractionReference = z.infer<typeof InteractionReferenceSchema>;
 export const InteractionResultSchema = z.strictObject({
   interaction: InteractionSchema,
   replayed: z.boolean(),
@@ -188,6 +244,18 @@ export function createActionInteractionsClient(options: {
     return body;
   }
   return {
+    readTask: async (taskId: string, sessionId: string) =>
+      z
+        .object({ task: values })
+        .parse(
+          await request(
+            `/tasks/${encodeURIComponent(taskId)}?sessionId=${encodeURIComponent(sessionId)}`,
+          ),
+        ),
+    checkDispatch: async (input: CheckDispatch) =>
+      ClaimDispatchResultSchema.parse(
+        await request('/dispatch', 'POST', CheckDispatchSchema.parse(input)),
+      ),
     checkClaimDispatch: async (input: CheckClaimDispatch) =>
       ClaimDispatchResultSchema.parse(
         await request(
@@ -196,6 +264,14 @@ export function createActionInteractionsClient(options: {
           CheckClaimDispatchSchema.parse(input),
         ),
       ),
+    listReferences: async (sessionId: string) =>
+      z
+        .array(InteractionReferenceSchema)
+        .parse(
+          await request(
+            `?sessionId=${encodeURIComponent(sessionId)}&view=references`,
+          ),
+        ),
     list: async (sessionId: string) =>
       z
         .array(InteractionSchema)

@@ -1,6 +1,8 @@
+import { taskCardSummary } from '../plugins/tasks/tasks-tools';
 import {
   ActionInteractionError,
   type CheckClaimDispatch,
+  type CheckDispatch,
 } from '@ixo/action-interactions';
 import {
   ActionInteractionStore,
@@ -2706,6 +2708,34 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       });
     }
 
+    async readActionInteractionTask(
+      identity: TurnIdentity,
+      sessionId: string,
+      taskId: string,
+    ) {
+      return interactionOutcome(async () => {
+        await this.interactionStore(identity, sessionId);
+        const task = await this.taskScheduler?.surface.get(taskId);
+        if (!task)
+          throw new ActionInteractionError(404, 'not_found', 'Task not found');
+        return JSON.stringify({ task: taskCardSummary(task) });
+      });
+    }
+
+    async checkDispatch(identity: TurnIdentity, input: CheckDispatch) {
+      return interactionOutcome(async () => {
+        await this.ready(identity);
+        if (this.userDid !== identity.userDid)
+          throw new ActionInteractionError(404, 'not_found', 'Owner not found');
+        return JSON.stringify(
+          await new ActionInteractionStore(this.ctx.storage, {
+            userDid: identity.userDid,
+            oracleDid: this.env.ORACLE_DID,
+          }).checkDispatch(input),
+        );
+      });
+    }
+
     async checkClaimDispatch(
       identity: TurnIdentity,
       input: CheckClaimDispatch,
@@ -2726,24 +2756,35 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       identity: TurnIdentity,
       command: InteractionCommand,
     ) {
-      return interactionOutcome(async () =>
-        JSON.stringify(
-          await (
-            await this.interactionStore(identity, command.input.sessionId)
-          ).command(command),
-        ),
-      );
+      return interactionOutcome(async () => {
+        const store = await this.interactionStore(
+          identity,
+          command.input.sessionId,
+        );
+        if (
+          command.kind === 'prepare' &&
+          command.input.owner.kind === 'task' &&
+          !(await this.taskScheduler?.surface.get(command.input.owner.taskId))
+        )
+          throw new ActionInteractionError(404, 'not_found', 'Task not found');
+        return JSON.stringify(await store.command(command));
+      });
     }
 
     async readActionInteraction(
       identity: TurnIdentity,
       sessionId: string,
       id?: string,
+      references = false,
     ) {
       return interactionOutcome(async () => {
         const store = await this.interactionStore(identity, sessionId);
         return JSON.stringify(
-          await (id ? store.read(id, sessionId) : store.list(sessionId)),
+          await (id
+            ? store.read(id, sessionId)
+            : references
+              ? store.listReferences(sessionId)
+              : store.list(sessionId)),
         );
       });
     }
