@@ -7,8 +7,8 @@
     "ACTION_TOPIC_PROPOSALS_ENABLED": false
   },
   "sources": {
-    "runtime": "16fe4e65f97d57c064e6615e18dfe4ea7527bf25",
-    "runtimeBase": "cd2f36730f59ec91aaa961fed98013b1b832239f",
+    "runtime": "a10db9cc41d4a151b35287c3c7cd6e2a0df3cc8f",
+    "runtimeBase": "bc4626f7319d6166f3dd483eba59a70e43314464",
     "upstreamMain": "be439432bf59cb757673b61cb59bd77e3160b12b",
     "portal": "ded28cdb48482872fd73a790292a8e27c0b46725",
     "gateway": "c7564b573cb4d220b335f11084894658e40af901",
@@ -84,9 +84,9 @@
     },
     "reviewFixes": {
       "date": "2026-10-21",
-      "transferBranchHead": "44f8c36509cc85319e1bb882f74886959749381f",
-      "topicBranchHead": "cd2f36730f59ec91aaa961fed98013b1b832239f",
-      "summary": "Review blockers fixed on the PR branches: memo-bound chain verification and one hash per card; owner-object card policy; whole-token evidence rules; guarded alarm with background re-verification, receipt backoff, quarantine and retention; boot validation of ACTION_PROPOSALS_*; topic execution window and permit re-issue; grant merges only under the existing expiry; concurrent grant refusal; 409 vs 503; authority-only fingerprints; parallel grant and history reads."
+      "transferBranchHead": "9432316d4327fc1d370034737b3889103fd66c22",
+      "topicBranchHead": "bc4626f7319d6166f3dd483eba59a70e43314464",
+      "summary": "Review blockers fixed on the PR branches: memo-bound chain verification and one hash per card; owner-object card policy; whole-token evidence rules; guarded alarm with background re-verification, receipt backoff, quarantine and retention; boot validation of ACTION_PROPOSALS_*; topic execution window and permit re-issue; grant merges only under the existing expiry; concurrent grant refusal; 409 vs 503; authority-only fingerprints; parallel grant and history reads. Third pass (topic adapters): the topic store is optional at boot and every owner-object use is guarded; the alarm and the channel poll spend the attempt before reading references and quarantine unreadable rows; every authority read is typed on leaving its budget (transport failures 503, rejected authority content 409 without schema dumps); a grant reference proved to be another transaction is set aside and replaceable, a memo-bound transaction with other messages blocks the card; step records and permits carry the identity-only executor."
     }
   },
   "providerEvidence": {
