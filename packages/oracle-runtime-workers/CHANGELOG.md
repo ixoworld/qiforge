@@ -1,5 +1,11 @@
 # @ixo/oracle-runtime-workers
 
+## 0.21.2
+
+### Patch Changes
+
+- [#375](https://github.com/ixoworld/qiforge/pull/375) [`f2f3bb8`](https://github.com/ixoworld/qiforge/commit/f2f3bb8063f5ff5b647ab757d8c5f5600ab31c31) Thanks [@ig-shaun](https://github.com/ig-shaun)! - Portal questions and approval requests (`ask_user_question`, `propose_domain_creation`, `write_domain_files`, `publish_recipe_release`) are non-repeatable writes for the per-turn repetition guard, so an identical pending human decision is issued once per turn instead of up to five times. Navigation and read browser tools stay repeatable.
+
 ## 0.21.1
 
 ### Patch Changes
