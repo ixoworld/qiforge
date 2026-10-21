@@ -681,7 +681,15 @@ export class TopicProposalStore {
   async blockExecution(owner: string, id: string, reason: string) {
     const blocked = await this.db.transaction(async () => {
       const p = await this.get(owner, id);
-      if (!p || p.lifecycle.executionBlockedAt) return false;
+      if (!p) return false;
+      // Verification stops either way: a revoked card (blocked already) must
+      // not keep reading the chain for an effect it cannot own, nor hold the
+      // grant lock for the rest of its window.
+      await this.db.run(
+        `UPDATE topic_action_proposals SET verify_attempts=? WHERE owner_did=? AND id=?`,
+        [VERIFY_MAX_ATTEMPTS, owner, id],
+      );
+      if (p.lifecycle.executionBlockedAt) return false;
       await this.writeLifecycle(
         owner,
         id,
@@ -689,10 +697,6 @@ export class TopicProposalStore {
           ...p.lifecycle,
           executionBlockedAt: new Date(this.now()).toISOString(),
         }),
-      );
-      await this.db.run(
-        `UPDATE topic_action_proposals SET verify_attempts=? WHERE owner_did=? AND id=?`,
-        [VERIFY_MAX_ATTEMPTS, owner, id],
       );
       return true;
     });

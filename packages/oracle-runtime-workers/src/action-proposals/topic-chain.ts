@@ -54,13 +54,17 @@ export class TopicChainReader {
       new TextDecoder().decode(await boundedBytes(res, 524288)),
     ) as unknown;
   }
+  // The node's envelopes are transport: an answer this reader does not
+  // understand is the node failing, not a fact about the chain.
   async checkChain() {
     const s = z
       .object({
         result: z.object({ node_info: z.object({ network: z.string() }) }),
       })
-      .parse(await this.request('status'));
-    if (s.result.node_info.network !== this.chainId)
+      .safeParse(await this.request('status'));
+    if (!s.success)
+      throw new TopicReadUnavailable('Chain authority unavailable');
+    if (s.data.result.node_info.network !== this.chainId)
       throw new TopicReadUnavailable('Chain authority mismatch');
   }
   private async query(path: string, data: Uint8Array) {
@@ -74,14 +78,17 @@ export class TopicChainReader {
           }),
         }),
       })
-      .parse(
+      .safeParse(
         await this.request(
           `abci_query?path=${encodeURIComponent(JSON.stringify(path))}&data=0x${hex(data)}&prove=false`,
         ),
-      ).result.response;
-    if (r.code)
+      );
+    if (!r.success)
+      throw new TopicReadUnavailable('Chain authority unavailable');
+    const response = r.data.result.response;
+    if (response.code)
       throw new TopicReadUnavailable('Authoritative chain query failed');
-    return decode64(r.value);
+    return decode64(response.value);
   }
   async collection(
     entityDid: string,

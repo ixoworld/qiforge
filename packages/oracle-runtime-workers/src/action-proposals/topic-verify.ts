@@ -10,6 +10,7 @@ import { assertCreatePlanUnchanged } from '@ixo/ixo-transaction/topic-create-pla
 import {
   TopicMatrixEventSchema,
   assertTopicRoomUnchanged,
+  readTopicEvent,
   type TopicMatrixReader,
 } from './topic-matrix';
 import { readTopicAuthority } from './topic-history';
@@ -134,8 +135,10 @@ export async function verifyTopicReference(
   }
   if (reference.kind !== 'matrix')
     throw new ActionProposalConflict('Expected a Matrix reference');
-  const event = TopicMatrixEventSchema.parse(
-    await ctx.reader.event(effect.roomId, reference.eventId),
+  const event = await readTopicEvent(
+    ctx.reader,
+    effect.roomId,
+    reference.eventId,
   );
   if (
     event.event_id !== reference.eventId ||

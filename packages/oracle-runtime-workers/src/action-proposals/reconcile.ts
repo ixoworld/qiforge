@@ -47,7 +47,7 @@ export async function refreshActionProposal(
   } catch (error) {
     // Indexing lag, an RPC outage and a byte mismatch all leave the card
     // `unknown`; the reason is for the operator, never for the user. A
-    // hash or memo mismatch proves the hash is not this card's, so a later
+    // memo mismatch proves the hash is not this card's, so a later
     // reconcile may replace it; a transaction with this card's memo and
     // other messages is the owner's card-bound effect gone wrong, so the
     // card is blocked with the hash listed.

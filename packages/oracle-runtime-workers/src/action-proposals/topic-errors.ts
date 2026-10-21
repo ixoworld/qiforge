@@ -1,3 +1,4 @@
+import { TopicProtocolError } from '@ixo/topic-protocol';
 import { ZodError } from 'zod';
 import { ActionProposalConflict } from './store';
 
@@ -39,6 +40,14 @@ export function typedTopicError(
     error instanceof TopicReadUnavailable
   )
     return error;
+  if (error instanceof TopicProtocolError) {
+    // A contract body or operation in the room that the topic protocol
+    // itself rejects: a fact about the authority, reported by its code.
+    console.warn(
+      `[topic-actions] authority content rejected by the topic protocol: ${error.code}`,
+    );
+    return new ActionProposalConflict('Topic authority content is malformed');
+  }
   if (error instanceof ZodError) {
     console.warn(
       `[topic-actions] authority content rejected: ${error.issues
