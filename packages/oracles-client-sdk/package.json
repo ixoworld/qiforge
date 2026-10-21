@@ -21,14 +21,19 @@
       "types": "./dist/live-agent/index.d.ts",
       "import": "./dist/live-agent/index.js",
       "require": "./dist/live-agent/index.cjs"
+    },
+    "./action-interactions": {
+      "types": "./dist/action-interactions/index.d.ts",
+      "import": "./dist/action-interactions/index.js",
+      "require": "./dist/action-interactions/index.cjs"
     }
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsup src/index.ts src/live-agent/index.ts --format cjs,esm --dts",
-    "dev": "tsup src/index.ts src/live-agent/index.ts --format cjs,esm --dts --watch",
+    "build": "tsup src/index.ts src/live-agent/index.ts src/action-interactions/index.ts --format cjs,esm --dts",
+    "dev": "tsup src/index.ts src/live-agent/index.ts src/action-interactions/index.ts --format cjs,esm --dts --watch",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist node_modules"
@@ -41,7 +46,8 @@
     "jose": "^6.1.0",
     "livekit-client": "^2.15.6",
     "socket.io-client": "^4.8.1",
-    "zod-to-json-schema": "^3.24.5"
+    "zod-to-json-schema": "^3.24.5",
+    "@ixo/action-interactions": "workspace:*"
   },
   "peerDependencies": {
     "react": ">=18.0.0",

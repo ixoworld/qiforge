@@ -1,3 +1,6 @@
+import { ActionInteractionError } from '@ixo/action-interactions';
+import { ZodError } from 'zod';
+import { parseInteractionCommand } from '../action-interactions/routes';
 import {
   authenticateChannel,
   assertActiveChannelBindingCached,
@@ -382,6 +385,15 @@ export function createShell(
       status: 'ok',
       timestamp: new Date().toISOString(),
       frontendTools: FRONTEND_BRIDGE,
+      ...(c.env.ACTION_INTERACTIONS_ENABLED === 'true'
+        ? {
+            actionInteractions: {
+              version: 1,
+              owners: ['flow-claim', 'question', 'artifact'],
+              operations: ['prepare', 'read', 'update', 'reserve', 'observe'],
+            },
+          }
+        : {}),
     }),
   );
   // A liveness probe: the gateway's in-memory flag, no storage read. The
@@ -542,6 +554,108 @@ export function createShell(
       );
     return next();
   });
+
+  // These routes own private proposals, never action execution. No route is a
+  // model tool; host reservation requires the authenticated signed invocation.
+  app.use('/action-interactions*', async (c, next) => {
+    if (c.env.ACTION_INTERACTIONS_ENABLED !== 'true')
+      return c.json(
+        { code: 'unavailable', message: 'Action interactions are disabled' },
+        404,
+      );
+    if (c.get('auth')?.via !== 'invocation')
+      return c.json(
+        {
+          code: 'invocation_required',
+          message: 'A signed invocation is required',
+        },
+        401,
+      );
+    return next();
+  });
+  app.use('/action-interactions*', bodyLimit({ maxSize: 96 * 1024 }));
+  app.on(
+    ['GET', 'POST', 'PATCH'],
+    [
+      '/action-interactions',
+      '/action-interactions/:id',
+      '/action-interactions/:id/:operation',
+    ],
+    async (c) => {
+      try {
+        const identity = identityOf(c.get('auth'), c.req.raw.headers);
+        const stub = userStub(c.env, identity.userDid);
+        if (c.req.method === 'GET') {
+          const sessionId = c.req.query('sessionId');
+          if (!sessionId)
+            return c.json(
+              { code: 'invalid_request', message: 'sessionId is required' },
+              400,
+            );
+          const result = await stub.readActionInteraction(
+            identity,
+            sessionId,
+            c.req.param('id'),
+          );
+          if (result.ok)
+            return new Response(result.value, {
+              headers: {
+                'content-type': 'application/json',
+                'cache-control': 'no-store',
+              },
+            });
+          return c.json(
+            { code: result.code, message: result.message },
+            result.status === 404 ? 404 : 409,
+          );
+        }
+        const command = await parseInteractionCommand(
+          c.req.raw,
+          c.req.param('id'),
+          c.req.param('operation'),
+        );
+        const result = await stub.actionInteraction(identity, command);
+        if (result.ok)
+          return new Response(result.value, {
+            headers: {
+              'content-type': 'application/json',
+              'cache-control': 'no-store',
+            },
+          });
+        const status =
+          result.status === 403
+            ? 403
+            : result.status === 404
+              ? 404
+              : result.status === 410
+                ? 410
+                : result.status === 413
+                  ? 413
+                  : 409;
+        return c.json({ code: result.code, message: result.message }, status);
+      } catch (error) {
+        if (error instanceof ZodError)
+          return c.json(
+            { code: 'invalid_request', message: 'Invalid interaction request' },
+            400,
+          );
+        if (error instanceof ActionInteractionError) {
+          const status =
+            error.status === 403
+              ? 403
+              : error.status === 404
+                ? 404
+                : error.status === 410
+                  ? 410
+                  : error.status === 413
+                    ? 413
+                    : 409;
+          return c.json({ code: error.code, message: error.message }, status);
+        }
+        throw error;
+      }
+    },
+  );
 
   // --- sessions ----------------------------------------------------------------
   app.post('/sessions', async (c) => {

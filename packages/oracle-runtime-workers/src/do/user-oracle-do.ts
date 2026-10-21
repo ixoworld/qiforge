@@ -1,3 +1,9 @@
+import { ActionInteractionError } from '@ixo/action-interactions';
+import {
+  ActionInteractionStore,
+  interactionOutcome,
+  type InteractionCommand,
+} from '../action-interactions/store';
 import { ChannelTurns } from '../channels/turns';
 import { assertChannelAttemptAllowed } from '../channels/auth';
 import {
@@ -2683,6 +2689,45 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     // ── RPC surface (contracts.ts UserOracleObject) ───────────────────────
+
+    private async interactionStore(identity: TurnIdentity, sessionId: string) {
+      await this.ready(identity);
+      if (
+        this.userDid !== identity.userDid ||
+        !(await this.sessions?.getSession(sessionId))
+      )
+        throw new ActionInteractionError(404, 'not_found', 'Session not found');
+      return new ActionInteractionStore(this.ctx.storage, {
+        oracleDid: this.env.ORACLE_DID,
+        userDid: identity.userDid,
+      });
+    }
+
+    async actionInteraction(
+      identity: TurnIdentity,
+      command: InteractionCommand,
+    ) {
+      return interactionOutcome(async () =>
+        JSON.stringify(
+          await (
+            await this.interactionStore(identity, command.input.sessionId)
+          ).command(command),
+        ),
+      );
+    }
+
+    async readActionInteraction(
+      identity: TurnIdentity,
+      sessionId: string,
+      id?: string,
+    ) {
+      return interactionOutcome(async () => {
+        const store = await this.interactionStore(identity, sessionId);
+        return JSON.stringify(
+          await (id ? store.read(id, sessionId) : store.list(sessionId)),
+        );
+      });
+    }
 
     async createSession(
       identity: TurnIdentity,

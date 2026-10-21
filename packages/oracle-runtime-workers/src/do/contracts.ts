@@ -1,4 +1,8 @@
 import type {
+  InteractionCommand,
+  InteractionOutcome,
+} from '../action-interactions/store';
+import type {
   TopicDeliverableCommand,
   TopicDeliverableResult,
 } from '../tasks/topic-deliverables';
@@ -47,6 +51,7 @@ import type { DomainContextProvenance } from '../core/domain-context';
 
 /** Bindings every oracle Worker must declare (see the example `wrangler.jsonc`). */
 export interface OracleWorkerEnv {
+  ACTION_INTERACTIONS_ENABLED?: string;
   TOPIC_DELIVERABLES_ENABLED?: string;
   USER_ORACLE: DurableObjectNamespace<UserOracleObject>;
   MATRIX_GATEWAY: DurableObjectNamespace<MatrixGatewayObject>;
@@ -688,6 +693,15 @@ export interface StorageStatus {
  * piped straight to the client.
  */
 export interface UserOracleObject extends Rpc.DurableObjectBranded {
+  actionInteraction(
+    identity: TurnIdentity,
+    command: InteractionCommand,
+  ): Promise<InteractionOutcome<string>>;
+  readActionInteraction(
+    identity: TurnIdentity,
+    sessionId: string,
+    id?: string,
+  ): Promise<InteractionOutcome<string>>;
   topicDeliverable(
     identity: TurnIdentity,
     operationId: string,

@@ -191,6 +191,19 @@ importers:
         specifier: 13.6.32
         version: 13.6.32
 
+  packages/action-interactions:
+    dependencies:
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/debug@4.1.13)(@types/node@26.2.0)(happy-dom@19.0.2)(jiti@2.7.0)(jsdom@25.0.1)(lightningcss@1.33.0)(terser@5.50.0)(tsx@4.22.4)(yaml@2.9.0)
+
   packages/common:
     dependencies:
       '@cosmjs/proto-signing':
@@ -661,6 +674,9 @@ importers:
       '@composio/langchain':
         specifier: 0.9.2
         version: 0.9.2(@composio/core@0.10.0(ws@8.18.2)(zod@4.4.3))(@langchain/core@1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2))
+      '@ixo/action-interactions':
+        specifier: workspace:*
+        version: link:../action-interactions
       '@ixo/common':
         specifier: workspace:*
         version: link:../common
@@ -915,6 +931,9 @@ importers:
 
   packages/oracles-client-sdk:
     dependencies:
+      '@ixo/action-interactions':
+        specifier: workspace:*
+        version: link:../action-interactions
       '@ixo/oracles-chain-client':
         specifier: workspace:*
         version: link:../oracles-chain-client
