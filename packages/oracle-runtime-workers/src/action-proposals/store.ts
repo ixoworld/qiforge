@@ -42,7 +42,7 @@ export const VERIFY_RETRY_MAX_MS = 10 * 60_000;
 export const VERIFY_MAX_ATTEMPTS = 10;
 /**
  * Receipt posts into the originating room: the same doubling cooldown, up to
- * an hour apart, abandoned after twelve attempts (roughly seven hours) so a
+ * an hour apart, abandoned after twelve attempts (about five hours) so a
  * room that refuses the oracle does not keep its owner object awake for ever.
  */
 export const RECEIPT_RETRY_BASE_MS = 30_000;
@@ -54,15 +54,38 @@ export const ACTION_PROPOSAL_RETENTION_MS = 90 * 24 * 60 * 60_000;
 const backoff = (base: number, max: number, attempts: number) =>
   Math.min(base * 2 ** attempts, max);
 
+/** The verifier's answers that prove a recorded hash is not this card's transaction. */
+export const TRANSACTION_REJECTIONS = new Set([
+  'Transaction memo mismatch',
+  'Transaction subject mismatch',
+  'Transaction hash mismatch',
+]);
+
 export class ActionProposalStore {
   constructor(
     private readonly db: DoSqliteDatabase,
-    private readonly now = Date.now,
+    readonly now = Date.now,
   ) {}
 
   async setup(): Promise<void> {
+    // The unreleased first shape of these tables (no status, hash or attempt
+    // columns) exists only where a pre-release build of this branch ran: a
+    // local harness, a wrangler state directory, a devnet test user. Nothing
+    // in them is worth a migration; the tables are rebuilt and the fact
+    // logged, so an object holding the old shape boots instead of failing
+    // every request on the index below.
+    const columns = await this.db.exec<{ name: string }>(
+      `PRAGMA table_info(action_proposals)`,
+    );
+    if (columns.length && !columns.some((c) => c.name === 'transaction_hash')) {
+      console.warn(
+        '[action-proposals] rebuilding pre-release action_proposals tables',
+      );
+      await this.db.run(`DROP TABLE IF EXISTS action_proposal_receipts`);
+      await this.db.run(`DROP TABLE IF EXISTS action_proposals`);
+    }
     await this.db.run(
-      `CREATE TABLE IF NOT EXISTS action_proposals (id TEXT PRIMARY KEY, owner_did TEXT NOT NULL, invocation_id TEXT NOT NULL, session_id TEXT NOT NULL, run_id TEXT NOT NULL, subject TEXT NOT NULL, digest TEXT NOT NULL, lifecycle TEXT NOT NULL, status TEXT NOT NULL, transaction_hash TEXT, verify_after INTEGER NOT NULL DEFAULT 0, verify_attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, UNIQUE(owner_did, invocation_id))`,
+      `CREATE TABLE IF NOT EXISTS action_proposals (id TEXT PRIMARY KEY, owner_did TEXT NOT NULL, invocation_id TEXT NOT NULL, session_id TEXT NOT NULL, run_id TEXT NOT NULL, subject TEXT NOT NULL, digest TEXT NOT NULL, lifecycle TEXT NOT NULL, status TEXT NOT NULL, transaction_hash TEXT, transaction_hash_rejected INTEGER NOT NULL DEFAULT 0, verify_after INTEGER NOT NULL DEFAULT 0, verify_attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, UNIQUE(owner_did, invocation_id))`,
     );
     // One signed transaction verifies one card: the memo already pins it,
     // the index refuses a second card recording the same hash.
@@ -234,7 +257,14 @@ export class ActionProposalStore {
           );
           continue;
         }
-        if (!proposal) continue;
+        if (!proposal) {
+          // A receipt whose card is gone would stay due for ever.
+          await this.db.run(
+            `UPDATE action_proposal_receipts SET state='quarantined' WHERE owner_did=? AND proposal_id=?`,
+            [ownerDid, row.proposal_id],
+          );
+          continue;
+        }
         const attempts = row.attempts + 1;
         await this.db.run(
           attempts >= RECEIPT_MAX_ATTEMPTS
@@ -302,10 +332,34 @@ export class ActionProposalStore {
     );
     const proposals: ActionProposal[] = [];
     for (const row of rows) {
-      const p = await this.get(ownerDid, row.id);
-      if (p) proposals.push(p);
+      try {
+        const p = await this.get(ownerDid, row.id);
+        if (p) proposals.push(p);
+      } catch (error) {
+        // A row this build cannot read must not fail the alarm every tick:
+        // its attempts are spent and it drops out of the schedule.
+        await this.db.run(
+          `UPDATE action_proposals SET verify_attempts=? WHERE owner_did=? AND id=?`,
+          [VERIFY_MAX_ATTEMPTS, ownerDid, row.id],
+        );
+        console.error(
+          `[action-proposals] verification of ${row.id} quarantined: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
     return proposals;
+  }
+  /**
+   * The verifier proved the recorded hash is another transaction (wrong
+   * memo, other messages, bytes that do not hash to it): the owner may
+   * record the right one with a later reconcile instead of the card staying
+   * `unknown` for ever.
+   */
+  async markTransactionRejected(ownerDid: string, id: string): Promise<void> {
+    await this.db.run(
+      `UPDATE action_proposals SET transaction_hash_rejected=1 WHERE owner_did=? AND id=? AND status='unknown'`,
+      [ownerDid, id],
+    );
   }
   /** When the alarm should next look a recorded transaction up, if ever. */
   async nextVerificationAt(ownerDid: string): Promise<number | undefined> {
@@ -430,15 +484,23 @@ export class ActionProposalStore {
           p.lifecycle.status !== 'unknown'
         )
           throw new ActionProposalConflict('Proposal was not claimed');
+        let replacing = false;
         if (
           p.lifecycle.status === 'unknown' &&
           p.lifecycle.transactionHash &&
           command.transactionHash &&
           p.lifecycle.transactionHash !== command.transactionHash.toUpperCase()
-        )
-          throw new ActionProposalConflict(
-            'Transaction reference already recorded',
+        ) {
+          const row = await this.db.get<{ transaction_hash_rejected: number }>(
+            `SELECT transaction_hash_rejected FROM action_proposals WHERE owner_did=? AND id=?`,
+            [ownerDid, id],
           );
+          if (!row?.transaction_hash_rejected)
+            throw new ActionProposalConflict(
+              'Transaction reference already recorded',
+            );
+          replacing = true;
+        }
         const hash =
           command.transactionHash ??
           (p.lifecycle.status === 'unknown'
@@ -449,6 +511,12 @@ export class ActionProposalStore {
           claimedAt: p.lifecycle.claimedAt,
           ...(hash ? { transactionHash: hash.toUpperCase() } : {}),
         };
+        if (replacing)
+          // A fresh hash gets a fresh verification schedule.
+          await this.db.run(
+            `UPDATE action_proposals SET transaction_hash_rejected=0,verify_after=0,verify_attempts=0 WHERE owner_did=? AND id=?`,
+            [ownerDid, id],
+          );
       } else {
         if (p.digest !== command.digest)
           throw new ActionProposalConflict('Confirmed values changed');

@@ -1760,8 +1760,18 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         oracleName: this.core.identity.name,
       });
       await this.saver.setup();
-      this.actionProposals = new ActionProposalStore(liveDb);
-      await this.actionProposals.setup();
+      // A card store this build cannot open must not take the user's whole
+      // object down: the feature is unavailable for this user, the rest works.
+      try {
+        const actionProposals = new ActionProposalStore(liveDb);
+        await actionProposals.setup();
+        this.actionProposals = actionProposals;
+      } catch (err) {
+        this.actionProposals = null;
+        console.error(
+          `[action-proposals] store unavailable for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
       this.sessions = new SessionsStore(liveDb);
       await this.sessions.setup();
       this.matrixLedger = new MatrixTurnLedger(liveDb);
@@ -3068,12 +3078,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const userDid = this.userDid;
       if (this.env.ACTION_PROPOSALS_ENABLED !== 'true' || !userDid)
         throw new Error('Action proposal preparation unavailable');
+      const store = this.requireActionProposals();
       // The owner object's own policy, whichever plugin prepared the card:
-      // this owner signs from their own account, off mainnet, on the chain
-      // configured for the network, within the expiry window.
+      // this owner signs from their own account, off mainnet, on a chain the
+      // Worker is configured for and can verify against, stamped now, within
+      // the expiry window.
       assertActionProposalPolicy(subject, {
         ownerDid: userDid,
         chainIds: chainIdsFromConfig(chainIdConfigSchema.parse(this.env)),
+        rpc: this.actionProposalRpcs(),
+        now: store.now(),
       });
       const record = await this.runStore!.get(subject.origin.runId);
       if (!record) throw new Error('Action proposal origin unavailable');
@@ -3084,8 +3098,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       )
         throw new Error('Action proposal origin mismatch');
       // A card names one person's wallet; a group room would show its link
-      // and its receipt to everyone in the room.
-      if (request.client === 'matrix' && request.roomKind === 'group')
+      // and its receipt to everyone in the room. The gateway marks every
+      // Matrix turn, so an unmarked one is refused rather than trusted.
+      if (request.client === 'matrix' && request.roomKind !== 'direct')
         throw new ActionProposalConflict(
           'Action cards are prepared in direct chats only',
         );
@@ -3108,9 +3123,28 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           ...(request.channel ? { channel: request.channel } : {}),
         };
       }
-      const proposal = await this.actionProposals!.create(subject, origin);
+      const proposal = await store.create(subject, origin);
       this.markDirty();
       return proposal;
+    }
+
+    /** The card store, or the one error every card route answers when boot could not open it. */
+    private requireActionProposals(): ActionProposalStore {
+      if (!this.actionProposals)
+        throw new Error('Action proposals are unavailable for this user');
+      return this.actionProposals;
+    }
+
+    /** The chain RPC per network, as configured. */
+    private actionProposalRpcs(): Record<
+      'devnet' | 'testnet' | 'mainnet',
+      string | undefined
+    > {
+      return {
+        devnet: this.env.ACTION_PROPOSALS_RPC_DEVNET,
+        testnet: this.env.ACTION_PROPOSALS_RPC_TESTNET,
+        mainnet: this.env.ACTION_PROPOSALS_RPC_MAINNET,
+      };
     }
 
     /**
@@ -3181,11 +3215,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     private actionProposalRpc(proposal: ActionProposal): string | undefined {
-      return {
-        devnet: this.env.ACTION_PROPOSALS_RPC_DEVNET,
-        testnet: this.env.ACTION_PROPOSALS_RPC_TESTNET,
-        mainnet: this.env.ACTION_PROPOSALS_RPC_MAINNET,
-      }[proposal.action.network];
+      return this.actionProposalRpcs()[proposal.action.network];
     }
     async actionProposal(
       identity: TurnIdentity,
@@ -3193,18 +3223,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       command?: ProposalCommand,
     ): Promise<string | null> {
       await this.ready(identity);
+      const store = this.requireActionProposals();
       try {
         let result = command
-          ? await this.actionProposals!.transition(
-              identity.userDid,
-              id,
-              command,
-            )
-          : await this.actionProposals!.get(identity.userDid, id);
+          ? await store.transition(identity.userDid, id, command)
+          : await store.get(identity.userDid, id);
         if (command && result) this.markDirty();
         if (command?.kind === 'reconcile' && result) {
           const refreshed = await refreshActionProposal(
-            this.actionProposals!,
+            store,
             result,
             this.actionProposalRpc(result),
           );
