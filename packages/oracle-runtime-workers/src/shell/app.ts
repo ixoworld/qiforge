@@ -1,4 +1,14 @@
 import {
+  ActionInteractionError,
+  CheckClaimDispatchSchema,
+} from '@ixo/action-interactions';
+import { ZodError } from 'zod';
+import {
+  interactionStatus,
+  parseInteractionCommand,
+  parseInteractionRead,
+} from '../action-interactions/routes';
+import {
   authenticateChannel,
   assertActiveChannelBindingCached,
   channelAuthConfig,
@@ -213,7 +223,14 @@ export function isDidShaped(value: string): boolean {
  */
 export function rateLimitKey(
   env: Pick<OracleWorkerEnv, 'ORACLE_DID'>,
-  scope: 'user' | 'channel' | 'artifact' | 'socket' | 'status' | 'start',
+  scope:
+    | 'user'
+    | 'card-read'
+    | 'channel'
+    | 'artifact'
+    | 'socket'
+    | 'status'
+    | 'start',
   subject: string,
 ): string {
   return `${env.ORACLE_DID}|${scope}|${subject}`;
@@ -382,6 +399,15 @@ export function createShell(
       status: 'ok',
       timestamp: new Date().toISOString(),
       frontendTools: FRONTEND_BRIDGE,
+      ...(c.env.ACTION_INTERACTIONS_ENABLED === 'true'
+        ? {
+            actionInteractions: {
+              version: 1,
+              owners: ['flow-claim', 'question', 'artifact'],
+              operations: ['prepare', 'read', 'update', 'reserve', 'observe'],
+            },
+          }
+        : {}),
     }),
   );
   // A liveness probe: the gateway's in-memory flag, no storage read. The
@@ -528,8 +554,15 @@ export function createShell(
     if (!limiter) return next();
     const auth = c.get('auth') as AuthResult | undefined;
     if (!auth) return next();
+    // Action-card reads are background polls of open cards: they get their
+    // own bucket, so cards on screen never use up the user's budget for
+    // chat turns and claim submissions.
+    const scope =
+      c.req.method === 'GET' && c.req.path.startsWith('/action-interactions')
+        ? 'card-read'
+        : 'user';
     const { success } = await limiter.limit({
-      key: rateLimitKey(c.env, 'user', auth.userDid),
+      key: rateLimitKey(c.env, scope, auth.userDid),
     });
     if (!success)
       return c.json(
@@ -542,6 +575,130 @@ export function createShell(
       );
     return next();
   });
+
+  // These routes own private proposals, never action execution. No route is a
+  // model tool; host reservation requires the authenticated signed invocation.
+  app.use('/action-interactions*', async (c, next) => {
+    if (
+      c.env.ACTION_INTERACTIONS_ENABLED !== 'true' &&
+      c.req.path !== '/action-interactions/claim-dispatch'
+    )
+      return c.json(
+        { code: 'unavailable', message: 'Action interactions are disabled' },
+        404,
+      );
+    if (c.get('auth')?.via !== 'invocation')
+      return c.json(
+        {
+          code: 'invocation_required',
+          message: 'A signed invocation is required',
+        },
+        401,
+      );
+    return next();
+  });
+  app.use(
+    '/action-interactions*',
+    bodyLimit({
+      maxSize: 96 * 1024,
+      onError: (c) =>
+        c.json({ code: 'too_large', message: 'Request is too large' }, 413),
+    }),
+  );
+  app.post('/action-interactions/claim-dispatch', async (c) => {
+    const parsed = CheckClaimDispatchSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success)
+      return c.json(
+        { code: 'invalid_request', message: 'Invalid claim dispatch binding' },
+        400,
+      );
+    const identity = identityOf(c.get('auth'), c.req.raw.headers);
+    const result = await userStub(c.env, identity.userDid).checkClaimDispatch(
+      identity,
+      parsed.data,
+    );
+    if (result.ok)
+      return new Response(result.value, {
+        headers: {
+          'content-type': 'application/json',
+          'cache-control': 'no-store',
+        },
+      });
+    return c.json(
+      { code: result.code, message: result.message },
+      result.status === 403 ? 403 : 409,
+    );
+  });
+  app.on(
+    ['GET', 'POST', 'PATCH'],
+    [
+      '/action-interactions',
+      '/action-interactions/:id',
+      '/action-interactions/:id/:operation',
+    ],
+    async (c) => {
+      try {
+        // Every request is parsed before a user object is addressed.
+        const identity = identityOf(c.get('auth'), c.req.raw.headers);
+        if (c.req.method === 'GET') {
+          const read = parseInteractionRead(
+            c.req.query('sessionId'),
+            c.req.param('id'),
+            c.req.param('operation'),
+          );
+          const result = await userStub(
+            c.env,
+            identity.userDid,
+          ).readActionInteraction(identity, read.sessionId, read.id);
+          if (result.ok)
+            return new Response(result.value, {
+              headers: {
+                'content-type': 'application/json',
+                'cache-control': 'no-store',
+              },
+            });
+          return c.json(
+            { code: result.code, message: result.message },
+            interactionStatus(result.status),
+          );
+        }
+        const command = await parseInteractionCommand(
+          c.req.raw,
+          c.req.param('id'),
+          c.req.param('operation'),
+        );
+        const result = await userStub(
+          c.env,
+          identity.userDid,
+        ).actionInteraction(identity, command);
+        if (result.ok)
+          return new Response(result.value, {
+            headers: {
+              'content-type': 'application/json',
+              'cache-control': 'no-store',
+            },
+          });
+        return c.json(
+          { code: result.code, message: result.message },
+          interactionStatus(result.status),
+        );
+      } catch (error) {
+        if (error instanceof ZodError)
+          return c.json(
+            { code: 'invalid_request', message: 'Invalid interaction request' },
+            400,
+          );
+        if (error instanceof ActionInteractionError)
+          return c.json(
+            { code: error.code, message: error.message },
+            interactionStatus(error.status),
+          );
+        throw error;
+      }
+    },
+  );
 
   // --- sessions ----------------------------------------------------------------
   app.post('/sessions', async (c) => {
