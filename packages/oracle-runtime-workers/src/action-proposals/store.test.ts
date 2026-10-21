@@ -33,6 +33,7 @@ function stub(name: string) {
     due: (owner: string) => s.due(owner),
     nextVerification: (owner: string) => s.nextVerification(owner),
     prune: (owner: string) => s.prune(owner),
+    legacyTable: () => s.legacyTable(),
     setNow: (now: number) => s.setNow(now),
     reopen: () => s.reopen(),
   };
@@ -197,6 +198,60 @@ describe('durable action proposals', () => {
     // has passed, however many attempts the alarm made.
     await s.setNow(now + 600_000);
     expect((await s.refresh(OWNER, p.id, tx.json))?.lifecycle.status).toBe(
+      'succeeded',
+    );
+  });
+  it('rebuilds the pre-release table shape instead of failing every request', async () => {
+    const s = stub('legacy-shape');
+    await s.legacyTable();
+    const p = await s.create(proposalSubject());
+    expect(await s.get(OWNER, p.id)).toEqual(p);
+    expect(
+      await s.get('did:ixo:legacy', 'ap_00000000-0000-4000-8000-00000000dead'),
+    ).toBeNull();
+    await s.reopen();
+    expect(await s.get(OWNER, p.id)).toEqual(p);
+  });
+  it('lets the owner replace a recorded hash the verifier proved is another transaction', async () => {
+    const s = stub('wrong-hash');
+    const p = await s.create(proposalSubject());
+    const other = await s.create(
+      proposalSubject({
+        origin: {
+          sessionId: 'session-1',
+          runId: 'run-2',
+          invocationId: 'run-2:call-1',
+        },
+      }),
+    );
+    // A real transaction, but signed for the OTHER card (its memo).
+    const wrong = await indexedTransaction(other);
+    const right = await indexedTransaction(p);
+    await s.transition(OWNER, p.id, { kind: 'claim', digest: p.digest });
+    await s.transition(OWNER, p.id, {
+      kind: 'reconcile',
+      transactionHash: wrong.hash,
+    });
+    // Before the verifier has spoken, the recorded hash is final.
+    await expect(
+      s.transition(OWNER, p.id, {
+        kind: 'reconcile',
+        transactionHash: right.hash,
+      }),
+    ).rejects.toThrow('already recorded');
+    expect((await s.refresh(OWNER, p.id, wrong.json))?.lifecycle.status).toBe(
+      'unknown',
+    );
+    // Memo mismatch proved it is not this card's: the right hash may replace it.
+    const replaced = await s.transition(OWNER, p.id, {
+      kind: 'reconcile',
+      transactionHash: right.hash,
+    });
+    expect(replaced?.lifecycle).toMatchObject({
+      status: 'unknown',
+      transactionHash: right.hash,
+    });
+    expect((await s.refresh(OWNER, p.id, right.json))?.lifecycle.status).toBe(
       'succeeded',
     );
   });

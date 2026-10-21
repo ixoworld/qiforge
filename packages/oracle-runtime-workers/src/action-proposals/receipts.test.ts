@@ -13,7 +13,7 @@ import { RunStore } from '../do/run-store';
 import { storedRunRequest } from '../do/run-request';
 import { createUserOracleDO } from '../do/user-oracle-do';
 import { DoSqliteDatabase } from '../sqlite/database';
-import { NOW, OWNER, proposalSubject } from './fixtures/proposal';
+import { NOW, OWNER, RECIPIENT, proposalSubject } from './fixtures/proposal';
 import { ActionProposalStore } from './store';
 
 async function call<T>(
@@ -60,7 +60,10 @@ async function harness(state: DurableObjectState) {
     Object.assign(host, {
       ctx: state,
       userDid: OWNER,
-      env: { ACTION_PROPOSALS_ENABLED: 'true' },
+      env: {
+        ACTION_PROPOSALS_ENABLED: 'true',
+        ACTION_PROPOSALS_RPC_TESTNET: 'https://rpc.test',
+      },
       runStore,
       actionProposals: store,
       topicProposals: topicStore,
@@ -78,6 +81,7 @@ async function harness(state: DurableObjectState) {
   return {
     host,
     topics: () => topicStore,
+    store: () => store,
     send,
     async prepare(
       index: number,
@@ -234,22 +238,73 @@ describe('durable canonical action receipts', () => {
           channel: undefined,
         }),
       ).rejects.toThrow('direct chats only');
+      // An unmarked Matrix turn is not trusted to be a direct chat either.
       await expect(
-        call(h.host, 'prepareActionProposal', {
-          ...proposalSubject({
-            origin: {
-              sessionId: '$thread-2',
-              runId: 'run-2',
-              invocationId: 'run-2:call',
-            },
-          }),
-          action: {
-            ...proposalSubject().action,
-            network: 'mainnet',
-            chainId: 'ixo-5',
-          },
+        h.prepare(2, '$unmarked-thread', {
+          client: 'matrix',
+          channel: undefined,
         }),
-      ).rejects.toThrow('Mainnet action proposals are disabled');
+      ).rejects.toThrow('direct chats only');
+      const origin = (n: number) => ({
+        sessionId: `$thread-${n}`,
+        runId: `run-${n}`,
+        invocationId: `run-${n}:call`,
+      });
+      const base = proposalSubject();
+      const refused = async (subject: unknown, message: string) =>
+        expect(call(h.host, 'prepareActionProposal', subject)).rejects.toThrow(
+          message,
+        );
+      await refused(
+        {
+          ...proposalSubject({ origin: origin(3) }),
+          ownerDid: 'did:ixo:other',
+        },
+        'owner mismatch',
+      );
+      await refused(
+        {
+          ...proposalSubject({ origin: origin(4) }),
+          action: { ...base.action, network: 'mainnet', chainId: 'ixo-5' },
+        },
+        'Mainnet action proposals are disabled',
+      );
+      await refused(
+        {
+          ...proposalSubject({ origin: origin(5) }),
+          action: { ...base.action, signerAddress: RECIPIENT },
+        },
+        'signer must be the authenticated account',
+      );
+      await refused(
+        {
+          ...proposalSubject({ origin: origin(6) }),
+          action: { ...base.action, chainId: 'pandora-9' },
+        },
+        'Chain ID does not match',
+      );
+      await refused(
+        {
+          ...proposalSubject({ origin: origin(7) }),
+          action: { ...base.action, network: 'devnet', chainId: 'devnet-1' },
+        },
+        'No chain endpoint is configured for devnet',
+      );
+      await refused(
+        {
+          ...proposalSubject({ origin: origin(8) }),
+          expiresAt: new Date(NOW + 60 * 60_000).toISOString(),
+        },
+        'expiry exceeds the policy window',
+      );
+      await refused(
+        {
+          ...proposalSubject({ origin: origin(9) }),
+          createdAt: new Date(NOW - 60 * 60_000).toISOString(),
+          expiresAt: new Date(NOW - 45 * 60_000).toISOString(),
+        },
+        'timestamp is not current',
+      );
       expect(h.send).not.toHaveBeenCalled();
     });
   });
@@ -298,6 +353,60 @@ describe('durable canonical action receipts', () => {
         error: 'Topic authority is unavailable',
       });
       expect(h.send).not.toHaveBeenCalled();
+    });
+  });
+
+  it('backs off a card whose network lost its RPC instead of ticking every second', async () => {
+    await withReceipts('receipt-no-rpc', async (h) => {
+      const proposal = await h.prepare(1);
+      await h.store().transition(OWNER, proposal.id, {
+        kind: 'claim',
+        digest: proposal.digest,
+      });
+      await h.store().transition(OWNER, proposal.id, {
+        kind: 'reconcile',
+        transactionHash: 'D'.repeat(64),
+      });
+      Object.assign(h.host, { env: { ACTION_PROPOSALS_ENABLED: 'true' } });
+      let now = NOW;
+      const waits: number[] = [];
+      for (let i = 0; i < 12; i++) {
+        h.setNow(now);
+        const next = await call<number | undefined>(
+          h.host,
+          'tickActionProposals',
+        );
+        if (next === undefined) break;
+        expect(next).toBeGreaterThanOrEqual(now + 30_000);
+        waits.push(next - now);
+        now = next;
+      }
+      // Ten attempts spent: nine waits between them, then nothing scheduled.
+      expect(waits).toHaveLength(9);
+      expect(waits[0]).toBe(30_000);
+      expect(waits.at(-1)).toBe(600_000);
+      expect(await call(h.host, 'tickActionProposals')).toBeUndefined();
+      // A row this build cannot read drops out of the schedule too. (The
+      // clock goes back: a card stamped an hour ago is refused as stale.)
+      h.setNow(NOW);
+      Object.assign(h.host, {
+        env: {
+          ACTION_PROPOSALS_ENABLED: 'true',
+          ACTION_PROPOSALS_RPC_TESTNET: 'https://rpc.test',
+        },
+      });
+      const second = await h.prepare(2);
+      await h.store().transition(OWNER, second.id, {
+        kind: 'claim',
+        digest: second.digest,
+      });
+      await h.store().transition(OWNER, second.id, {
+        kind: 'reconcile',
+        transactionHash: 'E'.repeat(64),
+      });
+      await h.corruptSubject(second.id);
+      expect(await h.store().dueVerifications(OWNER)).toEqual([]);
+      expect(await call(h.host, 'tickActionProposals')).toBeUndefined();
     });
   });
 

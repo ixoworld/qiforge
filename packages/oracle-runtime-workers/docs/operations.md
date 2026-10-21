@@ -1567,8 +1567,10 @@ prepared in direct chats only`, chain id or signer mismatch) show the
 - **Retention**: finished cards older than 90 days are deleted at the next
   tick; a `/a/<id>` link then answers 404.
 - The alarm tick is guarded: an action-card failure logs
-  `[user-do] action proposal tick failed …` and re-arms in a minute without
-  touching runs, flush, tasks or eviction.
+  `[user-do] action proposal tick failed …` and re-arms in a minute; runs,
+  flush and tasks still run in the same tick. A row the build cannot read is
+  quarantined the first time it is met, so one bad row does not repeat the
+  failure every minute.
 - **Topic cards** (`ACTION_TOPIC_PROPOSALS_ENABLED`): a claim or step
   request answers `409` when the card or the authority it was sealed on
   changed, and `503 Topic authority is unavailable` when a room, DID or
