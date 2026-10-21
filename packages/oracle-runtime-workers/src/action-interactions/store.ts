@@ -9,6 +9,7 @@ import {
   type UpdateInteraction,
   type ReserveInteraction,
   type ObserveInteraction,
+  type CheckClaimDispatch,
 } from '@ixo/action-interactions';
 
 const PREFIX = 'interaction:';
@@ -39,6 +40,34 @@ export async function interactionOutcome<T>(
   }
 }
 
+async function ownerStorageKey(
+  owner: Interaction['owner'],
+  sessionId: string,
+): Promise<string> {
+  const binding =
+    owner.kind === 'flow-claim'
+      ? {
+          kind: owner.kind,
+          flowId: owner.flowId,
+          runId: owner.runId,
+          stepId: owner.stepId,
+          accountDid: owner.accountDid,
+          network: owner.network,
+        }
+      : owner;
+  const hash = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(
+      canonicalJson(
+        owner.kind === 'flow-claim'
+          ? { owner: binding }
+          : { sessionId, owner: binding },
+      ),
+    ),
+  );
+  return `interaction-owner:${Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+}
+
 /** Personal drafts only. Execution and verified receipts remain owned by Flow. */
 export class ActionInteractionStore {
   constructor(
@@ -46,6 +75,59 @@ export class ActionInteractionStore {
     private readonly context: { oracleDid: string; userDid: string },
     private readonly now: () => number = Date.now,
   ) {}
+
+  /** A dispatch precondition, never an authorization grant or an executor. */
+  async checkClaimDispatch(
+    input: CheckClaimDispatch,
+  ): Promise<{ allowed: true; managed: boolean }> {
+    if (input.owner.accountDid !== this.context.userDid)
+      throw new ActionInteractionError(
+        403,
+        'account_mismatch',
+        'Claim account differs from authenticated user',
+      );
+    const ownerKey = await ownerStorageKey(input.owner, '');
+    return this.storage.transaction(async (tx) => {
+      const id = await tx.get<string>(ownerKey);
+      if (!id) {
+        if (input.cardRef || input.operationKey)
+          throw new ActionInteractionError(
+            409,
+            'review_required',
+            'No matching managed draft exists for this owner',
+          );
+        return { allowed: true, managed: false };
+      }
+      const raw = await tx.get<unknown>(`${PREFIX}${id}`);
+      const record =
+        raw === undefined ? undefined : InteractionSchema.parse(raw);
+      if (
+        !record ||
+        canonicalJson(record.owner) !== canonicalJson(input.owner) ||
+        record.status !== 'reserved' ||
+        record.expiresAt <= this.now() ||
+        record.id !== input.cardRef ||
+        !input.operationKey ||
+        record.reservation?.operationKey !== input.operationKey ||
+        !input.valuesDigest ||
+        record.reservation.valuesDigest !== input.valuesDigest
+      )
+        throw new ActionInteractionError(
+          409,
+          'review_required',
+          'This claim step has a managed draft; reopen and review its current operation',
+        );
+      const consumedKey = `interaction-dispatch:${input.operationKey}`;
+      if (await tx.get<boolean>(consumedKey))
+        throw new ActionInteractionError(
+          409,
+          'dispatch_consumed',
+          'The reserved operation was already dispatched; reconcile its outcome',
+        );
+      await tx.put(consumedKey, true);
+      return { allowed: true, managed: true };
+    });
+  }
 
   async read(id: string, sessionId: string): Promise<Interaction> {
     return this.readFrom(this.storage, id, sessionId);
@@ -111,29 +193,7 @@ export class ActionInteractionStore {
       let record: Interaction;
       if (command.kind === 'prepare') {
         const input = command.input;
-        // A Flow step has one draft and one reservation across cards and tabs.
-        const ownerBinding =
-          input.owner.kind === 'flow-claim'
-            ? {
-                kind: input.owner.kind,
-                flowId: input.owner.flowId,
-                runId: input.owner.runId,
-                stepId: input.owner.stepId,
-                accountDid: input.owner.accountDid,
-                network: input.owner.network,
-              }
-            : input.owner;
-        const ownerHash = await crypto.subtle.digest(
-          'SHA-256',
-          new TextEncoder().encode(
-            canonicalJson(
-              input.owner.kind === 'flow-claim'
-                ? { owner: ownerBinding }
-                : { sessionId: input.sessionId, owner: ownerBinding },
-            ),
-          ),
-        );
-        const ownerKey = `interaction-owner:${Array.from(new Uint8Array(ownerHash), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+        const ownerKey = await ownerStorageKey(input.owner, input.sessionId);
         const existingId = await tx.get<string>(ownerKey);
         if (existingId) {
           const existing = await this.readFrom(tx, existingId, input.sessionId);
@@ -208,7 +268,13 @@ export class ActionInteractionStore {
                     !record.updatedByUser.includes(key),
                 ),
               );
+              const removed = (input.remove ?? []).filter(
+                (name) =>
+                  input.source === 'user' ||
+                  !record.updatedByUser.includes(name),
+              );
               const merged = { ...record.values, ...patch };
+              for (const name of removed) delete merged[name];
               if (canonicalJson(merged).length > 64 * 1024)
                 throw new ActionInteractionError(
                   413,
@@ -224,6 +290,7 @@ export class ActionInteractionStore {
                         new Set([
                           ...record.updatedByUser,
                           ...Object.keys(patch),
+                          ...removed,
                         ]),
                       )
                     : record.updatedByUser,

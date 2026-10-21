@@ -1,4 +1,7 @@
-import { ActionInteractionError } from '@ixo/action-interactions';
+import {
+  ActionInteractionError,
+  type CheckClaimDispatch,
+} from '@ixo/action-interactions';
 import {
   ActionInteractionStore,
   interactionOutcome,
@@ -2700,6 +2703,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return new ActionInteractionStore(this.ctx.storage, {
         oracleDid: this.env.ORACLE_DID,
         userDid: identity.userDid,
+      });
+    }
+
+    async checkClaimDispatch(
+      identity: TurnIdentity,
+      input: CheckClaimDispatch,
+    ) {
+      return interactionOutcome(async () => {
+        await this.ready(identity);
+        if (this.userDid !== identity.userDid)
+          throw new ActionInteractionError(404, 'not_found', 'Owner not found');
+        const store = new ActionInteractionStore(this.ctx.storage, {
+          userDid: identity.userDid,
+          oracleDid: this.env.ORACLE_DID,
+        });
+        return JSON.stringify(await store.checkClaimDispatch(input));
       });
     }
 

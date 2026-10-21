@@ -2,6 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { ActionInteractionStore } from './store';
 import {
   ActionInteractionError,
+  CheckClaimDispatchSchema,
   PrepareInteractionSchema,
   UpdateInteractionSchema,
   ReserveInteractionSchema,
@@ -56,6 +57,20 @@ export class ActionInteractionsTestDO extends DurableObject {
       return JSON.stringify({
         ok: true,
         result: await this.store(userDid).read(id, sessionId),
+      });
+    } catch (error) {
+      if (error instanceof ActionInteractionError)
+        return JSON.stringify({ ok: false, code: error.code });
+      throw error;
+    }
+  }
+  async dispatch(userDid: string, inputJson: string) {
+    try {
+      return JSON.stringify({
+        ok: true,
+        result: await this.store(userDid).checkClaimDispatch(
+          CheckClaimDispatchSchema.parse(JSON.parse(inputJson)),
+        ),
       });
     } catch (error) {
       if (error instanceof ActionInteractionError)

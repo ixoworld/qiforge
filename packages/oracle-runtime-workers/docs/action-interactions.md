@@ -26,7 +26,7 @@ fails. A replay returns the current interaction and `replayed: true`. All edits
 and reservations use compare-and-swap revisions inside real DO transactions.
 Preparing the same immutable owner in its original session returns the existing draft; claim owner keys also prevent independent reservations from another session. Changed collection or schema bindings fail closed.
 opening another card cannot obtain an independent dispatch reservation.
-Agent updates preserve fields edited by the user. Host integrations must set
+Updates may include `remove: string[]` for fields cleared by SurveyJS. A removed field must be unique and absent from `patch`. User removals are remembered in `updatedByUser`, so later agent pre-fill cannot restore a deliberately cleared value. Agent updates and removals preserve fields edited by the user. Host integrations must set
 `source: user` for genuine user edits and `source: agent` for model pre-fill.
 
 The server validates structural JSON and immutable owner context. The live Flow
@@ -34,7 +34,20 @@ adapter must validate its actual SurveyJS schema and authorization before it
 reserves or dispatches. The personal store is not a collection authorization
 service. Claim owner fields are binding information, not proof of access.
 
-Only the host exposes reserve/observe; never register either as an agent tool.
+The app-wide existing claim executor calls `client.checkClaimDispatch` before each
+claim side effect, including forms reopened outside Companion. It supplies the
+actual Flow owner and the digest of executable answers. An owner with no personal
+draft may continue its existing manual path. A managed owner requires its exact
+`cardRef`, reserved `operationKey`, reviewed `valuesDigest`, live schema/collection,
+and an unexpired `reserved` record. The operation key is atomically consumed once;
+a second tab, replay, unknown outcome, or reopened unkeyed manual form fails
+closed. The dispatch check stays authenticated and active when new draft
+preparation is disabled, so disabling the feature cannot bypass existing records.
+This check is only a duplicate-effect precondition; the existing executor must
+still check authorization and signing. It must be installed in the app-wide
+claim handler, not only in the transient card UI.
+
+Only the host exposes reserve/observe/claim-dispatch; never register either as an agent tool.
 A fresh reservation is metadata, not consent or permission to execute. Dispatch
 only when `replayed === false`, after checking the current account, network,
 session, owner, schema digest, revision and reviewed values against the existing

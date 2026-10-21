@@ -1,3 +1,4 @@
+import type { CheckClaimDispatch } from '@ixo/action-interactions';
 import type {
   InteractionCommand,
   InteractionOutcome,
@@ -693,6 +694,10 @@ export interface StorageStatus {
  * piped straight to the client.
  */
 export interface UserOracleObject extends Rpc.DurableObjectBranded {
+  checkClaimDispatch(
+    identity: TurnIdentity,
+    input: CheckClaimDispatch,
+  ): Promise<InteractionOutcome<string>>;
   actionInteraction(
     identity: TurnIdentity,
     command: InteractionCommand,

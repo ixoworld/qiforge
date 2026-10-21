@@ -3,6 +3,7 @@ import {
   canonicalJson,
   interactionValuesDigest,
   PrepareInteractionSchema,
+  UpdateInteractionSchema,
   createActionInteractionsClient,
 } from './index.js';
 
@@ -34,6 +35,31 @@ describe('portable interaction contract', () => {
       { ...input, owner: { ...input.owner, handler: 'function' } },
     ])
       expect(PrepareInteractionSchema.safeParse(invalid).success).toBe(false);
+  });
+  it('supports explicit removals and rejects ambiguous or repeated field mutations', () => {
+    const update = {
+      version: 1,
+      requestId: crypto.randomUUID(),
+      sessionId: '$session',
+      expectedRevision: 1,
+      kind: 'update',
+      source: 'user',
+      patch: {},
+      remove: ['answer'],
+    };
+    expect(UpdateInteractionSchema.safeParse(update).success).toBe(true);
+    expect(
+      UpdateInteractionSchema.safeParse({
+        ...update,
+        patch: { answer: 'both' },
+      }).success,
+    ).toBe(false);
+    expect(
+      UpdateInteractionSchema.safeParse({
+        ...update,
+        remove: ['answer', 'answer'],
+      }).success,
+    ).toBe(false);
   });
   it('encodes session context and forwards current authentication', async () => {
     const requests: { url: string; auth: string | null }[] = [];

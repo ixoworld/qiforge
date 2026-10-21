@@ -22,13 +22,24 @@ function fixture(enabled = 'true') {
     code: 'stale_revision',
     message: 'changed',
   }));
+  const checkClaimDispatch = vi.fn(async () => ({
+    ok: false,
+    status: 409,
+    code: 'review_required',
+    message: 'Managed draft exists',
+  }));
   const readActionInteraction = vi.fn(async () => ({ ok: true, value: '[]' }));
   const idFromName = vi.fn((name: string) => name);
-  const get = vi.fn(() => ({ actionInteraction, readActionInteraction }));
+  const get = vi.fn(() => ({
+    actionInteraction,
+    readActionInteraction,
+    checkClaimDispatch,
+  }));
   return {
     app: createShell(),
     actionInteraction,
     readActionInteraction,
+    checkClaimDispatch,
     idFromName,
     get,
     bindings: {
@@ -86,6 +97,39 @@ describe('interaction HTTP authority and structural boundary', () => {
     expect(f.get).not.toHaveBeenCalled();
     expect(disabled.get).not.toHaveBeenCalled();
   });
+  it('keeps the host duplicate guard active when preparation is disabled', async () => {
+    const f = fixture('false');
+    const response = await f.app.request(
+      '/action-interactions/claim-dispatch',
+      {
+        method: 'POST',
+        headers: await authHeaders(),
+        body: JSON.stringify({
+          version: 1,
+          owner: {
+            kind: 'flow-claim',
+            accountDid: user.did,
+            flowId: 'flow',
+            runId: 'run',
+            stepId: 'step',
+            collectionId: 'collection',
+            schemaDigest: 'schema',
+            network: 'testnet',
+          },
+        }),
+      },
+      f.bindings,
+    );
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: 'review_required' });
+    expect(f.checkClaimDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ userDid: user.did }),
+      expect.objectContaining({
+        owner: expect.objectContaining({ runId: 'run' }),
+      }),
+    );
+  });
+
   it('selects the signed user and refuses extra identity/execution fields before RPC mutation', async () => {
     const f = fixture();
     const headers = await authHeaders();

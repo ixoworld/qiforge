@@ -148,6 +148,84 @@ describe('private interaction drafts on Workers', () => {
     expect(updated.values).toEqual({ name: 'human', age: 13 });
   });
 
+  it('persists user-cleared fields and preserves deletions against later agent pre-fill', async () => {
+    const stub = env.ACTION_INTERACTIONS_TEST.getByName('clear-answer');
+    const initial = unwrap(
+      await command(stub, alice, { kind: 'prepare', input: prepare() }),
+    ).interaction;
+    const clear = {
+      version: 1,
+      requestId: crypto.randomUUID(),
+      sessionId: initial.sessionId,
+      expectedRevision: 1,
+      kind: 'update',
+      source: 'user',
+      patch: {},
+      remove: ['name'],
+    } satisfies UpdateInteraction;
+    const cleared = unwrap(
+      await command(stub, alice, {
+        kind: 'update',
+        id: initial.id,
+        input: clear,
+      }),
+    ).interaction;
+    expect(cleared.values).toEqual({ age: 12 });
+    expect(cleared.updatedByUser).toContain('name');
+    expect(
+      unwrap(await read(stub, alice, initial.id, initial.sessionId)).values,
+    ).toEqual({ age: 12 });
+    expect(
+      await command(stub, alice, {
+        kind: 'update',
+        id: initial.id,
+        input: { ...clear, requestId: crypto.randomUUID() },
+      }),
+    ).toMatchObject({ code: 'stale_revision' });
+    const suggested = unwrap(
+      await command(stub, alice, {
+        kind: 'update',
+        id: initial.id,
+        input: {
+          ...clear,
+          requestId: crypto.randomUUID(),
+          expectedRevision: 2,
+          source: 'agent',
+          patch: { name: 'restored by agent' },
+          remove: ['age'],
+        },
+      }),
+    ).interaction;
+    expect(suggested.values).toEqual({});
+    const protectedClear = unwrap(
+      await command(stub, alice, {
+        kind: 'update',
+        id: initial.id,
+        input: {
+          ...clear,
+          requestId: crypto.randomUUID(),
+          expectedRevision: 3,
+          source: 'user',
+          patch: { name: 'user restored' },
+          remove: [],
+        },
+      }),
+    ).interaction;
+    const agentRemove = unwrap(
+      await command(stub, alice, {
+        kind: 'update',
+        id: initial.id,
+        input: {
+          ...clear,
+          requestId: crypto.randomUUID(),
+          expectedRevision: 4,
+          source: 'agent',
+        },
+      }),
+    ).interaction;
+    expect(agentRemove.values).toEqual(protectedClear.values);
+  });
+
   it('replays request IDs, reserves once across two clients and never reopens unknown outcomes', async () => {
     const stub = env.ACTION_INTERACTIONS_TEST.getByName('reservation');
     const input = prepare();
@@ -250,6 +328,88 @@ describe('private interaction drafts on Workers', () => {
     ).interaction;
     expect(observed.status).toBe('observed');
     expect(observed).not.toHaveProperty('verified');
+  });
+
+  it('checks every host dispatch across sessions and consumes a reserved operation once', async () => {
+    const stub = env.ACTION_INTERACTIONS_TEST.getByName(
+      'dispatch-precondition',
+    );
+    const input = prepare();
+    if (input.owner.kind !== 'flow-claim')
+      throw new Error('Expected claim owner');
+    const check = { version: 1, owner: input.owner };
+    const dispatch = async (value: unknown) =>
+      JSON.parse(await stub.dispatch(alice, JSON.stringify(value)));
+    expect(await dispatch(check)).toEqual({
+      ok: true,
+      result: { allowed: true, managed: false },
+    });
+    const draft = unwrap(
+      await command(stub, alice, { kind: 'prepare', input }),
+    ).interaction;
+    expect(await dispatch(check)).toMatchObject({
+      ok: false,
+      code: 'review_required',
+    });
+    const reserved = unwrap(
+      await command(stub, alice, {
+        kind: 'reserve',
+        id: draft.id,
+        input: {
+          version: 1,
+          requestId: crypto.randomUUID(),
+          sessionId: input.sessionId,
+          expectedRevision: 1,
+          valuesDigest: await interactionValuesDigest(draft.values),
+        },
+      }),
+    ).interaction;
+    if (!reserved.reservation) throw new Error('Missing reservation');
+    const bound = {
+      ...check,
+      cardRef: reserved.id,
+      operationKey: reserved.reservation.operationKey,
+      valuesDigest: reserved.reservation.valuesDigest,
+    };
+    expect(
+      await dispatch({ ...bound, valuesDigest: '0'.repeat(64) }),
+    ).toMatchObject({ code: 'review_required' });
+    const attempts = await Promise.all([dispatch(bound), dispatch(bound)]);
+    expect(attempts.filter((result) => result.ok)).toHaveLength(1);
+    expect(attempts.filter((result) => !result.ok)).toMatchObject([
+      { code: 'dispatch_consumed' },
+    ]);
+    expect(
+      await dispatch({
+        ...bound,
+        owner: { ...input.owner, schemaDigest: 'changed-schema' },
+      }),
+    ).toMatchObject({ code: 'review_required' });
+    await command(stub, alice, {
+      kind: 'observe',
+      id: reserved.id,
+      input: {
+        version: 1,
+        requestId: crypto.randomUUID(),
+        sessionId: input.sessionId,
+        expectedRevision: reserved.revision,
+        operationKey: reserved.reservation.operationKey,
+        outcome: 'unknown',
+      },
+    });
+    // Neither a new Companion session nor a normal manually reopened form has a bypass key.
+    expect(await dispatch(check)).toMatchObject({ code: 'review_required' });
+    expect(await dispatch(bound)).toMatchObject({ code: 'review_required' });
+    expect(
+      await command(stub, alice, {
+        kind: 'prepare',
+        input: {
+          ...input,
+          requestId: crypto.randomUUID(),
+          sessionId: '$new-session',
+        },
+      }),
+    ).toMatchObject({ code: 'not_found' });
   });
 
   it('refuses expired and cancelled drafts', async () => {

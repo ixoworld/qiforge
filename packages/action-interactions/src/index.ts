@@ -28,12 +28,27 @@ export const PrepareInteractionSchema = z.strictObject({
 });
 const mutation = { ...context, expectedRevision: z.number().int().positive() };
 export const UpdateInteractionSchema = z.discriminatedUnion('kind', [
-  z.strictObject({
-    ...mutation,
-    kind: z.literal('update'),
-    patch: values,
-    source: z.enum(['agent', 'user']),
-  }),
+  z
+    .strictObject({
+      ...mutation,
+      kind: z.literal('update'),
+      patch: values,
+      remove: z.array(z.string().min(1).max(256)).max(256).optional(),
+      source: z.enum(['agent', 'user']),
+    })
+    .refine(
+      (input) => {
+        const removed = input.remove ?? [];
+        return (
+          new Set(removed).size === removed.length &&
+          removed.every((name) => !Object.hasOwn(input.patch, name))
+        );
+      },
+      {
+        message:
+          'Removed fields must be unique and cannot also appear in the patch',
+      },
+    ),
   z.strictObject({ ...mutation, kind: z.literal('cancel') }),
 ]);
 export const ReserveInteractionSchema = z.strictObject({
@@ -53,6 +68,25 @@ export const ObserveInteractionSchema = z.discriminatedUnion('outcome', [
     ownerExecutionRef: text,
   }),
 ]);
+export const CheckClaimDispatchSchema = z
+  .strictObject({
+    version: z.literal(1),
+    owner: claimOwner,
+    cardRef: requestId.optional(),
+    operationKey: requestId.optional(),
+    valuesDigest: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+  })
+  .refine((input) => Boolean(input.cardRef) === Boolean(input.operationKey), {
+    message: 'cardRef and operationKey must be supplied together',
+  });
+export type CheckClaimDispatch = z.infer<typeof CheckClaimDispatchSchema>;
+export const ClaimDispatchResultSchema = z.strictObject({
+  allowed: z.literal(true),
+  managed: z.boolean(),
+});
 export const InteractionSchema = z.strictObject({
   version: z.literal(1),
   id: requestId,
@@ -154,6 +188,14 @@ export function createActionInteractionsClient(options: {
     return body;
   }
   return {
+    checkClaimDispatch: async (input: CheckClaimDispatch) =>
+      ClaimDispatchResultSchema.parse(
+        await request(
+          '/claim-dispatch',
+          'POST',
+          CheckClaimDispatchSchema.parse(input),
+        ),
+      ),
     list: async (sessionId: string) =>
       z
         .array(InteractionSchema)

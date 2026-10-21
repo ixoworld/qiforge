@@ -1,4 +1,7 @@
-import { ActionInteractionError } from '@ixo/action-interactions';
+import {
+  ActionInteractionError,
+  CheckClaimDispatchSchema,
+} from '@ixo/action-interactions';
 import { ZodError } from 'zod';
 import { parseInteractionCommand } from '../action-interactions/routes';
 import {
@@ -558,7 +561,10 @@ export function createShell(
   // These routes own private proposals, never action execution. No route is a
   // model tool; host reservation requires the authenticated signed invocation.
   app.use('/action-interactions*', async (c, next) => {
-    if (c.env.ACTION_INTERACTIONS_ENABLED !== 'true')
+    if (
+      c.env.ACTION_INTERACTIONS_ENABLED !== 'true' &&
+      c.req.path !== '/action-interactions/claim-dispatch'
+    )
       return c.json(
         { code: 'unavailable', message: 'Action interactions are disabled' },
         404,
@@ -574,6 +580,32 @@ export function createShell(
     return next();
   });
   app.use('/action-interactions*', bodyLimit({ maxSize: 96 * 1024 }));
+  app.post('/action-interactions/claim-dispatch', async (c) => {
+    const parsed = CheckClaimDispatchSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success)
+      return c.json(
+        { code: 'invalid_request', message: 'Invalid claim dispatch binding' },
+        400,
+      );
+    const identity = identityOf(c.get('auth'), c.req.raw.headers);
+    const result = await userStub(c.env, identity.userDid).checkClaimDispatch(
+      identity,
+      parsed.data,
+    );
+    if (result.ok)
+      return new Response(result.value, {
+        headers: {
+          'content-type': 'application/json',
+          'cache-control': 'no-store',
+        },
+      });
+    return c.json(
+      { code: result.code, message: result.message },
+      result.status === 403 ? 403 : 409,
+    );
+  });
   app.on(
     ['GET', 'POST', 'PATCH'],
     [
