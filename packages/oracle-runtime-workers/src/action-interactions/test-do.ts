@@ -81,6 +81,12 @@ export class ActionInteractionsTestDO extends DurableObject {
   async list(userDid: string, sessionId: string) {
     return JSON.stringify(await this.store(userDid).list(sessionId));
   }
+  async forget(userDid: string, sessionId: string) {
+    let total = 0;
+    for (let n = 1; n > 0; total += n)
+      n = await this.store(userDid).forgetSession(sessionId);
+    return total;
+  }
   async prune(userDid: string) {
     return this.store(userDid).prune();
   }

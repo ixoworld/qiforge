@@ -5,7 +5,11 @@ const requestId = z.string().uuid();
 const jsonValue = z.json();
 export type JsonValue = z.infer<typeof jsonValue>;
 const values = z.record(z.string().max(256), jsonValue);
-const claimOwner = z.strictObject({
+// Requests are strict: a field this version does not know is refused.
+// Stored records and responses are read with the same shapes but strip
+// unknown fields, so a record written by a newer runtime (or read by an
+// older client) still parses instead of failing a claim submission.
+const claimOwnerShape = {
   kind: z.literal('flow-claim'),
   flowId: text,
   runId: text,
@@ -14,11 +18,17 @@ const claimOwner = z.strictObject({
   schemaDigest: text,
   network: text,
   accountDid: text,
-});
+};
+const claimOwner = z.strictObject(claimOwnerShape);
 export const InteractionOwnerSchema = z.discriminatedUnion('kind', [
   claimOwner,
   z.strictObject({ kind: z.literal('question'), requestId: text }),
   z.strictObject({ kind: z.literal('artifact'), artifactId: text }),
+]);
+const storedOwner = z.discriminatedUnion('kind', [
+  z.object(claimOwnerShape),
+  z.object({ kind: z.literal('question'), requestId: text }),
+  z.object({ kind: z.literal('artifact'), artifactId: text }),
 ]);
 const context = { version: z.literal(1), requestId, sessionId: text };
 export const PrepareInteractionSchema = z.strictObject({
@@ -61,6 +71,16 @@ export const ObserveInteractionSchema = z.discriminatedUnion('outcome', [
     operationKey: requestId,
     outcome: z.literal('unknown'),
   }),
+  /**
+   * The executor refused before anything was sent (a declined signature,
+   * an input or eligibility refusal). Only for a reservation that is still
+   * `reserved`: it ends the card and releases the step for another attempt.
+   */
+  z.strictObject({
+    ...mutation,
+    operationKey: requestId,
+    outcome: z.literal('not-submitted'),
+  }),
   z.strictObject({
     ...mutation,
     operationKey: requestId,
@@ -83,17 +103,17 @@ export const CheckClaimDispatchSchema = z
     message: 'cardRef and operationKey must be supplied together',
   });
 export type CheckClaimDispatch = z.infer<typeof CheckClaimDispatchSchema>;
-export const ClaimDispatchResultSchema = z.strictObject({
+export const ClaimDispatchResultSchema = z.object({
   allowed: z.literal(true),
   managed: z.boolean(),
 });
-export const InteractionSchema = z.strictObject({
+export const InteractionSchema = z.object({
   version: z.literal(1),
   id: requestId,
   revision: z.number().int().positive(),
   sessionId: text,
   oracleDid: text,
-  owner: InteractionOwnerSchema,
+  owner: storedOwner,
   values,
   updatedByUser: z.array(z.string()),
   status: z.enum([
@@ -106,19 +126,20 @@ export const InteractionSchema = z.strictObject({
   createdAt: z.number().int(),
   expiresAt: z.number().int(),
   reservation: z
-    .strictObject({ operationKey: requestId, valuesDigest: text })
+    .object({ operationKey: requestId, valuesDigest: text })
     .optional(),
   ownerExecutionRef: text.optional(),
   /**
    * Why a `cancelled` draft ended: `user` when a person or the agent
-   * cancelled it, `superseded` when the same claim step was submitted from
+   * cancelled it; `superseded` when the same claim step was submitted from
    * the ordinary form (or a newer card replaced a stale one) before this
-   * draft's operation ever reached the executor. Absent on records written
-   * before the field existed.
+   * draft's operation reached the executor; `not-submitted` when the host
+   * reported that the executor refused before sending anything. Absent on
+   * records written before the field existed.
    */
-  cancelReason: z.enum(['user', 'superseded']).optional(),
+  cancelReason: z.enum(['user', 'superseded', 'not-submitted']).optional(),
 });
-export const InteractionResultSchema = z.strictObject({
+export const InteractionResultSchema = z.object({
   interaction: InteractionSchema,
   replayed: z.boolean(),
 });
@@ -182,7 +203,8 @@ export function createActionInteractionsClient(options: {
         ...(input !== undefined ? { body: JSON.stringify(input) } : {}),
       },
     );
-    const body: unknown = await response.json();
+    // A body limit, gateway or platform error page may not be JSON.
+    const body: unknown = await response.json().catch(() => null);
     if (!response.ok) {
       const error = z
         .object({ code: z.string(), message: z.string() })
@@ -204,10 +226,15 @@ export function createActionInteractionsClient(options: {
           CheckClaimDispatchSchema.parse(input),
         ),
       ),
+    /** One unreadable record is left out instead of failing the whole list. */
     list: async (sessionId: string) =>
       z
-        .array(InteractionSchema)
-        .parse(await request(`?sessionId=${encodeURIComponent(sessionId)}`)),
+        .array(z.unknown())
+        .parse(await request(`?sessionId=${encodeURIComponent(sessionId)}`))
+        .flatMap((item) => {
+          const record = InteractionSchema.safeParse(item);
+          return record.success ? [record.data] : [];
+        }),
     read: async (id: string, sessionId: string) =>
       InteractionSchema.parse(
         await request(

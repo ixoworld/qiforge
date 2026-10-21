@@ -3,7 +3,11 @@ import {
   CheckClaimDispatchSchema,
 } from '@ixo/action-interactions';
 import { ZodError } from 'zod';
-import { parseInteractionCommand } from '../action-interactions/routes';
+import {
+  interactionStatus,
+  parseInteractionCommand,
+  parseInteractionRead,
+} from '../action-interactions/routes';
 import {
   authenticateChannel,
   assertActiveChannelBindingCached,
@@ -219,7 +223,14 @@ export function isDidShaped(value: string): boolean {
  */
 export function rateLimitKey(
   env: Pick<OracleWorkerEnv, 'ORACLE_DID'>,
-  scope: 'user' | 'channel' | 'artifact' | 'socket' | 'status' | 'start',
+  scope:
+    | 'user'
+    | 'card-read'
+    | 'channel'
+    | 'artifact'
+    | 'socket'
+    | 'status'
+    | 'start',
   subject: string,
 ): string {
   return `${env.ORACLE_DID}|${scope}|${subject}`;
@@ -543,8 +554,15 @@ export function createShell(
     if (!limiter) return next();
     const auth = c.get('auth') as AuthResult | undefined;
     if (!auth) return next();
+    // Action-card reads are background polls of open cards: they get their
+    // own bucket, so cards on screen never use up the user's budget for
+    // chat turns and claim submissions.
+    const scope =
+      c.req.method === 'GET' && c.req.path.startsWith('/action-interactions')
+        ? 'card-read'
+        : 'user';
     const { success } = await limiter.limit({
-      key: rateLimitKey(c.env, 'user', auth.userDid),
+      key: rateLimitKey(c.env, scope, auth.userDid),
     });
     if (!success)
       return c.json(
@@ -579,7 +597,14 @@ export function createShell(
       );
     return next();
   });
-  app.use('/action-interactions*', bodyLimit({ maxSize: 96 * 1024 }));
+  app.use(
+    '/action-interactions*',
+    bodyLimit({
+      maxSize: 96 * 1024,
+      onError: (c) =>
+        c.json({ code: 'too_large', message: 'Request is too large' }, 413),
+    }),
+  );
   app.post('/action-interactions/claim-dispatch', async (c) => {
     const parsed = CheckClaimDispatchSchema.safeParse(
       await c.req.json().catch(() => null),
@@ -615,20 +640,18 @@ export function createShell(
     ],
     async (c) => {
       try {
+        // Every request is parsed before a user object is addressed.
         const identity = identityOf(c.get('auth'), c.req.raw.headers);
-        const stub = userStub(c.env, identity.userDid);
         if (c.req.method === 'GET') {
-          const sessionId = c.req.query('sessionId');
-          if (!sessionId)
-            return c.json(
-              { code: 'invalid_request', message: 'sessionId is required' },
-              400,
-            );
-          const result = await stub.readActionInteraction(
-            identity,
-            sessionId,
+          const read = parseInteractionRead(
+            c.req.query('sessionId'),
             c.req.param('id'),
+            c.req.param('operation'),
           );
+          const result = await userStub(
+            c.env,
+            identity.userDid,
+          ).readActionInteraction(identity, read.sessionId, read.id);
           if (result.ok)
             return new Response(result.value, {
               headers: {
@@ -638,7 +661,7 @@ export function createShell(
             });
           return c.json(
             { code: result.code, message: result.message },
-            result.status === 404 ? 404 : 409,
+            interactionStatus(result.status),
           );
         }
         const command = await parseInteractionCommand(
@@ -646,7 +669,10 @@ export function createShell(
           c.req.param('id'),
           c.req.param('operation'),
         );
-        const result = await stub.actionInteraction(identity, command);
+        const result = await userStub(
+          c.env,
+          identity.userDid,
+        ).actionInteraction(identity, command);
         if (result.ok)
           return new Response(result.value, {
             headers: {
@@ -654,36 +680,21 @@ export function createShell(
               'cache-control': 'no-store',
             },
           });
-        const status =
-          result.status === 403
-            ? 403
-            : result.status === 404
-              ? 404
-              : result.status === 410
-                ? 410
-                : result.status === 413
-                  ? 413
-                  : 409;
-        return c.json({ code: result.code, message: result.message }, status);
+        return c.json(
+          { code: result.code, message: result.message },
+          interactionStatus(result.status),
+        );
       } catch (error) {
         if (error instanceof ZodError)
           return c.json(
             { code: 'invalid_request', message: 'Invalid interaction request' },
             400,
           );
-        if (error instanceof ActionInteractionError) {
-          const status =
-            error.status === 403
-              ? 403
-              : error.status === 404
-                ? 404
-                : error.status === 410
-                  ? 410
-                  : error.status === 413
-                    ? 413
-                    : 409;
-          return c.json({ code: error.code, message: error.message }, status);
-        }
+        if (error instanceof ActionInteractionError)
+          return c.json(
+            { code: error.code, message: error.message },
+            interactionStatus(error.status),
+          );
         throw error;
       }
     },

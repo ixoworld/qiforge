@@ -2489,6 +2489,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         }
       }
 
+      // Action-card drafts past retention: one bounded batch per tick, so a
+      // user who stopped preparing cards still loses expired draft values.
+      // Its follow-up is no reason to keep an idle copy either.
+      if (this.userDid) {
+        try {
+          await new ActionInteractionStore(this.ctx.storage, {
+            oracleDid: this.env.ORACLE_DID,
+            userDid: this.userDid,
+          }).prune();
+        } catch (err) {
+          console.warn(
+            `[action-interactions] retention tick failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+
       // Idle housekeeping: a user silent for five days loses the cached
       // pages — their file is safe upstream, and we stop paying to store a
       // copy. Never evict while tasks are scheduled: their runs ARE
@@ -2711,8 +2727,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       input: CheckClaimDispatch,
     ) {
       return interactionOutcome(async () => {
-        await this.ready(identity);
-        if (this.userDid !== identity.userDid)
+        // Every Portal claim calls this, Companion user or not, so it must
+        // not boot the object (gateway, signer, SQLite, owner-copy import):
+        // it only reads and writes a few keys. The object is addressed by
+        // the caller's DID; the stored binding is checked without a boot.
+        const bound =
+          this.userDid ?? (await this.ctx.storage.get<string>(META_USER_DID));
+        if (bound && bound !== identity.userDid)
           throw new ActionInteractionError(404, 'not_found', 'Owner not found');
         const store = new ActionInteractionStore(this.ctx.storage, {
           userDid: identity.userDid,
@@ -2720,6 +2741,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         });
         return JSON.stringify(await store.checkClaimDispatch(input));
       });
+    }
+
+    /** Drafts of a deleted chat, in bounded batches. */
+    private async forgetInteractions(userDid: string, sessionId: string) {
+      const store = new ActionInteractionStore(this.ctx.storage, {
+        oracleDid: this.env.ORACLE_DID,
+        userDid,
+      });
+      while ((await store.forgetSession(sessionId)) > 0);
     }
 
     async actionInteraction(
@@ -3042,6 +3072,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           });
         await this.ctx.storage.delete(contextStatsKey(sessionId));
         await this.feedbackMarkers!.forgetSession(sessionId);
+        // The chat's action-card drafts go with it; a dispatched claim keeps
+        // only the tombstones that stop a duplicate.
+        await this.forgetInteractions(identity.userDid, sessionId).catch(
+          (err: unknown) => {
+            console.warn(
+              `[action-interactions] could not delete the drafts of ${sessionId}; retention removes them later: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          },
+        );
         this.markDirty();
       }
       // A channel binding that pointed at the session opens a new one on

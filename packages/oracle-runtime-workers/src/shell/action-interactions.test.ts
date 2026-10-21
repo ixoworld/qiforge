@@ -169,7 +169,7 @@ describe('interaction HTTP authority and structural boundary', () => {
   it('preserves serialized CAS errors across the Durable Object boundary', async () => {
     const f = fixture();
     const response = await f.app.request(
-      '/action-interactions/id',
+      `/action-interactions/${crypto.randomUUID()}`,
       {
         method: 'PATCH',
         headers: await authHeaders(),
@@ -188,5 +188,78 @@ describe('interaction HTTP authority and structural boundary', () => {
       code: 'stale_revision',
       message: 'changed',
     });
+  });
+  it('serves only the documented route shapes and answers limits in JSON', async () => {
+    const f = fixture();
+    const headers = await authHeaders();
+    const id = crypto.randomUUID();
+    const status = async (path: string, init: RequestInit = {}) =>
+      (await f.app.request(path, { headers, ...init }, f.bindings)).status;
+    // A path id that is not a UUID, an unknown operation, a PATCH without an
+    // id, a GET with an operation and a bare POST to an id are not routes.
+    expect(await status('/action-interactions/not-a-uuid?sessionId=$s')).toBe(
+      404,
+    );
+    expect(
+      await status(`/action-interactions/${id}/cancel`, {
+        method: 'POST',
+        body: '{}',
+      }),
+    ).toBe(404);
+    expect(
+      await status('/action-interactions', { method: 'PATCH', body: '{}' }),
+    ).toBe(404);
+    expect(
+      await status(`/action-interactions/${id}/reserve?sessionId=$s`),
+    ).toBe(404);
+    expect(
+      await status(`/action-interactions/${id}`, {
+        method: 'POST',
+        body: '{}',
+      }),
+    ).toBe(404);
+    expect(
+      await status(`/action-interactions?sessionId=${'x'.repeat(513)}`),
+    ).toBe(400);
+    expect(f.get).not.toHaveBeenCalled();
+    const tooLarge = await f.app.request(
+      '/action-interactions',
+      { method: 'POST', headers, body: 'x'.repeat(97 * 1024) },
+      f.bindings,
+    );
+    expect(tooLarge.status).toBe(413);
+    expect(await tooLarge.json()).toEqual({
+      code: 'too_large',
+      message: 'Request is too large',
+    });
+  });
+
+  it('meters card reads in their own bucket, separate from turns and submissions', async () => {
+    const f = fixture();
+    const keys: string[] = [];
+    const bindings = {
+      ...f.bindings,
+      RATE_LIMIT: {
+        limit: vi.fn(async ({ key }: { key: string }) => {
+          keys.push(key);
+          return { success: true };
+        }),
+      },
+    };
+    const headers = await authHeaders();
+    await f.app.request(
+      '/action-interactions?sessionId=$s',
+      { headers },
+      bindings,
+    );
+    await f.app.request(
+      '/action-interactions/claim-dispatch',
+      { method: 'POST', headers, body: '{}' },
+      bindings,
+    );
+    expect(keys).toEqual([
+      `${oracle.did}|card-read|${user.did}`,
+      `${oracle.did}|user|${user.did}`,
+    ]);
   });
 });

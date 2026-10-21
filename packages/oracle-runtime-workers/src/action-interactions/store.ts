@@ -11,6 +11,7 @@ import {
   type ObserveInteraction,
   type CheckClaimDispatch,
 } from '@ixo/action-interactions';
+/* eslint-disable no-console -- console IS the logger on Workers (Logs/observability). */
 
 const PREFIX = 'interaction:';
 const REQUEST_PREFIX = 'interaction-request:';
@@ -20,7 +21,19 @@ const REQUESTS_OF_PREFIX = 'interaction-requests-of:';
 const SESSION_PREFIX = 'interaction-session:';
 /** `<expiresAt>:<id>` → id: retention reads only what is due. */
 const EXPIRY_PREFIX = 'interaction-expiry:';
+/** `<operationKey>` → `true` once dispatched, `'released'` when the host reported nothing was sent. */
 const DISPATCH_PREFIX = 'interaction-dispatch:';
+/** `<id>` → the last few `{requestId, fingerprint}` of update/reserve/observe on that record. */
+const RECENT_PREFIX = 'interaction-recent:';
+/** `<owner key hash>` → when the ordinary form last passed the dispatch check for that claim step. */
+const MANUAL_PREFIX = 'interaction-manual:';
+/**
+ * Replays of edits only need the newest requests: an older retry fails the
+ * revision compare-and-swap instead, which never applies an edit twice.
+ */
+const RECENT_LIMIT = 16;
+/** Values plus the user-edit list of one record, in UTF-8 bytes. */
+const MAX_RECORD_BYTES = 64 * 1024;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TTL_MS = 7 * DAY_MS;
 /** How long an expired record stays readable before retention removes its values. */
@@ -51,6 +64,25 @@ async function sessionIndexKey(record: Interaction): Promise<string> {
 }
 const expiryIndexKey = (record: Interaction) =>
   `${EXPIRY_PREFIX}${sortable(record.expiresAt)}:${record.id}`;
+const utf8Bytes = (text: string) => new TextEncoder().encode(text).byteLength;
+function assertRecordSize(
+  values: Interaction['values'],
+  updatedByUser: string[],
+) {
+  if (
+    utf8Bytes(canonicalJson(values)) +
+      utf8Bytes(JSON.stringify(updatedByUser)) >
+    MAX_RECORD_BYTES
+  )
+    throw new ActionInteractionError(
+      413,
+      'too_large',
+      'Draft values exceed 64 KiB',
+    );
+}
+type RecentRequest = { requestId: string; fingerprint: string };
+const manualMarkerKey = (ownerKey: string) =>
+  `${MANUAL_PREFIX}${ownerKey.slice(ownerKey.indexOf(':') + 1)}`;
 async function deleteKeys(storage: Storage, keys: string[]) {
   for (let i = 0; i < keys.length; i += STORAGE_BATCH)
     await storage.delete(keys.slice(i, i + STORAGE_BATCH));
@@ -137,38 +169,45 @@ export class ActionInteractionStore {
         'Claim account differs from authenticated user',
       );
     const ownerKey = await ownerStorageKey(input.owner, '');
+    const manualKey = manualMarkerKey(ownerKey);
     return this.storage.transaction(async (tx) => {
       const id = await tx.get<string>(ownerKey);
-      if (!id) {
-        if (input.cardRef || input.operationKey)
-          throw new ActionInteractionError(
-            409,
-            'review_required',
-            'No matching managed draft exists for this owner',
-          );
-        return { allowed: true, managed: false };
-      }
-      const record = await this.recordFrom(tx, id);
+      const record = id ? await this.recordFrom(tx, id) : undefined;
       if (!input.cardRef) {
         // The ordinary form. It only has to wait for a Companion operation
         // that may already have reached the executor; any other draft for
         // this step is superseded, so its own dispatch check can no longer
-        // pass and the step is never locked by an abandoned card.
-        if (!record)
+        // pass and the step is never locked by an abandoned card. The
+        // marker stops a card prepared later from filing the same claim.
+        if (id && !record)
           throw new ActionInteractionError(
             409,
             'review_required',
             'This claim step has an unreadable Companion draft',
           );
-        if ((await this.ownerState(tx, record)) === 'blocked')
+        if (record && (await this.ownerState(tx, record)) === 'blocked')
           throw new ActionInteractionError(
             409,
             'dispatch_consumed',
             'A Companion submission for this claim step already reached the claim service; check the claims list before submitting again',
           );
-        await this.supersede(tx, record);
+        if (record) await this.supersede(tx, record);
+        await tx.put(manualKey, this.now());
         return { allowed: true, managed: false };
       }
+      if (!record)
+        throw new ActionInteractionError(
+          409,
+          'review_required',
+          'No matching managed draft exists for this owner',
+        );
+      const manualAt = await tx.get<number>(manualKey);
+      if (manualAt !== undefined && manualAt >= record.createdAt)
+        throw new ActionInteractionError(
+          409,
+          'dispatch_consumed',
+          'This claim step was submitted from the form; check the claims list before submitting again',
+        );
       if (
         !record ||
         canonicalJson(record.owner) !== canonicalJson(input.owner) ||
@@ -186,7 +225,7 @@ export class ActionInteractionStore {
           'This claim step has a managed draft; reopen and review its current operation',
         );
       const consumedKey = `${DISPATCH_PREFIX}${input.operationKey}`;
-      if (await tx.get<boolean>(consumedKey))
+      if ((await tx.get<true | 'released'>(consumedKey)) !== undefined)
         throw new ActionInteractionError(
           409,
           'dispatch_consumed',
@@ -217,9 +256,11 @@ export class ActionInteractionStore {
         records.set(key, value);
     return ids.flatMap((id) => {
       const raw = records.get(`${PREFIX}${id}`);
-      if (raw === undefined) return [];
-      const record = InteractionSchema.parse(raw);
-      return record.sessionId === sessionId ? [record] : [];
+      // One unreadable record is left out instead of failing the list.
+      const record = InteractionSchema.safeParse(raw);
+      return record.success && record.data.sessionId === sessionId
+        ? [record.data]
+        : [];
     });
   }
 
@@ -238,34 +279,66 @@ export class ActionInteractionStore {
     });
     if (due.size === 0) return 0;
     await this.storage.transaction(async (tx) => {
-      for (const [expiryKey, id] of due) {
-        const requests = await tx.list<string>({
-          prefix: `${REQUESTS_OF_PREFIX}${id}:`,
-        });
-        const doomed = [
-          expiryKey,
-          ...requests.keys(),
-          ...Array.from(requests.values(), (r) => `${REQUEST_PREFIX}${r}`),
-        ];
-        const record = await this.recordFrom(tx, id);
-        if (record && (await this.ownerState(tx, record)) === 'blocked') {
-          await tx.put(`${PREFIX}${id}`, {
-            ...record,
-            values: {},
-            updatedByUser: [],
-          } satisfies Interaction);
-        } else if (record) {
-          doomed.push(`${PREFIX}${id}`, await sessionIndexKey(record));
-          const ownerKey = await ownerStorageKey(
-            record.owner,
-            record.sessionId,
-          );
-          if ((await tx.get<string>(ownerKey)) === id) doomed.push(ownerKey);
-        }
-        await deleteKeys(tx, doomed);
-      }
+      for (const [expiryKey, id] of due) await this.forget(tx, id, expiryKey);
     });
     return due.size;
+  }
+
+  /**
+   * A deleted chat takes its drafts with it, by the same rules as
+   * retention: a dispatched claim keeps only its tombstones. Bounded per
+   * call; the caller repeats until it returns 0.
+   */
+  async forgetSession(sessionId: string): Promise<number> {
+    const index = await this.storage.list<string>({
+      prefix: `${SESSION_PREFIX}${await sha256Hex(sessionId)}:`,
+      limit: PRUNE_BATCH,
+    });
+    if (index.size === 0) return 0;
+    await this.storage.transaction(async (tx) => {
+      for (const [indexKey, id] of index) {
+        const record = await this.recordFrom(tx, id);
+        await this.forget(tx, id, record ? expiryIndexKey(record) : undefined);
+        // A kept tombstone leaves the deleted chat's listing too.
+        await tx.delete(indexKey);
+      }
+    });
+    return index.size;
+  }
+
+  /**
+   * Removes a record and everything that points at it, except what stops a
+   * duplicate claim: a dispatched record keeps its owner key, reservation and
+   * dispatch tombstone, and only loses its values and user-edit list.
+   */
+  private async forget(tx: Storage, id: string, expiryKey?: string) {
+    // Only prepare requests are indexed per record (edits keep their
+    // replay window on the record itself), so this list stays small.
+    const requests = await tx.list<string>({
+      prefix: `${REQUESTS_OF_PREFIX}${id}:`,
+      limit: 256,
+    });
+    const doomed = [
+      ...(expiryKey ? [expiryKey] : []),
+      `${RECENT_PREFIX}${id}`,
+      ...requests.keys(),
+      ...Array.from(requests.values(), (r) => `${REQUEST_PREFIX}${r}`),
+    ];
+    const record = await this.recordFrom(tx, id);
+    if (record && (await this.ownerState(tx, record)) === 'blocked') {
+      if (Object.keys(record.values).length || record.updatedByUser.length)
+        await tx.put(`${PREFIX}${id}`, {
+          ...record,
+          values: {},
+          updatedByUser: [],
+          revision: record.revision + 1,
+        } satisfies Interaction);
+    } else if (record) {
+      doomed.push(`${PREFIX}${id}`, await sessionIndexKey(record));
+      const ownerKey = await ownerStorageKey(record.owner, record.sessionId);
+      if ((await tx.get<string>(ownerKey)) === id) doomed.push(ownerKey);
+    }
+    await deleteKeys(tx, doomed);
   }
 
   private async recordFrom(
@@ -281,12 +354,7 @@ export class ActionInteractionStore {
     record: Interaction,
   ): Promise<OwnerState> {
     if (record.status === 'observed') return 'blocked';
-    if (
-      record.reservation &&
-      (await storage.get<boolean>(
-        `${DISPATCH_PREFIX}${record.reservation.operationKey}`,
-      ))
-    )
+    if (record.reservation && (await this.dispatched(storage, record)))
       return 'blocked';
     if (
       record.expiresAt > this.now() &&
@@ -294,6 +362,19 @@ export class ActionInteractionStore {
     )
       return 'live';
     return 'stale';
+  }
+
+  /** Whether the record's operation passed the dispatch check and was not released since. */
+  private async dispatched(
+    storage: Pick<DurableObjectStorage, 'get'>,
+    record: Interaction,
+  ): Promise<boolean> {
+    return (
+      !!record.reservation &&
+      (await storage.get<true | 'released'>(
+        `${DISPATCH_PREFIX}${record.reservation.operationKey}`,
+      )) === true
+    );
   }
 
   /** Ends a draft that can no longer dispatch; its card shows why. */
@@ -344,16 +425,30 @@ export class ActionInteractionStore {
     const fingerprint = await sha256Hex(
       canonicalJson(JSON.parse(JSON.stringify(command))),
     );
+    // A prepare is remembered globally (it has no record id yet); an edit
+    // only in its record's short replay window.
+    const recentKey = (id: string) => `${RECENT_PREFIX}${id}`;
     const remember = async (tx: Storage, id: string) => {
-      await tx.put({
-        [requestKey]: { fingerprint, id },
-        [`${REQUESTS_OF_PREFIX}${id}:${requestId}`]: requestId,
-      });
+      if (command.kind === 'prepare') {
+        await tx.put({
+          [requestKey]: { fingerprint, id },
+          [`${REQUESTS_OF_PREFIX}${id}:${requestId}`]: requestId,
+        });
+        return;
+      }
+      const recent = (await tx.get<RecentRequest[]>(recentKey(id))) ?? [];
+      await tx.put(
+        recentKey(id),
+        [...recent, { requestId, fingerprint }].slice(-RECENT_LIMIT),
+      );
     };
     return this.storage.transaction(async (tx) => {
-      const previous = await tx.get<{ fingerprint: string; id: string }>(
-        requestKey,
-      );
+      const previous =
+        command.kind === 'prepare'
+          ? await tx.get<{ fingerprint: string; id: string }>(requestKey)
+          : (await tx.get<RecentRequest[]>(recentKey(command.id)))
+              ?.filter((r) => r.requestId === requestId)
+              .map((r) => ({ fingerprint: r.fingerprint, id: command.id }))[0];
       if (previous) {
         if (previous.fingerprint !== fingerprint)
           throw new ActionInteractionError(
@@ -382,13 +477,19 @@ export class ActionInteractionStore {
             'account_mismatch',
             'Claim account differs from authenticated user',
           );
-        if (canonicalJson(input.values).length > 64 * 1024)
-          throw new ActionInteractionError(
-            413,
-            'too_large',
-            'Draft values exceed 64 KiB',
-          );
+        assertRecordSize(input.values, []);
         const ownerKey = await ownerStorageKey(input.owner, input.sessionId);
+        if (
+          input.owner.kind === 'flow-claim' &&
+          (await tx.get<number>(manualMarkerKey(ownerKey))) !== undefined
+        )
+          // The ordinary form already passed its dispatch check for this
+          // step; a card could file the same claim a second time.
+          throw new ActionInteractionError(
+            409,
+            'dispatch_consumed',
+            'This claim step was submitted from the form; check the claims list before preparing another',
+          );
         const existingId = await tx.get<string>(ownerKey);
         const existing = existingId
           ? await this.recordFrom(tx, existingId)
@@ -471,7 +572,16 @@ export class ActionInteractionStore {
           );
         switch (command.kind) {
           case 'update': {
-            if (record.status !== 'draft')
+            const cancel = command.input.kind === 'cancel';
+            // A reservation whose dispatch never happened (a lost reserve
+            // acknowledgement, a closed tab) can still be cancelled; once
+            // dispatched only its outcome may be recorded.
+            const editable =
+              record.status === 'draft' ||
+              (cancel &&
+                record.status === 'reserved' &&
+                !(await this.dispatched(tx, record)));
+            if (!editable)
               throw new ActionInteractionError(
                 409,
                 'not_editable',
@@ -495,26 +605,18 @@ export class ActionInteractionStore {
               );
               const merged = { ...record.values, ...patch };
               for (const name of removed) delete merged[name];
-              if (canonicalJson(merged).length > 64 * 1024)
-                throw new ActionInteractionError(
-                  413,
-                  'too_large',
-                  'Draft values exceed 64 KiB',
-                );
-              record = {
-                ...record,
-                values: merged,
-                updatedByUser:
-                  input.source === 'user'
-                    ? Array.from(
-                        new Set([
-                          ...record.updatedByUser,
-                          ...Object.keys(patch),
-                          ...removed,
-                        ]),
-                      )
-                    : record.updatedByUser,
-              };
+              const updatedByUser =
+                input.source === 'user'
+                  ? Array.from(
+                      new Set([
+                        ...record.updatedByUser,
+                        ...Object.keys(patch),
+                        ...removed,
+                      ]),
+                    )
+                  : record.updatedByUser;
+              assertRecordSize(merged, updatedByUser);
+              record = { ...record, values: merged, updatedByUser };
             }
             break;
           }
@@ -545,24 +647,41 @@ export class ActionInteractionStore {
             break;
           }
           case 'observe': {
+            const outcome = command.input.outcome;
             if (
               !record.reservation ||
               record.reservation.operationKey !== command.input.operationKey ||
-              !['reserved', 'outcome-unknown'].includes(record.status)
+              !(outcome === 'not-submitted'
+                ? record.status === 'reserved'
+                : record.status === 'reserved' ||
+                  record.status === 'outcome-unknown')
             )
               throw new ActionInteractionError(
                 409,
                 'reservation_mismatch',
                 'No matching pending reservation',
               );
-            record =
-              command.input.outcome === 'unknown'
-                ? { ...record, status: 'outcome-unknown' }
-                : {
-                    ...record,
-                    status: 'observed',
-                    ownerExecutionRef: command.input.ownerExecutionRef,
-                  };
+            if (command.input.outcome === 'not-submitted') {
+              // The executor refused before sending anything: the card ends
+              // and the step is free for the form or a new card.
+              await tx.put(
+                `${DISPATCH_PREFIX}${record.reservation.operationKey}`,
+                'released',
+              );
+              record = {
+                ...record,
+                status: 'cancelled',
+                cancelReason: 'not-submitted',
+              };
+            } else
+              record =
+                command.input.outcome === 'unknown'
+                  ? { ...record, status: 'outcome-unknown' }
+                  : {
+                      ...record,
+                      status: 'observed',
+                      ownerExecutionRef: command.input.ownerExecutionRef,
+                    };
             break;
           }
         }
