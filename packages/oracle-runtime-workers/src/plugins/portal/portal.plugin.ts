@@ -54,6 +54,13 @@ const manifest: PluginManifest = {
 
 export const BROWSER_TOOL_TIMEOUT_MS = 15_000;
 
+const HUMAN_DECISION_TOOLS = new Set([
+  'ask_user_question',
+  'propose_domain_creation',
+  'write_domain_files',
+  'publish_recipe_release',
+]);
+
 /**
  * The Portal's Topic write tool. Its commands can take a while to settle in
  * the browser (several Matrix writes), so it gets a longer window before the
@@ -194,7 +201,10 @@ export function buildBrowserTool(
       description: descriptor.description,
       schema,
       // A browser step (scroll, page, click) repeated is a new step.
-      repeatable: true,
+      repeatable: !HUMAN_DECISION_TOOLS.has(descriptor.name),
+      ...(HUMAN_DECISION_TOOLS.has(descriptor.name)
+        ? { effect: 'write' as const }
+        : {}),
     },
   );
 }

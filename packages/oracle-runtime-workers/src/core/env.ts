@@ -12,6 +12,10 @@ import {
   MAX_ARTIFACT_SWEEP_INTERVAL_HOURS,
   MAX_ARTIFACT_TTL_DAYS,
 } from '../artifacts/config';
+import {
+  USER_CONTEXT_BLOCKING_CAP_MS_DEFAULT,
+  USER_CONTEXT_CACHE_TTL_MS_DEFAULT,
+} from '../memory/user-context-fetcher';
 
 /**
  * Tier-0 (core) environment for the Workers runtime. Mirrors
@@ -296,6 +300,34 @@ export const baseEnvSchema = z.object({
     .min(1)
     .max(MAX_ARTIFACT_SWEEP_INTERVAL_HOURS)
     .optional(),
+
+  // --- memory prefetch (src/memory/user-context-fetcher.ts) ----------------
+  /**
+   * First-turn user-context prefetch: the six memory-engine queries
+   * (identity, work, goals, interests, relationships, recent) that fill the
+   * prompt's memory-context block. Only runs where `MEMORY_ENGINE_URL` is
+   * set. `off` disables the prefetch; the memory tools keep working.
+   */
+  USER_CONTEXT_PREFETCH: z.enum(['on', 'off']).default('on'),
+  /**
+   * How long a first turn waits for the prefetch (ms) before the model call
+   * goes ahead without it; the request keeps running and warms the cache.
+   * `0` never waits: the prefetch always runs in the background and the
+   * turn uses what is cached or checkpointed.
+   */
+  USER_CONTEXT_PREFETCH_CAP_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(30_000)
+    .default(USER_CONTEXT_BLOCKING_CAP_MS_DEFAULT),
+  /** How long a room's prefetched context is reused (ms). */
+  USER_CONTEXT_CACHE_TTL_MS: z.coerce
+    .number()
+    .int()
+    .min(1_000)
+    .max(3_600_000)
+    .default(USER_CONTEXT_CACHE_TTL_MS_DEFAULT),
 
   // --- misc ---------------------------------------------------------------
   LOG_LEVEL: z.string().default('info'),

@@ -10,22 +10,36 @@
  * `add_memory` in one turn comes back from `search_memory_engine` in the
  * next.
  *
+ * The same server answers the engine's REST `POST /search-enhanced-batch`
+ * (what the runtime's first-turn user-context prefetch calls with
+ * `MEMORY_ENGINE_URL`): six slots in query order, the stored memories
+ * returned as facts in the first (identity) and last (recent) slot.
+ *
  * Also serves `/.well-known/did.json` (the oracle resolves the service DID
  * from the MCP URL's origin before minting), and `GET /__test/state` exposing
  * every recorded request + tool call for assertions.
  */
-import { createServer, type Server as HttpServer } from 'node:http';
+import { randomBytes } from 'node:crypto';
+import {
+  createServer,
+  type IncomingMessage,
+  type Server as HttpServer,
+} from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 
 export interface RecordedRequest {
   method: string;
+  /** Request path: `/mcp` or `/search-enhanced-batch`. */
+  pathname: string;
   /** JSON-RPC methods contained in the request body (POSTs only). */
   rpcMethods: string[];
   authorization?: string;
   xAuthType?: string;
   xRoomId?: string;
+  /** `/search-enhanced-batch` only: how many queries the batch carried. */
+  queryCount?: number;
 }
 
 export interface RecordedToolCall {
@@ -37,6 +51,24 @@ export interface MockMcpState {
   requests: RecordedRequest[];
   toolCalls: RecordedToolCall[];
   memories: string[];
+  /**
+   * Whether `/search-enhanced-batch` returns the stored memories (default
+   * true). A drill that must prove the MCP search tool again switches it off,
+   * so the model cannot recall from the pre-loaded context.
+   */
+  batchServesMemories: boolean;
+  /**
+   * Delay before the batch endpoint answers, in ms (default 0). A drill sets
+   * it above the runtime's prefetch cap to prove the gather that outlives a
+   * turn still fills the room's cache for the next session.
+   */
+  batchDelayMs: number;
+  /**
+   * Printed by `search_memory_engine` and never by the batch endpoint, so an
+   * answer containing it came over the MCP wire even when a cached
+   * pre-loaded context already carries the memory text.
+   */
+  lookupReference: string;
 }
 
 export interface MockMcpServer {
@@ -73,7 +105,7 @@ function buildMcpServer(state: MockMcpState): McpServer {
       return text(
         `Found ${state.memories.length} memories:\n${state.memories
           .map((m) => `- ${m}`)
-          .join('\n')}`,
+          .join('\n')}\nLookup reference: ${state.lookupReference}`,
       );
     },
   );
@@ -94,6 +126,45 @@ function buildMcpServer(state: MockMcpState): McpServer {
       state.toolCalls.push({ tool: 'add_memory', args });
       state.memories.push(args.content);
       return text('Memory stored.');
+    },
+  );
+  // In the runtime's default tool surface since 0.21.0; the real engine
+  // refuses a caller who is not a controller or owner of the oracle's
+  // entity. The mock records the call and refuses the same way without the
+  // confirmation flag, so a drill can tell a stored write from a refused one.
+  server.registerTool(
+    'add_oracle_knowledge',
+    {
+      description:
+        'Store knowledge shared with every user of this oracle. Needs the user to confirm the scope first.',
+      inputSchema: {
+        name: z.string().describe('Short title of the knowledge.'),
+        content: z.string().describe('The knowledge text to store.'),
+        confirmed_insertion_from_user: z
+          .boolean()
+          .describe('The user confirmed the knowledge may be shared.'),
+        knowledge_space_type: z
+          .enum(['public', 'private'])
+          .describe(
+            'public: every user of the oracle; private: its controllers and owners.',
+          ),
+      },
+    },
+    (args: {
+      name: string;
+      content: string;
+      confirmed_insertion_from_user: boolean;
+      knowledge_space_type: 'public' | 'private';
+    }) => {
+      state.toolCalls.push({ tool: 'add_oracle_knowledge', args });
+      if (!args.confirmed_insertion_from_user) {
+        return text(
+          'Oracle knowledge addition requires explicit user confirmation.',
+        );
+      }
+      return text(
+        `Oracle knowledge "${args.name}" added to shared knowledge space`,
+      );
     },
   );
   server.registerTool(
@@ -136,11 +207,127 @@ function rpcMethodsOf(body: unknown): string[] {
     .filter(Boolean);
 }
 
+/** The fields of the engine's `SearchEnhancedResponse` the mock fills. */
+interface MockSearchSlot {
+  strategy_used: string;
+  query: string;
+  total_results: {
+    facts: number;
+    entities: number;
+    episodes: number;
+    communities: number;
+  };
+  facts: Array<{
+    uuid: string;
+    fact: string;
+    source_node_uuid: string;
+    target_node_uuid: string;
+    created_at: string;
+    valid_at: string | null;
+    invalid_at: string | null;
+  }>;
+  entities: never[];
+  episodes: never[];
+  communities: never[];
+}
+
+/**
+ * One batch answer slot. Every stored memory is a fact in the `identity` and
+ * `recent` slots (the first and last query of the runtime's batch); the
+ * other four slots come back empty.
+ */
+function searchSlot(
+  request: BatchQuery,
+  memories: readonly string[],
+  withMemories: boolean,
+): MockSearchSlot {
+  const now = new Date().toISOString();
+  const facts = withMemories
+    ? memories.map((fact, i) => ({
+        uuid: `mock-fact-${i}`,
+        fact,
+        source_node_uuid: 'mock-user',
+        target_node_uuid: `mock-fact-target-${i}`,
+        created_at: now,
+        valid_at: now,
+        invalid_at: null,
+      }))
+    : [];
+  return {
+    strategy_used: request.strategy,
+    query: request.query,
+    total_results: {
+      facts: facts.length,
+      entities: 0,
+      episodes: 0,
+      communities: 0,
+    },
+    facts,
+    entities: [],
+    episodes: [],
+    communities: [],
+  };
+}
+
+/** One request of a `/search-enhanced-batch` body: the fields the mock echoes. */
+interface BatchQuery {
+  query: string;
+  strategy: string;
+}
+
+/** The queries of a `/search-enhanced-batch` body; undefined when malformed. */
+function batchQueries(body: unknown): BatchQuery[] | undefined {
+  if (body === null || typeof body !== 'object' || !('queries' in body))
+    return undefined;
+  const { queries } = body;
+  if (!Array.isArray(queries)) return undefined;
+  return queries.map((q: unknown): BatchQuery => {
+    const query =
+      q !== null &&
+      typeof q === 'object' &&
+      'query' in q &&
+      typeof q.query === 'string'
+        ? q.query
+        : '';
+    const strategy =
+      q !== null &&
+      typeof q === 'object' &&
+      'strategy' in q &&
+      typeof q.strategy === 'string'
+        ? q.strategy
+        : 'balanced';
+    return { query, strategy };
+  });
+}
+
+function recordedHeaders(
+  req: IncomingMessage,
+): Pick<RecordedRequest, 'authorization' | 'xAuthType' | 'xRoomId'> {
+  return {
+    ...(req.headers.authorization
+      ? { authorization: req.headers.authorization }
+      : {}),
+    ...(typeof req.headers['x-auth-type'] === 'string'
+      ? { xAuthType: req.headers['x-auth-type'] }
+      : {}),
+    ...(typeof req.headers['x-room-id'] === 'string'
+      ? { xRoomId: req.headers['x-room-id'] }
+      : {}),
+  };
+}
+
 export async function startMockMcpServer(port: number): Promise<MockMcpServer> {
   const origin = `http://localhost:${port}`;
   // did:web for a host with a port percent-encodes the colon.
   const did = `did:web:localhost%3A${port}`;
-  const state: MockMcpState = { requests: [], toolCalls: [], memories: [] };
+  const state: MockMcpState = {
+    requests: [],
+    toolCalls: [],
+    memories: [],
+    batchServesMemories: true,
+    batchDelayMs: 0,
+    lookupReference: `LOOKUP-${randomBytes(4).toString('hex')}`,
+  };
 
   const http: HttpServer = createServer((req, res) => {
     void (async () => {
@@ -159,8 +346,51 @@ export async function startMockMcpServer(port: number): Promise<MockMcpServer> {
         state.requests.length = 0;
         state.toolCalls.length = 0;
         state.memories.length = 0;
+        state.batchServesMemories = true;
+        state.batchDelayMs = 0;
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+      if (url.pathname === '/search-enhanced-batch') {
+        if (req.method !== 'POST') {
+          res.writeHead(405, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'POST only' }));
+          return;
+        }
+        const raw: Buffer[] = [];
+        for await (const chunk of req) raw.push(chunk as Buffer);
+        const queries = batchQueries(
+          JSON.parse(Buffer.concat(raw).toString('utf8')),
+        );
+        state.requests.push({
+          method: req.method,
+          pathname: url.pathname,
+          rpcMethods: [],
+          ...recordedHeaders(req),
+          ...(queries ? { queryCount: queries.length } : {}),
+        });
+        if (!queries) {
+          res.writeHead(422, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'body needs a `queries` array' }));
+          return;
+        }
+        const last = queries.length - 1;
+        if (state.batchDelayMs > 0) {
+          await new Promise((r) => setTimeout(r, state.batchDelayMs));
+        }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            results: queries.map((q, i) =>
+              searchSlot(
+                q,
+                state.memories,
+                state.batchServesMemories && (i === 0 || i === last),
+              ),
+            ),
+          }),
+        );
         return;
       }
       if (url.pathname !== '/mcp') {
@@ -179,16 +409,9 @@ export async function startMockMcpServer(port: number): Promise<MockMcpServer> {
       const body: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       state.requests.push({
         method: req.method,
+        pathname: url.pathname,
         rpcMethods: rpcMethodsOf(body),
-        ...(req.headers.authorization
-          ? { authorization: req.headers.authorization }
-          : {}),
-        ...(typeof req.headers['x-auth-type'] === 'string'
-          ? { xAuthType: req.headers['x-auth-type'] }
-          : {}),
-        ...(typeof req.headers['x-room-id'] === 'string'
-          ? { xRoomId: req.headers['x-room-id'] }
-          : {}),
+        ...recordedHeaders(req),
       });
       // Stateless streamable HTTP: fresh server+transport per request, torn
       // down when the response closes (the SDK's documented stateless mode).
