@@ -109,6 +109,14 @@ export const InteractionSchema = z.strictObject({
     .strictObject({ operationKey: requestId, valuesDigest: text })
     .optional(),
   ownerExecutionRef: text.optional(),
+  /**
+   * Why a `cancelled` draft ended: `user` when a person or the agent
+   * cancelled it, `superseded` when the same claim step was submitted from
+   * the ordinary form (or a newer card replaced a stale one) before this
+   * draft's operation ever reached the executor. Absent on records written
+   * before the field existed.
+   */
+  cancelReason: z.enum(['user', 'superseded']).optional(),
 });
 export const InteractionResultSchema = z.strictObject({
   interaction: InteractionSchema,

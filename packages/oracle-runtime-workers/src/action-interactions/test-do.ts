@@ -78,6 +78,16 @@ export class ActionInteractionsTestDO extends DurableObject {
       throw error;
     }
   }
+  async list(userDid: string, sessionId: string) {
+    return JSON.stringify(await this.store(userDid).list(sessionId));
+  }
+  async prune(userDid: string) {
+    return this.store(userDid).prune();
+  }
+  /** Every key the store wrote, so retention tests can prove what is gone. */
+  async keys() {
+    return Array.from((await this.ctx.storage.list()).keys());
+  }
   async advance(ms: number) {
     this.now += ms;
   }
