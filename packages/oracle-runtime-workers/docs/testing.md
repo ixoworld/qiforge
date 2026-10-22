@@ -228,3 +228,11 @@ request tool uses runtime channel identity and refuses a turn without it.
 `src/delivery/plan.test.ts` checks direct structured Reply Plan projection.
 These tests use local fixtures; full signed transfer, registered form submission,
 and private resource return need the coordinated Hub and gateway acceptance run.
+
+The Hub action client requests service-tagged options version 2 and refuses a
+legacy untagged response. The plugin uses the shared schema for Gmail connection,
+removal and one plain-text email; only runtime identity and the original channel
+turn supply its owner and binding. The coordinated Hub `scripts/conformance`
+harness runs the actual HTTP client, owner review and connector routes for two
+oracles. It substitutes external DID/provider and scope-attestation evidence;
+it does not send real email or prove live Google/WhatsApp acceptance.

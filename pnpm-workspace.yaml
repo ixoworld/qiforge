@@ -21,7 +21,7 @@ peerDependencyRules:
 
 overrides:
   '@ixo/topic-protocol': 'file:vendor/topic-protocol/ixo-topic-protocol-1.0.0-rc.8.tgz'
-  '@ixo/action-protocol': 'file:vendor/action-protocol/ixo-action-protocol-0.2.0.tgz'
+  '@ixo/action-protocol': 'file:vendor/action-protocol/ixo-action-protocol-0.3.0-8f5d4ea1.tgz'
   ws: '8.18.2'
   # request (deprecated, via @ixo/matrix-bot-sdk fork) locks form-data@2.3.3,
   # which has a critical predictable-boundary advisory (GHSA-fjxv-7rqg-78g4

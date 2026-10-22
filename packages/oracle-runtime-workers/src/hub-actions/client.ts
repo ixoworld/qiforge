@@ -8,7 +8,7 @@ import {
   type ActionCapabilitiesV1,
   type ActionOutcomeV1,
   type ActionReferenceV1,
-  type HubActionOptionsV1,
+  type HubActionOptionsV2,
 } from '@ixo/action-protocol';
 
 export interface HubActionStatus {
@@ -96,16 +96,20 @@ export class HubActionClient {
   async options(input: {
     bindingId: string;
     bindingRevision: number;
-  }): Promise<HubActionOptionsV1> {
+  }): Promise<HubActionOptionsV2> {
     const query = new URLSearchParams({
       bindingId: input.bindingId,
       bindingRevision: String(input.bindingRevision),
+      version: '2',
     });
-    return parseActionOptions(
+    const options = parseActionOptions(
       await this.send(
         `/api/internal/actions/operations/options?${query.toString()}`,
       ),
     );
+    if (options.version !== 'ixo.auth-options/2')
+      throw new Error('Hub action options require version 2');
+    return options;
   }
 
   async status(id: string): Promise<HubActionStatus> {

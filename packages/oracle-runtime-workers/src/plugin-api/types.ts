@@ -762,7 +762,7 @@ export interface RuntimeContext<TConfig = MergedConfig> {
       provider: string;
       bindingId: string;
       bindingRevision: number;
-    }): Promise<import('@ixo/action-protocol').HubActionOptionsV1>;
+    }): Promise<import('@ixo/action-protocol').HubActionOptionsV2>;
     request(input: {
       ownerDid: string;
       sessionId: string;

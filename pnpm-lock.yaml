@@ -6,7 +6,7 @@ settings:
 
 overrides:
   '@ixo/topic-protocol': file:vendor/topic-protocol/ixo-topic-protocol-1.0.0-rc.8.tgz
-  '@ixo/action-protocol': file:vendor/action-protocol/ixo-action-protocol-0.2.0.tgz
+  '@ixo/action-protocol': file:vendor/action-protocol/ixo-action-protocol-0.3.0-8f5d4ea1.tgz
   ws: 8.18.2
   form-data@<2.5.4: ^2.5.4
   langsmith@<0.6.0: ^0.6.0
@@ -676,8 +676,8 @@ importers:
         specifier: 0.9.2
         version: 0.9.2(@composio/core@0.10.0(ws@8.18.2)(zod@4.4.3))(@langchain/core@1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2))
       '@ixo/action-protocol':
-        specifier: file:../../vendor/action-protocol/ixo-action-protocol-0.2.0.tgz
-        version: file:vendor/action-protocol/ixo-action-protocol-0.2.0.tgz
+        specifier: file:../../vendor/action-protocol/ixo-action-protocol-0.3.0-8f5d4ea1.tgz
+        version: file:vendor/action-protocol/ixo-action-protocol-0.3.0-8f5d4ea1.tgz
       '@ixo/common':
         specifier: workspace:*
         version: link:../common
@@ -3408,9 +3408,9 @@ packages:
     resolution: {integrity: sha512-+Sg6GCR/wy1oSmQDFq4LQDAhm3ETKnorxN+y5nbLULOR3P0c14f2Wurzj3/xqPXtasLFfHd5iRFQ7AJt4KH2cw==}
     engines: {node: '>=8'}
 
-  '@ixo/action-protocol@file:vendor/action-protocol/ixo-action-protocol-0.2.0.tgz':
-    resolution: {integrity: sha512-M+NxZJJ5rCzbeKFORkoePIH+RrbUUZvhhjdrbWtLh05HLTgRJY6F4hG9DfXJzJmZUe9L3si+36jk3JSwwhDrXw==, tarball: file:vendor/action-protocol/ixo-action-protocol-0.2.0.tgz}
-    version: 0.2.0
+  '@ixo/action-protocol@file:vendor/action-protocol/ixo-action-protocol-0.3.0-8f5d4ea1.tgz':
+    resolution: {integrity: sha512-xCSqFzD4aqgPUpLhWgcgRKTtGQdNEW2NdYQEKf2oB7yVlCL/hVxkD9BdAfB17OjnKOnjuKqc9isaboffCJj2UQ==, tarball: file:vendor/action-protocol/ixo-action-protocol-0.3.0-8f5d4ea1.tgz}
+    version: 0.3.0
 
   '@ixo/did-provider-x@0.1.1':
     resolution: {integrity: sha512-7Xs0iZ7AdNF+mIESFp2o/gzoeiIl9iT6GkG1YV5j5MhlKqBDwVZTY7rE7nsFhy14B3pkleq1iFmRBdjdJmMO6w==}
@@ -15554,7 +15554,7 @@ snapshots:
 
   '@istanbuljs/schema@0.1.6': {}
 
-  '@ixo/action-protocol@file:vendor/action-protocol/ixo-action-protocol-0.2.0.tgz': {}
+  '@ixo/action-protocol@file:vendor/action-protocol/ixo-action-protocol-0.3.0-8f5d4ea1.tgz': {}
 
   '@ixo/did-provider-x@0.1.1':
     dependencies:

@@ -255,23 +255,36 @@ checks for hosts with a durable `reserve`/`record` store. Protocol versions are
 `ixo.auth-action/1`, `ixo.auth-capabilities/1` and `ixo.auth-outcome/1`;
 unsupported kinds and versions fail closed.
 
-Protocol package `0.2.0` adds exact signed statements, Google Calendar
-connection/removal and one reviewed event, document read-access requests, and
-new private text files. `hub_action_options` obtains confirmed connections,
+Protocol package `0.3.0` supports exact signed statements, Gmail connection/removal
+and one reviewed plain-text email, Google Calendar connection/removal and one
+reviewed event, document read-access requests, and new private text files.
+`hub_action_options` requests `ixo.auth-options/2` and obtains confirmed connections,
 requestable document identifiers and existing action resources for the current
-owner and channel binding. It accepts no model-supplied identity. The shared
+owner and channel binding. Each connection carries its `gmail` or `calendar`
+service; do not use a profile-only Gmail connection for sending. Old Hub clients
+still receive Calendar-only options version 1 by default. The tool accepts no
+model-supplied identity. The shared
 `operationJsonSchema` is the tool schema source; there is no second runtime
 operation catalogue. Capability and options reads may be used by any registered
 oracle account with the compatible channel adapter.
 
-The owner completes each review in Auth Hub. Calendar setup returns a fresh
+The owner completes each review in Auth Hub. Gmail and Calendar setup return a fresh
 review with the account and scopes selected at Google; setup alone does not
-authorize a connection or event. Connector and VFS services check fresh owner
+authorize a connection, email or event. The Gmail review freezes the verified
+sender, one recipient, subject and full message; edits create a new review before
+consent. Gmail permission includes managing drafts, although this action sends
+directly and does not read inbox messages. Connector and VFS services check fresh owner
 proofs and current Hub admission, own their durable effects and return typed
 receipts. An access-request receipt means `pending_owner`, never access granted.
 Private file content opens on its registered separate resource origin; it is
 not included in the Reply Plan or completion notice. Unknown effects are status
-reads on the same action, never a new model execution attempt.
+reads on the same action, never a new model execution attempt. A
+`gmail.message.accepted.v1` receipt means Gmail accepted the email for sending;
+it does not prove delivery. A lost send response can remain unknown. Do not
+prepare another email until the owner checks Gmail's Sent folder and explicitly
+asks again. The Gmail service requires fresh independently verified scope
+attestations and confirmed proxy no-retry behavior; missing evidence disables
+the journey. Local conformance fixtures do not establish those activation gates.
 
 Both shared packages are source-validation candidates. The action protocol must
 be published before releasing this runtime. The workspace also pins the reviewed

@@ -135,7 +135,7 @@ const manifest: PluginManifest = {
   summary:
     'Prepare a registered operation for owner review and read its verified status.',
   whenToUse: [
-    'The user requests a supported review, statement, calendar connection or event, document access request, or private note.',
+    'The user requests a supported review, statement, Gmail connection or reviewed email, calendar connection or event, document access request, or private note.',
   ],
   whenNotToUse: [
     'Signing, executing, or treating a resource open as acceptance.',
@@ -167,7 +167,7 @@ export class HubActionsPlugin extends OraclePlugin {
       {
         name: 'hub_action_options',
         description:
-          'Read this authenticated owner’s confirmed calendar connections, requestable documents and action resources. Use returned identifiers and labels before preparing a related Hub review.',
+          'Read this authenticated owner’s confirmed Gmail and Calendar connections, requestable documents and action resources. Use each returned service, identifier and label before preparing a related Hub review. A Gmail profile connection does not authorize sending.',
         schema: discoverSchema,
         effect: 'read',
         handler: hubActionOptions,
@@ -175,7 +175,7 @@ export class HubActionsPlugin extends OraclePlugin {
       {
         name: 'request_hub_action',
         description:
-          'Prepare a supported operation for the authenticated channel owner to review in Auth Hub. Never approves, signs, or executes. Supply only the operation candidate; the runtime supplies identity and turn binding.',
+          'Prepare a supported operation for the authenticated channel owner to review in Auth Hub. Never approves, signs, or executes. For email, propose one plain-text message to one recipient using a confirmed Gmail send connection. Supply only the operation candidate; the runtime supplies identity and turn binding. Never prepare a replacement email after an unknown send without the user checking Gmail’s Sent folder and asking again.',
         schema: requestSchema,
         effect: 'write',
         handler: requestHubAction,

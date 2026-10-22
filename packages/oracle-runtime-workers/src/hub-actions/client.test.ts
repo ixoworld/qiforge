@@ -29,6 +29,72 @@ const outcome: ActionOutcomeV1 = {
 };
 
 describe('Hub action HTTP client', () => {
+  it('requests service-tagged options for the trusted binding', async () => {
+    const requests: Request[] = [];
+    const options = {
+      version: 'ixo.auth-options/2',
+      accountId: reference.accountId,
+      ownerDid: 'did:ixo:second',
+      bindingId: reference.bindingId,
+      bindingRevision: reference.bindingRevision,
+      connections: [
+        {
+          service: 'gmail',
+          id: 'gmail-one',
+          label: 'sender@example.test',
+          scopes: ['https://www.googleapis.com/auth/gmail.compose'],
+        },
+      ],
+      targets: [],
+      resources: [],
+    };
+    const client = new HubActionClient({
+      origin: 'https://hub.test',
+      key: 'oracle-secret',
+      fetcher: {
+        fetch: async (request) => {
+          requests.push(request);
+          return Response.json(options);
+        },
+      },
+    });
+    expect(
+      await client.options({
+        bindingId: reference.bindingId,
+        bindingRevision: reference.bindingRevision,
+      }),
+    ).toEqual(options);
+    expect(new URL(requests[0]!.url).searchParams.get('version')).toBe('2');
+    expect(new URL(requests[0]!.url).searchParams.get('bindingId')).toBe(
+      'chb_two',
+    );
+  });
+
+  it('rejects legacy untagged options instead of guessing the connection service', async () => {
+    const client = new HubActionClient({
+      origin: 'https://hub.test',
+      key: 'oracle-secret',
+      fetcher: {
+        fetch: async () =>
+          Response.json({
+            version: 'ixo.auth-options/1',
+            accountId: reference.accountId,
+            ownerDid: 'did:ixo:second',
+            bindingId: reference.bindingId,
+            bindingRevision: reference.bindingRevision,
+            connections: [],
+            targets: [],
+            resources: [],
+          }),
+      },
+    });
+    await expect(
+      client.options({
+        bindingId: reference.bindingId,
+        bindingRevision: reference.bindingRevision,
+      }),
+    ).rejects.toThrow('version 2');
+  });
   it('sends a registered operation with service authentication and reads its typed outcome', async () => {
     const seen: Request[] = [];
     const client = new HubActionClient({

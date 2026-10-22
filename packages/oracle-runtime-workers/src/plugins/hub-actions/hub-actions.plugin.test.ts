@@ -3,7 +3,7 @@ import { makeRuntimeContext } from '../../core/test-fixtures';
 import { HubActionsPlugin } from './hub-actions.plugin';
 import { HubActionClient } from '../../hub-actions/client';
 import { prepareHubAction } from '../../hub-actions/request';
-import type { HubActionOptionsV1, P2Operation } from '@ixo/action-protocol';
+import type { HubActionOptionsV2, P2Operation } from '@ixo/action-protocol';
 
 const id = 'C'.repeat(32);
 const reference = {
@@ -34,8 +34,8 @@ const operation = {
   ],
   declaration: null,
 };
-const options: HubActionOptionsV1 = {
-  version: 'ixo.auth-options/1',
+const options: HubActionOptionsV2 = {
+  version: 'ixo.auth-options/2',
   accountId: 'account-three',
   ownerDid: 'did:ixo:owner',
   bindingId: 'chb_three',
@@ -256,6 +256,26 @@ describe('Hub actions Workers plugin', () => {
   });
 
   it.each<P2Operation>([
+    {
+      kind: 'gmail.connect.v1',
+      purpose: 'Send emails I review',
+      connectionId: null,
+      accountLabel: null,
+      scopes: [],
+    },
+    {
+      kind: 'gmail.disconnect.v1',
+      connectionId: 'gmail-one',
+      accountLabel: 'alex@example.test',
+    },
+    {
+      kind: 'gmail.message.send.v1',
+      connectionId: 'gmail-one',
+      accountLabel: 'alex@example.test',
+      to: 'sam@example.test',
+      subject: 'Garden plans',
+      body: 'Let’s meet on Tuesday.\nBring your ideas.',
+    },
     {
       kind: 'statement.sign.v1',
       statement: 'These are my words.',
