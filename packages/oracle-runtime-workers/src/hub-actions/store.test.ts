@@ -162,13 +162,13 @@ describe('Hub action Durable Object store', () => {
       },
     });
     const input = { ...origin, provider: 'whatsapp', operation };
-    await expect(
-      prepareHubAction(client, stub, input, nowMs),
-    ).rejects.toThrow('response lost');
+    await expect(prepareHubAction(client, stub, input, nowMs)).rejects.toThrow(
+      'response lost',
+    );
     await stub.reopen();
-    expect(
-      await prepareHubAction(client, stub, input, nowMs + 60_000),
-    ).toEqual(replayReference);
+    expect(await prepareHubAction(client, stub, input, nowMs + 60_000)).toEqual(
+      replayReference,
+    );
     expect(sent).toHaveLength(2);
     expect(sent[0]).toEqual(sent[1]);
     expect(await stub.get(ownerDid, id)).toMatchObject({
