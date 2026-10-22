@@ -1,5 +1,7 @@
 import { ActionProposalsPlugin } from './action-proposals/action-proposals.plugin';
+import { HubActionsPlugin } from './hub-actions/hub-actions.plugin';
 export { ActionProposalsPlugin } from './action-proposals/action-proposals.plugin';
+export { HubActionsPlugin } from './hub-actions/hub-actions.plugin';
 /**
  * Bundled Workers-runtime plugins — ports of the Node runtime's MCP / fetch
  * plugins. Each is gated the same way as on Node: `autoDetect` on its env
@@ -69,6 +71,7 @@ export const tasksPlugin = TasksPlugin;
  */
 export const BUNDLED_WORKERS_PLUGINS = [
   new ActionProposalsPlugin(),
+  new HubActionsPlugin(),
   memoryPlugin,
   sandboxPlugin,
   firecrawlPlugin,

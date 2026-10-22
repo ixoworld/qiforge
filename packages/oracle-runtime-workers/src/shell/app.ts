@@ -77,6 +77,23 @@ import {
   type FeedbackShellOptions,
 } from '../feedback/submit';
 import { z } from 'zod';
+import { parseOutcome } from '@ixo/action-protocol';
+
+async function equalOutcomeKeys(
+  provided: string | null,
+  expected: string | undefined,
+): Promise<boolean> {
+  if (!provided || !expected || expected.length < 32 || provided.length > 512)
+    return false;
+  const digest = async (value: string) =>
+    new Uint8Array(
+      await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)),
+    );
+  const [a, b] = await Promise.all([digest(provided), digest(expected)]);
+  let difference = 0;
+  for (let i = 0; i < a.length; i++) difference |= (a[i] ?? 0) ^ (b[i] ?? 0);
+  return difference === 0;
+}
 
 const DebugEventBody = z.object({
   type: z
@@ -429,6 +446,38 @@ export function createShell(
     );
   });
 
+  app.use('/api/internal/actions/outcomes', limitBody(64 * 1024));
+  app.post('/api/internal/actions/outcomes', async (c) => {
+    if (
+      c.env.HUB_ACTIONS_ENABLED !== 'true' ||
+      !(await equalOutcomeKeys(
+        c.req.header('x-auth-hub-outcome-key') ?? null,
+        c.env.AUTH_HUB_ACTION_OUTCOME_KEY,
+      ))
+    )
+      return c.json({ code: 'unauthorized' }, 401);
+    const body = await c.req.raw.text();
+    if (body.length > 64_000) return c.json({ code: 'request_too_large' }, 413);
+    try {
+      const outcome = parseOutcome(JSON.parse(body));
+      await userStub(c.env, outcome.ownerDid).recordHubActionOutcome(outcome);
+      return c.json({
+        accepted: true,
+        eventId: outcome.eventId,
+        accountId: outcome.reference.accountId,
+        actionId: outcome.reference.id,
+        revision: outcome.authorizedRevision,
+        digest: outcome.authorizedDigest,
+        sequence: outcome.sequence,
+      });
+    } catch (error) {
+      console.warn(
+        `[hub-actions] outcome refused: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return c.json({ code: 'outcome_refused' }, 409);
+    }
+  });
+
   app.post('/channels/turn', async (c) => {
     try {
       if (parseChannelServiceDids(c.env.CHANNEL_SERVICE_DID).length === 0)
@@ -483,7 +532,7 @@ export function createShell(
           outcome.status,
         );
       const result = outcome.result;
-      if (result.actionOutcomes?.length)
+      if (result.actionOutcomes?.length || result.hubActionOutcomes?.length)
         await assertActiveChannelBindingCached(identity, c.env);
       return c.json(
         result,

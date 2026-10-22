@@ -37,7 +37,18 @@ import type {
   ActionProposalSubject,
 } from '@ixo/ixo-transaction/action-proposals';
 import { ChannelTurns } from '../channels/turns';
-import { assertChannelAttemptAllowed } from '../channels/auth';
+import { HubActionClient } from '../hub-actions/client';
+import { prepareHubAction } from '../hub-actions/request';
+import { HubActionStore } from '../hub-actions/store';
+import {
+  canonicalJson,
+  type ActionOperationV1,
+  type ActionOutcomeV1,
+} from '@ixo/action-protocol';
+import {
+  assertActiveChannelBinding,
+  assertChannelAttemptAllowed,
+} from '../channels/auth';
 import {
   CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
   ChannelError,
@@ -931,6 +942,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     /** Chat delivery's artefacts; null when no bucket is bound (see `canShare` for new ones). */
     private artifacts: ArtifactStore | null = null;
     private actionProposals: ActionProposalStore | null = null;
+    private hubActionStore: HubActionStore | null = null;
+    private hubActionClient: HubActionClient | null = null;
     private topicProposals: TopicProposalStore | null = null;
     /** Text `view_attachment` extracted, per session (`attachments/view-cache.ts`). */
     private attachmentTextCache: AttachmentTextCacheStore | null = null;
@@ -1835,6 +1848,26 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         oracleName: this.core.identity.name,
       });
       await this.saver.setup();
+      if (this.env.HUB_ACTIONS_ENABLED === 'true') {
+        try {
+          if (!this.env.AUTH_HUB_URL || !this.env.AUTH_HUB_CHANNEL_SERVICE_KEY)
+            throw new Error('Hub URL and oracle service key are required');
+          const store = new HubActionStore(liveDb);
+          await store.setup();
+          this.hubActionStore = store;
+          this.hubActionClient = new HubActionClient({
+            origin: this.env.AUTH_HUB_URL,
+            key: this.env.AUTH_HUB_CHANNEL_SERVICE_KEY,
+            fetcher: this.env.AUTH_HUB,
+          });
+        } catch (error) {
+          this.hubActionStore = null;
+          this.hubActionClient = null;
+          console.error(
+            `[hub-actions] unavailable: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
       // A card store this build cannot open must not take the user's whole
       // object down: the feature is unavailable for this user, the rest works.
       try {
@@ -2059,6 +2092,26 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         logger: console,
       });
       this.ambient = createAmbientServices({
+        ...(this.hubActionStore && this.hubActionClient
+          ? {
+              hubActions: {
+                capabilities: () => this.hubActionClient!.capabilities(),
+                request: (input: {
+                  ownerDid: string;
+                  sessionId: string;
+                  runId: string;
+                  requestId: string;
+                  provider: string;
+                  bindingId: string;
+                  bindingRevision: number;
+                  requestKey: string;
+                  operation: ActionOperationV1;
+                }) => this.requestHubAction(input),
+                status: (ownerDid: string, actionId: string) =>
+                  this.statusHubAction(ownerDid, actionId),
+              },
+            }
+          : {}),
         actionProposals: {
           create: (subject) => this.prepareActionProposal(subject),
           prepareTopic: (input) => this.prepareTopicProposal(input),
@@ -2141,6 +2194,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.resultStore = null;
       this.artifacts = null;
       this.actionProposals = null;
+      this.hubActionStore = null;
+      this.hubActionClient = null;
       this.topicProposals = null;
       this.attachmentTextCache = null;
       this.domainContextStore = null;
@@ -3067,7 +3122,136 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         this.markDirty();
         await this.requestHousekeeping(Date.now() + 1000);
       }
-      return actionOutcomes.length ? { ...result, actionOutcomes } : result;
+      const hubActionOutcomes = await this.hubOutcomesForRun(
+        ownerDid,
+        result.sessionId,
+        result.runId,
+      );
+      return {
+        ...result,
+        ...(actionOutcomes.length ? { actionOutcomes } : {}),
+        ...(hubActionOutcomes.length ? { hubActionOutcomes } : {}),
+      };
+    }
+
+    private async requestHubAction(input: {
+      ownerDid: string;
+      sessionId: string;
+      runId: string;
+      requestId: string;
+      provider: string;
+      bindingId: string;
+      bindingRevision: number;
+      requestKey: string;
+      operation: ActionOperationV1;
+    }) {
+      if (
+        !this.hubActionStore ||
+        !this.hubActionClient ||
+        input.ownerDid !== this.userDid
+      )
+        throw new Error('Hub actions are unavailable for this channel');
+      await assertActiveChannelBinding(
+        {
+          userDid: input.ownerDid,
+          channel: {
+            provider: input.provider,
+            bindingId: input.bindingId,
+            bindingRevision: input.bindingRevision,
+          },
+        },
+        this.env,
+      );
+      const reference = await prepareHubAction(
+        this.hubActionClient,
+        {
+          reserve: async (origin, operation, expiresAt) => {
+            const reserved = await this.hubActionStore!.reserve(
+              origin,
+              operation,
+              expiresAt,
+            );
+            this.markDirty();
+            return reserved;
+          },
+          record: (origin, reference) =>
+            this.hubActionStore!.record(origin, reference),
+        },
+        input,
+      );
+      this.markDirty();
+      return reference;
+    }
+
+    private async statusHubAction(
+      ownerDid: string,
+      actionId: string,
+    ): Promise<ActionOutcomeV1 | null> {
+      const held = await this.hubActionStore?.get(ownerDid, actionId);
+      if (!held || !this.hubActionClient) return null;
+      const status = await this.hubActionClient.status(actionId);
+      if (
+        status.ownerDid !== ownerDid ||
+        canonicalJson(status.reference) !== canonicalJson(held.reference)
+      )
+        throw new Error('Hub status does not match the prepared action');
+      if (status.outcome) {
+        if (
+          status.revision !== status.outcome.authorizedRevision ||
+          status.digest !== status.outcome.authorizedDigest
+        )
+          return null;
+        await this.hubActionStore!.recordOutcome(status.outcome);
+        this.markDirty();
+      }
+      return status.outcome;
+    }
+
+    private async hubOutcomesForRun(
+      ownerDid: string,
+      sessionId: string,
+      runId: string,
+    ): Promise<ActionOutcomeV1[]> {
+      const store = this.hubActionStore;
+      if (!store) return [];
+      const current: ActionOutcomeV1[] = [];
+      for (const reference of await store.forRun(ownerDid, sessionId, runId)) {
+        try {
+          const outcome = await this.statusHubAction(ownerDid, reference.id);
+          if (outcome) current.push(outcome);
+        } catch (error) {
+          console.warn(
+            `[hub-actions] status recovery unavailable for ${reference.id}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      return current;
+    }
+
+    async recordHubActionOutcome(input: ActionOutcomeV1): Promise<void> {
+      if (this.env.HUB_ACTIONS_ENABLED !== 'true')
+        throw new Error('Hub actions disabled');
+      await this.ready({ userDid: input.ownerDid });
+      const held = await this.hubActionStore?.get(
+        input.ownerDid,
+        input.reference.id,
+      );
+      if (!held || !this.hubActionClient) throw new Error('Unknown Hub action');
+      const remote = await this.hubActionClient.status(input.reference.id);
+      if (
+        !remote.outcome ||
+        remote.ownerDid !== input.ownerDid ||
+        canonicalJson(remote.reference) !== canonicalJson(held.reference) ||
+        canonicalJson(input.reference) !== canonicalJson(held.reference) ||
+        remote.outcome.sequence < input.sequence ||
+        (remote.outcome.sequence === input.sequence &&
+          canonicalJson(remote.outcome) !== canonicalJson(input))
+      )
+        throw new Error(
+          'Hub outcome was not confirmed by authenticated status',
+        );
+      await this.hubActionStore!.recordOutcome(remote.outcome);
+      this.markDirty();
     }
 
     async listSessions(
@@ -6758,6 +6942,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             client: req.client,
             requestId: req.requestId,
             runId: run.runId,
+            ...(req.channel?.bindingRevision
+              ? {
+                  channel: {
+                    provider: req.channel.provider,
+                    bindingId: req.channel.bindingId,
+                    bindingRevision: req.channel.bindingRevision,
+                  },
+                }
+              : {}),
             roomId: sessionRoomId,
           },
           model: effectiveModel,

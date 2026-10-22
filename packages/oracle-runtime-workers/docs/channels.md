@@ -203,3 +203,80 @@ The `org.ixo.qi.origin` content contains only `v`, `transport`, `binding_id`, an
 The focused workerd tests exercise real UCAN signatures, negative authorization cases, concurrent duplicate admission, SQLite close and reopen, an abrupt Durable Object abort immediately after admission, session reuse, ownership rejection, and required mirror failures. They also cover a session released by its deletion, a reply mirrored once across the run end and repeated polls, the missing-delegation refusal, and receipt pruning. `src/channels/turns.test.ts` also proves that a turn is admitted and a finished reply answered while the mirrors hang or fail, that a hanging mirror does not hold up another request or a poll, that failed mirrors are retried from the alarm in order and abandoned on `M_FORBIDDEN`, that a request naming a deleted session answers `409 session_conflict` without a receipt and its resend without `sessionId` opens a new session, and the 7-day pruning of receipts and tombstones; `src/shell/channel-route.test.ts` that a poll of an existing run makes no Auth Hub call (also while Auth Hub is down), that active verdicts are cached for 60 s and refusals never, and that channel requests have their own rate-limit key; `src/do/user-object-lifecycle.test.ts` that a poll answers under a delegation inside the margin while a new request is refused, that a delegation inside the margin re-reads the deposited room state, that VFS 401/403 answers `403 storage_unauthorized` and a homeserver 403 `409 room_unavailable`, and that the encryption check is cached. A channel run driven by the run coordinator over the real SQLite store keeps its reply. Run coordinator tests cover enqueue order and deferred attempts. `src/channels/turns.test.ts` proves that repeated polls make no extra dirty mark or session check, `src/shell/channel-route.test.ts` that an over-limit request gets `429` without an Auth Hub call and that two concurrent identical requests under one invocation are both admitted, and that every refusal carries `{ code, message }` while an unexpected failure answers `503 unavailable` and is logged, and `src/do/user-object-lifecycle.test.ts` that the binding is not checked again after the shell did, that a missing or expired delegation is refused with `428` before the object boots, that a boot failing with `NO_VFS_DELEGATION` answers `428` while any other unclassified failure propagates, that a delegation deposited after a refusal is admitted at once, and that a missing Companion room answers `428 room_not_ready`. These tests do not contact a live model, Auth Hub, WhatsApp, or Matrix homeserver.
 
 Companion's `feat/workers-runtime` deployment must adopt the released runtime and configure these bindings. Live onboarding, revocation, encrypted Matrix event inspection, and provider delivery remain deployment acceptance checks. `pnpm test:e2e:channels` in the example app is the operator-run acceptance harness for them ([testing](testing.md#harness-end-to-end-minutes-local); its variables and checkpoints are in [`docs/testing/channels-acceptance.md`](../../../docs/testing/channels-acceptance.md)).
+
+# Auth Hub action review (disabled by default)
+
+`HUB_ACTIONS_ENABLED=true` adds the on-demand `request_hub_action` and
+`hub_action_status` tools plus read-only `hub_action_capabilities`. Discover
+capabilities first: Auth Hub returns enabled kinds, exact registered form field
+descriptors, transfer limits and the configured network. The request tool
+accepts a strictly typed candidate operation from
+`@ixo/action-protocol`; the runtime adds the authenticated owner, current
+channel binding/revision, session, run, request and tool invocation. It checks
+the active binding again before calling Auth Hub. The model cannot supply those
+identity fields or approve an action. The existing `prepare_action` Portal card
+path remains available independently.
+
+The oracle uses `AUTH_HUB_URL` (an HTTPS origin) and
+`AUTH_HUB_CHANNEL_SERVICE_KEY` to create and read operations. The owner object
+reserves the canonical request and stable expiry before the Hub POST, so an
+interrupted response can be retried with the same key and bytes. It stores each
+immutable initial reference with its original turn in SQLite. The
+finished run's Reply Plan contains a `hub-action` part with a typed
+`actionReference` and short summary. Polling the original `/channels/turn`
+request retrieves `hubActionOutcomes`; it reads Auth Hub's authenticated latest
+outcome and persists it. This read also recovers a callback that was lost.
+
+Auth Hub can post the same typed event to `/api/internal/actions/outcomes` with
+the separate `x-auth-hub-outcome-key` credential, configured on the oracle as
+`AUTH_HUB_ACTION_OUTCOME_KEY`. The callback is disabled when that secret is
+absent. The receiver checks the event against its stored original reference
+and confirms it through Auth Hub's authenticated status API before storing it.
+Neither a callback nor a model turn executes a transfer. Hub-owned native
+transfer events remain status only. A resource open is not treated as
+acceptance or submission.
+
+The operation registry and owner review live in Auth Hub. Enabling this runtime
+flag requires compatible Hub routes, registered account and binding policy,
+separate inbound/outbound service credentials, and gateway support for typed
+`hub-action` parts and `hubActionOutcomes`. Local tests do not establish live
+channel, wallet, provider or form-owner acceptance.
+
+Other HTTP hosts can import the framework-independent
+`@ixo/oracle-runtime-workers/hub-actions/client` subpath. Pass a registered
+oracle key and HTTPS Hub origin to `HubActionClient`, call `capabilities()` to
+construct only supported operations, then `request()` with a stable request key
+and expiry in Unix **seconds**. Persist both before POST. The same key must
+reuse identical bytes on retry. `status(reference.id)` is an authenticated
+owner-scoped recovery read; an operation reference alone is never completion.
+The `@ixo/oracle-runtime-workers/hub-actions/request` subpath implements these
+checks for hosts with a durable `reserve`/`record` store. Protocol versions are
+`ixo.auth-action/1`, `ixo.auth-capabilities/1` and `ixo.auth-outcome/1`;
+unsupported kinds and versions fail closed.
+
+```ts
+import { HubActionClient } from '@ixo/oracle-runtime-workers/hub-actions/client';
+
+const hub = new HubActionClient({ origin: hubOrigin, key: oracleServiceKey });
+const capabilities = await hub.capabilities();
+// Choose a registered operation from capabilities; never invent form fields.
+const expiresAt = await durableRequests.reserve(
+  requestKey,
+  operation,
+  Math.floor(Date.now() / 1000) + 900,
+);
+const reference = await hub.request({
+  bindingId,
+  bindingRevision,
+  requestKey,
+  expiresAt,
+  operation,
+});
+await durableRequests.record(requestKey, reference);
+const latest = await hub.status(reference.id);
+```
+
+Here `durableRequests` is the host's persistent idempotency store; it returns
+the original expiry for every retry of the same key and rejects changed
+operation bytes. The Workers adapter supplies one in the owner's Durable
+Object.

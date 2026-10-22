@@ -218,3 +218,13 @@ GET /matrix/status   # instanceId unchanged, sendScheduler.failed 0, rateLimited
 config for checking whether an MCP round trip leaves an object resident:
 deploy it with that config, call `/mcp-opt/timeout` vs `/mcp-opt/own`, and
 compare `instanceId` after 45 s idle. Delete the deployed copy afterwards.
+
+# Auth Hub action integration
+
+The focused `src/hub-actions` Workers tests exercise the packed shared protocol
+through real `Request`/`Response` objects and persist action/outcome rows in a
+SQLite Durable Object across reopen. The plugin core test verifies that the
+request tool uses runtime channel identity and refuses a turn without it.
+`src/delivery/plan.test.ts` checks direct structured Reply Plan projection.
+These tests use local fixtures; full signed transfer, registered form submission,
+and private resource return need the coordinated Hub and gateway acceptance run.

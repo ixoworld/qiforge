@@ -3,6 +3,7 @@ import type {
   TopicReceiptReferences,
 } from '@ixo/ixo-transaction/topic-proposals';
 import type { ProposalCommand } from '../action-proposals/store';
+import type { ActionOutcomeV1 } from '@ixo/action-protocol';
 import type {
   TopicDeliverableCommand,
   TopicDeliverableResult,
@@ -81,6 +82,8 @@ export interface OracleWorkerEnv {
   AUTH_HUB?: Fetcher;
   AUTH_HUB_URL?: string;
   AUTH_HUB_CHANNEL_SERVICE_KEY?: string;
+  HUB_ACTIONS_ENABLED?: string;
+  AUTH_HUB_ACTION_OUTCOME_KEY?: string;
 
   // --- matrix -------------------------------------------------------------
   MATRIX_BASE_URL: string;
@@ -378,6 +381,7 @@ export interface TurnRequest {
     /** A provider id (`/^[a-z][a-z0-9_-]{0,31}$/`), e.g. `whatsapp`. */
     provider: string;
     bindingId: string;
+    bindingRevision?: number;
     remoteMessageRef: string;
   };
   executionProfile?: TaskExecutionProfile;
@@ -699,6 +703,7 @@ export interface StorageStatus {
  * piped straight to the client.
  */
 export interface UserOracleObject extends Rpc.DurableObjectBranded {
+  recordHubActionOutcome(outcome: ActionOutcomeV1): Promise<void>;
   topicDeliverable(
     identity: TurnIdentity,
     operationId: string,
