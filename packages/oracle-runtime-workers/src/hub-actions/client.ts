@@ -1,12 +1,14 @@
 import {
   assertHubReferenceUrl,
   parseCapabilities,
+  parseActionOptions,
   parseOperation,
   parseOutcome,
   type ActionOperationV1,
   type ActionCapabilitiesV1,
   type ActionOutcomeV1,
   type ActionReferenceV1,
+  type HubActionOptionsV1,
 } from '@ixo/action-protocol';
 
 export interface HubActionStatus {
@@ -88,6 +90,21 @@ export class HubActionClient {
   async capabilities(): Promise<ActionCapabilitiesV1> {
     return parseCapabilities(
       await this.send('/api/internal/actions/operations/capabilities'),
+    );
+  }
+
+  async options(input: {
+    bindingId: string;
+    bindingRevision: number;
+  }): Promise<HubActionOptionsV1> {
+    const query = new URLSearchParams({
+      bindingId: input.bindingId,
+      bindingRevision: String(input.bindingRevision),
+    });
+    return parseActionOptions(
+      await this.send(
+        `/api/internal/actions/operations/options?${query.toString()}`,
+      ),
     );
   }
 

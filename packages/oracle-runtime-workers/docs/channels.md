@@ -207,7 +207,8 @@ Companion's `feat/workers-runtime` deployment must adopt the released runtime an
 # Auth Hub action review (disabled by default)
 
 `HUB_ACTIONS_ENABLED=true` adds the on-demand `request_hub_action` and
-`hub_action_status` tools plus read-only `hub_action_capabilities`. Discover
+`hub_action_status` tools plus read-only `hub_action_capabilities` and
+`hub_action_options`. Discover
 capabilities first: Auth Hub returns enabled kinds, exact registered form field
 descriptors, transfer limits and the configured network. The request tool
 accepts a strictly typed candidate operation from
@@ -253,6 +254,30 @@ The `@ixo/oracle-runtime-workers/hub-actions/request` subpath implements these
 checks for hosts with a durable `reserve`/`record` store. Protocol versions are
 `ixo.auth-action/1`, `ixo.auth-capabilities/1` and `ixo.auth-outcome/1`;
 unsupported kinds and versions fail closed.
+
+Protocol package `0.2.0` adds exact signed statements, Google Calendar
+connection/removal and one reviewed event, document read-access requests, and
+new private text files. `hub_action_options` obtains confirmed connections,
+requestable document identifiers and existing action resources for the current
+owner and channel binding. It accepts no model-supplied identity. The shared
+`operationJsonSchema` is the tool schema source; there is no second runtime
+operation catalogue. Capability and options reads may be used by any registered
+oracle account with the compatible channel adapter.
+
+The owner completes each review in Auth Hub. Calendar setup returns a fresh
+review with the account and scopes selected at Google; setup alone does not
+authorize a connection or event. Connector and VFS services check fresh owner
+proofs and current Hub admission, own their durable effects and return typed
+receipts. An access-request receipt means `pending_owner`, never access granted.
+Private file content opens on its registered separate resource origin; it is
+not included in the Reply Plan or completion notice. Unknown effects are status
+reads on the same action, never a new model execution attempt.
+
+Both shared packages are source-validation candidates. The action protocol must
+be published before releasing this runtime. The workspace also pins the reviewed
+Topic Protocol Worker validator candidate for the runtime and transaction
+package; see [its provenance and registry release gate](../../../vendor/topic-protocol/README.md).
+No candidate override establishes registry or deployment readiness.
 
 ```ts
 import { HubActionClient } from '@ixo/oracle-runtime-workers/hub-actions/client';

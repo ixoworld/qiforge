@@ -3,6 +3,7 @@ import { makeRuntimeContext } from '../../core/test-fixtures';
 import { HubActionsPlugin } from './hub-actions.plugin';
 import { HubActionClient } from '../../hub-actions/client';
 import { prepareHubAction } from '../../hub-actions/request';
+import type { HubActionOptionsV1, P2Operation } from '@ixo/action-protocol';
 
 const id = 'C'.repeat(32);
 const reference = {
@@ -33,6 +34,16 @@ const operation = {
   ],
   declaration: null,
 };
+const options: HubActionOptionsV1 = {
+  version: 'ixo.auth-options/1',
+  accountId: 'account-three',
+  ownerDid: 'did:ixo:owner',
+  bindingId: 'chb_three',
+  bindingRevision: 4,
+  connections: [],
+  targets: [],
+  resources: [],
+};
 
 describe('Hub actions Workers plugin', () => {
   it('uses only runtime channel identity and original tool invocation', async () => {
@@ -57,6 +68,7 @@ describe('Hub actions Workers plugin', () => {
       },
       toolCallId: 'tool-three',
       hubActions: {
+        options: async () => options,
         capabilities: async () => ({
           version: 'ixo.auth-capabilities/1',
           accountId: 'account-three',
@@ -167,6 +179,7 @@ describe('Hub actions Workers plugin', () => {
       },
       toolCallId: 'tool-three',
       hubActions: {
+        options: async () => options,
         capabilities: () => client.capabilities(),
         request: (input) =>
           prepareHubAction(
@@ -190,5 +203,110 @@ describe('Hub actions Workers plugin', () => {
     });
     expect(sent?.expiresAt).toBe(1_770_000_900);
     expect(sent?.bindingId).toBe('chb_three');
+  });
+
+  it('takes service discovery identity from the verified channel context', async () => {
+    const discover = vi.fn(async () => options);
+    const ctx = makeRuntimeContext({
+      config: { HUB_ACTIONS_ENABLED: 'true' },
+      user: {
+        did: options.ownerDid,
+        matrixUserId: '@owner:test',
+        ucanDelegation: { raw: 'delegation' },
+      },
+      session: {
+        id: 'session-three',
+        client: 'channel',
+        runId: 'run-three',
+        requestId: 'request-three',
+        channel: {
+          provider: 'whatsapp',
+          bindingId: options.bindingId,
+          bindingRevision: options.bindingRevision,
+        },
+      },
+      hubActions: {
+        capabilities: async () => {
+          throw new Error('not called');
+        },
+        options: discover,
+        request: async () => reference,
+        status: async () => null,
+      },
+    });
+    const tool = new HubActionsPlugin()
+      .getTools()
+      .find((item) => item.name === 'hub_action_options');
+    if (!tool) throw new Error('Options tool missing');
+    expect(await tool.handler({}, ctx)).toEqual(options);
+    expect(discover).toHaveBeenCalledWith({
+      ownerDid: options.ownerDid,
+      provider: 'whatsapp',
+      bindingId: options.bindingId,
+      bindingRevision: 4,
+    });
+    await tool.handler(
+      {},
+      makeRuntimeContext({
+        ...ctx,
+        session: { ...ctx.session, client: 'portal' },
+      }),
+    );
+    expect(discover).toHaveBeenCalledTimes(1);
+  });
+
+  it.each<P2Operation>([
+    {
+      kind: 'statement.sign.v1',
+      statement: 'These are my words.',
+      purpose: 'Keep a signed record',
+      audienceId: 'self',
+    },
+    {
+      kind: 'calendar.connect.v1',
+      purpose: 'Add events I review',
+      connectionId: null,
+      accountLabel: null,
+      scopes: [],
+    },
+    {
+      kind: 'calendar.disconnect.v1',
+      connectionId: 'connection-one',
+      accountLabel: 'alex@example.test',
+    },
+    {
+      kind: 'calendar.event.create.v1',
+      connectionId: 'connection-one',
+      accountLabel: 'alex@example.test',
+      calendarId: 'primary',
+      title: 'Planning',
+      description: '',
+      startsAt: '2099-11-03T02:00:00Z',
+      endsAt: '2099-11-03T02:30:00Z',
+      timeZone: 'Asia/Singapore',
+    },
+    {
+      kind: 'vfs.access.request.v1',
+      targetId: 'target-one',
+      title: 'Project notes',
+      ability: 'read',
+      purpose: 'Review the notes',
+    },
+    {
+      kind: 'vfs.text.save.v1',
+      filename: 'notes.txt',
+      text: 'Keep these exact words.',
+    },
+  ])('uses the shared tool schema for $kind', (candidate) => {
+    const tool = new HubActionsPlugin()
+      .getTools()
+      .find((item) => item.name === 'request_hub_action');
+    if (!tool) throw new Error('Request tool missing');
+    expect(tool.schema.safeParse({ operation: candidate }).success).toBe(true);
+    expect(
+      tool.schema.safeParse({
+        operation: { ...candidate, executorUrl: 'https://evil.test' },
+      }).success,
+    ).toBe(false);
   });
 });

@@ -2096,6 +2096,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           ? {
               hubActions: {
                 capabilities: () => this.hubActionClient!.capabilities(),
+                options: (input) => this.hubActionOptions(input),
                 request: (input: {
                   ownerDid: string;
                   sessionId: string;
@@ -3132,6 +3133,37 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         ...(actionOutcomes.length ? { actionOutcomes } : {}),
         ...(hubActionOutcomes.length ? { hubActionOutcomes } : {}),
       };
+    }
+
+    private async hubActionOptions(input: {
+      ownerDid: string;
+      provider: string;
+      bindingId: string;
+      bindingRevision: number;
+    }) {
+      if (!this.hubActionClient || input.ownerDid !== this.userDid)
+        throw new Error('Hub action options are unavailable for this owner');
+      await assertActiveChannelBinding(
+        {
+          userDid: input.ownerDid,
+          channel: {
+            provider: input.provider,
+            bindingId: input.bindingId,
+            bindingRevision: input.bindingRevision,
+          },
+        },
+        this.env,
+      );
+      const options = await this.hubActionClient.options(input);
+      if (
+        options.ownerDid !== input.ownerDid ||
+        options.bindingId !== input.bindingId ||
+        options.bindingRevision !== input.bindingRevision
+      )
+        throw new Error(
+          'Hub action options do not match this owner and binding',
+        );
+      return options;
     }
 
     private async requestHubAction(input: {

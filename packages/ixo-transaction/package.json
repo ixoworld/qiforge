@@ -58,7 +58,7 @@
   "dependencies": {
     "@scure/base": "2.2.0",
     "zod": "^4.4.3",
-    "@ixo/topic-protocol": "1.0.0-rc.7",
+    "@ixo/topic-protocol": "1.0.0-rc.8",
     "protobufjs": "^7.6.5"
   },
   "peerDependencies": {

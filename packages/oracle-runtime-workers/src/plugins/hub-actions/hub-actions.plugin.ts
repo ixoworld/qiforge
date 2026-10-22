@@ -1,4 +1,8 @@
-import { parseOperation, type ActionReferenceV1 } from '@ixo/action-protocol';
+import {
+  operationJsonSchema,
+  parseOperation,
+  type ActionReferenceV1,
+} from '@ixo/action-protocol';
 import { z } from 'zod';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin';
 import type {
@@ -11,46 +15,10 @@ const configSchema = z.object({
   HUB_ACTIONS_ENABLED: z.enum(['true', 'false']).default('false'),
 });
 
-const formFieldSchema = z.strictObject({
-  id: z.string().regex(/^[a-z][a-z0-9_]{0,39}$/),
-  label: z.string().min(1).max(120),
-  type: z.enum(['text', 'email', 'tel', 'textarea']),
-  required: z.boolean(),
-  value: z.string().max(1000),
-  source: z.enum(['user', 'record', 'suggestion']),
+const operationSchema = z.fromJSONSchema({
+  ...operationJsonSchema,
+  $schema: 'https://json-schema.org/draft/2020-12/schema',
 });
-const operationSchema = z.discriminatedUnion('kind', [
-  z.strictObject({
-    kind: z.literal('form.submit.v1'),
-    formId: z.string().min(1).max(120),
-    destination: z.string().min(1).max(200),
-    fields: z.array(formFieldSchema).min(1).max(20),
-    declaration: z.string().min(1).max(120).nullable(),
-  }),
-  z.strictObject({
-    kind: z.literal('ixo.bank.send.v1'),
-    chainId: z.string().min(1).max(100),
-    network: z.enum(['ixo testnet', 'ixo devnet']),
-    fromAddress: z
-      .string()
-      .regex(/^ixo1[023456789acdefghjklmnpqrstuvwxyz]{38,59}$/),
-    toAddress: z
-      .string()
-      .regex(/^ixo1[023456789acdefghjklmnpqrstuvwxyz]{38,59}$/),
-    amountBaseUnits: z.string().regex(/^[1-9][0-9]*$/),
-    denom: z.literal('uixo'),
-    feeBaseUnits: z.string().regex(/^(0|[1-9][0-9]*)$/),
-    memo: z.string().max(256),
-  }),
-  z.strictObject({
-    kind: z.literal('resource.read.v1'),
-    resourceId: z.string().min(1).max(200),
-    ownerDid: z.string().min(1).max(200),
-    url: z.url().max(2000),
-    version: z.string().min(1).max(200),
-    contentDigest: z.string().regex(/^[a-f0-9]{64}$/),
-  }),
-]);
 const requestSchema = z.strictObject({ operation: operationSchema });
 const statusSchema = z.strictObject({
   actionId: z.string().regex(/^[A-Za-z0-9_-]{32}$/),
@@ -142,12 +110,32 @@ async function hubActionCapabilities(
   return ctx.hubActions.capabilities();
 }
 
+async function hubActionOptions(
+  _input: unknown,
+  ctx: RuntimeContext,
+): Promise<unknown> {
+  const channel = ctx.session.channel;
+  if (
+    ctx.config.HUB_ACTIONS_ENABLED !== 'true' ||
+    ctx.session.client !== 'channel' ||
+    !channel ||
+    !ctx.hubActions
+  )
+    return { status: 'unavailable' };
+  return ctx.hubActions.options({
+    ownerDid: ctx.user.did,
+    provider: channel.provider,
+    bindingId: channel.bindingId,
+    bindingRevision: channel.bindingRevision,
+  });
+}
+
 const manifest: PluginManifest = {
   title: 'Auth Hub action review',
   summary:
     'Prepare a registered operation for owner review and read its verified status.',
   whenToUse: [
-    'The user requests a supported form submission, testnet transfer, or exact private resource review.',
+    'The user requests a supported review, statement, calendar connection or event, document access request, or private note.',
   ],
   whenNotToUse: [
     'Signing, executing, or treating a resource open as acceptance.',
@@ -175,6 +163,14 @@ export class HubActionsPlugin extends OraclePlugin {
         schema: discoverSchema,
         effect: 'read',
         handler: hubActionCapabilities,
+      },
+      {
+        name: 'hub_action_options',
+        description:
+          'Read this authenticated owner’s confirmed calendar connections, requestable documents and action resources. Use returned identifiers and labels before preparing a related Hub review.',
+        schema: discoverSchema,
+        effect: 'read',
+        handler: hubActionOptions,
       },
       {
         name: 'request_hub_action',
