@@ -23,6 +23,7 @@ import { boundedBytes } from '../core/domain-context/transport';
 import { digestTopicProposalEffect } from './topic-store';
 import { ActionProposalConflict } from './store';
 import { TopicReadUnavailable } from './topic-errors';
+import { chainNetwork } from './verify';
 const encode64 = (v: Uint8Array) =>
   btoa(Array.from(v, (c) => String.fromCharCode(c)).join(''));
 const decode64 = (v: string) =>
@@ -56,15 +57,19 @@ export class TopicChainReader {
   }
   // The node's envelopes are transport: an answer this reader does not
   // understand is the node failing, not a fact about the chain.
+  // The network an origin serves comes from the per-isolate `/status`
+  // cache the transfer verifier uses (5 minutes), not a read per call.
   async checkChain() {
-    const s = z
-      .object({
-        result: z.object({ node_info: z.object({ network: z.string() }) }),
-      })
-      .safeParse(await this.request('status'));
-    if (!s.success)
+    let network: string;
+    try {
+      network = await chainNetwork(new URL(this.rpc).href, () =>
+        this.request('status'),
+      );
+    } catch (error) {
+      if (error instanceof TopicReadUnavailable) throw error;
       throw new TopicReadUnavailable('Chain authority unavailable');
-    if (s.data.result.node_info.network !== this.chainId)
+    }
+    if (network !== this.chainId)
       throw new TopicReadUnavailable('Chain authority mismatch');
   }
   private async query(path: string, data: Uint8Array) {
