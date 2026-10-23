@@ -1,3 +1,4 @@
+import type { ProposalCommand } from '../action-proposals/store';
 import type {
   TopicDeliverableCommand,
   TopicDeliverableResult,
@@ -50,6 +51,11 @@ import type { DomainContextProvenance } from '../core/domain-context';
 /** Bindings every oracle Worker must declare (see the example `wrangler.jsonc`). */
 export interface OracleWorkerEnv {
   TOPIC_DELIVERABLES_ENABLED?: string;
+  ACTION_PROPOSALS_RPC_TESTNET?: string;
+  ACTION_PROPOSALS_RPC_DEVNET?: string;
+  ACTION_PROPOSALS_RPC_MAINNET?: string;
+  ACTION_PROPOSALS_ENABLED?: string;
+  ACTION_PROPOSALS_PORTAL_ORIGIN?: string;
   USER_ORACLE: DurableObjectNamespace<UserOracleObject>;
   MATRIX_GATEWAY: DurableObjectNamespace<MatrixGatewayObject>;
 
@@ -759,6 +765,11 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
     opts?: { limit?: number; offset?: number },
   ): Promise<{ sessions: SessionSummary[]; total: number }>;
   deleteSession(identity: TurnIdentity, sessionId: string): Promise<boolean>;
+  actionProposal(
+    identity: TurnIdentity,
+    id: string,
+    command?: ProposalCommand,
+  ): Promise<JsonString | null>;
   /** `GET /artifacts/:id` — the owner's canonical copy, or null. */
   artifact(
     identity: TurnIdentity,

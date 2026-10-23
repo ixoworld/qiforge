@@ -1645,6 +1645,42 @@ that into a fallback instead of a failed turn:
   extraction while the turn is prepared) still falls back, but the notice has
   no stream to ride and is dropped.
 
+## Action cards
+
+What an operator sees of [action proposals](action-proposals.md) once
+`ACTION_PROPOSALS_ENABLED` is on:
+
+- **Boot** refuses the Worker when the feature is on without
+  `ACTION_PROPOSALS_PORTAL_ORIGIN` and a devnet or testnet RPC, or with an
+  `http`, credentialed or query-bearing URL (`validateEnv`, attributed to
+  `core`).
+- **Refusals** are one warn line each, `[action-proposals] preparation
+refused: <ErrorName>: <reason>`; the user gets a clarification. Policy
+  refusals (`Mainnet action proposals are disabled`, `Action cards are
+prepared in direct chats only`, chain id or signer mismatch) show the
+  reason to the user as well.
+- **Verification** of a signed card runs in the owner object's alarm with a
+  doubling cooldown (30 s → 10 min, ten attempts); each miss logs
+  `[action-proposals] verification of <id> pending: <reason>` (indexing lag,
+  `Chain verification unavailable`, `Transaction memo mismatch`, …). After
+  the tenth attempt the alarm stops; a Portal reconcile still verifies.
+  `[action-proposals] <id> execution blocked: Transaction subject mismatch`
+  means the recorded transaction carries the card's memo with other
+  messages: the card stays `unknown` with the hash listed and takes only a
+  revoke; the owner prepares another card.
+- **Receipts** into the originating Matrix thread or channel retry with the
+  same cooldown up to an hour apart and are `abandoned` after twelve
+  attempts; a row this build cannot read is `quarantined` with an error
+  line. Both states are visible in the owner copy's
+  `action_proposal_receipts` table and never wake the object again.
+- **Retention**: finished cards older than 90 days are deleted at the next
+  tick; a `/a/<id>` link then answers 404.
+- The alarm tick is guarded: an action-card failure logs
+  `[user-do] action proposal tick failed …` and re-arms in a minute; runs,
+  flush and tasks still run in the same tick. A row the build cannot read is
+  quarantined the first time it is met, so one bad row does not repeat the
+  failure every minute.
+
 ## Known limits
 
 - The per-DID rate limit (100 requests / 60 s in the example config) is the

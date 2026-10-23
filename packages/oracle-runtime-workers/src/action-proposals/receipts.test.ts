@@ -1,0 +1,467 @@
+import { env, runInDurableObject } from 'cloudflare:test';
+import { describe, expect, it, vi } from 'vitest';
+import type { ActionProposal } from '@ixo/ixo-transaction/action-proposals';
+import { createRuntimeCore } from '../core';
+import { makeEnv } from '../core/test-fixtures';
+import type { TurnRequest } from '../do/contracts';
+import { RoomMirror, type MirrorSend } from '../do/room-mirror';
+import { RunStore } from '../do/run-store';
+import { storedRunRequest } from '../do/run-request';
+import { createUserOracleDO } from '../do/user-oracle-do';
+import { DoSqliteDatabase } from '../sqlite/database';
+import { NOW, OWNER, RECIPIENT, proposalSubject } from './fixtures/proposal';
+import { ActionProposalStore } from './store';
+import { resetChainNetworkCache } from './verify';
+
+async function call<T>(
+  host: object,
+  name: string,
+  ...args: unknown[]
+): Promise<T> {
+  return Reflect.apply(Reflect.get(host, name), host, args);
+}
+
+const core = createRuntimeCore({
+  config: { name: 'Qi' },
+  env: makeEnv(),
+  plugins: [],
+});
+const UserOracleDO = createUserOracleDO({ core: () => core });
+
+async function withReceipts(
+  name: string,
+  test: (setup: Awaited<ReturnType<typeof harness>>) => Promise<void>,
+) {
+  const stub = env.SQLITE_TEST.get(env.SQLITE_TEST.idFromName(name));
+  await runInDurableObject(stub, async (_instance, state) => {
+    const h = await harness(state);
+    try {
+      await test(h);
+    } finally {
+      await h.close();
+    }
+  });
+}
+
+async function harness(state: DurableObjectState) {
+  let now = NOW;
+  let db = await DoSqliteDatabase.open(state, 'receipts.db');
+  let store = new ActionProposalStore(db, () => now);
+  let runStore = new RunStore(db, () => now);
+  await store.setup();
+  const send = vi.fn(async (_message: MirrorSend) => '$receipt');
+  const host: object = Object.create(UserOracleDO.prototype);
+  const assignHost = () =>
+    Object.assign(host, {
+      ctx: state,
+      userDid: OWNER,
+      env: {
+        ACTION_PROPOSALS_ENABLED: 'true',
+        ACTION_PROPOSALS_RPC_TESTNET: 'https://rpc.test',
+      },
+      runStore,
+      actionProposals: store,
+      sessionRooms: new Map<string, string>(),
+      markDirty: vi.fn(),
+      mirror: new RoomMirror({
+        sendText: send,
+        keepAlive: () => undefined,
+        log: () => undefined,
+        warn: () => undefined,
+        retry: { delaysMs: [] },
+      }),
+    });
+  assignHost();
+  return {
+    host,
+    store: () => store,
+    send,
+    async prepare(
+      index: number,
+      sessionId = `$thread-${index}`,
+      turn: Partial<TurnRequest> = {},
+    ) {
+      const subject = proposalSubject({
+        id: `ap_00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+        origin: {
+          sessionId,
+          runId: `run-${index}`,
+          invocationId: `run-${index}:call`,
+        },
+      });
+      const request: TurnRequest = {
+        identity: { userDid: OWNER },
+        sessionId,
+        requestId: `request-${index}`,
+        client: 'channel',
+        roomId: '!origin:matrix.test',
+        message: 'Send the tokens',
+        channel: {
+          provider: 'whatsapp',
+          bindingId: 'chb_original',
+          remoteMessageRef: `hmac:${'a'.repeat(64)}`,
+        },
+        ...turn,
+      };
+      await runStore.create({
+        runId: subject.origin.runId,
+        sessionId,
+        requestId: request.requestId,
+        client: request.client,
+        status: 'running',
+        request: JSON.stringify(storedRunRequest(request)),
+        checkpointId: null,
+        instanceId: 'instance',
+      });
+      return call<ActionProposal>(host, 'prepareActionProposal', subject);
+    },
+    async verify(proposal: ActionProposal) {
+      // One transaction per card: the hash is unique to the proposal.
+      const hash = 'A'.repeat(52) + proposal.id.slice(-12);
+      await store.transition(OWNER, proposal.id, {
+        kind: 'claim',
+        digest: proposal.digest,
+      });
+      await store.transition(OWNER, proposal.id, {
+        kind: 'reconcile',
+        transactionHash: hash,
+      });
+      await store.recordVerified(OWNER, proposal.id, {
+        transactionHash: hash,
+        code: 0,
+        height: 12,
+        verifiedAt: new Date(now).toISOString(),
+      });
+    },
+    drain: () => call<number | undefined>(host, 'mirrorActionReceipts'),
+    setNow(value: number) {
+      now = value;
+    },
+    async deleteRuns() {
+      await db.run('DELETE FROM turn_runs');
+    },
+    async runExists(id: string) {
+      return Boolean(await runStore.get(id));
+    },
+    async receiptState(id: string) {
+      return (await this.receiptRow(id))?.state;
+    },
+    async receiptRow(id: string) {
+      return db.get<{ state: string; next_attempt: number; attempts: number }>(
+        'SELECT state,next_attempt,attempts FROM action_proposal_receipts WHERE proposal_id=?',
+        [id],
+      );
+    },
+    async corruptSubject(id: string) {
+      await db.run(
+        `UPDATE action_proposals SET subject=json_set(subject,'$.title','Tampered') WHERE id=?`,
+        [id],
+      );
+    },
+    async restart() {
+      await db.close();
+      db = await DoSqliteDatabase.open(state, 'receipts.db');
+      store = new ActionProposalStore(db, () => now);
+      runStore = new RunStore(db, () => now);
+      await store.setup();
+      assignHost();
+    },
+    async wrongOwnerReceipts() {
+      return store.takeReceipts('did:ixo:other');
+    },
+    async close() {
+      await db.close();
+    },
+  };
+}
+
+describe('durable canonical action receipts', () => {
+  it('handles four local sessions without calling them delivered or starving the next canonical receipt', async () => {
+    await withReceipts('receipt-local-fairness', async (h) => {
+      const local = [];
+      for (let i = 1; i <= 4; i++) {
+        const proposal = await h.prepare(i, `local-${i}`);
+        await h.verify(proposal);
+        local.push(proposal);
+      }
+      const valid = await h.prepare(5);
+      await h.verify(valid);
+      expect(await h.drain()).toBeUndefined();
+      expect(h.send).toHaveBeenCalledTimes(1);
+      expect(h.send.mock.calls[0]?.[0].threadId).toBe('$thread-5');
+      for (const proposal of local)
+        expect(await h.receiptState(proposal.id)).toBe('unavailable');
+      expect(await h.receiptState(valid.id)).toBe('delivered');
+      expect(await h.drain()).toBeUndefined();
+    });
+  });
+
+  it('keeps the trusted original room and channel across run pruning and owner restart', async () => {
+    await withReceipts('receipt-pruned-run', async (h) => {
+      const proposal = await h.prepare(1);
+      await h.verify(proposal);
+      await h.deleteRuns();
+      expect(await h.runExists(proposal.origin.runId)).toBe(false);
+      h.setNow(NOW + 8 * 24 * 60 * 60 * 1000);
+      await h.restart();
+      expect(await h.wrongOwnerReceipts()).toEqual([]);
+      expect(await h.drain()).toBeUndefined();
+      expect(h.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          roomId: '!origin:matrix.test',
+          threadId: '$thread-1',
+          origin: expect.objectContaining({ bindingId: 'chb_original' }),
+          body: expect.stringContaining('confirmed on chain'),
+        }),
+      );
+      await h.restart();
+      expect(await h.drain()).toBeUndefined();
+      expect(h.send).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('refuses a card asked for in a group room and enforces the owner policy', async () => {
+    await withReceipts('receipt-policy', async (h) => {
+      await expect(
+        h.prepare(1, '$group-thread', {
+          client: 'matrix',
+          roomKind: 'group',
+          channel: undefined,
+        }),
+      ).rejects.toThrow('direct chats only');
+      // An unmarked Matrix turn is not trusted to be a direct chat either.
+      await expect(
+        h.prepare(2, '$unmarked-thread', {
+          client: 'matrix',
+          channel: undefined,
+        }),
+      ).rejects.toThrow('direct chats only');
+      const origin = (n: number) => ({
+        sessionId: `$thread-${n}`,
+        runId: `run-${n}`,
+        invocationId: `run-${n}:call`,
+      });
+      const base = proposalSubject();
+      const refused = async (subject: unknown, message: string) =>
+        expect(call(h.host, 'prepareActionProposal', subject)).rejects.toThrow(
+          message,
+        );
+      await refused(
+        {
+          ...proposalSubject({ origin: origin(3) }),
+          ownerDid: 'did:ixo:other',
+        },
+        'owner mismatch',
+      );
+      await refused(
+        {
+          ...proposalSubject({ origin: origin(4) }),
+          action: { ...base.action, network: 'mainnet', chainId: 'ixo-5' },
+        },
+        'Mainnet action proposals are disabled',
+      );
+      await refused(
+        {
+          ...proposalSubject({ origin: origin(5) }),
+          action: { ...base.action, signerAddress: RECIPIENT },
+        },
+        'signer must be the authenticated account',
+      );
+      await refused(
+        {
+          ...proposalSubject({ origin: origin(6) }),
+          action: { ...base.action, chainId: 'pandora-9' },
+        },
+        'Chain ID does not match',
+      );
+      await refused(
+        {
+          ...proposalSubject({ origin: origin(7) }),
+          action: { ...base.action, network: 'devnet', chainId: 'devnet-1' },
+        },
+        'No chain endpoint is configured for devnet',
+      );
+      await refused(
+        {
+          ...proposalSubject({ origin: origin(8) }),
+          expiresAt: new Date(NOW + 60 * 60_000).toISOString(),
+        },
+        'expiry exceeds the policy window',
+      );
+      await refused(
+        {
+          ...proposalSubject({ origin: origin(9) }),
+          createdAt: new Date(NOW - 60 * 60_000).toISOString(),
+          expiresAt: new Date(NOW - 45 * 60_000).toISOString(),
+        },
+        'timestamp is not current',
+      );
+      expect(h.send).not.toHaveBeenCalled();
+    });
+  });
+
+  it('backs off a card whose network lost its RPC instead of ticking every second', async () => {
+    await withReceipts('receipt-no-rpc', async (h) => {
+      const proposal = await h.prepare(1);
+      await h.store().transition(OWNER, proposal.id, {
+        kind: 'claim',
+        digest: proposal.digest,
+      });
+      await h.store().transition(OWNER, proposal.id, {
+        kind: 'reconcile',
+        transactionHash: 'D'.repeat(64),
+      });
+      Object.assign(h.host, { env: { ACTION_PROPOSALS_ENABLED: 'true' } });
+      let now = NOW;
+      const waits: number[] = [];
+      for (let i = 0; i < 12; i++) {
+        h.setNow(now);
+        const next = await call<number | undefined>(
+          h.host,
+          'tickActionProposals',
+        );
+        if (next === undefined) break;
+        expect(next).toBeGreaterThanOrEqual(now + 30_000);
+        waits.push(next - now);
+        now = next;
+      }
+      // The first-lookup delay, then ten attempts spent: nine waits between
+      // them, then nothing scheduled.
+      expect(waits).toHaveLength(10);
+      expect(waits[0]).toBe(30_000);
+      expect(waits[1]).toBe(30_000);
+      expect(waits.at(-1)).toBe(600_000);
+      expect(await call(h.host, 'tickActionProposals')).toBeUndefined();
+      // A row this build cannot read drops out of the schedule too. (The
+      // clock goes back: a card stamped an hour ago is refused as stale.)
+      h.setNow(NOW);
+      Object.assign(h.host, {
+        env: {
+          ACTION_PROPOSALS_ENABLED: 'true',
+          ACTION_PROPOSALS_RPC_TESTNET: 'https://rpc.test',
+        },
+      });
+      const second = await h.prepare(2);
+      await h.store().transition(OWNER, second.id, {
+        kind: 'claim',
+        digest: second.digest,
+      });
+      await h.store().transition(OWNER, second.id, {
+        kind: 'reconcile',
+        transactionHash: 'E'.repeat(64),
+      });
+      h.setNow(NOW + 30_000);
+      await h.corruptSubject(second.id);
+      expect(await h.store().dueVerifications(OWNER)).toEqual([]);
+      expect(await call(h.host, 'tickActionProposals')).toBeUndefined();
+    });
+  });
+
+  it('runs the due chain lookups together under one wall budget when the RPC hangs', async () => {
+    await withReceipts('receipt-rpc-hang', async (h) => {
+      resetChainNetworkCache();
+      const cards = [await h.prepare(1), await h.prepare(2)];
+      for (const [i, card] of cards.entries()) {
+        await h.store().transition(OWNER, card.id, {
+          kind: 'claim',
+          digest: card.digest,
+        });
+        await h.store().transition(OWNER, card.id, {
+          kind: 'reconcile',
+          transactionHash: String(i + 1).repeat(64),
+        });
+      }
+      const started: string[] = [];
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+        started.push(String(input));
+        return new Promise<Response>((_, reject) =>
+          init?.signal?.addEventListener('abort', () =>
+            reject(new Error('aborted')),
+          ),
+        );
+      });
+      try {
+        // Past the first-lookup delay.
+        h.setNow(NOW + 30_000);
+        const tick = call<number | undefined>(h.host, 'tickActionProposals');
+        await vi.waitFor(() => expect(started).toHaveLength(2));
+        await vi.advanceTimersByTimeAsync(15_000);
+        // Both lookups were cut by the budget: attempts spent, cards
+        // `unknown`, the next lookup scheduled after the cooldown.
+        expect(await tick).toBe(NOW + 60_000);
+        for (const card of cards)
+          expect((await h.store().get(OWNER, card.id))?.lifecycle.status).toBe(
+            'unknown',
+          );
+      } finally {
+        vi.unstubAllGlobals();
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  it('quarantines a receipt whose card no longer verifies instead of retrying it for ever', async () => {
+    await withReceipts('receipt-quarantine', async (h) => {
+      const bad = await h.prepare(1);
+      await h.verify(bad);
+      const good = await h.prepare(2);
+      await h.verify(good);
+      await h.corruptSubject(bad.id);
+      expect(await h.drain()).toBeUndefined();
+      expect(h.send).toHaveBeenCalledTimes(1);
+      expect(h.send.mock.calls[0]?.[0].threadId).toBe('$thread-2');
+      expect(await h.receiptState(bad.id)).toBe('quarantined');
+      expect(await h.receiptState(good.id)).toBe('delivered');
+    });
+  });
+
+  it('backs off a failing receipt exponentially and abandons it after the cap', async () => {
+    await withReceipts('receipt-backoff', async (h) => {
+      const proposal = await h.prepare(1);
+      await h.verify(proposal);
+      h.send.mockRejectedValue(new Error('room refuses the oracle'));
+      let now = NOW;
+      const waits: number[] = [];
+      for (let attempt = 0; attempt < 20; attempt++) {
+        h.setNow(now);
+        const next = await h.drain();
+        if (next === undefined) break;
+        waits.push(next - now);
+        now = next;
+      }
+      expect(waits).toEqual([
+        30_000, 60_000, 120_000, 240_000, 480_000, 960_000, 1_920_000,
+        3_600_000, 3_600_000, 3_600_000, 3_600_000,
+      ]);
+      expect(await h.receiptRow(proposal.id)).toMatchObject({
+        state: 'abandoned',
+        attempts: 12,
+      });
+      expect(h.send).toHaveBeenCalledTimes(12);
+    });
+  });
+
+  it('moves failures behind other due receipts and retries with the same transaction id after restart', async () => {
+    await withReceipts('receipt-retry-fairness', async (h) => {
+      for (let i = 1; i <= 5; i++) await h.verify(await h.prepare(i));
+      h.send.mockRejectedValue(new Error('permanent gateway failure'));
+      expect(await h.drain()).toBe(NOW);
+      expect(h.send).toHaveBeenCalledTimes(4);
+      const original = h.send.mock.calls.map(([message]) => message);
+      h.send.mockResolvedValue('$receipt');
+      expect(await h.drain()).toBe(NOW + 30_000);
+      expect(h.send).toHaveBeenCalledTimes(5);
+      expect(h.send.mock.calls[4]?.[0].threadId).toBe('$thread-5');
+      await h.restart();
+      expect(await h.drain()).toBe(NOW + 30_000);
+      expect(h.send).toHaveBeenCalledTimes(5);
+      h.setNow(NOW + 30_001);
+      expect(await h.drain()).toBeUndefined();
+      expect(
+        h.send.mock.calls.slice(5).map(([message]) => message.txnId),
+      ).toEqual(original.map((message) => message.txnId));
+      expect(h.send).toHaveBeenCalledTimes(9);
+    });
+  });
+});
