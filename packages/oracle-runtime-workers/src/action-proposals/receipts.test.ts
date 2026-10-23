@@ -11,6 +11,7 @@ import { createUserOracleDO } from '../do/user-oracle-do';
 import { DoSqliteDatabase } from '../sqlite/database';
 import { NOW, OWNER, RECIPIENT, proposalSubject } from './fixtures/proposal';
 import { ActionProposalStore } from './store';
+import { resetChainNetworkCache } from './verify';
 
 async function call<T>(
   host: object,
@@ -350,6 +351,48 @@ describe('durable canonical action receipts', () => {
       await h.corruptSubject(second.id);
       expect(await h.store().dueVerifications(OWNER)).toEqual([]);
       expect(await call(h.host, 'tickActionProposals')).toBeUndefined();
+    });
+  });
+
+  it('runs the due chain lookups together under one wall budget when the RPC hangs', async () => {
+    await withReceipts('receipt-rpc-hang', async (h) => {
+      resetChainNetworkCache();
+      const cards = [await h.prepare(1), await h.prepare(2)];
+      for (const [i, card] of cards.entries()) {
+        await h.store().transition(OWNER, card.id, {
+          kind: 'claim',
+          digest: card.digest,
+        });
+        await h.store().transition(OWNER, card.id, {
+          kind: 'reconcile',
+          transactionHash: String(i + 1).repeat(64),
+        });
+      }
+      const started: string[] = [];
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+        started.push(String(input));
+        return new Promise<Response>((_, reject) =>
+          init?.signal?.addEventListener('abort', () =>
+            reject(new Error('aborted')),
+          ),
+        );
+      });
+      try {
+        const tick = call<number | undefined>(h.host, 'tickActionProposals');
+        await vi.waitFor(() => expect(started).toHaveLength(2));
+        await vi.advanceTimersByTimeAsync(15_000);
+        // Both lookups were cut by the budget: attempts spent, cards
+        // `unknown`, the next lookup scheduled after the cooldown.
+        expect(await tick).toBe(NOW + 30_000);
+        for (const card of cards)
+          expect((await h.store().get(OWNER, card.id))?.lifecycle.status).toBe(
+            'unknown',
+          );
+      } finally {
+        vi.unstubAllGlobals();
+        vi.useRealTimers();
+      }
     });
   });
 

@@ -85,6 +85,34 @@ export class ActionProposalTestDO extends DurableObject {
   async prune(owner: string) {
     return (await this.proposals()).prune(owner);
   }
+  async closeUnexecuted(owner: string) {
+    return (await this.proposals()).closeUnexecuted(owner);
+  }
+  async nextClose(owner: string) {
+    return (await this.proposals()).nextUnexecutedCloseAt(owner);
+  }
+  /** The indexed hash column, which a revoked blocked card keeps. */
+  async hashColumn(id: string) {
+    await this.proposals();
+    return (
+      (
+        await (
+          await this.database()
+        ).get<{ transaction_hash: string | null }>(
+          'SELECT transaction_hash FROM action_proposals WHERE id=?',
+          [id],
+        )
+      )?.transaction_hash ?? null
+    );
+  }
+  async queryPlan(sql: string, params: unknown[]) {
+    await this.proposals();
+    return (
+      await (
+        await this.database()
+      ).exec<{ detail: string }>(`EXPLAIN QUERY PLAN ${sql}`, params as never)
+    ).map((r) => r.detail);
+  }
   async setNow(now: number) {
     this.now = now;
   }

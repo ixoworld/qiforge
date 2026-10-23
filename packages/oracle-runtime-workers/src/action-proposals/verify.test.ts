@@ -4,13 +4,13 @@ import {
   TxBody,
 } from '@ixo/impactxclient-sdk/module/codegen/cosmos/tx/v1beta1/tx.js';
 import { MsgSend } from '@ixo/impactxclient-sdk/module/codegen/cosmos/bank/v1beta1/tx.js';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   digestActionProposal,
   type ActionProposal,
 } from '@ixo/ixo-transaction/action-proposals';
 import { proposalSubject } from './fixtures/proposal';
-import { verifyActionTransaction } from './verify';
+import { resetChainNetworkCache, verifyActionTransaction } from './verify';
 async function fixture(memo?: string) {
   const subject = proposalSubject();
   const proposal: ActionProposal = {
@@ -57,6 +57,7 @@ async function fixture(memo?: string) {
   return { proposal, hash, fetcher };
 }
 describe('chain verified action outcomes', () => {
+  beforeEach(() => resetChainNetworkCache());
   it('verifies exact bytes and chain before accepting an included transaction', async () => {
     const { proposal, hash, fetcher } = await fixture();
     expect(
@@ -117,9 +118,19 @@ describe('chain verified action outcomes', () => {
     await expect(
       verifyActionTransaction(proposal, hash, 'http://rpc.test', fetcher),
     ).rejects.toThrow('HTTPS');
+    proposal.action.chainId = 'pandora-8';
+    resetChainNetworkCache();
     fetcher.mockResolvedValue(new Response('', { status: 503 }));
     await expect(
       verifyActionTransaction(proposal, hash, 'https://rpc.test', fetcher),
     ).rejects.toThrow('unavailable');
+  });
+  it('asks an RPC origin for its network once per cache window', async () => {
+    const { proposal, hash, fetcher } = await fixture();
+    await verifyActionTransaction(proposal, hash, 'https://rpc.test', fetcher);
+    await verifyActionTransaction(proposal, hash, 'https://rpc.test', fetcher);
+    expect(
+      fetcher.mock.calls.filter(([input]) => String(input).includes('/status')),
+    ).toHaveLength(1);
   });
 });

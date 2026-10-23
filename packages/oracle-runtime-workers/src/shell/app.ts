@@ -220,7 +220,14 @@ export function isDidShaped(value: string): boolean {
  */
 export function rateLimitKey(
   env: Pick<OracleWorkerEnv, 'ORACLE_DID'>,
-  scope: 'user' | 'channel' | 'artifact' | 'socket' | 'status' | 'start',
+  scope:
+    | 'user'
+    | 'channel'
+    | 'action'
+    | 'artifact'
+    | 'socket'
+    | 'status'
+    | 'start',
   subject: string,
 ): string {
   return `${env.ORACLE_DID}|${scope}|${subject}`;
@@ -537,8 +544,14 @@ export function createShell(
     if (!limiter) return next();
     const auth = c.get('auth') as AuthResult | undefined;
     if (!auth) return next();
+    // Card reads and commands (Portal's review page) have their own
+    // bucket: polling a card while chatting must not push turns into 429.
     const { success } = await limiter.limit({
-      key: rateLimitKey(c.env, 'user', auth.userDid),
+      key: rateLimitKey(
+        c.env,
+        c.req.path.startsWith('/action-proposals/') ? 'action' : 'user',
+        auth.userDid,
+      ),
     });
     if (!success)
       return c.json(

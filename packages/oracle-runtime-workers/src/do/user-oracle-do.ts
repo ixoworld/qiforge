@@ -485,6 +485,14 @@ const ACCESS_PERSIST_INTERVAL_MS = 60 * 60_000;
 const TITLE_TIMEOUT_MS = 15_000;
 /** A new sweep of expired ambient blobs starts at most this often per instance. */
 const BLOB_SWEEP_INTERVAL_MS = 60 * 60_000;
+/**
+ * Wall time the alarm's action-card tick may spend on chain lookups (two at
+ * most, run together); an abort counts as an RPC outage (the card stays
+ * `unknown`, its attempt spent).
+ */
+const ACTION_TICK_BUDGET_MS = 15_000;
+/** The card retention sweep runs at most this often per instance. */
+const ACTION_PRUNE_INTERVAL_MS = 60 * 60_000;
 /** The Blocksync lookup of the user's homeserver is abandoned after this long (the fallback applies). */
 const HOMESERVER_LOOKUP_TIMEOUT_MS = 3_000;
 /** Set once the legacy Matrix copy has been removed (or found absent): no more lookups. */
@@ -857,6 +865,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     /** Chat delivery's artefacts; null when no bucket is bound (see `canShare` for new ones). */
     private artifacts: ArtifactStore | null = null;
     private actionProposals: ActionProposalStore | null = null;
+    /** When this instance last ran the card retention sweep (at most hourly). */
+    private lastActionPruneAt: number | null = null;
     /** Text `view_attachment` extracted, per session (`attachments/view-cache.ts`). */
     private attachmentTextCache: AttachmentTextCacheStore | null = null;
     /**
@@ -2402,21 +2412,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           deadlines.push(Math.max(nextRecovery, now + 1000));
       }
 
-      // Action cards: look up recorded transactions the chain has not
-      // confirmed yet, post the receipts that are due, drop old cards. One
-      // bad row here must not stop the flush, the tasks or the eviction
-      // below, so the tick is guarded like its neighbours.
-      try {
-        const actionAt = await this.tickActionProposals();
-        if (actionAt !== undefined)
-          deadlines.push(Math.max(actionAt, now + 1000));
-      } catch (err) {
-        console.error(
-          `[user-do] action proposal tick failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        deadlines.push(now + 60_000);
-      }
-
       // The last real request, stored for the next instance before anything
       // is decided on it.
       await this.persistAccess();
@@ -2475,6 +2470,24 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             `[user-do] channel housekeeping failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
+      }
+
+      // Action cards: look up recorded transactions the chain has not
+      // confirmed yet, close cards claimed and never executed, post the
+      // receipts that are due, drop old cards. It runs after the flush and
+      // the task scheduler (a slow chain RPC must not delay a user's task)
+      // under one wall budget, and before the eviction check (its deadline
+      // keeps the copy). One bad row must not stop what follows, so the tick
+      // is guarded like its neighbours.
+      try {
+        const actionAt = await this.tickActionProposals();
+        if (actionAt !== undefined)
+          deadlines.push(Math.max(actionAt, now + 1000));
+      } catch (err) {
+        console.error(
+          `[user-do] action proposal tick failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        deadlines.push(now + 60_000);
       }
 
       // Legacy-blob compaction: one bounded batch per tick until the whole
@@ -3148,34 +3161,87 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /**
-     * The alarm's share of action cards: at most two chain lookups for
-     * cards whose transaction is recorded but unconfirmed (so a card the
-     * user signed and walked away from still gets its receipt once the
-     * chain has indexed it), the receipts due now, and the retention sweep.
-     * Returns the earliest moment any of it is due again.
+     * The alarm's share of action cards: at most two chain lookups (run
+     * together) for cards whose transaction is recorded but unconfirmed (so
+     * a card the user signed and walked away from still gets its receipt
+     * once the chain has indexed it), closing claimed cards whose execution
+     * window passed with no transaction, the receipts due now (posted in the
+     * background: their schedule already moved forward, so a crash cannot
+     * post one sooner), and the retention sweep, at most hourly. All of it
+     * shares `ACTION_TICK_BUDGET_MS` of wall time. Returns the earliest
+     * moment any of it is due again.
      */
     private async tickActionProposals(): Promise<number | undefined> {
       if (!this.userDid || !this.actionProposals) return undefined;
       const store = this.actionProposals;
-      for (const proposal of await store.dueVerifications(this.userDid)) {
-        const refreshed = await refreshActionProposal(
-          store,
-          proposal,
-          this.actionProposalRpc(proposal),
+      const userDid = this.userDid;
+      const budget = new AbortController();
+      const timer = setTimeout(() => budget.abort(), ACTION_TICK_BUDGET_MS);
+      try {
+        const due = await store.dueVerifications(userDid);
+        const settled = await Promise.allSettled(
+          due.map((proposal) =>
+            refreshActionProposal(
+              store,
+              proposal,
+              this.actionProposalRpc(proposal),
+              fetch,
+              budget.signal,
+            ),
+          ),
         );
-        if (refreshed.attempted) this.markDirty();
+        for (const result of settled) {
+          if (result.status === 'fulfilled') {
+            if (result.value.attempted) this.markDirty();
+          } else
+            console.warn(
+              `[action-proposals] verification failed for ${userDid}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
+            );
+        }
+      } finally {
+        clearTimeout(timer);
       }
-      if ((await store.prune(this.userDid)) > 0) this.markDirty();
-      const receiptAt = await this.mirrorActionReceipts();
-      const verifyAt = await store.nextVerificationAt(this.userDid);
-      if (receiptAt === undefined) return verifyAt;
-      return verifyAt === undefined ? receiptAt : Math.min(receiptAt, verifyAt);
+      if ((await store.closeUnexecuted(userDid)) > 0) this.markDirty();
+      const now = store.now();
+      const lastPruneAt = this.lastActionPruneAt ?? null;
+      if (
+        lastPruneAt === null ||
+        now - lastPruneAt >= ACTION_PRUNE_INTERVAL_MS
+      ) {
+        this.lastActionPruneAt = now;
+        if ((await store.prune(userDid)) > 0) this.markDirty();
+      }
+      const receiptAt = await this.mirrorActionReceipts(true);
+      const next = [
+        receiptAt,
+        await store.nextVerificationAt(userDid),
+        await store.nextUnexecutedCloseAt(userDid),
+      ].filter((at): at is number => at !== undefined);
+      return next.length ? Math.min(...next) : undefined;
     }
 
-    private async mirrorActionReceipts(): Promise<number | undefined> {
+    /**
+     * Take the receipts due now and post them. `detach` hands the posts to
+     * `ctx.waitUntil` (the alarm does not wait on a slow room); otherwise
+     * they are awaited.
+     */
+    private async mirrorActionReceipts(
+      detach = false,
+    ): Promise<number | undefined> {
       if (!this.userDid || !this.actionProposals) return undefined;
-      const receipts = await this.actionProposals.takeReceipts(this.userDid);
+      const store = this.actionProposals;
+      const receipts = await store.takeReceipts(this.userDid);
       if (receipts.length) this.markDirty();
+      const posting = this.postActionReceipts(store, receipts);
+      if (detach) this.ctx.waitUntil(posting);
+      else await posting;
+      return store.nextReceiptAttempt(this.userDid);
+    }
+
+    private async postActionReceipts(
+      store: ActionProposalStore,
+      receipts: Awaited<ReturnType<ActionProposalStore['takeReceipts']>>,
+    ): Promise<void> {
       for (const { proposal, origin } of receipts) {
         try {
           if (
@@ -3199,10 +3265,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             'oracle',
             true,
           );
-          await this.actionProposals.receiptMirrored(
-            proposal.ownerDid,
-            proposal.id,
-          );
+          await store.receiptMirrored(proposal.ownerDid, proposal.id);
           this.markDirty();
         } catch (error) {
           console.warn(
@@ -3211,7 +3274,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           );
         }
       }
-      return this.actionProposals.nextReceiptAttempt(this.userDid);
     }
 
     private actionProposalRpc(proposal: ActionProposal): string | undefined {
