@@ -107,6 +107,16 @@ export class ActionProposalTestDO extends DurableObject {
       )?.transaction_hash ?? null
     );
   }
+  /** Make a card's subject fail its digest check (an unreadable row). */
+  async corrupt(id: string) {
+    await this.proposals();
+    await (
+      await this.database()
+    ).run(
+      `UPDATE action_proposals SET subject=json_set(subject,'$.title','Tampered') WHERE id=?`,
+      [id],
+    );
+  }
   async verifyAttempts(id: string) {
     await this.proposals();
     return (

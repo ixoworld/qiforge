@@ -102,6 +102,7 @@ stateDiagram-v2
     prepared --> expired: 15 min
     claimed --> unknown: reconcile (hash optional)
     claimed --> revoked: 60 min after claim, no hash
+    revoked --> unknown: late hash for a card closed this way
     unknown --> revoked: 60 min after claim, no hash
     unknown --> succeeded: verified, code 0
     unknown --> failed: verified, code != 0
@@ -112,8 +113,13 @@ claim reply) is closed by the alarm 60 minutes after its claim
 (`ACTION_PROPOSAL_EXECUTION_WINDOW_MS`) as `revoked`, ended then. It uses the
 existing terminal state, so strict readers of the contract (the Portal) need
 no change, and it never returns to `prepared`: a broadcast nobody observed is
-still possible, so the link stays used up. A hash reported after the window
-is refused (`Proposal was not claimed`); the owner asks for a new card.
+still possible, so the link stays used up. A hash reported after the window (a
+transaction signed late that landed after all) reopens the card: it goes back
+to `unknown` with that hash and its original claim time, on the normal
+verification path; the memo still binds the transaction to this card. A
+reconcile without a hash is refused (`Proposal was not claimed`). An
+unreadable claimed card is taken out of this sweep (logged, quarantined) so
+its claim never holds the alarm's next deadline in the past.
 
 A claim consumes a prepared card once and atomically; a second device gets a
 conflict. `reconcile` takes only an optional transaction hash and never a

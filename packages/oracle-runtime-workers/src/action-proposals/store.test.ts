@@ -38,6 +38,7 @@ function stub(name: string) {
     nextClose: (owner: string) => s.nextClose(owner),
     hashColumn: (id: string) => s.hashColumn(id),
     verifyAttempts: (id: string) => s.verifyAttempts(id),
+    corrupt: (id: string) => s.corrupt(id),
     queryPlan: (sql: string, params: (string | number)[]) =>
       s.queryPlan(sql, params),
     setNow: (now: number) => s.setNow(now),
@@ -452,6 +453,41 @@ describe('durable action proposals', () => {
         digest: cancelled.digest,
       }),
     ).rejects.toThrow('already consumed');
+    // A reconcile with no hash still finds it closed.
+    await expect(
+      s.transition(OWNER, cancelled.id, { kind: 'reconcile' }),
+    ).rejects.toThrow('Proposal was not claimed');
+    // The transaction was signed after the window and landed after all:
+    // its hash reopens the card on the normal verification path (the memo
+    // still binds it to this card).
+    const late = await indexedTransaction(cancelled);
+    expect(
+      (
+        await s.transition(OWNER, cancelled.id, {
+          kind: 'reconcile',
+          transactionHash: late.hash,
+        })
+      )?.lifecycle,
+    ).toEqual({
+      status: 'unknown',
+      claimedAt: new Date(NOW).toISOString(),
+      transactionHash: late.hash,
+    });
+    await s.setNow(NOW + 60 * 60_000 + 30_000);
+    expect(
+      (await s.refresh(OWNER, cancelled.id, late.json))?.lifecycle.status,
+    ).toBe('succeeded');
+  });
+  it('takes an unreadable claimed card out of the close schedule instead of re-arming every second', async () => {
+    const s = stub('unexecuted-unreadable');
+    const p = await s.create(proposalSubject());
+    await s.transition(OWNER, p.id, { kind: 'claim', digest: p.digest });
+    await s.corrupt(p.id);
+    await s.setNow(NOW + 61 * 60_000);
+    expect(await s.nextClose(OWNER)).toBe(NOW + 60 * 60_000);
+    expect(await s.closeUnexecuted(OWNER)).toBe(0);
+    // Quarantined: no deadline left in the past.
+    expect(await s.nextClose(OWNER)).toBeUndefined();
   });
   it('caps cards per run and open cards per owner', async () => {
     const s = stub('caps');
