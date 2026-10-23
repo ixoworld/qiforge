@@ -188,4 +188,66 @@ describe('Hub action HTTP client', () => {
       }),
     ).rejects.toThrow();
   });
+
+  it('declares protocol version 2 on capabilities, prepare and status, and reads v2 outcomes', async () => {
+    const urls: string[] = [];
+    const v2 = {
+      ...outcome,
+      version: 'ixo.auth-outcome/2' as const,
+      sequence: 5,
+      status: 'expired' as const,
+    };
+    const client = new HubActionClient({
+      origin: 'https://hub.test',
+      key: 'oracle-secret',
+      fetcher: {
+        fetch: async (request) => {
+          const url = new URL(request.url);
+          urls.push(`${request.method} ${url.pathname}${url.search}`);
+          if (url.pathname.endsWith('/capabilities'))
+            return Response.json({
+              version: 'ixo.auth-capabilities/2',
+              accountId: reference.accountId,
+              oracleDid: 'did:ixo:oracle',
+              network: null,
+              resourceOrigin: null,
+              operations: ['statement.sign.v1'],
+              transfer: null,
+              forms: [],
+            });
+          if (request.method === 'POST') return Response.json({ reference });
+          return Response.json({
+            reference,
+            ownerDid: 'did:ixo:second',
+            revision: 1,
+            digest: reference.digest,
+            reviewStatus: 'expired',
+            operationStatus: 'not_started',
+            outcome: v2,
+          });
+        },
+      },
+    });
+    expect((await client.capabilities()).operations).toEqual([
+      'statement.sign.v1',
+    ]);
+    await client.request({
+      bindingId: reference.bindingId,
+      bindingRevision: reference.bindingRevision,
+      requestKey: 'k'.repeat(64),
+      expiresAt: 1999999999,
+      operation: {
+        kind: 'statement.sign.v1',
+        statement: 'These are my words.',
+        purpose: 'Keep a signed record',
+        audienceId: 'self',
+      },
+    });
+    expect((await client.status(id)).outcome).toEqual(v2);
+    expect(urls).toEqual([
+      'GET /api/internal/actions/operations/capabilities?version=2',
+      'POST /api/internal/actions/operations?version=2',
+      `GET /api/internal/actions/operations/${id}?version=2`,
+    ]);
+  });
 });

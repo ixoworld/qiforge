@@ -265,6 +265,26 @@ describe('Hub actions in the owner object', () => {
     });
   });
 
+  it('treats a v2 expired or cancelled outcome as terminal', async () => {
+    await withHub('hub-v2-terminal', async (h) => {
+      const expired = await h.prepared(1);
+      const cancelled = await h.prepared(2);
+      for (const [ref, status] of [
+        [expired, 'expired'],
+        [cancelled, 'cancelled'],
+      ] as const)
+        await h.store.recordOutcome({
+          ...outcome(ref, 5, status),
+          version: 'ixo.auth-outcome/2',
+        });
+      expect((await h.poll()).map((o) => o.status)).toEqual([
+        'expired',
+        'cancelled',
+      ]);
+      expect(h.calls).toEqual([]);
+    });
+  });
+
   it('refreshes at most one non-terminal action per poll, then backs off', async () => {
     await withHub('hub-one-per-poll', async (h) => {
       const refs = [

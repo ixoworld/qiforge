@@ -8,9 +8,12 @@ import {
 } from '@ixo/action-protocol';
 import type { DoSqliteDatabase } from '../sqlite/database';
 
-/** Outcomes after which the Hub never reports another for the action. */
+/**
+ * Outcomes after which the Hub never reports another for the action
+ * (`expired` and `cancelled`: never executed, protocol 0.4.0).
+ */
 export const TERMINAL_HUB_STATUSES: ReadonlySet<ActionOutcomeV1['status']> =
-  new Set(['succeeded', 'failed', 'declined']);
+  new Set(['succeeded', 'failed', 'declined', 'expired', 'cancelled']);
 /** Status refreshes of a non-terminal action back off 15 s -> 10 min. */
 export const HUB_CHECK_BASE_MS = 15_000;
 export const HUB_CHECK_MAX_MS = 10 * 60_000;

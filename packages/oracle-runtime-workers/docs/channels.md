@@ -278,7 +278,16 @@ checks for hosts with a durable `reserve`/`record` store. Protocol versions are
 `ixo.auth-action/1`, `ixo.auth-capabilities/1` and `ixo.auth-outcome/1`;
 unsupported kinds and versions fail closed.
 
-Protocol package `0.3.0` supports exact signed statements, Gmail connection/removal
+The runtime declares protocol version 2 (`?version=2`) on the capabilities,
+prepare and status calls: without it Auth Hub answers v1 (the three P1 kinds
+only, v1-filtered outcomes) and refuses a P2 prepare with
+`protocol_version_required`, and it stores the version per action for the
+outcomes it pushes. Outcomes arrive as `ixo.auth-outcome/2`; `expired` and
+`cancelled` (never executed, receipt null) are terminal like `succeeded`,
+`failed` and `declined`, so a poll stops refreshing them. Gateways that read
+`hubActionOutcomes` must accept the v2 envelope.
+
+Protocol package `0.4.0` supports exact signed statements, Gmail connection/removal
 and one reviewed plain-text email, Google Calendar connection/removal and one
 reviewed event, document read-access requests, and new private text files.
 `hub_action_options` requests `ixo.auth-options/2` and obtains confirmed connections,
