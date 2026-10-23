@@ -127,7 +127,9 @@ Still refused after stage 2, it gives up. Stage 2 never runs on a first refusal 
 This applies to `authedRequest` (every hook's REST calls), the turn's `POST /messages/:sessionId` (repeated only while it is refused; once accepted it is never sent again), every re-join of a running reply, and the realtime socket's CONNECT (a refusal of the credentials themselves; a failed session check is final).
 
 - `run.ended === 'unauthorized'` (`useChat`): a re-join of the running reply was refused after both stages (or for a reason new credentials cannot fix). The reply itself goes on and appears in the transcript once the conversation reloads. A message whose POST is still refused after both stages was not sent: `sendMessage` rejects with the refusal (`status` 401/403).
-- `useOraclesContext().renewOracleAuth(oracleDid, stage, refused?)` is the same renewal for a host's own requests: call stage 1 after a refusal and repeat, stage 2 only after the repeat was refused too, passing the credentials the refused request carried. It resolves `false` when there is nothing to repeat with. `getDelegation(oracleDid, { fresh: true })` and `getInvocation(oracleDid, { fresh: true })` mint without the staging.
+- `useOraclesContext().renewOracleAuth(oracleDid, stage, refused?)` is the same renewal for a host's own requests: call stage 1 after a refusal and repeat, stage 2 only after the repeat was refused too, passing the credentials the refused request carried. It resolves `false` when there is nothing to repeat with. `getDelegation(oracleDid, { fresh: true })` and `getInvocation(oracleDid, { fresh: true })` mint without the staging. `getDelegation(oracleDid, { background: true })` returns the cached delegation only and never mints (`null` when none is cached, or with `fresh` too).
+- **Background requests** (`authedRequest(url, method, init, oracleDid, { background: true })`, used by `useActiveRuns`'s status poll; a background socket, `useWebSocketEvents({ executor: 'background' })`, follows the same rules for its CONNECT, failing with `BACKGROUND_SOCKET_UNAVAILABLE` instead) never involve the user. They send a cached delegation only and never mint one; an invocation they need (none cached, or the stage-1 renewal) is minted with `createInvocation(oracleDid, { background: true })`; stage 2 never runs. When the host mints nothing, the request fails without being sent, with a 401 `RequestError` whose `code` is `BACKGROUND_INVOCATION_UNAVAILABLE` (compare against the exported constant), and is never retried interactively; the poll then waits for the next window focus. A background mint goes into the same cache as any other.
+- **For host implementers:** `createInvocation(oracleDid, options?)` receives `{ background: true }` for those mints. Then mint without any user interaction — no PIN or passkey prompt, and without extending the signer's idle timer (no "touch" that keeps an unlocked signer from locking) — and resolve `null` (or an empty `serialized`) when you cannot, e.g. while the signer is locked. A host that ignores the argument keeps today's behaviour, prompts included, so a locked signer would prompt from a poll: implement it before mounting `useActiveRuns` or a background socket. The Portal's `useCreateUcanInvocation` is the reference host.
 - `onDelegationRenewed(oracleDid, delegation)` (provider prop, optional) runs after stage 2 minted a delegation. The oracle already adopts the new delegation from the repeated request; use the hook to update anything else that holds the old one, such as a delegation deposited with `POST /delegation` (the oracle reads that copy for Matrix turns when it has none of its own).
 
 ## 📚 Documentation
@@ -227,9 +229,30 @@ Socket calls are scoped to one session and one connection: a
 `browser_tool_call` or `action_call` runs only when it names the hook's
 current session on the current connection, an `action_call` only while its
 status is `isRunning`, and browser tools registered after the socket
-connected are honoured. This matches version 2 of the runtime's
+connected are honoured. A `browser_tool_call` of the session always gets a
+definite answer: a socket without browser tools answers a `tool_result`
+error `Tool <name> not found: no browser tools registered`. This matches version 2 of the runtime's
 [frontend bridge](../oracle-runtime-workers/docs/frontend-bridge.md), where a
 call that gets no answer resolves as an unknown outcome instead of a failure.
+
+A call for a chat that has no socket connected is parked by the runtime
+until one connects, and the run's summary carries `waitingFor`
+(`isWaitingOnUser(run)`): opening the chat sends it. A host can also keep
+a running chat's page-independent, read-only browser tools answering while
+the chat is not open with `useWebSocketEvents({ …, executor: 'background',
+browserTools })`, which declares the tool names on every CONNECT; such a
+socket only runs those tools, only while no foreground socket of the
+session is connected, and gets no events. It never listens for AG-UI
+action calls, refuses (a `tool_result` error) any tool its latest CONNECT
+did not declare, and runs calls only after the runtime's `connected` event
+echoed `executor: 'background'`; without that echo it closes, does not
+reconnect and reports an error of code `BACKGROUND_EXECUTOR_UNSUPPORTED`
+(exported). It never prompts: it uses a
+cached delegation only, background invocation mints (never a bare
+delegation) and a background stage-1 renewal; without a cached delegation
+or a silent invocation it does not connect and reports an error of code
+`BACKGROUND_SOCKET_UNAVAILABLE` (exported) — see the
+[usage guide](./docs/USAGE_GUIDE.md#running-a-chats-browser-tools-in-the-background).
 
 ### Real-time Streaming
 
@@ -254,8 +277,11 @@ import { useLiveAgent } from '@ixo/oracles-client-sdk/live-agent';
 ### Hooks
 
 - `useChat` - Real-time chat with streaming, history paging, anonymous feedback
-- `useOracleSessions` - Session management
+- `useOracleSessions` - Session management (rows carry `activeRun` while a chat is running)
+- `useActiveRuns` - Which of the user's chats are running now, for a live status on every chat-list row (polls `GET /runs/active`); `isWaitingOnUser(run)` tells which of them wait for the user to open the chat (a parked browser call)
+- `useAbortSession` - Stop any session's current message, not only the mounted chat's
 - `useAgAction` - Register an AG-UI action (`exposeToAgent` hides it from the model)
+- `useWebSocketEvents` - The session's realtime socket (`useChat` mounts it); `executor: 'background'` opens one that only runs declared browser tools of a chat that is not open
 - `useModels` - The oracle's model catalog (for a model picker)
 - `useOraclesConfig` - The oracle's entity document and authz config, read from the chain
 - `useContractOracle` - Payment and authorization

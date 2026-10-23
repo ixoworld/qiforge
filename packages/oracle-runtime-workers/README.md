@@ -90,6 +90,7 @@ Every variable, binding and migration is explained in
 | `GET /matrix/status`, `POST /matrix/start`            | Gateway status and start                              |
 | `POST/GET /sessions`, `POST/GET /messages/:id`        | The chat API                                          |
 | `GET /runs/:runId`, `GET /sessions/:id/messages`      | Re-join a durable run; one page of a transcript       |
+| `GET /sessions/:id/run`, `GET /runs/active`           | A session's active run; every active run of the user  |
 | `/delegation`, `/models`, `/socket.io/`, `/byo-llm/*` | Delegation, models, realtime channel, BYO LLM         |
 | `POST /channels/turn`                                 | IXO Channels ingress; refusals carry a `code`         |
 | `POST /messages/:sessionId/:messageId/feedback`       | Anonymous feedback on a reply (when configured)       |

@@ -861,6 +861,18 @@ export interface RuntimeContext<TConfig = MergedConfig> {
    * to the state update.
    */
   toolCallId?: string;
+
+  /**
+   * Record that THIS tool call has left the object: the executor that runs
+   * it outside the runtime received it (for a frontend tool, a browser
+   * socket). Present when the host keeps write-ahead marks for the turn's
+   * tool calls (durable runs on Workers) and the call has an id. A call
+   * restarted before this was recorded is known not to have run and is
+   * issued again on resume; after it, a write's outcome is unknown. A tool
+   * that may wait before sending (a parked frontend call) passes it as
+   * `FrontendCallParams.onDispatched`.
+   */
+  markDispatched?: () => void;
 }
 
 /** Lifecycle of a scheduled task. */
@@ -919,18 +931,46 @@ export interface OracleTaskInput {
 /**
  * Bridge to the user's browser over the realtime channel. Each call is one
  * invocation with its own id, sent (`browser_tool_call` / `action_call`) to
- * ONE authenticated socket of `sessionId`; only that socket's answer settles
- * it. It resolves with the browser's answer and rejects on the browser's
- * `error`, an AG-UI `success: false`, or when no socket could take it. When
- * the answer cannot arrive — the deadline passed or the socket went — it
- * resolves with `FRONTEND_OUTCOME_UNKNOWN` (`@ixo/common/ai/frontend-bridge`):
- * the browser may have performed the action, and it is never sent again.
+ * ONE authenticated socket of `sessionId` that can run it; only that socket's
+ * answer settles it. With no such socket the call is parked: it waits,
+ * unsent, for one to join the session (the turn's abort and the park
+ * deadline end the wait, rejecting the call as never sent). It resolves with
+ * the browser's answer and rejects on the browser's `error` or an AG-UI
+ * `success: false`. When the answer of a sent call cannot arrive — the
+ * deadline passed or the socket went — it resolves with
+ * `FRONTEND_OUTCOME_UNKNOWN` (`@ixo/common/ai/frontend-bridge`): the browser
+ * may have performed the action, and it is never sent again.
  */
 export interface FrontendCallSurface {
   callBrowserTool(params: FrontendCallParams): Promise<unknown>;
   callAgAction(params: FrontendCallParams): Promise<unknown>;
-  /** Whether at least one authenticated realtime client is attached to the session. */
+  /**
+   * Whether at least one authenticated realtime client is attached to the
+   * session, background executors included (see `canDispatch`).
+   */
   hasClient(sessionId: string): boolean;
+  /**
+   * Whether a call of `kind` to `toolName` would be sent right now rather
+   * than parked: an authenticated socket of the session can run it (any
+   * foreground socket; a background executor only for a browser tool it
+   * declared). A caller that must not park — wallet signing refuses at once
+   * — checks this first.
+   */
+  canDispatch(
+    sessionId: string,
+    kind: 'browser' | 'agui',
+    toolName: string,
+  ): boolean;
+  /** The session's oldest parked call (waiting unsent for a browser), if any. */
+  parkedFor(sessionId: string): FrontendWaitingFor | null;
+}
+
+/** A frontend call waiting, unsent, for a browser of its session to join. */
+export interface FrontendWaitingFor {
+  kind: 'browser' | 'agui';
+  toolName: string;
+  /** When the call was parked (ISO 8601). */
+  since: string;
 }
 
 export interface FrontendCallParams {
@@ -949,6 +989,12 @@ export interface FrontendCallParams {
    * `FRONTEND_OUTCOME_UNKNOWN` at once — the browser may already have run it.
    */
   signal?: AbortSignal;
+  /**
+   * Called once, when the call is sent to a socket (at once, or later when
+   * a parked call is dispatched); never for a call that ends unsent. A tool
+   * passes `ctx.markDispatched` here.
+   */
+  onDispatched?: () => void;
 }
 
 /**
@@ -1012,6 +1058,16 @@ export interface PluginTool {
    * `effect` still governs retries, write claims and resume.
    */
   repeatable?: boolean;
+  /**
+   * `'frontend'`: the tool acts in the user's browser through the frontend
+   * bridge (`ctx.frontend`). It is scheduled in the session's own
+   * `frontend` lane, one call at a time per session, never in the user-wide
+   * read/write lanes, so a call parked while the chat has no tab holds no
+   * server slot another chat needs. The identical-write ledger still
+   * applies when its `effect` is `write` (its fingerprint then includes the
+   * session). Omitted: a server-side tool, scheduled by its effect.
+   */
+  surface?: 'frontend';
   /**
    * Billing gate. `'contracted'` marks a tool that performs paid contracted
    * work: the runtime binds it only while the turn runs inside an active work

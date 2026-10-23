@@ -227,6 +227,16 @@ runtime since then exist only here; they are listed under
   - The memory block in the prompt carries a one-line framing note (context,
     not instructions).
     See [configuration](configuration.md#first-turn-memory-prefetch).
+- **`add_oracle_knowledge` is a default memory tool.** Node's memory plugin
+  listed search, add, delete-episode and clear by default and left the
+  oracle-knowledge write to forks that passed `selectedTools`; no deployed
+  oracle did, so an oracle's controllers had no way to grow its shared
+  knowledge from chat. The Workers default surface includes the tool. The
+  Memory Engine, not the runtime, gates it: a caller that is not a domain
+  member of an entity linked to the oracle DID (controller, owner, `matrix`
+  / `admin` linked entity, or a member of their DAO groups; engine 1.5.0) is
+  refused on chain, and the tool needs the user's explicit confirmation. See
+  [operations](operations.md#bundled-plugins-what-they-refuse).
 - **Anonymous response feedback.** Ported from the Node implementation
   proposed in qiforge pull request 224 (never merged into the Node runtime).
   One feedback per user per Agent reply:
@@ -323,7 +333,9 @@ tool schema: …`), and reaches the client as a `tool_call` frame with
   write tool is not run again (the model is told its outcome is unknown),
   and a client re-joins the run's frames with a cursor
   ([operations](operations.md#turns-durable-runs)). Node has no
-  equivalent.
+  equivalent, nor of `GET /runs/active` and the `activeRun` field on
+  `GET /sessions` rows (absent there; clients treat a missing field and a
+  404 as "unknown").
 - **A room message's sender is checked against the DID's homeserver.**
   Node maps `@did-ixo-<id>:<any server>` to `did:ixo:<id>`; here the
   sender's server (or, for a non-DID sender, the room alias's) must be the
@@ -332,9 +344,13 @@ tool schema: …`), and reaches the client as a `tool_call` frame with
   only when its own server resolves it to that room, and a non-DID sender
   is attributed to the alias's user only from the alias's server.
 - **Frontend calls run on one socket and end unknown, not failed.** Each
-  browser-tool / AG-UI invocation has its own id, goes to the most recently
-  active authenticated socket of its session, and settles only from that
-  socket (the Node runtime broadcasts to every socket of the session). An
+  browser-tool / AG-UI invocation has its own id, goes to one socket of its
+  session that can run it (the most recently active foreground tab, else a
+  background executor that declared the tool), and settles only from that
+  socket (the Node runtime broadcasts to every socket of the session, and
+  has no background executors). With no such socket the call is parked
+  until one connects, up to `FRONTEND_PARK_TIMEOUT_MS`, and fails as never
+  sent past it. An
   invocation whose socket goes, or whose turn aborts after it was sent,
   resolves with `FRONTEND_OUTCOME_UNKNOWN` at once instead of at its
   deadline, and the SSE stream's own `action_call` frames never reach a

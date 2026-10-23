@@ -58,6 +58,12 @@ export interface MockMcpState {
    */
   batchServesMemories: boolean;
   /**
+   * Delay before the batch endpoint answers, in ms (default 0). A drill sets
+   * it above the runtime's prefetch cap to prove the gather that outlives a
+   * turn still fills the room's cache for the next session.
+   */
+  batchDelayMs: number;
+  /**
    * Printed by `search_memory_engine` and never by the batch endpoint, so an
    * answer containing it came over the MCP wire even when a cached
    * pre-loaded context already carries the memory text.
@@ -120,6 +126,45 @@ function buildMcpServer(state: MockMcpState): McpServer {
       state.toolCalls.push({ tool: 'add_memory', args });
       state.memories.push(args.content);
       return text('Memory stored.');
+    },
+  );
+  // In the runtime's default tool surface since 0.21.0; the real engine
+  // refuses a caller who is not a controller or owner of the oracle's
+  // entity. The mock records the call and refuses the same way without the
+  // confirmation flag, so a drill can tell a stored write from a refused one.
+  server.registerTool(
+    'add_oracle_knowledge',
+    {
+      description:
+        'Store knowledge shared with every user of this oracle. Needs the user to confirm the scope first.',
+      inputSchema: {
+        name: z.string().describe('Short title of the knowledge.'),
+        content: z.string().describe('The knowledge text to store.'),
+        confirmed_insertion_from_user: z
+          .boolean()
+          .describe('The user confirmed the knowledge may be shared.'),
+        knowledge_space_type: z
+          .enum(['public', 'private'])
+          .describe(
+            'public: every user of the oracle; private: its controllers and owners.',
+          ),
+      },
+    },
+    (args: {
+      name: string;
+      content: string;
+      confirmed_insertion_from_user: boolean;
+      knowledge_space_type: 'public' | 'private';
+    }) => {
+      state.toolCalls.push({ tool: 'add_oracle_knowledge', args });
+      if (!args.confirmed_insertion_from_user) {
+        return text(
+          'Oracle knowledge addition requires explicit user confirmation.',
+        );
+      }
+      return text(
+        `Oracle knowledge "${args.name}" added to shared knowledge space`,
+      );
     },
   );
   server.registerTool(
@@ -280,6 +325,7 @@ export async function startMockMcpServer(port: number): Promise<MockMcpServer> {
     toolCalls: [],
     memories: [],
     batchServesMemories: true,
+    batchDelayMs: 0,
     lookupReference: `LOOKUP-${randomBytes(4).toString('hex')}`,
   };
 
@@ -301,6 +347,7 @@ export async function startMockMcpServer(port: number): Promise<MockMcpServer> {
         state.toolCalls.length = 0;
         state.memories.length = 0;
         state.batchServesMemories = true;
+        state.batchDelayMs = 0;
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
         return;
@@ -329,6 +376,9 @@ export async function startMockMcpServer(port: number): Promise<MockMcpServer> {
           return;
         }
         const last = queries.length - 1;
+        if (state.batchDelayMs > 0) {
+          await new Promise((r) => setTimeout(r, state.batchDelayMs));
+        }
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(
           JSON.stringify({

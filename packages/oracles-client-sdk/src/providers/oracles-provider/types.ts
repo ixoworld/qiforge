@@ -33,9 +33,38 @@ export interface InvocationResult {
   expiresAt: number;
 }
 
+export interface CreateInvocationOptions {
+  /**
+   * The SDK mints for a request the user did not start (a status poll).
+   * The host must then mint without any user interaction — no PIN or
+   * passkey prompt, and without extending the signer's idle timer — and
+   * resolve `null` (or an empty `serialized`) when it cannot, e.g. while
+   * the signer is locked. The request then fails as refused and is not
+   * retried interactively. A host that ignores the argument keeps minting
+   * as it always did, prompts included.
+   */
+  background?: boolean;
+}
+
 export type CreateInvocationFn = (
   oracleDid: string,
-) => Promise<InvocationResult>;
+  options?: CreateInvocationOptions,
+) => Promise<InvocationResult | null>;
+
+export interface AuthedRequestOptions {
+  /**
+   * A request the user did not start (a status poll). It never mints a
+   * delegation — minting one can open the wallet's PIN or passkey prompt —
+   * and sends only a cached one. An invocation it needs (none cached, or
+   * stage 1 of `renewOracleAuth` after a refusal) is minted with
+   * `createInvocation(oracleDid, { background: true })`; when the host
+   * mints nothing, the request fails with a 401 `RequestError`
+   * (`BACKGROUND_INVOCATION_UNAVAILABLE`) and is never retried
+   * interactively. Stage 2 (a fresh delegation) never runs: a request still
+   * refused after stage 1 fails with that refusal.
+   */
+  background?: boolean;
+}
 
 export interface IOraclesContextProps {
   wallet: IWalletProps | null;
@@ -45,24 +74,31 @@ export interface IOraclesContextProps {
     method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH',
     options?: RequestInit,
     oracleDid?: string,
+    requestOptions?: AuthedRequestOptions,
   ) => Promise<T>;
   /**
    * The cached delegation to this oracle, or a newly minted one. `fresh`
    * drops the cached one and mints a replacement (callers that ask at the
    * same moment share one mint). Minting a delegation needs the user's key;
    * prefer `renewOracleAuth`, which mints one only as the last resort.
+   * `background`: for a caller the user did not start (a background
+   * socket) — the cached delegation only (unexpired, with the cache's own
+   * margin), never minted: `null` when none is cached. With `fresh` as
+   * well it resolves `null` and leaves the cache as it is.
    */
   getDelegation: (
     oracleDid: string,
-    options?: { fresh?: boolean },
+    options?: { fresh?: boolean; background?: boolean },
   ) => Promise<string | null>;
   /**
    * The cached invocation for this oracle, or a newly minted one. `fresh`
-   * skips the cache (the oracle refused the cached one).
+   * skips the cache (the oracle refused the cached one). `background`
+   * mints without user interaction (`CreateInvocationOptions`), or not at
+   * all: `null` when the host could not.
    */
   getInvocation: (
     oracleDid: string,
-    options?: { fresh?: boolean },
+    options?: { fresh?: boolean; background?: boolean },
   ) => Promise<string | null>;
   /**
    * Renew this oracle's credentials after it refused a request for them,
@@ -74,12 +110,15 @@ export interface IOraclesContextProps {
    * the same moment share one renewal. Resolves `false` when there is
    * nothing to repeat with (no mint callback, the mint failed, or a stage 2
    * would replace a delegation stage 2 minted minutes ago that is refused
-   * already) — the caller gives up then.
+   * already) — the caller gives up then. `background`: stage 1 mints the
+   * invocation without user interaction, and stage 2 resolves `false`
+   * without minting anything.
    */
   renewOracleAuth: (
     oracleDid: string,
     stage: AuthRenewalStage,
     refused?: RefusedCredentials,
+    options?: { background?: boolean },
   ) => Promise<boolean>;
   // AG-UI action management
   /** Actions offered to the agent with each turn (`exposeToAgent` not false). */

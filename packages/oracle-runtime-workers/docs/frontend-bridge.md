@@ -20,9 +20,10 @@ sequenceDiagram
     participant T as Tool (portal / agui plugin)
     participant E as RealtimeEndpoint (user object)
     participant R as FrontendCallRegistry
-    participant B as Most recently active socket of the session
+    participant B as The session's executor socket
     T->>E: ctx.frontend.callBrowserTool({ toolCallId: tc-req })
     E->>R: open(tc-req:uuid), before anything is sent
+    Note over E,B: no socket can run it: parked until one passes CONNECT
     E->>B: 42["browser_tool_call", { toolCallId: tc-req:uuid, requestId: tc-req, … }]
     E->>R: dispatched(tc-req:uuid, { sid, sessionId, userDid })
     B-->>E: 42["tool_result", { toolCallId: tc-req:uuid, result }]
@@ -48,17 +49,20 @@ sequenceDiagram
   credentials themselves; a failed session check, a failed auth check and
   a token of another user are final.
 - **One socket per invocation.** The call goes to one authenticated socket
-  of its session only, never to every tab: the one with the most recent
-  client-originated socket.io event (a result, `ping`, `status`, …;
-  `lastActiveAt` on the socket attachment, so it survives hibernation).
-  With no such event on any tab, the one that connected last runs it. A
-  tab that connected last is often a background tab that reconnected after
-  a laptop woke, so activity wins over connection order. engine.io pongs do
-  not count: background tabs answer them too. Nothing advertises whether a
-  tab can run the tool or is in the foreground, so this is a heuristic. If
-  no socket is connected, the call is refused at once with
-  `<label> <tool> was not sent: no browser is connected to session <id>`. It
-  was never sent, so this is a definite failure, not an unknown outcome.
+  of its session only, never to every tab (`SessionSocketHub.executorFor`):
+  - a **foreground** socket first (any socket that did not declare itself
+    a background executor: a tab showing the chat), the one with the most
+    recent client-originated socket.io event (a result, `ping`, `status`,
+    …; `lastActiveAt` on the socket attachment, so it survives
+    hibernation). With no such event on any tab, the one that connected
+    last runs it. A tab that connected last is often a background tab that
+    reconnected after a laptop woke, so activity wins over connection
+    order. engine.io pongs do not count: background tabs answer them too.
+    A foreground socket runs any tool, whether or not it registered it;
+  - without one, for a browser tool, a **background executor** that
+    declared it (see
+    [Executor kinds](#executor-kinds)), by the same recency;
+  - with neither, the call is parked (see [Parked calls](#parked-calls)).
 - **Results are bound to the socket.** A `tool_result` / `action_call_result`
   settles the invocation only when it arrives on the socket it was sent to:
   the same engine.io sid, session and authenticated DID, and the same kind.
@@ -74,15 +78,18 @@ sequenceDiagram
   30 minutes (`MAX_COMPLETED_FRONTEND_CALLS`,
   `COMPLETED_FRONTEND_CALL_TTL_MS`). Pending calls are never evicted to make
   room. Past 256 calls in flight per user (`MAX_PENDING_FRONTEND_CALLS`), a
-  new call is refused instead.
-- **Unknown, not failed.** When the answer cannot arrive, the call resolves
-  with the result below and is never sent again. This happens when the
+  new call is refused instead, as never sent. Parked calls count toward the
+  256: a user with many chats waiting for their tabs has fewer slots for
+  sent calls.
+- **Unknown, not failed.** When the answer of a sent call cannot arrive,
+  the call resolves with the result below and is never sent again. This happens when the
   deadline passes, at once when the executing socket goes (closed, errored,
   dropped by the heartbeat, or a send to it failed), since only that socket
   could have answered, and at once when the turn aborts (Stop, the turn
   deadline). The plugins pass `ctx.abortSignal` as `FrontendCallParams.signal`.
-  A turn aborted before the call was sent rejects it as `… was not sent:
-the turn was aborted`.
+  A turn aborted before the call was sent (parked, or not made yet)
+  rejects it as `… was not sent: the turn was aborted`
+  (`FrontendCallNotSentError`, see [Parked calls](#parked-calls)).
 
   ```json
   {
@@ -143,15 +150,174 @@ dropped …` warning. The server tool, or the first request tool of that
   exactly these values. The value is static: it signals the version and is
   not proof that a deployment behaves.
 
+## Parked calls
+
+A chat's browser tab can be gone while its turn runs: the Portal opens one
+SDK socket per session and closes it when the user switches chats. A call
+with no socket of its session that can run it is **parked**, not failed:
+
+- It is registered as pending with no executor, and recorded per session
+  in call order (`toolCallId`, kind, event, payload, session, tool,
+  `parkedAt`). Nothing is sent: not to a socket, and not the SSE mirror of
+  a browser-tool invocation, which is emitted when the call is actually
+  sent.
+- When a socket of that session passes CONNECT, every parked call it can
+  run is sent to it, oldest first, right after its `connected` event: a
+  foreground socket takes all of them, a background executor the browser
+  tools it declared. From then the call is an ordinary invocation bound to that
+  socket, with its own deadline (15 s, 120 s for `mutate_topic`, 15 s for
+  the plugins' AG-UI actions) starting at the send.
+- While parked, the call's clock is the park deadline
+  (`FRONTEND_PARK_TIMEOUT_MS`, default 300 s, at most 2147483647). Past it
+  the call rejects with `<Browser tool|AG-UI action> <tool> was not sent: no
+browser joined session <id> within <n> s. Ask the user to open this chat;
+do not retry on your own.` The turn's abort (Stop, a superseding message,
+  the turn deadline `TURN_TIMEOUT_MS`) rejects it as `… was not sent: the
+turn was aborted`. Both are a `FrontendCallNotSentError` (exported from
+  `src/realtime/frontend-call-registry.ts`, `reason` `park-deadline` /
+  `aborted`), a definite failure: the call never reached a browser, so the
+  tool layer's `isUncertainOutcome` is false for it — checked before the
+  turn's aborted signal, which would otherwise make every failure of an
+  aborted turn uncertain — and a write tool's claim is released. The
+  wording matches nothing the tool layer reads as uncertain either. A
+  parked call is bound to no socket, so a socket going never ends it.
+- After a park deadline the session is marked: its later calls fail at
+  once, without parking, as `… was not sent: no browser has joined session
+<id> since an earlier call waited <n> s for one. Ask the user to open this
+chat; do not retry on your own.` (`reason` `no-browser`), so a model that
+  calls again does not wait another full deadline. The mark is cleared
+  when a socket of the session passes CONNECT; it is in memory, so it is
+  also gone when the object hibernates (the next call then parks again).
+  A call that a socket of the session can already run is sent as usual.
+- The plugins no longer refuse a call when `hasClient` is false: the
+  Portal and AG-UI plugins always call the bridge and let it park.
+  `wallet-signing.ts` never parks (see [Wallet signing](#wallet-signing)).
+- `ctx.frontend.parkedFor(sessionId)` returns the session's oldest parked
+  call as `{ kind, toolName, since }`. The user object sets it as
+  `waitingFor` on the run summaries of `GET /runs/active`,
+  `GET /sessions/:id/run` and `activeRun` on `GET /sessions` rows, on the
+  running (or recovering) run only, never persisted. A client shows the
+  chat as waiting for the user; opening it mounts the chat's socket, whose
+  CONNECT sends the call.
+- `GET /debug/realtime` marks each pending call `parked: true|false` and
+  counts `parkedCalls`. Log lines name the invocation id, session, socket
+  sid and tool, never the payload.
+- Browser tools and AG-UI actions declare `surface: 'frontend'`
+  (`PluginTool`): the tool scheduler runs them in their session's own
+  `frontend:<sessionId>` lane, one call at a time, never in the user-wide
+  read or write lanes, so a call parked in one chat holds no slot another
+  chat needs, whether it reads or writes. A sub-agent's dispatch lane is
+  kept per session too (`subagent:<sessionId>`), so an AG-UI action parked
+  inside its sub-agent holds only that chat's dispatch slots. A frontend
+  write is still claimed in the write-claim ledger by its effect, under a
+  fingerprint that names its session: the same browser action in two chats
+  is two actions and never blocks the other.
+- Every Portal browser tool runs in its session's lane, the ones that
+  change shared data (`mutate_topic`) included. This is deliberate: a
+  Portal shows one chat in the foreground at a time, so two chats' browser
+  writes cannot run at once — the other chat's call is parked until its tab
+  opens — and the Portal's own tools carry their guards (command journal,
+  revisions) for what reaches them. Two Portal tabs with two different
+  chats open can run two browser writes at once; see
+  [Known limits](#known-limits).
+
+## Declared effect
+
+A browser tool declaration in the turn body (`tools[]`, from
+`IBrowserToolParams.effect` in `@ixo/oracles-client-sdk`) may carry
+`effect: 'read' | 'write'`:
+
+```json
+{
+  "name": "getEntityProfileDomain",
+  "description": "Read the profile domain of an entity",
+  "schema": { "type": "object", "properties": { "did": { "type": "string" } } },
+  "effect": "read"
+}
+```
+
+- Only exactly `'read'` or `'write'` counts (`declaredToolEffect` in
+  `src/plugins/portal/declared-tools.ts`, applied by `parseTurnBody` and
+  `parseBrowserTools`). Any other value is treated as no declaration: the
+  tool is kept, never dropped, and the name convention of `toolEffectOf`
+  classifies it.
+- The Portal plugin passes a declared effect to the tool definition
+  (`PluginTool.effect`), so it decides the resume policy, the repetition
+  guard and the write-claim ledger (`tool-execution.ts` claims a write by
+  `effectOf`; a declared read is not claimed). The lane is the session's
+  frontend lane either way.
+- The human-decision tools (`ask_user_question`, `propose_domain_creation`,
+  `write_domain_files`, `publish_recipe_release`) are always writes,
+  whatever the client declares: a question that was sent is never asked
+  twice after a restart.
+- AG-UI actions take no declared effect; they are classified by name.
+
+## Wallet signing
+
+`wallet-signing.ts` (`walletChannel`: the IXO transaction and POD
+signature tools) keeps its own outcome contract and never parks: a
+signature is a user-wide server write that would otherwise hold every
+chat's writes while it waited for a tab. It sends the `sign_transaction`
+action only when `ctx.frontend.canDispatch(sessionId, 'agui',
+'sign_transaction')` is true — a socket of the session can run it right now,
+which for an AG-UI action means a foreground tab — and is `unavailable` at
+once otherwise, nothing sent. `hasClient` alone is not enough: it counts
+background executors, which never run an AG-UI action.
+
+## Executor kinds
+
+The CONNECT auth payload (`40{…}`) may carry `executor: 'background'` and
+`tools: string[]`:
+
+- Only `executor` exactly equal to `'background'` makes a background
+  executor; any other value, or none, is a foreground socket, and `tools`
+  then counts for nothing.
+- `tools` keeps each name that matches `DECLARED_TOOL_NAME_PATTERN`
+  (`^[A-Za-z0-9_-]{1,64}$`), de-duplicated, at most 24
+  (`MAX_BACKGROUND_EXECUTOR_TOOLS`), in the order given. The executor kind
+  and its tools are stored on the socket's Hibernatable WebSocket
+  attachment, which Workers caps at 2,048 bytes serialized: names are
+  dropped from the end until the attachment's JSON, heartbeat fields at
+  their widest, fits 2,000 bytes (`SOCKET_ATTACHMENT_BUDGET_BYTES`; JSON
+  never measures smaller than the structured clone for these fields). With
+  real identifiers (a 51-character `did:ixo`, a 36- or 44-character
+  session id) all 24 names of 64 characters fit; only a session id near
+  its 248-character ceiling costs names. One warning counts the names
+  dropped as invalid, over the cap and over the budget, never naming them.
+- A background executor runs only the browser tools it declared, and only
+  when no foreground socket of the session is connected; never an AG-UI
+  action, which renders on the chat's own surface or asks the user (a
+  wallet signature), whatever names it declared. It receives no fan-out
+  (it does not render the chat), and its leaving never counts as the
+  session draining: history indexing runs when the last foreground socket
+  goes, and a session left with background executors only counts as
+  drained. `hasClient`, `GET /debug/realtime` `authenticated`/`sessions`
+  and the `status` event's `activeSessions`/`totalConnections` count every
+  authenticated socket, background executors included.
+- Only the first 96 entries of `tools` (four times the cap) are read; the
+  rest count as over the cap without being looked at, so a CONNECT frame
+  full of names costs a bounded loop.
+- The `connected` event echoes the kind the runtime accepted:
+  `executor: 'foreground' | 'background'`. A client that asked for
+  `background` and reads anything else is on a runtime that ignores the
+  field and treats the socket as a foreground tab (fan-out and AG-UI
+  actions included); the client SDK closes such a socket.
+- The kind is fixed by the first accepted CONNECT; a later CONNECT on the
+  same socket is only acknowledged again.
+
 ## On Workers: restarts and hibernation
 
 - **Pending calls are in memory, which is exact here.** A pending call
   holds a timer, so its object cannot hibernate before the call ends.
 - **An object restart kills the turn that made the call.** If a durable run
-  resumes that turn, the tool marks keep a write that had started from
-  running again: the model is told the outcome is unknown (`tool-marks.ts`).
-  Read-named browser tools (`read_…`, `get_…`) do run again, as reads.
-  Across a restart nothing is redispatched automatically either.
+  resumes that turn, the tool marks keep a write that had been sent to a
+  browser from running again: the model is told the outcome is unknown
+  (`tool-marks.ts`). Reads run again: a browser tool declared
+  `effect: 'read'` (see [Declared effect](#declared-effect)), or, with no
+  declaration, one whose name starts with a read verb (`read_…`, `get_…`,
+  `getEntityProfileDomain`, `findEntity`; `toolEffectOf`). Across a
+  restart nothing is redispatched automatically by the bridge itself; a
+  call runs again only when the resumed run issues it again.
 - **A late result after a restart is rejected.** The registry is empty
   then, so the result is rejected as `not issued`.
 - **Finished-call records are lost when the object hibernates.** A replay
@@ -164,6 +330,22 @@ dropped …` warning. The server tool, or the first request tool of that
   (`tool-execution.ts`) treats a result whose `outcome` is `'unknown'` as an
   unknown outcome and keeps the claim. An identical write later in the run
   is not executed. The model is told to verify with a read first.
+- **A parked call that was never sent is issued again after a restart.**
+  Its tool mark was started when the tool began, but the mark also records
+  when the call reached a socket (`turn_tool_marks.sent_at`, written by
+  `RunStore.markSent`): the registry calls `FrontendCallOpenOptions.onDispatched`
+  once from `dispatched()`, the endpoint passes `FrontendCallParams.onDispatched`
+  through, and the Portal and AG-UI tools hand it `ctx.markDispatched`, which
+  the user object binds to the turn's run and the tool's own call id. A
+  resumed run that finds a frontend tool's mark started, unfinished and
+  never sent knows no browser saw the call, so it runs the tool again
+  whatever its effect (`[tool-marks] … was parked and never sent to a
+browser …; running it again`): the call is parked again, with a fresh
+  park deadline, until a socket of the session joins. A call that was sent
+  keeps the rule above: a write gets the unknown-outcome result, a read
+  runs again. A re-run clears `sent_at` (`bumpMark`), so the new execution
+  is judged by its own send. The parked call of the old instance itself is
+  gone with it; only the resumed run's new call can be sent.
 - **Several isolates cannot split a user's calls.** The registry is
   per user object, and one object is a single instance. Node's
   process-local registry needed sticky routing across instances; here no
@@ -191,18 +373,46 @@ Portal pins SDK 1.4.0.
   SDK. The `/health` advertisement is not acceptance evidence.
 - Exercise two Topic sessions next to HomeChat, account and session
   switches, reconnects, delayed and lost results, and AG-UI actions.
-- Verify executor choice when several tabs share a session. The tab with
-  the latest client event, else the one that connected last, runs the call
-  whether or not it registered the tool. The call is not re-sent to another
-  tab when that tab cannot run it; it answers `Tool … not found`, which is
-  a definite failure.
+- Verify executor choice when several tabs share a session. The foreground
+  tab with the latest client event, else the one that connected last, runs
+  the call whether or not it registered the tool. The call is not re-sent
+  to another tab when that tab cannot run it. A tab that has the tool
+  registry but not the tool answers a `tool_result` error, `Tool <name> not
+found`: a definite failure. A tab with no browser tools registered at all
+  (a parked call sent at CONNECT before the page registered its tools)
+  answers `Tool <name> not found: no browser tools registered` from an SDK
+  that has the fix; an older SDK drops such a call silently, and it ends
+  as an unknown outcome at its deadline, keeping a write's claim.
+- Switch away from a chat while its turn calls a browser tool: the call is
+  parked (`waitingFor` on `GET /runs/active`), and reopening the chat runs
+  it.
 - Keep Portal writes disabled until its identity, recovery, adapter-coverage
   and signed-in acceptance gates also pass.
 
 ## Known limits
 
-- **The executor choice is a heuristic.** No tab advertises whether it is
-  in the foreground or has the tool registered.
+- **The executor choice among foreground tabs is a heuristic.** A
+  foreground tab does not advertise which tools it has registered or
+  whether it is in front; only background executors declare their tools.
+- **Wallet signing still needs the chat open.** It is refused at once,
+  never parked, unless a foreground tab of the chat is connected (see
+  [Wallet signing](#wallet-signing)); a background executor cannot run it.
+- **Two tabs, two chats.** A session's browser calls run one at a time,
+  but two sessions' run side by side, the writes included. With one Portal
+  tab only one chat is in the foreground, so this does not arise; with two
+  tabs each showing a different chat, two browser writes can run at once,
+  and the Portal's own guards (its command journal, recovered by command id) are what keeps
+  them consistent.
+- **The send and its record are two steps.** `sent_at` is written right
+  after the frame is handed to the socket, in the same event-loop turn. An
+  object reset between the two, or a failed write of the mark (logged as
+  `[runs] …: could not record that … was sent`), would let a resumed run
+  issue a call the browser already received.
+- **A sub-agent's inner frontend calls are not recorded as sent.** An AG-UI
+  action runs inside the AG-UI sub-agent, whose tool marks are scoped to
+  the dispatch (`<dispatch>/<id>`), while the action's context carries the
+  inner call id, so its report names no mark. A resume never consults those
+  marks: the dispatch is a write and is not run again.
 - **A dropped socket never counts as a drained session.** When the hub
   itself drops a socket (heartbeat timeout, a send that throws), its
   frontend calls end as unknown, but `onSessionDrained` is not called. If
@@ -214,25 +424,65 @@ Portal pins SDK 1.4.0.
 
 - `src/realtime/realtime-endpoint.test.ts` (workerd, real WebSockets) proves
   each invariant end to end: ownership fails closed; single dispatch with
-  distinct ids; no relay of non-invocation call frames; refusal with no
-  socket; wrong socket, session override and duplicate rejected; no
+  distinct ids; no relay of non-invocation call frames; a call with no
+  socket parked (status `parked`, `parkedCalls`, `parkedFor`) and failed
+  as never sent at the park deadline, later calls of that session failing
+  at once until a tab connects; parked calls sent in order after
+  `connected` to a tab that connects, the SSE mirror only once sent; a
+  background executor taking only its declared tools, without fan-out,
+  the rest left for a tab, `canDispatch` false for every AG-UI action until
+  a tab joins, and `connected` echoing the accepted kind; an abort while
+  parked; executor validation (exact kind, valid distinct names, the cap,
+  only the first 96 names read); a worst-case attachment
+  within the budget; drain on the last foreground socket only; wrong
+  socket, session override and duplicate rejected; no
   redispatch after a disconnect and immediate unknown; unknown after a
   heartbeat drop; unknown at the deadline with a scrubbed log; the most
   recently active tab executes; an abort before dispatch rejects and an
   abort after it resolves unknown; only browser-tool invocations reach the
   SSE sinks.
 - `src/realtime/frontend-call-registry.test.ts` covers settlement rules,
-  binding, abort before and after dispatch, replay records, capacity and
-  eviction bounds. `src/realtime/session-socket-hub.test.ts` covers
-  executor choice by activity and drop reporting.
+  binding, the park deadline (a `FrontendCallNotSentError` with a definite,
+  not-uncertain wording) against the dispatched deadline, abort while
+  parked (not uncertain even on the aborted signal) and after dispatch,
+  the abort listener removed however a call ends, replay records, capacity
+  and eviction bounds.
+  `src/realtime/session-socket-hub.test.ts` covers executor choice by kind,
+  declared tools and activity, foreground-only fan-out, the kind across a
+  restart, drop reporting, and an event encoded only when a foreground
+  socket takes it.
+- `src/do/active-runs.test.ts` and `src/do/user-object-lifecycle.test.ts`
+  cover `waitingFor` on `GET /runs/active`, `GET /sessions/:id/run` and the
+  session row (the running run only, gone when the call ends) and that a
+  listing never builds the realtime endpoint.
 - `src/do/sse-stream.test.ts` checks that an AG-UI unknown outcome ends as
   `done` and a refused action as `error`.
 - `src/shell/health-route.test.ts` covers the `/health` advertisement.
 - `src/plugins/portal/frontend-calls.test.ts` (core) covers caller ids, the
   turn's abort signal, duplicate descriptors, the Topic window, the unknown
-  result reaching the model, and the scrubbed action log.
+  result reaching the model, the scrubbed action log, calling the bridge
+  without a connected browser, `surface: 'frontend'`, a declared effect
+  reaching the tool (a human-decision tool staying a write) and
+  `ctx.markDispatched` reaching the bridge as `onDispatched`.
+  `src/plugins/portal/declared-tools.test.ts` and `src/do/turn-body.test.ts`
+  cover a declared effect kept and an invalid one ignored, the tool kept.
+- `src/core/middlewares/tool-marks.test.ts` (core) covers the resume
+  policy: a frontend call parked and never sent runs again even as a
+  write, a sent frontend write gets the unknown outcome, a sent frontend
+  read runs again, a non-frontend write is unchanged, and the camelCase
+  read verbs. `src/do/run-store.test.ts` covers `sent_at` (`markSent`,
+  cleared by `bumpMark`) and its migration onto an older table.
+  `src/realtime/frontend-call-registry.test.ts` and
+  `realtime-endpoint.test.ts` check that `onDispatched` fires once when a
+  call is sent, at once or from the park, and never for one that ends
+  unsent.
 - `src/core/middlewares/tool-execution.test.ts` checks that an unknown
-  outcome keeps the write claim. `src/core/registries.test.ts` covers a
+  outcome keeps the write claim, that a call never sent (aborted while
+  parked, or past its park deadline) releases it, that frontend tools run
+  in their session's lane (four parked in four chats leave a user read
+  free), and that a frontend write's claim names its session.
+  `src/plugins/ixo-transaction/tools.test.ts` checks that signing is
+  `unavailable` at once, nothing sent, with only a background executor. `src/core/registries.test.ts` covers a
   shadowing or duplicate request tool being dropped with one warning.
 - `@ixo/common`: `src/ai/frontend-bridge/frontend-bridge.test.ts` and
   `src/ai/tools/frontend-tool-caller.test.ts` (the Node caller).
@@ -240,3 +490,18 @@ Portal pins SDK 1.4.0.
   `src/hooks/use-websocket-events/use-websocket-events.test.ts`.
 - Devnet matrix, step `realtime: a browser tool call runs on exactly one of
 two tabs of the session, and /health advertises the frontend bridge`.
+
+### Questions and approval requests
+
+`ask_user_question`, `propose_domain_creation`, `write_domain_files`, and
+`publish_recipe_release` are non-repeatable writes for the existing per-turn
+repetition guard. An identical successful request runs once, including when
+its result is `awaiting_answer` or `awaiting_approval`. Ordinary navigation
+steps and reads keep their repeatable behaviour.
+
+The Portal must return a pending result promptly, then deliver the person's
+answer or approval outcome as a later user message. A human decision is not
+held open inside the 15-second browser call. A later user message starts a new
+turn; the guard does not prevent a deliberate retry or a changed-input repair.
+The Portal remains responsible for request-key idempotency, validation before
+approval, and checking that the approved content is still current at signing.

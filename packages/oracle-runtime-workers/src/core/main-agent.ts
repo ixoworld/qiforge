@@ -235,6 +235,7 @@ export async function createMainAgent(
       systemPrompt,
       boundToolNames: [],
       toolEffects: new Map(),
+      toolSurfaces: new Map(),
       subAgentToolNames: new Set(),
       context: { user: requestCtx.user, session: requestCtx.session },
     };
@@ -580,6 +581,28 @@ export async function createMainAgent(
   for (const { tool } of allTools)
     toolEffects.set(tool.name, toolEffectOf(tool));
   for (const t of subAgentTools) toolEffects.set(t.name, 'write');
+  // The plugin tools that act in the user's browser (`PluginTool.surface`),
+  // a sub-agent's inner tools included (the execution middleware schedules
+  // them too, by name): scheduled in their session's frontend lane. A name
+  // is listed only when every tool of that name declares it; meta, domain
+  // and dispatch tools never are.
+  const surfaceOf = new Map<string, PluginTool['surface']>();
+  const declareSurface = (tool: PluginTool): void => {
+    const known = surfaceOf.get(tool.name);
+    surfaceOf.set(
+      tool.name,
+      surfaceOf.has(tool.name) && known !== tool.surface
+        ? undefined
+        : tool.surface,
+    );
+  };
+  for (const { tool } of [...turnTools, ...allTools]) declareSurface(tool);
+  for (const { subAgent } of subAgentEntries)
+    for (const tool of Array.isArray(subAgent.tools) ? subAgent.tools : [])
+      declareSurface(tool);
+  const toolSurfaces = new Map<string, 'frontend'>();
+  for (const [name, surface] of surfaceOf)
+    if (surface === 'frontend') toolSurfaces.set(name, surface);
   // Tools whose identical call is a new action (a browser step), which the
   // repetition guard caps like a read whatever their effect.
   const repeatableToolNames = new Set(
@@ -933,6 +956,7 @@ export async function createMainAgent(
     systemPrompt,
     boundToolNames: tools.map((t) => t.name),
     toolEffects,
+    toolSurfaces,
     subAgentToolNames: new Set(subAgentTools.map((t) => t.name)),
     context: runConfig.context,
     ...(domain

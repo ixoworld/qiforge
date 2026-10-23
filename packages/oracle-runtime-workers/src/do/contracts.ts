@@ -14,9 +14,11 @@ import type {
 } from '@ixo/common/ai/decisions';
 import type { TranscriptPageOptions } from './transcript';
 import type { TurnUsage } from '../core/turn-budget';
+import type { ToolSchedulerSnapshot } from '../core/tool-scheduler';
 import type { BotStatus, EncryptedFileInfo } from '@ixo/matrix-bot-workers-sdk';
 import type { AttachmentInput } from '../attachments/types';
 import type { RealtimeStatus } from '../realtime/realtime-endpoint';
+import type { FrontendWaitingFor } from '../plugin-api/types';
 import type { TierFlushResult, TierStatus } from '../sqlite/do-vfs';
 import type { OwnedArtifact } from '../artifacts/store';
 import type {
@@ -268,6 +270,8 @@ export interface OracleWorkerEnv {
   TURN_MAX_IDENTICAL_READS?: string;
   /** Time limit per request-admission handler in ms (default 2000). */
   REQUEST_ADMISSION_TIMEOUT_MS?: string;
+  /** How long a frontend call waits unsent for a browser, in ms (default 300000). */
+  FRONTEND_PARK_TIMEOUT_MS?: string;
   /** Durable-run knobs (docs/plans/durable-runs.md); see `runDurabilityConfig`. */
   RUN_KEEPALIVE_MS?: string;
   RUN_SEGMENT_FLUSH_MS?: string;
@@ -422,7 +426,6 @@ export interface TurnRequest {
   taskRunId?: string;
 }
 
-/** A run as the shell reports it (`GET /sessions/:id/run`, `GET /debug/runs`). */
 /** `GET /debug/context` — the context budget a model gets on this object. */
 /**
  * Per-session context counters (`GET /debug/context?session=`): what the
@@ -517,6 +520,10 @@ export interface DomainContextRouterUpdate {
   domainContext: DomainContextProvenance[];
 }
 
+/**
+ * A run as the shell reports it (`GET /sessions/:id/run`, `GET /runs/active`,
+ * `activeRun` on `GET /sessions` rows, `GET /debug/runs`).
+ */
 export interface RunSummary {
   runId: string;
   sessionId: string;
@@ -530,13 +537,27 @@ export interface RunSummary {
     | 'aborted'
     | 'interrupted'
     | 'failed';
+  /**
+   * When the run's row was created (`RunStore.create`), unchanged when a
+   * queued run starts: a dequeued run's elapsed time includes its wait.
+   */
   startedAt: string;
   updatedAt: string;
-  /** Highest frame sequence a re-join can ask `after`. */
+  /**
+   * Highest frame sequence packed when the row was last written; written
+   * when the run ends, so not a live cursor for an active run.
+   */
   lastSeq: number;
   messageId?: string;
   /** The reply so far, for a run that ended without a committed reply. */
   partialText?: string;
+  /**
+   * The browser tool / AG-UI action the run is waiting on, parked because no
+   * browser of the session that can run it is connected: opening the chat
+   * sends it. Live state of this object only, never persisted; absent when
+   * the run waits on nothing.
+   */
+  waitingFor?: FrontendWaitingFor;
 }
 
 /** `GET /debug/runs`: the durable-run configuration, live runs and recent rows. */
@@ -590,6 +611,12 @@ export interface RunsStatus {
     startedAt: string;
     state: 'pending' | 'warned';
   }>;
+  /**
+   * Tool lanes of the object right now (tool-scheduler.ts): the user-wide
+   * `read` / `write` lanes, the per-session `frontend` and `subagent` lanes
+   * summed, and each busy per-session lane by key (`sessionLanes`).
+   */
+  tools: ToolSchedulerSnapshot;
 }
 
 /** Non-streaming turn result. */
@@ -628,6 +655,12 @@ export interface SessionSummary {
   createdAt: string;
   lastUpdatedAt: string;
   roomId?: string;
+  /**
+   * The run the session is busy with (queued / running / recovering), as
+   * `GET /runs/active` reports it: without `partialText`. Absent, never
+   * null, when the session has none.
+   */
+  activeRun?: RunSummary;
 }
 
 /** `search_memory_engine`'s raw upstream schema + whether it converts to Zod. */
@@ -778,12 +811,23 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
     target: FeedbackTarget,
     outcome: FeedbackSettlement,
   ): Promise<void>;
-  abortTurn(sessionId: string): Promise<boolean>;
+  /**
+   * Stop the session's current message. With `identity` (the HTTP route)
+   * the object boots first and the answer waits until the stopped runs
+   * have ended (at most the supersede grace).
+   */
+  abortTurn(sessionId: string, identity?: TurnIdentity): Promise<boolean>;
   /** The session's active (queued/running/recovering) run, if any. */
   sessionRun(
     identity: TurnIdentity,
     sessionId: string,
   ): Promise<RunSummary | null>;
+  /**
+   * `GET /runs/active` — every active run of the chats `GET /sessions`
+   * lists (same main-room rule, task runs excluded), oldest first, without
+   * `partialText`.
+   */
+  activeRuns(identity: TurnIdentity): Promise<RunSummary[]>;
   /** Diagnostics: recent runs with their tool marks and live state. */
   runsStatus(): Promise<RunsStatus>;
   /** `GET /debug/context` — the context budget a model gets on this object. */

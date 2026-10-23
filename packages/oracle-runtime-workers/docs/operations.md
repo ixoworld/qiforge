@@ -14,10 +14,11 @@ Public (UCAN-authenticated unless noted):
 | `GET /health/matrix`                                                            | No auth. `{ running }` from the gateway's memory: 200 when true, 503 otherwise. Reads no storage.                                   |
 | `GET /matrix/status`, `POST /matrix/start`                                      | No auth, each rate-limited per client IP. Gateway status; start the sync loop (idempotent).                                         |
 | `GET /models`                                                                   | Priced platform models (no auth).                                                                                                   |
-| `POST/GET /sessions`, `DELETE /sessions/:id`                                    | Sessions.                                                                                                                           |
+| `POST/GET /sessions`, `DELETE /sessions/:id`                                    | Sessions; a `GET` row carries `activeRun` while the session has an active run.                                                      |
 | `POST /messages/:id` (SSE or JSON), `GET /messages/:id`, `POST /messages/abort` | Turns and transcripts.                                                                                                              |
 | `GET /sessions/:id/messages`                                                    | One turn-aligned page of a transcript ([paging](#transcript-paging)).                                                               |
 | `GET /sessions/:id/run`, `GET /runs/:runId?after=<seq>`                         | Whether a session has an active run; re-join a run's frames after a cursor ([durable runs](#turns-durable-runs)).                   |
+| `GET /runs/active`                                                              | Every active run of the caller's chats, for a chat list's live status ([durable runs](#turns-durable-runs)).                        |
 | `POST /channels/turn`                                                           | IXO Channels ingress, own channel UCAN policy; refusals carry a `code` ([channels](channels.md#errors)).                            |
 | `PUT/GET /topic-deliverables/:operationId`, `POST …/:operationId/cancel`        | Owner-only Topic deliverables (`TOPIC_DELIVERABLES_ENABLED=true`, else 404; [architecture](architecture.md#topic-deliverable-api)). |
 | `POST/GET/DELETE /delegation`                                                   | The user's deposited UCAN delegation.                                                                                               |
@@ -30,7 +31,8 @@ Public (UCAN-authenticated unless noted):
 
 Every other route needs a UCAN invocation (`src/shell/auth.ts`), and each
 authenticated request then spends one unit of the caller's `RATE_LIMIT`
-budget (see [configuration](configuration.md#wrangler-config)).
+budget (see [configuration](configuration.md#wrangler-config)); the
+`GET /runs/active` poll spends a budget of its own (`poll` key).
 
 - **Body caps.** The shell refuses an oversized body with 413 before it
   reads it (`bodyLimit`): `POST /messages/:id` 256 KiB
@@ -80,9 +82,9 @@ addressed; unset, any authenticated caller may use them. Set it wherever
 | `POST /debug/storage/tier-flush`                                               | Run one R2 page-tier eviction pass now; body `{ "force": true }` evicts every clean chunk regardless of recency, `{ "maxSegments": n }` caps the pass.                                                                                               |
 | `GET /debug/sessions/:id`                                                      | Raw session row (`lastProcessedCount` included) plus `threadMessages` / `summaryMessages` / `toolMessages` — whether the thread's agent context was condensed.                                                                                       |
 | `GET /debug/tasks`                                                             | The caller's task records, the open (unfinished) runs and the object's current alarm.                                                                                                                                                                |
-| `GET /debug/runs`                                                              | Recent durable runs with their tool marks, segment counts, attempts and live state ([durable runs](#turns-durable-runs)).                                                                                                                            |
+| `GET /debug/runs`                                                              | Recent durable runs with their tool marks, segment counts, attempts and live state, the write claims and the tool lanes' occupancy ([durable runs](#turns-durable-runs)).                                                                            |
 | `GET /debug/context?model=<id>&session=<id>`                                   | The context-window resolution and derived thresholds for a model; with `session`, that session's context counters ([context budgets](#turns-context-budgets)); always a `userContext` block ([user-context prefetch](#turns-user-context-prefetch)). |
-| `GET /debug/realtime`                                                          | Sockets, heartbeat deadline, pending browser calls, live timers with creation stacks.                                                                                                                                                                |
+| `GET /debug/realtime`                                                          | Sockets, heartbeat deadline, pending browser calls, parked calls, live timers with creation stacks.                                                                                                                                                  |
 | `GET /debug/delegation`, `GET /debug/memory-schema`                            | What header-less turns mint from; the memory engine's tool schema as delivered.                                                                                                                                                                      |
 | `POST /debug/matrix/restart`, `POST /debug/matrix/stop`                        | Gateway stop / restart.                                                                                                                                                                                                                              |
 | `POST /debug/matrix/rotate-device`                                             | Log the bot in as a new device (old one retired).                                                                                                                                                                                                    |
@@ -340,6 +342,68 @@ an operator sees:
   is answered as for an ended run: the frames read, the buffer's remaining
   frames without their `done`, and the trailer built from the closed row
   (status, `messageId`, `partialText`).
+- **Which chats are busy.** `GET /runs/active` answers
+  `{ runs: RunSummary[] }`: every queued, running or recovering run of the
+  chats `GET /sessions` lists, oldest first (`startedAt`, then run id),
+  whichever client sent the message (Portal, Matrix room, channel).
+  - **Same chats as the session list.** Task runs (`task:<id>` sessions)
+    are left out, and with a main oracle room only sessions in that room
+    count (one `SELECT … WHERE session_id IN (…)` over the active runs'
+    sessions). A run whose session has no row yet (a Matrix thread is
+    recorded inside its first attempt) is placed by the room its stored
+    request names; a Portal run without a row is listed. A user without a
+    main room sees every chat, as `GET /sessions` lists every session then.
+  - **Live state, no SQL.** The boot recovers every run a previous
+    incarnation left (`recoverOrphans`), so afterwards every active row is
+    a live run, and the coordinator's records are the answer: a run leaves
+    the live map before its row is closed, so a just-ended (stopped,
+    superseded) run never shows from a row that still says `running`. Only
+    when the boot's recovery scan failed are the stored rows
+    (`RunStore.listActive()`) merged in, live records winning.
+  - **The summaries.** No `partialText` (it can be large; the session's own
+    route still has it). `startedAt` is when the run's row was created and
+    does not move when a queued run starts, so a dequeued run's elapsed
+    time includes its wait. `lastSeq` is the row's, written when a run
+    ends: not a live cursor. A session can have more than one entry (a
+    running run and messages enqueued behind it).
+  - **Waiting on the browser.** A running or recovering run whose turn has
+    a browser tool or AG-UI action parked (no browser of the chat that can
+    run it is connected, see [Realtime channel](#realtime-channel)) carries
+    `waitingFor: { kind: 'browser' | 'agui', toolName, since }` — the
+    session's oldest parked call, `since` when it was parked. It is the
+    object's live realtime state, never stored, and is absent otherwise
+    (never `null`); a queued run, or one that is over, never has it. The same field is on
+    `GET /sessions/:id/run` and on `activeRun` of a session row. Opening
+    the chat (its socket passing CONNECT) sends the call, and the next
+    poll no longer shows it. Answering a listing never builds the realtime
+    endpoint.
+  - **On session rows.** The rows of `GET /sessions` carry the same summary
+    as `activeRun` — the running or recovering run of the session, else
+    its oldest queued one, the run `GET /sessions/:id/run` reports — from
+    the live records once per page; the key is absent when the session has
+    none.
+  - **Cold objects.** `meta:runsMaybeActive` is written `false` by a boot
+    that found nothing in flight and `true` before the first run row an
+    instance creates (one write per instance, not per turn). A cold object
+    whose flag is `false` answers `{ runs: [] }` without booting (no
+    SQLite open, no owner-copy import) and without counting as access for
+    the idle eviction; otherwise the poll boots the object like any
+    request, and every poll of a booted object counts as access, so a tab
+    left open keeps a busy user's object warm.
+  - **Rate limit.** Polls spend their own budget on the `RATE_LIMIT`
+    binding (key `<ORACLE_DID>|poll|<userDid>`), apart from the user's
+    other requests, so a polling tab never pushes the user's messages into
+    `429`. Clients poll at most every ~4 s while something runs and the
+    tab is visible, every ~30 s otherwise, and not at all while it is
+    hidden (100 requests per 60 s on the Companion: one busy tab spends 15
+    a minute). `@ixo/oracles-client-sdk`'s `useActiveRuns` does this; on an
+    older runtime, where the path reaches `GET /runs/:runId` and answers
+    404 `Run active not found`, it probes again every 10 min.
+  - **Stop.** A row's Stop is `POST /messages/abort` with its session id.
+    The route boots the object first (so a run only the store knew after a
+    reset is recovered, then stopped) and answers once the runs it stopped
+    have ended — out of the live records, rows closed — or after the 5 s
+    supersede grace, so the client's next poll sees the chat idle.
 - **What a client does with a resumed attempt.** A recovered attempt is
   announced with `run` `{ resumed: true, attempt, partialLength }`. The
   frames of each attempt live in their own sequence space (attempt _n_
@@ -365,10 +429,18 @@ S s`, `resuming`, and the terminal `finished|aborted|interrupted|failed`.
   call before it executes (`started`) and when it returns (`done`). On a
   resumed attempt a started, unfinished **write** call is not executed
   again: the model gets "outcome unknown, verify before repeating".
-  **Read** calls (declared `effect: 'read'` by the plugin, MCP
-  `readOnlyHint`, or the `list_/get_/search_/read_/preview_/…` naming
-  convention) run again. Undeclared tools are writes. A sub-agent's inner
-  tool calls are marked too; the sub-agent call itself is a write.
+  **Read** calls (declared `effect: 'read'` by the plugin or, for a browser
+  tool, by the client's declaration, MCP `readOnlyHint`, or the
+  `list/get/find/search/read/preview/…` naming convention, snake case
+  `get_entity` or camel case `getEntity`) run again. Undeclared tools are
+  writes. A sub-agent's inner tool calls are marked too; the sub-agent call
+  itself is a write. A browser tool or AG-UI action also records in its
+  mark when the call reached a browser socket (`sent_at`): one still
+  parked when the object reset never left it, so it runs again whatever
+  its effect (`[tool-marks] <tool> (<id>) was parked and never sent to a
+browser …; running it again`). A sent one follows the read / write rule
+  ([frontend bridge](frontend-bridge.md#on-workers-restarts-and-hibernation)).
+  Marks written before the column existed count as sent.
 - **Task runs.** A scheduled run cut off by a reset is resumed like any
   other and its result delivered once by the scheduler
   (`completeRecoveredRun`); it is closed as interrupted only after the
@@ -397,7 +469,9 @@ S s`, `resuming`, and the terminal `finished|aborted|interrupted|failed`.
 - **Diagnostics.** `GET /debug/runs` lists recent runs with their marks,
   segment counts, attempts and the live state — per live run its
   `generation`, `lastSeq`, `packedSeq` (what a reset would keep) and
-  subscriber count (`ORACLE_DEBUG_ROUTES=true`). `POST /debug/object/abort`
+  subscriber count — the outstanding write claims (`claims`) and the
+  object's tool lanes (`tools`, see
+  [write claims](#write-claims-and-turn-usage)) (`ORACLE_DEBUG_ROUTES=true`). `POST /debug/object/abort`
   resets the object mid-turn; it is what the durable-runs drill uses.
 - **Cost.** Rows written per turn: the run row and one update when it
   ends, which also stores the turn's usage; the end is one transaction
@@ -598,8 +672,8 @@ to. Settings and the measured latencies are in
 memories…`. The client SDK does not render `router.update` frames yet, so
   users see nothing until it does; other surfaces (Matrix, Channels) get no
   step.
-- **Group rooms** (a Matrix turn in a group room) never prefetch; the log
-  carries `[user-context] skipped: group room` once per turn.
+- **Group rooms** (a Matrix turn in a group room) never prefetch; the
+  first-contact line reads `outcome=skipped reason=group-room`.
 - **Cache life.** 5 minutes per room (`USER_CONTEXT_CACHE_TTL_MS`), but an
   answer with no memories at all lives 30 s, so a user who has just started
   using memory is not shown "nothing" for 5 minutes. The room's entry is
@@ -610,6 +684,16 @@ memories…`. The client SDK does not render `router.update` frames yet, so
   cognifies asynchronously, so a gather right after a write can still come
   back without it.
 - **Log lines** (prefix `[user-context]`, never user content):
+  `first contact room=… session=… outcome=<cached|fresh|timeout|failed|skipped|aborted> [reason=…] waited=Nms`
+  (warn, once per thread: what its first-contact turn was given and how long
+  it waited; the one line to grep when reading logs at warn level and above.
+  A first contact that fetches nothing prints it too, with `waited=0ms` and
+  the reason: `no-room`, `disabled` (`USER_CONTEXT_PREFETCH=off` or no
+  `MEMORY_ENGINE_URL`), `not-booted`, `group-room`, `no-memory-grant`, or the
+  fetcher's `no-signing-key`, `no-invocation`, `recently-failed`; a `failed`
+  outcome carries its reason the same way. Task-run and supplied-context
+  turns print nothing, and a thread that already holds a context prints
+  nothing on its later turns),
   `cache hit room=… age=…ms keys=N` (served from the room's cache, no
   request), `fetched in N ms for room=… (identity=f12/e8/p3/c1, work=…,
 recent=missing)` (per slot: rendered fact, entity, episode and community
@@ -617,12 +701,16 @@ recent=missing)` (per slot: rendered fact, entity, episode and community
   `exceeded Nms cap for room=…; continuing in the background`,
   `slot <label> failed (<status_code>)` (warn: one slot of the batch failed,
   the others are used; the engine's detail text is not logged at this
-  level), `failed for room=…: <reason> (not retried for 60s)` and
+  level), `gather for room=… unsettled after Nms; starting a new one`
+  (warn: a gather was still unsettled 5 s past its own 30 s request timeout,
+  so it was abandoned and a new one started; its late answer, if any, is
+  dropped. It should not happen and is worth a look),
+  `failed for room=…: <reason> (not retried for 60s)` and the fetcher's own
   `skipped: …` (no engine URL, no signing key, no invocation, a recent
-  failure, no room, group room, or `the delegation grants no ixo:memory
-memory/*`). A user with no `ixo:memory` delegation logs `skipped` on every
-  first turn and is not slowed. If every one of the six slots fails the
-  batch counts as `failed` (`every slot failed`), not as an empty answer.
+  failure). A user with no `ixo:memory` delegation gets
+  `first contact … outcome=skipped reason=no-memory-grant` on every first
+  turn and is not slowed. If every one of the six slots fails the batch
+  counts as `failed` (`every slot failed`), not as an empty answer.
 - **`GET /debug/context?session=<id>`** carries `userContext` for the
   session's room (the user room when `session` is absent): `enabled`,
   `room`, `cached`, `ageMs` (of the cached result), `inFlight`,
@@ -726,8 +814,8 @@ run's output.
   task is claimed before anything is awaited, so none runs twice. The tick
   still waits for all of its runs before it returns.
 - **Approvals.** `resolve_task_approval` does not run the task inside its
-  own tool call (the run's write tools would wait for the write slot that
-  call holds). It stores the approval on the task (`approved_at`,
+  own tool call (the run's write tools would wait for the user-wide write
+  slot that call holds). It stores the approval on the task (`approved_at`,
   `approval_note`) and arms the alarm for now; the alarm runs it once.
   Claiming the approval and opening the run row are one transaction, so a
   reset before the alarm still runs it once and a reset after it started
@@ -1162,15 +1250,45 @@ calls do not survive a restart (neither does the turn that made them).
 A socket joins only a session of the user its CONNECT token proves; a
 session lookup that fails refuses it. Browser tools and AG-UI actions follow
 the [frontend bridge](frontend-bridge.md) contract: each invocation has its
-own id, goes to one socket of its session (the one with the latest client
-event, else the one that connected last) and settles only from
-that socket; a result from another socket, with a different `sessionId`, or
-for an invocation already settled is rejected with a `[realtime] … rejected:`
-warning that names ids only. A call no socket can take fails at once; one
-whose answer misses its deadline or whose socket goes resolves with
-`FRONTEND_OUTCOME_UNKNOWN` and is never re-sent. `GET /debug/realtime`
-shows `pendingCalls` (with the executing socket's `executorSid`) and
-`completedCalls`. A
+own id, goes to one socket of its session that can run it and settles only
+from that socket; a result from another socket, with a different
+`sessionId`, or for an invocation already settled is rejected with a
+`[realtime] … rejected:` warning that names ids only. The executor is a
+foreground socket (a tab showing the chat: the one with the latest client
+event, else the one that connected last), else, for a browser tool, a
+background executor that declared it in its CONNECT (`executor: 'background'`, `tools`: at
+most 24 valid names, cut further only when the 2 KiB socket attachment
+would not hold them, with one `[realtime] background executor …` warning
+that counts the dropped names). A background executor gets no fan-out and
+never counts for the session's drain (history indexing runs when the last
+foreground socket goes).
+
+A call no socket can take is parked, not failed: it waits, unsent, until a
+socket of its session that can run it passes CONNECT, which receives every
+parked call it can run, oldest first, right after its `connected` event
+(`[realtime] … parked: …` and `[realtime] parked … sent to …` log lines,
+identifiers only). A parked call ends as never sent when the turn aborts
+(`… was not sent: the turn was aborted`) or when the park deadline passes
+(`FRONTEND_PARK_TIMEOUT_MS`, default 300 s, at most 2147483647:
+`<Browser tool|AG-UI action> <name> was not sent: no browser joined session <id> within <n> s. Ask the user to open this chat; do not retry on your own.`);
+both are definite failures (`FrontendCallNotSentError`), so a write tool's
+claim is released, even on an aborted turn. After a park deadline the
+session's later calls fail at once (`… was not sent: no browser has joined
+session <id> since an earlier call waited <n> s for one. …`) until a socket
+of the session passes CONNECT; the mark is in memory and lost when the
+object hibernates. The turn's own deadline (`TURN_TIMEOUT_MS`) ends the
+wait first when it is sooner. Parked calls count toward the 256 calls in
+flight per user (`MAX_PENDING_FRONTEND_CALLS`); past it new calls are
+refused as never sent. Wallet signing (`sign_ixo_transaction`,
+`request_pod_signature`) never parks: it is refused at once
+(`unavailable`) unless a socket can run the action now
+(`ctx.frontend.canDispatch`: a foreground tab, since a background executor
+never runs an AG-UI action).
+A sent call whose answer misses its deadline or whose socket goes resolves
+with `FRONTEND_OUTCOME_UNKNOWN` and is never re-sent. `GET /debug/realtime`
+shows `pendingCalls` (each with `parked`, and the executing socket's
+`executorSid` once sent), `parkedCalls`, `completedCalls`, and per socket
+`executor` (`foreground` / `background`, with the kept `tools` count). A
 dead connection is noticed by either side after up to four minutes; the
 client SDK's reconnect then restores it. `socket.io-client` must use
 `transports: ['websocket']`.
@@ -1189,7 +1307,8 @@ Turn events reach the sockets too, mirrored through the event router's
 taps on the Node runtime's wire: the socket event `event` carrying
 `{ eventName, payload }` (`tool_call`, `render_component`, `router_update`,
 `message_cache_invalidation`, …), which is the envelope the client SDK
-validates before it dispatches. `browser_tool_call` and `action_call` are
+validates before it dispatches, to the session's foreground sockets only.
+`browser_tool_call` and `action_call` are
 not mirrored: they reach a socket only as a dispatched invocation, by name
 with the raw payload, because the SDK executes them. `message` / `done`
 chunks stay SSE-only.
@@ -1316,6 +1435,22 @@ The constants named here are listed in
   `sandbox_write_blob` reports `success: false` for a failed write. A
   sandbox connect reads the user's secrets with one room-state read
   (`ctx.secrets.getAll()`).
+- **Memory.** `memory-engine__add_oracle_knowledge` is in the default tool
+  surface, so every user's agent lists it, and the Memory Engine decides who
+  may use it: the call is refused (`Forbidden: …`) unless the calling user is
+  a domain member of an entity whose linked entities include the oracle DID.
+  From memory engine 1.5.0 a domain member is a `controller` or the `owner`
+  of that entity, the `id` of a `linkedEntity` with `service: matrix` and
+  `relationship: admin` (not `support`), or a member with positive voting
+  power of a DAO group (`did:ixo:wasm:…`) among those; legacy `did:x:zQ3…`
+  keys count as their `did:ixo:<address>` account. Engine 1.4.x admitted
+  controllers and the owner only. The engine caches the member set for
+  5 min and refuses while Blocksync is unreachable and nothing cached is
+  usable. The call is also refused without
+  `confirmed_insertion_from_user: true`. The agent has to confirm the scope
+  with the user first: `public` knowledge is read by every user of the
+  oracle, `private` by its domain members only. A fork that does not want
+  the tool passes `selectedTools` without it.
 - **MCP call timeouts.** Sandbox, memory-engine and Firecrawl tools are
   MCP tools; each call carries its timeout as the MCP request's own
   (`metadata.timeoutMs`, which the MCP SDK clears when the response
@@ -1619,13 +1754,38 @@ failed`, `socket hang up`, `Network connection lost`, `timed out`, an
   status or reason phrase — never a bare word, so a refusal such as
   `network 'base' not supported` releases the row. A returned failure of
   any other kind is a reported one.
+- A frontend call that was never sent (parked until the turn aborted or
+  its park deadline passed) releases the row: no browser saw it.
 - An identical write attempted while a row stands is not run. The model
   gets an error tool message asking it to verify with a read and tell the
-  user; the row becomes `warned` and is owned by that run, which stays
-  blocked. A later turn that asks for the same write again runs it: the
-  user was told and asked again.
-- Rows are per user object (every session of the user) and are dropped
-  with the run retention (7 days) at the next setup.
+  user. A row of this run, or of a run that is over, becomes `warned` and
+  is owned by the run that asked, which stays blocked; a `pending` row of
+  another run that is still active (queued / running / recovering) is left
+  as it is, so its owner's release still deletes it. A later turn that
+  asks for the same write again after a warning runs it: the user was told
+  and asked again.
+- Rows are per user object (every session of the user), whatever lane the
+  tool runs in, and are dropped with the run retention (7 days) at the
+  next setup. A write is claimed by its effect, a browser write too; a
+  browser write's fingerprint also names its session (the same browser
+  action in two chats is two actions).
+
+Tool concurrency (`src/core/tool-scheduler.ts`): server-side writes run one
+at a time across every session (`write`), reads up to four at a time
+(`read`); every tool that acts in the browser (`surface: 'frontend'`: the
+Portal's browser tools and AG-UI actions, reads and writes alike) runs in
+its session's own `frontend:<sessionId>` lane, one call at a time, never in
+the user-wide lanes, so a call parked for minutes in one chat holds no slot
+another chat needs; sub-agent dispatches run up to four per session
+(`subagent:<sessionId>`), so a sub-agent waiting on a parked inner call
+holds only its own chat's slots. A wallet signature (`sign_ixo_transaction`,
+`request_pod_signature`) is a server-side write: it still holds every chat's
+writes while it waits for the user, but it is only sent when a tab can run
+it (see [Realtime channel](#realtime-channel)). The per-session lanes are created
+on demand and dropped once idle. `GET /debug/runs` reports the occupancy
+as `tools`: `read`, `write`, `frontend` and `subagent` (the last two summed
+over sessions) and `sessionLanes` (each busy per-session lane by key). See
+[configuration](configuration.md) for how a tool's effect is classified.
 
 To inspect, use the existing storage inspection route and read
 `turn_write_claims`. To clear one by hand after reconciling the external

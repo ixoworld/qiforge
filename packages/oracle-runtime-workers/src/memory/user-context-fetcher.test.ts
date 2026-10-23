@@ -902,6 +902,105 @@ describe('UserContextFetcher', () => {
     expect(h.calls).toHaveLength(1);
   });
 
+  describe('a gather that never settles', () => {
+    // The held reply ignores the request's abort signal, so the gather hangs
+    // past its own timeout the way a lost request context does. Stale after
+    // requestTimeoutMs (1 s) + 5 s grace.
+    const STALE_AFTER_MS = 6_000;
+    const options = { requestTimeoutMs: 1_000, blockingCapMs: 500 };
+    const STALE_SLOTS = batchBody([
+      slot({ facts: ['The detached gather answered late'] }),
+      slot(),
+      slot(),
+      slot(),
+      slot(),
+      slot(),
+    ]);
+
+    /** First contact times out at the cap on a held reply. */
+    async function strand(h: Harness): Promise<void> {
+      const first = h.fetcher.fetch(PARAMS);
+      await vi.advanceTimersByTimeAsync(options.blockingCapMs);
+      await expect(first).resolves.toEqual({
+        kind: 'timeout',
+        capMs: options.blockingCapMs,
+      });
+      expect(h.calls).toHaveLength(1);
+    }
+
+    it('is joined within its request timeout plus 5 s', async () => {
+      const h = harness({
+        replies: ['hold', { status: 200, body: SIX_SLOTS }],
+        options,
+      });
+      await strand(h);
+      await vi.advanceTimersByTimeAsync(STALE_AFTER_MS - options.blockingCapMs);
+
+      const joined = h.fetcher.fetch({ ...PARAMS, sessionId: 's2' });
+      await vi.advanceTimersByTimeAsync(options.blockingCapMs);
+      await expect(joined).resolves.toEqual({
+        kind: 'timeout',
+        capMs: options.blockingCapMs,
+      });
+      expect(h.calls).toHaveLength(1);
+      expect(h.logs.filter((line) => line.includes('unsettled'))).toEqual([]);
+      expect(h.fetcher.status(PARAMS.roomId).inFlight).toBe(true);
+    });
+
+    it('is abandoned after that: the next fetch starts a new request and returns its answer', async () => {
+      const h = harness({
+        replies: ['hold', { status: 200, body: SIX_SLOTS }],
+        options,
+      });
+      await strand(h);
+      await vi.advanceTimersByTimeAsync(
+        STALE_AFTER_MS - options.blockingCapMs + 1,
+      );
+
+      const second = await h.fetcher.fetch({ ...PARAMS, sessionId: 's2' });
+      expect(h.logs).toContain(
+        `warn [user-context] gather for room=!room:x unsettled after ${STALE_AFTER_MS + 1}ms; starting a new one`,
+      );
+      expect(h.calls).toHaveLength(2);
+      expect(h.held).toHaveLength(1);
+      expect(second).toMatchObject({
+        kind: 'fresh',
+        context: { identity: { facts: [{ fact: 'The user is called Zed' }] } },
+      });
+      expect(h.fetcher.status(PARAMS.roomId)).toMatchObject({
+        cached: true,
+        inFlight: false,
+      });
+    });
+
+    it('does not repopulate the room when the abandoned gather answers late', async () => {
+      const h = harness({
+        replies: ['hold', { status: 200, body: SIX_SLOTS }],
+        options,
+      });
+      await strand(h);
+      // Hold on to the stranded gather, as the turn's `waitUntil` does.
+      const detached = h.fetcher.refresh(PARAMS);
+      await vi.advanceTimersByTimeAsync(
+        STALE_AFTER_MS - options.blockingCapMs + 1,
+      );
+      const second = await h.fetcher.fetch({ ...PARAMS, sessionId: 's2' });
+      if (second.kind !== 'fresh') throw new Error(`got ${second.kind}`);
+
+      h.held[0]!.resolve({ status: 200, body: STALE_SLOTS });
+      await detached;
+
+      await expect(
+        h.fetcher.fetch({ ...PARAMS, sessionId: 's3' }),
+      ).resolves.toEqual({
+        kind: 'cached',
+        context: second.context,
+        ageMs: 0,
+      });
+      expect(h.calls).toHaveLength(2);
+    });
+  });
+
   it('refresh does nothing while the cache is fresh and never rejects', async () => {
     const h = harness();
     await h.fetcher.fetch(PARAMS);

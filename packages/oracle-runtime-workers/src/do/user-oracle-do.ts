@@ -118,6 +118,7 @@ import {
   priorMetadataState,
 } from './turn-metadata';
 import {
+  frontendParkTimeoutMs,
   RealtimeEndpoint,
   type RealtimeStatus,
 } from '../realtime/realtime-endpoint';
@@ -261,6 +262,13 @@ import {
   storedRunRequest,
   type StoredRunRequest,
 } from './run-request';
+import {
+  activeChatRuns,
+  activeRunSummaryOf,
+  listedChatRuns,
+  withActiveRuns,
+  withWaitingFor,
+} from './active-runs';
 import {
   createToolMarksMiddleware,
   toolEffectOf,
@@ -563,6 +571,14 @@ const META_LAST_ACCESS = 'meta:lastAccessAt';
  * `POST /delegation` — the same place the Node runtime reads it from.
  */
 const META_DELEGATION = 'meta:delegation';
+/**
+ * `false` only when no run can be active: written at a boot that found
+ * none, turned `true` before the first run row an instance creates (once
+ * per instance, not per turn). A cold object whose flag is `false` answers
+ * `GET /runs/active` without booting; absent or `true`, it boots and asks
+ * the coordinator.
+ */
+const META_RUNS_MAYBE_ACTIVE = 'meta:runsMaybeActive';
 /** How long a "no deposited delegation" verdict is trusted before re-checking the room. */
 const DELEGATION_MISS_TTL_MS = 60_000;
 /** Storage key prefix: a room this object found end-to-end encrypted. */
@@ -823,8 +839,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private runStore: RunStore | null = null;
     /**
      * Tool concurrency of this user object (tool-scheduler.ts): writes one
-     * at a time across every session and turn, reads and sub-agents in
-     * bounded lanes. Lives as long as the object.
+     * at a time across every session and turn, reads in a bounded lane,
+     * browser tools and sub-agents in bounded lanes per session. Lives as
+     * long as the object; `GET /debug/runs` reports its occupancy.
      */
     private readonly toolScheduler = new ToolScheduler();
     /**
@@ -837,6 +854,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     /** Per-turn domain-context provenance (`domain_context_runs`). */
     private domainContextStore: DomainContextStore | null = null;
     private runs: RunCoordinator | null = null;
+    /**
+     * The boot's scan for runs a previous incarnation left failed: rows may
+     * be active that the coordinator does not hold, so the user-wide run
+     * listings read the store as well.
+     */
+    private runRecoveryFailed = false;
+    /** Whether this instance has written `META_RUNS_MAYBE_ACTIVE` true. */
+    private runsMarkedActive = false;
     private readonly runConfig: RunDurabilityConfig = runDurabilityConfig(
       this.env,
     );
@@ -1793,6 +1818,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         runAttempt: (live, resumed) => this.runAttempt(live, resumed),
         checkpointIdOf: (sessionId) => this.checkpointIdOf(sessionId),
         onRunEnded: (record, outcome) => this.onRunEnded(record, outcome),
+        beforeCreate: () => this.markRunsMaybeActive(),
       });
 
       this.channelTurns = new ChannelTurns(liveDb, {
@@ -1914,10 +1940,24 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // (attempts run from the alarm, never inside this boot).
       try {
         await this.runs.recoverOrphans();
+        this.runRecoveryFailed = false;
       } catch (err) {
+        this.runRecoveryFailed = true;
         console.error(
           `[user-do] run recovery scan failed for ${userDid}: ${err instanceof Error ? err.message : String(err)}`,
         );
+      }
+      // Nothing left in flight: a cold poll of `GET /runs/active` may skip
+      // the boot until this or a later instance creates a run.
+      const runsMarked = await this.ctx.storage.get<boolean>(
+        META_RUNS_MAYBE_ACTIVE,
+      );
+      if (!this.runRecoveryFailed && this.runs.size === 0) {
+        if (runsMarked !== false)
+          await this.ctx.storage.put(META_RUNS_MAYBE_ACTIVE, false);
+        this.runsMarkedActive = false;
+      } else {
+        this.runsMarkedActive = runsMarked === true;
       }
 
       // Resume (or start) legacy-blob compaction in the background: files
@@ -2902,7 +2942,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         o.offset ?? 0,
         TASK_SESSION_PREFIX,
       );
-      return { sessions: sessions.map(toSummary), total };
+      // One read of the active runs for the whole page, never one per row.
+      return {
+        sessions: withActiveRuns(
+          sessions.map(toSummary),
+          await this.activeChatRunRecords(),
+          this.parkedFrontendCall,
+        ),
+        total,
+      };
     }
 
     /**
@@ -3225,17 +3273,28 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       client: TurnRequest['client'];
       roomKind: TurnRequest['roomKind'];
     }): UserContextSettle | null {
-      // Task runs never get the user's memory (see `scheduleHistoryIndexing`).
-      if (!input.roomId || input.sessionId.startsWith(TASK_SESSION_PREFIX))
+      // A first contact that fetches nothing still prints the one
+      // first-contact line (see the settle step below), with its reason, so
+      // a warn-level reading of the logs accounts for every first turn.
+      const skipped = (reason: string): null => {
+        if (!hasUserContext(input.prior)) {
+          console.warn(
+            `[user-context] first contact room=${input.roomId ?? '-'} session=${input.sessionId} outcome=skipped reason=${reason} waited=0ms`,
+          );
+        }
         return null;
+      };
+      // Task runs never get the user's memory (see `scheduleHistoryIndexing`).
+      if (input.sessionId.startsWith(TASK_SESSION_PREFIX)) return null;
+      if (!input.roomId) return skipped('no-room');
       const settings = this.userContextSettings();
+      if (!settings) return skipped('disabled');
       const ambient = this.ambient;
-      if (!settings || !ambient) return null;
+      if (!ambient) return skipped('not-booted');
       // A group room's reply is posted to every member: one user's memory
       // must not be (as direct reads are not, see `admissionApplies`).
       if (input.client === 'matrix' && input.roomKind === 'group') {
-        console.log('[user-context] skipped: group room');
-        return null;
+        return skipped('group-room');
       }
       // Without a memory grant the gather could only fail at the mint: skip
       // it before any request (the engine's did.json included).
@@ -3246,10 +3305,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           MEMORY_CAPABILITY.action,
         )
       ) {
-        console.log(
-          `[user-context] skipped: the delegation grants no ${MEMORY_CAPABILITY.resource} ${MEMORY_CAPABILITY.action}`,
-        );
-        return null;
+        return skipped('no-memory-grant');
       }
       const fetcher = this.userContextFetcherFor(settings);
       const params: UserContextFetchParams = {
@@ -3280,6 +3336,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       keepGathering();
       return async (onSlow, signal) => {
         if (signal.aborted) return undefined;
+        const waitedFrom = Date.now();
         const timer = setTimeout(onSlow, USER_CONTEXT_PROGRESS_GRACE_MS);
         let onAbort: (() => void) | undefined;
         const aborted = new Promise<undefined>((resolve) => {
@@ -3288,6 +3345,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         });
         try {
           const outcome = await Promise.race([pending, aborted]);
+          // One line per first contact, at warn so it stands out when logs
+          // are read at warn and above: what the turn was given and how
+          // long it waited for it.
+          const reason =
+            outcome?.kind === 'skipped' || outcome?.kind === 'failed'
+              ? ` reason=${outcome.reason}`
+              : '';
+          console.warn(
+            `[user-context] first contact room=${input.roomId} session=${input.sessionId} outcome=${outcome?.kind ?? 'aborted'}${reason} waited=${Date.now() - waitedFrom}ms`,
+          );
           return outcome?.kind === 'cached' || outcome?.kind === 'fresh'
             ? withEverySlot(outcome.context)
             : undefined;
@@ -3570,8 +3637,23 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * a queued run is dropped. (A client that merely disconnects does NOT
      * reach here — runs outlive their connections.)
      */
-    async abortTurn(sessionId: string): Promise<boolean> {
-      if (this.runs?.abortSession(sessionId)) return true;
+    /**
+     * Stop the session's current message. From `POST /messages/abort`
+     * (`identity` given) the object is booted first — the boot recovers the
+     * runs a previous incarnation left, so a run only the store still knows
+     * (`recovering` after a reset) is live and stopped like any other — and
+     * the answer waits until the runs it stopped have ended (at most the
+     * supersede grace), so the client's next look sees the chat idle. The
+     * scheduler calls it on a booted object without `identity`.
+     */
+    async abortTurn(
+      sessionId: string,
+      identity?: TurnIdentity,
+    ): Promise<boolean> {
+      if (identity) {
+        await this.ready(identity);
+        if (await this.runs?.abortSessionSettled(sessionId)) return true;
+      } else if (this.runs?.abortSession(sessionId)) return true;
       const controller = this.aborts.get(sessionId);
       if (!controller) return false;
       controller.abort();
@@ -4319,9 +4401,17 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         // disconnects (`WsService.removeClientConnection`); same trigger here.
         onSessionDrained: (sessionId) =>
           this.scheduleHistoryIndexing(sessionId),
+        parkTimeoutMs: frontendParkTimeoutMs(this.env),
       });
       return this.realtimeEndpoint;
     }
+
+    /**
+     * The session's parked frontend call, for `waitingFor` on run
+     * summaries. Never builds the endpoint: without one nothing is parked.
+     */
+    private readonly parkedFrontendCall = (sessionId: string) =>
+      this.realtimeEndpoint?.frontend.parkedFor(sessionId) ?? null;
 
     async realtimeStatus(): Promise<RealtimeStatus> {
       return {
@@ -5087,7 +5177,60 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const live = this.runs?.activeForSession(sessionId);
       const record =
         live?.record ?? (await this.runStore?.activeForSession(sessionId));
-      return record ? runSummaryOf(record) : null;
+      return record
+        ? withWaitingFor(runSummaryOf(record), this.parkedFrontendCall)
+        : null;
+    }
+
+    /**
+     * `GET /runs/active` — the active runs of the chats `GET /sessions`
+     * lists (same room rule, task runs out), oldest first. A cold object
+     * that has run nothing since a boot found none answers without booting
+     * (`META_RUNS_MAYBE_ACTIVE`): an idle user's polls never pay a boot,
+     * and do not count as access for the idle eviction.
+     */
+    async activeRuns(identity: TurnIdentity): Promise<RunSummary[]> {
+      if (
+        !this.initPromise &&
+        (await this.ctx.storage.get<boolean>(META_RUNS_MAYBE_ACTIVE)) === false
+      )
+        return [];
+      await this.ready(identity);
+      const runs = await this.activeChatRunRecords();
+      if (runs.length === 0) return [];
+      const mainRoomId = await this.resolveMainRoomId(identity.userDid);
+      const sessionRooms =
+        mainRoomId === null
+          ? new Map<string, string | null>()
+          : await this.sessions!.roomsOf([
+              ...new Set(runs.map((run) => run.sessionId)),
+            ]);
+      return listedChatRuns(runs, { mainRoomId, sessionRooms }).map((run) =>
+        activeRunSummaryOf(run, this.parkedFrontendCall),
+      );
+    }
+
+    /**
+     * The active chat runs (task runs excluded). After a boot whose
+     * recovery scan succeeded every active row is live, and the live record
+     * is the truth (a run leaves the map before its row is closed): no SQL.
+     * Without a coordinator, or after a failed scan, the stored rows count
+     * too, live records winning.
+     */
+    private async activeChatRunRecords(): Promise<RunRecord[]> {
+      if (this.runs && !this.runRecoveryFailed)
+        return activeChatRuns(this.runs.records(), []);
+      return activeChatRuns(
+        this.runs?.records() ?? [],
+        (await this.runStore?.listActive()) ?? [],
+      );
+    }
+
+    /** Before a run row is created: from now on a cold poll must boot. */
+    private async markRunsMaybeActive(): Promise<void> {
+      if (this.runsMarkedActive) return;
+      await this.ctx.storage.put(META_RUNS_MAYBE_ACTIVE, true);
+      this.runsMarkedActive = true;
     }
 
     /** `GET /debug/context?model=` — the context budget a model gets here. */
@@ -5254,6 +5397,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         live: this.runs?.snapshot() ?? [],
         runs,
         claims: store ? await store.listClaims() : [],
+        tools: this.toolScheduler.snapshot(),
       };
     }
 
@@ -5833,19 +5977,40 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         : clientSurfaceFor(body, priorState);
 
       // Write-ahead tool marks + the resume policy (tool-marks.ts). The
-      // effect map is filled from the build below; the closure reads it at
-      // call time, so the middleware can be created before the agent.
+      // effect and surface maps are filled from the build below; the
+      // closures read them at call time, so the middleware can be created
+      // before the agent.
       const toolEffects = new Map<string, ToolEffect>();
+      const toolSurfaces = new Map<string, 'frontend'>();
       const subAgentToolNames = new Set<string>();
       const effectOf = (name: string): ToolEffect =>
         toolEffects.get(name) ?? toolEffectOf({ name });
+      const runStore = this.runStore!;
       const marksMiddleware = createToolMarksMiddleware({
         runId: run.runId,
-        store: this.runStore!,
+        store: runStore,
         effectOf,
+        surfaceOf: (name) => toolSurfaces.get(name),
         continuation: run.continuation,
         logger: console,
       });
+      // `ctx.markDispatched`: a frontend call reached a browser socket, so a
+      // restart from here on cannot tell whether it ran. A tool's context
+      // carries its own LangChain call id, which is its mark's id on the
+      // main agent. A sub-agent's inner marks are scoped to the dispatch
+      // (`<dispatch>/<id>`), so an inner call's report names no mark and
+      // they stay unsent; that never decides a resume, since a dispatch is a
+      // write and is not run again. (An inner id equal to a main-agent call
+      // id would mark that call sent early: the conservative side.)
+      const markDispatched = (toolCallId: string): void => {
+        void runStore
+          .markSent(run.runId, toolCallId)
+          .catch((error: unknown) =>
+            console.warn(
+              `[runs] ${run.runId}: could not record that ${toolCallId} was sent: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          );
+      };
       // The turn's budget (turn-budget.ts): model tokens are accounted (for
       // the usage line below, never limited) by the metered adapter every
       // model of this turn comes from, tool calls are charged by
@@ -5882,12 +6047,20 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           `[harness] turn ${req.requestId} usage: ~${usage.tokens} tokens (${usage.reportedTokens} reported over ${usage.modelCalls} model calls), ${usage.toolAttempts} tool attempts, ${usage.elapsedMs} ms`,
         );
       });
+      // A dispatch waits in its session's sub-agent lane, a browser tool
+      // (`surface: 'frontend'`) in its session's frontend lane whatever its
+      // effect, every other tool in the user-wide lane of its effect.
       const laneOf = (name: string): ToolLane =>
-        subAgentToolNames.has(name) ? 'subagent' : effectOf(name);
+        subAgentToolNames.has(name)
+          ? 'subagent'
+          : toolSurfaces.has(name)
+            ? 'frontend'
+            : effectOf(name);
       const executionMiddleware = createToolExecutionMiddleware({
         budget,
         scheduler: this.toolScheduler,
         laneOf,
+        effectOf,
         runId: run.runId,
         sessionId: req.sessionId,
         claims: this.runStore!,
@@ -5984,6 +6157,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           llm: meteredLlm,
           attachments: attachmentAccess,
           onTurnEnd: (dispose) => turnDisposables.add(dispose),
+          markDispatched,
         },
         hooks: {
           // Drives the Matrix `work_status` card (one step per model/tool
@@ -6059,6 +6233,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const { agent, context } = built;
       for (const [name, effect] of built.toolEffects)
         toolEffects.set(name, effect);
+      for (const [name, surface] of built.toolSurfaces)
+        toolSurfaces.set(name, surface);
       for (const name of built.subAgentToolNames) subAgentToolNames.add(name);
 
       const attachmentKwargs =
