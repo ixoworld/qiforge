@@ -27,7 +27,12 @@ const discoverSchema = z.strictObject({});
 
 export type HubActionRequestResult =
   | { status: 'prepared'; actionReference: ActionReferenceV1; summary: string }
-  | { status: 'unavailable' | 'expired'; reason: string };
+  | {
+      status: 'unavailable' | 'expired';
+      reason: string;
+      /** The earlier action that blocks this one (an unconfirmed email). */
+      priorActionId?: string;
+    };
 
 /**
  * The idempotency key the Hub sees: a fixed-length digest of the run and
@@ -69,10 +74,12 @@ async function requestHubAction(
   let operation;
   try {
     operation = parseOperation(parsed.data.operation);
-  } catch {
+  } catch (error) {
+    // The protocol's own words ("Invalid fromAddress"): the model can fix
+    // the field instead of guessing.
     return {
       status: 'unavailable',
-      reason: 'The requested operation is unsupported or incomplete.',
+      reason: `The requested operation is unsupported or incomplete${error instanceof Error && error.message ? ` (${error.message})` : ''}.`,
     };
   }
   let reference: ActionReferenceV1;
@@ -100,6 +107,9 @@ async function requestHubAction(
       return {
         status: error.kind === 'expired' ? 'expired' : 'unavailable',
         reason: error.message,
+        ...('priorActionId' in error && typeof error.priorActionId === 'string'
+          ? { priorActionId: error.priorActionId }
+          : {}),
       };
     throw error;
   }
@@ -166,7 +176,10 @@ const manifest: PluginManifest = {
   summary:
     'Prepare a registered operation for owner review and read its verified status.',
   whenToUse: [
-    'The user requests a supported review, statement, Gmail connection or reviewed email, calendar connection or event, document access request, or private note.',
+    'The user requests a registered form submission or a testnet transfer.',
+    'The user asks to review an exact private resource or to sign a statement.',
+    'The user asks to connect Gmail or Calendar, send a reviewed email or add an event.',
+    'The user asks for document access or to save a private note.',
   ],
   whenNotToUse: [
     'Signing, executing, or treating a resource open as acceptance.',

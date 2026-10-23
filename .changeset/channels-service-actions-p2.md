@@ -3,10 +3,14 @@
 '@ixo/ixo-transaction': patch
 ---
 
-Discover owner-scoped action options and prepare the shared signed-statement,
-Calendar, document-access-request and private-text operations from verified
-channel turns. Derive the tool schema from action-protocol 0.2.0 and retain the
-original-turn outcome and owner review boundaries.
+Add `hub_action_options` (service-tagged v2 discovery of the owner's
+connections and targets) and prepare Gmail connect, disconnect and one
+plain-text email send, plus signed-statement, Calendar, document-access-request
+and private-text operations, from verified channel turns. Derive the tool
+schema from action-protocol 0.3.0 and retain the original-turn outcome and
+owner review boundaries. A new email is refused while an earlier send through
+the same connection is unconfirmed, and a Gmail operation must name one of the
+owner's listed connections.
 
 Pin the Worker-compatible Topic validator candidate in both consumers. Release
 requires the reviewed action-protocol and Topic Protocol registry artifacts;

@@ -52,6 +52,7 @@
   "sideEffects": false,
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "node ../../scripts/assert-no-vendored-overrides.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

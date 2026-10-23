@@ -303,9 +303,17 @@ Private file content opens on its registered separate resource origin; it is
 not included in the Reply Plan or completion notice. Unknown effects are status
 reads on the same action, never a new model execution attempt. A
 `gmail.message.accepted.v1` receipt means Gmail accepted the email for sending;
-it does not prove delivery. A lost send response can remain unknown. Do not
-prepare another email until the owner checks Gmail's Sent folder and explicitly
-asks again. The Gmail service requires fresh independently verified scope
+it does not prove delivery. A lost send response can remain unknown. The owner
+object enforces what follows from that: while an earlier
+`gmail.message.send.v1` through the same connection has an `unknown` latest
+outcome, a new send is refused (`unavailable`, with the earlier action's id as
+`priorActionId`) and the owner is asked to check Gmail's Sent folder; the
+refusal lifts when that action's outcome resolves (or its rows are pruned, 30
+days after its review expired). A Gmail send or disconnect must also name a
+connection (service `gmail`, id and label) from the owner's
+`hub_action_options` (the last read within 10 minutes, else a fresh one);
+any other is refused. The tool's refusal names the field the protocol
+rejected (for example `Invalid fromAddress`). The Gmail service requires fresh independently verified scope
 attestations and confirmed proxy no-retry behavior; missing evidence disables
 the journey. Local conformance fixtures do not establish those activation gates.
 

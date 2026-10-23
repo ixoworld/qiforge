@@ -48,6 +48,7 @@ import {
 import {
   canonicalJson,
   type ActionCapabilitiesV1,
+  type HubActionOptionsV2,
   type ActionOperationV1,
   type ActionOutcomeV1,
 } from '@ixo/action-protocol';
@@ -586,6 +587,8 @@ const ACTION_TICK_BUDGET_MS = 15_000;
 const ACTION_PRUNE_INTERVAL_MS = 60 * 60_000;
 /** How long the Hub's capabilities answer is reused per object. */
 const HUB_CAPABILITIES_CACHE_MS = 60_000;
+/** How long a `hub_action_options` answer vouches for a Gmail connection. */
+const HUB_OPTIONS_REUSE_MS = 10 * 60_000;
 /** A channel poll waits this long for Auth Hub, once per poll at most. */
 const HUB_POLL_TIMEOUT_MS = 3_000;
 /** How long a passed topic authority read is reused for the same card. */
@@ -969,6 +972,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       value: ActionCapabilitiesV1;
       at: number;
     } | null = null;
+    /** The last `hub_action_options` answer for this owner (Gmail connection checks). */
+    private lastHubOptions: { value: HubActionOptionsV2; at: number } | null =
+      null;
     private topicProposals: TopicProposalStore | null = null;
     /** `assertTopicDependenciesMemo`: card id and digest -> when it passed. */
     private topicAuthorityMemo: Map<string, number> | undefined;
@@ -2227,6 +2233,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.hubActionStore = null;
       this.hubActionClient = null;
       this.hubCapabilities = null;
+      this.lastHubOptions = null;
       this.topicProposals = null;
       this.attachmentTextCache = null;
       this.domainContextStore = null;
@@ -3196,7 +3203,62 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         throw new Error(
           'Hub action options do not match this owner and binding',
         );
+      this.lastHubOptions = { value: options, at: Date.now() };
       return options;
+    }
+
+    /**
+     * A Gmail operation that names a connection must name one the owner's
+     * options list (service, id and label), from the last
+     * `hub_action_options` read when it is recent, else a fresh one. A send
+     * through a connection whose earlier send is unconfirmed is refused with
+     * that action's id: the owner checks Gmail's Sent folder first.
+     */
+    private async assertGmailOperationAllowed(input: {
+      ownerDid: string;
+      provider: string;
+      bindingId: string;
+      bindingRevision: number;
+      operation: ActionOperationV1;
+    }): Promise<void> {
+      const operation = input.operation;
+      if (
+        operation.kind !== 'gmail.message.send.v1' &&
+        operation.kind !== 'gmail.disconnect.v1'
+      )
+        return;
+      const cached = this.lastHubOptions ?? null;
+      const options =
+        cached &&
+        Date.now() - cached.at < HUB_OPTIONS_REUSE_MS &&
+        cached.value.ownerDid === input.ownerDid &&
+        cached.value.bindingId === input.bindingId &&
+        cached.value.bindingRevision === input.bindingRevision
+          ? cached.value
+          : await this.hubActionOptions(input);
+      if (
+        !options.connections.some(
+          (c) =>
+            c.service === 'gmail' &&
+            c.id === operation.connectionId &&
+            c.label === operation.accountLabel,
+        )
+      )
+        throw new HubActionRefused(
+          'refused',
+          "That Gmail connection is not one of this owner's; read hub_action_options and use a listed connection.",
+        );
+      if (operation.kind !== 'gmail.message.send.v1') return;
+      const prior = await this.hubActionStore?.unconfirmedGmailSend(
+        input.ownerDid,
+        operation.connectionId,
+      );
+      if (prior)
+        throw new HubActionRefused(
+          'refused',
+          `An earlier email (action ${prior}) is unconfirmed; ask the owner to check Gmail's Sent folder before preparing another.`,
+          prior,
+        );
     }
 
     /** The Hub's capabilities, cached per object for `HUB_CAPABILITIES_CACHE_MS`. */
@@ -3256,6 +3318,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         },
         this.env,
       );
+      await this.assertGmailOperationAllowed(input);
       const reference = await prepareHubAction(
         {
           capabilities: () => this.cachedHubCapabilities(),

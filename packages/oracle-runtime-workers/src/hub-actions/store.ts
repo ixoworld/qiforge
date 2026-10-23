@@ -23,11 +23,16 @@ export const HUB_ACTIONS_PER_DAY = 10;
 /** Rows are dropped this long after their review expired. */
 const HUB_RETENTION_SECONDS = 30 * 24 * 60 * 60;
 
-/** A refusal the model can act on: a cap reached, or a request that expired. */
+/**
+ * A refusal the model can act on: a cap reached, a request that expired, or
+ * an operation the owner's own state rules out (an unknown connection, an
+ * email whose earlier send is unconfirmed: `priorActionId`).
+ */
 export class HubActionRefused extends Error {
   constructor(
-    readonly kind: 'limit' | 'expired',
+    readonly kind: 'limit' | 'expired' | 'refused',
     message: string,
+    readonly priorActionId?: string,
   ) {
     super(message);
     this.name = 'HubActionRefused';
@@ -148,6 +153,27 @@ export class HubActionStore {
       }
       return requests.changes + actions.length;
     });
+  }
+
+  /**
+   * The newest Gmail send through `connectionId` whose latest outcome is
+   * `unknown` (the connector could not tell whether it went): its action
+   * id, or null. While one exists no replacement email is prepared.
+   */
+  async unconfirmedGmailSend(
+    ownerDid: string,
+    connectionId: string,
+  ): Promise<string | null> {
+    const row = await this.db.get<{ action_id: string }>(
+      `SELECT a.action_id FROM hub_action_requests r JOIN hub_actions a ON a.request_key = r.request_key
+       WHERE r.owner_did = ? AND json_extract(r.operation, '$.kind') = 'gmail.message.send.v1'
+         AND json_extract(r.operation, '$.connectionId') = ?
+         AND (SELECT json_extract(o.outcome, '$.status') FROM hub_action_outcomes o
+              WHERE o.action_id = a.action_id ORDER BY o.sequence DESC LIMIT 1) = 'unknown'
+       ORDER BY r.created_at DESC LIMIT 1`,
+      [ownerDid, connectionId],
+    );
+    return row?.action_id ?? null;
   }
 
   /** The reference already recorded for a request key, if any. */

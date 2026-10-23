@@ -402,4 +402,77 @@ describe('Hub actions Workers plugin', () => {
       });
     },
   );
+
+  it('names the field the protocol refused and the earlier action that blocks a send', async () => {
+    const ctx = makeRuntimeContext({
+      config: { HUB_ACTIONS_ENABLED: 'true' },
+      session: {
+        id: 'session-three',
+        client: 'channel',
+        requestId: 'request-three',
+        runId: 'run-three',
+        channel: {
+          provider: 'whatsapp',
+          bindingId: 'chb_three',
+          bindingRevision: 4,
+        },
+      },
+      toolCallId: 'tool-three',
+      hubActions: {
+        capabilities: async () => {
+          throw new Error('unused');
+        },
+        options: async () => options,
+        request: async () => {
+          throw new HubActionRefused(
+            'refused',
+            'An earlier email is unconfirmed',
+            'D'.repeat(32),
+          );
+        },
+        status: async () => null,
+      },
+    });
+    const tool = new HubActionsPlugin()
+      .getTools()
+      .find((item) => item.name === 'request_hub_action');
+    if (!tool) throw new Error('request tool missing');
+    const bad = await tool.handler(
+      {
+        operation: {
+          kind: 'ixo.bank.send.v1',
+          chainId: 'pandora-8',
+          network: 'ixo testnet',
+          fromAddress: 'x',
+          toAddress: 'x',
+          amountBaseUnits: '1',
+          denom: 'uixo',
+          feeBaseUnits: '0',
+          memo: '',
+        },
+      },
+      ctx,
+    );
+    expect(bad).toMatchObject({ status: 'unavailable' });
+    expect(JSON.stringify(bad)).toMatch(/Invalid/);
+    expect(
+      await tool.handler(
+        {
+          operation: {
+            kind: 'gmail.message.send.v1',
+            connectionId: 'gmail-one',
+            accountLabel: 'alex@example.test',
+            to: 'sam@example.test',
+            subject: 'Garden plans',
+            body: 'See you Tuesday.',
+          },
+        },
+        ctx,
+      ),
+    ).toEqual({
+      status: 'unavailable',
+      reason: 'An earlier email is unconfirmed',
+      priorActionId: 'D'.repeat(32),
+    });
+  });
 });
