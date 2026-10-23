@@ -189,6 +189,35 @@ describe('unwrapCloudflareEnvelope', () => {
 });
 
 describe('parseJevResult', () => {
+  it.each(['Queued', 'Running', 'Failed', 'Cancelled', 'completed'])(
+    'rejects a Cloudflare %s inference even when it contains answers',
+    (state) => {
+      const result = { answers: { work: { type: 'noul', noul: 0.99 } } };
+      for (const payload of [
+        { state, result },
+        { success: true, state, result },
+        { success: true, result: { state, result } },
+      ]) {
+        expect(() => parseJevResult(payload, 'cloudflare', 200)).toThrow(
+          JevDecisionError,
+        );
+      }
+    },
+  );
+
+  it.each([undefined, null, {}, { result: { answers: {} } }])(
+    'rejects a completed inference with malformed result %j',
+    (result) => {
+      expect(() =>
+        parseJevResult(
+          { success: true, result: { state: 'Completed', result } },
+          'cloudflare',
+          200,
+        ),
+      ).toThrow(JevDecisionError);
+    },
+  );
+
   it('rejects unknown answer types', () => {
     expect(() =>
       parseJevResult(
@@ -209,6 +238,11 @@ describe('parseJevResult', () => {
         ),
       () => parseJevResult({ answers: { work: sensitive } }, 'openrouter'),
       () => parseJevResult(sensitive, 'cloudflare'),
+      () =>
+        parseJevResult(
+          { success: true, state: sensitive, result: { answers: {} } },
+          'cloudflare',
+        ),
     ];
 
     for (const attempt of attempts) {
