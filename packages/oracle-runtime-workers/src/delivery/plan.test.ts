@@ -74,6 +74,52 @@ describe('isNarration', () => {
 });
 
 describe('draftReplyPlan', () => {
+  it('projects the Hub tool reference as a structured action part', async () => {
+    const id = 'H'.repeat(32);
+    const actionReference = {
+      version: 'ixo.auth-action/1',
+      id,
+      accountId: 'account-one',
+      bindingId: 'chb_one',
+      bindingRevision: 1,
+      revision: 1,
+      digest: 'a'.repeat(64),
+      url: `https://hub.test/a/${id}`,
+      expiresAt: 1999999999999,
+      title: 'Review form',
+    };
+    const draft = draftReplyPlan({
+      steps: [
+        {
+          text: 'I have prepared the form.',
+          toolCalls: [{ id: 'hub-call', name: 'request_hub_action', args: {} }],
+        },
+      ],
+      toolResults: new Map([
+        [
+          'hub-call',
+          JSON.stringify({
+            status: 'prepared',
+            actionReference,
+            summary: 'Review form',
+          }),
+        ],
+      ]),
+      limits: limits(),
+      canSpill: false,
+    });
+    expect(draft).toContainEqual({
+      kind: 'hub-action',
+      actionReference,
+      summary: 'Review form',
+    });
+    const plan = await materializeReplyPlan(draft, {
+      limits: limits(),
+      createSpill: async () => REF,
+    });
+    expect(parseReplyPlan(JSON.stringify(plan))).toEqual(plan);
+    expect(planText(plan)).toContain(actionReference.url);
+  });
   it('drops narration before a tool call but keeps substantive text written before one', () => {
     const plan = draftReplyPlan({
       steps: [
