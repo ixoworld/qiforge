@@ -6,7 +6,11 @@ import {
 import { z } from 'zod';
 import { canonicalizeIxoJson } from '@ixo/ixo-transaction/action-proposals';
 import type { TopicMatrixReader } from './topic-matrix';
-import { TopicMatrixEventSchema, readTopicEvent } from './topic-matrix';
+import {
+  TopicMatrixEventSchema,
+  readTopicEvent,
+  type TopicMatrixEvent,
+} from './topic-matrix';
 import { digestTopicProposalEffect } from './topic-store';
 import { ActionProposalConflict } from './store';
 
@@ -88,11 +92,15 @@ export async function readTopicAuthority(
   room: string,
   topicId: string,
   owner: string,
+  /** The room state the caller already read and parsed, if any. */
+  roomState?: TopicMatrixEvent[],
 ) {
-  const stateEvents = z
-    .array(TopicMatrixEventSchema)
-    .max(2048)
-    .parse(await reader.state(room));
+  const stateEvents =
+    roomState ??
+    z
+      .array(TopicMatrixEventSchema)
+      .max(2048)
+      .parse(await reader.state(room));
   const stateEvent = stateEvents.find(
     (e) => e.type === 'ixo.topic.contract' && e.state_key === topicId,
   );
@@ -113,9 +121,12 @@ export async function readTopicAuthority(
   const history = z
     .array(TopicMatrixEventSchema)
     .max(256)
-    .parse(await reader.history(room, root.event_id));
+    // Only the owner's relations are fetched and decrypted: authority here
+    // is owner-authored, and another member's relations must neither cost a
+    // decrypt nor fork or overflow the history read.
+    .parse(await reader.history(room, root.event_id, { sender: owner }));
   const contracts = history
-    .filter((e) => e.type === 'ixo.topic.operation')
+    .filter((e) => e.sender === owner && e.type === 'ixo.topic.operation')
     .flatMap((event) => {
       const raw = z
         .object({

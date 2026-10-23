@@ -32,6 +32,8 @@ export type TopicVerificationContext = {
   rpc: string | undefined;
   fetcher?: typeof fetch;
   onAttempt?: () => void;
+  /** An outer wall budget (the alarm tick's) every read here also obeys. */
+  signal?: AbortSignal;
 };
 export async function assertTopicDependencies(
   proposal: TopicActionProposal,
@@ -46,13 +48,14 @@ export async function assertTopicDependencies(
         reader,
         fetcher,
       }),
+    ctx.signal,
   );
 }
 async function assertTopicDependenciesWithinBudget(
   proposal: TopicActionProposal,
   ctx: TopicVerificationContext,
 ) {
-  await assertTopicRoomUnchanged(
+  const room = await assertTopicRoomUnchanged(
     proposal,
     ctx.reader,
     ctx.blocksync,
@@ -76,11 +79,14 @@ async function assertTopicDependenciesWithinBudget(
   if (!ctx.rpc)
     throw new TopicReadUnavailable('Trusted chain endpoint unavailable');
   const action = proposal.action;
+  // The room state just read is the state the authority is judged on: one
+  // state read, not two.
   const topic = await readTopicAuthority(
     ctx.reader,
     action.roomId,
     action.topicId,
     action.owner.matrixUserId,
+    room.state,
   );
   const chain = new TopicChainReader(ctx.rpc, action.chainId, ctx.fetcher);
   const collection = await chain.collection(
@@ -220,6 +226,7 @@ export async function reconcileTopicReferences(
     ctx.fetcher ?? fetch,
     (reader, fetcher) =>
       reconcileWithinBudget(store, p, input, { ...ctx, reader, fetcher }),
+    ctx.signal,
   ).catch(async () => (await store.get(p.ownerDid, p.id)) ?? p);
 }
 async function reconcileWithinBudget(

@@ -34,6 +34,10 @@ function stub(name: string) {
     nextVerification: (owner: string) => s.nextVerification(owner),
     prune: (owner: string) => s.prune(owner),
     legacyTable: () => s.legacyTable(),
+    closeUnexecuted: (owner: string) => s.closeUnexecuted(owner),
+    nextClose: (owner: string) => s.nextClose(owner),
+    hashColumn: (id: string) => s.hashColumn(id),
+    queryPlan: (sql: string, params: unknown[]) => s.queryPlan(sql, params),
     setNow: (now: number) => s.setNow(now),
     reopen: () => s.reopen(),
   };
@@ -327,6 +331,113 @@ describe('durable action proposals', () => {
       (await s.transition(OWNER, p.id, { kind: 'revoke', digest: p.digest }))
         ?.lifecycle,
     ).toMatchObject({ status: 'revoked' });
+    // The memo-bound hash survives the revoke in the indexed column: no
+    // other card may record it.
+    expect(await s.hashColumn(p.id)).toBe(tampered.hash);
+    const other = await s.create(
+      proposalSubject({
+        origin: {
+          sessionId: 'session-1',
+          runId: 'run-2',
+          invocationId: 'run-2:call-1',
+        },
+      }),
+    );
+    await s.transition(OWNER, other.id, {
+      kind: 'claim',
+      digest: other.digest,
+    });
+    await expect(
+      s.transition(OWNER, other.id, {
+        kind: 'reconcile',
+        transactionHash: tampered.hash,
+      }),
+    ).rejects.toThrow('already recorded for another proposal');
+  });
+  it('closes a claimed card that never recorded a transaction after the execution window, never back to prepared', async () => {
+    const s = stub('unexecuted-close');
+    const cancelled = await s.create(proposalSubject());
+    await s.transition(OWNER, cancelled.id, {
+      kind: 'claim',
+      digest: cancelled.digest,
+    });
+    // A wallet cancel: Portal reconciles with no hash.
+    await s.transition(OWNER, cancelled.id, { kind: 'reconcile' });
+    const signed = await s.create(
+      proposalSubject({
+        origin: {
+          sessionId: 'session-1',
+          runId: 'run-2',
+          invocationId: 'run-2:call-1',
+        },
+      }),
+    );
+    await s.transition(OWNER, signed.id, {
+      kind: 'claim',
+      digest: signed.digest,
+    });
+    await s.transition(OWNER, signed.id, {
+      kind: 'reconcile',
+      transactionHash: 'B'.repeat(64),
+    });
+    expect(await s.nextClose(OWNER)).toBe(NOW + 60 * 60_000);
+    expect(await s.closeUnexecuted(OWNER)).toBe(0);
+    await s.setNow(NOW + 60 * 60_000);
+    expect(await s.closeUnexecuted(OWNER)).toBe(1);
+    expect((await s.get(OWNER, cancelled.id))?.lifecycle).toEqual({
+      status: 'revoked',
+      endedAt: new Date(NOW + 60 * 60_000).toISOString(),
+    });
+    // A card with a recorded hash is the verifier's, not this sweep's.
+    expect((await s.get(OWNER, signed.id))?.lifecycle.status).toBe('unknown');
+    expect(await s.nextClose(OWNER)).toBeUndefined();
+    await expect(
+      s.transition(OWNER, cancelled.id, {
+        kind: 'claim',
+        digest: cancelled.digest,
+      }),
+    ).rejects.toThrow('already consumed');
+  });
+  it('caps cards per run and open cards per owner', async () => {
+    const s = stub('caps');
+    const subject = (run: number, call: number) =>
+      proposalSubject({
+        origin: {
+          sessionId: 'session-1',
+          runId: `run-${run}`,
+          invocationId: `run-${run}:call-${call}`,
+        },
+      });
+    for (let call = 0; call < 8; call++) await s.create(subject(1, call));
+    await expect(s.create(subject(1, 8))).rejects.toThrow(
+      'Too many action cards in this request',
+    );
+    for (let call = 0; call < 8; call++) await s.create(subject(2, call));
+    await expect(s.create(subject(3, 0))).rejects.toThrow(
+      'Too many action cards are open',
+    );
+    // Expired prepared cards no longer count as open.
+    await s.setNow(NOW + 21 * 60_000);
+    await s.create({
+      ...subject(3, 0),
+      createdAt: new Date(NOW + 21 * 60_000).toISOString(),
+      expiresAt: new Date(NOW + 36 * 60_000).toISOString(),
+    });
+  });
+  it('indexes the alarm queries', async () => {
+    const s = stub('plans');
+    await s.create(proposalSubject());
+    const plans = [
+      await s.queryPlan(
+        `SELECT proposal_id FROM action_proposal_receipts WHERE owner_did=? AND state='pending' AND next_attempt<=? ORDER BY next_attempt,proposal_id LIMIT 4`,
+        [OWNER, NOW],
+      ),
+      await s.queryPlan(
+        `SELECT id FROM action_proposals WHERE owner_did=? AND created_at<? LIMIT 64`,
+        [OWNER, NOW],
+      ),
+    ];
+    for (const plan of plans) expect(plan.join(' ')).not.toMatch(/\bSCAN\b/);
   });
   it('drops finished cards after the retention window and keeps open ones', async () => {
     const s = stub('retention');
@@ -347,6 +458,10 @@ describe('durable action proposals', () => {
     expect(await s.prune(OWNER)).toBe(1);
     expect(await s.get(OWNER, done.id)).toBeNull();
     expect((await s.get(OWNER, open.id))?.lifecycle.status).toBe('claimed');
+    // Unresolved cards go too, after the longer window.
+    await s.setNow(NOW + 181 * 24 * 60 * 60 * 1000);
+    expect(await s.prune(OWNER)).toBe(1);
+    expect(await s.get(OWNER, open.id)).toBeNull();
   });
   it('only emits verified outcomes for the original owner session and run', async () => {
     const s = stub('receipt');

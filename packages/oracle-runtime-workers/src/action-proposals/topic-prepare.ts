@@ -59,7 +59,7 @@ export const TopicCandidateSchema = z.discriminatedUnion('action', [
         }),
       )
       .min(1)
-      .max(32),
+      .max(8),
   }),
 ]);
 export type TopicCandidate = z.infer<typeof TopicCandidateSchema>;
@@ -192,6 +192,7 @@ async function prepareTopicSubjectWithinBudget(
     candidate.roomId,
     candidate.topicId,
     owner.matrixUserId,
+    room.state,
   );
   if (!topic.body.claimBinding)
     throw new Error('The authenticated topic has no claim collection binding');

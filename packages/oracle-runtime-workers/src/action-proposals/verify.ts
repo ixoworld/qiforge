@@ -34,11 +34,42 @@ export type VerifiedActionTransaction = {
   verifiedAt: string;
 };
 
+/**
+ * How long a chain RPC's answer to `/status` is trusted per isolate: the
+ * network an origin serves does not change between lookups, and `/status`
+ * would otherwise be half of all verification traffic.
+ */
+export const CHAIN_NETWORK_CACHE_MS = 5 * 60_000;
+const chainNetworks = new Map<string, { network: string; at: number }>();
+/** Tests only: forget every cached `/status` answer. */
+export function resetChainNetworkCache(): void {
+  chainNetworks.clear();
+}
+/**
+ * The network (chain id) an RPC origin serves, from `/status`, cached per
+ * isolate for `CHAIN_NETWORK_CACHE_MS`. Only a parsed answer is cached; a
+ * failed read is retried on the next lookup.
+ */
+export async function chainNetwork(
+  origin: string,
+  readStatus: () => Promise<unknown>,
+  now = Date.now(),
+): Promise<string> {
+  const cached = chainNetworks.get(origin);
+  if (cached && now - cached.at < CHAIN_NETWORK_CACHE_MS) return cached.network;
+  const network = StatusResponse.parse(await readStatus()).result.node_info
+    .network;
+  chainNetworks.set(origin, { network, at: now });
+  return network;
+}
+
 export async function verifyActionTransaction(
   proposal: ActionProposal,
   transactionHash: string,
   rpcOrigin: string,
   fetcher: typeof fetch = fetch,
+  /** The caller's wall budget (the alarm's); each read also stops at 10 s. */
+  signal?: AbortSignal,
 ): Promise<VerifiedActionTransaction> {
   return verifyTransaction(
     proposal.action.chainId,
@@ -62,6 +93,7 @@ export async function verifyActionTransaction(
     transactionHash,
     rpcOrigin,
     fetcher,
+    signal,
   );
 }
 export async function verifyTopicGrantTransaction(
@@ -69,6 +101,7 @@ export async function verifyTopicGrantTransaction(
   transactionHash: string,
   rpcOrigin: string,
   fetcher: typeof fetch = fetch,
+  signal?: AbortSignal,
 ): Promise<VerifiedActionTransaction> {
   return verifyTransaction(
     effect.chainId,
@@ -80,6 +113,7 @@ export async function verifyTopicGrantTransaction(
     transactionHash,
     rpcOrigin,
     fetcher,
+    signal,
   );
 }
 async function verifyTransaction(
@@ -89,6 +123,7 @@ async function verifyTransaction(
   transactionHash: string,
   rpcOrigin: string,
   fetcher: typeof fetch,
+  signal?: AbortSignal,
 ): Promise<VerifiedActionTransaction> {
   const origin = new URL(rpcOrigin);
   if (
@@ -102,7 +137,12 @@ async function verifyTransaction(
   const request = async (path: string) => {
     const response = await fetcher(
       new URL(path, `${origin.href.replace(/\/$/, '')}/`),
-      { redirect: 'error', signal: AbortSignal.timeout(10_000) },
+      {
+        redirect: 'error',
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(10_000)])
+          : AbortSignal.timeout(10_000),
+      },
     );
     if (!response.ok) throw new Error('Chain verification unavailable');
     const text = new TextDecoder().decode(
@@ -110,9 +150,8 @@ async function verifyTransaction(
     );
     return JSON.parse(text) as unknown;
   };
-  const status = StatusResponse.parse(await request('status'));
-  if (status.result.node_info.network !== chainId)
-    throw new Error('Chain mismatch');
+  const network = await chainNetwork(origin.href, () => request('status'));
+  if (network !== chainId) throw new Error('Chain mismatch');
   const tx = TxResponse.parse(
     await request(`tx?hash=0x${transactionHash.toUpperCase()}&prove=false`),
   ).result;

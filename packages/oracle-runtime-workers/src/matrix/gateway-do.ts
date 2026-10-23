@@ -249,6 +249,40 @@ function isForbidden(err: unknown): boolean {
   );
 }
 
+/** A topic read's own ceiling when the caller names no deadline. */
+const TOPIC_READ_MS = 10_000;
+/** Relations pages one topic history read may walk (32 relations each). */
+const TOPIC_HISTORY_MAX_PAGES = 16;
+/** Decrypted bytes one topic history read may hand back over the stub. */
+const TOPIC_HISTORY_MAX_BYTES = 2 * 1024 * 1024;
+/** Milliseconds left before `deadlineAt`, at least one. */
+function remaining(deadlineAt: number): number {
+  return Math.max(1, Math.min(TOPIC_READ_MS, deadlineAt - Date.now()));
+}
+/**
+ * `work`, or a rejection at `deadlineAt`. The work itself is not cancelled
+ * (the SDK's decrypt wait takes no signal); the caller just stops waiting.
+ */
+async function withinDeadline<T>(
+  work: Promise<T>,
+  deadlineAt: number,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('Topic history verification timed out')),
+          Math.max(0, deadlineAt - Date.now()),
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1204,62 +1238,121 @@ export class MatrixGatewayDO
       throw new Error('Topic room state exceeds verification bounds');
     return JSON.stringify(response.json);
   }
+  /**
+   * One topic event: `/event` once, with its room binding and state key.
+   * A plaintext event (every state event) is returned from that read; an
+   * encrypted one needs the SDK's decrypting read (a second GET: its
+   * decrypt API takes an event id, not an event). The decrypt wait is cut
+   * at the caller's deadline.
+   */
   async getTopicEvent(
     roomId: string,
     eventId: string,
+    opts: { deadlineAt?: number } = {},
   ): Promise<JsonString | null> {
+    const deadlineAt = Math.min(
+      opts.deadlineAt ?? Infinity,
+      Date.now() + TOPIC_READ_MS,
+    );
     const raw = await this.fetchCapped<Record<string, unknown>>(
       `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/event/${encodeURIComponent(eventId)}`,
       {},
-      { capBytes: 262144, timeoutMs: 10000 },
+      { capBytes: 262144, timeoutMs: remaining(deadlineAt) },
     );
     if (raw.oversized || !raw.json)
       throw new Error('Topic event exceeds verification bounds');
     if (raw.json.room_id !== undefined && raw.json.room_id !== roomId)
       throw new Error('Topic event room binding mismatch');
-    const decrypted = await this.getEvent(roomId, eventId);
+    const stateKey =
+      typeof raw.json.state_key === 'string'
+        ? { state_key: raw.json.state_key }
+        : {};
+    if (raw.json.type !== 'm.room.encrypted')
+      return JSON.stringify({
+        event_id: raw.json.event_id,
+        type: raw.json.type,
+        content: raw.json.content,
+        sender: raw.json.sender,
+        origin_server_ts: raw.json.origin_server_ts,
+        ...stateKey,
+        room_id: roomId,
+      });
+    const decrypted = await withinDeadline(
+      this.getEvent(roomId, eventId),
+      deadlineAt,
+    );
     if (!decrypted) return null;
     return JSON.stringify({
       ...JSON.parse(decrypted),
-      ...(typeof raw.json.state_key === 'string'
-        ? { state_key: raw.json.state_key }
-        : {}),
+      ...stateKey,
       room_id: roomId,
     });
   }
-  async getTopicHistory(roomId: string, root: string): Promise<JsonString> {
+  /**
+   * The `m.reference` relations of a topic root, decrypted. Only `sender`'s
+   * relations are decrypted and counted (another member's cost nothing and
+   * cannot fork or overflow the read); at most 256 of them and
+   * `TOPIC_HISTORY_MAX_BYTES` decrypted, within the caller's deadline.
+   */
+  async getTopicHistory(
+    roomId: string,
+    root: string,
+    opts: { deadlineAt?: number; sender?: string } = {},
+  ): Promise<JsonString> {
     const events: unknown[] = [];
-    const deadline = Date.now() + 10000;
-    let from: string | undefined;
-    for (let page = 0; page < 8; page++) {
-      if (Date.now() >= deadline)
+    let bytes = 0;
+    const deadlineAt = Math.min(
+      opts.deadlineAt ?? Infinity,
+      Date.now() + TOPIC_READ_MS,
+    );
+    const timedOut = () => {
+      if (Date.now() >= deadlineAt)
         throw new Error('Topic history verification timed out');
+    };
+    let from: string | undefined;
+    for (let page = 0; page < TOPIC_HISTORY_MAX_PAGES; page++) {
+      timedOut();
       const response = await this.fetchCapped<{
-        chunk: { event_id?: string; room_id?: string; state_key?: string }[];
+        chunk: {
+          event_id?: string;
+          room_id?: string;
+          state_key?: string;
+          sender?: string;
+        }[];
         next_batch?: string;
       }>(
         `/_matrix/client/v1/rooms/${encodeURIComponent(roomId)}/relations/${encodeURIComponent(root)}/m.reference`,
         { limit: '32', ...(from ? { from } : {}) },
-        { capBytes: 524288, timeoutMs: 10000 },
+        { capBytes: 524288, timeoutMs: remaining(deadlineAt) },
       );
       if (response.oversized || !response.json)
         throw new Error('Topic history exceeds verification bounds');
-      // The relations page already carries each event's room and state key;
-      // only the decryption read is needed per event, eight at a time, which
-      // keeps a 60-event topic inside the caller's budget without flooding
-      // the homeserver from this one shared object.
-      const { chunk } = response.json;
+      // The relations page already carries each event's room, sender and
+      // state key; only the decryption read is needed per kept event, eight
+      // at a time, which keeps a 60-event topic inside the caller's budget
+      // without flooding the homeserver from this one shared object.
+      const chunk = response.json.chunk.filter(
+        (event) => opts.sender === undefined || event.sender === opts.sender,
+      );
+      if (events.length + chunk.length > 256)
+        throw new Error('Topic history exceeds 256 events');
       for (let i = 0; i < chunk.length; i += 8) {
-        if (Date.now() >= deadline)
-          throw new Error('Topic history verification timed out');
+        timedOut();
         const values = await Promise.all(
           chunk.slice(i, i + 8).map(async (event) => {
             if (!event.event_id)
               throw new Error('Topic history event has no ID');
             if (event.room_id !== undefined && event.room_id !== roomId)
               throw new Error('Topic history event room binding mismatch');
-            const decrypted = await this.getEvent(roomId, event.event_id);
+            timedOut();
+            const decrypted = await withinDeadline(
+              this.getEvent(roomId, event.event_id),
+              deadlineAt,
+            );
             if (!decrypted) throw new Error('Topic history is incomplete');
+            bytes += decrypted.length;
+            if (bytes > TOPIC_HISTORY_MAX_BYTES)
+              throw new Error('Topic history exceeds verification bounds');
             return {
               ...(JSON.parse(decrypted) as Record<string, unknown>),
               ...(typeof event.state_key === 'string'
@@ -1274,7 +1367,7 @@ export class MatrixGatewayDO
       if (!response.json.next_batch) return JSON.stringify(events);
       from = response.json.next_batch;
     }
-    throw new Error('Topic history exceeds 256 events');
+    throw new Error('Topic history exceeds verification bounds');
   }
 
   override async getRoomState(roomId: string): Promise<JsonString> {
