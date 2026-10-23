@@ -4,7 +4,7 @@ import {
   TRANSACTION_REJECTIONS,
   type ActionProposalStore,
 } from './store';
-import { verifyActionTransaction } from './verify';
+import { TRANSACTION_NOT_FOUND, verifyActionTransaction } from './verify';
 export async function refreshActionProposal(
   store: ActionProposalStore,
   proposal: ActionProposal,
@@ -58,7 +58,15 @@ export async function refreshActionProposal(
     console.warn(
       `[action-proposals] verification of ${proposal.id} pending: ${message}`,
     );
-    if (message === TRANSACTION_CARD_BOUND_MISMATCH)
+    if (message === TRANSACTION_NOT_FOUND)
+      // Inside the grace window after the hash arrived this is the
+      // broadcast or the indexer still in flight, not a spent attempt.
+      await store.deferNotFound(
+        proposal.ownerDid,
+        proposal.id,
+        proposal.lifecycle.transactionHash,
+      );
+    else if (message === TRANSACTION_CARD_BOUND_MISMATCH)
       await store.blockExecution(
         proposal.ownerDid,
         proposal.id,
