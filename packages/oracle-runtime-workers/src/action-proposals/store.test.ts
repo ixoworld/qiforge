@@ -37,6 +37,7 @@ function stub(name: string) {
     closeUnexecuted: (owner: string) => s.closeUnexecuted(owner),
     nextClose: (owner: string) => s.nextClose(owner),
     hashColumn: (id: string) => s.hashColumn(id),
+    verifyAttempts: (id: string) => s.verifyAttempts(id),
     queryPlan: (sql: string, params: unknown[]) => s.queryPlan(sql, params),
     setNow: (now: number) => s.setNow(now),
     reopen: () => s.reopen(),
@@ -178,14 +179,16 @@ describe('durable action proposals', () => {
       kind: 'reconcile',
       transactionHash: tx.hash,
     });
-    expect(await s.due(OWNER)).toEqual([p.id]);
-    expect(await s.nextVerification(OWNER)).toBe(0);
-    let now = NOW;
+    // The first lookup waits 30 s: the Portal may report the hash of the
+    // signed bytes before it broadcasts them.
+    expect(await s.due(OWNER)).toEqual([]);
+    expect(await s.nextVerification(OWNER)).toBe(NOW + 30_000);
+    let now = NOW + 30_000;
     const waits: number[] = [];
     for (let attempt = 0; attempt < 10; attempt++) {
       await s.setNow(now);
       expect(await s.due(OWNER)).toEqual([p.id]);
-      await s.refresh(OWNER, p.id, null);
+      await s.refresh(OWNER, p.id, 'unavailable');
       const next = await s.nextVerification(OWNER);
       if (next === undefined) break;
       waits.push(next - now);
@@ -201,6 +204,53 @@ describe('durable action proposals', () => {
     // A Portal reconcile still looks the transaction up once the cooldown
     // has passed, however many attempts the alarm made.
     await s.setNow(now + 600_000);
+    expect((await s.refresh(OWNER, p.id, tx.json))?.lifecycle.status).toBe(
+      'succeeded',
+    );
+  });
+  it('accepts a hash the chain does not know yet, waits before the first lookup and is idempotent on the same hash', async () => {
+    const s = stub('pre-broadcast-hash');
+    const p = await s.create(proposalSubject());
+    const tx = await indexedTransaction(p);
+    await s.transition(OWNER, p.id, { kind: 'claim', digest: p.digest });
+    // (a) The Portal's fire-and-forget reconcile with the hash of the
+    // signed bytes, before broadcast: accepted, scheduled, not looked up.
+    const first = await s.transition(OWNER, p.id, {
+      kind: 'reconcile',
+      transactionHash: tx.hash,
+    });
+    expect(first?.lifecycle).toMatchObject({
+      status: 'unknown',
+      transactionHash: tx.hash,
+    });
+    expect(await s.nextVerification(OWNER)).toBe(NOW + 30_000);
+    expect((await s.refresh(OWNER, p.id, null))?.lifecycle.status).toBe(
+      'unknown',
+    );
+    // (c) The normal reconcile after broadcast, same hash: same card, same
+    // schedule (no reset, no conflict).
+    await s.setNow(NOW + 10_000);
+    const second = await s.transition(OWNER, p.id, {
+      kind: 'reconcile',
+      transactionHash: tx.hash.toLowerCase(),
+    });
+    expect(second?.lifecycle).toEqual(first?.lifecycle);
+    expect(await s.nextVerification(OWNER)).toBe(NOW + 30_000);
+    // (b) Not found inside the two-minute grace: rescheduled, the attempt
+    // given back. Three not-founds in the grace window spend nothing.
+    for (const at of [NOW + 30_000, NOW + 60_000, NOW + 90_000]) {
+      await s.setNow(at);
+      expect((await s.refresh(OWNER, p.id, null))?.lifecycle.status).toBe(
+        'unknown',
+      );
+      expect(await s.nextVerification(OWNER)).toBe(at + 30_000);
+    }
+    expect(await s.verifyAttempts(p.id)).toBe(0);
+    // Past the grace window a not-found is an ordinary attempt.
+    await s.setNow(NOW + 120_000);
+    await s.refresh(OWNER, p.id, null);
+    expect(await s.verifyAttempts(p.id)).toBe(1);
+    await s.setNow(NOW + 150_000);
     expect((await s.refresh(OWNER, p.id, tx.json))?.lifecycle.status).toBe(
       'succeeded',
     );
@@ -253,6 +303,7 @@ describe('durable action proposals', () => {
         tx_result: { code: 0 },
       },
     });
+    await s.setNow(NOW + 30_000);
     expect((await s.refresh(OWNER, p.id, faulty))?.lifecycle.status).toBe(
       'unknown',
     );
@@ -267,7 +318,7 @@ describe('durable action proposals', () => {
       s.transition(OWNER, p.id, { kind: 'revoke', digest: p.digest }),
     ).rejects.toThrow('already consumed');
     // The faulty answer spent the cooldown slot; the next look-up waits.
-    await s.setNow(NOW + 31_000);
+    await s.setNow(NOW + 61_000);
     expect((await s.refresh(OWNER, p.id, wrong.json))?.lifecycle.status).toBe(
       'unknown',
     );
@@ -280,6 +331,8 @@ describe('durable action proposals', () => {
       status: 'unknown',
       transactionHash: right.hash,
     });
+    // A replacing hash gets a fresh schedule, first lookup after 30 s.
+    await s.setNow(NOW + 91_000);
     expect((await s.refresh(OWNER, p.id, right.json))?.lifecycle.status).toBe(
       'succeeded',
     );
@@ -299,6 +352,7 @@ describe('durable action proposals', () => {
       kind: 'reconcile',
       transactionHash: tampered.hash,
     });
+    await s.setNow(NOW + 30_000);
     const blocked = await s.refresh(OWNER, p.id, tampered.json);
     expect(blocked?.lifecycle).toMatchObject({
       status: 'unknown',

@@ -41,6 +41,17 @@ export const VERIFY_RETRY_BASE_MS = 30_000;
 export const VERIFY_RETRY_MAX_MS = 10 * 60_000;
 export const VERIFY_MAX_ATTEMPTS = 10;
 /**
+ * A hash recorded for the first time is looked up no sooner than this: the
+ * Portal reports the hash of the signed bytes BEFORE it broadcasts them.
+ */
+export const VERIFY_FIRST_DELAY_MS = 30_000;
+/**
+ * "Not found" this soon after the hash arrived is the broadcast or the
+ * indexer still in flight: the lookup is rescheduled without spending one
+ * of the ten attempts.
+ */
+export const VERIFY_NOT_FOUND_GRACE_MS = 2 * 60_000;
+/**
  * Receipt posts into the originating room: the same doubling cooldown, up to
  * an hour apart, abandoned after twelve attempts (about five hours) so a
  * room that refuses the oracle does not keep its owner object awake for ever.
@@ -119,6 +130,16 @@ export class ActionProposalStore {
     );
     // One signed transaction verifies one card: the memo already pins it,
     // the index refuses a second card recording the same hash.
+    // Added after the first released shape: when the current hash arrived
+    // (the not-found grace window counts from it). Adding a column is
+    // instant in SQLite.
+    const shape = await this.db.exec<{ name: string }>(
+      `PRAGMA table_info(action_proposals)`,
+    );
+    if (!shape.some((c) => c.name === 'hash_recorded_at'))
+      await this.db.run(
+        `ALTER TABLE action_proposals ADD COLUMN hash_recorded_at INTEGER NOT NULL DEFAULT 0`,
+      );
     await this.db.run(
       `CREATE UNIQUE INDEX IF NOT EXISTS action_proposals_transaction ON action_proposals(owner_did, transaction_hash)`,
     );
@@ -481,6 +502,29 @@ export class ActionProposalStore {
     if (blocked)
       console.error(`[action-proposals] ${id} execution blocked: ${reason}`);
   }
+  /**
+   * The lookup just made found no transaction, inside the grace window
+   * after the hash arrived: give the attempt back and look again after the
+   * first-lookup delay. Guarded on the hash. Returns whether it applied.
+   */
+  async deferNotFound(
+    ownerDid: string,
+    id: string,
+    transactionHash: string,
+  ): Promise<boolean> {
+    const now = this.now();
+    const result = await this.db.run(
+      `UPDATE action_proposals SET verify_attempts=MAX(verify_attempts-1,0),verify_after=? WHERE owner_did=? AND id=? AND status='unknown' AND transaction_hash=? AND hash_recorded_at>?`,
+      [
+        now + VERIFY_FIRST_DELAY_MS,
+        ownerDid,
+        id,
+        transactionHash.toUpperCase(),
+        now - VERIFY_NOT_FOUND_GRACE_MS,
+      ],
+    );
+    return result.changes === 1;
+  }
   /** When the alarm should next look a recorded transaction up, if ever. */
   async nextVerificationAt(ownerDid: string): Promise<number | undefined> {
     const row = await this.db.get<{ due: number | null }>(
@@ -676,6 +720,9 @@ export class ActionProposalStore {
           throw new ActionProposalConflict('Execution is blocked');
         }
         let replacing = false;
+        const firstHash =
+          !!command.transactionHash &&
+          !(p.lifecycle.status === 'unknown' && p.lifecycle.transactionHash);
         if (
           p.lifecycle.status === 'unknown' &&
           p.lifecycle.transactionHash &&
@@ -702,11 +749,14 @@ export class ActionProposalStore {
           claimedAt: p.lifecycle.claimedAt,
           ...(hash ? { transactionHash: hash.toUpperCase() } : {}),
         };
-        if (replacing)
-          // A fresh hash gets a fresh verification schedule.
+        if (replacing || firstHash)
+          // A fresh hash gets a fresh verification schedule, its first
+          // lookup no sooner than `VERIFY_FIRST_DELAY_MS` (the Portal may
+          // report it before broadcasting). The same hash again changes
+          // nothing.
           await this.db.run(
-            `UPDATE action_proposals SET transaction_hash_rejected=0,verify_after=0,verify_attempts=0 WHERE owner_did=? AND id=?`,
-            [ownerDid, id],
+            `UPDATE action_proposals SET transaction_hash_rejected=0,verify_after=?,verify_attempts=0,hash_recorded_at=? WHERE owner_did=? AND id=?`,
+            [this.now() + VERIFY_FIRST_DELAY_MS, this.now(), ownerDid, id],
           );
       } else {
         if (p.digest !== command.digest)
