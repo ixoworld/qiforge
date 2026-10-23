@@ -308,6 +308,12 @@ export async function createMainAgent(
     },
     ...(abortSignal ? { signal: abortSignal } : {}),
   };
+  // A plugin may narrow this turn first (the commerce front desk): request
+  // tools read the resolved `ctx.commerce`, so it must exist before they run.
+  const turnScope = await registries.tools.collectTurnScope(
+    buildRuntimeContext(runConfig, ambient, wrapState, sharedFactory),
+  );
+  if (turnScope.commerce) runConfig.context.commerce = turnScope.commerce;
   const rtCtx = buildRuntimeContext(
     runConfig,
     ambient,
@@ -364,8 +370,22 @@ export async function createMainAgent(
     ],
     logger: ambient.logger,
   });
-  const collectedTools = unshadowed.tools;
-  const collectedSubAgents = [...bootSubAgents, ...unshadowed.requestSubAgents];
+  // The turn scope's allowlist and the contracted-billing gate act before
+  // anything is selected or bound: a support-mode turn never sees paid-work
+  // tools, sub-agents or the meta-tools that could load them.
+  const scopeAllow = turnScope.allowPlugins
+    ? new Set(turnScope.allowPlugins)
+    : null;
+  const inWork = turnScope.commerce?.mode === 'work';
+  const collectedTools = unshadowed.tools.filter(
+    ({ pluginName, tool }) =>
+      (!scopeAllow || scopeAllow.has(pluginName)) &&
+      !(turnScope.commerce && tool.billing === 'contracted' && !inWork),
+  );
+  const collectedSubAgents = [
+    ...bootSubAgents,
+    ...unshadowed.requestSubAgents,
+  ].filter(({ pluginName }) => !scopeAllow || scopeAllow.has(pluginName));
   // The user's delegation decides what the model may see, by one rule: a
   // manifest's `requires` per plugin (below), a tool's plane per tool here.
   const hasCapability = (resource: string, action: string): boolean =>
@@ -449,18 +469,22 @@ export async function createMainAgent(
 
   // ── 4. Wrap tools (meta + plugin) so handlers receive a RuntimeContext ──
   const metaTools = [
-    ...buildMetaTools({
-      manifestRegistry: registries.manifests,
-      // This turn's own collection (the shared registry holds no request
-      // tools), already cut to what the delegation reaches.
-      toolRegistry: turnToolSummaries(toolAccess.tools),
-      toolAccess: {
-        ...toolAccess,
-        preloadedOnly: new Set(
-          [...(turnPreloads ?? [])].filter((name) => !threadLoaded.has(name)),
-        ),
-      },
-    }),
+    ...(scopeAllow
+      ? []
+      : buildMetaTools({
+          manifestRegistry: registries.manifests,
+          // This turn's own collection (the shared registry holds no request
+          // tools), already cut to what the delegation reaches.
+          toolRegistry: turnToolSummaries(toolAccess.tools),
+          toolAccess: {
+            ...toolAccess,
+            preloadedOnly: new Set(
+              [...(turnPreloads ?? [])].filter(
+                (name) => !threadLoaded.has(name),
+              ),
+            ),
+          },
+        })),
     // Pages through tool results the result cap saved whole (result-cap.ts);
     // its chunks stay well under the cap so a page is never capped itself.
     ...(hooks?.readResult
@@ -904,9 +928,9 @@ export async function createMainAgent(
   });
   // The domain block goes last: it frames its documents as retrieved data
   // that never outranks the instructions above it.
-  const systemPrompt = domain?.prompt
-    ? `${composedPrompt}\n\n${domain.prompt}`
-    : composedPrompt;
+  const systemPrompt = [composedPrompt, turnScope.promptOverlay, domain?.prompt]
+    .filter((part): part is string => Boolean(part))
+    .join('\n\n');
 
   // ── 8. Model ────────────────────────────────────────────────────────────
   // A per-request model (already allow-list-validated by the caller) wins

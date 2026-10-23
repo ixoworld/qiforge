@@ -316,6 +316,24 @@ export interface CommerceContext {
   gate?: CommerceGateFailure;
 }
 
+/**
+ * How a plugin narrows ONE turn (`OraclePlugin.getTurnScope`). The commerce
+ * front desk uses it: in support mode only its own and the memory plugin's
+ * tools stay bound, so free support can never do the paid work.
+ */
+export interface TurnScope {
+  /** Exposed to tool handlers as `ctx.commerce` for this turn. */
+  commerce?: CommerceContext;
+  /**
+   * When set, only tools and sub-agents contributed by these plugins are
+   * bound this turn, and the meta-tools (`load_capability`, …) are not.
+   * Several scopes intersect.
+   */
+  allowPlugins?: readonly string[];
+  /** Appended to the system prompt for this turn. */
+  promptOverlay?: string;
+}
+
 export type ToolCallEventPayload = Record<string, unknown>;
 export type ActionCallEventPayload = Record<string, unknown>;
 export type RenderComponentEventPayload = Record<string, unknown>;
@@ -781,6 +799,16 @@ export interface RuntimeContext<TConfig = MergedConfig> {
   kv?: UserKvSurface;
 
   /**
+   * The oracle's own secp256k1 chain account: signs and broadcasts IXO
+   * transactions as the oracle (the AuthZ grantee its claims, intents and
+   * other chain writes go out as). Present when the host has the oracle's
+   * secp mnemonic and a sequence keeper (the Workers runtime does, with
+   * `ORACLE_SECP_MNEMONIC` + the `SEQUENCE_MANAGER` binding); absent
+   * otherwise — a plugin that needs it degrades with a clear error.
+   */
+  chain?: ChainSigningSurface;
+
+  /**
    * Host bridge to the user's browser over the realtime (socket.io) channel:
    * browser tools declared by the client (`state.browserTools`) and AG-UI
    * actions (`state.agActions`) are invoked through it and awaited until the
@@ -1138,6 +1166,31 @@ export interface UserKvWriteOptions {
  * replacing an entry counts only the difference in size. Keep plugin state
  * bounded with `idleTtlMs` / `maxEntries` rather than relying on the caps.
  */
+/** One protobuf-encoded message to sign (cosmjs `EncodeObject`). */
+export interface ChainMessage {
+  typeUrl: string;
+  value: unknown;
+}
+
+/** What a broadcast returned. `code` 0 is success; anything else failed in the block. */
+export interface ChainBroadcastResult {
+  code: number;
+  transactionHash: string;
+  rawLog?: string;
+  gasUsed: bigint;
+}
+
+/** `ctx.chain` — see {@link RuntimeContext.chain}. */
+export interface ChainSigningSurface {
+  /** The oracle account's `ixo1…` address. */
+  address(): Promise<string>;
+  /** Sign with the oracle account, fee "auto", and broadcast. */
+  signAndBroadcast(
+    messages: readonly ChainMessage[],
+    memo: string,
+  ): Promise<ChainBroadcastResult>;
+}
+
 export interface UserKvSurface {
   /** The stored value, or `undefined` when absent or expired. */
   get(namespace: string, key: string): Promise<unknown>;

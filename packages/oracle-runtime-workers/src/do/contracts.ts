@@ -228,6 +228,23 @@ export interface OracleWorkerEnv {
    */
   AI?: Ai;
 
+  // --- chain (the oracle's own account) -------------------------------------
+  /**
+   * The oracle's secp256k1 wallet mnemonic: the account its chain writes sign
+   * as (an agent's claim intents and claims go out as the AuthZ grantee).
+   * With `SEQUENCE_MANAGER` it turns on `ctx.chain`; without either,
+   * `ctx.chain` is absent.
+   */
+  ORACLE_SECP_MNEMONIC?: string;
+  /** IXO RPC for signing; defaults per `NETWORK`. */
+  CHAIN_RPC_URL?: string;
+  /**
+   * The SDK's `SequenceManagerDO` (`@ixo/impactxclient-sdk/cloudflare`, re-exported
+   * as `SequenceManagerDO`): one instance per signer address allocates account
+   * sequences atomically, so concurrent user objects never collide.
+   */
+  SEQUENCE_MANAGER?: DurableObjectNamespace;
+
   // --- llm ----------------------------------------------------------------
   OPEN_ROUTER_API_KEY: string;
   DEFAULT_MODEL?: string;

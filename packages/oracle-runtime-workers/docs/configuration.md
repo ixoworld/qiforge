@@ -140,7 +140,10 @@ are described in [ixo-transaction](ixo-transaction.md#configuration). The
 declared by both wallet-signing plugins (the same schema objects, so the
 boot does not report them as a collision): one set of variables names the
 chain for `sign_ixo_transaction` and for the POD Creator's
-`request_pod_signature`, whichever plugins the oracle loads.
+`request_pod_signature`, whichever plugins the oracle loads. The opt-in paid
+services plugin moves money too: its keys (`AGENT_CARD_JSON`,
+`ORACLE_PAYMENTS_DENOM`, …) and the `SEQUENCE_MANAGER` binding are in
+[oracle-payments](oracle-payments.md#setup).
 
 ### Identity and auth
 
@@ -154,6 +157,8 @@ chain for `sign_ixo_transaction` and for the POD Creator's
 | `UCAN_AUTH_MAX_TTL_SECONDS`           | no       | Maximum lifetime accepted for a user auth invocation (default 900).                                                                                                                                                                                    |
 | `UCAN_ALLOW_BARE_DELEGATION_AUTH`     | no       | `true` lets an `x-ucan-delegation` without an invocation authenticate (the legacy fallback, logged per HTTP request and per socket CONNECT as `[auth] … authenticated with a bare delegation`). Off by default: requests must carry a UCAN invocation. |
 | `UCAN_REAUTH_PROMPT_THROTTLE_SECONDS` | no       | Minimum time between two `delegation_required` prompts a Matrix turn posts for one user without a usable delegation (default 21600 = 6 h; anything not a positive number keeps the default). See [operations](operations.md#best-effort-room-posts).   |
+| `ORACLE_SECP_MNEMONIC`                | no       | secp256k1 wallet of the oracle account (secret): the AuthZ grantee its chain writes sign as. With the `SEQUENCE_MANAGER` binding it turns on `ctx.chain`; `did:ixo:<its address>` should be `ORACLE_DID`.                                              |
+| `CHAIN_RPC_URL`                       | no       | IXO RPC `ctx.chain` signs through; defaults per `NETWORK`.                                                                                                                                                                                             |
 | `ORACLE_SIGNING_MNEMONIC`             | no       | Ed25519 mnemonic the oracle signs downstream UCAN invocations with (secret). Unset = read from the account room like the Node runtime (needs `MATRIX_ACCOUNT_ROOM_ID` + `MATRIX_VALUE_PIN`; see first-time setup).                                     |
 
 ### Matrix

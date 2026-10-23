@@ -444,8 +444,10 @@ the naming difference above.
 
 Measured against the Node runtime's `BUNDLED_PLUGINS` (Sep 2026):
 
-- **Slack transport** (retired internally) and the **commerce lane**
-  (oracle-payments).
+- **Slack transport** (retired internally).
+- (The **commerce lane** was ported in October 2026 as the opt-in
+  `OraclePaymentsPlugin` — see [oracle-payments](oracle-payments.md#differences-from-the-node-plugin)
+  for how it differs.)
 - (Matrix group chats were ported in September 2026 — see
   [Identical](#identical).)
 
