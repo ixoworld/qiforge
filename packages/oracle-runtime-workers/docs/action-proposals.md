@@ -144,7 +144,7 @@ minute later:
 - **Verification**: at most two chain lookups per tick, run together, for cards that are
   `unknown` with a recorded hash, so a card the owner signed and then
   closed the browser on still gets confirmed once the chain has indexed
-  it. The cooldown doubles from 30 s to 10 min and the alarm gives up after
+  it. A newly recorded hash is first looked up 30 s after it arrives (the Portal reports the hash of the signed bytes before it broadcasts them, then again after; the same hash twice changes nothing), and a "not found" answer within two minutes of its arrival reschedules the lookup without spending an attempt. The cooldown doubles from 30 s to 10 min and the alarm gives up after
   ten attempts (about an hour); a Portal reconcile still looks the hash up
   once the cooldown has passed. Two proofs end the wait early. A hash the
   verifier proved is **another transaction** (the chain holds it under

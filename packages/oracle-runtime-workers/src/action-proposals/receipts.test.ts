@@ -325,9 +325,11 @@ describe('durable canonical action receipts', () => {
         waits.push(next - now);
         now = next;
       }
-      // Ten attempts spent: nine waits between them, then nothing scheduled.
-      expect(waits).toHaveLength(9);
+      // The first-lookup delay, then ten attempts spent: nine waits between
+      // them, then nothing scheduled.
+      expect(waits).toHaveLength(10);
       expect(waits[0]).toBe(30_000);
+      expect(waits[1]).toBe(30_000);
       expect(waits.at(-1)).toBe(600_000);
       expect(await call(h.host, 'tickActionProposals')).toBeUndefined();
       // A row this build cannot read drops out of the schedule too. (The
@@ -348,6 +350,7 @@ describe('durable canonical action receipts', () => {
         kind: 'reconcile',
         transactionHash: 'E'.repeat(64),
       });
+      h.setNow(NOW + 30_000);
       await h.corruptSubject(second.id);
       expect(await h.store().dueVerifications(OWNER)).toEqual([]);
       expect(await call(h.host, 'tickActionProposals')).toBeUndefined();
@@ -379,12 +382,14 @@ describe('durable canonical action receipts', () => {
         );
       });
       try {
+        // Past the first-lookup delay.
+        h.setNow(NOW + 30_000);
         const tick = call<number | undefined>(h.host, 'tickActionProposals');
         await vi.waitFor(() => expect(started).toHaveLength(2));
         await vi.advanceTimersByTimeAsync(15_000);
         // Both lookups were cut by the budget: attempts spent, cards
         // `unknown`, the next lookup scheduled after the cooldown.
-        expect(await tick).toBe(NOW + 30_000);
+        expect(await tick).toBe(NOW + 60_000);
         for (const card of cards)
           expect((await h.store().get(OWNER, card.id))?.lifecycle.status).toBe(
             'unknown',

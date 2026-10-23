@@ -63,9 +63,11 @@ export class ActionProposalTestDO extends DurableObject {
     const fetcher: typeof fetch = async (input) =>
       String(input).includes('/status')
         ? Response.json({ result: { node_info: { network: 'pandora-8' } } })
-        : indexed
-          ? new Response(indexed)
-          : new Response('', { status: 404 });
+        : indexed === 'unavailable'
+          ? new Response('', { status: 503 })
+          : indexed
+            ? new Response(indexed)
+            : new Response('', { status: 404 });
     const refreshed = await refreshActionProposal(
       store,
       proposal,
@@ -104,6 +106,17 @@ export class ActionProposalTestDO extends DurableObject {
         )
       )?.transaction_hash ?? null
     );
+  }
+  async verifyAttempts(id: string) {
+    await this.proposals();
+    return (
+      await (
+        await this.database()
+      ).get<{ verify_attempts: number }>(
+        'SELECT verify_attempts FROM action_proposals WHERE id=?',
+        [id],
+      )
+    )?.verify_attempts;
   }
   async queryPlan(sql: string, params: unknown[]) {
     await this.proposals();

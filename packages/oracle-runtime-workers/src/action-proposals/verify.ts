@@ -62,6 +62,26 @@ export async function chainNetwork(
   return network;
 }
 
+/**
+ * The node does not hold the transaction (yet): not indexed, or not
+ * broadcast. CometBFT answers `/tx` for an unknown hash with a JSON-RPC
+ * error whose text says "not found" (HTTP 200 or 500 by version).
+ */
+export const TRANSACTION_NOT_FOUND = 'Transaction not found';
+function isTransactionNotFound(text: string): boolean {
+  try {
+    const body = JSON.parse(text) as {
+      error?: { message?: unknown; data?: unknown };
+    };
+    return (
+      !!body.error &&
+      /not found/i.test(`${body.error.message ?? ''} ${body.error.data ?? ''}`)
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function verifyActionTransaction(
   proposal: ActionProposal,
   transactionHash: string,
@@ -79,7 +99,7 @@ export async function verifyActionTransaction(
     origin.hash
   )
     throw new Error('Expected configured HTTPS RPC origin');
-  const request = async (path: string) => {
+  const request = async (path: string, notFound = false) => {
     const response = await fetcher(
       new URL(path, `${origin.href.replace(/\/$/, '')}/`),
       {
@@ -89,16 +109,25 @@ export async function verifyActionTransaction(
           : AbortSignal.timeout(10_000),
       },
     );
-    if (!response.ok) throw new Error('Chain verification unavailable');
+    if (notFound && response.status === 404)
+      throw new Error(TRANSACTION_NOT_FOUND);
+    if (!response.ok && !notFound)
+      throw new Error('Chain verification unavailable');
     const text = new TextDecoder().decode(
       await boundedBytes(response, 1_500_000),
     );
+    if (notFound && isTransactionNotFound(text))
+      throw new Error(TRANSACTION_NOT_FOUND);
+    if (!response.ok) throw new Error('Chain verification unavailable');
     return JSON.parse(text) as unknown;
   };
   const network = await chainNetwork(origin.href, () => request('status'));
   if (network !== proposal.action.chainId) throw new Error('Chain mismatch');
   const tx = TxResponse.parse(
-    await request(`tx?hash=0x${transactionHash.toUpperCase()}&prove=false`),
+    await request(
+      `tx?hash=0x${transactionHash.toUpperCase()}&prove=false`,
+      true,
+    ),
   ).result;
   const bytes = decode64(tx.tx);
   const digest = hex(
