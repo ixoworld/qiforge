@@ -3340,6 +3340,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           // The attempt is spent before the read: a Hub that hangs is
           // asked again only after the backoff.
           await store.scheduleCheck(row.reference.id, row.checkAttempts);
+          // The schedule is SQLite state the owner copy must carry (else a
+          // restored copy asks the Hub again at once). Only a poll that
+          // refreshed writes it, at most one per poll.
+          this.markDirty();
           try {
             const fresh = await this.statusHubAction(
               ownerDid,

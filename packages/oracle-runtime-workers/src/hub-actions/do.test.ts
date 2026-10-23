@@ -215,15 +215,18 @@ describe('Hub actions in the owner object', () => {
         h.outcomes.set(ref.id, outcome(ref, 1, 'submitted'));
       expect(await h.poll()).toHaveLength(1);
       expect(h.calls).toHaveLength(1);
+      // The refresh schedule and the new outcome are both owner-copy state.
+      expect(h.markDirty).toHaveBeenCalled();
       expect(await h.poll()).toHaveLength(2);
       expect(h.calls).toHaveLength(2);
       expect(await h.poll()).toHaveLength(3);
       expect(h.calls).toHaveLength(3);
-      // Every action is inside its 15 s backoff now: no call at all.
+      // Every action is inside its 15 s backoff now: no call at all, and
+      // a poll that refreshed nothing writes nothing.
+      const marks = h.markDirty.mock.calls.length;
       expect(await h.poll()).toHaveLength(3);
       expect(h.calls).toHaveLength(3);
-      // Three new outcomes stored, three dirty marks; repeats add none.
-      expect(h.markDirty).toHaveBeenCalledTimes(3);
+      expect(h.markDirty).toHaveBeenCalledTimes(marks);
     });
   });
 
