@@ -203,6 +203,12 @@ export interface AmbientServices {
   onTurnEnd?: (dispose: () => void | Promise<void>) => void;
   /** Host keep-alive for un-awaited work (`ctx.waitUntil` on Workers). */
   background?: (work: Promise<unknown>) => void;
+  /**
+   * Records that the tool call `toolCallId` of this turn left the object
+   * (`ctx.markDispatched`). Set per turn by a host that keeps write-ahead
+   * tool marks.
+   */
+  markDispatched?: (toolCallId: string) => void;
 }
 
 // ── Scoped emitter ──────────────────────────────────────────────────────────
@@ -436,6 +442,8 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
   };
 
   const delegation = user.ucanDelegation;
+  const toolCallId = runConfig.toolCall?.id;
+  const { markDispatched } = ambient;
 
   const ctx: RuntimeContext<TConfig> = {
     user,
@@ -532,7 +540,10 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
     ...(ambient.onTurnEnd ? { onTurnEnd: ambient.onTurnEnd } : {}),
     ...(ambient.background ? { background: ambient.background } : {}),
     shared: EMPTY_SHARED,
-    ...(runConfig.toolCall?.id ? { toolCallId: runConfig.toolCall.id } : {}),
+    ...(toolCallId ? { toolCallId } : {}),
+    ...(toolCallId && markDispatched
+      ? { markDispatched: () => markDispatched(toolCallId) }
+      : {}),
   };
   if (sharedFactory) {
     ctx.shared = sharedFactory(ctx);
@@ -735,5 +746,8 @@ export function createNoopAmbient(
     logger: overrides.logger ?? NOOP_LOGGER,
     ...(overrides.decisions ? { decisions: overrides.decisions } : {}),
     ...(overrides.kv ? { kv: overrides.kv } : {}),
+    ...(overrides.markDispatched
+      ? { markDispatched: overrides.markDispatched }
+      : {}),
   };
 }

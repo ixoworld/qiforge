@@ -27,6 +27,7 @@ import {
   type SSEReasoningEventData,
   type SSEToolCallPayload,
 } from '../../../utils/sse-parser.js';
+import { isActiveRunStatus } from '../../use-active-runs/types.js';
 import { useOracleSessions } from '../../use-oracle-sessions/use-oracle-sessions.js';
 import { useOraclesConfig } from '../../use-oracles-config.js';
 import { useWebSocketEvents } from '../../use-websocket-events/use-websocket-events.js';
@@ -527,7 +528,7 @@ export function useChat({
       }
       if (currentSessionRef.current !== sessionId) return; // moved on
       if (!active) return;
-      if (!['queued', 'running', 'recovering'].includes(active.status)) return;
+      if (!isActiveRunStatus(active.status)) return;
       if (chatRef.current?.status === 'streaming') return;
       await resumeRunRef.current(active.runId);
     })();

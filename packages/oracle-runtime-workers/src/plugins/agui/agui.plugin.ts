@@ -98,11 +98,8 @@ export function buildActionTool(action: AgAction): PluginTool | null {
           `AG-UI action ${action.name} needs the realtime channel, which this host does not provide.`,
         );
       }
-      if (!frontend.hasClient(sessionId)) {
-        throw new Error(
-          `No browser is connected to session ${sessionId}, so AG-UI action ${action.name} cannot run — the client must open the realtime (socket.io) channel for this session first.`,
-        );
-      }
+      // No browser of the session connected yet: the bridge parks the call
+      // until one joins (or its park deadline / the turn's abort ends it).
       // The bridge makes every invocation unique (`ag_<requestId>:<uuid>`).
       let invocationId: string | undefined;
       const result = await frontend.callAgAction({
@@ -112,6 +109,7 @@ export function buildActionTool(action: AgAction): PluginTool | null {
         args: parseArgs(input),
         timeoutMs: AG_ACTION_TIMEOUT_MS,
         signal: ctx.abortSignal,
+        ...(ctx.markDispatched ? { onDispatched: ctx.markDispatched } : {}),
         onInvocation: (id) => {
           invocationId = id;
         },
@@ -125,6 +123,10 @@ export function buildActionTool(action: AgAction): PluginTool | null {
       schema,
       // A UI action on the user's screen: running it again is a new action.
       repeatable: true,
+      // It runs on this session's AG-UI surface in the browser: scheduled in
+      // the session's frontend lane, so a parked call holds no slot another
+      // chat needs.
+      surface: 'frontend',
     },
   );
 }

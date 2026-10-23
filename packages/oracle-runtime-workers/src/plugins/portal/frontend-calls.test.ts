@@ -27,7 +27,10 @@ const schema = {
   properties: { note: { type: 'string' } },
 };
 
-function harness(answer: (params: FrontendCallParams) => unknown) {
+function harness(
+  answer: (params: FrontendCallParams) => unknown,
+  o: { connected?: boolean } = {},
+) {
   const calls: FrontendCallParams[] = [];
   const respond = (params: FrontendCallParams): Promise<unknown> => {
     calls.push(params);
@@ -38,7 +41,9 @@ function harness(answer: (params: FrontendCallParams) => unknown) {
   const frontend: FrontendCallSurface = {
     callBrowserTool: respond,
     callAgAction: respond,
-    hasClient: () => true,
+    hasClient: () => o.connected ?? true,
+    canDispatch: () => o.connected ?? true,
+    parkedFor: () => null,
   };
   const postEvent = vi.fn().mockResolvedValue('$ev');
   const kept: Promise<unknown>[] = [];
@@ -87,6 +92,29 @@ describe('Portal browser tools over the frontend bridge', () => {
     expect(calls[0]?.timeoutMs).toBe(BROWSER_TOOL_TIMEOUT_MS);
   });
 
+  it('calls the bridge without a connected browser, which parks the call until one joins', async () => {
+    const { ctx, calls } = harness(() => ({ opened: true }), {
+      connected: false,
+    });
+    const browserTool = buildBrowserTool({
+      name: 'open_url',
+      description: 'Open a URL',
+      schema,
+    });
+    expect(await browserTool!.handler({ note: 'x' }, ctx)).toEqual({
+      opened: true,
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('runs in the session frontend lane, a question to the person included', () => {
+    for (const name of ['mutate_topic', 'ask_user_question', 'scroll_page'])
+      expect(
+        buildBrowserTool({ name, description: 'Browser action', schema })
+          ?.surface,
+      ).toBe('frontend');
+  });
+
   it('keeps repeatable browser navigation and reads available', () => {
     for (const name of ['scroll_page', 'click', 'read_topic']) {
       expect(
@@ -94,6 +122,86 @@ describe('Portal browser tools over the frontend bridge', () => {
           ?.repeatable,
       ).toBe(true);
     }
+  });
+
+  it('passes a declared effect to the tool, except for a question to the person', () => {
+    expect(
+      buildBrowserTool({
+        name: 'getEntityProfileDomain',
+        description: 'Read',
+        schema,
+        effect: 'read',
+      })?.effect,
+    ).toBe('read');
+    expect(
+      buildBrowserTool({
+        name: 'get_page',
+        description: 'Write',
+        schema,
+        effect: 'write',
+      })?.effect,
+    ).toBe('write');
+    expect(
+      buildBrowserTool({ name: 'click', description: 'Click', schema })?.effect,
+    ).toBeUndefined();
+    for (const name of ['ask_user_question', 'publish_recipe_release'])
+      expect(
+        buildBrowserTool({ name, description: 'Ask', schema, effect: 'read' })
+          ?.effect,
+      ).toBe('write');
+  });
+
+  it('reads a declared effect, and ignores one that is not read or write', () => {
+    expect(
+      parseBrowserTools([
+        { name: 'getResources', description: 'r', schema, effect: 'read' },
+        { name: 'mutate_topic', description: 'w', schema, effect: 'write' },
+        { name: 'open_url', description: 'o', schema, effect: 'maybe' },
+      ]),
+    ).toEqual([
+      { name: 'getResources', description: 'r', schema, effect: 'read' },
+      { name: 'mutate_topic', description: 'w', schema, effect: 'write' },
+      { name: 'open_url', description: 'o', schema },
+    ]);
+  });
+
+  it("reports the dispatch through the call's own mark", async () => {
+    const markDispatched = vi.fn();
+    const { calls } = harness(() => ({ ok: true }));
+    const frontend: FrontendCallSurface = {
+      callBrowserTool: (params) => {
+        calls.push(params);
+        params.onDispatched?.();
+        return Promise.resolve({ ok: true });
+      },
+      callAgAction: () => Promise.resolve({ success: true }),
+      hasClient: () => true,
+      canDispatch: () => true,
+      parkedFor: () => null,
+    };
+    const ctx = makeRuntimeContext(
+      { frontend },
+      {
+        ambient: { markDispatched },
+        runConfig: { toolCall: { id: 'call_42' } },
+      },
+    );
+    const browserTool = buildBrowserTool({
+      name: 'getEntityProfileDomain',
+      description: 'Read',
+      schema,
+    });
+    await browserTool!.handler({}, ctx);
+    expect(calls[0]?.onDispatched).toBeTypeOf('function');
+    expect(markDispatched).toHaveBeenCalledExactlyOnceWith('call_42');
+
+    // No call id (a direct invocation): nothing to mark, nothing passed.
+    const bare = makeRuntimeContext(
+      { frontend },
+      { ambient: { markDispatched } },
+    );
+    await browserTool!.handler({}, bare);
+    expect(calls[1]).not.toHaveProperty('onDispatched');
   });
 
   it('keeps the first descriptor of a browser tool declared twice', () => {
@@ -182,6 +290,22 @@ describe('AG-UI actions over the frontend bridge', () => {
     ).toEqual([first]);
   });
 
+  it('calls the bridge without a connected browser, and runs in the session frontend lane', async () => {
+    const { ctx, calls } = harness(() => ({ success: true }), {
+      connected: false,
+    });
+    const action = buildActionTool({
+      name: 'render_table',
+      description: 'Render a table',
+      schema,
+    });
+    expect(action?.surface).toBe('frontend');
+    expect(JSON.parse(String(await action!.handler({}, ctx)))).toEqual({
+      success: true,
+    });
+    expect(calls).toHaveLength(1);
+  });
+
   it('hands the bridge a turn-level caller id, returns the JSON result, and logs identifiers only', async () => {
     const { ctx, calls, logged } = harness(() => ({
       success: true,
@@ -199,6 +323,8 @@ describe('AG-UI actions over the frontend bridge', () => {
     });
     expect(calls[0]?.toolCallId).toBe('ag_req-1');
     expect(calls[0]?.signal).toBe(ctx.abortSignal);
+    // No write-ahead mark on this context: no dispatch report.
+    expect(calls[0]).not.toHaveProperty('onDispatched');
     const events = await logged();
     expect(events[0]?.content).toMatchObject({
       action: {

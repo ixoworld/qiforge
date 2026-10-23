@@ -207,6 +207,52 @@ describe('RunStore', () => {
     expect((await s.activeForSession('sess'))?.runId).toBe('q1');
   });
 
+  it('user-wide active runs: chats of every client, oldest first, each run once with its live record; ended and task runs never', async () => {
+    const s = stub('runs-user-wide');
+    const mk = async (
+      runId: string,
+      sessionId: string,
+      client: 'portal' | 'matrix' | 'channel',
+      at: number,
+      status: 'queued' | 'running' = 'running',
+    ) => {
+      await s.setNow(at);
+      await s.create({
+        runId,
+        sessionId,
+        requestId: `req-${runId}`,
+        client,
+        status,
+        request: '{}',
+        checkpointId: null,
+        instanceId: 'i1',
+      });
+    };
+    await mk('portal', 's-portal', 'portal', T0 + 1);
+    await mk('matrix', '$thread-root', 'matrix', T0 + 2);
+    await mk('channel', '$channel-session', 'channel', T0 + 3);
+    await mk('task', 'task:t1', 'portal', T0 + 4);
+    await mk('lagging', 's-lagging', 'portal', T0 + 5, 'queued');
+    for (const [i, status] of (
+      ['finished', 'aborted', 'interrupted', 'failed'] as const
+    ).entries()) {
+      await mk(`ended-${status}`, `s-${status}`, 'portal', T0 + 10 + i);
+      await s.update(`ended-${status}`, { status });
+    }
+    // The coordinator already moved `lagging` to running; its row still
+    // says queued.
+    const lagging = (await s.get('lagging'))!;
+    const live = [{ ...lagging, status: 'running' as const }];
+
+    const runs = await s.activeChatRuns(live);
+    expect(runs.map((r) => [r.runId, r.client, r.status])).toEqual([
+      ['portal', 'portal', 'running'],
+      ['matrix', 'matrix', 'running'],
+      ['channel', 'channel', 'running'],
+      ['lagging', 'portal', 'running'],
+    ]);
+  });
+
   it('stores segments in order, serves them after a cursor, and deletes them at cutover', async () => {
     const s = stub('runs-segments');
     await s.setNow(T0);
@@ -274,6 +320,97 @@ describe('RunStore', () => {
       attempts: 2,
       doneAt: null,
     });
+  });
+
+  it('records when a call was sent, and a re-run clears it', async () => {
+    const s = stub('runs-marks-sent');
+    await s.setNow(T0);
+    await s.startMark({
+      runId: 'r1',
+      toolCallId: 'f1',
+      toolName: 'getEntityProfileDomain',
+      effect: 'read',
+    });
+    // Parked: started, not sent yet.
+    expect(
+      await s.startMark({
+        runId: 'r1',
+        toolCallId: 'f1',
+        toolName: 'getEntityProfileDomain',
+        effect: 'read',
+      }),
+    ).toMatchObject({ sentAt: null, doneAt: null });
+    await s.setNow(T0 + 4000);
+    await s.markSent('r1', 'f1');
+    expect((await s.listMarks('r1'))[0]).toMatchObject({
+      toolCallId: 'f1',
+      sentAt: new Date(T0 + 4000).toISOString(),
+      doneAt: null,
+    });
+    // A re-run is a new execution, not handed to a browser yet.
+    await s.bumpMark('r1', 'f1');
+    expect((await s.listMarks('r1'))[0]).toMatchObject({
+      attempts: 2,
+      sentAt: null,
+    });
+    // Only the named call is marked.
+    await s.startMark({
+      runId: 'r1',
+      toolCallId: 'f2',
+      toolName: 'mutate_topic',
+      effect: 'write',
+    });
+    await s.markSent('r1', 'f2');
+    const marks = await s.listMarks('r1');
+    expect(marks.find((m) => m.toolCallId === 'f1')?.sentAt).toBeNull();
+    expect(marks.find((m) => m.toolCallId === 'f2')?.sentAt).not.toBeNull();
+  });
+
+  it('adds sent_at to a turn_tool_marks table created before it, counting old marks as sent', async () => {
+    const s = stub('runs-marks-migrate');
+    await s.rawRun(`
+      CREATE TABLE IF NOT EXISTS turn_tool_marks (
+        run_id TEXT NOT NULL,
+        tool_call_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        effect TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        done_at TEXT,
+        outcome TEXT,
+        attempts INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (run_id, tool_call_id)
+      ) WITHOUT ROWID`);
+    await s.rawRun(
+      `INSERT INTO turn_tool_marks (run_id, tool_call_id, tool_name, effect, started_at, attempts)
+       VALUES ('old', 'c1', 'mutate_topic', 'write', '2026-09-13T09:00:00.000Z', 1)`,
+    );
+    expect(await s.columnsOf('turn_tool_marks')).not.toContain('sent_at');
+    // An old mark cannot tell whether its call was sent: it counts as sent,
+    // so a resume treats it as it did before the column existed.
+    expect(await s.listMarks('old')).toEqual([
+      {
+        runId: 'old',
+        toolCallId: 'c1',
+        toolName: 'mutate_topic',
+        effect: 'write',
+        startedAt: '2026-09-13T09:00:00.000Z',
+        doneAt: null,
+        outcome: null,
+        attempts: 1,
+        sentAt: '2026-09-13T09:00:00.000Z',
+      },
+    ]);
+    expect(await s.columnsOf('turn_tool_marks')).toContain('sent_at');
+    // New marks start unsent.
+    await s.startMark({
+      runId: 'old',
+      toolCallId: 'c2',
+      toolName: 'mutate_topic',
+      effect: 'write',
+    });
+    expect(
+      (await s.listMarks('old')).find((m) => m.toolCallId === 'c2')?.sentAt,
+    ).toBeNull();
   });
 
   it('claims a write until its outcome is known, warns once, and lets a later run repeat it', async () => {
@@ -349,6 +486,56 @@ describe('RunStore', () => {
     await s.setNow(T0 + RUN_RETENTION_MS + 1);
     await s.reopen();
     expect(await s.listClaims()).toEqual([]);
+  });
+
+  it('never takes over a pending claim of another run that is still active', async () => {
+    const s = stub('runs-claims-concurrent');
+    await s.setNow(T0);
+    const runOf = (runId: string, sessionId: string) =>
+      s.create({
+        runId,
+        sessionId,
+        requestId: `req-${runId}`,
+        client: 'portal',
+        status: 'running',
+        request: '{}',
+        checkpointId: null,
+        instanceId: 'i1',
+      });
+    await runOf('a', 's1');
+    await runOf('b', 's2');
+    const fp = 'c'.repeat(64);
+    const claim = (runId: string, sessionId: string) =>
+      s.claimWrite({
+        fingerprint: fp,
+        toolName: 'send_message',
+        runId,
+        sessionId,
+      });
+    expect(await claim('a', 's1')).toEqual({ status: 'claimed' });
+    // Chat B asks for the identical write while A's is still in flight: it
+    // is blocked, and the row stays A's, untouched.
+    expect(await claim('b', 's2')).toMatchObject({ status: 'blocked' });
+    expect(await s.listClaims()).toEqual([
+      expect.objectContaining({
+        runId: 'a',
+        sessionId: 's1',
+        state: 'pending',
+      }),
+    ]);
+    // A's write returns: its release deletes its own claim.
+    await s.releaseWrite(fp, 'a');
+    expect(await s.listClaims()).toEqual([]);
+
+    // A's next identical write leaves its outcome unknown and A ends: the
+    // claim of a run that is over is warned to the run that asks next.
+    expect(await claim('a', 's1')).toEqual({ status: 'claimed' });
+    await s.update('a', { status: 'interrupted' });
+    expect(await claim('b', 's2')).toMatchObject({ status: 'blocked' });
+    expect((await s.listClaims())[0]).toMatchObject({
+      runId: 'b',
+      state: 'warned',
+    });
   });
 
   it('survives a reopen (state is in SQLite, not memory) and prunes ended runs past retention', async () => {

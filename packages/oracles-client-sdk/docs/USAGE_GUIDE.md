@@ -134,6 +134,125 @@ function ChatApp() {
 }
 ```
 
+### Showing Which Chats Are Running
+
+A reply keeps running on the oracle when the user switches chats or
+closes the tab, and a chat can also be answering a Matrix or WhatsApp
+message. `useActiveRuns` polls the oracle for the user's running chats so
+every row of a list can show it, and `useAbortSession` stops any of them:
+
+```tsx
+import {
+  useAbortSession,
+  useActiveRuns,
+  useOracleSessions,
+} from '@ixo/oracles-client-sdk';
+
+function SessionList({ oracleDid }) {
+  const { sessions } = useOracleSessions(oracleDid);
+  // Once per list, not once per row: each instance polls on its own timer.
+  const { bySession } = useActiveRuns(oracleDid);
+  const { abortSession } = useAbortSession(oracleDid);
+
+  return sessions.map((session) => (
+    <div key={session.sessionId}>
+      {session.title}
+      {bySession[session.sessionId] && (
+        <button onClick={() => abortSession(session.sessionId)}>Stop</button>
+      )}
+    </div>
+  ));
+}
+```
+
+It polls every 4 s while something runs and every 30 s otherwise, only
+while the tab is visible, never opens a wallet prompt (a refused poll
+waits for the next window focus), and on a runtime without the route
+reports `isSupported: false` and asks again every 10 min. See the
+[API reference](./API_REFERENCE.md#useactiveruns).
+
+Host apps: the poll mints its invocations with
+`createInvocation(oracleDid, { background: true })`. Mint those without
+any user interaction (no PIN or passkey prompt, and without extending the
+signer's idle timer) and return `null` when you cannot; the poll then
+pauses until the window is focused again. A `createInvocation` that
+ignores the option prompts from the poll. The Portal's
+`useCreateUcanInvocation` is the reference host; details in the README's
+[Credentials and renewal](../README.md#credentials-and-renewal).
+
+A running chat can need the user without asking a question: when the
+oracle calls a browser tool or an AG-UI action of a chat that is not open
+anywhere, the runtime parks the call until a browser of that chat
+connects, and the run's summary carries `waitingFor`. Show that chat as
+needing the user; opening it mounts `useChat`'s socket, the runtime sends
+the parked call there, and the reply goes on:
+
+```tsx
+import { isWaitingOnUser } from '@ixo/oracles-client-sdk';
+
+const run = bySession[session.sessionId];
+const label = isWaitingOnUser(run)
+  ? `Needs you (${run.waitingFor.toolName})`
+  : run
+    ? 'Working'
+    : null;
+```
+
+### Running a Chat's Browser Tools in the Background
+
+Some browser tools need no page at all — a read of the user's data
+vault, an entity lookup. A host can keep answering those for a chat that
+is running but not open, so its reply does not wait for the user to come
+back, by opening a background executor socket for that session:
+
+```tsx
+import { useWebSocketEvents } from '@ixo/oracles-client-sdk';
+
+function BackgroundExecutor({ oracleDid, sessionId, readOnlyTools }) {
+  useWebSocketEvents({
+    oracleDid,
+    sessionId,
+    executor: 'background',
+    browserTools: readOnlyTools, // only tools that need no page
+    handleNewEvent: () => undefined, // a background socket gets no events
+  });
+  return null;
+}
+```
+
+The socket declares itself and the names of `browserTools` on every
+CONNECT. The runtime sends it only calls of those tools, only while no
+foreground socket of the session (the open chat's `useChat`) is
+connected, and none of the session's events. Declare at most 24 tools,
+and only ones that are read-only, never navigate and do not depend on the
+current page; a call of any other tool stays parked until the chat is
+opened (or the runtime's park deadline fails it unsent). Close the socket
+(unmount) when the run ends or when the chat is opened.
+
+The socket runs only what it declared: it never listens for AG-UI action
+calls (wallet signing among them), and it refuses a call of a tool its
+latest CONNECT did not declare with a `tool_result` error. It answers
+calls only once the runtime's `connected` event confirmed
+`executor: 'background'`; on a runtime without background executors
+(no such echo) it closes at once, does not reconnect and reports
+`connectionStatus: 'error'` with an error of code
+`BACKGROUND_EXECUTOR_UNSUPPORTED` — do not mount it again for that
+oracle until its runtime is upgraded.
+
+A background socket never prompts the user. It sends only a cached
+delegation and never mints one: with none cached it opens nothing and
+reports `connectionStatus: 'error'` with an error of code
+`BACKGROUND_SOCKET_UNAVAILABLE`. It mints invocations with
+`createInvocation(oracleDid, { background: true })` — the background auth
+mode `useActiveRuns` uses, which the host must answer without user
+interaction or with `null`; without an invocation it never connects (a
+bare delegation is not sent): it closes with the same error code — and
+renews a refused CONNECT with that
+background stage 1 only, never with a new delegation; when that does not
+get it through, it stays disconnected with the refusal as its error. Mount
+it again to retry, e.g. once the chat list's next poll shows the run still
+active. See the [API reference](./API_REFERENCE.md#usewebsocketevents).
+
 ### Using the Chat Hook
 
 The `useChat` hook provides complete chat functionality:

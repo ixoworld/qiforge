@@ -227,6 +227,7 @@ export function rateLimitKey(
   env: Pick<OracleWorkerEnv, 'ORACLE_DID'>,
   scope:
     | 'user'
+    | 'poll'
     | 'channel'
     | 'action'
     | 'artifact'
@@ -544,19 +545,25 @@ export function createShell(
   // unbounded LLM spend; the key carries the oracle's DID (`rateLimitKey`).
   // Auth-excluded routes (health/models/matrix status) ran `next()` above
   // and never reach here. Absent binding = no limiting (local harness / tests).
+  // The chat lists' status poll (`GET /runs/active`) spends its own budget
+  // (`poll` scope, same binding): a tab polling every 4 s never pushes the
+  // user's messages into 429, nor the other way round.
   app.use('*', async (c, next) => {
     const limiter = c.env.RATE_LIMIT;
     if (!limiter) return next();
     const auth = c.get('auth') as AuthResult | undefined;
     if (!auth) return next();
-    // Card reads and commands (Portal's review page) have their own
-    // bucket: polling a card while chatting must not push turns into 429.
+    // The chat lists' status poll and the card routes (Portal's review
+    // page) each have their own bucket: polling a card or the run list
+    // while chatting must not push turns into 429.
+    const scope =
+      c.req.method === 'GET' && c.req.path === '/runs/active'
+        ? 'poll'
+        : c.req.path.startsWith('/action-proposals/')
+          ? 'action'
+          : 'user';
     const { success } = await limiter.limit({
-      key: rateLimitKey(
-        c.env,
-        c.req.path.startsWith('/action-proposals/') ? 'action' : 'user',
-        auth.userDid,
-      ),
+      key: rateLimitKey(c.env, scope, auth.userDid),
     });
     if (!success)
       return c.json(
@@ -818,6 +825,7 @@ export function createShell(
       return c.json({ message: 'sessionId is required' }, 400);
     const success = await userStub(c.env, identity.userDid).abortTurn(
       body.sessionId,
+      identity,
     );
     return c.json({ success });
   });
@@ -894,6 +902,15 @@ export function createShell(
       c.req.param('sessionId'),
     );
     return c.json({ run });
+  });
+  // Every active run of the caller's chats (task runs excluded, no
+  // `partialText`), oldest first: a client's chat lists poll it to show
+  // which chats are busy. Registered before `/runs/:runId`, which would
+  // otherwise take `active` for a run id.
+  app.get('/runs/active', async (c) => {
+    const identity = identityOf(c.get('auth'), c.req.raw.headers);
+    const runs = await userStub(c.env, identity.userDid).activeRuns(identity);
+    return c.json({ runs });
   });
   // Re-join a run's SSE stream after a cursor (`?after=<seq>`, the `id:` of
   // the last frame the client saw). Frames after it are replayed, then the

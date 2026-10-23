@@ -12,6 +12,11 @@
  *     gets a synthetic result saying the outcome is unknown, so it can tell
  *     the user or verify with a read;
  *   - a started, unfinished **read** call runs again (it has no effect);
+ *   - a started, unfinished **frontend** call (`PluginTool.surface`) that
+ *     was never sent — it was parked waiting for a browser socket when the
+ *     object restarted, so no browser saw it — runs again whatever its
+ *     effect. Once sent (`markSent`, recorded by the frontend bridge when a
+ *     socket receives it) it follows the read / write rules above;
  *   - a call that already finished is not executed again either (its result
  *     is in the checkpoint's pending writes; reaching here means LangGraph
  *     could not replay it) — writes get the unknown-outcome result, reads run.
@@ -41,6 +46,8 @@ export interface ToolMarkStore {
     effect: ToolEffect;
   }): Promise<ToolMark | undefined>;
   bumpMark(runId: string, toolCallId: string): Promise<void>;
+  /** The call was handed to its executor outside the object (a browser socket). */
+  markSent(runId: string, toolCallId: string): Promise<void>;
   finishMark(
     runId: string,
     toolCallId: string,
@@ -53,6 +60,12 @@ export interface ToolMarksOptions {
   store: ToolMarkStore;
   /** The effect of a tool by name; unknown tools are writes (see `toolEffectOf`). */
   effectOf: (toolName: string) => ToolEffect;
+  /**
+   * `frontend` for a tool that runs in the user's browser
+   * (`PluginTool.surface`); such a call that was never sent before a restart
+   * runs again whatever its effect. Omitted → no tool is a frontend tool.
+   */
+  surfaceOf?: (toolName: string) => 'frontend' | undefined;
   /**
    * The reply text the user already received before the run was cut off.
    * Set only on a resumed attempt; consumed by the first model call.
@@ -84,18 +97,32 @@ export function continuationNote(partialText: string): string {
   );
 }
 
-const READ_PREFIXES = [
-  'list_',
-  'get_',
-  'search_',
-  'read_',
-  'preview_',
-  'describe_',
-  'check_',
-  'explain_',
-  'validate_',
-  'view_',
+/**
+ * Verbs a read-only tool name starts with, in either convention: snake case
+ * (`get_entity`) or camel case (`getEntity`, as browser tools are named).
+ */
+const READ_VERBS = [
+  'list',
+  'get',
+  'find',
+  'search',
+  'read',
+  'preview',
+  'describe',
+  'check',
+  'explain',
+  'validate',
+  'view',
 ];
+
+function startsWithReadVerb(name: string): boolean {
+  for (const verb of READ_VERBS) {
+    if (!name.startsWith(verb)) continue;
+    const next = name.charAt(verb.length);
+    if (next === '_' || (next >= 'A' && next <= 'Z')) return true;
+  }
+  return false;
+}
 const READ_NAMES = new Set([
   'requirements',
   'flow_status',
@@ -125,9 +152,7 @@ export function toolEffectOf(tool: {
     ? tool.name.slice(tool.name.lastIndexOf('__') + 2)
     : tool.name;
   if (READ_NAMES.has(bare)) return 'read';
-  for (const prefix of READ_PREFIXES)
-    if (bare.startsWith(prefix)) return 'read';
-  return 'write';
+  return startsWithReadVerb(bare) ? 'read' : 'write';
 }
 
 /** Whether a tool call's output is an error result (`ToolMessage` status `error`). */
@@ -170,7 +195,16 @@ export function createToolMarksMiddleware(
         effect,
       });
       if (existing) {
-        if (effect === 'write') {
+        const neverSent =
+          !existing.doneAt &&
+          existing.sentAt === null &&
+          options.surfaceOf?.(toolName) === 'frontend';
+        if (neverSent) {
+          logger.log(
+            `[tool-marks] ${toolName} (${toolCallId}) was parked and never sent to a browser in an earlier attempt of run ${options.runId}; running it again`,
+          );
+          await options.store.bumpMark(options.runId, toolCallId);
+        } else if (effect === 'write') {
           logger.warn(
             `[tool-marks] ${toolName} (${toolCallId}) was ${existing.doneAt ? 'already executed' : 'interrupted mid-execution'} in an earlier attempt of run ${options.runId}; not run again`,
           );
@@ -185,11 +219,12 @@ export function createToolMarksMiddleware(
             content: unknownOutcomeToolResult(toolName),
             status: 'error',
           });
+        } else {
+          logger.log(
+            `[tool-marks] ${toolName} (${toolCallId}) is read-only; running it again after the interruption`,
+          );
+          await options.store.bumpMark(options.runId, toolCallId);
         }
-        logger.log(
-          `[tool-marks] ${toolName} (${toolCallId}) is read-only; running it again after the interruption`,
-        );
-        await options.store.bumpMark(options.runId, toolCallId);
       }
       try {
         const output = await handler(request);
