@@ -38,7 +38,8 @@ function stub(name: string) {
     nextClose: (owner: string) => s.nextClose(owner),
     hashColumn: (id: string) => s.hashColumn(id),
     verifyAttempts: (id: string) => s.verifyAttempts(id),
-    queryPlan: (sql: string, params: unknown[]) => s.queryPlan(sql, params),
+    queryPlan: (sql: string, params: (string | number)[]) =>
+      s.queryPlan(sql, params),
     setNow: (now: number) => s.setNow(now),
     reopen: () => s.reopen(),
   };

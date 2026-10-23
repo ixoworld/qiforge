@@ -8,7 +8,7 @@ import { topicExpectedEffect } from './topic-effects';
 import { reconcileTopicReferences } from './topic-verify';
 import { refreshActionProposal } from './reconcile';
 import { DurableObject } from 'cloudflare:workers';
-import { DoSqliteDatabase } from '../sqlite/database';
+import { DoSqliteDatabase, type SqlParams } from '../sqlite/database';
 import { ActionProposalStore, type ProposalCommand } from './store';
 import type { ActionProposalSubject } from '@ixo/ixo-transaction/action-proposals';
 import type { VerifiedActionTransaction } from './verify';
@@ -287,12 +287,12 @@ export class ActionProposalTestDO extends DurableObject {
       )
     )?.verify_attempts;
   }
-  async queryPlan(sql: string, params: unknown[]) {
+  async queryPlan(sql: string, params: SqlParams) {
     await this.proposals();
     return (
       await (
         await this.database()
-      ).exec<{ detail: string }>(`EXPLAIN QUERY PLAN ${sql}`, params as never)
+      ).exec<{ detail: string }>(`EXPLAIN QUERY PLAN ${sql}`, params)
     ).map((r) => r.detail);
   }
   async setNow(now: number) {
