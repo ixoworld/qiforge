@@ -1,12 +1,14 @@
 import {
   assertHubReferenceUrl,
   parseCapabilities,
+  parseActionOptions,
   parseOperation,
   parseOutcome,
   type ActionOperationV1,
   type ActionCapabilitiesV1,
   type ActionOutcomeV1,
   type ActionReferenceV1,
+  type HubActionOptionsV2,
 } from '@ixo/action-protocol';
 
 export interface HubActionStatus {
@@ -24,6 +26,9 @@ export interface HubActionTransport {
   key: string;
   fetcher?: { fetch(request: Request): Promise<Response> };
 }
+
+/** The envelope version this runtime parses (`ixo.auth-outcome/2`, `ixo.auth-capabilities/2`). */
+const HUB_PROTOCOL_QUERY = 'version=2';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -80,10 +85,16 @@ export class HubActionClient {
     expiresAt: number;
     operation: ActionOperationV1;
   }): Promise<ActionReferenceV1> {
-    const response = await this.send('/api/internal/actions/operations', {
-      ...input,
-      operation: parseOperation(input.operation),
-    });
+    // `version=2` on the three operation calls: the Hub answers v1 (P1
+    // kinds only, v1-filtered outcomes, a P2 POST refused) without it, and
+    // stores the version per action for the outcomes it pushes.
+    const response = await this.send(
+      `/api/internal/actions/operations?${HUB_PROTOCOL_QUERY}`,
+      {
+        ...input,
+        operation: parseOperation(input.operation),
+      },
+    );
     if (!response || typeof response !== 'object' || !('reference' in response))
       throw new Error('Hub action response has no reference');
     return assertHubReferenceUrl(response.reference, this.origin);
@@ -91,8 +102,29 @@ export class HubActionClient {
 
   async capabilities(): Promise<ActionCapabilitiesV1> {
     return parseCapabilities(
-      await this.send('/api/internal/actions/operations/capabilities'),
+      await this.send(
+        `/api/internal/actions/operations/capabilities?${HUB_PROTOCOL_QUERY}`,
+      ),
     );
+  }
+
+  async options(input: {
+    bindingId: string;
+    bindingRevision: number;
+  }): Promise<HubActionOptionsV2> {
+    const query = new URLSearchParams({
+      bindingId: input.bindingId,
+      bindingRevision: String(input.bindingRevision),
+      version: '2',
+    });
+    const options = parseActionOptions(
+      await this.send(
+        `/api/internal/actions/operations/options?${query.toString()}`,
+      ),
+    );
+    if (options.version !== 'ixo.auth-options/2')
+      throw new Error('Hub action options require version 2');
+    return options;
   }
 
   /** `timeoutMs`: the poll path passes a short one (a slow Hub must not hold a poll). */
@@ -100,7 +132,7 @@ export class HubActionClient {
     if (!/^[A-Za-z0-9_-]{32}$/.test(id))
       throw new Error('Invalid Hub action id');
     const raw = await this.send(
-      `/api/internal/actions/operations/${id}`,
+      `/api/internal/actions/operations/${id}?${HUB_PROTOCOL_QUERY}`,
       undefined,
       timeoutMs,
     );

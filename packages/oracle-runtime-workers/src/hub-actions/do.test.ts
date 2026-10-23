@@ -82,6 +82,7 @@ function outcome(
 }
 
 type HubMode = 'up' | 'down' | 'hang';
+const GMAIL = { id: 'gmail-one', label: 'alex@example.test' };
 
 async function harness(state: DurableObjectState) {
   const db = await DoSqliteDatabase.open(state, 'hub-do.db');
@@ -91,10 +92,38 @@ async function harness(state: DurableObjectState) {
   const outcomes = new Map<string, ActionOutcomeV1 | null>();
   const calls: string[] = [];
   let mode: HubMode = 'up';
+  const hubState = {
+    bindingActive: true,
+    optionsOwner: OWNER,
+    optionsBinding: 'chb_one',
+  };
   const hub = {
     fetch: async (request: Request): Promise<Response> => {
-      calls.push(`${request.method} ${new URL(request.url).pathname}`);
+      const path = new URL(request.url).pathname;
+      calls.push(`${request.method} ${path}`);
       if (mode === 'down') return new Response('down', { status: 503 });
+      if (path === '/api/internal/channels/validate-binding')
+        return Response.json({ active: hubState.bindingActive });
+      if (path === '/api/internal/actions/operations/options')
+        return Response.json({
+          version: 'ixo.auth-options/2',
+          accountId: 'account-one',
+          ownerDid: hubState.optionsOwner,
+          bindingId: hubState.optionsBinding,
+          bindingRevision: 2,
+          connections: [
+            {
+              service: 'gmail',
+              id: GMAIL.id,
+              label: GMAIL.label,
+              scopes: ['https://www.googleapis.com/auth/gmail.compose'],
+            },
+          ],
+          targets: [],
+          resources: [],
+        });
+      if (request.method === 'POST')
+        return new Response('unexpected prepare', { status: 500 });
       if (mode === 'hang')
         return new Promise<Response>((_resolve, reject) =>
           request.signal.addEventListener('abort', () =>
@@ -120,7 +149,12 @@ async function harness(state: DurableObjectState) {
   Object.assign(host, {
     ctx: state,
     userDid: OWNER,
-    env: { HUB_ACTIONS_ENABLED: 'true' },
+    env: {
+      HUB_ACTIONS_ENABLED: 'true',
+      ORACLE_DID: 'did:ixo:oracle',
+      AUTH_HUB_CHANNEL_SERVICE_KEY: 'oracle-secret',
+      AUTH_HUB: hub,
+    },
     runStore,
     actionProposals: null,
     topicProposals: null,
@@ -149,8 +183,35 @@ async function harness(state: DurableObjectState) {
     markDirty,
     outcomes,
     runStore,
+    hubState,
     setMode(next: HubMode) {
       mode = next;
+    },
+    /** A run an inbound channel message started, as the run store holds it. */
+    async channelRun(runId: string) {
+      const request: TurnRequest = {
+        identity: { userDid: OWNER },
+        sessionId: SESSION,
+        requestId: `request-${runId}`,
+        client: 'channel',
+        message: 'Send it',
+        channel: {
+          provider: 'whatsapp',
+          bindingId: 'chb_one',
+          bindingRevision: 2,
+          remoteMessageRef: `hmac:${'a'.repeat(64)}`,
+        },
+      };
+      await runStore.create({
+        runId,
+        sessionId: SESSION,
+        requestId: request.requestId,
+        client: 'channel',
+        status: 'running',
+        request: JSON.stringify(storedRunRequest(request)),
+        checkpointId: null,
+        instanceId: 'instance',
+      });
     },
     async prepared(n: number) {
       const ref = reference(n);
@@ -201,6 +262,26 @@ describe('Hub actions in the owner object', () => {
       expect(await h.poll()).toEqual([outcome(ref, 3, 'succeeded')]);
       expect(h.calls).toEqual([]);
       expect(h.markDirty).not.toHaveBeenCalled();
+    });
+  });
+
+  it('treats a v2 expired or cancelled outcome as terminal', async () => {
+    await withHub('hub-v2-terminal', async (h) => {
+      const expired = await h.prepared(1);
+      const cancelled = await h.prepared(2);
+      for (const [ref, status] of [
+        [expired, 'expired'],
+        [cancelled, 'cancelled'],
+      ] as const)
+        await h.store.recordOutcome({
+          ...outcome(ref, 5, status),
+          version: 'ixo.auth-outcome/2',
+        });
+      expect((await h.poll()).map((o) => o.status)).toEqual([
+        'expired',
+        'cancelled',
+      ]);
+      expect(h.calls).toEqual([]);
     });
   });
 
@@ -310,6 +391,189 @@ describe('Hub actions in the owner object', () => {
         }),
       ).rejects.toThrow('only in reply to a message from the user');
       expect(h.calls).toEqual([]);
+    });
+  });
+
+  const options = (over: Partial<{ ownerDid: string; bindingId: string }>) => ({
+    ownerDid: OWNER,
+    provider: 'whatsapp',
+    bindingId: 'chb_one',
+    bindingRevision: 2,
+    ...over,
+  });
+
+  it('guards hub_action_options on owner, binding and the Hub answer', async () => {
+    await withHub('hub-options-guards', async (h) => {
+      expect(
+        (
+          await call<{ connections: unknown[] }>(
+            h.host,
+            'hubActionOptions',
+            options({}),
+          )
+        ).connections,
+      ).toHaveLength(1);
+      // Another owner than this object's: refused before any Hub call.
+      const before = h.calls.length;
+      await expect(
+        call(
+          h.host,
+          'hubActionOptions',
+          options({ ownerDid: 'did:ixo:other' }),
+        ),
+      ).rejects.toThrow('unavailable for this owner');
+      expect(h.calls.length).toBe(before);
+      // The Hub answering for another binding or owner.
+      h.hubState.optionsBinding = 'chb_other';
+      await expect(
+        call(h.host, 'hubActionOptions', options({})),
+      ).rejects.toThrow('do not match this owner and binding');
+      h.hubState.optionsBinding = 'chb_one';
+      h.hubState.optionsOwner = 'did:ixo:other';
+      await expect(
+        call(h.host, 'hubActionOptions', options({})),
+      ).rejects.toThrow('do not match this owner and binding');
+      h.hubState.optionsOwner = OWNER;
+      // An inactive binding: refused, no options read.
+      h.hubState.bindingActive = false;
+      const reads = h.calls.filter((c) => c.endsWith('/options')).length;
+      await expect(
+        call(h.host, 'hubActionOptions', options({})),
+      ).rejects.toThrow();
+      expect(h.calls.filter((c) => c.endsWith('/options')).length).toBe(reads);
+    });
+  });
+
+  it('refuses an unknown Gmail connection and a new email while an earlier send is unconfirmed', async () => {
+    await withHub('hub-gmail-guards', async (h) => {
+      await h.channelRun('run-mail');
+      const send = (connectionId: string, accountLabel: string) =>
+        call(h.host, 'requestHubAction', {
+          ownerDid: OWNER,
+          sessionId: SESSION,
+          runId: 'run-mail',
+          requestId: 'request-run-mail',
+          provider: 'whatsapp',
+          bindingId: 'chb_one',
+          bindingRevision: 2,
+          requestKey: 'k'.repeat(64),
+          operation: {
+            kind: 'gmail.message.send.v1',
+            connectionId,
+            accountLabel,
+            to: 'sam@example.test',
+            subject: 'Garden plans',
+            body: 'See you Tuesday.',
+          },
+        });
+      await expect(send('gmail-two', GMAIL.label)).rejects.toThrow(
+        'not one of this owner',
+      );
+      await expect(send(GMAIL.id, 'someone@example.test')).rejects.toThrow(
+        'not one of this owner',
+      );
+      // An earlier send through this connection whose outcome is unknown.
+      const prior = reference(7);
+      const priorOrigin = {
+        ownerDid: OWNER,
+        sessionId: SESSION,
+        runId: 'run-earlier',
+        requestId: 'request-earlier',
+        bindingId: prior.bindingId,
+        bindingRevision: prior.bindingRevision,
+        requestKey: 'earlier-key',
+      };
+      await h.store.reserve(
+        priorOrigin,
+        {
+          kind: 'gmail.message.send.v1',
+          connectionId: GMAIL.id,
+          accountLabel: GMAIL.label,
+          to: 'sam@example.test',
+          subject: 'Garden plans',
+          body: 'See you Tuesday.',
+        },
+        Math.floor(Date.now() / 1000) + 900,
+      );
+      await h.store.record(priorOrigin, prior);
+      await h.store.recordOutcome(outcome(prior, 1, 'unknown'));
+      const refused = await send(GMAIL.id, GMAIL.label).catch(
+        (error: unknown) => error,
+      );
+      expect(refused).toMatchObject({
+        name: 'HubActionRefused',
+        kind: 'refused',
+        priorActionId: prior.id,
+      });
+      expect(
+        h.calls.filter((c) => c.startsWith('POST /api/internal/actions')),
+      ).toEqual([]);
+    });
+  });
+
+  it('allows one Gmail send in flight per mailbox, across a reconnect', async () => {
+    await withHub('hub-gmail-in-flight', async (h) => {
+      await h.channelRun('run-mail');
+      const send = () =>
+        call(h.host, 'requestHubAction', {
+          ownerDid: OWNER,
+          sessionId: SESSION,
+          runId: 'run-mail',
+          requestId: 'request-run-mail',
+          provider: 'whatsapp',
+          bindingId: 'chb_one',
+          bindingRevision: 2,
+          requestKey: 'k'.repeat(64),
+          operation: {
+            kind: 'gmail.message.send.v1',
+            connectionId: GMAIL.id,
+            accountLabel: GMAIL.label,
+            to: 'sam@example.test',
+            subject: 'Garden plans',
+            body: 'See you Tuesday.',
+          },
+        }).catch((error: unknown) => error);
+      // An earlier send through the mailbox's previous connection (it was
+      // reconnected under a new id), approved and handed to Gmail.
+      const prior = reference(8);
+      const priorOrigin = {
+        ownerDid: OWNER,
+        sessionId: SESSION,
+        runId: 'run-earlier',
+        requestId: 'request-earlier',
+        bindingId: prior.bindingId,
+        bindingRevision: prior.bindingRevision,
+        requestKey: 'earlier-key',
+      };
+      await h.store.reserve(
+        priorOrigin,
+        {
+          kind: 'gmail.message.send.v1',
+          connectionId: 'gmail-before-reconnect',
+          accountLabel: GMAIL.label.toUpperCase(),
+          to: 'sam@example.test',
+          subject: 'Garden plans',
+          body: 'See you Tuesday.',
+        },
+        Math.floor(Date.now() / 1000) + 900,
+      );
+      await h.store.record(priorOrigin, prior);
+      for (const status of ['authorized', 'submitted'] as const) {
+        await h.store.recordOutcome(
+          outcome(prior, status === 'authorized' ? 1 : 2, status),
+        );
+        expect(await send()).toMatchObject({
+          name: 'HubActionRefused',
+          kind: 'refused',
+          priorActionId: prior.id,
+        });
+      }
+      // Finished: the mailbox is free again (the request goes on to the
+      // Hub, which this fake does not serve).
+      await h.store.recordOutcome(outcome(prior, 4, 'succeeded'));
+      const next = await send();
+      expect(next).toBeInstanceOf(Error);
+      expect(next).not.toMatchObject({ name: 'HubActionRefused' });
     });
   });
 });

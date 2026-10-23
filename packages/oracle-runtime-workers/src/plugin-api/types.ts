@@ -757,6 +757,12 @@ export interface RuntimeContext<TConfig = MergedConfig> {
   /** Host-owned action coordinator. It accepts only runtime-derived channel context. */
   hubActions?: {
     capabilities(): Promise<ActionCapabilitiesV1>;
+    options(input: {
+      ownerDid: string;
+      provider: string;
+      bindingId: string;
+      bindingRevision: number;
+    }): Promise<import('@ixo/action-protocol').HubActionOptionsV2>;
     request(input: {
       ownerDid: string;
       sessionId: string;

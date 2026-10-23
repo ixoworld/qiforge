@@ -52,13 +52,14 @@
   "sideEffects": false,
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "node ../../scripts/assert-no-vendored-overrides.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@scure/base": "2.2.0",
     "zod": "^4.4.3",
-    "@ixo/topic-protocol": "1.0.0-rc.7",
+    "@ixo/topic-protocol": "1.0.0-rc.8",
     "protobufjs": "^7.6.5"
   },
   "peerDependencies": {
