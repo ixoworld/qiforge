@@ -283,7 +283,10 @@ The runtime declares protocol version 2 (`?version=2`) on the capabilities,
 prepare and status calls: without it Auth Hub answers v1 (the three P1 kinds
 only, v1-filtered outcomes) and refuses a P2 prepare with
 `protocol_version_required`, and it stores the version per action for the
-outcomes it pushes. Outcomes arrive as `ixo.auth-outcome/2`; `expired` and
+outcomes it pushes. Pairing: runtime #381 must run with gateway PR 20 (it accepts the v2
+envelopes and the P2 receipt kinds); gateway PR 19 understands only
+`ixo.auth-outcome/1` and must never run against this runtime (a v2 outcome
+fails the whole turn). Outcomes arrive as `ixo.auth-outcome/2`; `expired` and
 `cancelled` (never executed, receipt null) are terminal like `succeeded`,
 `failed` and `declined`, so a poll stops refreshing them. Gateways that read
 `hubActionOutcomes` must accept the v2 envelope.
@@ -314,12 +317,13 @@ not included in the Reply Plan or completion notice. Unknown effects are status
 reads on the same action, never a new model execution attempt. A
 `gmail.message.accepted.v1` receipt means Gmail accepted the email for sending;
 it does not prove delivery. A lost send response can remain unknown. The owner
-object enforces what follows from that: while an earlier
-`gmail.message.send.v1` through the same connection has an `unknown` latest
-outcome, a new send is refused (`unavailable`, with the earlier action's id as
-`priorActionId`) and the owner is asked to check Gmail's Sent folder; the
-refusal lifts when that action's outcome resolves (or its rows are pruned, 30
-days after its review expired). A Gmail send or disconnect must also name a
+object enforces one Gmail send in flight per mailbox: while an earlier
+`gmail.message.send.v1` to the same connection id or the same account label
+(a reconnect gets a new id) has the latest outcome `authorized`, `submitted`
+or `unknown`, a new send is refused (`unavailable`, with the earlier action's
+id as `priorActionId`); for an `unknown` one the owner is asked to check
+Gmail's Sent folder. The refusal lifts when that action reaches a terminal
+outcome (or its rows are pruned, 30 days after its review expired). A Gmail send or disconnect must also name a
 connection (service `gmail`, id and label) from the owner's
 `hub_action_options` (the last read within 10 minutes, else a fresh one);
 any other is refused. The tool's refusal names the field the protocol

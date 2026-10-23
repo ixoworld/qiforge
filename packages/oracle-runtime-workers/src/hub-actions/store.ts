@@ -159,22 +159,28 @@ export class HubActionStore {
   }
 
   /**
-   * The newest Gmail send through `connectionId` whose latest outcome is
-   * `unknown` (the connector could not tell whether it went): its action
-   * id, or null. While one exists no replacement email is prepared.
+   * The newest Gmail send to the same mailbox (the same `connectionId`, or
+   * the same account label: a reconnect gets a new id) that is still in
+   * flight: approved and not finished, its latest outcome `authorized`,
+   * `submitted` or `unknown` (the connector could not tell whether it
+   * went). Its action id, or null. One Gmail send in flight per mailbox:
+   * while one exists no other email is prepared.
    */
-  async unconfirmedGmailSend(
+  async gmailSendInFlight(
     ownerDid: string,
     connectionId: string,
+    accountLabel: string,
   ): Promise<string | null> {
     const row = await this.db.get<{ action_id: string }>(
       `SELECT a.action_id FROM hub_action_requests r JOIN hub_actions a ON a.request_key = r.request_key
        WHERE r.owner_did = ? AND json_extract(r.operation, '$.kind') = 'gmail.message.send.v1'
-         AND json_extract(r.operation, '$.connectionId') = ?
+         AND (json_extract(r.operation, '$.connectionId') = ?
+              OR lower(json_extract(r.operation, '$.accountLabel')) = lower(?))
          AND (SELECT json_extract(o.outcome, '$.status') FROM hub_action_outcomes o
-              WHERE o.action_id = a.action_id ORDER BY o.sequence DESC LIMIT 1) = 'unknown'
+              WHERE o.action_id = a.action_id ORDER BY o.sequence DESC LIMIT 1)
+             IN ('authorized', 'submitted', 'unknown')
        ORDER BY r.created_at DESC LIMIT 1`,
-      [ownerDid, connectionId],
+      [ownerDid, connectionId, accountLabel],
     );
     return row?.action_id ?? null;
   }

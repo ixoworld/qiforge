@@ -9,8 +9,8 @@ plain-text email send, plus signed-statement, Calendar, document-access-request
 and private-text operations, from verified channel turns. Derive the tool
 schema from action-protocol 0.4.0 (declaring protocol version 2 to Auth Hub;
 `ixo.auth-outcome/2` with terminal `expired` / `cancelled`) and retain the original-turn outcome and
-owner review boundaries. A new email is refused while an earlier send through
-the same connection is unconfirmed, and a Gmail operation must name one of the
+owner review boundaries. Only one Gmail send per mailbox is in flight at a time
+(authorized, submitted or unconfirmed), and a Gmail operation must name one of the
 owner's listed connections.
 
 Pin the Worker-compatible Topic validator candidate in both consumers. Release

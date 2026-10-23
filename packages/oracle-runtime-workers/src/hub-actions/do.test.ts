@@ -510,4 +510,70 @@ describe('Hub actions in the owner object', () => {
       ).toEqual([]);
     });
   });
+
+  it('allows one Gmail send in flight per mailbox, across a reconnect', async () => {
+    await withHub('hub-gmail-in-flight', async (h) => {
+      await h.channelRun('run-mail');
+      const send = () =>
+        call(h.host, 'requestHubAction', {
+          ownerDid: OWNER,
+          sessionId: SESSION,
+          runId: 'run-mail',
+          requestId: 'request-run-mail',
+          provider: 'whatsapp',
+          bindingId: 'chb_one',
+          bindingRevision: 2,
+          requestKey: 'k'.repeat(64),
+          operation: {
+            kind: 'gmail.message.send.v1',
+            connectionId: GMAIL.id,
+            accountLabel: GMAIL.label,
+            to: 'sam@example.test',
+            subject: 'Garden plans',
+            body: 'See you Tuesday.',
+          },
+        }).catch((error: unknown) => error);
+      // An earlier send through the mailbox's previous connection (it was
+      // reconnected under a new id), approved and handed to Gmail.
+      const prior = reference(8);
+      const priorOrigin = {
+        ownerDid: OWNER,
+        sessionId: SESSION,
+        runId: 'run-earlier',
+        requestId: 'request-earlier',
+        bindingId: prior.bindingId,
+        bindingRevision: prior.bindingRevision,
+        requestKey: 'earlier-key',
+      };
+      await h.store.reserve(
+        priorOrigin,
+        {
+          kind: 'gmail.message.send.v1',
+          connectionId: 'gmail-before-reconnect',
+          accountLabel: GMAIL.label.toUpperCase(),
+          to: 'sam@example.test',
+          subject: 'Garden plans',
+          body: 'See you Tuesday.',
+        },
+        Math.floor(Date.now() / 1000) + 900,
+      );
+      await h.store.record(priorOrigin, prior);
+      for (const status of ['authorized', 'submitted'] as const) {
+        await h.store.recordOutcome(
+          outcome(prior, status === 'authorized' ? 1 : 2, status),
+        );
+        expect(await send()).toMatchObject({
+          name: 'HubActionRefused',
+          kind: 'refused',
+          priorActionId: prior.id,
+        });
+      }
+      // Finished: the mailbox is free again (the request goes on to the
+      // Hub, which this fake does not serve).
+      await h.store.recordOutcome(outcome(prior, 4, 'succeeded'));
+      const next = await send();
+      expect(next).toBeInstanceOf(Error);
+      expect(next).not.toMatchObject({ name: 'HubActionRefused' });
+    });
+  });
 });

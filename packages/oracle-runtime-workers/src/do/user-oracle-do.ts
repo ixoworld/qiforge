@@ -3250,9 +3250,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     /**
      * A Gmail operation that names a connection must name one the owner's
      * options list (service, id and label), from the last
-     * `hub_action_options` read when it is recent, else a fresh one. A send
-     * through a connection whose earlier send is unconfirmed is refused with
-     * that action's id: the owner checks Gmail's Sent folder first.
+     * `hub_action_options` read when it is recent, else a fresh one. One
+     * Gmail send in flight per mailbox: while an earlier send to the same
+     * connection or account label is authorized, submitted or unknown, a
+     * new one is refused with that action's id.
      */
     private async assertGmailOperationAllowed(input: {
       ownerDid: string;
@@ -3289,14 +3290,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           "That Gmail connection is not one of this owner's; read hub_action_options and use a listed connection.",
         );
       if (operation.kind !== 'gmail.message.send.v1') return;
-      const prior = await this.hubActionStore?.unconfirmedGmailSend(
+      const prior = await this.hubActionStore?.gmailSendInFlight(
         input.ownerDid,
         operation.connectionId,
+        operation.accountLabel,
       );
       if (prior)
         throw new HubActionRefused(
           'refused',
-          `An earlier email (action ${prior}) is unconfirmed; ask the owner to check Gmail's Sent folder before preparing another.`,
+          `An earlier email from this mailbox (action ${prior}) is still in flight or unconfirmed; wait for its outcome, or ask the owner to check Gmail's Sent folder, before preparing another.`,
           prior,
         );
     }
