@@ -34,6 +34,12 @@ function stub(name: string) {
     nextVerification: (owner: string) => s.nextVerification(owner),
     prune: (owner: string) => s.prune(owner),
     legacyTable: () => s.legacyTable(),
+    closeUnexecuted: (owner: string) => s.closeUnexecuted(owner),
+    nextClose: (owner: string) => s.nextClose(owner),
+    hashColumn: (id: string) => s.hashColumn(id),
+    verifyAttempts: (id: string) => s.verifyAttempts(id),
+    queryPlan: (sql: string, params: (string | number)[]) =>
+      s.queryPlan(sql, params),
     setNow: (now: number) => s.setNow(now),
     reopen: () => s.reopen(),
   };
@@ -174,14 +180,16 @@ describe('durable action proposals', () => {
       kind: 'reconcile',
       transactionHash: tx.hash,
     });
-    expect(await s.due(OWNER)).toEqual([p.id]);
-    expect(await s.nextVerification(OWNER)).toBe(0);
-    let now = NOW;
+    // The first lookup waits 30 s: the Portal may report the hash of the
+    // signed bytes before it broadcasts them.
+    expect(await s.due(OWNER)).toEqual([]);
+    expect(await s.nextVerification(OWNER)).toBe(NOW + 30_000);
+    let now = NOW + 30_000;
     const waits: number[] = [];
     for (let attempt = 0; attempt < 10; attempt++) {
       await s.setNow(now);
       expect(await s.due(OWNER)).toEqual([p.id]);
-      await s.refresh(OWNER, p.id, null);
+      await s.refresh(OWNER, p.id, 'unavailable');
       const next = await s.nextVerification(OWNER);
       if (next === undefined) break;
       waits.push(next - now);
@@ -197,6 +205,53 @@ describe('durable action proposals', () => {
     // A Portal reconcile still looks the transaction up once the cooldown
     // has passed, however many attempts the alarm made.
     await s.setNow(now + 600_000);
+    expect((await s.refresh(OWNER, p.id, tx.json))?.lifecycle.status).toBe(
+      'succeeded',
+    );
+  });
+  it('accepts a hash the chain does not know yet, waits before the first lookup and is idempotent on the same hash', async () => {
+    const s = stub('pre-broadcast-hash');
+    const p = await s.create(proposalSubject());
+    const tx = await indexedTransaction(p);
+    await s.transition(OWNER, p.id, { kind: 'claim', digest: p.digest });
+    // (a) The Portal's fire-and-forget reconcile with the hash of the
+    // signed bytes, before broadcast: accepted, scheduled, not looked up.
+    const first = await s.transition(OWNER, p.id, {
+      kind: 'reconcile',
+      transactionHash: tx.hash,
+    });
+    expect(first?.lifecycle).toMatchObject({
+      status: 'unknown',
+      transactionHash: tx.hash,
+    });
+    expect(await s.nextVerification(OWNER)).toBe(NOW + 30_000);
+    expect((await s.refresh(OWNER, p.id, null))?.lifecycle.status).toBe(
+      'unknown',
+    );
+    // (c) The normal reconcile after broadcast, same hash: same card, same
+    // schedule (no reset, no conflict).
+    await s.setNow(NOW + 10_000);
+    const second = await s.transition(OWNER, p.id, {
+      kind: 'reconcile',
+      transactionHash: tx.hash.toLowerCase(),
+    });
+    expect(second?.lifecycle).toEqual(first?.lifecycle);
+    expect(await s.nextVerification(OWNER)).toBe(NOW + 30_000);
+    // (b) Not found inside the two-minute grace: rescheduled, the attempt
+    // given back. Three not-founds in the grace window spend nothing.
+    for (const at of [NOW + 30_000, NOW + 60_000, NOW + 90_000]) {
+      await s.setNow(at);
+      expect((await s.refresh(OWNER, p.id, null))?.lifecycle.status).toBe(
+        'unknown',
+      );
+      expect(await s.nextVerification(OWNER)).toBe(at + 30_000);
+    }
+    expect(await s.verifyAttempts(p.id)).toBe(0);
+    // Past the grace window a not-found is an ordinary attempt.
+    await s.setNow(NOW + 120_000);
+    await s.refresh(OWNER, p.id, null);
+    expect(await s.verifyAttempts(p.id)).toBe(1);
+    await s.setNow(NOW + 150_000);
     expect((await s.refresh(OWNER, p.id, tx.json))?.lifecycle.status).toBe(
       'succeeded',
     );
@@ -249,6 +304,7 @@ describe('durable action proposals', () => {
         tx_result: { code: 0 },
       },
     });
+    await s.setNow(NOW + 30_000);
     expect((await s.refresh(OWNER, p.id, faulty))?.lifecycle.status).toBe(
       'unknown',
     );
@@ -263,7 +319,7 @@ describe('durable action proposals', () => {
       s.transition(OWNER, p.id, { kind: 'revoke', digest: p.digest }),
     ).rejects.toThrow('already consumed');
     // The faulty answer spent the cooldown slot; the next look-up waits.
-    await s.setNow(NOW + 31_000);
+    await s.setNow(NOW + 61_000);
     expect((await s.refresh(OWNER, p.id, wrong.json))?.lifecycle.status).toBe(
       'unknown',
     );
@@ -276,6 +332,8 @@ describe('durable action proposals', () => {
       status: 'unknown',
       transactionHash: right.hash,
     });
+    // A replacing hash gets a fresh schedule, first lookup after 30 s.
+    await s.setNow(NOW + 91_000);
     expect((await s.refresh(OWNER, p.id, right.json))?.lifecycle.status).toBe(
       'succeeded',
     );
@@ -295,6 +353,7 @@ describe('durable action proposals', () => {
       kind: 'reconcile',
       transactionHash: tampered.hash,
     });
+    await s.setNow(NOW + 30_000);
     const blocked = await s.refresh(OWNER, p.id, tampered.json);
     expect(blocked?.lifecycle).toMatchObject({
       status: 'unknown',
@@ -327,6 +386,113 @@ describe('durable action proposals', () => {
       (await s.transition(OWNER, p.id, { kind: 'revoke', digest: p.digest }))
         ?.lifecycle,
     ).toMatchObject({ status: 'revoked' });
+    // The memo-bound hash survives the revoke in the indexed column: no
+    // other card may record it.
+    expect(await s.hashColumn(p.id)).toBe(tampered.hash);
+    const other = await s.create(
+      proposalSubject({
+        origin: {
+          sessionId: 'session-1',
+          runId: 'run-2',
+          invocationId: 'run-2:call-1',
+        },
+      }),
+    );
+    await s.transition(OWNER, other.id, {
+      kind: 'claim',
+      digest: other.digest,
+    });
+    await expect(
+      s.transition(OWNER, other.id, {
+        kind: 'reconcile',
+        transactionHash: tampered.hash,
+      }),
+    ).rejects.toThrow('already recorded for another proposal');
+  });
+  it('closes a claimed card that never recorded a transaction after the execution window, never back to prepared', async () => {
+    const s = stub('unexecuted-close');
+    const cancelled = await s.create(proposalSubject());
+    await s.transition(OWNER, cancelled.id, {
+      kind: 'claim',
+      digest: cancelled.digest,
+    });
+    // A wallet cancel: Portal reconciles with no hash.
+    await s.transition(OWNER, cancelled.id, { kind: 'reconcile' });
+    const signed = await s.create(
+      proposalSubject({
+        origin: {
+          sessionId: 'session-1',
+          runId: 'run-2',
+          invocationId: 'run-2:call-1',
+        },
+      }),
+    );
+    await s.transition(OWNER, signed.id, {
+      kind: 'claim',
+      digest: signed.digest,
+    });
+    await s.transition(OWNER, signed.id, {
+      kind: 'reconcile',
+      transactionHash: 'B'.repeat(64),
+    });
+    expect(await s.nextClose(OWNER)).toBe(NOW + 60 * 60_000);
+    expect(await s.closeUnexecuted(OWNER)).toBe(0);
+    await s.setNow(NOW + 60 * 60_000);
+    expect(await s.closeUnexecuted(OWNER)).toBe(1);
+    expect((await s.get(OWNER, cancelled.id))?.lifecycle).toEqual({
+      status: 'revoked',
+      endedAt: new Date(NOW + 60 * 60_000).toISOString(),
+    });
+    // A card with a recorded hash is the verifier's, not this sweep's.
+    expect((await s.get(OWNER, signed.id))?.lifecycle.status).toBe('unknown');
+    expect(await s.nextClose(OWNER)).toBeUndefined();
+    await expect(
+      s.transition(OWNER, cancelled.id, {
+        kind: 'claim',
+        digest: cancelled.digest,
+      }),
+    ).rejects.toThrow('already consumed');
+  });
+  it('caps cards per run and open cards per owner', async () => {
+    const s = stub('caps');
+    const subject = (run: number, call: number) =>
+      proposalSubject({
+        origin: {
+          sessionId: 'session-1',
+          runId: `run-${run}`,
+          invocationId: `run-${run}:call-${call}`,
+        },
+      });
+    for (let call = 0; call < 8; call++) await s.create(subject(1, call));
+    await expect(s.create(subject(1, 8))).rejects.toThrow(
+      'Too many action cards in this request',
+    );
+    for (let call = 0; call < 8; call++) await s.create(subject(2, call));
+    await expect(s.create(subject(3, 0))).rejects.toThrow(
+      'Too many action cards are open',
+    );
+    // Expired prepared cards no longer count as open.
+    await s.setNow(NOW + 21 * 60_000);
+    await s.create({
+      ...subject(3, 0),
+      createdAt: new Date(NOW + 21 * 60_000).toISOString(),
+      expiresAt: new Date(NOW + 36 * 60_000).toISOString(),
+    });
+  });
+  it('indexes the alarm queries', async () => {
+    const s = stub('plans');
+    await s.create(proposalSubject());
+    const plans = [
+      await s.queryPlan(
+        `SELECT proposal_id FROM action_proposal_receipts WHERE owner_did=? AND state='pending' AND next_attempt<=? ORDER BY next_attempt,proposal_id LIMIT 4`,
+        [OWNER, NOW],
+      ),
+      await s.queryPlan(
+        `SELECT id FROM action_proposals WHERE owner_did=? AND created_at<? LIMIT 64`,
+        [OWNER, NOW],
+      ),
+    ];
+    for (const plan of plans) expect(plan.join(' ')).not.toMatch(/\bSCAN\b/);
   });
   it('drops finished cards after the retention window and keeps open ones', async () => {
     const s = stub('retention');
@@ -347,6 +513,10 @@ describe('durable action proposals', () => {
     expect(await s.prune(OWNER)).toBe(1);
     expect(await s.get(OWNER, done.id)).toBeNull();
     expect((await s.get(OWNER, open.id))?.lifecycle.status).toBe('claimed');
+    // Unresolved cards go too, after the longer window.
+    await s.setNow(NOW + 181 * 24 * 60 * 60 * 1000);
+    expect(await s.prune(OWNER)).toBe(1);
+    expect(await s.get(OWNER, open.id)).toBeNull();
   });
   it('only emits verified outcomes for the original owner session and run', async () => {
     const s = stub('receipt');

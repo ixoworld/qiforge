@@ -8,7 +8,7 @@ import { topicExpectedEffect } from './topic-effects';
 import { reconcileTopicReferences } from './topic-verify';
 import { refreshActionProposal } from './reconcile';
 import { DurableObject } from 'cloudflare:workers';
-import { DoSqliteDatabase } from '../sqlite/database';
+import { DoSqliteDatabase, type SqlParams } from '../sqlite/database';
 import { ActionProposalStore, type ProposalCommand } from './store';
 import type { ActionProposalSubject } from '@ixo/ixo-transaction/action-proposals';
 import type { VerifiedActionTransaction } from './verify';
@@ -71,9 +71,11 @@ export class ActionProposalTestDO extends DurableObject {
     const fetcher: typeof fetch = async (input) =>
       String(input).includes('/status')
         ? Response.json({ result: { node_info: { network: 'pandora-8' } } })
-        : indexed
-          ? new Response(indexed)
-          : new Response('', { status: 404 });
+        : indexed === 'unavailable'
+          ? new Response('', { status: 503 })
+          : indexed
+            ? new Response(indexed)
+            : new Response('', { status: 404 });
     const refreshed = await refreshActionProposal(
       store,
       proposal,
@@ -114,6 +116,18 @@ export class ActionProposalTestDO extends DurableObject {
         await this.topics()
       ).create(TopicProposalSubjectSchema.parse(JSON.parse(raw))),
     );
+  }
+  async topicPrune(owner: string) {
+    return (await this.topics()).prune(owner);
+  }
+  async topicReceiptState(id: string) {
+    await this.topics();
+    return (
+      await this.db!.get<{ receipt_state: string }>(
+        'SELECT receipt_state FROM topic_action_proposals WHERE id=?',
+        [id],
+      )
+    )?.receipt_state;
   }
   async topicGet(owner: string, id: string) {
     return JSON.stringify(await (await this.topics()).get(owner, id));
@@ -241,6 +255,45 @@ export class ActionProposalTestDO extends DurableObject {
   }
   async prune(owner: string) {
     return (await this.proposals()).prune(owner);
+  }
+  async closeUnexecuted(owner: string) {
+    return (await this.proposals()).closeUnexecuted(owner);
+  }
+  async nextClose(owner: string) {
+    return (await this.proposals()).nextUnexecutedCloseAt(owner);
+  }
+  /** The indexed hash column, which a revoked blocked card keeps. */
+  async hashColumn(id: string) {
+    await this.proposals();
+    return (
+      (
+        await (
+          await this.database()
+        ).get<{ transaction_hash: string | null }>(
+          'SELECT transaction_hash FROM action_proposals WHERE id=?',
+          [id],
+        )
+      )?.transaction_hash ?? null
+    );
+  }
+  async verifyAttempts(id: string) {
+    await this.proposals();
+    return (
+      await (
+        await this.database()
+      ).get<{ verify_attempts: number }>(
+        'SELECT verify_attempts FROM action_proposals WHERE id=?',
+        [id],
+      )
+    )?.verify_attempts;
+  }
+  async queryPlan(sql: string, params: SqlParams) {
+    await this.proposals();
+    return (
+      await (
+        await this.database()
+      ).exec<{ detail: string }>(`EXPLAIN QUERY PLAN ${sql}`, params)
+    ).map((r) => r.detail);
   }
   async setNow(now: number) {
     this.now = now;

@@ -23,6 +23,10 @@ import type { DoSqliteDatabase } from '../sqlite/database';
 import {
   ActionProposalConflict,
   ACTION_PROPOSAL_RETENTION_MS,
+  ACTION_PROPOSAL_UNRESOLVED_RETENTION_MS,
+  ACTION_PROPOSALS_OPEN_PER_OWNER,
+  ACTION_PROPOSALS_PER_RUN,
+  OPEN_PREPARED_MS,
   RECEIPT_MAX_ATTEMPTS,
   RECEIPT_RETRY_BASE_MS,
   RECEIPT_RETRY_MAX_MS,
@@ -42,7 +46,16 @@ type VerifiedEffect = z.infer<typeof VerifiedTopicEffectSchema>;
 export const TOPIC_EXECUTION_WINDOW_MS = 60 * 60_000;
 const backoff = (base: number, max: number, attempts: number) =>
   Math.min(base * 2 ** attempts, max);
+/** Validated cards remembered per store, keyed on their stored text. */
+const VALIDATED_CACHE_ENTRIES = 16;
 export class TopicProposalStore {
+  /**
+   * `assertTopicProposalUnchanged` per stored text (subject, digest and
+   * lifecycle): one operation reads a card many times, and for a topic
+   * creation every check rebuilds the whole plan. A changed row is a new
+   * key, so it is validated again; entries are handed out as copies.
+   */
+  private validated = new Map<string, TopicActionProposal>();
   constructor(
     private readonly db: DoSqliteDatabase,
     private readonly now = Date.now,
@@ -82,6 +95,17 @@ export class TopicProposalStore {
       await this.db.run(
         `ALTER TABLE topic_action_steps ADD COLUMN reference_rejected TEXT`,
       );
+    await this.db.run(
+      `CREATE INDEX IF NOT EXISTS topic_action_proposals_receipts ON topic_action_proposals(owner_did,receipt_state,next_attempt)`,
+    );
+    await this.db.run(
+      `CREATE INDEX IF NOT EXISTS topic_action_proposals_created ON topic_action_proposals(owner_did,created_at)`,
+    );
+    // A card with no room to receipt into never posts one: `unavailable`,
+    // so the retention sweep (which waits on pending receipts) can drop it.
+    await this.db.run(
+      `UPDATE topic_action_proposals SET receipt_state='unavailable' WHERE origin IS NULL AND receipt_state IN ('waiting','pending')`,
+    );
   }
   /** Every lifecycle write keeps the indexed `status` column in step with the JSON. */
   private async writeLifecycle(
@@ -92,7 +116,9 @@ export class TopicProposalStore {
   ): Promise<void> {
     await this.db.run(
       receipt
-        ? `UPDATE topic_action_proposals SET lifecycle=?,status=?,receipt_state=?,next_attempt=? WHERE owner_did=? AND id=?`
+        ? // A receipt with nowhere to go (`unavailable`) or already
+          // delivered is never scheduled again.
+          `UPDATE topic_action_proposals SET lifecycle=?,status=?,receipt_state=CASE WHEN receipt_state IN ('waiting','pending') THEN ? ELSE receipt_state END,next_attempt=? WHERE owner_did=? AND id=?`
         : `UPDATE topic_action_proposals SET lifecycle=?,status=? WHERE owner_did=? AND id=?`,
       receipt
         ? [
@@ -137,6 +163,11 @@ export class TopicProposalStore {
       }
       if (Date.parse(subject.expiresAt) <= this.now())
         throw new ActionProposalConflict('Proposal expired');
+      await this.assertCapacity(
+        subject.ownerDid,
+        subject.origin.sessionId,
+        subject.origin.runId,
+      );
       const steps: TopicStepId[] =
         subject.action.name === 'create_topic'
           ? ['anchor', 'body', 'operation', 'snapshot']
@@ -146,7 +177,7 @@ export class TopicProposalStore {
         steps: steps.map((step) => ({ step, status: 'pending' })),
       };
       await this.db.run(
-        `INSERT INTO topic_action_proposals(id,owner_did,invocation_id,session_id,run_id,subject,digest,lifecycle,status,origin,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO topic_action_proposals(id,owner_did,invocation_id,session_id,run_id,subject,digest,lifecycle,status,origin,receipt_state,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           subject.id,
           subject.ownerDid,
@@ -158,6 +189,7 @@ export class TopicProposalStore {
           JSON.stringify(lifecycle),
           'prepared',
           origin ? JSON.stringify(origin) : null,
+          origin ? 'waiting' : 'unavailable',
           Date.parse(subject.createdAt),
         ],
       );
@@ -169,6 +201,40 @@ export class TopicProposalStore {
       return TopicProposalV2Schema.parse({ ...subject, digest, lifecycle });
     });
   }
+  /**
+   * At most `ACTION_PROPOSALS_PER_RUN` cards per run and
+   * `ACTION_PROPOSALS_OPEN_PER_OWNER` open ones (prepared in the last 20
+   * minutes, or claimed / unknown in the last two hours: the claim window
+   * plus the execution window). The owner object runs this before the
+   * authority read a refused card would waste; `create` runs it again.
+   */
+  async assertCapacity(
+    owner: string,
+    sessionId: string,
+    runId: string,
+  ): Promise<void> {
+    const now = this.now();
+    const run = await this.db.get<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM topic_action_proposals WHERE owner_did=? AND session_id=? AND run_id=?`,
+      [owner, sessionId, runId],
+    );
+    if ((run?.n ?? 0) >= ACTION_PROPOSALS_PER_RUN)
+      throw new ActionProposalConflict(
+        'Too many action cards in this request; finish the open ones first',
+      );
+    const open = await this.db.get<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM topic_action_proposals WHERE owner_did=? AND ((status='prepared' AND created_at>?) OR (status IN ('claimed','unknown') AND created_at>?))`,
+      [
+        owner,
+        now - OPEN_PREPARED_MS,
+        now - OPEN_PREPARED_MS - TOPIC_EXECUTION_WINDOW_MS - 40 * 60_000,
+      ],
+    );
+    if ((open?.n ?? 0) >= ACTION_PROPOSALS_OPEN_PER_OWNER)
+      throw new ActionProposalConflict(
+        'Too many action cards are open; finish or decline them first',
+      );
+  }
   async get(owner: string, id: string): Promise<TopicActionProposal | null> {
     const row = await this.db.get<{
       subject: string;
@@ -178,13 +244,43 @@ export class TopicProposalStore {
       `SELECT subject,digest,lifecycle FROM topic_action_proposals WHERE owner_did=? AND id=?`,
       [owner, id],
     );
-    return row
-      ? assertTopicProposalUnchanged({
-          ...JSON.parse(row.subject),
-          digest: row.digest,
-          lifecycle: JSON.parse(row.lifecycle),
-        })
-      : null;
+    if (!row) return null;
+    const key = `${row.digest}\0${row.lifecycle}\0${row.subject}`;
+    const cached = this.validated.get(key);
+    if (cached) {
+      // Most recently used last.
+      this.validated.delete(key);
+      this.validated.set(key, cached);
+      return structuredClone(cached);
+    }
+    const p = await assertTopicProposalUnchanged({
+      ...JSON.parse(row.subject),
+      digest: row.digest,
+      lifecycle: JSON.parse(row.lifecycle),
+    });
+    this.validated.set(key, structuredClone(p));
+    if (this.validated.size > VALIDATED_CACHE_ENTRIES)
+      this.validated.delete(this.validated.keys().next().value!);
+    return p;
+  }
+  /**
+   * The local refusals a claim applies (missing, changed, consumed,
+   * expired), without writing anything: the owner object runs these before
+   * the remote authority read, so a repeated claim is answered at once.
+   */
+  async assertClaimable(
+    owner: string,
+    id: string,
+    digest: string,
+  ): Promise<void> {
+    const p = await this.get(owner, id);
+    if (!p) throw new ActionProposalConflict('Proposal missing');
+    if (p.digest !== digest)
+      throw new ActionProposalConflict('Proposal changed');
+    if (p.lifecycle.status !== 'prepared')
+      throw new ActionProposalConflict('Proposal already consumed');
+    if (Date.parse(p.expiresAt) <= this.now())
+      throw new ActionProposalConflict('Proposal expired');
   }
   async replayPreparation(
     owner: string,
@@ -274,13 +370,21 @@ export class TopicProposalStore {
     );
     return row?.due ?? undefined;
   }
-  /** Finished cards past retention go, with their steps; open ones stay. */
+  /**
+   * Finished cards past retention go, with their steps; unresolved ones
+   * (claimed, unknown) after the longer window, long after any lookup of
+   * theirs stopped. A card whose receipt is still pending stays.
+   */
   async prune(owner: string): Promise<number> {
-    const before = this.now() - ACTION_PROPOSAL_RETENTION_MS;
+    const now = this.now();
     return this.db.transaction(async () => {
       const rows = await this.db.exec<{ id: string }>(
-        `SELECT id FROM topic_action_proposals WHERE owner_did=? AND created_at<? AND status IN ('prepared','succeeded','failed','rejected','revoked','superseded') AND receipt_state<>'pending' LIMIT 64`,
-        [owner, before],
+        `SELECT id FROM topic_action_proposals WHERE owner_did=? AND created_at<? AND receipt_state<>'pending' AND (status IN ('prepared','succeeded','failed','rejected','revoked','superseded') OR (created_at<? AND status IN ('claimed','unknown'))) LIMIT 64`,
+        [
+          owner,
+          now - ACTION_PROPOSAL_RETENTION_MS,
+          now - ACTION_PROPOSAL_UNRESOLVED_RETENTION_MS,
+        ],
       );
       for (const row of rows) {
         await this.db.run(

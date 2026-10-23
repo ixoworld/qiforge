@@ -34,12 +34,24 @@ export class HubActionTestDO extends DurableObject {
     return (await this.actions()).get(ownerDid, id);
   }
   async outcome(input: ActionOutcomeV1) {
-    await (await this.actions()).recordOutcome(input);
+    return (await this.actions()).recordOutcome(input);
   }
   async forRun(ownerDid: string, sessionId: string, runId: string) {
     return (await this.actions()).outcomesForRun(ownerDid, sessionId, runId);
   }
+  async byRequestKey(key: string) {
+    return (await this.actions()).byRequestKey(key);
+  }
+  async runState(ownerDid: string, sessionId: string, runId: string) {
+    return (await this.actions()).runState(ownerDid, sessionId, runId);
+  }
+  async prune() {
+    return (await this.actions()).prune();
+  }
+  /** Close the database and open it again: what persists is what SQLite holds. */
   async reopen() {
+    await this.db?.close();
+    this.db = undefined;
     this.store = undefined;
   }
 }

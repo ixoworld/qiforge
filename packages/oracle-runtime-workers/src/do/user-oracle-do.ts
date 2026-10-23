@@ -39,9 +39,15 @@ import type {
 import { ChannelTurns } from '../channels/turns';
 import { HubActionClient } from '../hub-actions/client';
 import { prepareHubAction } from '../hub-actions/request';
-import { HubActionStore } from '../hub-actions/store';
+import {
+  HUB_CHECK_AFTER_EXPIRY_MS,
+  HubActionRefused,
+  HubActionStore,
+  TERMINAL_HUB_STATUSES,
+} from '../hub-actions/store';
 import {
   canonicalJson,
+  type ActionCapabilitiesV1,
   type ActionOperationV1,
   type ActionOutcomeV1,
 } from '@ixo/action-protocol';
@@ -570,6 +576,20 @@ const ACCESS_PERSIST_INTERVAL_MS = 60 * 60_000;
 const TITLE_TIMEOUT_MS = 15_000;
 /** A new sweep of expired ambient blobs starts at most this often per instance. */
 const BLOB_SWEEP_INTERVAL_MS = 60 * 60_000;
+/**
+ * Wall time the alarm's action-card tick may spend on chain lookups (two at
+ * most, run together); an abort counts as an RPC outage (the card stays
+ * `unknown`, its attempt spent).
+ */
+const ACTION_TICK_BUDGET_MS = 15_000;
+/** The card retention sweep runs at most this often per instance. */
+const ACTION_PRUNE_INTERVAL_MS = 60 * 60_000;
+/** How long the Hub's capabilities answer is reused per object. */
+const HUB_CAPABILITIES_CACHE_MS = 60_000;
+/** A channel poll waits this long for Auth Hub, once per poll at most. */
+const HUB_POLL_TIMEOUT_MS = 3_000;
+/** How long a passed topic authority read is reused for the same card. */
+const TOPIC_AUTHORITY_MEMO_MS = 30_000;
 /** The Blocksync lookup of the user's homeserver is abandoned after this long (the fallback applies). */
 const HOMESERVER_LOOKUP_TIMEOUT_MS = 3_000;
 /** Set once the legacy Matrix copy has been removed (or found absent): no more lookups. */
@@ -944,7 +964,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private actionProposals: ActionProposalStore | null = null;
     private hubActionStore: HubActionStore | null = null;
     private hubActionClient: HubActionClient | null = null;
+    /** The Hub's capabilities for this oracle account, reused for `HUB_CAPABILITIES_CACHE_MS`. */
+    private hubCapabilities: {
+      value: ActionCapabilitiesV1;
+      at: number;
+    } | null = null;
     private topicProposals: TopicProposalStore | null = null;
+    /** `assertTopicDependenciesMemo`: card id and digest -> when it passed. */
+    private topicAuthorityMemo: Map<string, number> | undefined;
+    /** When this instance last ran the card retention sweep (at most hourly). */
+    private lastActionPruneAt: number | null = null;
     /** Text `view_attachment` extracted, per session (`attachments/view-cache.ts`). */
     private attachmentTextCache: AttachmentTextCacheStore | null = null;
     /**
@@ -2095,7 +2124,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         ...(this.hubActionStore && this.hubActionClient
           ? {
               hubActions: {
-                capabilities: () => this.hubActionClient!.capabilities(),
+                capabilities: () => this.cachedHubCapabilities(),
                 options: (input) => this.hubActionOptions(input),
                 request: (input: {
                   ownerDid: string;
@@ -2197,6 +2226,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.actionProposals = null;
       this.hubActionStore = null;
       this.hubActionClient = null;
+      this.hubCapabilities = null;
       this.topicProposals = null;
       this.attachmentTextCache = null;
       this.domainContextStore = null;
@@ -2545,21 +2575,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           deadlines.push(Math.max(nextRecovery, now + 1000));
       }
 
-      // Action cards: look up recorded transactions the chain has not
-      // confirmed yet, post the receipts that are due, drop old cards. One
-      // bad row here must not stop the flush, the tasks or the eviction
-      // below, so the tick is guarded like its neighbours.
-      try {
-        const actionAt = await this.tickActionProposals();
-        if (actionAt !== undefined)
-          deadlines.push(Math.max(actionAt, now + 1000));
-      } catch (err) {
-        console.error(
-          `[user-do] action proposal tick failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        deadlines.push(now + 60_000);
-      }
-
       // The last real request, stored for the next instance before anything
       // is decided on it.
       await this.persistAccess();
@@ -2618,6 +2633,24 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             `[user-do] channel housekeeping failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
+      }
+
+      // Action cards: look up recorded transactions the chain has not
+      // confirmed yet, close cards claimed and never executed, post the
+      // receipts that are due, drop old cards. It runs after the flush and
+      // the task scheduler (a slow chain RPC must not delay a user's task)
+      // under one wall budget, and before the eviction check (its deadline
+      // keeps the copy). One bad row must not stop what follows, so the tick
+      // is guarded like its neighbours.
+      try {
+        const actionAt = await this.tickActionProposals();
+        if (actionAt !== undefined)
+          deadlines.push(Math.max(actionAt, now + 1000));
+      } catch (err) {
+        console.error(
+          `[user-do] action proposal tick failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        deadlines.push(now + 60_000);
       }
 
       // Legacy-blob compaction: one bounded batch per tick until the whole
@@ -3166,6 +3199,19 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return options;
     }
 
+    /** The Hub's capabilities, cached per object for `HUB_CAPABILITIES_CACHE_MS`. */
+    private async cachedHubCapabilities(): Promise<ActionCapabilitiesV1> {
+      const client = this.hubActionClient;
+      if (!client) throw new Error('Hub actions are unavailable');
+      const now = Date.now();
+      const cached = this.hubCapabilities ?? null;
+      if (cached && now - cached.at < HUB_CAPABILITIES_CACHE_MS)
+        return cached.value;
+      const value = await client.capabilities();
+      this.hubCapabilities = { value, at: now };
+      return value;
+    }
+
     private async requestHubAction(input: {
       ownerDid: string;
       sessionId: string;
@@ -3177,12 +3223,28 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       requestKey: string;
       operation: ActionOperationV1;
     }) {
-      if (
-        !this.hubActionStore ||
-        !this.hubActionClient ||
-        input.ownerDid !== this.userDid
-      )
+      const store = this.hubActionStore;
+      const client = this.hubActionClient;
+      if (!store || !client || input.ownerDid !== this.userDid)
         throw new Error('Hub actions are unavailable for this channel');
+      // Only a run an inbound channel message started may prepare a review:
+      // a scheduled or background run has no user asking for it.
+      const record = await this.runStore?.get(input.runId);
+      const turn = record
+        ? (JSON.parse(record.request) as StoredRunRequest).turn
+        : null;
+      if (
+        !turn ||
+        turn.client !== 'channel' ||
+        !turn.channel?.remoteMessageRef ||
+        turn.identity.userDid !== input.ownerDid ||
+        turn.sessionId !== input.sessionId ||
+        turn.sessionId.startsWith(SYNTHETIC_SESSION_PREFIX)
+      )
+        throw new HubActionRefused(
+          'limit',
+          'Reviews are prepared only in reply to a message from the user.',
+        );
       await assertActiveChannelBinding(
         {
           userDid: input.ownerDid,
@@ -3195,19 +3257,18 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         this.env,
       );
       const reference = await prepareHubAction(
-        this.hubActionClient,
+        {
+          capabilities: () => this.cachedHubCapabilities(),
+          request: (body) => client.request(body),
+        },
         {
           reserve: async (origin, operation, expiresAt) => {
-            const reserved = await this.hubActionStore!.reserve(
-              origin,
-              operation,
-              expiresAt,
-            );
+            const reserved = await store.reserve(origin, operation, expiresAt);
             this.markDirty();
             return reserved;
           },
-          record: (origin, reference) =>
-            this.hubActionStore!.record(origin, reference),
+          record: (origin, reference) => store.record(origin, reference),
+          byRequestKey: (key) => store.byRequestKey(key),
         },
         input,
       );
@@ -3218,10 +3279,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private async statusHubAction(
       ownerDid: string,
       actionId: string,
+      timeoutMs?: number,
     ): Promise<ActionOutcomeV1 | null> {
       const held = await this.hubActionStore?.get(ownerDid, actionId);
       if (!held || !this.hubActionClient) return null;
-      const status = await this.hubActionClient.status(actionId);
+      const status = await this.hubActionClient.status(actionId, timeoutMs);
       if (
         status.ownerDid !== ownerDid ||
         canonicalJson(status.reference) !== canonicalJson(held.reference)
@@ -3233,12 +3295,20 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           status.digest !== status.outcome.authorizedDigest
         )
           return null;
-        await this.hubActionStore!.recordOutcome(status.outcome);
-        this.markDirty();
+        if (await this.hubActionStore!.recordOutcome(status.outcome))
+          this.markDirty();
       }
       return status.outcome;
     }
 
+    /**
+     * The run's Hub outcomes for a channel poll: stored outcomes first
+     * (callback-delivered ones included, so a Hub outage hides nothing
+     * already known), then at most ONE status refresh per poll, only for an
+     * action with no terminal outcome whose backoff (15 s doubling to
+     * 10 min) has passed, with a 3 s timeout. The newer outcome by
+     * sequence wins.
+     */
     private async hubOutcomesForRun(
       ownerDid: string,
       sessionId: string,
@@ -3246,16 +3316,37 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     ): Promise<ActionOutcomeV1[]> {
       const store = this.hubActionStore;
       if (!store) return [];
+      const now = Date.now();
+      let refreshed = false;
       const current: ActionOutcomeV1[] = [];
-      for (const reference of await store.forRun(ownerDid, sessionId, runId)) {
-        try {
-          const outcome = await this.statusHubAction(ownerDid, reference.id);
-          if (outcome) current.push(outcome);
-        } catch (error) {
-          console.warn(
-            `[hub-actions] status recovery unavailable for ${reference.id}: ${error instanceof Error ? error.message : String(error)}`,
-          );
+      for (const row of await store.runState(ownerDid, sessionId, runId)) {
+        let latest = row.latest;
+        if (
+          !refreshed &&
+          this.hubActionClient &&
+          !(latest && TERMINAL_HUB_STATUSES.has(latest.status)) &&
+          row.nextCheckAt <= now &&
+          row.reference.expiresAt * 1000 + HUB_CHECK_AFTER_EXPIRY_MS > now
+        ) {
+          refreshed = true;
+          // The attempt is spent before the read: a Hub that hangs is
+          // asked again only after the backoff.
+          await store.scheduleCheck(row.reference.id, row.checkAttempts);
+          try {
+            const fresh = await this.statusHubAction(
+              ownerDid,
+              row.reference.id,
+              HUB_POLL_TIMEOUT_MS,
+            );
+            if (fresh && (!latest || fresh.sequence > latest.sequence))
+              latest = fresh;
+          } catch (error) {
+            console.warn(
+              `[hub-actions] status recovery unavailable for ${row.reference.id}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
         }
+        if (latest) current.push(latest);
       }
       return current;
     }
@@ -3263,7 +3354,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     async recordHubActionOutcome(input: ActionOutcomeV1): Promise<void> {
       if (this.env.HUB_ACTIONS_ENABLED !== 'true')
         throw new Error('Hub actions disabled');
-      await this.ready({ userDid: input.ownerDid });
+      // A Hub callback is not the user: it must not count as access (that
+      // would delay idle eviction).
+      await this.ready({ userDid: input.ownerDid }, { recordAccess: false });
       const held = await this.hubActionStore?.get(
         input.ownerDid,
         input.reference.id,
@@ -3282,8 +3375,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         throw new Error(
           'Hub outcome was not confirmed by authenticated status',
         );
-      await this.hubActionStore!.recordOutcome(remote.outcome);
-      this.markDirty();
+      if (await this.hubActionStore!.recordOutcome(remote.outcome))
+        this.markDirty();
     }
 
     async listSessions(
@@ -3415,6 +3508,34 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return deleted;
     }
 
+    /**
+     * `assertTopicDependencies`, remembered per card (id and digest) for
+     * `TOPIC_AUTHORITY_MEMO_MS` after it passed (or after preparation read
+     * the same facts): prepare, claim and begin within seconds of each other
+     * read the room, history and chain once, not three times. Only a pass
+     * is remembered; a refusal re-reads.
+     */
+    private async assertTopicDependenciesMemo(
+      proposal: TopicActionProposal,
+    ): Promise<void> {
+      const key = `${proposal.id}:${proposal.digest}`;
+      const now = Date.now();
+      const passed = this.topicAuthorityMemo?.get(key);
+      if (passed !== undefined && now - passed < TOPIC_AUTHORITY_MEMO_MS)
+        return;
+      await assertTopicDependencies(
+        proposal,
+        this.topicVerificationContext(proposal),
+      );
+      this.rememberTopicAuthority(key, Date.now());
+    }
+    private rememberTopicAuthority(key: string, at: number): void {
+      const memo = (this.topicAuthorityMemo ??= new Map());
+      for (const [k, t] of memo)
+        if (at - t >= TOPIC_AUTHORITY_MEMO_MS) memo.delete(k);
+      memo.set(key, at);
+    }
+
     private topicVerificationContext(
       proposal: TopicActionProposal,
     ): TopicVerificationContext {
@@ -3446,13 +3567,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         reader: {
           state: async (room) =>
             readList(await read(() => this.gateway.getTopicRoomState(room))),
-          event: async (room, id) => {
-            const raw = await read(() => this.gateway.getTopicEvent(room, id));
+          event: async (room, id, opts) => {
+            const raw = await read(() =>
+              this.gateway.getTopicEvent(room, id, opts),
+            );
             return raw ? JSON.parse(raw) : null;
           },
-          history: async (room, root) =>
+          history: async (room, root, opts) =>
             readList(
-              await read(() => this.gateway.getTopicHistory(room, root)),
+              await read(() => this.gateway.getTopicHistory(room, root, opts)),
             ),
         },
         blocksync: this.env.BLOCKSYNC_GRAPHQL_URL,
@@ -3488,6 +3611,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         input.evidenceRefs,
       );
       if (prior) return prior;
+      // The caps before the authority read it would waste (create checks
+      // them again, atomically).
+      await topics.assertCapacity(
+        this.userDid,
+        input.origin.sessionId,
+        input.origin.runId,
+      );
       const rpc = {
         devnet: this.env.ACTION_PROPOSALS_RPC_DEVNET,
         testnet: this.env.ACTION_PROPOSALS_RPC_TESTNET,
@@ -3508,12 +3638,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           reader: {
             state: async (room) =>
               JSON.parse(await this.gateway.getTopicRoomState(room)),
-            event: async (room, id) => {
-              const raw = await this.gateway.getTopicEvent(room, id);
+            event: async (room, id, opts) => {
+              const raw = await this.gateway.getTopicEvent(room, id, opts);
               return raw ? JSON.parse(raw) : null;
             },
-            history: async (room, root) =>
-              JSON.parse(await this.gateway.getTopicHistory(room, root)),
+            history: async (room, root, opts) =>
+              JSON.parse(await this.gateway.getTopicHistory(room, root, opts)),
           },
         },
       );
@@ -3531,6 +3661,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           : null;
       const p = await topics.create(subject, origin);
       this.markDirty();
+      // Preparation just read and sealed every fact the claim re-checks.
+      this.rememberTopicAuthority(`${p.id}:${p.digest}`, Date.now());
       return p;
     }
     /** Both switches: topic cards may be claimed and their steps permitted. */
@@ -3571,10 +3703,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             ok: true,
             result: { status: 'already_started', proposal },
           });
-        await assertTopicDependencies(
-          proposal,
-          this.topicVerificationContext(proposal),
-        );
+        await this.assertTopicDependenciesMemo(proposal);
         const effect = await topicExpectedEffect(proposal, input.step);
         const result = await store.begin(identity.userDid, id, input, effect);
         this.markDirty();
@@ -3660,87 +3789,184 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /**
-     * The alarm's share of action cards: at most two chain lookups for
-     * cards whose transaction is recorded but unconfirmed (so a card the
-     * user signed and walked away from still gets its receipt once the
-     * chain has indexed it), the receipts due now, and the retention sweep.
-     * Returns the earliest moment any of it is due again.
+     * The alarm's share of action cards: at most two chain lookups (run
+     * together) for cards whose transaction is recorded but unconfirmed (so
+     * a card the user signed and walked away from still gets its receipt
+     * once the chain has indexed it), closing claimed cards whose execution
+     * window passed with no transaction, the receipts due now (posted in the
+     * background: their schedule already moved forward, so a crash cannot
+     * post one sooner), and the retention sweep, at most hourly. All of it
+     * shares `ACTION_TICK_BUDGET_MS` of wall time. Returns the earliest
+     * moment any of it is due again.
      */
     private async tickActionProposals(): Promise<number | undefined> {
       if (!this.userDid) return undefined;
+      const userDid = this.userDid;
       // Each store on its own: the other one failing to open must not stop
       // this one's verifications, receipts or retention.
       const store = this.actionProposals;
-      if (store) {
-        for (const proposal of await store.dueVerifications(this.userDid)) {
-          const refreshed = await refreshActionProposal(
-            store,
-            proposal,
-            this.actionProposalRpc(proposal),
-          );
-          if (refreshed.attempted) this.markDirty();
-        }
-        if ((await store.prune(this.userDid)) > 0) this.markDirty();
-      }
-      // Topic cards with started steps the room or chain has not confirmed
-      // yet: reconcile their recorded references on the same cooldown.
       const topics = this.topicProposals;
-      if (topics) {
-        // Guarded on its own: a topic card's trouble must not hold up the
-        // transfer receipts below.
-        try {
-          for (const proposal of await topics.dueVerifications(this.userDid)) {
-            // The attempt is spent before the references are read: a
-            // reference row this build cannot parse is quarantined, not
-            // retried every second.
-            if (!(await topics.claimVerification(this.userDid, proposal.id)))
-              continue;
-            this.markDirty();
-            try {
-              const refs = await topics.references(this.userDid, proposal.id);
-              if (refs.length)
-                await reconcileTopicReferences(
-                  topics,
+      const budget = new AbortController();
+      const timer = setTimeout(() => budget.abort(), ACTION_TICK_BUDGET_MS);
+      const settle = (
+        label: string,
+        results: PromiseSettledResult<unknown>[],
+      ) => {
+        for (const result of results)
+          if (result.status === 'rejected')
+            console.warn(
+              `[${label}] verification failed for ${userDid}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
+            );
+      };
+      try {
+        await Promise.all([
+          (async () => {
+            if (!store) return;
+            const due = await store.dueVerifications(userDid);
+            const settled = await Promise.allSettled(
+              due.map(async (proposal) => {
+                const refreshed = await refreshActionProposal(
+                  store,
                   proposal,
-                  { v: 2, references: refs },
-                  this.topicVerificationContext(proposal),
-                  true,
+                  this.actionProposalRpc(proposal),
+                  fetch,
+                  budget.signal,
                 );
-            } catch (error) {
-              await topics.quarantineVerification(
-                this.userDid,
-                proposal.id,
-                error,
+                if (refreshed.attempted) this.markDirty();
+              }),
+            );
+            settle('action-proposals', settled);
+          })(),
+          // Topic cards with started steps the room or chain has not
+          // confirmed yet: reconcile their recorded references on the same
+          // cooldown, under the same budget. Guarded on its own: a topic
+          // card's trouble must not hold up the transfer receipts below.
+          (async () => {
+            if (!topics) return;
+            try {
+              const due = await topics.dueVerifications(userDid);
+              const settled = await Promise.allSettled(
+                due.map(async (proposal) => {
+                  // The attempt is spent before the references are read: a
+                  // reference row this build cannot parse is quarantined,
+                  // not retried every second.
+                  if (!(await topics.claimVerification(userDid, proposal.id)))
+                    return;
+                  this.markDirty();
+                  try {
+                    const refs = await topics.references(userDid, proposal.id);
+                    if (refs.length)
+                      await reconcileTopicReferences(
+                        topics,
+                        proposal,
+                        { v: 2, references: refs },
+                        {
+                          ...this.topicVerificationContext(proposal),
+                          signal: budget.signal,
+                        },
+                        true,
+                      );
+                  } catch (error) {
+                    await topics.quarantineVerification(
+                      userDid,
+                      proposal.id,
+                      error,
+                    );
+                  }
+                }),
+              );
+              settle('topic-actions', settled);
+            } catch (err) {
+              console.error(
+                `[topic-actions] tick failed for ${userDid}: ${err instanceof Error ? err.message : String(err)}`,
               );
             }
-          }
-          if ((await topics.prune(this.userDid)) > 0) this.markDirty();
+          })(),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+      if (store && (await store.closeUnexecuted(userDid)) > 0) this.markDirty();
+      const now = store?.now() ?? Date.now();
+      const lastPruneAt = this.lastActionPruneAt ?? null;
+      if (
+        lastPruneAt === null ||
+        now - lastPruneAt >= ACTION_PRUNE_INTERVAL_MS
+      ) {
+        this.lastActionPruneAt = now;
+        if (store && (await store.prune(userDid)) > 0) this.markDirty();
+        try {
+          if (topics && (await topics.prune(userDid)) > 0) this.markDirty();
         } catch (err) {
           console.error(
-            `[topic-actions] tick failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+            `[topic-actions] prune failed for ${userDid}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        // Hub action rows (requests, references, outcomes) 30 days after
+        // their review expired.
+        try {
+          if (this.hubActionStore && (await this.hubActionStore.prune()) > 0)
+            this.markDirty();
+        } catch (err) {
+          console.error(
+            `[hub-actions] prune failed for ${userDid}: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
       }
-      const receiptAt = await this.mirrorActionReceipts();
-      const deadlines = [
+      const receiptAt = await this.mirrorActionReceipts(true);
+      const next = [
         receiptAt,
-        store ? await store.nextVerificationAt(this.userDid) : undefined,
-        topics ? await topics.nextVerificationAt(this.userDid) : undefined,
-      ].filter((d): d is number => d !== undefined);
-      return deadlines.length ? Math.min(...deadlines) : undefined;
+        store ? await store.nextVerificationAt(userDid) : undefined,
+        store ? await store.nextUnexecutedCloseAt(userDid) : undefined,
+        topics ? await topics.nextVerificationAt(userDid) : undefined,
+      ].filter((at): at is number => at !== undefined);
+      return next.length ? Math.min(...next) : undefined;
     }
 
-    private async mirrorActionReceipts(): Promise<number | undefined> {
+    /**
+     * Take the receipts due now (both card stores) and post them. `detach`
+     * hands the posts to `ctx.waitUntil` (the alarm does not wait on a slow
+     * room); otherwise they are awaited.
+     */
+    private async mirrorActionReceipts(
+      detach = false,
+    ): Promise<number | undefined> {
       if (!this.userDid) return undefined;
       const store = this.actionProposals;
+      const topics = this.topicProposals;
       const receipts = store ? await store.takeReceipts(this.userDid) : [];
-      if (receipts.length) this.markDirty();
+      const topicReceipts = topics
+        ? await topics.takeReceipts(this.userDid)
+        : [];
+      if (receipts.length || topicReceipts.length) this.markDirty();
+      const posting = Promise.all([
+        store ? this.postActionReceipts(store, receipts) : undefined,
+        topics ? this.postTopicReceipts(topics, topicReceipts) : undefined,
+      ]).then(() => undefined);
+      if (detach) this.ctx.waitUntil(posting);
+      else await posting;
+      const due = store
+        ? await store.nextReceiptAttempt(this.userDid)
+        : undefined;
+      const topicDue = topics
+        ? await topics.nextReceiptAttempt(this.userDid)
+        : undefined;
+      return due === undefined
+        ? topicDue
+        : topicDue === undefined
+          ? due
+          : Math.min(due, topicDue);
+    }
+
+    private async postActionReceipts(
+      store: ActionProposalStore,
+      receipts: Awaited<ReturnType<ActionProposalStore['takeReceipts']>>,
+    ): Promise<void> {
       for (const { proposal, origin } of receipts) {
         try {
           if (
-            !store ||
-            (proposal.lifecycle.status !== 'succeeded' &&
-              proposal.lifecycle.status !== 'failed')
+            proposal.lifecycle.status !== 'succeeded' &&
+            proposal.lifecycle.status !== 'failed'
           )
             continue;
           const status =
@@ -3768,49 +3994,40 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           );
         }
       }
-      const topics = this.topicProposals;
-      if (topics)
-        for (const { proposal, origin } of await topics.takeReceipts(
-          this.userDid,
-        )) {
-          try {
-            const receipt = proposal.lifecycle.receipt;
-            if (!receipt) continue;
-            const text =
-              receipt.kind === 'topic-created'
-                ? `${proposal.title} created. Room ${receipt.roomId}. Topic ${receipt.topicId}. Root ${receipt.rootEventId}.`
-                : `${proposal.title} ${receipt.kind === 'topic-access-granted' ? 'confirmed' : 'failed'} on chain. Transaction ${receipt.transactionHash}. Block ${receipt.height}. Code ${receipt.code}.`;
-            await this.replayToRoom(
-              {
-                ...origin,
-                identity: { userDid: proposal.ownerDid },
-                message: '',
-                requestId: `action-receipt:${proposal.id}:${proposal.digest}`,
-              },
-              text,
-              'oracle',
-              true,
-            );
-            await topics.receiptMirrored(proposal.ownerDid, proposal.id);
-            this.markDirty();
-          } catch (error) {
-            console.warn(
-              '[topic-actions] receipt mirror pending',
-              error instanceof Error ? error.message : 'mirror failed',
-            );
-          }
+    }
+
+    private async postTopicReceipts(
+      topics: TopicProposalStore,
+      receipts: Awaited<ReturnType<TopicProposalStore['takeReceipts']>>,
+    ): Promise<void> {
+      for (const { proposal, origin } of receipts) {
+        try {
+          const receipt = proposal.lifecycle.receipt;
+          if (!receipt) continue;
+          const text =
+            receipt.kind === 'topic-created'
+              ? `${proposal.title} created. Room ${receipt.roomId}. Topic ${receipt.topicId}. Root ${receipt.rootEventId}.`
+              : `${proposal.title} ${receipt.kind === 'topic-access-granted' ? 'confirmed' : 'failed'} on chain. Transaction ${receipt.transactionHash}. Block ${receipt.height}. Code ${receipt.code}.`;
+          await this.replayToRoom(
+            {
+              ...origin,
+              identity: { userDid: proposal.ownerDid },
+              message: '',
+              requestId: `action-receipt:${proposal.id}:${proposal.digest}`,
+            },
+            text,
+            'oracle',
+            true,
+          );
+          await topics.receiptMirrored(proposal.ownerDid, proposal.id);
+          this.markDirty();
+        } catch (error) {
+          console.warn(
+            '[topic-actions] receipt mirror pending',
+            error instanceof Error ? error.message : 'mirror failed',
+          );
         }
-      const due = store
-        ? await store.nextReceiptAttempt(this.userDid)
-        : undefined;
-      const topicDue = topics
-        ? await topics.nextReceiptAttempt(this.userDid)
-        : undefined;
-      return due === undefined
-        ? topicDue
-        : topicDue === undefined
-          ? due
-          : Math.min(due, topicDue);
+      }
     }
 
     private actionProposalRpc(
@@ -3855,10 +4072,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                 throw new ActionProposalConflict(
                   'Topic action execution is disabled',
                 );
-              await assertTopicDependencies(
-                topic,
-                this.topicVerificationContext(topic),
+              // The local refusals first (already consumed, changed,
+              // expired): the remote authority read only for a claim that
+              // could succeed.
+              await topics.assertClaimable(
+                identity.userDid,
+                id,
+                command.digest,
               );
+              await this.assertTopicDependenciesMemo(topic);
             }
             const next = await topics.transition(
               identity.userDid,

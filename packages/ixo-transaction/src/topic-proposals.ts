@@ -271,7 +271,10 @@ export const TopicAccessActionSchema = z.strictObject({
       }),
     )
     .min(1)
-    .max(32),
+    // Each grant is a DID lookup and two chain reads inside one ten second
+    // budget, and Workers allow six open connections per invocation: eight
+    // is what reliably fits.
+    .max(8),
   memo: z.string().max(256),
   dependencies: z.array(TopicDependencySchema).min(1).max(64),
 });

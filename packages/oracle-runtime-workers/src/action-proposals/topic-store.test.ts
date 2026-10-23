@@ -206,6 +206,12 @@ describe('durable topic effect journal', () => {
       verifiedAt: expect.any(String),
     });
     expect('transactionHash' in final.lifecycle.receipt!).toBe(false);
+    // No room to receipt into (no origin): never pending, so the retention
+    // sweep can drop the finished card.
+    expect(await s.topicReceiptState(p.id)).toBe('unavailable');
+    expect(await s.topicPrune(OWNER)).toBe(0);
+    await s.setNow(NOW + 91 * 24 * 60 * 60 * 1000);
+    expect(await s.topicPrune(OWNER)).toBe(1);
   });
   it('rejects forged receipt sender and preserves unknown without rearming', async () => {
     const s = stub('forged');

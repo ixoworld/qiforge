@@ -21,6 +21,7 @@ import { createUserOracleDO } from '../do/user-oracle-do';
 import { DoSqliteDatabase } from '../sqlite/database';
 import { NOW, OWNER, RECIPIENT, proposalSubject } from './fixtures/proposal';
 import { ActionProposalConflict, ActionProposalStore } from './store';
+import { resetChainNetworkCache } from './verify';
 
 async function call<T>(
   host: object,
@@ -413,6 +414,89 @@ describe('durable canonical action receipts', () => {
     });
   });
 
+  it('refuses a repeated topic claim locally and reuses a passed authority read for 30 s', async () => {
+    await withReceipts('topic-claim-local', async (h) => {
+      const topics = h.topics();
+      const p = await topics.create(await topicSubject());
+      const reads: string[] = [];
+      const gateway = new Proxy(
+        {},
+        {
+          get: (_target, name) => async () => {
+            reads.push(String(name));
+            throw new Error('Topic room state exceeds verification bounds');
+          },
+        },
+      );
+      const fetches: string[] = [];
+      vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+        fetches.push(String(input));
+        return new Response('', { status: 503 });
+      });
+      try {
+        Object.defineProperty(h.host, 'gateway', { value: gateway });
+        Object.assign(h.host, {
+          ready: async () => undefined,
+          env: {
+            ACTION_PROPOSALS_ENABLED: 'true',
+            ACTION_TOPIC_PROPOSALS_ENABLED: 'true',
+            BLOCKSYNC_GRAPHQL_URL: 'https://blocksync.test/graphql',
+          },
+        });
+        await topics.transition(OWNER, p.id, 'claim', p.digest);
+        const claim = async () =>
+          JSON.parse(
+            (await call<string | null>(
+              h.host,
+              'actionProposal',
+              { userDid: OWNER },
+              p.id,
+              { kind: 'claim', digest: p.digest },
+            ))!,
+          );
+        expect(await claim()).toMatchObject({
+          ok: false,
+          error: 'Proposal already consumed',
+        });
+        expect(reads).toEqual([]);
+        expect(fetches).toEqual([]);
+        const begin = async () =>
+          JSON.parse(
+            (await call<string | null>(
+              h.host,
+              'beginTopicStep',
+              { userDid: OWNER },
+              p.id,
+              { digest: p.digest, step: 'anchor', executor },
+            ))!,
+          );
+        // A read that passed moments ago (preparation's) is not repeated.
+        await call(
+          h.host,
+          'rememberTopicAuthority',
+          `${p.id}:${p.digest}`,
+          Date.now(),
+        );
+        expect(await begin()).toMatchObject({
+          ok: true,
+          result: { status: 'permitted' },
+        });
+        expect(fetches).toEqual([]);
+        // Older than the memo window: the authority is read again.
+        await call(
+          h.host,
+          'rememberTopicAuthority',
+          `${p.id}:${p.digest}`,
+          Date.now() - 31_000,
+        );
+        expect(await begin()).toMatchObject({ ok: false });
+        expect(fetches.length + reads.length).toBeGreaterThan(0);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+  });
+
   it('serves transfer cards, turn outcomes and the alarm when the topic store failed to open', async () => {
     await withReceipts('topic-store-missing', async (h) => {
       const proposal = await h.prepare(1);
@@ -442,8 +526,10 @@ describe('durable canonical action receipts', () => {
         },
       );
       expect(outcomes.actionOutcomes).toHaveLength(1);
-      expect(await call(h.host, 'tickActionProposals')).toBeUndefined();
-      expect(h.send).toHaveBeenCalledTimes(1);
+      // The alarm posts receipts in the background: the deadline it returns
+      // is the receipt's next attempt, moved forward before the post.
+      expect(await call(h.host, 'tickActionProposals')).toBe(NOW + 30_000);
+      await vi.waitFor(() => expect(h.send).toHaveBeenCalledTimes(1));
       // An id the transfer store does not know may be a topic card: the
       // Portal is told to retry, not that the card is gone.
       const unavailable = {
@@ -625,9 +711,11 @@ describe('durable canonical action receipts', () => {
         waits.push(next - now);
         now = next;
       }
-      // Ten attempts spent: nine waits between them, then nothing scheduled.
-      expect(waits).toHaveLength(9);
+      // The first-lookup delay, then ten attempts spent: nine waits between
+      // them, then nothing scheduled.
+      expect(waits).toHaveLength(10);
       expect(waits[0]).toBe(30_000);
+      expect(waits[1]).toBe(30_000);
       expect(waits.at(-1)).toBe(600_000);
       expect(await call(h.host, 'tickActionProposals')).toBeUndefined();
       // A row this build cannot read drops out of the schedule too. (The
@@ -648,9 +736,54 @@ describe('durable canonical action receipts', () => {
         kind: 'reconcile',
         transactionHash: 'E'.repeat(64),
       });
+      h.setNow(NOW + 30_000);
       await h.corruptSubject(second.id);
       expect(await h.store().dueVerifications(OWNER)).toEqual([]);
       expect(await call(h.host, 'tickActionProposals')).toBeUndefined();
+    });
+  });
+
+  it('runs the due chain lookups together under one wall budget when the RPC hangs', async () => {
+    await withReceipts('receipt-rpc-hang', async (h) => {
+      resetChainNetworkCache();
+      const cards = [await h.prepare(1), await h.prepare(2)];
+      for (const [i, card] of cards.entries()) {
+        await h.store().transition(OWNER, card.id, {
+          kind: 'claim',
+          digest: card.digest,
+        });
+        await h.store().transition(OWNER, card.id, {
+          kind: 'reconcile',
+          transactionHash: String(i + 1).repeat(64),
+        });
+      }
+      const started: string[] = [];
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+        started.push(String(input));
+        return new Promise<Response>((_, reject) =>
+          init?.signal?.addEventListener('abort', () =>
+            reject(new Error('aborted')),
+          ),
+        );
+      });
+      try {
+        // Past the first-lookup delay.
+        h.setNow(NOW + 30_000);
+        const tick = call<number | undefined>(h.host, 'tickActionProposals');
+        await vi.waitFor(() => expect(started).toHaveLength(2));
+        await vi.advanceTimersByTimeAsync(15_000);
+        // Both lookups were cut by the budget: attempts spent, cards
+        // `unknown`, the next lookup scheduled after the cooldown.
+        expect(await tick).toBe(NOW + 60_000);
+        for (const card of cards)
+          expect((await h.store().get(OWNER, card.id))?.lifecycle.status).toBe(
+            'unknown',
+          );
+      } finally {
+        vi.unstubAllGlobals();
+        vi.useRealTimers();
+      }
     });
   });
 

@@ -55,6 +55,13 @@ creation. A card asked for in a Matrix **group room** is refused (`Action
 cards are prepared in direct chats only`): a card names one person's wallet
 and its link and receipt would be visible to the whole room.
 
+**Caps** (`src/action-proposals/store.ts`): one agent run prepares at most
+8 cards (`Too many action cards in this request…`), and an owner has at most
+16 open ones: `prepared` in the last 20 minutes, `claimed`, or `unknown` with
+no hash (`Too many action cards are open…`). Both refusals reach the model as
+`clarification_required`; a resumed tool call returns its original card and
+is never refused.
+
 ## Evidence before the model
 
 `prepare_action` (`src/plugins/action-proposals/`) runs deterministic checks
@@ -96,33 +103,50 @@ stateDiagram-v2
     prepared --> revoked
     prepared --> expired: 15 min
     claimed --> unknown: reconcile (hash optional)
+    claimed --> revoked: 60 min after claim, no hash
+    unknown --> revoked: 60 min after claim, no hash
     unknown --> succeeded: verified, code 0
     unknown --> failed: verified, code != 0
 ```
+
+A claimed card that never recorded a transaction (a wallet cancel, a lost
+claim reply) is closed by the alarm 60 minutes after its claim
+(`ACTION_PROPOSAL_EXECUTION_WINDOW_MS`) as `revoked`, ended then. It uses the
+existing terminal state, so strict readers of the contract (the Portal) need
+no change, and it never returns to `prepared`: a broadcast nobody observed is
+still possible, so the link stays used up. A hash reported after the window
+is refused (`Proposal was not claimed`); the owner asks for a new card.
 
 A claim consumes a prepared card once and atomically; a second device gets a
 conflict. `reconcile` takes only an optional transaction hash and never a
 claimed outcome. Verification (`src/action-proposals/verify.ts`) reads
 `/status` and `/tx?hash=` from the configured RPC, requires the chain id, the
 hash of the returned bytes, a signature, the memo and byte-exact message
-bytes, and records height and result code.
+bytes, and records height and result code. The `/status` answer (the
+network an RPC origin serves) is cached per isolate for 5 minutes.
 
 Routes (`private, no-store`, owner UCAN): `GET /action-proposals/:id`,
 `POST …/claim | reject | revoke | reconcile`. 2xx answers `{ proposal }`,
 a refused command answers `409 { error }`. The `/a/<id>` link is an opaque
-locator for the Portal and grants nothing.
+locator for the Portal and grants nothing. These routes have their own
+per-user rate-limit bucket (`action`), so polling a card does not use up the
+chat budget.
 
 ## Background verification and receipts
 
 The owner object's alarm (`tickActionProposals` in `user-oracle-do.ts`)
-does three things. The tick is guarded and rows this build cannot read are
-quarantined on first sight, so one bad row neither stops the flush, the tasks
-and the eviction nor fails the tick again a minute later:
+does four things. It runs after the flush, the task scheduler and channel
+housekeeping, so a slow chain RPC never delays a user's task, and its chain
+lookups share one 15 s wall budget (`ACTION_TICK_BUDGET_MS`; an abort counts
+as an RPC outage, the attempt is spent). The tick is guarded and rows this
+build cannot read are quarantined on first sight, so one bad row neither
+stops the flush, the tasks and the eviction nor fails the tick again a
+minute later:
 
-- **Verification**: at most two chain lookups per tick for cards that are
+- **Verification**: at most two chain lookups per tick, run together, for cards that are
   `unknown` with a recorded hash, so a card the owner signed and then
   closed the browser on still gets confirmed once the chain has indexed
-  it. The cooldown doubles from 30 s to 10 min and the alarm gives up after
+  it. A newly recorded hash is first looked up 30 s after it arrives (the Portal reports the hash of the signed bytes before it broadcasts them, then again after; the same hash twice changes nothing), and a "not found" answer within two minutes of its arrival reschedules the lookup without spending an attempt. The cooldown doubles from 30 s to 10 min and the alarm gives up after
   ten attempts (about an hour); a Portal reconcile still looks the hash up
   once the cooldown has passed. Two proofs end the wait early. A hash the
   verifier proved is **another transaction** (the chain holds it under
@@ -144,15 +168,21 @@ blocked: …`), never sent. Both proofs are guarded on the hash they were
 - **Receipts**: a verified card whose turn came from a Matrix thread or a
   channel is receipted into that thread (`<title> confirmed on chain.
 Transaction … Block … Code …`) with a stable transaction id, at most four
-  per tick. A failed post is retried with the same doubling cooldown up to an
+  per tick, posted in the background (`ctx.waitUntil`; their next attempt is
+  scheduled before the post, so a crash cannot post one sooner). A failed post is retried with the same doubling cooldown up to an
   hour apart and **abandoned** after twelve attempts (about five hours);
   a receipt row whose card no longer parses or verifies is **quarantined**
   and logged (`[action-proposals] receipt <id> quarantined: …`). Cards from
   Portal-local sessions have no room and are marked `unavailable`.
-- **Retention**: finished cards (succeeded, failed, rejected, revoked,
-  superseded, or prepared and long expired) older than 90 days are deleted
-  with their receipts; `/a/<id>` then answers 404. Claimed and unknown cards
-  are kept.
+- **Closing unexecuted cards**: claimed cards with no recorded hash, 60
+  minutes after their claim (see Lifecycle).
+- **Retention**, at most hourly per instance: finished cards (succeeded,
+  failed, rejected, revoked, superseded, or prepared and long expired) older
+  than 90 days are deleted with their receipts; `/a/<id>` then answers 404.
+  Unresolved cards (claimed, `unknown` with no hash or with its lookups
+  spent, blocked) are deleted after 180 days. A card whose receipt is still
+  pending stays. A revoked blocked card keeps its memo-bound hash in the
+  indexed column, so no other card can record it.
 
 Channel polls (`/channels/turn`) attach `actionOutcomes` for the proposals
 of that authenticated owner's original session and run only, attempting at

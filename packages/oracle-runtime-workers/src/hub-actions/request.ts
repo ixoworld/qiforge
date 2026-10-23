@@ -5,7 +5,7 @@ import {
   type ActionReferenceV1,
 } from '@ixo/action-protocol';
 import type { HubActionClient } from './client';
-import type { HubActionOrigin } from './store';
+import { HubActionRefused, type HubActionOrigin } from './store';
 
 export interface PreparedHubActionRequest extends HubActionOrigin {
   provider: string;
@@ -56,7 +56,7 @@ export function assertOperationEnabled(
 
 /** The host verifies the channel binding before invoking this transport. */
 export async function prepareHubAction(
-  client: HubActionClient,
+  client: Pick<HubActionClient, 'capabilities' | 'request'>,
   store: {
     reserve(
       origin: HubActionOrigin,
@@ -67,6 +67,7 @@ export async function prepareHubAction(
       origin: HubActionOrigin,
       reference: ActionReferenceV1,
     ): Promise<ActionReferenceV1>;
+    byRequestKey?(requestKey: string): Promise<ActionReferenceV1 | null>;
   },
   input: PreparedHubActionRequest,
   nowMs = Date.now(),
@@ -78,6 +79,18 @@ export async function prepareHubAction(
     input.operation,
     Math.floor(nowMs / 1000) + 15 * 60,
   );
+  // A retry of a key whose reservation lapsed: the Hub refuses a past
+  // expiry before its idempotency lookup, so a POST could never succeed.
+  // The recorded reference (the first POST's) is the answer if there is
+  // one; otherwise the request is over.
+  if (expiresAt <= Math.floor(nowMs / 1000)) {
+    const recorded = await store.byRequestKey?.(input.requestKey);
+    if (recorded) return recorded;
+    throw new HubActionRefused(
+      'expired',
+      'This review request expired before it reached Auth Hub; ask the user to confirm again.',
+    );
+  }
   const reference = await client.request({
     bindingId: input.bindingId,
     bindingRevision: input.bindingRevision,
