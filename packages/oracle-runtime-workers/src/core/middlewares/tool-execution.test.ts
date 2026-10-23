@@ -13,6 +13,11 @@ import {
   uncertainWriteToolResult,
 } from './tool-execution';
 import { makeClaimStore } from '../test-fixtures';
+import {
+  FrontendCallNotSentError,
+  FrontendCallRegistry,
+  OPEN_CHAT_HINT,
+} from '../../realtime/frontend-call-registry';
 
 type WrapToolCall = NonNullable<
   ReturnType<typeof createToolExecutionMiddleware>['wrapToolCall']
@@ -47,6 +52,7 @@ function middlewareFor(
         : name.startsWith('get_')
           ? 'read'
           : 'write',
+    effectOf: (name) => (name.startsWith('get_') ? 'read' : 'write'),
     runId: 'run-1',
     sessionId: 'session-1',
     claims: claims.store,
@@ -67,6 +73,16 @@ describe('operationKey', () => {
     expect(one).toMatch(/^[a-f0-9]{64}$/);
     expect(same).toBe(one);
     expect(other).not.toBe(one);
+  });
+
+  it('names the session for a frontend write: the same call in two chats is two actions', async () => {
+    const plain = await operationKey('show_card', { id: 'a' });
+    const one = await operationKey('show_card', { id: 'a' }, 's1');
+    const again = await operationKey('show_card', { id: 'a' }, 's1');
+    const two = await operationKey('show_card', { id: 'a' }, 's2');
+    expect(again).toBe(one);
+    expect(two).not.toBe(one);
+    expect(one).not.toBe(plain);
   });
 });
 
@@ -113,6 +129,31 @@ describe('isUncertainOutcome', () => {
     expect(
       isUncertainOutcome(new Error('Connection error.', { cause: stall })),
     ).toBe(true);
+  });
+
+  it('is false for a frontend call that was never sent, even on an aborted turn and when wrapped', () => {
+    const notSent = new FrontendCallNotSentError(
+      'aborted',
+      'Browser tool mutate_topic was not sent: the turn was aborted',
+    );
+    const controller = new AbortController();
+    controller.abort();
+    expect(isUncertainOutcome(notSent, controller.signal)).toBe(false);
+    const deadline = new FrontendCallNotSentError(
+      'park-deadline',
+      `Browser tool mutate_topic was not sent: no browser joined session s1 within 300 s. ${OPEN_CHAT_HINT}`,
+    );
+    expect(isUncertainOutcome(deadline)).toBe(false);
+    // LangChain's middleware error keeps the original as `cause`.
+    expect(
+      isUncertainOutcome(
+        new Error(deadline.message, { cause: deadline }),
+        controller.signal,
+      ),
+    ).toBe(false);
+    // The texts would not read as uncertain either, typed or not.
+    expect(isUncertainOutcome(new Error(deadline.message))).toBe(false);
+    expect(isUncertainOutcome(new Error(notSent.message))).toBe(false);
   });
 
   it('is false for a failure the service reported', () => {
@@ -513,6 +554,253 @@ describe('createToolExecutionMiddleware', () => {
     release();
     await Promise.all([a, b, r]);
     expect(order.at(-1)).toBe('b');
+  });
+
+  describe('frontend tools', () => {
+    /** `show_*` / `view_*` act in the browser (`surface: 'frontend'`); `view_*` only read. */
+    const laneOf = (name: string) =>
+      name.startsWith('show_') || name.startsWith('view_')
+        ? ('frontend' as const)
+        : name.startsWith('get_')
+          ? ('read' as const)
+          : ('write' as const);
+    const effectOf = (name: string) =>
+      name.startsWith('get_') || name.startsWith('view_')
+        ? ('read' as const)
+        : ('write' as const);
+
+    function sessions(options: { maxReads?: number } = {}) {
+      const scheduler = new ToolScheduler(options);
+      const claims = makeClaimStore();
+      const forSession = (
+        sessionId: string,
+        runId: string,
+        signal?: AbortSignal,
+      ) =>
+        middlewareFor({
+          scheduler,
+          claims: claims.store,
+          laneOf,
+          effectOf,
+          sessionId,
+          runId,
+          ...(signal ? { signal } : {}),
+        }).wrap;
+      return { scheduler, claims, forSession };
+    }
+
+    const held = () => {
+      let release!: () => void;
+      const done = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { done, release };
+    };
+
+    const until = async (check: () => boolean) => {
+      for (let i = 0; i < 50 && !check(); i += 1)
+        await new Promise((resolve) => setTimeout(resolve, 1));
+    };
+
+    it('runs in the session’s own frontend lane, one at a time per session, beside the user-wide write lane', async () => {
+      const { scheduler, forSession } = sessions();
+      const one = forSession('session-1', 'run-1');
+      const two = forSession('session-2', 'run-2');
+      const started: string[] = [];
+      const first = held();
+      const write = held();
+      const runs = [
+        one(requestFor('send_message', { to: 'x' }), async () => {
+          started.push('write');
+          await write.done;
+          return okResult('send_message');
+        }),
+        one(requestFor('show_card', { id: 'a' }), async () => {
+          started.push('one:a');
+          await first.done;
+          return okResult('show_card');
+        }),
+        one(requestFor('show_card', { id: 'b' }), async () => {
+          started.push('one:b');
+          return okResult('show_card');
+        }),
+        two(requestFor('show_card', { id: 'c' }), async () => {
+          started.push('two:c');
+          return okResult('show_card');
+        }),
+      ];
+      await until(() => started.length >= 4);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      // The held server write held up no browser call; session 1's second
+      // browser call waits for its first.
+      expect([...started].sort()).toEqual(['one:a', 'two:c', 'write']);
+      expect(scheduler.snapshot()).toMatchObject({
+        write: { inFlight: 1, queued: 0 },
+        sessionLanes: { 'frontend:session-1': { inFlight: 1, queued: 1 } },
+      });
+      first.release();
+      write.release();
+      await Promise.all(runs);
+      expect(started.at(-1)).toBe('one:b');
+      expect(scheduler.snapshot().sessionLanes).toEqual({});
+    });
+
+    it('lets a user read run while four chats each have a browser read parked', async () => {
+      const { scheduler, claims, forSession } = sessions({ maxReads: 4 });
+      const parked = held();
+      const views = ['s1', 's2', 's3', 's4'].map((sessionId, i) =>
+        forSession(sessionId, `run-${i}`)(
+          requestFor('view_page', { tab: i }),
+          async () => {
+            await parked.done;
+            return okResult('view_page');
+          },
+        ),
+      );
+      await until(() => scheduler.snapshot().frontend.inFlight === 4);
+      expect(scheduler.snapshot().read).toEqual({ inFlight: 0, queued: 0 });
+      const read = await forSession('s5', 'run-5')(
+        requestFor('get_thing'),
+        async () => okResult('get_thing'),
+      );
+      expect(read).toMatchObject({ content: 'ok' });
+      parked.release();
+      await Promise.all(views);
+      // A browser read is never claimed.
+      expect(claims.log).toEqual([]);
+    });
+
+    it('claims a frontend write by its effect, under a fingerprint of its session', async () => {
+      const { claims, forSession } = sessions();
+      // The same browser write in two chats at once: two actions, both run.
+      const first = held();
+      let secondRan = false;
+      const a = forSession('session-1', 'run-1')(
+        requestFor('show_card', { id: 'a' }),
+        async () => {
+          await first.done;
+          return okResult('show_card');
+        },
+      );
+      await until(() => claims.rows.size === 1);
+      const b = await forSession('session-2', 'run-2')(
+        requestFor('show_card', { id: 'a' }),
+        async () => {
+          secondRan = true;
+          return okResult('show_card');
+        },
+      );
+      expect(secondRan).toBe(true);
+      expect(b).toMatchObject({ content: 'ok' });
+      first.release();
+      await a;
+      expect(claims.log).toEqual([
+        'claim:show_card',
+        'claim:show_card',
+        'release:show_card',
+        'release:show_card',
+      ]);
+      expect(claims.rows.size).toBe(0);
+    });
+
+    it('still blocks an identical frontend write in the same session while its outcome is unknown', async () => {
+      const { claims, forSession } = sessions();
+      const one = forSession('session-1', 'run-1');
+      await Promise.resolve(
+        one(requestFor('show_card', { id: 'a' }), async () => {
+          throw new TypeError('fetch failed');
+        }),
+      ).catch(() => undefined);
+      let ran = false;
+      const out = await forSession('session-1', 'run-2')(
+        requestFor('show_card', { id: 'a' }),
+        async () => {
+          ran = true;
+          return okResult('show_card');
+        },
+      );
+      expect(ran).toBe(false);
+      expect(out).toMatchObject({
+        status: 'error',
+        content: uncertainWriteToolResult('show_card'),
+      });
+      expect(claims.log.at(-1)).toBe('blocked:show_card');
+    });
+
+    it('still guards an identical server write user-wide across sessions', async () => {
+      const { claims, forSession } = sessions();
+      await Promise.resolve(
+        forSession('session-1', 'run-1')(
+          requestFor('send_message', { to: 'a' }),
+          async () => {
+            throw new TypeError('fetch failed');
+          },
+        ),
+      ).catch(() => undefined);
+      let ran = false;
+      await forSession('session-2', 'run-2')(
+        requestFor('send_message', { to: 'a' }),
+        async () => {
+          ran = true;
+          return okResult('send_message');
+        },
+      );
+      expect(ran).toBe(false);
+      expect(claims.log.at(-1)).toBe('blocked:send_message');
+    });
+
+    it('releases the claim of a frontend write never sent: the turn aborted while it was parked', async () => {
+      const { claims, forSession } = sessions();
+      const registry = new FrontendCallRegistry();
+      const controller = new AbortController();
+      const wrap = forSession('session-1', 'run-1', controller.signal);
+      const out = wrap(requestFor('show_card', { id: 'a' }), async () => {
+        const pending = registry.open(
+          {
+            kind: 'browser',
+            toolCallId: 'inv-1',
+            toolName: 'show_card',
+            sessionId: 'session-1',
+          },
+          {
+            timeoutMs: 15_000,
+            parkTimeoutMs: 60_000,
+            signal: controller.signal,
+          },
+        );
+        controller.abort();
+        await pending;
+        return okResult('show_card');
+      });
+      await expect(out).rejects.toBeInstanceOf(FrontendCallNotSentError);
+      expect(claims.log).toEqual(['claim:show_card', 'release:show_card']);
+      expect(claims.rows.size).toBe(0);
+    });
+
+    it('releases the claim of a frontend write never sent: its park deadline passed', async () => {
+      const { claims, forSession } = sessions();
+      const registry = new FrontendCallRegistry();
+      const out = forSession('session-1', 'run-1')(
+        requestFor('show_card', { id: 'a' }),
+        async () => {
+          await registry.open(
+            {
+              kind: 'browser',
+              toolCallId: 'inv-1',
+              toolName: 'show_card',
+              sessionId: 'session-1',
+            },
+            { timeoutMs: 15_000, parkTimeoutMs: 5 },
+          );
+          return okResult('show_card');
+        },
+      );
+      await expect(out).rejects.toMatchObject({
+        name: 'FrontendCallNotSentError',
+        reason: 'park-deadline',
+      });
+      expect(claims.log).toEqual(['claim:show_card', 'release:show_card']);
+    });
   });
 
   it('is refused outright once the turn is aborted', async () => {

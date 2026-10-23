@@ -83,6 +83,13 @@ export const ACTION_PROPOSALS_OPEN_PER_OWNER = 16;
 /** A `prepared` card counts as open this long after creation (its TTL plus clock skew). */
 export const OPEN_PREPARED_MS = 20 * 60_000;
 
+/**
+ * A card's claim time from its lifecycle JSON, NULL when the JSON is not
+ * valid (such a row is the prune's, never a deadline). Claim times are
+ * written by `toISOString()`, so they order as text.
+ */
+const UNEXECUTED_CLAIMED_AT = `(CASE WHEN json_valid(lifecycle) THEN json_extract(lifecycle,'$.claimedAt') END)`;
+
 const backoff = (base: number, max: number, attempts: number) =>
   Math.min(base * 2 ** attempts, max);
 
@@ -139,6 +146,18 @@ export class ActionProposalStore {
     if (!shape.some((c) => c.name === 'hash_recorded_at'))
       await this.db.run(
         `ALTER TABLE action_proposals ADD COLUMN hash_recorded_at INTEGER NOT NULL DEFAULT 0`,
+      );
+    // `closeUnexecuted`'s mark: 1 = closed as revoked when the execution
+    // window passed with no transaction (`unexecuted_claimed_at` keeps the
+    // claim, so a late hash can still be accepted), 2 = unreadable, out of
+    // the sweep's schedule (the prune drops it).
+    if (!shape.some((c) => c.name === 'unexecuted_close'))
+      await this.db.run(
+        `ALTER TABLE action_proposals ADD COLUMN unexecuted_close INTEGER NOT NULL DEFAULT 0`,
+      );
+    if (!shape.some((c) => c.name === 'unexecuted_claimed_at'))
+      await this.db.run(
+        `ALTER TABLE action_proposals ADD COLUMN unexecuted_claimed_at TEXT`,
       );
     await this.db.run(
       `CREATE UNIQUE INDEX IF NOT EXISTS action_proposals_transaction ON action_proposals(owner_did, transaction_hash)`,
@@ -541,33 +560,48 @@ export class ActionProposalStore {
   async closeUnexecuted(ownerDid: string): Promise<number> {
     const now = this.now();
     return this.db.transaction(async () => {
+      // Due rows only, oldest claim first: the same filter the deadline
+      // below reads, so a row this sweep cannot close never keeps the
+      // deadline in the past.
       const rows = await this.db.exec<{ id: string }>(
-        `SELECT id FROM action_proposals WHERE owner_did=? AND status IN ('claimed','unknown') AND transaction_hash IS NULL LIMIT 16`,
-        [ownerDid],
+        `SELECT id FROM action_proposals WHERE owner_did=? AND status IN ('claimed','unknown') AND transaction_hash IS NULL AND unexecuted_close=0 AND ${UNEXECUTED_CLAIMED_AT}<=? ORDER BY ${UNEXECUTED_CLAIMED_AT},id LIMIT 16`,
+        [
+          ownerDid,
+          new Date(now - ACTION_PROPOSAL_EXECUTION_WINDOW_MS).toISOString(),
+        ],
       );
       let closed = 0;
       for (const row of rows) {
         let p: ActionProposal | null;
         try {
           p = await this.get(ownerDid, row.id);
-        } catch {
-          // An unreadable row is the prune's to drop, not this sweep's.
+        } catch (error) {
+          // Unreadable: out of this sweep's schedule (the prune drops it),
+          // so its claim no longer holds the next deadline in the past.
+          await this.db.run(
+            `UPDATE action_proposals SET unexecuted_close=2 WHERE owner_did=? AND id=?`,
+            [ownerDid, row.id],
+          );
+          console.error(
+            `[action-proposals] unexecuted close of ${row.id} quarantined: ${error instanceof Error ? error.message : String(error)}`,
+          );
           continue;
         }
         if (
           !p ||
           (p.lifecycle.status !== 'claimed' &&
             p.lifecycle.status !== 'unknown') ||
-          ('transactionHash' in p.lifecycle && p.lifecycle.transactionHash) ||
-          Date.parse(p.lifecycle.claimedAt) +
-            ACTION_PROPOSAL_EXECUTION_WINDOW_MS >
-            now
+          ('transactionHash' in p.lifecycle && p.lifecycle.transactionHash)
         )
           continue;
         await this.writeLifecycle(ownerDid, row.id, {
           status: 'revoked',
           endedAt: new Date(now).toISOString(),
         });
+        await this.db.run(
+          `UPDATE action_proposals SET unexecuted_close=1,unexecuted_claimed_at=? WHERE owner_did=? AND id=?`,
+          [p.lifecycle.claimedAt, ownerDid, row.id],
+        );
         closed++;
       }
       return closed;
@@ -576,7 +610,7 @@ export class ActionProposalStore {
   /** When the next hash-less claimed card's execution window ends, if any. */
   async nextUnexecutedCloseAt(ownerDid: string): Promise<number | undefined> {
     const row = await this.db.get<{ claimed: string | null }>(
-      `SELECT MIN(json_extract(lifecycle,'$.claimedAt')) AS claimed FROM action_proposals WHERE owner_did=? AND status IN ('claimed','unknown') AND transaction_hash IS NULL`,
+      `SELECT MIN(${UNEXECUTED_CLAIMED_AT}) AS claimed FROM action_proposals WHERE owner_did=? AND status IN ('claimed','unknown') AND transaction_hash IS NULL AND unexecuted_close=0`,
       [ownerDid],
     );
     const claimed = row?.claimed ? Date.parse(row.claimed) : NaN;
@@ -700,6 +734,32 @@ export class ActionProposalStore {
               command.transactionHash.toUpperCase())
         )
           return p;
+        if (p.lifecycle.status === 'revoked' && command.transactionHash) {
+          // Closed by `closeUnexecuted` (the window passed with no hash) and
+          // the transaction landed after all: the hash is accepted and the
+          // card goes back to `unknown` on the normal verification path.
+          // The memo still binds the transaction to this card.
+          const closed = await this.db.get<{
+            unexecuted_close: number;
+            unexecuted_claimed_at: string | null;
+          }>(
+            `SELECT unexecuted_close,unexecuted_claimed_at FROM action_proposals WHERE owner_did=? AND id=?`,
+            [ownerDid, id],
+          );
+          if (closed?.unexecuted_close === 1 && closed.unexecuted_claimed_at) {
+            lifecycle = {
+              status: 'unknown',
+              claimedAt: closed.unexecuted_claimed_at,
+              transactionHash: command.transactionHash.toUpperCase(),
+            };
+            await this.writeLifecycle(ownerDid, id, lifecycle);
+            await this.db.run(
+              `UPDATE action_proposals SET unexecuted_close=0,transaction_hash_rejected=0,verify_after=?,verify_attempts=0,hash_recorded_at=? WHERE owner_did=? AND id=?`,
+              [this.now() + VERIFY_FIRST_DELAY_MS, this.now(), ownerDid, id],
+            );
+            return { ...p, lifecycle };
+          }
+        }
         if (
           p.lifecycle.status !== 'claimed' &&
           p.lifecycle.status !== 'unknown'

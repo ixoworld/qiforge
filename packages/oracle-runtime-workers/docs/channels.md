@@ -246,7 +246,8 @@ and a per-action backoff of 15 s doubling to 10 min (the attempt is spent
 before the read), and stops refreshing an action 24 h after its review
 expired. The newer outcome by `sequence` wins; outcome sequences never move
 backwards on write (an older one is ignored), and the object is marked dirty
-only when an outcome is new. This read also recovers a callback that was lost.
+only when an outcome is new or a refresh was scheduled (the backoff is
+owner-copy state); a poll that refreshes nothing marks nothing. This read also recovers a callback that was lost.
 The callback does not count as user access. Hub rows (requests, references,
 outcomes) are pruned from the alarm, at most hourly, 30 days after their
 review expired.

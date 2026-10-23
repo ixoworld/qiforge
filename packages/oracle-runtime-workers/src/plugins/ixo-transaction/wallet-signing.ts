@@ -65,7 +65,10 @@ type WalletChannel =
 
 /**
  * The turn's way to the wallet: a session with a realtime channel and a
- * Portal browser connected to it.
+ * Portal tab that can run the action right now (`canDispatch`: a foreground
+ * socket; a background executor never runs an AG-UI action). A signing
+ * request is never parked: without such a tab it is refused at once, so it
+ * never waits minutes in the user-wide write lane for a tab to open.
  */
 function walletChannel(ctx: RuntimeContext): WalletChannel {
   const sessionId = ctx.session.id;
@@ -77,7 +80,7 @@ function walletChannel(ctx: RuntimeContext): WalletChannel {
         'Wallet signing needs a Portal session with a realtime connection, which this conversation does not have.',
     };
   }
-  if (!frontend.hasClient(sessionId)) {
+  if (!frontend.canDispatch(sessionId, 'agui', SIGN_TRANSACTION_ACTION_NAME)) {
     return {
       ok: false,
       reason:

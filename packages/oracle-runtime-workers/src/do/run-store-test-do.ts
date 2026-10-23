@@ -5,6 +5,7 @@
  */
 import { DurableObject } from 'cloudflare:workers';
 import { DoSqliteDatabase } from '../sqlite/database';
+import { activeChatRuns } from './active-runs';
 import type { RunSummary } from './contracts';
 import type { PackedSegment } from './run-buffer';
 import { RunCoordinator } from './run-coordinator';
@@ -172,6 +173,11 @@ export class RunStoreTestDO extends DurableObject {
     return (await this.runStore()).listActive();
   }
 
+  /** `activeChatRuns` over the given live records and this store's `listActive()`. */
+  async activeChatRuns(live: RunRecord[]): Promise<RunRecord[]> {
+    return activeChatRuns(live, await (await this.runStore()).listActive());
+  }
+
   async queuedForSession(sessionId: string): Promise<RunRecord[]> {
     return (await this.runStore()).queuedForSession(sessionId);
   }
@@ -200,6 +206,10 @@ export class RunStoreTestDO extends DurableObject {
 
   async bumpMark(runId: string, toolCallId: string): Promise<void> {
     await (await this.runStore()).bumpMark(runId, toolCallId);
+  }
+
+  async markSent(runId: string, toolCallId: string): Promise<void> {
+    await (await this.runStore()).markSent(runId, toolCallId);
   }
 
   async finishMark(

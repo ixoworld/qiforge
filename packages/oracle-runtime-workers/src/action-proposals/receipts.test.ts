@@ -5,6 +5,7 @@ import { TopicProposalStore } from './topic-store';
 import { TopicReadUnavailable, typedTopicError } from './topic-errors';
 import { readTopicEvent, resolveTopicIdentity } from './topic-matrix';
 import { TopicChainReader } from './topic-chain';
+import { TopicCandidateSchema } from './topic-prepare';
 import { TopicProtocolError } from '@ixo/topic-protocol';
 import { ZodError } from 'zod';
 import { env, runInDurableObject } from 'cloudflare:test';
@@ -437,13 +438,13 @@ describe('durable canonical action receipts', () => {
         Object.defineProperty(h.host, 'gateway', { value: gateway });
         Object.assign(h.host, {
           ready: async () => undefined,
+          requestHousekeeping: async () => undefined,
           env: {
             ACTION_PROPOSALS_ENABLED: 'true',
             ACTION_TOPIC_PROPOSALS_ENABLED: 'true',
             BLOCKSYNC_GRAPHQL_URL: 'https://blocksync.test/graphql',
           },
         });
-        await topics.transition(OWNER, p.id, 'claim', p.digest);
         const claim = async () =>
           JSON.parse(
             (await call<string | null>(
@@ -454,6 +455,25 @@ describe('durable canonical action receipts', () => {
               { kind: 'claim', digest: p.digest },
             ))!,
           );
+        // The first claim passes on the authority read preparation made.
+        await call(
+          h.host,
+          'rememberTopicAuthority',
+          `${p.id}:${p.digest}`,
+          Date.now(),
+        );
+        expect(await claim()).toMatchObject({
+          ok: true,
+          proposal: { lifecycle: { status: 'claimed' } },
+        });
+        // The second, with no remembered read at all: refused from the
+        // journal, zero remote reads.
+        await call(
+          h.host,
+          'rememberTopicAuthority',
+          `${p.id}:${p.digest}`,
+          Date.now() - 31_000,
+        );
         expect(await claim()).toMatchObject({
           ok: false,
           error: 'Proposal already consumed',
@@ -599,9 +619,49 @@ describe('durable canonical action receipts', () => {
     // A node answer the chain reader does not understand.
     const node: typeof fetch = async () =>
       Response.json({ jsonrpc: '2.0', error: { code: -32601 } });
+    resetChainNetworkCache();
     await expect(
       new TopicChainReader('https://rpc.test', 'pandora-8', node).checkChain(),
     ).rejects.toBeInstanceOf(TopicReadUnavailable);
+  });
+
+  it("reads an RPC origin's network once per cache window for topic chain reads", async () => {
+    resetChainNetworkCache();
+    let status = 0;
+    const node: typeof fetch = async (input) => {
+      if (String(input).includes('/status')) status++;
+      return Response.json({
+        result: { node_info: { network: 'pandora-8' } },
+      });
+    };
+    const chain = new TopicChainReader('https://rpc.test', 'pandora-8', node);
+    await chain.checkChain();
+    await chain.checkChain();
+    await new TopicChainReader(
+      'https://rpc.test',
+      'pandora-8',
+      node,
+    ).checkChain();
+    expect(status).toBe(1);
+    resetChainNetworkCache();
+  });
+
+  it('refuses a ninth grant on a grant card', () => {
+    const grant = (n: number) => ({
+      did: `did:ixo:ixo1${'q'.repeat(37)}${n}`,
+      role: 'submit' as const,
+      agentQuota: '1',
+      expiresAt: '2099-01-01T00:00:00.000Z',
+    });
+    const candidate = (count: number) => ({
+      action: 'grant_topic_access',
+      network: 'testnet',
+      roomId: '!room:mx.test',
+      topicId: 'topic-1',
+      grants: Array.from({ length: count }, (_, i) => grant(i)),
+    });
+    expect(TopicCandidateSchema.safeParse(candidate(8)).success).toBe(true);
+    expect(TopicCandidateSchema.safeParse(candidate(9)).success).toBe(false);
   });
 
   it('serves topic cards, turn outcomes and the alarm when the transfer store failed to open', async () => {

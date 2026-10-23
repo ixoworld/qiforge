@@ -802,5 +802,11 @@ export {
 export type { TurnLimits, TurnUsage } from './turn-budget';
 export { budgetedLlm } from './budgeted-llm';
 export type { BudgetedLlm, BudgetedLlmOptions } from './budgeted-llm';
-export { ToolScheduler } from './tool-scheduler';
-export type { ToolLane, ToolSchedulerOptions } from './tool-scheduler';
+export { sessionLaneKey, ToolScheduler } from './tool-scheduler';
+export type {
+  LaneOccupancy,
+  SessionToolLane,
+  ToolLane,
+  ToolSchedulerOptions,
+  ToolSchedulerSnapshot,
+} from './tool-scheduler';

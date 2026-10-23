@@ -25,6 +25,7 @@ function fakeStore(seed: ToolMark[] = []) {
         doneAt: null,
         outcome: null,
         attempts: 1,
+        sentAt: null,
       });
       log.push(`start:${input.toolCallId}`);
       return undefined;
@@ -33,7 +34,12 @@ function fakeStore(seed: ToolMark[] = []) {
       const mark = marks.get(toolCallId)!;
       mark.attempts += 1;
       mark.doneAt = null;
+      mark.sentAt = null;
       log.push(`bump:${toolCallId}`);
+    },
+    async markSent(_runId, toolCallId) {
+      marks.get(toolCallId)!.sentAt = 'now';
+      log.push(`sent:${toolCallId}`);
     },
     async finishMark(_runId, toolCallId, outcome) {
       const mark = marks.get(toolCallId)!;
@@ -76,6 +82,26 @@ describe('toolEffectOf', () => {
     expect(toolEffectOf({ name: 'create_task' })).toBe('write');
     expect(toolEffectOf({ name: 'sandbox_run' })).toBe('write');
     expect(toolEffectOf({ name: 'call_research_agent' })).toBe('write');
+  });
+
+  it('reads the camelCase forms of the read verbs, and find', () => {
+    expect(toolEffectOf({ name: 'getEntityProfileDomain' })).toBe('read');
+    expect(toolEffectOf({ name: 'getResources' })).toBe('read');
+    expect(toolEffectOf({ name: 'getOntology' })).toBe('read');
+    expect(toolEffectOf({ name: 'findEntity' })).toBe('read');
+    expect(toolEffectOf({ name: 'find_entity' })).toBe('read');
+    expect(toolEffectOf({ name: 'listRooms' })).toBe('read');
+    expect(toolEffectOf({ name: 'viewPage' })).toBe('read');
+    // The verb must end at a word boundary of either convention.
+    expect(toolEffectOf({ name: 'getter' })).toBe('write');
+    expect(toolEffectOf({ name: 'finder' })).toBe('write');
+    expect(toolEffectOf({ name: 'get' })).toBe('write');
+    expect(toolEffectOf({ name: 'createEntity' })).toBe('write');
+    expect(toolEffectOf({ name: 'mutate_topic' })).toBe('write');
+    // A declaration still wins over the name.
+    expect(toolEffectOf({ name: 'getAndDelete', effect: 'write' })).toBe(
+      'write',
+    );
   });
 });
 
@@ -121,6 +147,7 @@ describe('ToolMarksMiddleware', () => {
         doneAt: null,
         outcome: null,
         attempts: 1,
+        sentAt: null,
       },
     ]);
     const mw = createToolMarksMiddleware({
@@ -154,6 +181,7 @@ describe('ToolMarksMiddleware', () => {
         doneAt: null,
         outcome: null,
         attempts: 1,
+        sentAt: null,
       },
     ]);
     const mw = createToolMarksMiddleware({
@@ -172,6 +200,142 @@ describe('ToolMarksMiddleware', () => {
     expect(executed).toBe(1);
     expect(marks.get('c4')?.attempts).toBe(2);
     expect(log).toEqual(['bump:c4', 'finish:c4:ok']);
+  });
+
+  function frontendMark(
+    toolCallId: string,
+    toolName: string,
+    effect: ToolMark['effect'],
+    sentAt: string | null,
+  ): ToolMark {
+    return {
+      runId: 'r1',
+      toolCallId,
+      toolName,
+      effect,
+      startedAt: 'earlier',
+      doneAt: null,
+      outcome: null,
+      attempts: 1,
+      sentAt,
+    };
+  }
+
+  it('re-runs a frontend write that was parked and never sent', async () => {
+    const { store, log, marks } = fakeStore([
+      frontendMark('c5', 'mutate_topic', 'write', null),
+    ]);
+    const mw = createToolMarksMiddleware({
+      runId: 'r1',
+      store,
+      effectOf: () => 'write',
+      surfaceOf: (name) => (name === 'mutate_topic' ? 'frontend' : undefined),
+    });
+    let executed = 0;
+    const out = (await (mw.wrapToolCall as WrapToolCall)(
+      requestFor('c5', 'mutate_topic'),
+      async () => {
+        executed += 1;
+        return new ToolMessage({ tool_call_id: 'c5', content: 'done' });
+      },
+    )) as ToolMessage;
+    expect(executed).toBe(1);
+    expect(out.content).toBe('done');
+    expect(marks.get('c5')?.attempts).toBe(2);
+    expect(marks.get('c5')?.outcome).toBe('ok');
+    expect(log).toEqual(['bump:c5', 'finish:c5:ok']);
+  });
+
+  it('keeps the unknown outcome for a frontend write that was sent', async () => {
+    const { store, log, marks } = fakeStore([
+      frontendMark('c6', 'mutate_topic', 'write', 'earlier'),
+    ]);
+    const mw = createToolMarksMiddleware({
+      runId: 'r1',
+      store,
+      effectOf: () => 'write',
+      surfaceOf: () => 'frontend',
+    });
+    let executed = false;
+    const out = (await (mw.wrapToolCall as WrapToolCall)(
+      requestFor('c6', 'mutate_topic'),
+      async () => {
+        executed = true;
+        return new ToolMessage({ tool_call_id: 'c6', content: 'ran' });
+      },
+    )) as ToolMessage;
+    expect(executed).toBe(false);
+    expect(out.status).toBe('error');
+    expect(out.content).toBe(unknownOutcomeToolResult('mutate_topic'));
+    expect(marks.get('c6')?.outcome).toBe('interrupted');
+    expect(log).toEqual(['finish:c6:interrupted']);
+  });
+
+  it('re-runs a frontend read that was sent', async () => {
+    const { store, log } = fakeStore([
+      frontendMark('c7', 'getEntityProfileDomain', 'read', 'earlier'),
+    ]);
+    const mw = createToolMarksMiddleware({
+      runId: 'r1',
+      store,
+      effectOf: () => 'read',
+      surfaceOf: () => 'frontend',
+    });
+    let executed = 0;
+    await (mw.wrapToolCall as WrapToolCall)(
+      requestFor('c7', 'getEntityProfileDomain'),
+      async () => {
+        executed += 1;
+        return new ToolMessage({ tool_call_id: 'c7', content: '{}' });
+      },
+    );
+    expect(executed).toBe(1);
+    expect(log).toEqual(['bump:c7', 'finish:c7:ok']);
+  });
+
+  it('does not re-run an unsent write of a tool that is not a frontend tool', async () => {
+    const { store, log } = fakeStore([
+      frontendMark('c8', 'create_task', 'write', null),
+    ]);
+    const mw = createToolMarksMiddleware({
+      runId: 'r1',
+      store,
+      effectOf: () => 'write',
+      surfaceOf: (name) => (name === 'mutate_topic' ? 'frontend' : undefined),
+    });
+    let executed = false;
+    const out = (await (mw.wrapToolCall as WrapToolCall)(
+      requestFor('c8', 'create_task'),
+      async () => {
+        executed = true;
+        return new ToolMessage({ tool_call_id: 'c8', content: 'ran' });
+      },
+    )) as ToolMessage;
+    expect(executed).toBe(false);
+    expect(out.content).toBe(unknownOutcomeToolResult('create_task'));
+    expect(log).toEqual(['finish:c8:interrupted']);
+  });
+
+  it('does not re-run a frontend write that already finished, sent or not', async () => {
+    const { store, log } = fakeStore([
+      { ...frontendMark('c9', 'mutate_topic', 'write', null), doneAt: 'x' },
+    ]);
+    const mw = createToolMarksMiddleware({
+      runId: 'r1',
+      store,
+      effectOf: () => 'write',
+      surfaceOf: () => 'frontend',
+    });
+    let executed = false;
+    await (mw.wrapToolCall as WrapToolCall)(
+      requestFor('c9', 'mutate_topic'),
+      async () => {
+        executed = true;
+        return new ToolMessage({ tool_call_id: 'c9', content: 'ran' });
+      },
+    );
+    expect(executed).toBe(false);
+    expect(log).toEqual(['finish:c9:interrupted']);
   });
 
   it('adds the continuation note to the first model call only', async () => {
