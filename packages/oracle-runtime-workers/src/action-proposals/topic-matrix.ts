@@ -15,10 +15,25 @@ export const TopicMatrixEventSchema = z.object({
   origin_server_ts: z.number().optional(),
 });
 export type TopicMatrixEvent = z.infer<typeof TopicMatrixEventSchema>;
+/**
+ * What a topic read may tell the gateway about itself: the moment its
+ * budget ends (the gateway stops before it, decrypt waits included) and,
+ * for history, the only sender whose relations matter (others are never
+ * decrypted or counted).
+ */
+export type TopicReadOptions = { deadlineAt?: number; sender?: string };
 export interface TopicMatrixReader {
   state(roomId: string): Promise<unknown>;
-  event(roomId: string, eventId: string): Promise<unknown>;
-  history(roomId: string, root: string): Promise<unknown>;
+  event(
+    roomId: string,
+    eventId: string,
+    opts?: TopicReadOptions,
+  ): Promise<unknown>;
+  history(
+    roomId: string,
+    root: string,
+    opts?: TopicReadOptions,
+  ): Promise<unknown>;
 }
 const DidResponse = z.object({
   data: z.object({

@@ -1046,8 +1046,16 @@ export interface MatrixGatewayObject extends Rpc.DurableObjectBranded {
   /** Full room state as a JSON-encoded array of `{ type, state_key, content, sender, event_id }`. */
   getRoomState(roomId: string): Promise<JsonString>;
   getTopicRoomState(roomId: string): Promise<JsonString>;
-  getTopicEvent(roomId: string, eventId: string): Promise<JsonString | null>;
-  getTopicHistory(roomId: string, root: string): Promise<JsonString>;
+  getTopicEvent(
+    roomId: string,
+    eventId: string,
+    opts?: { deadlineAt?: number },
+  ): Promise<JsonString | null>;
+  getTopicHistory(
+    roomId: string,
+    root: string,
+    opts?: { deadlineAt?: number; sender?: string },
+  ): Promise<JsonString>;
   /** One timeline event (decrypted when E2EE) as JSON `{ event_id, type, content, sender, origin_server_ts }`, or null. */
   getEvent(roomId: string, eventId: string): Promise<JsonString | null>;
   /**

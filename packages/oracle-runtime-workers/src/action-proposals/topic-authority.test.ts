@@ -218,6 +218,45 @@ describe('canonical topic authority', () => {
         fixture.owner,
       ),
     ).rejects.toThrow('owner-authored');
+    // Another member's relation, even a forged operation on the same
+    // revision, is neither decrypted for nor counted: the owner's history
+    // still reads, and the reader is asked for the owner's relations only.
+    const asked: unknown[] = [];
+    const forged = {
+      ...fixture.operation,
+      event_id: '$forged',
+      sender: '@attacker:evil.test',
+    };
+    const filtered = await readTopicAuthority(
+      {
+        ...reader,
+        history: async (_room, _root, opts) => {
+          asked.push(opts);
+          return [fixture.operation, forged];
+        },
+      },
+      fixture.roomId,
+      fixture.topicId,
+      fixture.owner,
+    );
+    expect(filtered.authority).toEqual(result.authority);
+    expect(asked).toEqual([{ sender: fixture.owner }]);
+    // The room state the caller already read is used, not read again.
+    let stateReads = 0;
+    await readTopicAuthority(
+      {
+        ...reader,
+        state: async () => {
+          stateReads++;
+          return [];
+        },
+      },
+      fixture.roomId,
+      fixture.topicId,
+      fixture.owner,
+      [{ ...fixture.snapshot, state_key: fixture.topicId }],
+    );
+    expect(stateReads).toBe(0);
   });
   it('prepares a valid discussion through passive reads and rejects changed room policy', async () => {
     const reader = simpleReader();
