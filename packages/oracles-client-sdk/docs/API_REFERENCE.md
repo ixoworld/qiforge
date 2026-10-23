@@ -7,6 +7,9 @@ Complete API documentation for @ixo/oracles-client-sdk.
 - [Hooks](#hooks)
   - [useChat](#usechat)
   - [useOracleSessions](#useoraclesessions)
+  - [useActiveRuns](#useactiveruns)
+  - [useAbortSession](#useabortsession)
+  - [useWebSocketEvents](#usewebsocketevents)
   - [useContractOracle](#usecontractoracle)
   - [useMemoryEngine](#usememoryengine)
   - [useGetOpenIdToken](#usegetopenidtoken)
@@ -159,8 +162,17 @@ interface UseOracleSessionsReturn {
 
 interface IChatSession {
   sessionId: string;
+  title: string;
   createdAt: string;
-  updatedAt: string;
+  lastUpdatedAt: string;
+  oracleName: string;
+  roomId?: string;
+  /**
+   * The run the session was busy with when the list was fetched; absent
+   * when none (and on runtimes that predate it). For a live status use
+   * `useActiveRuns`.
+   */
+  activeRun?: ChatRunSummary;
 }
 ```
 
@@ -188,6 +200,303 @@ function SessionManager({ oracleDid }) {
   );
 }
 ```
+
+---
+
+### useActiveRuns
+
+Which of the user's chats on an oracle are running right now, for a live
+status on every row of a chat list (`GET /runs/active`). Runs started from
+any client count — the Portal, a Matrix room, a channel such as WhatsApp.
+Scheduled task runs are not listed (they are not in the session list
+either).
+
+#### Signature
+
+```typescript
+function useActiveRuns(
+  oracleDid: string,
+  overrides?: { baseUrl?: string },
+): UseActiveRunsReturn;
+```
+
+#### Return Value
+
+```typescript
+interface UseActiveRunsReturn {
+  runs: ChatRunSummary[]; // Every active run, oldest first
+  bySession: Record<string, ChatRunSummary>; // The run each busy session is on
+  count: number; // How many chats have an active run
+  isSupported: boolean; // False once the runtime answered 404
+  isLoading: boolean;
+  error: Error | null; // The last poll's failure, if it failed
+  refetch: () => Promise<unknown>;
+}
+
+interface ChatRunSummary {
+  runId: string;
+  sessionId: string;
+  requestId: string;
+  client: 'portal' | 'matrix' | 'channel';
+  status: ChatRunStatus; // 'queued' | 'running' | 'recovering' here
+  startedAt: string;
+  updatedAt: string;
+  lastSeq: number;
+  messageId?: string;
+  waitingFor?: ChatRunWaitingFor; // A parked browser call: the user must open the chat
+}
+
+interface ChatRunWaitingFor {
+  kind: 'browser' | 'agui'; // A browser tool call or an AG-UI action call
+  toolName: string; // The oldest parked call's tool or action
+  since: string; // When it was parked (ISO 8601)
+}
+```
+
+A session can have more than one active run (a running one and messages
+sent with `multitask: 'enqueue'` behind it); `bySession` holds the running
+or recovering one, else the oldest queued one. The summaries carry no
+`partialText`.
+
+#### Polling
+
+- Every 4 s (`ACTIVE_RUNS_BUSY_POLL_MS`) while a run is active, every 30 s
+  (`ACTIVE_RUNS_IDLE_POLL_MS`) otherwise and after a failed poll.
+- Only while the tab is visible and a wallet is signed in; once more when
+  the window regains focus.
+- The runtime gives the polls their own per-user rate-limit budget (100
+  requests per 60 s on the Companion), apart from the user's messages.
+  Mount the hook once per oracle (e.g. in the chat list) and read
+  `bySession` in the rows; every mounted instance runs its own timer.
+- A poll is a background request (`authedRequest(…, { background: true })`):
+  it never mints a delegation, and mints invocations with
+  `createInvocation(oracleDid, { background: true })`, which the host must
+  answer without user interaction (see
+  [Credentials and renewal](../README.md#credentials-and-renewal); the
+  Portal's `useCreateUcanInvocation` is the reference host). When the host
+  mints nothing (a locked signer: 401 with `code` equal to the exported
+  `BACKGROUND_INVOCATION_UNAVAILABLE`,
+  nothing sent) or the oracle refuses the credentials (401/403) even after
+  a fresh invocation, polling pauses until the window is focused again;
+  `isSupported` stays `true` and `error` holds the refusal. A host whose
+  `createInvocation` ignores the option still prompts from a poll.
+- A runtime that predates the route answers 404 `Run active not found`:
+  `isSupported` is `false` and the hook probes again every 10 min
+  (`ACTIVE_RUNS_UNSUPPORTED_REPROBE_MS`). Fall back to
+  `IChatSession.activeRun` (also absent there) or show no status. Any
+  other 404 (a wrong base URL) is an ordinary failed poll.
+- A busy chat missing from a loaded `useOracleSessions` list (started in a
+  Matrix room, a channel or another tab) refreshes that list once.
+- Sending a message with `useChat` refreshes the active runs as soon as
+  the message's run has started, so the open chat shows busy at once.
+- The runs are those of the chats `useOracleSessions` lists (same room
+  rule, scheduled task runs left out). `startedAt` is when the runtime
+  recorded the message's run; a queued run's wait is included.
+
+`isActiveRunStatus(status)` is `true` for `queued`, `running` and
+`recovering`.
+
+`waitingFor` is set while the run is blocked on a call to the user's
+browser that no browser could take: the runtime parks a browser tool or
+AG-UI action call of the session when no socket of that session that can
+run it is connected — usually because the chat is not open in any tab —
+instead of failing it. Opening the chat mounts `useChat`'s socket, which
+lets the runtime send the parked call, and the run goes on; the host does
+nothing else. A parked call nobody takes fails after the runtime's park
+deadline (5 min by default) without having been sent. The field describes
+the oldest parked call, is computed for each response (never stored), and
+is absent on runtimes that do not park calls. `isWaitingOnUser(run)` is
+`true` for an active run with a well-formed `waitingFor` (and narrows the
+run so `run.waitingFor` can be read); a malformed one counts as not
+waiting, so the run still shows as an ordinary active one. Show such a
+chat as needing the user ("Needs you") rather than as working.
+
+#### Example
+
+```tsx
+import {
+  isWaitingOnUser,
+  useAbortSession,
+  useActiveRuns,
+  useOracleSessions,
+} from '@ixo/oracles-client-sdk';
+
+function ChatList({ oracleDid }) {
+  const { sessions } = useOracleSessions(oracleDid);
+  const { bySession, isSupported } = useActiveRuns(oracleDid);
+  const { abortSession, isAborting } = useAbortSession(oracleDid);
+
+  return sessions.map((session) => {
+    const run = isSupported ? bySession[session.sessionId] : session.activeRun;
+    return (
+      <div key={session.sessionId}>
+        <span>{session.title}</span>
+        {run && (
+          <span>
+            {isWaitingOnUser(run)
+              ? 'Needs you'
+              : run.status === 'queued'
+                ? 'Waiting'
+                : 'Working'}
+          </span>
+        )}
+        {run && (
+          <button
+            disabled={isAborting}
+            onClick={() => abortSession(session.sessionId)}
+          >
+            Stop
+          </button>
+        )}
+      </div>
+    );
+  });
+}
+```
+
+---
+
+### useAbortSession
+
+Stop the current message of any session (`POST /messages/abort`), not
+only the mounted chat's (`useChat().abortStream` stops that one).
+
+```typescript
+function useAbortSession(
+  oracleDid: string,
+  overrides?: { baseUrl?: string },
+): {
+  abortSession: (sessionId: string) => Promise<{ success: boolean }>;
+  isAborting: boolean;
+  error: Error | null;
+};
+```
+
+The runtime ends the session's active run (the reply so far is kept),
+a message still being admitted and one queued behind a superseded run;
+messages sent with `multitask: 'enqueue'` behind it still start.
+`success` is `false` when there was nothing to stop. The runtime answers
+once the stopped run has ended (at most ~5 s). The session leaves
+`useActiveRuns` at once and comes back if the request fails; afterwards
+the active runs and the `useOracleSessions` lists (whose rows carry
+`activeRun`) are refreshed.
+
+---
+
+### useWebSocketEvents
+
+The session's realtime socket (socket.io): it receives the session's
+events and runs the browser tools and AG-UI actions the oracle calls in
+the browser. `useChat` mounts one for its session; use the hook directly
+only for a socket without a chat, such as a background executor.
+
+```typescript
+function useWebSocketEvents(
+  config: IWebSocketConfig,
+): IUseWebSocketEventsReturn;
+
+interface IWebSocketConfig {
+  oracleDid: string;
+  sessionId: string;
+  handleNewEvent: (event: WebSocketEvent) => void;
+  handleInvalidateCache?: () => void;
+  browserTools?: IBrowserTools; // Read at each call; may change after connect
+  actionTools?: IActionTools;
+  executor?: 'foreground' | 'background'; // Default 'foreground'
+  overrides?: { baseUrl?: string; wsUrl?: string };
+}
+
+interface IUseWebSocketEventsReturn {
+  isConnected: boolean;
+  error: Error | null;
+  connectionStatus: WebSocketConnectionStatus; // 'connecting' | 'connected' | 'disconnected' | 'error'
+  lastActivity: string | null;
+  isConfigReady: boolean;
+  socket: Socket | null;
+}
+```
+
+The CONNECT carries the user's delegation and invocation, built again for
+every reconnect; a refusal of the credentials renews them like any other
+request (stage 1, then stage 2; a background socket: stage 1 only, see
+below).
+
+#### Executor kinds
+
+- `'foreground'` (default): the socket renders the chat. It receives the
+  session's events and runs any browser tool or AG-UI action call of the
+  session. Its CONNECT payload is `{ ucanDelegation, invocation? }`.
+- `'background'`: the socket only runs calls, for a chat that is running
+  but not open. Its CONNECT payload adds `executor: 'background'` and
+  `tools: Object.keys(browserTools ?? {})`, read again at every CONNECT
+  (socket.io asks for the payload on each reconnect), so tools registered
+  since are declared on the next one. The runtime sends it only calls of
+  the names it declared (so no AG-UI action calls), and only when the
+  session has no foreground socket connected (one that connects later
+  takes the next call); it gets none of the session's events. The runtime
+  keeps at most 24 declared names, each matching
+  `^[A-Za-z0-9_-]{1,64}$` (others are dropped), so declare only tools that
+  can run without the chat on screen: read-only, no navigation, nothing
+  that depends on the current page. When a background socket connects,
+  the runtime sends it every parked call of the session it can run
+  (`ChatRunSummary.waitingFor`).
+- Changing `executor` reconnects the socket.
+
+Every socket answers each `browser_tool_call` of its session definitely:
+the runtime sends a call to one socket only, so a socket without any
+browser tools answers a `tool_result` with `result: null` and
+`error: 'Tool <name> not found: no browser tools registered'` (a tool
+missing from a non-empty registry: `Tool <name> not found`) instead of
+leaving the call to end as an unknown outcome.
+
+A background socket runs nothing it did not declare, on any runtime:
+
+- It never listens for `action_call` (AG-UI actions, wallet signing
+  among them), whatever `actionTools` holds.
+- A `browser_tool_call` whose `toolName` its latest CONNECT did not
+  declare is refused with a `tool_result` error
+  (`Tool <name> not found: not declared by this background executor`),
+  also for a tool registered since (the next CONNECT declares it).
+- The runtime echoes the accepted executor in its `connected` event
+  (`executor: 'foreground' | 'background'`). Until that echo says
+  `'background'` the socket answers no call. When the `connected` event
+  lacks it — a runtime that predates executor kinds, which would treat
+  the socket as a foreground one and send it the session's events and
+  every call — the socket closes at once and is not reconnected:
+  `connectionStatus` is `'error'` and `error` carries
+  `code: 'BACKGROUND_EXECUTOR_UNSUPPORTED'` (exported as
+  `BACKGROUND_EXECUTOR_UNSUPPORTED`), with a message saying the runtime
+  does not support background executors.
+
+A background socket never involves the user — no PIN or passkey prompt,
+whatever is cached:
+
+- It sends the cached delegation only
+  (`getDelegation(oracleDid, { background: true })`) and never mints one.
+  With none cached (or one inside the cache's 5 min expiry margin) it
+  opens nothing: `connectionStatus` is `'error'` and `error` carries
+  `code: 'BACKGROUND_SOCKET_UNAVAILABLE'` (exported as
+  `BACKGROUND_SOCKET_UNAVAILABLE`). Mount it again once a delegation is
+  cached (any foreground request caches one).
+- Every CONNECT reads the invocation with
+  `getInvocation(oracleDid, { background: true })`: the cached one, or one
+  the host's `createInvocation(oracleDid, { background: true })` mints
+  without user interaction. When there is none (the host minted nothing,
+  e.g. a locked signer, or the read failed) the CONNECT is not sent — a
+  background socket never connects with a bare delegation: the socket is
+  closed, `connectionStatus` is `'error'` and `error` carries
+  `code: 'BACKGROUND_SOCKET_UNAVAILABLE'`.
+- A CONNECT refused for its credentials is renewed with
+  `renewOracleAuth(oracleDid, 1, sent, { background: true })` only — stage
+  2 mints a delegation and never runs. When stage 1 renews nothing, or the
+  CONNECT after it is refused again, the socket stays disconnected with the
+  refusal as its `error`; mount it again (e.g. after the next successful
+  foreground request) to retry.
+
+This relies on the host's `createInvocation` honouring
+`{ background: true }`, as for `useActiveRuns` (see
+[Credentials and renewal](../README.md#credentials-and-renewal)); a host
+that ignores the option still prompts from a background mint.
 
 ---
 
@@ -731,6 +1040,14 @@ Required context provider that wraps your application.
 interface OraclesProviderProps {
   initialWallet: IWalletProps; // User's wallet
   transactSignX: TransactionFn; // Transaction signing function
+  createDelegation: (oracleDid: string) => Promise<DelegationResult>;
+  // `{ background: true }`: mint without any user interaction (no prompt,
+  // no signer idle-timer extension) or resolve null. See the README's
+  // "Credentials and renewal".
+  createInvocation?: (
+    oracleDid: string,
+    options?: { background?: boolean },
+  ) => Promise<InvocationResult | null>;
   children: ReactNode;
 }
 
@@ -1040,6 +1357,7 @@ const browserTools = {
     toolName: 'getCurrentLocation',
     description: "Get the user's current location",
     schema: z.object({}),
+    effect: 'read', // optional: 'read' | 'write'
     fn: async () => {
       return new Promise((resolve) => {
         navigator.geolocation.getCurrentPosition((position) => {
@@ -1060,6 +1378,17 @@ const { sendMessage } = useChat({
   onPaymentRequiredError: () => {},
 });
 ```
+
+`effect` (optional) tells the oracle what the tool does, and is sent with
+its declaration. `read` only looks: if the oracle restarts while the call
+is out, it may run the call again. `write` changes something: after a
+restart that leaves its outcome unknown it is not repeated blindly. Leave
+it out and the oracle classifies the tool by its name (`get…`, `list…`,
+`find…`, `get_…` and the like are reads; any other name is a write). The
+oracle treats its human-decision tools (`ask_user_question`,
+`propose_domain_creation`, `write_domain_files`, `publish_recipe_release`)
+as writes whatever is declared. A call the oracle never managed to send to
+a browser is always issued again after a restart, whatever its effect.
 
 ### Overriding API URLs
 

@@ -14,6 +14,10 @@ export interface UseOracleSessionsOptions {
   limit?: number;
 }
 
+/** Query-key prefix of every `useOracleSessions` list of an oracle. */
+export const oracleSessionsQueryKey = (oracleDid: string) =>
+  ['oracle-sessions', oracleDid] as const;
+
 export const useOracleSessions = (
   oracleDid: string,
   overrides?: UseOracleSessionsOptions,
@@ -49,7 +53,7 @@ export const useOracleSessions = (
   >({
     // The user is part of the key: the query client outlives an account
     // switch, and a list cached for one user is never shown to another.
-    queryKey: ['oracle-sessions', oracleDid, limit, wallet?.did],
+    queryKey: [...oracleSessionsQueryKey(oracleDid), limit, wallet?.did],
     queryFn: async ({ pageParam }) => {
       const offset = pageParam ?? 0;
       const params = new URLSearchParams();
@@ -98,7 +102,7 @@ export const useOracleSessions = (
     onSettled: async () => {
       // Invalidate and refetch to get the new session
       await queryClient.invalidateQueries({
-        queryKey: ['oracle-sessions', oracleDid],
+        queryKey: oracleSessionsQueryKey(oracleDid),
       });
     },
   });
@@ -118,7 +122,7 @@ export const useOracleSessions = (
     onSettled: async () => {
       // Invalidate and refetch to remove the deleted session
       await queryClient.invalidateQueries({
-        queryKey: ['oracle-sessions', oracleDid],
+        queryKey: oracleSessionsQueryKey(oracleDid),
       });
     },
   });

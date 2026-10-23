@@ -1,6 +1,6 @@
 /* eslint-disable no-console */
 'use client';
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef } from 'react';
 import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
@@ -28,6 +28,7 @@ import {
   type SSEToolCallEventData,
 } from '../../../utils/sse-parser.js';
 import type { ToolSchema } from '../../../types/browser-tool.type.js';
+import { activeRunsQueryKey } from '../../use-active-runs/use-active-runs.js';
 import { useOraclesConfig } from '../../use-oracles-config.js';
 import type { OracleChat } from './oracle-chat.js';
 import {
@@ -99,6 +100,7 @@ export function useSendMessage({
     overrides,
   );
   const apiUrl = overrides?.baseUrl ?? config.apiUrl;
+  const queryClient = useQueryClient();
   const {
     wallet,
     authedRequest,
@@ -505,6 +507,7 @@ export function useSendMessage({
                 name: tool.toolName,
                 description: tool.description,
                 schema: toolJsonSchema(tool.schema),
+                ...(tool.effect && { effect: tool.effect }),
               }))
             : undefined,
           agActions:
@@ -522,6 +525,12 @@ export function useSendMessage({
           },
           onRunStarted: (runId) => {
             activeRunRef.current = runId;
+            // The chat lists show this chat busy now, not at their next
+            // idle poll (up to 30 s later).
+            if (oracleDid)
+              void queryClient.invalidateQueries({
+                queryKey: activeRunsQueryKey(oracleDid),
+              });
           },
           callbacks: frameCallbacks(chat),
         });
@@ -795,6 +804,7 @@ const askOracleStream = async (props: {
     name: string;
     description: string;
     schema: Record<string, unknown>;
+    effect?: 'read' | 'write';
   }[];
   agActions?: {
     name: string;

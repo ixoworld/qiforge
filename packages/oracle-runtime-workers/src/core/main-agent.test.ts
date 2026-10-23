@@ -1216,7 +1216,10 @@ describe('createMainAgent tool execution', () => {
           laneOf: (name) =>
             built.subAgentToolNames.has(name)
               ? 'subagent'
-              : (built.toolEffects.get(name) ?? 'write'),
+              : built.toolSurfaces.has(name)
+                ? 'frontend'
+                : (built.toolEffects.get(name) ?? 'write'),
+          effectOf: (name) => built.toolEffects.get(name) ?? 'write',
           runId: 'run-1',
           sessionId: 'sess-1',
           claims: claims.store,
@@ -1271,6 +1274,103 @@ describe('createMainAgent tool execution', () => {
       (error: unknown) => harnessLimitOf(error)?.limit === 'tools',
     );
     expect(calls.read).toBe(1);
+  }, 15_000);
+
+  it('hands a plugin tool’s frontend surface to the execution middleware’s lane choice', async () => {
+    const scheduler = new ToolScheduler();
+    const lanesSeen: Record<string, string[]> = {};
+    const busyLanes = (name: string) => async () => {
+      const snapshot = scheduler.snapshot();
+      lanesSeen[name] = [
+        ...Object.keys(snapshot.sessionLanes),
+        ...(snapshot.write.inFlight > 0 ? ['write'] : []),
+      ];
+      return 'done';
+    };
+    const plugin = makePlugin({
+      name: 'surfaced',
+      getTools: () => [
+        makeTool('stage_card', {
+          effect: 'write',
+          surface: 'frontend',
+          handler: busyLanes('stage_card'),
+        }),
+        makeTool('save_note', {
+          effect: 'write',
+          handler: busyLanes('save_note'),
+        }),
+      ],
+      getSubAgents: () => [
+        makeSubAgent('Card Agent', {
+          tools: [
+            makeTool('render_card', { effect: 'write', surface: 'frontend' }),
+            // Shares a name with the main tool above but declares the
+            // browser: the two disagree, so it stays a server-side tool.
+            makeTool('save_note', { effect: 'write', surface: 'frontend' }),
+          ],
+        }),
+      ],
+    });
+    const core = bootCore([plugin]);
+    await core.warm();
+    const claims = makeClaimStore();
+    const built = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(
+        core,
+        scriptedLlm({
+          main: [
+            [{ name: 'stage_card', args: {}, id: 'w1' }],
+            [{ name: 'save_note', args: {}, id: 'w2' }],
+            [],
+          ],
+        }),
+      ),
+      requestCtx,
+      state: {},
+      checkpointer: new MemorySaver(),
+      hooks: {
+        toolExecution: createToolExecutionMiddleware({
+          budget: new TurnBudget({ tools: 20, durationMs: 60_000 }),
+          scheduler,
+          laneOf: (name) =>
+            built.subAgentToolNames.has(name)
+              ? 'subagent'
+              : built.toolSurfaces.has(name)
+                ? 'frontend'
+                : (built.toolEffects.get(name) ?? 'write'),
+          effectOf: (name) => built.toolEffects.get(name) ?? 'write',
+          runId: 'run-1',
+          sessionId: 'sess-1',
+          claims: claims.store,
+        }),
+      },
+    });
+    expect(built.toolSurfaces.get('stage_card')).toBe('frontend');
+    expect(built.toolSurfaces.has('save_note')).toBe(false);
+    // A sub-agent's inner tools are scheduled by the same middleware.
+    expect(built.toolSurfaces.get('render_card')).toBe('frontend');
+
+    await built.agent.invoke(
+      { messages: [new HumanMessage('go')] },
+      { configurable: { thread_id: 'sess-1' } },
+    );
+    expect(lanesSeen).toEqual({
+      stage_card: ['frontend:sess-1'],
+      save_note: ['write'],
+    });
+    // Both writes were claimed by their effect, whatever their lane.
+    expect(claims.log).toEqual([
+      'claim:stage_card',
+      'release:stage_card',
+      'claim:save_note',
+      'release:save_note',
+    ]);
+    // The session lane was dropped once idle.
+    expect(scheduler.snapshot().sessionLanes).toEqual({});
   }, 15_000);
 });
 
@@ -2088,10 +2188,12 @@ describe('createMainAgent — sub-agent dispatches', () => {
           doneAt: null,
           outcome: null,
           attempts: 1,
+          sentAt: null,
         });
         return undefined;
       },
       async bumpMark() {},
+      async markSent() {},
       async finishMark(runId, toolCallId, outcome) {
         const mark = marks.get(`${runId}:${toolCallId}`);
         if (mark) Object.assign(mark, { doneAt: 'now', outcome });

@@ -76,6 +76,8 @@ function frontend(
     },
     callAgAction: callAgActionMock,
     hasClient: () => true,
+    canDispatch: () => true,
+    parkedFor: () => null,
     ...over,
   };
 }
@@ -431,7 +433,10 @@ describe('create-path tools', () => {
     const { tools, sessions } = await makeTools();
     await sessions.prepared(USER, THREAD, BLOB, PREP);
     const ctx = ctxWithStoredBlob({
-      frontend: frontend({ hasClient: () => false }),
+      frontend: frontend({
+        hasClient: () => false,
+        canDispatch: () => false,
+      }),
     });
 
     await byName(tools, 'approve_pod_transaction').handler(approval(BLOB), ctx);

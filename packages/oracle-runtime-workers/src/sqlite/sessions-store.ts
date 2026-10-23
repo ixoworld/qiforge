@@ -220,6 +220,28 @@ export class SessionsStore {
     return { sessions: [], total: Number(count?.n ?? 0) };
   }
 
+  /**
+   * The room of each of these sessions that has a row (`null`: a row
+   * without a room). One statement for the lot; sessions without a row are
+   * absent from the map.
+   */
+  async roomsOf(
+    sessionIds: readonly string[],
+  ): Promise<Map<string, string | null>> {
+    const rooms = new Map<string, string | null>();
+    if (sessionIds.length === 0) return rooms;
+    await this.setup();
+    const rows = await this.db.exec<{
+      session_id: string;
+      room_id: string | null;
+    }>(
+      `SELECT session_id, room_id FROM sessions WHERE session_id IN (${sessionIds.map(() => '?').join(', ')})`,
+      [...sessionIds],
+    );
+    for (const row of rows) rooms.set(row.session_id, row.room_id);
+    return rooms;
+  }
+
   async getSession(sessionId: string): Promise<SessionRecord | undefined> {
     await this.setup();
     const row = await this.db.get<SessionRow>(

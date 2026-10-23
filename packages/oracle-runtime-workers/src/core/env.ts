@@ -63,6 +63,10 @@ export const LLM_STREAM_RETRIES_DEFAULT = 1;
 export const LLM_STREAM_RETRIES_MAX = 5;
 /** The turn's wall-clock deadline when `TURN_TIMEOUT_MS` is unset. */
 export const TURN_TIMEOUT_MS_DEFAULT = 600_000;
+/** How long a frontend call waits unsent for a browser when `FRONTEND_PARK_TIMEOUT_MS` is unset. */
+export const FRONTEND_PARK_TIMEOUT_MS_DEFAULT = 300_000;
+/** The longest delay `setTimeout` honours (2^31 − 1 ms); a larger one fires at once. */
+export const MAX_TIMER_MS = 2_147_483_647;
 
 /** An https URL, or http on localhost / 127.0.0.1 (local harness). */
 const secureUrlSchema = z.string().refine((raw) => isSecureUrl(raw), {
@@ -220,6 +224,20 @@ export const baseEnvSchema = z.object({
     .int()
     .positive()
     .default(2_000),
+  /**
+   * How long a browser tool / AG-UI call waits, unsent, for a socket of its
+   * session that can run it (ms) before it fails as never sent. The turn's
+   * own deadline (`TURN_TIMEOUT_MS`) still ends it first when sooner. At
+   * most `MAX_TIMER_MS` (a timer holds it). The user object reads it
+   * through this field (`frontendParkTimeoutMs`,
+   * src/realtime/realtime-endpoint.ts).
+   */
+  FRONTEND_PARK_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(MAX_TIMER_MS)
+    .default(FRONTEND_PARK_TIMEOUT_MS_DEFAULT),
 
   // --- decisions ----------------------------------------------------------
   // Bounded semantic Decision provider (`DECISION_PROVIDER`, `DECISION_MODEL`,

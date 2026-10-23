@@ -34,7 +34,7 @@ describe('executeBrowserToolCall', () => {
 
     await executeBrowserToolCall(
       socket,
-      {},
+      { propose_topic: { fn: vi.fn() } },
       {
         sessionId: 'session-456',
         toolCallId: 'tool-456',
@@ -49,5 +49,30 @@ describe('executeBrowserToolCall', () => {
       result: null,
       error: 'Tool missing_tool not found',
     });
+  });
+
+  it('answers a definite error when no browser tools are registered at all', async () => {
+    for (const registry of [undefined, {}]) {
+      const socket = { emit: vi.fn() };
+
+      await executeBrowserToolCall(socket, registry, {
+        sessionId: 'session-789',
+        toolCallId: 'tool-789',
+        toolName: 'propose_topic',
+        args: {},
+      });
+
+      expect(socket.emit.mock.calls).toEqual([
+        [
+          'tool_result',
+          {
+            toolCallId: 'tool-789',
+            sessionId: 'session-789',
+            result: null,
+            error: 'Tool propose_topic not found: no browser tools registered',
+          },
+        ],
+      ]);
+    }
   });
 });
