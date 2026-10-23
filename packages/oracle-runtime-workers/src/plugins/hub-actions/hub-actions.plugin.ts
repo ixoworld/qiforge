@@ -59,7 +59,21 @@ const discoverSchema = z.strictObject({});
 
 export type HubActionRequestResult =
   | { status: 'prepared'; actionReference: ActionReferenceV1; summary: string }
-  | { status: 'unavailable'; reason: string };
+  | { status: 'unavailable' | 'expired'; reason: string };
+
+/**
+ * The idempotency key the Hub sees: a fixed-length digest of the run and
+ * tool call (the Hub allows 120 characters; a run id alone is 72).
+ */
+async function hubRequestKey(runId: string, toolCallId: string) {
+  const bytes = new Uint8Array(
+    await crypto.subtle.digest(
+      'SHA-256',
+      new TextEncoder().encode(`${runId}:${toolCallId}`),
+    ),
+  );
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
 
 async function requestHubAction(
   input: unknown,
@@ -93,17 +107,34 @@ async function requestHubAction(
       reason: 'The requested operation is unsupported or incomplete.',
     };
   }
-  const reference = await ctx.hubActions.request({
-    ownerDid: ctx.user.did,
-    sessionId: ctx.session.id,
-    runId: ctx.session.runId,
-    requestId: ctx.session.requestId,
-    provider: channel.provider,
-    bindingId: channel.bindingId,
-    bindingRevision: channel.bindingRevision,
-    requestKey: `${ctx.session.runId}:${ctx.toolCallId}`,
-    operation,
-  });
+  let reference: ActionReferenceV1;
+  try {
+    reference = await ctx.hubActions.request({
+      ownerDid: ctx.user.did,
+      sessionId: ctx.session.id,
+      runId: ctx.session.runId,
+      requestId: ctx.session.requestId,
+      provider: channel.provider,
+      bindingId: channel.bindingId,
+      bindingRevision: channel.bindingRevision,
+      requestKey: await hubRequestKey(ctx.session.runId, ctx.toolCallId),
+      operation,
+    });
+  } catch (error) {
+    // A cap reached, a request that expired, a run no user message
+    // started: the runtime's own words, so the model can tell the user.
+    // Anything else stays an error.
+    if (
+      error instanceof Error &&
+      error.name === 'HubActionRefused' &&
+      'kind' in error
+    )
+      return {
+        status: error.kind === 'expired' ? 'expired' : 'unavailable',
+        reason: error.message,
+      };
+    throw error;
+  }
   return {
     status: 'prepared',
     actionReference: reference,
@@ -163,8 +194,15 @@ export class HubActionsPlugin extends OraclePlugin {
   readonly version = '0.1.0';
   readonly manifest = manifest;
   override readonly configSchema = configSchema;
+  /** The flag alone is not enough: the owner object needs the Hub's URL and this oracle's key. */
   override autoDetect(env: Record<string, unknown>): boolean {
-    return env.HUB_ACTIONS_ENABLED === 'true';
+    return (
+      env.HUB_ACTIONS_ENABLED === 'true' &&
+      typeof env.AUTH_HUB_URL === 'string' &&
+      env.AUTH_HUB_URL.length > 0 &&
+      typeof env.AUTH_HUB_CHANNEL_SERVICE_KEY === 'string' &&
+      env.AUTH_HUB_CHANNEL_SERVICE_KEY.length > 0
+    );
   }
   override getTools(): PluginTool[] {
     return [

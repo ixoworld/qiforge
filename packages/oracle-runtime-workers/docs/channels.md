@@ -218,14 +218,37 @@ identity fields or approve an action. The existing `prepare_action` Portal card
 path remains available independently.
 
 The oracle uses `AUTH_HUB_URL` (an HTTPS origin) and
-`AUTH_HUB_CHANNEL_SERVICE_KEY` to create and read operations. The owner object
+`AUTH_HUB_CHANNEL_SERVICE_KEY` to create and read operations; both are
+required (the `AUTH_HUB` binding alone is not enough), and the plugin's tools
+are offered only when the flag, the URL and the key are all set.
+
+Only a run an inbound channel message started may prepare a review (its run
+record carries the channel's `remoteMessageRef`; a scheduled or background run
+is refused). Each prepare is capped: 2 per agent run, 5 per user per hour and
+10 per user per day (`HUB_ACTIONS_PER_*` in `src/hub-actions/store.ts`); a
+retry of the same tool call is not a new prepare. A refusal reaches the model
+as `{ status: 'unavailable' | 'expired', reason }`. Auth Hub's capabilities
+are cached per owner object for 60 s. The Hub's idempotency key is the
+SHA-256 hex of `runId:toolCallId` (fixed length). A retry whose reserved
+expiry has passed returns the reference recorded for it, or `expired`, and
+never POSTs a past expiry. The owner object
 reserves the canonical request and stable expiry before the Hub POST, so an
 interrupted response can be retried with the same key and bytes. It stores each
 immutable initial reference with its original turn in SQLite. The
 finished run's Reply Plan contains a `hub-action` part with a typed
 `actionReference` and short summary. Polling the original `/channels/turn`
-request retrieves `hubActionOutcomes`; it reads Auth Hub's authenticated latest
-outcome and persists it. This read also recovers a callback that was lost.
+request retrieves `hubActionOutcomes` from SQLite first (callback-delivered
+outcomes included, so an Auth Hub outage hides nothing already known). A poll
+then refreshes at most ONE action that has no terminal outcome (`succeeded`,
+`failed`, `declined`) from Auth Hub's authenticated status, with a 3 s timeout
+and a per-action backoff of 15 s doubling to 10 min (the attempt is spent
+before the read), and stops refreshing an action 24 h after its review
+expired. The newer outcome by `sequence` wins; outcome sequences never move
+backwards on write (an older one is ignored), and the object is marked dirty
+only when an outcome is new. This read also recovers a callback that was lost.
+The callback does not count as user access. Hub rows (requests, references,
+outcomes) are pruned from the alarm, at most hourly, 30 days after their
+review expired.
 
 Auth Hub can post the same typed event to `/api/internal/actions/outcomes` with
 the separate `x-auth-hub-outcome-key` credential, configured on the oracle as

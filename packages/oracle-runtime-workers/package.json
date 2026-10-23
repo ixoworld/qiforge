@@ -15,6 +15,7 @@
     "node": ">=22"
   },
   "scripts": {
+    "prepublishOnly": "node ../../scripts/assert-no-vendored-overrides.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:core": "vitest run --config vitest.core.config.ts",

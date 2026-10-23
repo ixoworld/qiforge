@@ -3,6 +3,7 @@ import { makeRuntimeContext } from '../../core/test-fixtures';
 import { HubActionsPlugin } from './hub-actions.plugin';
 import { HubActionClient } from '../../hub-actions/client';
 import { prepareHubAction } from '../../hub-actions/request';
+import { HubActionRefused } from '../../hub-actions/store';
 
 const id = 'C'.repeat(32);
 const reference = {
@@ -97,7 +98,17 @@ describe('Hub actions Workers plugin', () => {
       provider: 'whatsapp',
       bindingId: 'chb_three',
       bindingRevision: 4,
-      requestKey: 'run-three:tool-three',
+      // A fixed-length digest of run and tool call (the Hub allows 120
+      // characters; a channel run id alone is 72).
+      requestKey: Array.from(
+        new Uint8Array(
+          await crypto.subtle.digest(
+            'SHA-256',
+            new TextEncoder().encode('run-three:tool-three'),
+          ),
+        ),
+        (b) => b.toString(16).padStart(2, '0'),
+      ).join(''),
       operation,
     });
     const other = makeRuntimeContext({
@@ -191,4 +202,63 @@ describe('Hub actions Workers plugin', () => {
     expect(sent?.expiresAt).toBe(1_770_000_900);
     expect(sent?.bindingId).toBe('chb_three');
   });
+
+  it('registers only with the flag, the Hub URL and the oracle key', () => {
+    const plugin = new HubActionsPlugin();
+    expect(plugin.autoDetect({ HUB_ACTIONS_ENABLED: 'true' })).toBe(false);
+    expect(
+      plugin.autoDetect({
+        HUB_ACTIONS_ENABLED: 'true',
+        AUTH_HUB_URL: 'https://hub.test',
+      }),
+    ).toBe(false);
+    expect(
+      plugin.autoDetect({
+        HUB_ACTIONS_ENABLED: 'true',
+        AUTH_HUB_URL: 'https://hub.test',
+        AUTH_HUB_CHANNEL_SERVICE_KEY: 'oracle-secret',
+      }),
+    ).toBe(true);
+  });
+
+  it.each([
+    ['limit', 'unavailable'],
+    ['expired', 'expired'],
+  ] as const)(
+    'answers a %s refusal with a typed result the model can relay',
+    async (kind, status) => {
+      const ctx = makeRuntimeContext({
+        config: { HUB_ACTIONS_ENABLED: 'true' },
+        session: {
+          id: 'session-three',
+          client: 'channel',
+          requestId: 'request-three',
+          runId: 'run-three',
+          channel: {
+            provider: 'whatsapp',
+            bindingId: 'chb_three',
+            bindingRevision: 4,
+          },
+        },
+        toolCallId: 'tool-three',
+        hubActions: {
+          capabilities: async () => {
+            throw new Error('unused');
+          },
+          request: async () => {
+            throw new HubActionRefused(kind, `refused: ${kind}`);
+          },
+          status: async () => null,
+        },
+      });
+      const tool = new HubActionsPlugin()
+        .getTools()
+        .find((item) => item.name === 'request_hub_action');
+      if (!tool) throw new Error('request tool missing');
+      expect(await tool.handler({ operation }, ctx)).toEqual({
+        status,
+        reason: `refused: ${kind}`,
+      });
+    },
+  );
 });

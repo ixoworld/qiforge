@@ -39,9 +39,15 @@ import type {
 import { ChannelTurns } from '../channels/turns';
 import { HubActionClient } from '../hub-actions/client';
 import { prepareHubAction } from '../hub-actions/request';
-import { HubActionStore } from '../hub-actions/store';
+import {
+  HUB_CHECK_AFTER_EXPIRY_MS,
+  HubActionRefused,
+  HubActionStore,
+  TERMINAL_HUB_STATUSES,
+} from '../hub-actions/store';
 import {
   canonicalJson,
+  type ActionCapabilitiesV1,
   type ActionOperationV1,
   type ActionOutcomeV1,
 } from '@ixo/action-protocol';
@@ -578,6 +584,10 @@ const BLOB_SWEEP_INTERVAL_MS = 60 * 60_000;
 const ACTION_TICK_BUDGET_MS = 15_000;
 /** The card retention sweep runs at most this often per instance. */
 const ACTION_PRUNE_INTERVAL_MS = 60 * 60_000;
+/** How long the Hub's capabilities answer is reused per object. */
+const HUB_CAPABILITIES_CACHE_MS = 60_000;
+/** A channel poll waits this long for Auth Hub, once per poll at most. */
+const HUB_POLL_TIMEOUT_MS = 3_000;
 /** How long a passed topic authority read is reused for the same card. */
 const TOPIC_AUTHORITY_MEMO_MS = 30_000;
 /** The Blocksync lookup of the user's homeserver is abandoned after this long (the fallback applies). */
@@ -954,6 +964,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private actionProposals: ActionProposalStore | null = null;
     private hubActionStore: HubActionStore | null = null;
     private hubActionClient: HubActionClient | null = null;
+    /** The Hub's capabilities for this oracle account, reused for `HUB_CAPABILITIES_CACHE_MS`. */
+    private hubCapabilities: {
+      value: ActionCapabilitiesV1;
+      at: number;
+    } | null = null;
     private topicProposals: TopicProposalStore | null = null;
     /** `assertTopicDependenciesMemo`: card id and digest -> when it passed. */
     private topicAuthorityMemo: Map<string, number> | undefined;
@@ -2109,7 +2124,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         ...(this.hubActionStore && this.hubActionClient
           ? {
               hubActions: {
-                capabilities: () => this.hubActionClient!.capabilities(),
+                capabilities: () => this.cachedHubCapabilities(),
                 request: (input: {
                   ownerDid: string;
                   sessionId: string;
@@ -2210,6 +2225,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.actionProposals = null;
       this.hubActionStore = null;
       this.hubActionClient = null;
+      this.hubCapabilities = null;
       this.topicProposals = null;
       this.attachmentTextCache = null;
       this.domainContextStore = null;
@@ -3151,6 +3167,19 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       };
     }
 
+    /** The Hub's capabilities, cached per object for `HUB_CAPABILITIES_CACHE_MS`. */
+    private async cachedHubCapabilities(): Promise<ActionCapabilitiesV1> {
+      const client = this.hubActionClient;
+      if (!client) throw new Error('Hub actions are unavailable');
+      const now = Date.now();
+      const cached = this.hubCapabilities ?? null;
+      if (cached && now - cached.at < HUB_CAPABILITIES_CACHE_MS)
+        return cached.value;
+      const value = await client.capabilities();
+      this.hubCapabilities = { value, at: now };
+      return value;
+    }
+
     private async requestHubAction(input: {
       ownerDid: string;
       sessionId: string;
@@ -3162,12 +3191,28 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       requestKey: string;
       operation: ActionOperationV1;
     }) {
-      if (
-        !this.hubActionStore ||
-        !this.hubActionClient ||
-        input.ownerDid !== this.userDid
-      )
+      const store = this.hubActionStore;
+      const client = this.hubActionClient;
+      if (!store || !client || input.ownerDid !== this.userDid)
         throw new Error('Hub actions are unavailable for this channel');
+      // Only a run an inbound channel message started may prepare a review:
+      // a scheduled or background run has no user asking for it.
+      const record = await this.runStore?.get(input.runId);
+      const turn = record
+        ? (JSON.parse(record.request) as StoredRunRequest).turn
+        : null;
+      if (
+        !turn ||
+        turn.client !== 'channel' ||
+        !turn.channel?.remoteMessageRef ||
+        turn.identity.userDid !== input.ownerDid ||
+        turn.sessionId !== input.sessionId ||
+        turn.sessionId.startsWith(SYNTHETIC_SESSION_PREFIX)
+      )
+        throw new HubActionRefused(
+          'limit',
+          'Reviews are prepared only in reply to a message from the user.',
+        );
       await assertActiveChannelBinding(
         {
           userDid: input.ownerDid,
@@ -3180,19 +3225,18 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         this.env,
       );
       const reference = await prepareHubAction(
-        this.hubActionClient,
+        {
+          capabilities: () => this.cachedHubCapabilities(),
+          request: (body) => client.request(body),
+        },
         {
           reserve: async (origin, operation, expiresAt) => {
-            const reserved = await this.hubActionStore!.reserve(
-              origin,
-              operation,
-              expiresAt,
-            );
+            const reserved = await store.reserve(origin, operation, expiresAt);
             this.markDirty();
             return reserved;
           },
-          record: (origin, reference) =>
-            this.hubActionStore!.record(origin, reference),
+          record: (origin, reference) => store.record(origin, reference),
+          byRequestKey: (key) => store.byRequestKey(key),
         },
         input,
       );
@@ -3203,10 +3247,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private async statusHubAction(
       ownerDid: string,
       actionId: string,
+      timeoutMs?: number,
     ): Promise<ActionOutcomeV1 | null> {
       const held = await this.hubActionStore?.get(ownerDid, actionId);
       if (!held || !this.hubActionClient) return null;
-      const status = await this.hubActionClient.status(actionId);
+      const status = await this.hubActionClient.status(actionId, timeoutMs);
       if (
         status.ownerDid !== ownerDid ||
         canonicalJson(status.reference) !== canonicalJson(held.reference)
@@ -3218,12 +3263,20 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           status.digest !== status.outcome.authorizedDigest
         )
           return null;
-        await this.hubActionStore!.recordOutcome(status.outcome);
-        this.markDirty();
+        if (await this.hubActionStore!.recordOutcome(status.outcome))
+          this.markDirty();
       }
       return status.outcome;
     }
 
+    /**
+     * The run's Hub outcomes for a channel poll: stored outcomes first
+     * (callback-delivered ones included, so a Hub outage hides nothing
+     * already known), then at most ONE status refresh per poll, only for an
+     * action with no terminal outcome whose backoff (15 s doubling to
+     * 10 min) has passed, with a 3 s timeout. The newer outcome by
+     * sequence wins.
+     */
     private async hubOutcomesForRun(
       ownerDid: string,
       sessionId: string,
@@ -3231,16 +3284,37 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     ): Promise<ActionOutcomeV1[]> {
       const store = this.hubActionStore;
       if (!store) return [];
+      const now = Date.now();
+      let refreshed = false;
       const current: ActionOutcomeV1[] = [];
-      for (const reference of await store.forRun(ownerDid, sessionId, runId)) {
-        try {
-          const outcome = await this.statusHubAction(ownerDid, reference.id);
-          if (outcome) current.push(outcome);
-        } catch (error) {
-          console.warn(
-            `[hub-actions] status recovery unavailable for ${reference.id}: ${error instanceof Error ? error.message : String(error)}`,
-          );
+      for (const row of await store.runState(ownerDid, sessionId, runId)) {
+        let latest = row.latest;
+        if (
+          !refreshed &&
+          this.hubActionClient &&
+          !(latest && TERMINAL_HUB_STATUSES.has(latest.status)) &&
+          row.nextCheckAt <= now &&
+          row.reference.expiresAt * 1000 + HUB_CHECK_AFTER_EXPIRY_MS > now
+        ) {
+          refreshed = true;
+          // The attempt is spent before the read: a Hub that hangs is
+          // asked again only after the backoff.
+          await store.scheduleCheck(row.reference.id, row.checkAttempts);
+          try {
+            const fresh = await this.statusHubAction(
+              ownerDid,
+              row.reference.id,
+              HUB_POLL_TIMEOUT_MS,
+            );
+            if (fresh && (!latest || fresh.sequence > latest.sequence))
+              latest = fresh;
+          } catch (error) {
+            console.warn(
+              `[hub-actions] status recovery unavailable for ${row.reference.id}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
         }
+        if (latest) current.push(latest);
       }
       return current;
     }
@@ -3248,7 +3322,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     async recordHubActionOutcome(input: ActionOutcomeV1): Promise<void> {
       if (this.env.HUB_ACTIONS_ENABLED !== 'true')
         throw new Error('Hub actions disabled');
-      await this.ready({ userDid: input.ownerDid });
+      // A Hub callback is not the user: it must not count as access (that
+      // would delay idle eviction).
+      await this.ready({ userDid: input.ownerDid }, { recordAccess: false });
       const held = await this.hubActionStore?.get(
         input.ownerDid,
         input.reference.id,
@@ -3267,8 +3343,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         throw new Error(
           'Hub outcome was not confirmed by authenticated status',
         );
-      await this.hubActionStore!.recordOutcome(remote.outcome);
-      this.markDirty();
+      if (await this.hubActionStore!.recordOutcome(remote.outcome))
+        this.markDirty();
     }
 
     async listSessions(
@@ -3792,6 +3868,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         } catch (err) {
           console.error(
             `[topic-actions] prune failed for ${userDid}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        // Hub action rows (requests, references, outcomes) 30 days after
+        // their review expired.
+        try {
+          if (this.hubActionStore && (await this.hubActionStore.prune()) > 0)
+            this.markDirty();
+        } catch (err) {
+          console.error(
+            `[hub-actions] prune failed for ${userDid}: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
       }

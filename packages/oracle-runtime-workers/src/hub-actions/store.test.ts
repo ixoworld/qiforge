@@ -100,14 +100,17 @@ describe('Hub action Durable Object store', () => {
       env.HUB_ACTION_TEST.idFromName('outcome-sequence'),
     );
     await stub.record(origin, reference);
-    await stub.outcome(outcome);
-    await stub.outcome({
-      ...outcome,
-      eventId: 'event-late-arrival',
-      sequence: 1,
-      status: 'submitted',
-      receipt: null,
-    });
+    expect(await stub.outcome(outcome)).toBe(true);
+    // An older outcome than the latest stored changes nothing.
+    expect(
+      await stub.outcome({
+        ...outcome,
+        eventId: 'event-late-arrival',
+        sequence: 1,
+        status: 'submitted',
+        receipt: null,
+      }),
+    ).toBe(false);
     await stub.reopen();
     expect(await stub.forRun(ownerDid, origin.sessionId, origin.runId)).toEqual(
       [outcome],
@@ -175,5 +178,87 @@ describe('Hub action Durable Object store', () => {
       origin,
       reference: replayReference,
     });
+  });
+
+  it('caps prepares per run and refuses a lapsed reservation instead of posting it', async () => {
+    const stub = env.HUB_ACTION_TEST.get(
+      env.HUB_ACTION_TEST.idFromName('caps-and-expiry'),
+    );
+    const now = Math.floor(Date.now() / 1000);
+    await stub.reserve(origin, operation, now + 900);
+    await stub.reserve(
+      { ...origin, requestKey: 'run-one:tool-two' },
+      operation,
+      now + 900,
+    );
+    // A retry of a reserved key is not a new prepare.
+    expect(await stub.reserve(origin, operation, now + 900)).toBe(now + 900);
+    // A native promise around the RPC one: `rejects` would otherwise probe
+    // the RPC promise's properties, each a pipelined call of its own.
+    await expect(
+      Promise.resolve(
+        stub.reserve(
+          { ...origin, requestKey: 'run-one:tool-three' },
+          operation,
+          now + 900,
+        ),
+      ),
+    ).rejects.toThrow('most reviews one turn may prepare');
+    // A reservation that lapsed with no reference recorded: no POST.
+    const posted: unknown[] = [];
+    const client = {
+      capabilities: async () => ({
+        version: 'ixo.auth-capabilities/1' as const,
+        accountId: reference.accountId,
+        oracleDid: 'did:ixo:oracle',
+        network: null,
+        resourceOrigin: null,
+        operations: ['form.submit.v1' as const],
+        transfer: null,
+        forms: [
+          {
+            formId: 'form-one',
+            destination: 'registered-form',
+            fields: [
+              {
+                id: 'answer',
+                label: 'Answer',
+                type: 'text' as const,
+                required: true,
+              },
+            ],
+            declaration: null,
+          },
+        ],
+      }),
+      request: async (body: unknown) => {
+        posted.push(body);
+        return reference;
+      },
+    };
+    const late = Date.now() + 16 * 60_000;
+    await expect(
+      prepareHubAction(
+        client,
+        stub,
+        { ...origin, provider: 'whatsapp', operation },
+        late,
+      ),
+    ).rejects.toThrow('expired before it reached Auth Hub');
+    expect(posted).toEqual([]);
+  });
+
+  it('prunes rows 30 days after their review expired', async () => {
+    const stub = env.HUB_ACTION_TEST.get(
+      env.HUB_ACTION_TEST.idFromName('prune'),
+    );
+    const old = Math.floor(Date.now() / 1000) - 31 * 24 * 60 * 60;
+    const oldRef = { ...reference, expiresAt: old };
+    await stub.reserve(origin, operation, old);
+    await stub.record(origin, oldRef);
+    await stub.outcome({ ...outcome, reference: oldRef });
+    expect(await stub.prune()).toBe(2);
+    expect(await stub.get(ownerDid, id)).toBeNull();
+    expect(await stub.prune()).toBe(0);
   });
 });

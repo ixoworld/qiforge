@@ -50,7 +50,11 @@ export class HubActionClient {
     this.origin = url.origin;
   }
 
-  private async send(path: string, body?: unknown): Promise<unknown> {
+  private async send(
+    path: string,
+    body?: unknown,
+    timeoutMs = 10_000,
+  ): Promise<unknown> {
     const request = new Request(new URL(path, this.origin), {
       method: body === undefined ? 'GET' : 'POST',
       headers: {
@@ -58,7 +62,7 @@ export class HubActionClient {
         ...(body === undefined ? {} : { 'content-type': 'application/json' }),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(timeoutMs),
       redirect: 'manual',
     });
     const response = await (this.transport.fetcher
@@ -91,10 +95,15 @@ export class HubActionClient {
     );
   }
 
-  async status(id: string): Promise<HubActionStatus> {
+  /** `timeoutMs`: the poll path passes a short one (a slow Hub must not hold a poll). */
+  async status(id: string, timeoutMs = 10_000): Promise<HubActionStatus> {
     if (!/^[A-Za-z0-9_-]{32}$/.test(id))
       throw new Error('Invalid Hub action id');
-    const raw = await this.send(`/api/internal/actions/operations/${id}`);
+    const raw = await this.send(
+      `/api/internal/actions/operations/${id}`,
+      undefined,
+      timeoutMs,
+    );
     if (!isRecord(raw)) throw new Error('Invalid Hub action status');
     const value = raw;
     const reference = assertHubReferenceUrl(value.reference, this.origin);
