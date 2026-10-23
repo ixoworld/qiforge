@@ -219,6 +219,14 @@ export interface MainAgentBuildResult {
    * turn, `write` never does). Declared by the plugin, else by name.
    */
   toolEffects: Map<string, 'read' | 'write'>;
+  /**
+   * The plugin tools the turn can run that act in the user's browser
+   * (`PluginTool.surface`), a sub-agent's inner tools included: scheduled
+   * in their session's `frontend` lane. A tool absent from the map (meta,
+   * domain and dispatch tools, every server-side tool, and a name two tools
+   * disagree on) is scheduled by its effect.
+   */
+  toolSurfaces: Map<string, 'frontend'>;
   /** Names of the sub-agent dispatch tools (`call_*_agent`): scheduled in their own lane. */
   subAgentToolNames: ReadonlySet<string>;
   /**

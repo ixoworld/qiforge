@@ -108,6 +108,8 @@ export interface RunCoordinatorHost {
   checkpointIdOf: (sessionId: string) => Promise<string | null>;
   /** After a run reached a terminal state and its row was closed. */
   onRunEnded?: (record: RunRecord, outcome: RunOutcome) => Promise<void>;
+  /** Before a run's row is created (the host marks that runs may be active). */
+  beforeCreate?: () => Promise<void>;
   /** How long a superseded or aborted attempt gets to wind down (default 5 s). */
   supersedeGraceMs?: number;
 }
@@ -213,6 +215,11 @@ export class RunCoordinator {
       if (run.record.status === 'queued' && !candidate) candidate = run;
     }
     return candidate;
+  }
+
+  /** The record of every run this coordinator holds (not ended yet). */
+  records(): RunRecord[] {
+    return [...this.live.values()].map((run) => run.record);
   }
 
   byRequestId(requestId: string): LiveRun | undefined {
@@ -367,6 +374,7 @@ export class RunCoordinator {
       }
     }
     const checkpointId = await this.host.checkpointIdOf(sessionId);
+    await this.host.beforeCreate?.();
     const record = await this.host.store.create({
       runId: input.runId,
       sessionId,
@@ -421,6 +429,28 @@ export class RunCoordinator {
     }
     this.abortRun(active, 'aborted');
     return true;
+  }
+
+  /**
+   * `abortSession`, resolving once every run it stopped has ended — out of
+   * the live map, its row closed — or after the supersede grace, whichever
+   * comes first. Runs enqueued behind the active one are not stopped and
+   * not waited for.
+   */
+  async abortSessionSettled(sessionId: string): Promise<boolean> {
+    const before = [...this.live.values()].filter(
+      (run) => run.sessionId === sessionId,
+    );
+    const stopped = this.abortSession(sessionId);
+    const ending = before.filter(
+      (run) => this.live.get(run.runId) !== run || run.abort.signal.aborted,
+    );
+    if (ending.length > 0)
+      await withinGrace(
+        this.graceMs,
+        Promise.all(ending.map((run) => run.done)),
+      );
+    return stopped;
   }
 
   /**
