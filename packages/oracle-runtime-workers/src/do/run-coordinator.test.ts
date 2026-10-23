@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { activeChatRuns } from './active-runs';
 import { createSseSubscriberStream } from './sse-stream';
 import type { Logger } from '../plugin-api/types';
 import type { PackedSegment, RunFrame } from './run-buffer';
@@ -1347,5 +1348,102 @@ describe('re-join racing the end of a run', () => {
       partialText: 'Hello',
     });
     expect(joined?.replay.map((f) => f.event)).not.toContain('done');
+  });
+});
+
+describe('user-wide active runs over the live records and the stored rows', () => {
+  it('lists a dequeued run once, running, while its row still says queued, and drops runs as they end', async () => {
+    const h = harness();
+    const a = await h.begin('a');
+    const b = await h.begin('b', 'enqueue');
+    const t = await h.begin('t', 'interrupt', 'task:t1');
+    expect(h.runs.records().map((r) => [r.runId, r.status])).toEqual([
+      ['a', 'running'],
+      ['b', 'queued'],
+      ['t', 'running'],
+    ]);
+    let duringDequeue: RunRecord[] | undefined;
+    h.store.onUpdate = (runId) => {
+      if (runId !== 'b' || duringDequeue) return;
+      // Called before the row update lands: memory is ahead of the row.
+      expect(h.store.rows.get('b')?.status).toBe('queued');
+      duringDequeue = activeChatRuns(h.runs.records(), [
+        ...h.store.rows.values(),
+      ]);
+    };
+    h.attempts[0]!.finish({ status: 'finished', text: 'A' });
+    await a.live.done;
+    await settled();
+    expect(duringDequeue?.map((r) => [r.runId, r.status])).toEqual([
+      ['b', 'running'],
+    ]);
+    h.store.onUpdate = null;
+    const attemptOf = (runId: string) =>
+      h.attempts.find((x) => x.live.runId === runId)!;
+    attemptOf('b').finish({ status: 'finished', text: 'B' });
+    await b.live.done;
+    await settled();
+    attemptOf('t').finish({ status: 'finished', text: 'T' });
+    await t.live.done;
+    await settled();
+    expect(h.runs.records()).toEqual([]);
+    expect(
+      activeChatRuns(h.runs.records(), await h.store.listActive()),
+    ).toEqual([]);
+  });
+});
+
+describe('a run ending, as the user-wide listing sees it', () => {
+  it('is gone from the live records while its row is being closed, though the row still says running', async () => {
+    const h = harness();
+    const a = await h.begin('a');
+    let duringClose:
+      | { listed: RunRecord[]; rowStatus: string | undefined }
+      | undefined;
+    const close = h.store.close.bind(h.store);
+    h.store.close = async (runId, patch) => {
+      duringClose = {
+        listed: activeChatRuns(h.runs.records(), []),
+        rowStatus: h.store.rows.get(runId)?.status,
+      };
+      return close(runId, patch);
+    };
+    h.attempts[0]!.finish({ status: 'finished', text: 'A' });
+    await a.live.done;
+    expect(duringClose).toEqual({ listed: [], rowStatus: 'running' });
+  });
+
+  it('abortSessionSettled answers once the stopped run has ended and left the live records', async () => {
+    const h = harness();
+    // The attempt winds down 30 ms after its abort signal, not at once.
+    h.stubborn.add('a');
+    const a = await h.begin('a');
+    a.live.abort.signal.addEventListener('abort', () => {
+      setTimeout(
+        () => h.attempts[0]!.finish({ status: 'aborted', text: '' }),
+        30,
+      );
+    });
+    let settled = false;
+    const answer = h.runs.abortSessionSettled(SESSION).then((stopped) => {
+      settled = true;
+      return stopped;
+    });
+    await pause(10);
+    expect(settled).toBe(false);
+    expect(await answer).toBe(true);
+    expect(h.runs.records()).toEqual([]);
+    expect((await h.store.get('a'))?.status).toBe('aborted');
+  });
+
+  it('abortSessionSettled stops a recovering run that no attempt is executing', async () => {
+    const h = harness();
+    h.store.seed({ runId: 'orphan', status: 'running' });
+    await h.runs.recoverOrphans();
+    expect(h.runs.records().map((r) => r.status)).toEqual(['recovering']);
+    expect(await h.runs.abortSessionSettled(SESSION)).toBe(true);
+    expect(h.runs.records()).toEqual([]);
+    expect((await h.store.get('orphan'))?.status).toBe('aborted');
+    expect(h.attempts).toEqual([]);
   });
 });

@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { z as z3 } from 'zod/v3';
 import type { IOraclesContextProps } from '../../../providers/oracles-provider/types.js';
 import type { IBrowserTools } from '../../../types/browser-tool.type.js';
+import { activeRunsQueryKey } from '../../use-active-runs/use-active-runs.js';
 import { OracleChat } from './oracle-chat.js';
 import { useSendMessage } from './use-send-message.js';
 
@@ -449,6 +450,31 @@ describe('useSendMessage', () => {
     expect(refetchQueries).toHaveBeenCalledTimes(1);
   });
 
+  it("refreshes the oracle's active runs once the message's run has started, so chat lists show this chat busy", async () => {
+    context = makeContext();
+    respond = (call) =>
+      call.method === 'POST' ? openPost(call) : new Response('');
+    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
+    try {
+      const { result } = setup(newChat());
+      let sending!: Promise<void>;
+      act(() => {
+        sending = result.current.sendMessage('hi');
+      });
+      await waitFor(() =>
+        expect(
+          invalidate.mock.calls.map(([filters]) => filters?.queryKey),
+        ).toContainEqual(activeRunsQueryKey(ORACLE)),
+      );
+      posts[0]!.write(frame('done', 2, { status: 'finished' }));
+      await act(async () => {
+        await sending;
+      });
+    } finally {
+      invalidate.mockRestore();
+    }
+  });
+
   it("advertises an AG-UI action's zod schema as its JSON Schema, reused parts inlined", async () => {
     const row = z.object({ label: z.string(), value: z.number() });
     context = makeContext({
@@ -515,6 +541,49 @@ describe('useSendMessage', () => {
     } = JSON.parse(calls.find((c) => c.method === 'POST')!.body ?? '{}');
     expect(body.tools[0]!.name).toBe('readLocalStorage');
     expect(body.tools[0]!.schema.properties?.key).toEqual({ type: 'string' });
+  });
+
+  it("forwards a browser tool's declared effect, and sends none when it declares none", async () => {
+    context = makeContext();
+    respond = (call) =>
+      call.method === 'POST' ? openPost(call) : new Response('');
+    const { result } = setup(newChat(), undefined, false, {
+      getEntityProfileDomain: {
+        toolName: 'getEntityProfileDomain',
+        description: 'Read the profile domain of an entity',
+        schema: z.object({ did: z.string() }),
+        fn: async () => null,
+        effect: 'read',
+      },
+      mutateTopic: {
+        toolName: 'mutateTopic',
+        description: 'Change the topic',
+        schema: z.object({ note: z.string() }),
+        fn: async () => null,
+        effect: 'write',
+      },
+      openUrl: {
+        toolName: 'openUrl',
+        description: 'Open a URL',
+        schema: z.object({ url: z.string() }),
+        fn: async () => null,
+      },
+    });
+
+    act(() => {
+      void result.current.sendMessage('hi');
+    });
+    await waitFor(() => expect(posts).toHaveLength(1));
+
+    const body: {
+      tools: { name: string; effect?: string }[];
+    } = JSON.parse(calls.find((c) => c.method === 'POST')!.body ?? '{}');
+    expect(body.tools.map((t) => [t.name, t.effect])).toEqual([
+      ['getEntityProfileDomain', 'read'],
+      ['mutateTopic', 'write'],
+      ['openUrl', undefined],
+    ]);
+    expect(body.tools[2]).not.toHaveProperty('effect');
   });
 
   it('still advertises a browser tool declared with a zod/v3 schema', async () => {
