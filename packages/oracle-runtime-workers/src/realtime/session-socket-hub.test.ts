@@ -87,18 +87,145 @@ describe('SessionSocketHub', () => {
     hub.add(unauthenticated, { ...meta('s1'), sid: 'anon', openedAt: 3 });
     hub.add(otherSession, { ...meta('s2', 'did:ixo:u'), openedAt: 4 });
     // No client activity yet: the tab that connected last.
-    expect(hub.executorForSession('s1')?.socket).toBe(newer);
+    expect(hub.executorFor('s1', 'browser', 'open_url')?.socket).toBe(newer);
     // The older tab is the one the user acted in last.
     hub.noteActivity(older);
-    expect(hub.executorForSession('s1')?.socket).toBe(older);
+    expect(hub.executorFor('s1', 'browser', 'open_url')?.socket).toBe(older);
     // Persisted on the attachment, so a wake from hibernation keeps it.
     expect(
       (older.deserializeAttachment() as { lastActiveAt?: number }).lastActiveAt,
     ).toBe(10);
     t = 20;
     hub.noteActivity(newer);
-    expect(hub.executorForSession('s1')?.socket).toBe(newer);
-    expect(hub.executorForSession('s3')).toBeUndefined();
+    expect(hub.executorFor('s1', 'browser', 'open_url')?.socket).toBe(newer);
+    expect(hub.executorFor('s3', 'browser', 'open_url')).toBeUndefined();
+  });
+
+  it('prefers any foreground tab, else a background executor that declared the tool, by recency', () => {
+    let t = 10;
+    const hub = new SessionSocketHub<FakeSocket>({ now: () => t });
+    const reader = new FakeSocket();
+    const writer = new FakeSocket();
+    const late = new FakeSocket();
+    const background = (sid: string, tools: string[], openedAt: number) => ({
+      ...meta('s1', 'did:ixo:u'),
+      sid,
+      openedAt,
+      executor: 'background' as const,
+      tools,
+    });
+    hub.add(reader, background('reader', ['read_vault', 'find_entity'], 1));
+    hub.add(writer, background('writer', ['mutate_topic'], 2));
+    hub.add(late, background('late', ['find_entity'], 3));
+    // Only a background executor that declared the tool can run it, and
+    // never as an AG-UI action.
+    expect(hub.executorFor('s1', 'browser', 'read_vault')?.socket).toBe(reader);
+    expect(hub.executorFor('s1', 'agui', 'read_vault')).toBeUndefined();
+    expect(hub.executorFor('s1', 'browser', 'mutate_topic')?.socket).toBe(
+      writer,
+    );
+    expect(hub.executorFor('s1', 'browser', 'open_url')).toBeUndefined();
+    // Among the ones that can, the most recent (opened last, then activity).
+    expect(hub.executorFor('s1', 'browser', 'find_entity')?.socket).toBe(late);
+    hub.noteActivity(reader);
+    expect(hub.executorFor('s1', 'browser', 'find_entity')?.socket).toBe(
+      reader,
+    );
+    // A foreground tab wins for every tool, even an older, idle one.
+    const tab = new FakeSocket();
+    hub.add(tab, { ...meta('s1', 'did:ixo:u'), sid: 'tab', openedAt: 0 });
+    t = 30;
+    hub.noteActivity(late);
+    for (const tool of ['read_vault', 'find_entity', 'open_url'])
+      expect(hub.executorFor('s1', 'browser', tool)?.socket).toBe(tab);
+    expect(hub.executorFor('s1', 'agui', 'render_table')?.socket).toBe(tab);
+    // Not authenticated: runs nothing.
+    const anon = new FakeSocket();
+    hub.add(anon, { ...meta('s2'), executor: 'background', tools: ['x'] });
+    expect(hub.executorFor('s2', 'browser', 'x')).toBeUndefined();
+  });
+
+  it('fans events out to foreground tabs only, while every authenticated executor counts for the session', () => {
+    const hub = new SessionSocketHub<FakeSocket>();
+    const background = new FakeSocket();
+    hub.add(background, {
+      ...meta('s1', 'did:ixo:u'),
+      sid: 'bg',
+      executor: 'background',
+      tools: ['read_vault'],
+    });
+    expect(hub.emitToSession('s1', 'tool_call', { x: 1 })).toBe(0);
+    expect(background.sent).toEqual([]);
+    expect(hub.hasSession('s1')).toBe(true);
+    expect(hub.forSession('s1')).toEqual([background]);
+    expect(hub.hasForegroundSession('s1')).toBe(false);
+    expect(hub.sessionCount()).toBe(1);
+    expect(hub.connectionCount()).toBe(1);
+
+    const tab = new FakeSocket();
+    hub.add(tab, { ...meta('s1', 'did:ixo:u'), sid: 'tab' });
+    expect(hub.hasForegroundSession('s1')).toBe(true);
+    expect(hub.emitToSession('s1', 'tool_call', { x: 2 })).toBe(1);
+    expect(tab.sent).toEqual(['42["tool_call",{"x":2}]']);
+    expect(background.sent).toEqual([]);
+    expect(hub.connectionCount()).toBe(2);
+  });
+
+  it('encodes an event only when a foreground socket of the session will take it, and once for all of them', () => {
+    const hub = new SessionSocketHub<FakeSocket>();
+    const background = new FakeSocket();
+    hub.add(background, {
+      ...meta('s1', 'did:ixo:u'),
+      sid: 'bg',
+      executor: 'background',
+      tools: ['read_vault'],
+    });
+    hub.add(new FakeSocket(), meta('s2', 'did:ixo:u'));
+    // JSON.stringify throws on a BigInt: reaching the encoder would throw.
+    const unencodable = { n: 1n };
+    expect(hub.emitToSession('s1', 'tool_call', unencodable)).toBe(0);
+    expect(hub.emitToSession('nobody', 'tool_call', unencodable)).toBe(0);
+    expect(() => hub.emitToSession('s2', 'tool_call', unencodable)).toThrow();
+
+    const tabs = [new FakeSocket(), new FakeSocket()];
+    tabs.forEach((tab, i) =>
+      hub.add(tab, { ...meta('s1', 'did:ixo:u'), sid: `tab-${i}` }),
+    );
+    const payload = { x: 1 };
+    let reads = 0;
+    Object.defineProperty(payload, 'x', {
+      enumerable: true,
+      get: () => {
+        reads += 1;
+        return 1;
+      },
+    });
+    expect(hub.emitToSession('s1', 'tool_call', payload)).toBe(2);
+    expect(reads).toBe(1);
+    for (const tab of tabs)
+      expect(tab.sent).toEqual(['42["tool_call",{"x":1}]']);
+    expect(background.sent).toEqual([]);
+  });
+
+  it('keeps the executor kind and tools on the attachment across a restart', () => {
+    const hub = new SessionSocketHub<FakeSocket>();
+    const background = new FakeSocket();
+    hub.add(background, meta('s1'));
+    hub.update(background, {
+      userDid: 'did:ixo:u',
+      executor: 'background',
+      tools: ['read_vault'],
+    });
+    const woken = new SessionSocketHub<FakeSocket>();
+    expect(woken.restore([background])).toBe(1);
+    expect(woken.get(background)).toMatchObject({
+      executor: 'background',
+      tools: ['read_vault'],
+    });
+    expect(woken.executorFor('s1', 'browser', 'read_vault')?.socket).toBe(
+      background,
+    );
+    expect(woken.emitToSession('s1', 'ev', null)).toBe(0);
   });
 
   it('pings live sockets, closes the ones that stopped answering, and persists the bookkeeping', () => {

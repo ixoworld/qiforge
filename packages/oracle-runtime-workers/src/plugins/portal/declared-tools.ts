@@ -25,6 +25,18 @@ export interface DeclaredTool {
   schema: Record<string, unknown>;
 }
 
+/**
+ * The effect a client declares for one of its tools (`effect` on a browser
+ * tool declaration): exactly `'read'` or `'write'`. Any other value is
+ * treated as no declaration — the entry itself is kept, and the runtime's
+ * own classification applies.
+ */
+export function declaredToolEffect(
+  value: unknown,
+): 'read' | 'write' | undefined {
+  return value === 'read' || value === 'write' ? value : undefined;
+}
+
 export interface DroppedDeclaration {
   name: string;
   reason: string;

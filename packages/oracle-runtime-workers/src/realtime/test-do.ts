@@ -6,9 +6,16 @@
  */
 import { DurableObject } from 'cloudflare:workers';
 import { SessionEventRouter } from '../do/ambient';
-import type { FrontendCallParams } from '../plugin-api/types';
+import type {
+  FrontendCallParams,
+  FrontendWaitingFor,
+} from '../plugin-api/types';
 import type { AuthOutcome } from '../shell/auth';
-import { RealtimeEndpoint, type RealtimeStatus } from './realtime-endpoint';
+import {
+  RealtimeEndpoint,
+  socketAttachmentBytes,
+  type RealtimeStatus,
+} from './realtime-endpoint';
 
 export const TEST_GOOD_TOKEN = 'good-token';
 /** Authenticates like `TEST_GOOD_TOKEN`, after `TEST_SLOW_AUTH_MS` (a Blocksync round trip). */
@@ -16,14 +23,20 @@ export const TEST_SLOW_TOKEN = 'slow-token';
 export const TEST_SLOW_AUTH_MS = 200;
 /** A CONNECT carrying only this delegation authenticates as the bare-delegation fallback does. */
 export const TEST_BARE_DELEGATION = 'bare-delegation';
-export const TEST_USER_DID = 'did:ixo:realtimeuser';
+/** As long as a real `did:ixo:ixo1…` (51 characters): the attachment budget test depends on it. */
+export const TEST_USER_DID = `did:ixo:ixo1${'realtimeuser'.padEnd(38, '0')}`;
 export const TEST_MISSING_SESSION = 'missing-session';
 /** A session whose ownership lookup fails (the user's database is unavailable). */
 export const TEST_BROKEN_SESSION = 'broken-session';
 
 export type CallOutcome =
   | { ok: true; value: unknown }
-  | { ok: false; error: string };
+  | {
+      ok: false;
+      error: string;
+      /** The error class's name when it is not a plain `Error` (e.g. `FrontendCallNotSentError`). */
+      errorName?: string;
+    };
 
 async function outcomeOf(call: Promise<unknown>): Promise<CallOutcome> {
   try {
@@ -32,6 +45,9 @@ async function outcomeOf(call: Promise<unknown>): Promise<CallOutcome> {
     return {
       ok: false,
       error: err instanceof Error ? err.message : String(err),
+      ...(err instanceof Error && err.name !== 'Error'
+        ? { errorName: err.name }
+        : {}),
     };
   }
 }
@@ -51,11 +67,21 @@ export class RealtimeTestDO extends DurableObject {
     eventName: string;
     payload: Record<string, unknown>;
   }> = [];
+
+  /** Caller ids whose call reported its dispatch (`onDispatched`), in order. */
+  private readonly dispatchReports: string[] = [];
+
   private authentications = 0;
+
+  /** The endpoint's park deadline (`configure`); the runtime default when unset. */
+  private parkTimeoutMs: number | undefined;
 
   private get realtime(): RealtimeEndpoint {
     this.endpoint ??= new RealtimeEndpoint({
       ctx: this.ctx,
+      ...(this.parkTimeoutMs !== undefined
+        ? { parkTimeoutMs: this.parkTimeoutMs }
+        : {}),
       requestAlarm: (at) => {
         this.requestedAlarms.push(at);
       },
@@ -126,6 +152,27 @@ export class RealtimeTestDO extends DurableObject {
 
   // ── test surface ─────────────────────────────────────────────────────────
 
+  /** Set the park deadline; call before anything else touches the endpoint. */
+  async configure(o: { parkTimeoutMs: number }): Promise<void> {
+    if (this.endpoint)
+      throw new Error('configure before the endpoint is built');
+    this.parkTimeoutMs = o.parkTimeoutMs;
+  }
+
+  async parkedFor(sessionId: string): Promise<FrontendWaitingFor | null> {
+    return this.realtime.frontend.parkedFor(sessionId);
+  }
+
+  /** Each socket's persisted attachment, measured as the endpoint's budget measures it. */
+  async attachmentSizes(): Promise<number[]> {
+    return this.realtime.hub.entries().map(({ socket, attachment }) => {
+      const persisted: unknown = socket.deserializeAttachment();
+      if (JSON.stringify(persisted) !== JSON.stringify(attachment))
+        throw new Error('persisted attachment differs from the hub');
+      return socketAttachmentBytes(attachment);
+    });
+  }
+
   /** Emit a runtime event the way `ctx.emit.*` does (through the router). */
   async emitForSession(
     sessionId: string,
@@ -148,14 +195,31 @@ export class RealtimeTestDO extends DurableObject {
     return outcomeOf(this.realtime.frontend.callAgAction(params));
   }
 
+  /** A browser tool call that records when it reports its dispatch. */
+  async callBrowserToolReporting(
+    params: FrontendCallParams,
+  ): Promise<CallOutcome> {
+    return outcomeOf(
+      this.realtime.frontend.callBrowserTool({
+        ...params,
+        onDispatched: () => this.dispatchReports.push(params.toolCallId),
+      }),
+    );
+  }
+
+  async dispatched(): Promise<string[]> {
+    return [...this.dispatchReports];
+  }
+
   /**
-   * A browser tool call whose turn aborts — `before` it is made, or right
-   * `after` it was sent (the send is synchronous inside the call). An
+   * A browser tool call whose turn aborts — `before` it is made, right
+   * `after` it was made (sent, or parked when no socket can run it; the
+   * send is synchronous inside the call), or `afterMs` later. An
    * AbortSignal cannot cross the RPC boundary, so the controller lives here.
    */
   async callBrowserToolAborted(
     params: FrontendCallParams,
-    when: 'before' | 'after',
+    when: 'before' | 'after' | { afterMs: number },
   ): Promise<CallOutcome> {
     const controller = new AbortController();
     if (when === 'before') controller.abort();
@@ -164,6 +228,8 @@ export class RealtimeTestDO extends DurableObject {
       signal: controller.signal,
     });
     if (when === 'after') controller.abort();
+    else if (typeof when === 'object')
+      setTimeout(() => controller.abort(), when.afterMs);
     return outcomeOf(call);
   }
 
@@ -189,6 +255,14 @@ export class RealtimeTestDO extends DurableObject {
 
   async hasClient(sessionId: string): Promise<boolean> {
     return this.realtime.frontend.hasClient(sessionId);
+  }
+
+  async canDispatch(
+    sessionId: string,
+    kind: 'browser' | 'agui',
+    toolName: string,
+  ): Promise<boolean> {
+    return this.realtime.frontend.canDispatch(sessionId, kind, toolName);
   }
 
   async status(): Promise<RealtimeStatus> {
