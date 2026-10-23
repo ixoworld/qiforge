@@ -81,7 +81,7 @@ export const ACTION_PROPOSALS_PER_RUN = 8;
 /** Cards still awaiting the owner (live `prepared`, `claimed`, hash-less `unknown`) per owner. */
 export const ACTION_PROPOSALS_OPEN_PER_OWNER = 16;
 /** A `prepared` card counts as open this long after creation (its TTL plus clock skew). */
-const OPEN_PREPARED_MS = 20 * 60_000;
+export const OPEN_PREPARED_MS = 20 * 60_000;
 
 /**
  * A card's claim time from its lifecycle JSON, NULL when the JSON is not

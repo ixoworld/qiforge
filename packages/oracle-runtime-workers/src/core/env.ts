@@ -121,6 +121,7 @@ export const baseEnvSchema = z.object({
   ACTION_PROPOSALS_RPC_DEVNET: rpcOriginSchema.optional(),
   ACTION_PROPOSALS_RPC_MAINNET: rpcOriginSchema.optional(),
   ACTION_PROPOSALS_ENABLED: z.enum(['true', 'false']).default('false'),
+  ACTION_TOPIC_PROPOSALS_ENABLED: z.enum(['true', 'false']).default('false'),
   ACTION_PROPOSALS_PORTAL_ORIGIN: portalOriginSchema.optional(),
   // --- identity -----------------------------------------------------------
   ORACLE_NAME: z.string().min(1),
@@ -544,6 +545,12 @@ function actionProposalEnvErrors(
       field: 'ACTION_PROPOSALS_RPC_TESTNET',
       message:
         'ACTION_PROPOSALS_RPC_DEVNET or ACTION_PROPOSALS_RPC_TESTNET is required when ACTION_PROPOSALS_ENABLED is true',
+    });
+  if (config['ACTION_TOPIC_PROPOSALS_ENABLED'] === 'true' && !enabled)
+    errors.push({
+      plugin: 'core',
+      field: 'ACTION_TOPIC_PROPOSALS_ENABLED',
+      message: 'requires ACTION_PROPOSALS_ENABLED=true',
     });
   return errors;
 }

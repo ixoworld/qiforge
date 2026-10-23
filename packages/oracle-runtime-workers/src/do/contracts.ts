@@ -1,3 +1,7 @@
+import type {
+  BeginTopicStep,
+  TopicReceiptReferences,
+} from '@ixo/ixo-transaction/topic-proposals';
 import type { ProposalCommand } from '../action-proposals/store';
 import type {
   TopicDeliverableCommand,
@@ -55,6 +59,7 @@ export interface OracleWorkerEnv {
   ACTION_PROPOSALS_RPC_DEVNET?: string;
   ACTION_PROPOSALS_RPC_MAINNET?: string;
   ACTION_PROPOSALS_ENABLED?: string;
+  ACTION_TOPIC_PROPOSALS_ENABLED?: string;
   ACTION_PROPOSALS_PORTAL_ORIGIN?: string;
   USER_ORACLE: DurableObjectNamespace<UserOracleObject>;
   MATRIX_GATEWAY: DurableObjectNamespace<MatrixGatewayObject>;
@@ -768,7 +773,14 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
   actionProposal(
     identity: TurnIdentity,
     id: string,
-    command?: ProposalCommand,
+    command?:
+      | ProposalCommand
+      | { kind: 'topic-reconcile'; input: TopicReceiptReferences },
+  ): Promise<JsonString | null>;
+  beginTopicStep(
+    identity: TurnIdentity,
+    id: string,
+    input: BeginTopicStep,
   ): Promise<JsonString | null>;
   /** `GET /artifacts/:id` — the owner's canonical copy, or null. */
   artifact(
@@ -1077,6 +1089,17 @@ export interface MatrixGatewayObject extends Rpc.DurableObjectBranded {
   ): Promise<string>;
   /** Full room state as a JSON-encoded array of `{ type, state_key, content, sender, event_id }`. */
   getRoomState(roomId: string): Promise<JsonString>;
+  getTopicRoomState(roomId: string): Promise<JsonString>;
+  getTopicEvent(
+    roomId: string,
+    eventId: string,
+    opts?: { deadlineAt?: number },
+  ): Promise<JsonString | null>;
+  getTopicHistory(
+    roomId: string,
+    root: string,
+    opts?: { deadlineAt?: number; sender?: string },
+  ): Promise<JsonString>;
   /** One timeline event (decrypted when E2EE) as JSON `{ event_id, type, content, sender, origin_server_ts }`, or null. */
   getEvent(roomId: string, eventId: string): Promise<JsonString | null>;
   /**
