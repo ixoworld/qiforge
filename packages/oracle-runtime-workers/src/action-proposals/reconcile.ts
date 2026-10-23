@@ -10,6 +10,8 @@ export async function refreshActionProposal(
   proposal: ActionProposal,
   rpc: string | undefined,
   fetcher: typeof fetch = fetch,
+  /** The caller's wall budget: an abort ends the lookup like an RPC outage. */
+  signal?: AbortSignal,
 ): Promise<{ proposal: ActionProposal; attempted: boolean }> {
   if (
     proposal.lifecycle.status !== 'unknown' ||
@@ -34,6 +36,7 @@ export async function refreshActionProposal(
       proposal.lifecycle.transactionHash,
       rpc,
       fetcher,
+      signal,
     );
     return {
       proposal:

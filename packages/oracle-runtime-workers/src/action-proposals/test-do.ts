@@ -115,6 +115,18 @@ export class ActionProposalTestDO extends DurableObject {
       ).create(TopicProposalSubjectSchema.parse(JSON.parse(raw))),
     );
   }
+  async topicPrune(owner: string) {
+    return (await this.topics()).prune(owner);
+  }
+  async topicReceiptState(id: string) {
+    await this.topics();
+    return (
+      await this.db!.get<{ receipt_state: string }>(
+        'SELECT receipt_state FROM topic_action_proposals WHERE id=?',
+        [id],
+      )
+    )?.receipt_state;
+  }
   async topicGet(owner: string, id: string) {
     return JSON.stringify(await (await this.topics()).get(owner, id));
   }
@@ -241,6 +253,34 @@ export class ActionProposalTestDO extends DurableObject {
   }
   async prune(owner: string) {
     return (await this.proposals()).prune(owner);
+  }
+  async closeUnexecuted(owner: string) {
+    return (await this.proposals()).closeUnexecuted(owner);
+  }
+  async nextClose(owner: string) {
+    return (await this.proposals()).nextUnexecutedCloseAt(owner);
+  }
+  /** The indexed hash column, which a revoked blocked card keeps. */
+  async hashColumn(id: string) {
+    await this.proposals();
+    return (
+      (
+        await (
+          await this.database()
+        ).get<{ transaction_hash: string | null }>(
+          'SELECT transaction_hash FROM action_proposals WHERE id=?',
+          [id],
+        )
+      )?.transaction_hash ?? null
+    );
+  }
+  async queryPlan(sql: string, params: unknown[]) {
+    await this.proposals();
+    return (
+      await (
+        await this.database()
+      ).exec<{ detail: string }>(`EXPLAIN QUERY PLAN ${sql}`, params as never)
+    ).map((r) => r.detail);
   }
   async setNow(now: number) {
     this.now = now;
