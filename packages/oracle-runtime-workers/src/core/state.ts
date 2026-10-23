@@ -21,6 +21,8 @@ export interface BrowserToolCall {
   name: string;
   description: string;
   schema: Record<string, unknown>;
+  /** The tool's effect as the client declares it (`'read'` / `'write'`). */
+  effect?: 'read' | 'write';
 }
 
 /** AG-UI action descriptor injected per request from the client. */

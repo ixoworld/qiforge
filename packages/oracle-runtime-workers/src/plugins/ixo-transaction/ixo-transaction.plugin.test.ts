@@ -118,6 +118,8 @@ function silentBridge() {
       return pending;
     },
     hasClient: () => true,
+    canDispatch: () => true,
+    parkedFor: () => null,
   };
   return { surface, calls };
 }
@@ -177,7 +179,10 @@ async function runTurn(
               laneOf: (name) =>
                 built.subAgentToolNames.has(name)
                   ? 'subagent'
-                  : (built.toolEffects.get(name) ?? 'write'),
+                  : built.toolSurfaces.has(name)
+                    ? 'frontend'
+                    : (built.toolEffects.get(name) ?? 'write'),
+              effectOf: (name) => built.toolEffects.get(name) ?? 'write',
               runId: opts.runId ?? 'run-1',
               sessionId: 'sess-1',
               claims: opts.claims.store,

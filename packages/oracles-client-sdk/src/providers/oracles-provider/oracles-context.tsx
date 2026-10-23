@@ -12,6 +12,7 @@ import {
 } from 'react';
 import { request, RequestError } from '../../utils/request.js';
 import {
+  BACKGROUND_INVOCATION_UNAVAILABLE,
   isCredentialRefusal,
   withAuthRenewal,
   type AuthRenewalStage,
@@ -30,6 +31,7 @@ import {
 import type { AgAction } from '../../hooks/use-ag-action.js';
 import { agentVisibleAgActions, upsertAgAction } from './ag-actions.js';
 import {
+  type AuthedRequestOptions,
   type IOraclesContextProps,
   type IOraclesProviderProps,
 } from './types.js';
@@ -154,10 +156,14 @@ export const OraclesProvider = ({
   );
 
   const mintInvocation = useCallback(
-    async (oracleDid: string): Promise<string | null> => {
+    async (oracleDid: string, background = false): Promise<string | null> => {
       if (!createInvocation) return null;
       try {
-        const result = await createInvocation(oracleDid);
+        // Background: the host mints without user interaction, or not at all.
+        const result = background
+          ? await createInvocation(oracleDid, { background: true })
+          : await createInvocation(oracleDid);
+        if (!result?.serialized) return null;
         setCachedInvocation(
           initialWallet.did,
           oracleDid,
@@ -176,8 +182,14 @@ export const OraclesProvider = ({
   const getDelegation = useCallback(
     async (
       oracleDid: string,
-      options?: { fresh?: boolean },
+      options?: { fresh?: boolean; background?: boolean },
     ): Promise<string | null> => {
+      // A background caller never mints a delegation (a wallet prompt),
+      // and a fresh one is what only a mint could give it.
+      if (options?.background === true)
+        return options.fresh
+          ? null
+          : getCachedDelegation(initialWallet.did, oracleDid);
       if (options?.fresh) {
         // Dropped before the mint starts, so a reader that comes along
         // meanwhile joins the mint instead of taking the stale one.
@@ -204,7 +216,7 @@ export const OraclesProvider = ({
   const getInvocation = useCallback(
     async (
       oracleDid: string,
-      options?: { fresh?: boolean },
+      options?: { fresh?: boolean; background?: boolean },
     ): Promise<string | null> => {
       // Check cache first
       if (!options?.fresh) {
@@ -215,11 +227,15 @@ export const OraclesProvider = ({
       // No callback provided — skip invocation (migration-safe)
       if (!createInvocation) return null;
 
-      // A mint already in flight is as fresh as a new one.
+      // A mint already in flight is as fresh as a new one. Background and
+      // interactive mints are shared apart: an interactive caller never
+      // takes a background mint's "could not" for an answer, and a
+      // background caller never waits on a prompt.
+      const background = options?.background === true;
       return shareInFlight(
         pendingInvocations.current,
-        `${initialWallet.did}::${oracleDid}`,
-        () => mintInvocation(oracleDid),
+        `${initialWallet.did}::${oracleDid}${background ? '::background' : ''}`,
+        () => mintInvocation(oracleDid, background),
       );
     },
     [initialWallet.did, createInvocation, mintInvocation],
@@ -230,12 +246,16 @@ export const OraclesProvider = ({
       oracleDid: string,
       stage: AuthRenewalStage,
       refused?: RefusedCredentials,
+      options?: { background?: boolean },
     ): Promise<boolean> => {
       const userDid = initialWallet.did;
       const key = `${userDid}::${oracleDid}`;
+      const background = options?.background === true;
+      // A background renewal never mints a delegation (a wallet prompt).
+      if (background && stage === 2) return Promise.resolve(false);
       return shareInFlight(
         pendingRenewals.current,
-        `${key}::${stage}`,
+        `${key}::${stage}${background ? '::background' : ''}`,
         async () => {
           if (stage === 1) {
             if (!createInvocation) return false;
@@ -247,7 +267,10 @@ export const OraclesProvider = ({
               current !== refused.invocation
             )
               return true;
-            return (await getInvocation(oracleDid, { fresh: true })) !== null;
+            return (
+              (await getInvocation(oracleDid, { fresh: true, background })) !==
+              null
+            );
           }
 
           if (!createDelegation) return false;
@@ -312,14 +335,41 @@ export const OraclesProvider = ({
       method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH',
       options?: RequestInit,
       oracleDid?: string,
+      requestOptions?: AuthedRequestOptions,
     ): Promise<T> => {
+      const background = requestOptions?.background === true;
       let sent: RefusedCredentials = {};
+      // The host could not mint an invocation without the user: nothing
+      // is sent, and no renewal asks it again.
+      let backgroundMintFailed = false;
       const attempt = async (): Promise<RequestOutcome<T>> => {
         const headers = headersRecord(options?.headers);
         if (oracleDid) {
-          const delegation = await getDelegation(oracleDid);
+          // A background request never mints a delegation (a wallet prompt).
+          const delegation = background
+            ? getCachedDelegation(initialWallet.did, oracleDid)
+            : await getDelegation(oracleDid);
           if (delegation) headers['x-ucan-delegation'] = delegation;
-          const invocation = await getInvocation(oracleDid);
+          const invocation = await getInvocation(
+            oracleDid,
+            background ? { background: true } : undefined,
+          );
+          // Without a `createInvocation` callback the host sends no
+          // invocations at all (migration-safe), background or not.
+          if (background && !invocation && createInvocation) {
+            backgroundMintFailed = true;
+            return {
+              ok: false,
+              error: new RequestError(
+                'No invocation could be minted without the user',
+                {
+                  status: 401,
+                  code: BACKGROUND_INVOCATION_UNAVAILABLE,
+                  retryable: true,
+                },
+              ),
+            };
+          }
           if (invocation) {
             headers['Authorization'] = `Bearer ${invocation}`;
             headers['X-Auth-Type'] = 'ucan';
@@ -343,14 +393,31 @@ export const OraclesProvider = ({
           isCredentialRefusal(result.error.status, result.error.code),
         renew:
           oracleDid && !isOneShotBody(options?.body)
-            ? (stage) => renewOracleAuth(oracleDid, stage, sent)
+            ? (stage) =>
+                // Background: a fresh invocation minted without the user,
+                // never a fresh delegation; nothing at all once the host
+                // could not mint one.
+                background && (stage === 2 || backgroundMintFailed)
+                  ? false
+                  : renewOracleAuth(
+                      oracleDid,
+                      stage,
+                      sent,
+                      background ? { background: true } : undefined,
+                    )
             : undefined,
         signal: options?.signal ?? undefined,
       });
       if (!outcome.ok) throw outcome.error;
       return outcome.value;
     },
-    [getDelegation, getInvocation, renewOracleAuth],
+    [
+      initialWallet.did,
+      createInvocation,
+      getDelegation,
+      getInvocation,
+      renewOracleAuth,
+    ],
   );
 
   // AG-UI action management functions

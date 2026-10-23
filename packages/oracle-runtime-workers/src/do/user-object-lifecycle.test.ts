@@ -35,12 +35,13 @@ import { turnLimitsFromEnv } from '../core/turn-budget';
 import { SessionsStore, UNTITLED_SESSION } from '../sqlite/sessions-store';
 import { RunCoordinator, type LiveRun } from './run-coordinator';
 import { RunStore } from './run-store';
+import { RealtimeEndpoint } from '../realtime/realtime-endpoint';
 import { DEFAULT_MODEL_ID, OPENROUTER_MODEL_MAP } from '../core/llm';
 import { renderTurnTimeNote } from '../core/prompt-composer';
 import { TURN_TIME_NOTE_KWARG } from '../core/turn-time-note';
 import { RunBuffer } from './run-buffer';
 import { storedRunRequest } from './run-request';
-import type { TurnRequest } from './contracts';
+import type { RunSummary, SessionSummary, TurnRequest } from './contracts';
 import { installTimerTracker, pendingTimers } from './debug-timers';
 /**
  * The user object's lifecycle over a real Durable Object's storage: boot and
@@ -2224,6 +2225,273 @@ describe('resetting the working copy', () => {
       ).rejects.toThrow('did:ixo:someone-else');
       expect(h.db()).not.toBeNull();
       expect(await h.storage.get('meta:ownerEtag')).toBe(etag);
+    });
+  });
+});
+
+describe('user-wide run listings and Stop', () => {
+  const identity = { userDid: USER_DID };
+
+  function coordinatorOf(h: UserObjectHarness): RunCoordinator {
+    const runs = h.field('runs');
+    if (!(runs instanceof RunCoordinator)) throw new Error('not booted');
+    return runs;
+  }
+
+  /** Attempts that run until aborted, then wind down after `windDownMs`. */
+  function attemptsUntilAborted(h: UserObjectHarness, windDownMs = 0) {
+    Reflect.set(h.host, 'runAttempt', async (live: LiveRun) => {
+      await new Promise((resolve) =>
+        live.abort.signal.addEventListener('abort', resolve),
+      );
+      await new Promise((resolve) => setTimeout(resolve, windDownMs));
+      return { status: 'aborted', text: '' };
+    });
+  }
+
+  function begin(
+    h: UserObjectHarness,
+    runId: string,
+    sessionId: string,
+    client: 'portal' | 'matrix' | 'channel' = 'portal',
+    roomId?: string,
+  ) {
+    return coordinatorOf(h).begin({
+      runId,
+      sessionId,
+      requestId: runId,
+      client,
+      request: JSON.stringify({
+        turn: {
+          identity,
+          sessionId,
+          message: 'hi',
+          client,
+          requestId: runId,
+          ...(roomId ? { roomId } : {}),
+        },
+      }),
+      multitask: 'interrupt',
+    });
+  }
+
+  async function sessionIn(
+    h: UserObjectHarness,
+    sessionId: string,
+    roomId: string,
+  ) {
+    await sessionsOf(h).createSession({
+      sessionId,
+      roomId,
+      oracleName: 'Test',
+      oracleDid: 'did:ixo:oracle1',
+      oracleEntityDid: 'did:ixo:oracle1',
+    });
+  }
+
+  it("lists the busy chats of the user's main room, on GET /runs/active and as activeRun on GET /sessions", async () => {
+    await withObject('active-runs-listing', {}, async (h) => {
+      h.gateway.resolveUserRoom.mockResolvedValue({
+        roomId: '!main',
+        alias: '#main',
+      });
+      await h.ready();
+      await sessionIn(h, 'busy', '!main');
+      await sessionIn(h, 'idle', '!main');
+      await sessionIn(h, 'elsewhere', '!other');
+      attemptsUntilAborted(h);
+      await begin(h, 'r-busy', 'busy');
+      await begin(h, 'r-elsewhere', 'elsewhere', 'matrix', '!other');
+      await begin(h, 'r-task', 'task:t1');
+      // A room thread whose session row the attempt has not written yet.
+      await begin(h, 'r-thread', '$thread-root', 'matrix', '!main');
+
+      const active = (await h.call('activeRuns', identity)) as RunSummary[];
+      expect(active.map((r) => [r.runId, r.client, r.status])).toEqual([
+        ['r-busy', 'portal', 'running'],
+        ['r-thread', 'matrix', 'running'],
+      ]);
+      for (const summary of active)
+        expect(summary).not.toHaveProperty('partialText');
+
+      const { sessions } = (await h.call('listSessions', identity)) as {
+        sessions: SessionSummary[];
+      };
+      const byId = new Map(sessions.map((s) => [s.sessionId, s]));
+      expect([...byId.keys()].sort()).toEqual(['busy', 'idle']);
+      expect(byId.get('busy')?.activeRun).toMatchObject({
+        runId: 'r-busy',
+        sessionId: 'busy',
+        status: 'running',
+      });
+      expect(byId.get('idle')).not.toHaveProperty('activeRun');
+
+      const runs = coordinatorOf(h);
+      for (const sessionId of ['busy', 'elsewhere', 'task:t1', '$thread-root'])
+        await runs.abortAllForSession(sessionId);
+      expect(await h.call('activeRuns', identity)).toEqual([]);
+      const after = (await h.call('listSessions', identity)) as {
+        sessions: SessionSummary[];
+      };
+      for (const session of after.sessions)
+        expect(session).not.toHaveProperty('activeRun');
+    });
+  });
+
+  it('reports the browser call a run is parked on as waitingFor on GET /runs/active, GET /sessions/:id/run and the session row, and drops it when the call ends', async () => {
+    await withObject('active-runs-waiting', {}, async (h) => {
+      h.gateway.resolveUserRoom.mockResolvedValue({
+        roomId: '!main',
+        alias: '#main',
+      });
+      await h.ready();
+      await sessionIn(h, 'busy', '!main');
+      attemptsUntilAborted(h);
+      await begin(h, 'r-busy', 'busy');
+      const listings = async () => {
+        const active = (await h.call('activeRuns', identity)) as RunSummary[];
+        const own = (await h.call(
+          'sessionRun',
+          identity,
+          'busy',
+        )) as RunSummary | null;
+        const { sessions } = (await h.call('listSessions', identity)) as {
+          sessions: SessionSummary[];
+        };
+        return [
+          active[0],
+          own,
+          sessions.find((s) => s.sessionId === 'busy')?.activeRun,
+        ];
+      };
+      for (const summary of await listings())
+        expect(summary).not.toHaveProperty('waitingFor');
+
+      // The turn's browser tool, with no browser of the chat connected.
+      const realtime = h.field('realtime');
+      if (!(realtime instanceof RealtimeEndpoint))
+        throw new Error('no realtime endpoint');
+      const turn = new AbortController();
+      const outcome = realtime.frontend
+        .callBrowserTool({
+          sessionId: 'busy',
+          toolCallId: 'tc-r-busy',
+          toolName: 'mutate_topic',
+          args: {},
+          signal: turn.signal,
+        })
+        .then(
+          () => 'resolved',
+          (err: unknown) => (err instanceof Error ? err.message : String(err)),
+        );
+      for (const summary of await listings())
+        expect(summary).toMatchObject({
+          runId: 'r-busy',
+          status: 'running',
+          waitingFor: {
+            kind: 'browser',
+            toolName: 'mutate_topic',
+            since: expect.stringMatching(/^\d{4}-/),
+          },
+        });
+
+      turn.abort();
+      expect(await outcome).toBe(
+        'Browser tool mutate_topic was not sent: the turn was aborted',
+      );
+      for (const summary of await listings())
+        expect(summary).not.toHaveProperty('waitingFor');
+      await coordinatorOf(h).abortAllForSession('busy');
+    });
+  });
+
+  it('never builds the realtime endpoint to answer a listing', async () => {
+    await withObject('active-runs-no-endpoint', {}, async (h) => {
+      await h.ready();
+      attemptsUntilAborted(h);
+      await begin(h, 'r1', 's1');
+      // An instance whose endpoint was never built (no socket, no turn
+      // context yet): the listings leave it unbuilt.
+      Reflect.set(h.host, 'realtimeEndpoint', null);
+      const active = (await h.call('activeRuns', identity)) as RunSummary[];
+      expect(active.map((r) => r.runId)).toEqual(['r1']);
+      expect(active[0]).not.toHaveProperty('waitingFor');
+      expect(await h.call('sessionRun', identity, 's1')).not.toHaveProperty(
+        'waitingFor',
+      );
+      expect(h.field('realtimeEndpoint')).toBeNull();
+      await coordinatorOf(h).abortAllForSession('s1');
+    });
+  });
+
+  it('a cold object that has run nothing since its last boot answers without booting', async () => {
+    await withObject('active-runs-cold', {}, async (h) => {
+      await h.ready();
+      expect(await h.storage.get('meta:runsMaybeActive')).toBe(false);
+      const loads = h.store.load.mock.calls.length;
+      await h.restart();
+      expect(await h.call('activeRuns', identity)).toEqual([]);
+      expect(h.field('initPromise')).toBeNull();
+      expect(h.db()).toBeNull();
+      expect(h.store.load.mock.calls.length).toBe(loads);
+    });
+  });
+
+  it('boots for a cold poll once a run was created, and clears the mark when that boot finds nothing running', async () => {
+    await withObject('active-runs-marked', {}, async (h) => {
+      await h.ready();
+      Reflect.set(h.host, 'runAttempt', async () => ({
+        status: 'finished',
+        text: 'done',
+      }));
+      const { live } = await begin(h, 'r1', 's1');
+      await live.done;
+      expect(await h.storage.get('meta:runsMaybeActive')).toBe(true);
+      await h.restart();
+      expect(await h.call('activeRuns', identity)).toEqual([]);
+      expect(h.db()).not.toBeNull();
+      expect(await h.storage.get('meta:runsMaybeActive')).toBe(false);
+    });
+  });
+
+  it('Stop on a run only the store knows (recovering after a reset) boots the object and ends it', async () => {
+    await withObject('abort-stored-only', {}, async (h) => {
+      await h.ready();
+      const store = h.field('runStore');
+      if (!(store instanceof RunStore)) throw new Error('not booted');
+      await store.create({
+        runId: 'orphan',
+        sessionId: 's1',
+        requestId: 'orphan',
+        client: 'portal',
+        status: 'running',
+        request: JSON.stringify({
+          turn: { ...portalTurn, requestId: 'orphan' },
+        }),
+        checkpointId: null,
+        instanceId: 'previous-instance',
+      });
+      await h.restart();
+      expect(await h.call('abortTurn', 's1', identity)).toBe(true);
+      expect(coordinatorOf(h).records()).toEqual([]);
+      const reopened = h.field('runStore');
+      if (!(reopened instanceof RunStore)) throw new Error('not booted');
+      expect((await reopened.get('orphan'))?.status).toBe('aborted');
+    });
+  });
+
+  it('Stop answers once the stopped run has ended, so the next look sees the chat idle', async () => {
+    await withObject('abort-settled', {}, async (h) => {
+      await h.ready();
+      attemptsUntilAborted(h, 50);
+      await begin(h, 'r1', 's1');
+      expect(
+        ((await h.call('activeRuns', identity)) as RunSummary[]).length,
+      ).toBe(1);
+      expect(await h.call('abortTurn', 's1', identity)).toBe(true);
+      expect(coordinatorOf(h).records()).toEqual([]);
+      expect(await h.call('activeRuns', identity)).toEqual([]);
+      expect(await h.call('abortTurn', 's1', identity)).toBe(false);
     });
   });
 });

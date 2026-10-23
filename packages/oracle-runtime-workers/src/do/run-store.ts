@@ -14,6 +14,8 @@
  *   - `turn_tool_marks`: one row per tool call, written BEFORE the tool runs
  *     (`started`) and updated when it returns (`done`). This is what makes a
  *     resume safe: a started-but-unfinished write call is never re-executed.
+ *     A frontend call also records when it reached a browser (`sent_at`):
+ *     one still parked at the restart never left the object and runs again.
  *   - `turn_write_claims`: one row per write whose outcome is not known yet
  *     (tool-execution.ts), keyed by the fingerprint of the tool name and
  *     arguments. Released by a returned outcome; kept by an abort, a deadline
@@ -22,7 +24,8 @@
  *
  * Cost shape (SQLite-backed DO storage bills rows written or deleted): a run
  * costs 1 insert + ~2 updates, a segment 1 insert + 1 delete, a tool call
- * 1 insert + 1 update, a write 1 insert + 1 delete more.
+ * 1 insert + 1 update (a frontend call 1 update more, when it is sent), a
+ * write 1 insert + 1 delete more.
  */
 import type { DoSqliteDatabase } from '../sqlite/database';
 import type { PackedSegment } from './run-buffer';
@@ -169,6 +172,14 @@ export interface ToolMark {
   outcome: string | null;
   /** Executions started for this call id (a read re-run bumps it). */
   attempts: number;
+  /**
+   * When the call was handed to its executor, for tools that run outside
+   * the object (frontend tools: the moment a browser socket received it).
+   * `null` while a frontend call is parked waiting for a socket, so a
+   * restart knows the call never left the object. Always `null` for tools
+   * that run in the object.
+   */
+  sentAt: string | null;
 }
 
 /** Rows of ended runs are kept a week (a re-join that late gets 404). */
@@ -331,6 +342,7 @@ type MarkRow = {
   done_at: string | null;
   outcome: string | null;
   attempts: number;
+  sent_at: string | null;
 } & Record<string, string | number | null>;
 
 type SegmentRow = {
@@ -393,6 +405,7 @@ function toMark(row: MarkRow): ToolMark {
     doneAt: row.done_at,
     outcome: row.outcome,
     attempts: Number(row.attempts),
+    sentAt: row.sent_at,
   };
 }
 
@@ -474,8 +487,21 @@ export class RunStore {
         done_at TEXT,
         outcome TEXT,
         attempts INTEGER NOT NULL DEFAULT 1,
+        sent_at TEXT,
         PRIMARY KEY (run_id, tool_call_id)
       ) WITHOUT ROWID`);
+    // When a call left the object (frontend calls; see `markSent`). Marks
+    // from before the column cannot tell, so they count as sent: a resume
+    // keeps treating them as it did when they were written.
+    const markColumns = await this.db.exec<{ name: string }>(
+      'PRAGMA table_info(turn_tool_marks)',
+    );
+    if (!markColumns.some((c) => c.name === 'sent_at')) {
+      await this.db.run('ALTER TABLE turn_tool_marks ADD COLUMN sent_at TEXT');
+      await this.db.run(
+        'UPDATE turn_tool_marks SET sent_at = started_at WHERE sent_at IS NULL',
+      );
+    }
     await this.db.run(`
       CREATE TABLE IF NOT EXISTS turn_write_claims (
         fingerprint TEXT PRIMARY KEY,
@@ -705,12 +731,12 @@ export class RunStore {
     return row ? toRecord(row) : undefined;
   }
 
-  /** Every run that is not over, oldest first. */
+  /** Every run that is not over, oldest first (run id breaks a tie). */
   async listActive(): Promise<RunRecord[]> {
     await this.setup();
     const rows = await this.db.exec<RunRow>(
       `SELECT ${RUN_COLUMNS} FROM turn_runs
-       WHERE status IN ('running','recovering','queued') ORDER BY started_at ASC`,
+       WHERE status IN ('running','recovering','queued') ORDER BY started_at ASC, run_id ASC`,
     );
     return rows.map(toRecord);
   }
@@ -853,12 +879,28 @@ export class RunStore {
     return undefined;
   }
 
-  /** A read-only call re-executed on resume: count the execution, keep the row open. */
+  /**
+   * A call re-executed on resume: count the execution, keep the row open.
+   * The new execution has not been handed to an executor yet, so `sent_at`
+   * is cleared with it.
+   */
   async bumpMark(runId: string, toolCallId: string): Promise<void> {
     await this.setup();
     await this.db.run(
-      `UPDATE turn_tool_marks SET attempts = attempts + 1, started_at = ?, done_at = NULL, outcome = NULL
+      `UPDATE turn_tool_marks SET attempts = attempts + 1, started_at = ?, done_at = NULL, outcome = NULL, sent_at = NULL
        WHERE run_id = ? AND tool_call_id = ?`,
+      [this.iso(), runId, toolCallId],
+    );
+  }
+
+  /**
+   * The call left the object: its executor (a browser socket for a frontend
+   * tool) received it. From here on a restart cannot tell whether it ran.
+   */
+  async markSent(runId: string, toolCallId: string): Promise<void> {
+    await this.setup();
+    await this.db.run(
+      `UPDATE turn_tool_marks SET sent_at = ? WHERE run_id = ? AND tool_call_id = ?`,
       [this.iso(), runId, toolCallId],
     );
   }
@@ -881,7 +923,7 @@ export class RunStore {
   ): Promise<ToolMark | undefined> {
     await this.setup();
     const row = await this.db.get<MarkRow>(
-      `SELECT run_id, tool_call_id, tool_name, effect, started_at, done_at, outcome, attempts
+      `SELECT run_id, tool_call_id, tool_name, effect, started_at, done_at, outcome, attempts, sent_at
        FROM turn_tool_marks WHERE run_id = ? AND tool_call_id = ?`,
       [runId, toolCallId],
     );
@@ -891,7 +933,7 @@ export class RunStore {
   async listMarks(runId: string): Promise<ToolMark[]> {
     await this.setup();
     const rows = await this.db.exec<MarkRow>(
-      `SELECT run_id, tool_call_id, tool_name, effect, started_at, done_at, outcome, attempts
+      `SELECT run_id, tool_call_id, tool_name, effect, started_at, done_at, outcome, attempts, sent_at
        FROM turn_tool_marks WHERE run_id = ? ORDER BY started_at ASC`,
       [runId],
     );
@@ -902,10 +944,14 @@ export class RunStore {
 
   /**
    * Claim a write before it runs. `claimed` when no identical write is
-   * outstanding. `blocked` when one is: a `pending` claim becomes `warned`
-   * (owned by this run, so the same turn stays blocked); a claim already
-   * `warned` by an earlier run is released to this run — the user was told
-   * and asked again.
+   * outstanding. `blocked` when one is: a `pending` claim of this run, or of
+   * a run that is over, becomes `warned` (owned by this run, so the same
+   * turn stays blocked); a `pending` claim of ANOTHER run that is still
+   * active (queued / running / recovering) is left exactly as it is — its
+   * owner may still release it when its write returns, and a takeover would
+   * make that release delete nothing; a claim already `warned` by an
+   * earlier run is released to this run — the user was told and asked
+   * again.
    */
   async claimWrite(input: {
     fingerprint: string;
@@ -939,9 +985,16 @@ export class RunStore {
       return { status: 'claimed' };
     }
     if (existing.state === 'pending')
+      // One statement: the owner's liveness is read where the row is
+      // written, so no release or run end can slip in between.
       await this.db.run(
-        `UPDATE turn_write_claims SET state = 'warned', run_id = ? WHERE fingerprint = ? AND state = 'pending'`,
-        [input.runId, input.fingerprint],
+        `UPDATE turn_write_claims SET state = 'warned', run_id = ?
+         WHERE fingerprint = ? AND state = 'pending'
+           AND (run_id = ? OR NOT EXISTS (
+             SELECT 1 FROM turn_runs r WHERE r.run_id = turn_write_claims.run_id
+               AND r.status IN ('running','recovering','queued')
+           ))`,
+        [input.runId, input.fingerprint, input.runId],
       );
     return {
       status: 'blocked',
