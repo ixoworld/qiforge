@@ -265,6 +265,7 @@ export class WorkersUcanService {
       const cached = this.serviceDidCache.get(origin);
       if (cached && cached.expiresAt > Date.now()) return cached.did;
       const res = await fetch(`${origin}/.well-known/did.json`, {
+        redirect: 'manual',
         signal: this.fetchSignal(),
       });
       if (!res.ok) {
@@ -413,8 +414,19 @@ export class WorkersUcanService {
 
   async getServiceDelegation(
     userDid: string,
-    opts: { storeUrl: string; resource: string; requiredAbility: string },
+    opts: {
+      storeUrl: string;
+      resource: string;
+      requiredAbility: string;
+      fresh?: boolean;
+    },
   ): Promise<ServiceDelegationResult> {
+    if (opts.fresh)
+      return this.fetchServiceDelegation(
+        userDid,
+        opts,
+        `${opts.storeUrl}:${userDid}:${opts.resource}:${opts.requiredAbility}`,
+      );
     const cacheKey = `${userDid}:${opts.resource}:${opts.requiredAbility}`;
     const cached = this.storeDelegationCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) return cached.value;
@@ -453,6 +465,7 @@ export class WorkersUcanService {
       res = await fetch(
         `${opts.storeUrl}/api/delegations?rootIssuer=${encodeURIComponent(userDid)}`,
         {
+          redirect: 'manual',
           headers: {
             authorization: `Bearer ${inv.invocation}`,
             'x-auth-type': 'ucan',

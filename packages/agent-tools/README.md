@@ -8,7 +8,7 @@ The package exports six runtime values from its root.
 
 | Export                    | Contract                                                                                                    |
 | ------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `CATALOG_VERSION`         | `1.0.0`                                                                                                     |
+| `CATALOG_VERSION`         | `2.0.0`                                                                                                     |
 | `SOURCE_ENVELOPE_VERSION` | `1`                                                                                                         |
 | `catalog`                 | Immutable tool descriptions, generated argument schemas, read effect, permission names, and policy variants |
 | `createAgentToolsHost`    | Trusted host factory with context binding, discovery, and invocation                                        |
@@ -33,7 +33,7 @@ const adapters = {
     scope: { ...context },
     value: {
       lookupStatus: 'confirmed',
-      amount: '123456789012345678901.001',
+      amount: '123456789012345678901001',
       denomination: 'upay',
       decimals: 3,
       ledger: 'subscription_credits',
@@ -140,7 +140,7 @@ The factory copies the descriptor's review assertion and function. Later caller 
 
 ## Migration from the frozen reference
 
-The reference remains `0.2.0-proposed`. This package starts at version `0.1.0`, catalog version `1.0.0`, and source-envelope version `1`. These versions identify different contracts.
+The reference remains `0.2.0-proposed`. This package starts at version `0.1.0`, catalog version `2.0.0`, and source-envelope version `1`. These versions identify different contracts.
 
 - `createReferenceHost` becomes `createAgentToolsHost`.
 - Every source envelope requires `version: 1`. Legacy envelopes are rejected.
@@ -166,3 +166,5 @@ pnpm --filter @ixo/agent-tools test:package
 ```
 
 Behavioral tests use fake adapters and authority callbacks. The 37 migrated reference scenarios retain the original read semantics while explicitly updating source versions, seven-field binding, and the quote descriptor. Additional scenarios cover response ownership, callback mutation, revocation, final expiry, concurrency, invalid source data, and type inference. The package test imports the packed artifact in real workerd without `nodejs_compat`. These checks do not establish live-service integration or model acceptance.
+
+Catalog 2.0.0 requires integer `upay` base units and an explicit file `timeBasis`. Convert `amount` with `decimals: 3` only for display. File timestamps identify VFS registration or session receipt, not original media upload. Source-envelope version stays 1.

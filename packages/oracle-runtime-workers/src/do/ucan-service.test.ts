@@ -100,7 +100,7 @@ describe('WorkersUcanService.createInvocationFromDelegation', () => {
     expect(result).toHaveProperty('invocation');
     expect(fetchSpy).toHaveBeenCalledWith(
       'https://memory.example.com/.well-known/did.json',
-      { signal: expect.any(AbortSignal) },
+      { signal: expect.any(AbortSignal), redirect: 'manual' },
     );
   });
 });
@@ -362,6 +362,70 @@ describe('WorkersUcanService.getServiceDelegation', () => {
           '/.well-known/did.json',
         ),
     ).length;
+
+  it('fresh reads bypass a prior active delegation after store revocation', async () => {
+    storeHolds([{ can: 'fs/*', with: 'ixo:filesystem' }]);
+    const service = new WorkersUcanService({
+      oracleDid: ORACLE_DID,
+      signingMnemonic: ORACLE_MNEMONIC,
+    });
+    const opts = {
+      storeUrl: STORE,
+      resource: 'ixo:filesystem',
+      requiredAbility: 'fs/read',
+    };
+    expect(await service.getServiceDelegation(USER_DID, opts)).toEqual({
+      token: 'token-0',
+      with: 'ixo:filesystem',
+    });
+    storeHolds([]);
+    expect(
+      await service.getServiceDelegation(USER_DID, { ...opts, fresh: true }),
+    ).toEqual({ error: 'no-delegation' });
+    expect(listings()).toBe(2);
+  });
+
+  it('refuses redirected DID and store responses without forwarding a bearer', async () => {
+    const service = new WorkersUcanService({
+      oracleDid: ORACLE_DID,
+      signingMnemonic: ORACLE_MNEMONIC,
+    });
+    fetchSpy.mockResolvedValue(
+      new Response(null, {
+        status: 302,
+        headers: { location: 'https://evil.test' },
+      }),
+    );
+    expect(await service.resolveServiceDid(STORE)).toBeNull();
+    expect(
+      fetchSpy.mock.calls.every(([, init]) => init?.redirect === 'manual'),
+    ).toBe(true);
+    fetchSpy.mockReset();
+    fetchSpy.mockImplementation(async (request) =>
+      String(request).endsWith('/.well-known/did.json')
+        ? Response.json({ id: 'did:web:ucan-store.example.com' })
+        : new Response(null, {
+            status: 302,
+            headers: { location: 'https://evil.test' },
+          }),
+    );
+    expect(
+      await service.getServiceDelegation(USER_DID, {
+        storeUrl: STORE,
+        resource: 'ixo:filesystem',
+        requiredAbility: 'fs/list',
+        fresh: true,
+      }),
+    ).toMatchObject({ error: 'store-error' });
+    expect(
+      fetchSpy.mock.calls.every(([, init]) => init?.redirect === 'manual'),
+    ).toBe(true);
+    expect(
+      fetchSpy.mock.calls.some(([request]) =>
+        String(request).startsWith('https://evil.test'),
+      ),
+    ).toBe(false);
+  });
 
   it('callers that miss the cache together share one store look-up', async () => {
     storeHolds([{ can: 'fs/*', with: 'ixo:filesystem' }]);

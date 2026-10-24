@@ -25,6 +25,7 @@ const file = z.strictObject({
   ...citation,
   name: text,
   uploadedAt: text,
+  timeBasis: z.enum(['vfs_created', 'session_received']),
   indexedText: z.boolean(),
 });
 const coverage = z.union([
@@ -36,7 +37,10 @@ const coverage = z.union([
   z.strictObject({ source: fileSource, state: z.literal('unavailable') }),
 ]);
 const creditsValue = z.strictObject({
-  amount: decimal,
+  amount: z
+    .string()
+    .max(100)
+    .regex(/^(0|[1-9][0-9]*)$/),
   denomination: z.literal('upay'),
   decimals: z.literal(3),
   ledger: z.literal('subscription_credits'),
@@ -262,7 +266,7 @@ export const definitions = [
   defineTool({
     name: 'ixo_credits_get',
     description:
-      'Read confirmed subscription credits with their ledger and base denomination.',
+      'Read confirmed subscription credits as integer upay base units. Divide by 1000 for display credits.',
     input: z.strictObject({}),
     output: creditsValue
       .extend({ lookupStatus: z.literal('confirmed') })
@@ -312,7 +316,7 @@ export const definitions = [
   defineTool({
     name: 'ixo_files_find',
     description:
-      'Find permitted VFS files and current session attachments with coverage limits.',
+      'Find permitted VFS files and current session attachments with coverage limits. Dates are VFS registration or session receipt times, not original media upload times.',
     input: filesInput,
     output: filesValue
       .extend({ absenceConfirmed: z.boolean().optional() })
@@ -360,7 +364,7 @@ export const definitions = [
   defineTool({
     name: 'ixo_offramp_options',
     description:
-      'Read current USDC corridor guidance. This does not create a sale.',
+      'Read current USDC corridor guidance. Eligibility describes a corridor, not user KYC approval. Continue in Portal /workspace/portfolio/offramp/yellowcard for bank withdrawal.',
     input: z.strictObject({
       asset: z.literal('USDC'),
       country: z
@@ -378,7 +382,7 @@ export const definitions = [
   defineTool({
     name: 'ixo_offramp_quote',
     description:
-      'Read a quote through a reviewed restricted adapter. This does not authorize execution.',
+      'Read an expiring USDC estimate through a reviewed restricted adapter. Rates are not settlement locked. This does not authorize execution.',
     input: z.strictObject({
       asset: z.literal('USDC'),
       amount: positiveDecimal,

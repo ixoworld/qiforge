@@ -26,6 +26,10 @@ jobs:
       - run: pnpm --filter @ixo/agent-tools typecheck
       - run: pnpm --filter @ixo/agent-tools test
       - run: pnpm --filter @ixo/agent-tools test:package
+      - run: pnpm --filter @ixo/agent-tools-sources build
+      - run: pnpm --filter @ixo/agent-tools-sources typecheck
+      - run: pnpm --filter @ixo/agent-tools-sources test
+      - run: pnpm --filter @ixo/agent-tools-sources test:package
       # The Workers runtime resolves @ixo/ucan, @ixo/common/ai/decisions and
       # @ixo/ixo-transaction through their built `dist`, so they (and their
       # workspace deps) are built before the typecheck and the test runs.

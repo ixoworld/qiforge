@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const CATALOG_VERSION = '1.0.0';
+export const CATALOG_VERSION = '2.0.0';
 export const SOURCE_ENVELOPE_VERSION = 1;
 export const text = z.string().min(1).max(4000);
 export const decimal = z

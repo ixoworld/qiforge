@@ -31,7 +31,7 @@ export default {
           scope,
           value: {
             lookupStatus: 'confirmed',
-            amount: '123456789012345678901.001',
+            amount: '123456789012345678901001',
             denomination: 'upay',
             decimals: 3,
             ledger: 'subscription_credits',

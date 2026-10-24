@@ -17,6 +17,7 @@ export default defineConfig({
     // runtime.
     include: [
       'src/core/**/*.test.ts',
+      'src/ixo-tools/**/*.test.ts',
       'src/plugins/*.test.ts',
       'src/plugins/!(editor|flows|ixo-transaction|pod-creator)/**/*.test.ts',
       'src/secrets/**/*.test.ts',
