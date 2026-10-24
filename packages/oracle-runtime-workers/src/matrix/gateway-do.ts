@@ -1,3 +1,4 @@
+import { z } from 'zod';
 /**
  * Matrix gateway Durable Object — one per oracle, home of the bot identity.
  *
@@ -1525,6 +1526,36 @@ export class MatrixGatewayDO
       bound.clear();
       throw err;
     }
+  }
+
+  async ixoToolsParticipants(
+    roomId: string,
+  ): Promise<{ oracleMatrixId: string; joined: string[] } | null> {
+    const config = this.cfg();
+    const stored =
+      this.pluginDevice ??
+      (await this.ctx.storage.get<StoredDevice>(BOT_CLIENT_IDENTITY_KEY));
+    if (!stored?.accessToken || stored.userId !== config.userId) return null;
+    const token = stored.accessToken;
+    const response = await fetch(
+      `${config.baseUrl}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/joined_members`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        redirect: 'manual',
+        signal: AbortSignal.timeout(10_000),
+      },
+    );
+    if (!response.ok) return null;
+    const result: unknown = await response.json();
+    const parsed = z
+      .object({ joined: z.record(z.string(), z.object({})) })
+      .safeParse(result);
+    return parsed.success
+      ? {
+          oracleMatrixId: config.userId,
+          joined: Object.keys(parsed.data.joined),
+        }
+      : null;
   }
 
   private async fetchMxc(

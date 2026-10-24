@@ -774,9 +774,187 @@ describe('boot', () => {
   });
 });
 
+function delegationDeferred<T>() {
+  let resolve = (_value: T): void => {
+    throw new Error('Promise not initialized');
+  };
+  const promise = new Promise<T>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}
+
 describe('delegations', () => {
   const as = (ucanDelegation: string) =>
     ({ userDid: USER_DID, ucanDelegation }) as const;
+
+  it.each(['setDelegation', 'hydrateDelegation', 'ready'])(
+    'does not restore a revoked delegation when %s finishes parsing late',
+    async (method) => {
+      await withObject(`native-revoke-${method}`, {}, async (h) => {
+        await h.ready();
+        const parsed = delegationDeferred<{
+          raw: string;
+          expiration: number;
+        }>();
+        const entered = delegationDeferred<void>();
+        const expiration = Math.floor(Date.now() / 1000) + 300;
+        Object.defineProperty(h.host, 'delegationRecord', {
+          value: async () => {
+            entered.resolve(undefined);
+            return parsed.promise;
+          },
+        });
+        if (method === 'hydrateDelegation')
+          await h.storage.put('meta:delegation', {
+            raw: 'old',
+            at: Date.now(),
+            expiration,
+          });
+        const pending =
+          method === 'ready'
+            ? h.call(method, as('old'))
+            : method === 'setDelegation'
+              ? h.call(method, USER_DID, 'old', expiration)
+              : h.call(method, USER_DID);
+        await entered.promise;
+        await h.call('clearDelegation', USER_DID);
+        parsed.resolve({ raw: 'old', expiration });
+        await pending;
+        expect(await h.call('delegationStatus', USER_DID)).toEqual({
+          present: false,
+          source: 'none',
+        });
+        expect(await h.storage.get('meta:delegation')).toMatchObject({
+          raw: '',
+          expiration: 0,
+        });
+      });
+    },
+  );
+
+  it('orders a delayed durable write before the revocation tombstone', async () => {
+    await withObject('native-revoke-storage', {}, async (h) => {
+      await h.ready();
+      const entered = delegationDeferred<void>();
+      const release = delegationDeferred<void>();
+      const originalPut = h.storage.put.bind(h.storage);
+      const delayedPut = async (...args: unknown[]) => {
+        if (args[0] === 'meta:delegation') {
+          entered.resolve(undefined);
+          await release.promise;
+        }
+        return Reflect.apply(originalPut, h.storage, args);
+      };
+      const put = vi.spyOn(h.storage, 'put').mockImplementation(delayedPut);
+      try {
+        const pending = h.call(
+          'setDelegation',
+          USER_DID,
+          'old',
+          Math.floor(Date.now() / 1000) + 300,
+        );
+        await entered.promise;
+        const revoked = h.call('clearDelegation', USER_DID);
+        expect(await h.call('delegationStatus', USER_DID)).toEqual({
+          present: false,
+          source: 'none',
+        });
+        release.resolve(undefined);
+        await Promise.all([pending, revoked]);
+        expect(await h.storage.get('meta:delegation')).toMatchObject({
+          raw: '',
+          expiration: 0,
+        });
+      } finally {
+        put.mockRestore();
+      }
+    });
+  });
+
+  it('keeps revocation in memory when its durable write fails', async () => {
+    await withObject('native-revoke-storage-failure', {}, async (h) => {
+      const expiration = Math.floor(Date.now() / 1000) + 300;
+      const oldToken = await delegationToken(expiration);
+      await h.call('setDelegation', USER_DID, oldToken, expiration);
+      const originalPut = h.storage.put.bind(h.storage);
+      const put = vi
+        .spyOn(h.storage, 'put')
+        .mockImplementation(async (...args: unknown[]) => {
+          if (args[0] === 'meta:delegation')
+            throw new Error('storage unavailable');
+          return Reflect.apply(originalPut, h.storage, args);
+        });
+      const remove = vi
+        .spyOn(h.storage, 'delete')
+        .mockRejectedValue(new Error('storage unavailable'));
+      try {
+        await expect(h.call('clearDelegation', USER_DID)).rejects.toThrow(
+          'storage unavailable',
+        );
+        expect(await h.storage.get('meta:delegation')).toMatchObject({
+          raw: oldToken,
+        });
+        await h.call('hydrateDelegation', USER_DID);
+        expect(await h.call('delegationStatus', USER_DID)).toEqual({
+          present: false,
+          source: 'none',
+        });
+        expect(h.gateway.resolveUserRoom).not.toHaveBeenCalled();
+      } finally {
+        put.mockRestore();
+        remove.mockRestore();
+      }
+    });
+  });
+
+  it.each(['setDelegation', 'ready'])(
+    'keeps cold revocation despite stale room state until explicit %s reauthorization',
+    async (method) => {
+      await withObject(`native-revoke-cold-${method}`, {}, async (h) => {
+        const expiration = Math.floor(Date.now() / 1000) + 300;
+        const oldToken = await delegationToken(expiration);
+        await h.call('setDelegation', USER_DID, oldToken, expiration);
+        await h.call('clearDelegation', USER_DID);
+        await h.restart();
+        h.gateway.resolveUserRoom.mockResolvedValue({
+          roomId: '!stale:test',
+          alias: '#stale:test',
+        });
+        h.gateway.getRoomStateEvent.mockResolvedValue(
+          JSON.stringify({ raw: oldToken, expiration }),
+        );
+        await h.call('hydrateDelegation', USER_DID);
+        expect(await h.call('delegationStatus', USER_DID)).toEqual({
+          present: false,
+          source: 'none',
+        });
+        expect(h.gateway.resolveUserRoom).not.toHaveBeenCalled();
+        const newToken = await delegationToken(expiration);
+        if (method === 'ready')
+          await h.call('ready', {
+            ...as(newToken),
+            ucanDelegationExpiration: expiration,
+          });
+        else await h.call('setDelegation', USER_DID, newToken, expiration);
+        expect(await h.call('delegationStatus', USER_DID)).toMatchObject({
+          present: true,
+          source: 'memory',
+          expiration,
+        });
+        await h.restart();
+        await h.call('hydrateDelegation', USER_DID);
+        expect(await h.call('delegationStatus', USER_DID)).toMatchObject({
+          present: true,
+          source: 'memory',
+          expiration,
+        });
+        expect(await h.storage.get('meta:delegation')).toMatchObject({
+          raw: newToken,
+        });
+      });
+    },
+  );
 
   it('alternating delegations of two clients never flush early without a recorded failure', async () => {
     await withObject('delegation-alternating', {}, async (h) => {

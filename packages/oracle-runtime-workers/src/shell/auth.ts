@@ -182,9 +182,17 @@ async function validateInvocation(
   invocation: string,
   cfg: AuthConfig,
 ): Promise<InvocationVerdict> {
-  const key = await sha256(invocation);
+  const key = await sha256(
+    JSON.stringify([
+      cfg.oracleDid,
+      cfg.blocksyncUri,
+      cfg.maxTtlSeconds,
+      invocation,
+    ]),
+  );
   const cached = invocationCache.get(key);
-  if (cached) return { ok: true, ...cached };
+  if (cached && cached.expiration > Date.now() / 1000)
+    return { ok: true, ...cached };
 
   const pending = pendingInvocations.get(key);
   if (pending) return pending;
@@ -250,9 +258,12 @@ export async function validateDelegation(
   | { ok: true; userDid: string; expiration: number }
   | { ok: false; error: string }
 > {
-  const key = await sha256(header);
+  const key = await sha256(
+    JSON.stringify([cfg.oracleDid, cfg.blocksyncUri, header]),
+  );
   const cached = delegationCache.get(key);
-  if (cached) return { ok: true, ...cached };
+  if (cached && cached.expiration > Date.now() / 1000)
+    return { ok: true, ...cached };
 
   const validator = await createUCANValidator({
     serverDid: cfg.oracleDid,

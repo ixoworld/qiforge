@@ -6,6 +6,7 @@ import {
 import type { Callbacks } from '@langchain/core/callbacks/manager';
 import type { BotCredentials } from '../do/contracts';
 import type { AttachmentViewSurface } from '../attachments/view';
+import type { IxoToolsBinding } from '../ixo-tools/surface';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { BaseMessage } from '@langchain/core/messages';
 import type {
@@ -173,6 +174,7 @@ export interface EmitAdapter {
  * consumes them through these interfaces.
  */
 export interface AmbientServices {
+  ixoTools?: IxoToolsBinding;
   config: Record<string, unknown>;
   identity: OracleIdentity;
   availablePlugins: ReadonlySet<string>;
@@ -446,6 +448,13 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
   const ctx: RuntimeContext<TConfig> = {
     user,
     session,
+    ...(ambient.ixoTools &&
+    ambient.ixoTools.scope.userDid === user.did &&
+    ambient.ixoTools.scope.sessionId === session.id &&
+    ambient.ixoTools.scope.roomId === session.roomId &&
+    ambient.ixoTools.scope.timezone === user.timezone
+      ? { ixoTools: ambient.ixoTools.tools }
+      : {}),
     history: {
       messages,
       recent,
@@ -740,6 +749,7 @@ export function createNoopAmbient(
     ucan: overrides.ucan ?? createUnsignedUcanAdapter(),
     logger: overrides.logger ?? NOOP_LOGGER,
     ...(overrides.decisions ? { decisions: overrides.decisions } : {}),
+    ...(overrides.ixoTools ? { ixoTools: overrides.ixoTools } : {}),
     ...(overrides.kv ? { kv: overrides.kv } : {}),
     ...(overrides.markDispatched
       ? { markDispatched: overrides.markDispatched }

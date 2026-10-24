@@ -1,3 +1,4 @@
+import { ixoParticipantStub } from './ixo-participant-stub';
 export { ChannelTurnsTestDO } from '../src/channels/test-do';
 export { ArtifactStoreTestDO } from '../src/artifacts/test-do';
 export { FeedbackTestDO } from '../src/feedback/test-do';
@@ -52,6 +53,7 @@ async function domainContextStub(request: Request): Promise<Response | null> {
 export default {
   async fetch(request: Request): Promise<Response> {
     return (
+      (await ixoParticipantStub(request)) ??
       (await domainContextStub(request)) ??
       new Response('oracle-runtime-workers test worker', { status: 200 })
     );
