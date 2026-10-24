@@ -5,8 +5,11 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
   SUPPORTED_PROTOCOL_VERSIONS,
+  McpError,
+  ErrorCode,
 } from '@modelcontextprotocol/sdk/types.js';
 import type { IxoToolsSurface } from '../surface';
+import { runIxoOperation } from '../lifetime';
 import {
   authenticateIxoMcp,
   ixoMcpAuthFailure,
@@ -23,7 +26,10 @@ import {
 export type IxoMcpHandlerInput = Readonly<{
   config: IxoMcpConfig;
   secret: string | undefined;
-  surfaceFor(authorization: IxoMcpAuthorization): Promise<IxoToolsSurface>;
+  surfaceFor(
+    authorization: IxoMcpAuthorization,
+    lifetimeSignal: AbortSignal,
+  ): Promise<IxoToolsSurface>;
 }>;
 export function withIxoMcpResponse(
   response: Response,
@@ -112,6 +118,8 @@ export function prepareIxoMcpRequest(
     response.headers.set('allow', 'POST, OPTIONS');
     return finish(response);
   }
+  if (request.headers.has('last-event-id'))
+    return finish(failure(400, 'replay_unsupported'));
   if (request.headers.has('mcp-session-id'))
     return finish(failure(400, 'sessions_unsupported'));
   const version = request.headers.get('mcp-protocol-version');
@@ -128,12 +136,48 @@ export async function handleIxoMcp(
   request: Request,
   input: IxoMcpHandlerInput,
 ): Promise<Response> {
-  const { config } = input;
-  const prepared = prepareIxoMcpRequest(request, config);
+  const prepared = prepareIxoMcpRequest(request, input.config);
   if (prepared) return prepared;
+  return withIxoMcpLifetime(request, input.config, (signal) =>
+    handleAuthorizedIxoMcp(request, input, signal),
+  );
+}
+export async function withIxoMcpLifetime(
+  request: Request,
+  config: IxoMcpConfig,
+  work: (signal: AbortSignal) => Promise<Response>,
+): Promise<Response> {
+  try {
+    return await runIxoOperation(request.signal, work);
+  } catch (error) {
+    const cancelled =
+      error instanceof DOMException && error.name === 'AbortError';
+    const timedOut =
+      error instanceof DOMException && error.name === 'TimeoutError';
+    return withIxoMcpResponse(
+      failure(
+        cancelled ? 499 : timedOut ? 504 : 503,
+        cancelled
+          ? 'request_cancelled'
+          : timedOut
+            ? 'request_timeout'
+            : 'tools_unavailable',
+      ),
+      request,
+      config,
+    );
+  }
+}
+
+async function handleAuthorizedIxoMcp(
+  request: Request,
+  input: IxoMcpHandlerInput,
+  signal: AbortSignal,
+): Promise<Response> {
+  const { config } = input;
   const finish = (response: Response) =>
     withIxoMcpResponse(response, request, config);
-  const auth = await authenticateIxoMcp(request, config, input.secret);
+  const auth = await authenticateIxoMcp(request, config, input.secret, signal);
   if (!auth.ok) return finish(auth.response);
   const { authorization } = auth;
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -141,9 +185,11 @@ export async function handleIxoMcp(
   let parsedBody: unknown;
   try {
     parsedBody = await Promise.race([
-      readBoundedBody(request, 65_536, bodyController.signal).then((text) =>
-        JSON.parse(text),
-      ),
+      readBoundedBody(
+        request,
+        65_536,
+        AbortSignal.any([signal, bodyController.signal]),
+      ).then((text) => JSON.parse(text)),
       new Promise<never>((_, reject) => {
         timeout = setTimeout(() => {
           bodyController.abort();
@@ -166,11 +212,20 @@ export async function handleIxoMcp(
     enableJsonResponse: true,
   });
   try {
-    const surface = await input.surfaceFor(authorization);
-    server.setRequestHandler(ListToolsRequestSchema, async () => {
+    signal.throwIfAborted();
+    const surface = await input.surfaceFor(authorization, signal);
+    signal.throwIfAborted();
+    server.setRequestHandler(ListToolsRequestSchema, async (call) => {
+      if (call.params?.cursor !== undefined)
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          'Pagination cursor unsupported',
+        );
       try {
         if (!(await authorization.current())) return { tools: [] };
+        signal.throwIfAborted();
         const discovery = await surface.discover();
+        signal.throwIfAborted();
         return {
           tools:
             discovery.status === 'available'
@@ -186,7 +241,9 @@ export async function handleIxoMcp(
         const tool = mcpTools().find(
           (entry) => entry.name === call.params.name,
         );
+        signal.throwIfAborted();
         const discovery = await surface.discover();
+        signal.throwIfAborted();
         if (
           !tool ||
           discovery.status !== 'available' ||
@@ -200,10 +257,12 @@ export async function handleIxoMcp(
             isError: true,
           };
         }
+        signal.throwIfAborted();
         const result = await surface.invoke(
           tool.name,
           call.params.arguments ?? {},
         );
+        signal.throwIfAborted();
         return {
           content: [{ type: 'text', text: JSON.stringify(result) }],
           structuredContent: result,
@@ -225,10 +284,11 @@ export async function handleIxoMcp(
     await server.connect(transport);
     const response = await transport.handleRequest(request, { parsedBody });
     const body = response.body
-      ? await readBoundedBody(response, 2_097_152)
+      ? await readBoundedBody(response, 2_097_152, signal)
       : null;
     if (!(await authorization.current()))
       return finish(ixoMcpAuthFailure(config));
+    signal.throwIfAborted();
     return finish(
       new Response(body, {
         status: response.status,
@@ -240,7 +300,7 @@ export async function handleIxoMcp(
       return finish(ixoMcpAuthFailure(config));
     return finish(failure(503, 'tools_unavailable'));
   } finally {
-    await server.close().catch(() => undefined);
+    void server.close().catch(() => undefined);
   }
 }
 export { ixoMcpMetadataUrl };

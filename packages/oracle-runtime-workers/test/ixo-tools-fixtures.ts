@@ -60,6 +60,11 @@ export function loopFixture(
     context?: typeof facts;
     oracleKnowledge?: 'public' | 'private';
     plugins?: OraclePlugin[];
+    lifetimeSignal?: AbortSignal;
+    onFetch?: (
+      url: string,
+      init?: RequestInit,
+    ) => Promise<Response | undefined>;
   } = {},
 ) {
   const context = options.context ?? facts;
@@ -98,6 +103,7 @@ export function loopFixture(
   });
   const binding = createTurnIxoTools({
     context,
+    lifetimeSignal: options.lifetimeSignal,
     config,
     currentVerifiedDelegation: async () =>
       active
@@ -139,6 +145,8 @@ export function loopFixture(
     fetch: async (input, init) => {
       const url = String(input instanceof Request ? input.url : input);
       requests.push(url);
+      const intercepted = await options.onFetch?.(url, init);
+      if (intercepted) return intercepted;
       if (failedPath && url.includes(failedPath))
         return new Response('source unavailable', { status: 503 });
       if (privateMemoryInShared && url.endsWith('/agent/search')) {

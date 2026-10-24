@@ -6,6 +6,7 @@ import type {
   PluginTool,
   RuntimeContext,
 } from '../../plugin-api/types';
+import { runIxoOperation } from '../../ixo-tools/lifetime';
 import { ixoToolsConfigSchema } from '../../ixo-tools/config';
 
 const manifest: PluginManifest = {
@@ -68,7 +69,9 @@ export class IxoToolsPlugin extends OraclePlugin {
   override async getRequestTools(rtCtx: RuntimeContext): Promise<PluginTool[]> {
     const surface = rtCtx.ixoTools;
     if (!surface) return [];
-    const discovery = await surface.discover();
+    const discovery = await runIxoOperation(rtCtx.abortSignal, () =>
+      surface.discover(),
+    );
     if (discovery.status !== 'available') return [];
     const available = new Set(discovery.tools);
     const scope = {
@@ -97,7 +100,9 @@ export class IxoToolsPlugin extends OraclePlugin {
               reason: 'scope_denied',
             });
           }
-          return surface.invoke(name, args);
+          return runIxoOperation(callCtx.abortSignal, () =>
+            surface.invoke(name, args),
+          );
         },
       }));
   }

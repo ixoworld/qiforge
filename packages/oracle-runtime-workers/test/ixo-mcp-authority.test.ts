@@ -453,6 +453,70 @@ describe('MCP owner scope and native authority', () => {
     ).toHaveLength(1);
   });
 
+  it('rejects a pre-aborted Worker request before authentication or owner selection', async () => {
+    const worker = createOracleWorker({
+      config: { name: 'MCP test' },
+      plugins: [new IxoToolsPlugin()],
+      ixoToolsMcp: registration,
+    });
+    const environment = {
+      ORACLE_NAME: 'MCP test',
+      BLOCKSYNC_GRAPHQL_URL: 'https://indexer.test/graphql',
+      MATRIX_BASE_URL: 'https://matrix.test',
+      MATRIX_ORACLE_ADMIN_USER_ID: '@oracle:matrix.test',
+      MATRIX_ORACLE_ADMIN_PASSWORD: 'unused',
+      OPEN_ROUTER_API_KEY: 'unused',
+      USER_ORACLE: namespace,
+      MATRIX_GATEWAY: namespace,
+      ORACLE_DID: oracle.did,
+      IXO_MCP_RESOURCE_CLIENT_SECRET: 'secret',
+    } satisfies OracleWorkerEnv;
+    const introspect = vi.fn(async () => Response.json({ active: false }));
+    vi.stubGlobal('fetch', introspect);
+    const controller = new AbortController();
+    controller.abort();
+    const response = await worker.fetch(
+      new Request(request(), { signal: controller.signal }),
+      environment,
+      createExecutionContext(),
+    );
+    expect(response.status).toBe(499);
+    expect(introspect).not.toHaveBeenCalled();
+  });
+
+  it('does not select an owner when the Worker request aborts during introspection', async () => {
+    const worker = createOracleWorker({
+      config: { name: 'MCP test' },
+      plugins: [new IxoToolsPlugin()],
+      ixoToolsMcp: registration,
+    });
+    const environment = {
+      ORACLE_NAME: 'MCP test',
+      BLOCKSYNC_GRAPHQL_URL: 'https://indexer.test/graphql',
+      MATRIX_BASE_URL: 'https://matrix.test',
+      MATRIX_ORACLE_ADMIN_USER_ID: '@oracle:matrix.test',
+      MATRIX_ORACLE_ADMIN_PASSWORD: 'unused',
+      OPEN_ROUTER_API_KEY: 'unused',
+      USER_ORACLE: namespace,
+      MATRIX_GATEWAY: namespace,
+      ORACLE_DID: oracle.did,
+      IXO_MCP_RESOURCE_CLIENT_SECRET: 'secret',
+    } satisfies OracleWorkerEnv;
+    const controller = new AbortController();
+    const introspect = vi.fn(async () => {
+      controller.abort();
+      return Response.json(principal());
+    });
+    vi.stubGlobal('fetch', introspect);
+    const response = await worker.fetch(
+      new Request(request(), { signal: controller.signal }),
+      environment,
+      createExecutionContext(),
+    );
+    expect(response.status).toBe(499);
+    expect(introspect).toHaveBeenCalledTimes(1);
+  });
+
   it('mounts metadata and rejects bad authentication before selecting an owner object', async () => {
     const worker = createOracleWorker({
       config: { name: 'MCP test' },

@@ -49,8 +49,11 @@ import {
   parseIxoMcpConfig,
   prepareIxoMcpRequest,
   withIxoMcpResponse,
+  withIxoMcpLifetime,
+  ixoMcpAuthFailure,
   type IxoMcpConfigInput,
 } from './ixo-tools/mcp';
+import { readBoundedBody } from './ixo-tools/mcp/auth';
 export type { IxoMcpConfigInput } from './ixo-tools/mcp';
 
 export * from './plugin-api';
@@ -404,17 +407,43 @@ export function createOracleWorker(
         if (isIxoMcpResource(request, ixoMcp)) {
           const preflight = prepareIxoMcpRequest(request, ixoMcp);
           if (preflight) return preflight;
-          const authentication = await authenticateIxoMcp(
-            request,
-            ixoMcp,
-            env.IXO_MCP_RESOURCE_CLIENT_SECRET,
-          );
-          if (!authentication.ok)
-            return withIxoMcpResponse(authentication.response, request, ixoMcp);
-          return userStub(
-            env,
-            authentication.authorization.principal.sub,
-          ).handleIxoMcp(request);
+          return withIxoMcpLifetime(request, ixoMcp, async (signal) => {
+            const authentication = await authenticateIxoMcp(
+              request,
+              ixoMcp,
+              env.IXO_MCP_RESOURCE_CLIENT_SECRET,
+              signal,
+            );
+            if (!authentication.ok)
+              return withIxoMcpResponse(
+                authentication.response,
+                request,
+                ixoMcp,
+              );
+            signal.throwIfAborted();
+            const response = await userStub(
+              env,
+              authentication.authorization.principal.sub,
+            ).handleIxoMcp(new Request(request, { signal }));
+            const body = response.body
+              ? await readBoundedBody(response, 2_097_152, signal)
+              : null;
+            if (!(await authentication.authorization.current()))
+              return withIxoMcpResponse(
+                ixoMcpAuthFailure(ixoMcp),
+                request,
+                ixoMcp,
+              );
+            signal.throwIfAborted();
+            return withIxoMcpResponse(
+              new Response(body, {
+                status: response.status,
+                headers: response.headers,
+              }),
+              request,
+              ixoMcp,
+            );
+          });
         }
       }
       // Make sure the Matrix bot is running; the call is idempotent and cheap

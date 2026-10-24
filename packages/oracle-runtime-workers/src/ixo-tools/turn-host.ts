@@ -15,6 +15,7 @@ import {
   type IxoSourceUcan,
 } from './source-authority';
 import type { IxoToolsBinding } from './surface';
+import { lifetimeFetch, runIxoOperation } from './lifetime';
 
 export type VerifiedIxoDelegation = CurrentSourceDelegation &
   Readonly<{
@@ -29,6 +30,7 @@ export type TurnIxoToolsInput = Readonly<{
   currentAudience: () => Promise<'private' | 'shared'>;
   attachments: SourceConfig['attachments'];
   fetch?: typeof fetch;
+  lifetimeSignal?: AbortSignal;
 }>;
 
 export function createTurnIxoTools(input: TurnIxoToolsInput): IxoToolsBinding {
@@ -48,12 +50,16 @@ export function createTurnIxoTools(input: TurnIxoToolsInput): IxoToolsBinding {
       )
     );
   }
-  async function currentDelegation(tool?: ToolName) {
+  async function currentDelegation(signal: AbortSignal, tool?: ToolName) {
+    signal.throwIfAborted();
     const before = await input.currentVerifiedDelegation();
+    signal.throwIfAborted();
     if (!before || before.expiration <= Date.now() / 1000) return null;
     const audience = await input.currentAudience();
+    signal.throwIfAborted();
     if (context.visibility === 'private' && audience !== 'private') return null;
     const after = await input.currentVerifiedDelegation();
+    signal.throwIfAborted();
     if (
       !after ||
       after.raw !== before.raw ||
@@ -63,7 +69,7 @@ export function createTurnIxoTools(input: TurnIxoToolsInput): IxoToolsBinding {
       return null;
     return tool && !grantsTool(after, tool) ? null : after;
   }
-  function bindHost(invokingTool?: ToolName) {
+  function bindHost(signal: AbortSignal, invokingTool?: ToolName) {
     const sources = createIXOSourceAdapters({
       network: context.network,
       origins: input.config.origins,
@@ -74,14 +80,17 @@ export function createTurnIxoTools(input: TurnIxoToolsInput): IxoToolsBinding {
         context,
         origins: input.config.origins,
         storeUrl: input.config.storeUrl,
-        currentDelegation: () => currentDelegation(invokingTool),
+        currentDelegation: () => currentDelegation(signal, invokingTool),
       }),
-      ...(input.fetch ? { fetch: input.fetch } : {}),
+      fetch: lifetimeFetch(
+        input.fetch ?? globalThis.fetch.bind(globalThis),
+        signal,
+      ),
     });
     const host = createAgentToolsHost({
       ...sources,
       readGrants: async () => {
-        const delegation = await currentDelegation();
+        const delegation = await currentDelegation(signal);
         if (!delegation) return [];
         return catalog
           .filter(({ name }) => grantsTool(delegation, name))
@@ -94,7 +103,6 @@ export function createTurnIxoTools(input: TurnIxoToolsInput): IxoToolsBinding {
     });
     return { host, token: host.bindContext(context) };
   }
-  const discovery = bindHost();
   return Object.freeze({
     scope: Object.freeze({
       userDid: context.userDid,
@@ -103,11 +111,16 @@ export function createTurnIxoTools(input: TurnIxoToolsInput): IxoToolsBinding {
       timezone: context.timezone,
     }),
     tools: Object.freeze({
-      discover: () => discovery.host.discover(discovery.token),
-      invoke: (name: ToolName, args: unknown) => {
-        const { host, token } = bindHost(name);
-        return host.invoke(token, name, args);
-      },
+      discover: () =>
+        runIxoOperation(input.lifetimeSignal, async (signal) => {
+          const { host, token } = bindHost(signal);
+          return host.discover(token);
+        }),
+      invoke: (name: ToolName, args: unknown) =>
+        runIxoOperation(input.lifetimeSignal, async (signal) => {
+          const { host, token } = bindHost(signal, name);
+          return host.invoke(token, name, args);
+        }),
     }),
   } satisfies IxoToolsBinding);
 }

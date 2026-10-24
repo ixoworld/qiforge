@@ -80,7 +80,9 @@ async function introspect(
   token: string,
   config: IxoMcpConfig,
   secret: string,
+  signal?: AbortSignal,
 ): Promise<IxoMcpPrincipal | null> {
+  if (signal?.aborted) return null;
   const controller = new AbortController();
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let received: Response | undefined;
@@ -99,7 +101,9 @@ async function introspect(
         {
           method: 'POST',
           redirect: 'manual',
-          signal: controller.signal,
+          signal: signal
+            ? AbortSignal.any([signal, controller.signal])
+            : controller.signal,
           headers: {
             authorization: `Basic ${btoa(credentials)}`,
             'content-type': 'application/x-www-form-urlencoded',
@@ -118,7 +122,15 @@ async function introspect(
       )
         return null;
       const parsed = principalSchema.safeParse(
-        JSON.parse(await readBoundedBody(received, 16_384, controller.signal)),
+        JSON.parse(
+          await readBoundedBody(
+            received,
+            16_384,
+            signal
+              ? AbortSignal.any([signal, controller.signal])
+              : controller.signal,
+          ),
+        ),
       );
       if (!parsed.success) return null;
       const value = parsed.data;
@@ -146,6 +158,7 @@ export async function authenticateIxoMcp(
   request: Request,
   config: IxoMcpConfig,
   secret: string | undefined,
+  signal?: AbortSignal,
 ): Promise<
   | { ok: true; authorization: IxoMcpAuthorization }
   | { ok: false; response: Response }
@@ -156,7 +169,7 @@ export async function authenticateIxoMcp(
   const token = header?.match(/^Bearer ([A-Za-z0-9._~+/-]+=*)$/i)?.[1];
   if (!token || token.length > 16_384)
     return { ok: false, response: ixoMcpAuthFailure(config) };
-  const principal = await introspect(token, config, secret);
+  const principal = await introspect(token, config, secret, signal);
   const client = config.clients.find(
     (entry) => entry.clientId === principal?.client_id,
   );
@@ -174,7 +187,7 @@ export async function authenticateIxoMcp(
       principal,
       client,
       current: async () => {
-        const next = await introspect(token, config, secret);
+        const next = await introspect(token, config, secret, signal);
         const currentClient = config.clients.find(
           (entry) => entry.clientId === next?.client_id,
         );
