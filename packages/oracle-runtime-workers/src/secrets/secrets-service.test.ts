@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import type { SecretsAdapter } from '../core/runtime-context';
 import { makeRuntimeContext } from '../core/test-fixtures';
 import { createSecretsAdapter } from '../do/secrets-adapter';
@@ -296,7 +297,14 @@ describe('one room-state read per secrets consumer', () => {
         return { Authorization: 'Bearer sandbox-token' };
       },
       mcpClientFactory: () => ({
-        getTools: async () => [],
+        getTools: async () => [
+          {
+            name: 'sandbox_run',
+            description: 'run',
+            schema: z.object({ code: z.string() }),
+            invoke: async () => 'ran',
+          },
+        ],
         close: async () => undefined,
       }),
     });
@@ -321,7 +329,11 @@ describe('one room-state read per secrets consumer', () => {
         },
       },
     );
-    await plugin.getRequestTools(ctx);
+    const tools = await plugin.getRequestTools(ctx);
+    expect(forwarded.at(-1)).toEqual({});
+    const run = tools.find((tool) => tool.name === 'sandbox_run');
+    if (!run) throw new Error('sandbox_run was not discovered');
+    await run.handler({ code: 'true' }, ctx);
     const last = forwarded.at(-1);
     if (!last) throw new Error('the sandbox never built its headers');
     return last;

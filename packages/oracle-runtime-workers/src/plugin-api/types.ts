@@ -514,6 +514,8 @@ export type SessionSurface =
   | { kind: 'chat'; surface: string; label: string };
 
 export interface RuntimeContext<TConfig = MergedConfig> {
+  /** Current host-verified disclosure audience; absent hosts are treated as shared. */
+  skillAudience?: () => Promise<'private' | 'shared'>;
   /** Turn-bound native IXO read tools, forwarded only for the matching host scope. */
   ixoTools?: IxoToolsSurface;
   /** Authenticated user identity (validated by core auth middleware). */

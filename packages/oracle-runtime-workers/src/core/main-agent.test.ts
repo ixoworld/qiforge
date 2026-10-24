@@ -25,6 +25,7 @@ import type { ContextGuardEvent } from './middlewares/context-guard';
 import { isSummarizationMessage } from './middlewares/summarization';
 import { SkillsPlugin } from './plugins/skills';
 import { PortalPlugin } from '../plugins/portal';
+import { SandboxPlugin } from '../plugins/sandbox/sandbox.plugin';
 import { WeatherPlugin } from './plugins/weather';
 import { FlowsPlugin } from '../plugins/flows/flows.plugin';
 import { FLOWS_OPERATING_GUIDE } from '../plugins/flows/prompts';
@@ -220,6 +221,7 @@ describe('createRuntimeCore', () => {
       'get_current_weather',
       'list_skills',
       'search_skills',
+      'inspect_skill',
     ]);
   });
 
@@ -1045,7 +1047,14 @@ describe('createMainAgent', () => {
         identity: core.identity,
         config: core.validatedEnv,
         availablePlugins: core.availablePlugins,
-        ambient: ambientFor(core, llm),
+        ambient: {
+          ...ambientFor(core, llm),
+          skillScope: {
+            userDid: requestCtx.user.did,
+            sessionId: requestCtx.session.id,
+            currentAudience: async () => 'private',
+          },
+        },
         requestCtx,
         state: {},
       });
@@ -1057,11 +1066,9 @@ describe('createMainAgent', () => {
         skills: Array<{ title: string; source: string }>;
         privateSkillCount: number;
       };
-      // Private rows first, then public.
-      expect(payload.skills.map((s) => `${s.title}:${s.source}`)).toEqual([
-        'mine:private',
-        'invoice:public',
-      ]);
+      expect(payload.skills.map((s) => `${s.title}:${s.source}`)).toEqual(
+        expectAuth ? ['mine:private', 'invoice:public'] : ['invoice:public'],
+      );
       const registryCall = fetchCalls.find((c) => c.url.includes('/capsules?'));
       const headers = (registryCall?.init?.headers ?? {}) as Record<
         string,
@@ -1073,6 +1080,123 @@ describe('createMainAgent', () => {
         expectAuth ? 'Bearer minted-ucan' : undefined,
       );
     }
+  });
+
+  it('gates the actual sandbox call using post-grant inventory before any secret-bearing connection', async () => {
+    const cid = 'QmYwAPJzv5CZsnAzt8auVTLWHtUAwKPWyVYFQnwxKZ3Uez';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({
+          cid,
+          visibility: 'public',
+          skillName: 'example',
+          archiveSha256: 'a'.repeat(64),
+          archiveSize: 1000,
+          declaration: {
+            status: 'validated',
+            contract: {
+              schemaVersion: 1,
+              skillName: 'example',
+              runtime: 'qiforge-workers',
+              audiences: ['private', 'shared'],
+              effects: ['read'],
+              requiredTools: [{ name: 'protected_read', effect: 'read' }],
+              requiredCapabilities: [],
+              requiredServices: [],
+            },
+          },
+        }),
+      ),
+    );
+    const calls: unknown[] = [];
+    const headerInputs: unknown[] = [];
+    const sandbox = new SandboxPlugin({
+      authBuilder: async (input) => {
+        headerInputs.push(input);
+        return { Authorization: 'Bearer sandbox-token' };
+      },
+      mcpClientFactory: () => ({
+        close: async () => undefined,
+        getTools: async () => [
+          {
+            name: 'sandbox_run',
+            description: 'run',
+            schema: z.object({ code: z.string() }),
+            invoke: async (args) => {
+              calls.push(args);
+              return 'ran';
+            },
+          },
+        ],
+      }),
+    });
+    const protectedPlugin = makePlugin({
+      name: 'protected',
+      manifest: makeManifest({
+        requires: [{ resource: 'ixo:protected', action: 'read' }],
+      }),
+      getTools: () => [makeTool('protected_read', { effect: 'read' })],
+    });
+    const core = createRuntimeCore({
+      config: { name: 'ContractTest' },
+      plugins: [new SkillsPlugin(), sandbox, protectedPlugin],
+      env: makeEnv({ SANDBOX_MCP_URL: 'https://sandbox.example/mcp' }),
+    });
+    const ambient = ambientFor(
+      core,
+      scriptedLlm({
+        main: [
+          [
+            {
+              name: 'sandbox_run',
+              args: { cid, code: 'run skill' },
+              id: 'run-skill',
+            },
+          ],
+          [],
+        ],
+      }),
+    );
+    const secrets = vi.fn(async () => ({ key: { key: 'key' } }));
+    ambient.secrets = {
+      getIndex: secrets,
+      getValues: async () => ({ key: 'secret-value' }),
+    };
+    const { agent } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient,
+      requestCtx: {
+        ...requestCtx,
+        user: {
+          ...requestCtx.user,
+          ucanDelegation: {
+            raw: 'ucan',
+            capabilities: [{ resource: 'ixo:sandbox', action: 'sandbox/*' }],
+          },
+        },
+      },
+      state: {},
+    });
+    const result = await agent.invoke({
+      messages: [new HumanMessage('Run the selected skill')],
+    });
+    const outputs = toolMessages(result.messages).map((message) =>
+      String(message.content),
+    );
+    expect(
+      outputs.some((content) =>
+        content.includes('missing_tool:protected_read'),
+      ),
+    ).toBe(true);
+    expect(calls).toEqual([]);
+    expect(secrets).not.toHaveBeenCalled();
+    expect(headerInputs).toEqual([
+      expect.objectContaining({ oracleSecrets: {}, userSecrets: {} }),
+    ]);
   });
 
   it('keeps building when one sub-agent fails to initialise', async () => {

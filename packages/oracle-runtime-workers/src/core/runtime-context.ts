@@ -174,6 +174,12 @@ export interface EmitAdapter {
  * consumes them through these interfaces.
  */
 export interface AmbientServices {
+  skillScope?: {
+    userDid: string;
+    sessionId: string;
+    roomId?: string;
+    currentAudience: () => Promise<'private' | 'shared'>;
+  };
   ixoTools?: IxoToolsBinding;
   config: Record<string, unknown>;
   identity: OracleIdentity;
@@ -454,6 +460,11 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
     ambient.ixoTools.scope.roomId === session.roomId &&
     ambient.ixoTools.scope.timezone === user.timezone
       ? { ixoTools: ambient.ixoTools.tools }
+      : {}),
+    ...(ambient.skillScope?.userDid === user.did &&
+    ambient.skillScope.sessionId === session.id &&
+    ambient.skillScope.roomId === session.roomId
+      ? { skillAudience: ambient.skillScope.currentAudience }
       : {}),
     history: {
       messages,
@@ -750,6 +761,7 @@ export function createNoopAmbient(
     logger: overrides.logger ?? NOOP_LOGGER,
     ...(overrides.decisions ? { decisions: overrides.decisions } : {}),
     ...(overrides.ixoTools ? { ixoTools: overrides.ixoTools } : {}),
+    ...(overrides.skillScope ? { skillScope: overrides.skillScope } : {}),
     ...(overrides.kv ? { kv: overrides.kv } : {}),
     ...(overrides.markDispatched
       ? { markDispatched: overrides.markDispatched }

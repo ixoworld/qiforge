@@ -2,6 +2,11 @@ import { z } from 'zod';
 import { tool } from '../../../plugin-api/tool-helper';
 import type { PluginTool, RuntimeContext } from '../../../plugin-api/types';
 import { UcanMintUnavailableError } from '../../../plugin-api/ucan-errors';
+import {
+  currentSkillAudience,
+  inspectionArgsSchema,
+  inspectSkillReference,
+} from './capsule-inspection';
 
 /**
  * Raw capsule shape returned by ai-skills. Validated via Zod at the network
@@ -46,6 +51,7 @@ const searchResponseSchema = z.object({
 
 /** Normalised skill record exposed to the agent. */
 export interface MergedSkill {
+  execution: 'unchecked';
   title: string;
   description: string;
   path: string;
@@ -55,7 +61,9 @@ export interface MergedSkill {
   createdAt?: string;
 }
 
-const LIST_DESCRIPTION = `List available skills from the IXO skills registry — the caller's **published** private skills first, then public registry skills.
+const LIST_DESCRIPTION = `List discoverable skills from the IXO skills registry — the caller's **published** private skills first, then public registry skills.
+
+Discovery does not establish execution compatibility or permission. Use inspect_skill for instructions without launching a sandbox. Every entry has execution: unchecked.
 
 Each entry includes:
 - title: skill name
@@ -66,7 +74,7 @@ Each entry includes:
 
 const SEARCH_DESCRIPTION = `Search the caller's published skills and the public IXO registry by query.
 
-Matching published (private) skills come first, then public registry results. Each entry includes title, description, path, source ("private" | "public"), and cid.`;
+Results have execution: unchecked. Use inspect_skill to read instructions without shell or secrets. Matching published (private) skills come first, then public registry results. Each entry includes title, description, path, source ("private" | "public"), and cid.`;
 
 const listSchema = z.object({
   limit: z
@@ -99,6 +107,7 @@ const searchSchema = z.object({
 
 function normalizeRegistryCapsule(capsule: Capsule): MergedSkill {
   return {
+    execution: 'unchecked',
     title: capsule.name,
     description: capsule.description ?? '',
     path: `/workspace/skills/${capsule.name}`,
@@ -284,7 +293,11 @@ export function createSkillsTools(opts: SkillsToolsOptions): PluginTool[] {
       const limit = params.limit ?? 20;
       const offset = params.offset ?? 0;
 
-      const skillsUcan = await opts.ucanBuilder(opts.baseUrl, runCtx);
+      const audienceBefore = await currentSkillAudience(runCtx);
+      const skillsUcan =
+        audienceBefore === 'private'
+          ? await opts.ucanBuilder(opts.baseUrl, runCtx)
+          : undefined;
 
       const registryResult = await fetchRegistryCapsules(
         {
@@ -298,7 +311,13 @@ export function createSkillsTools(opts: SkillsToolsOptions): PluginTool[] {
       );
 
       const registry = registryResult.capsules.map(normalizeRegistryCapsule);
-      const privateRegistry = registry.filter((s) => s.source === 'private');
+      const audience = await currentSkillAudience(runCtx);
+      if (audience !== audienceBefore)
+        return { status: 'blocked', reasons: ['audience_changed'] };
+      const privateRegistry =
+        audience === 'private' && skillsUcan
+          ? registry.filter((s) => s.source === 'private')
+          : [];
       const publicRegistry = registry.filter((s) => s.source === 'public');
       const skills: MergedSkill[] = [...privateRegistry, ...publicRegistry];
 
@@ -320,7 +339,11 @@ export function createSkillsTools(opts: SkillsToolsOptions): PluginTool[] {
       const params = searchSchema.parse(rawArgs);
       const limit = params.limit ?? 10;
 
-      const skillsUcan = await opts.ucanBuilder(opts.baseUrl, runCtx);
+      const audienceBefore = await currentSkillAudience(runCtx);
+      const skillsUcan =
+        audienceBefore === 'private'
+          ? await opts.ucanBuilder(opts.baseUrl, runCtx)
+          : undefined;
 
       const capsules = await searchRegistryCapsules(
         {
@@ -334,7 +357,13 @@ export function createSkillsTools(opts: SkillsToolsOptions): PluginTool[] {
       );
 
       const registry = capsules.map(normalizeRegistryCapsule);
-      const privateRegistry = registry.filter((s) => s.source === 'private');
+      const audience = await currentSkillAudience(runCtx);
+      if (audience !== audienceBefore)
+        return { status: 'blocked', reasons: ['audience_changed'] };
+      const privateRegistry =
+        audience === 'private' && skillsUcan
+          ? registry.filter((s) => s.source === 'private')
+          : [];
       const publicRegistry = registry.filter((s) => s.source === 'public');
       const skills: MergedSkill[] = [...privateRegistry, ...publicRegistry];
 
@@ -352,5 +381,12 @@ export function createSkillsTools(opts: SkillsToolsOptions): PluginTool[] {
     },
   );
 
-  return [list, search];
+  const inspect = tool((args, ctx) => inspectSkillReference(args, ctx, opts), {
+    name: 'inspect_skill',
+    description:
+      'Inspect an exact capsule CID and optionally read SKILL.md or a text reference. Verifies registry archive content identity without launching shell or injecting sandbox secrets. Reports declared dependencies, not permission to execute. Use path: SKILL.md to read instructions.',
+    schema: inspectionArgsSchema,
+    effect: 'read',
+  });
+  return [list, search, inspect];
 }

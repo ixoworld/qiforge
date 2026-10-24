@@ -13,3 +13,5 @@ apps/qiforge-workers-example/test/.accounts.json
 .claude/
 **/.wrangler/
 packages/agent-tools-sources/tests/fixtures/topics.md
+
+packages/oracle-runtime-workers/src/core/plugins/skills/skill-contract.ts

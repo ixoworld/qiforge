@@ -32,10 +32,9 @@ const manifest: PluginManifest = {
   whenToUse: [
     'User asks "what skills are available?" or "what can you do?".',
     'User asks the agent to find a skill for a specific task ("a skill for invoices", "is there a skill for KYC?").',
+    'Read a discovered skill instruction or reference without shell or sandbox secrets via inspect_skill.',
   ],
-  whenNotToUse: [
-    'Executing a skill — this runtime only lists and searches the registry.',
-  ],
+  whenNotToUse: ['Executing arbitrary shell without the sandbox capability.'],
   examples: [
     {
       user: 'Do you have a skill that can generate an invoice?',
@@ -61,12 +60,12 @@ export interface SkillsPluginOptions {
 /**
  * Skills plugin — the read-only half of the Node runtime's skills plugin.
  *
- * Exposes `list_skills` and `search_skills` over the IXO skills registry
- * (ai-skills). When the oracle has a signing key, both tools mint an
+ * Exposes `list_skills`, `search_skills` and `inspect_skill` over the IXO skills registry
+ * (ai-skills). When the oracle has a signing key, the tools mint an
  * `ixo:skills` UCAN invocation per call so the registry can surface the
  * caller's own published private skills alongside the public ones; without
- * one (`ctx.ucan.hasSigningKey()` is `false`) they call public-only. They
- * never throw on auth issues.
+ * one (`ctx.ucan.hasSigningKey()` is `false`) they call public-only. Discovery falls back to public results on auth issues.
+ * Inspection fails closed when its exact-CID read fails.
  *
  * Unlike the Node plugin this one has no `dependsOn: ['sandbox']` — skill
  * *execution* (`sandbox_run`) is not part of the Workers runtime.

@@ -27,7 +27,8 @@
     ".": "./src/index.ts",
     "./gateway": "./src/gateway-worker.ts",
     "./prompt": "./src/core/prompt-composer.ts",
-    "./ixo-tools": "./src/ixo-tools/index.ts"
+    "./ixo-tools": "./src/ixo-tools/index.ts",
+    "./skills": "./src/core/plugins/skills/index.ts"
   },
   "files": [
     "src",
