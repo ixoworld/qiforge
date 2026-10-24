@@ -77,3 +77,6 @@ checkpoints/
 apps/app
 # local git worktrees used by Claude Code sessions
 .claude/worktrees/
+
+# Local conformance reports
+packages/oracle-runtime-workers/artifacts/

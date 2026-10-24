@@ -37,6 +37,13 @@ jobs:
       - run: pnpm --filter @ixo/oracle-runtime-workers typecheck
       - run: pnpm --filter @ixo/oracle-runtime-workers test:core
       - run: pnpm --filter @ixo/oracle-runtime-workers test
+      - run: pnpm --filter @ixo/oracle-runtime-workers test:ixo-conformance
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ixo-conformance-report
+          path: packages/oracle-runtime-workers/artifacts/ixo-conformance-report.json
+          if-no-files-found: warn
       - run: pnpm --filter @ixo/oracle-runtime-workers test:native-package
       # The packages the runtime and the Portal build on: UCAN validation,
       # the shared Decision and work contracts, and the client SDK.
