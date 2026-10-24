@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import ts from 'typescript';
+import { builtinModules } from 'node:module';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const scratch = await mkdtemp(join(tmpdir(), 'ixo-native-package-'));
@@ -96,10 +97,12 @@ try {
     `
 import { IxoToolsPlugin as RootPlugin, createOracleWorker } from '@ixo/oracle-runtime-workers';
 import { IxoToolsPlugin as NativePlugin } from '@ixo/oracle-runtime-workers/ixo-tools';
+import { SkillsPlugin } from '@ixo/oracle-runtime-workers/skills';
+const skills = new SkillsPlugin();
 const root = new RootPlugin();
 const native = new NativePlugin();
 const oracle = createOracleWorker({config: {name: 'Consumer'}, plugins: [root]});
-void [oracle, native];
+void [oracle, native, skills];
 `,
   );
   const program = ts.createProgram([join(scratch, 'consumer.ts')], {
@@ -131,9 +134,23 @@ void [oracle, native];
     join(scratch, 'worker.js'),
     `
 import { IxoToolsPlugin } from '@ixo/oracle-runtime-workers/ixo-tools';
+import { SkillsPlugin } from '@ixo/oracle-runtime-workers/skills';
 import { catalog } from '@ixo/agent-tools';
 export default {
-  async fetch() {
+  async fetch(request) {
+    if (new URL(request.url).pathname.startsWith('/skills')) {
+      let secretReads = 0;
+      const plugin = new SkillsPlugin({ucanBuilder: async () => undefined});
+      const ctx = {
+        config: {SKILLS_CAPSULES_BASE_URL: new URL(request.url).pathname === '/skills-redirect' ? 'https://registry-redirect.example' : 'https://registry.example', NETWORK: 'testnet'},
+        skillAudience: async () => 'shared',
+        secrets: {getAll: async () => {secretReads++; return {};}},
+      };
+      const tools = plugin.getTools(ctx);
+      const inspector = tools.find(t => t.name === 'inspect_skill');
+      const result = await inspector.handler({cid: 'QmYwAPJzv5CZsnAzt8auVTLWHtUAwKPWyVYFQnwxKZ3Uez', path: 'SKILL.md'}, ctx);
+      return Response.json({names: tools.map(t => t.name), result, secretReads});
+    }
     const plugin = new IxoToolsPlugin();
     let calls = 0;
     const surface = {
@@ -171,6 +188,8 @@ export default {
     target: 'es2022',
     write: false,
     metafile: true,
+    conditions: ['workerd', 'worker', 'browser'],
+    external: ['cloudflare:workers', ...builtinModules, 'node:*'],
   });
   assert.ok(
     Object.keys(bundle.metafile.inputs).some((path) =>
@@ -180,12 +199,34 @@ export default {
     ),
   );
   assert.equal(bundle.outputFiles.length, 1);
+  const outboundOrigins = [];
   worker = new Miniflare(
     convertV4MiniflareOptions({
       modules: true,
       script: bundle.outputFiles[0].text,
       compatibilityDate: '2026-08-20',
-      compatibilityFlags: [],
+      compatibilityFlags: ['nodejs_compat'],
+      outboundService: async (request) => {
+        const url = new URL(request.url);
+        outboundOrigins.push(url.origin);
+        if (url.origin === 'https://registry-redirect.example')
+          return new Response(null, {
+            status: 307,
+            headers: { Location: 'https://other.example/canary' },
+          });
+        assert.equal(url.origin, 'https://registry.example');
+        assert.equal(url.searchParams.get('path'), 'SKILL.md');
+        assert.equal(request.headers.has('Authorization'), false);
+        return Response.json({
+          cid: 'QmYwAPJzv5CZsnAzt8auVTLWHtUAwKPWyVYFQnwxKZ3Uez',
+          visibility: 'public',
+          skillName: 'example',
+          archiveSha256: 'a'.repeat(64),
+          archiveSize: 1000,
+          declaration: { status: 'legacy' },
+          document: { path: 'SKILL.md', text: '# Example' },
+        });
+      },
     }),
   );
   const response = await worker.dispatchFetch('http://localhost/');
@@ -202,6 +243,31 @@ export default {
     result: { status: 'unavailable', reason: 'source_unavailable' },
     calls: 1,
   });
+  const skillResponse = await worker.dispatchFetch('http://localhost/skills');
+  const skillResult = await skillResponse.json();
+  assert.deepEqual(skillResult.names, [
+    'list_skills',
+    'search_skills',
+    'inspect_skill',
+  ]);
+  assert.equal(skillResult.secretReads, 0);
+  assert.equal(skillResult.result.status, 'reference_only');
+  assert.equal(skillResult.result.execution, 'unchecked');
+  assert.equal(skillResult.result.document.text, '# Example');
+  assert.equal(skillResult.result.mountIntegrity, 'unverified');
+  const redirectResponse = await worker.dispatchFetch(
+    'http://localhost/skills-redirect',
+  );
+  const redirected = await redirectResponse.json();
+  assert.deepEqual(redirected.result, {
+    status: 'blocked',
+    reasons: ['inspection_unavailable'],
+  });
+  assert.equal(redirected.secretReads, 0);
+  assert.deepEqual(outboundOrigins, [
+    'https://registry.example',
+    'https://registry-redirect.example',
+  ]);
   const denied = await build({
     stdin: {
       contents:
@@ -222,7 +288,7 @@ export default {
     'Internal host constructor became a public deep import',
   );
   process.stdout.write(
-    `Installed native plugin passed root/subpath types, strict schemas and workerd execution. Packed ${packed.size} workspace dependencies.\n`,
+    `Installed native plugin and shell-free skill inspection passed types, schemas and workerd execution. Packed ${packed.size} workspace dependencies.\n`,
   );
 } finally {
   await worker?.dispose();

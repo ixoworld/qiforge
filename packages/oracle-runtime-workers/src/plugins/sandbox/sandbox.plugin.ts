@@ -49,7 +49,7 @@ const manifest: PluginManifest = {
     'Per-user Linux box for code execution. `sandbox_run` runs shell/python (writes anywhere via shell — incl. `/tmp` for scratch). `sandbox_write_file` writes raw bytes BUT only under `/workspace/data/` — paths like `/tmp/...` or `/workspace/tmp/...` are rejected; use `sandbox_run` for those. STORAGE: the box is a scratch disk, not your file store. Files under `/workspace/data/` are pushed UP to durable storage after each call, but NOTHING comes back DOWN automatically and the box is wiped after a few idle minutes. Any file not created in the current call must be fetched with `load_artifact` before you can read it.',
   whenToUse: [
     "Execute a skill — call `sandbox_run` with `cid` so user + oracle secrets are injected; the skill folder mounts read-only at `/workspace/skills/<skill-name>/` (use the absolute paths from `load_skill`'s `skillFiles`).",
-    'Read a skill file (SKILL.md, scripts, configs) — call `sandbox_run` with `cid` and shell: `cat /workspace/skills/<skill-name>/SKILL.md`, `ls /workspace/skills/<skill-name>/`, `grep -r "<pattern>" /workspace/skills/<skill-name>/`, or `sed -n "1,80p" <file>` for a line range. There is no dedicated `read_skill` tool.',
+    'Read a skill instruction or reference with inspect_skill({cid, path: "SKILL.md"}) or a supported references/ text path. It verifies registry content identity without launching shell or injecting sandbox secrets. Discovery is unchecked. CID-based load_skill and sandbox_run refuse legacy or incompatible contracts. A dependencies_checked result does not prove shell effect enforcement or mounted-byte integrity.',
     'Hit a JSON/REST API — write curl or python in `sandbox_run`. Never use a web scraper for `/api/`, `/v1/`, `/v2/`, `/v3/` endpoints.',
     'Generate or transform a file the user (or a later turn) will re-read — write it to `/workspace/data/output/<name>` (alias `/workspace/output/`). It is pushed to durable storage after the call; a later turn must `load_artifact` it back before reading.',
     'Re-read ANY file you did not create in this same call — an attachment the user sent earlier, output from a previous turn, anything `artifact_list` shows — call `load_artifact` with its path FIRST, then read it with `sandbox_run`. Do not assume it is still on disk: the box is recycled after a few idle minutes and comes back empty.',
@@ -69,10 +69,10 @@ const manifest: PluginManifest = {
     {
       user: "Read the pptx skill's instructions before generating slides.",
       thought:
-        "After `load_skill`, the SKILL.md path is the absolute path the response returned (e.g. /workspace/skills/pptx/SKILL.md). Cat it directly through sandbox_run — there's no separate read tool. Pass `cid` so the same skill context is in place.",
-      tool: 'sandbox_run',
+        'Read the exact discovered CID through inspect_skill before deciding whether the host can execute it.',
+      tool: 'inspect_skill',
       args: {
-        code: 'cat /workspace/skills/pptx/SKILL.md',
+        path: 'SKILL.md',
         cid: 'cid returned by list_skills / search_skills',
       },
     },
@@ -317,6 +317,7 @@ export class SandboxPlugin extends OraclePlugin {
           skillsServiceUrl,
           oracleSecrets,
           rtCtx,
+          includeSecrets: false,
         })
           .then(async ({ client, tools }) => {
             // Defs are plain data — the refresh connection has nothing left
@@ -351,14 +352,12 @@ export class SandboxPlugin extends OraclePlugin {
       return this.toPluginTools(lazyUpstream, rtCtx);
     }
 
-    const userSecrets = await rtCtx.secrets.getAll();
-
     const headers = await this.authBuilder(
       {
         sandboxMcpUrl,
         skillsServiceUrl,
-        oracleSecrets,
-        userSecrets,
+        oracleSecrets: {},
+        userSecrets: {},
       },
       rtCtx,
     );
@@ -519,12 +518,19 @@ export class SandboxPlugin extends OraclePlugin {
     skillsServiceUrl: string | undefined;
     oracleSecrets: Record<string, string>;
     rtCtx: RuntimeContext;
+    includeSecrets?: boolean;
   }): Promise<{ client: SandboxMcpClientLike; tools: SandboxMcpTool[] }> {
     const { sandboxMcpUrl, skillsServiceUrl, oracleSecrets, rtCtx } = args;
-    const userSecrets = await rtCtx.secrets.getAll();
+    const userSecrets =
+      args.includeSecrets === false ? {} : await rtCtx.secrets.getAll();
 
     const headers = await this.authBuilder(
-      { sandboxMcpUrl, skillsServiceUrl, oracleSecrets, userSecrets },
+      {
+        sandboxMcpUrl,
+        skillsServiceUrl,
+        oracleSecrets: args.includeSecrets === false ? {} : oracleSecrets,
+        userSecrets,
+      },
       rtCtx,
     );
     if (!headers.Authorization) {

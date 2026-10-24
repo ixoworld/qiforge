@@ -6281,20 +6281,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           )
         : {};
 
+      const currentAudience = sessionRoomId
+        ? createCurrentIxoAudienceReader({
+            client: req.client,
+            sessionId: req.sessionId,
+            roomId: sessionRoomId,
+            userDid: req.identity.userDid,
+            ownerMatrixId: req.identity.matrixUserId,
+            blocksyncUri: this.env.BLOCKSYNC_GRAPHQL_URL,
+            participants: (roomId) => this.gateway.ixoToolsParticipants(roomId),
+          })
+        : async () => 'shared' as const;
       const ixoTimezone = req.identity.timezone;
       const ixoTools =
         core.availablePlugins.has('ixo-tools') && sessionRoomId && ixoTimezone
           ? await (async () => {
-              const currentAudience = createCurrentIxoAudienceReader({
-                client: req.client,
-                sessionId: req.sessionId,
-                roomId: sessionRoomId,
-                userDid: req.identity.userDid,
-                ownerMatrixId: req.identity.matrixUserId,
-                blocksyncUri: this.env.BLOCKSYNC_GRAPHQL_URL,
-                participants: (roomId) =>
-                  this.gateway.ixoToolsParticipants(roomId),
-              });
               return createTurnIxoTools({
                 context: {
                   userDid: req.identity.userDid,
@@ -6346,6 +6347,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           ...ambient,
           llm: meteredLlm,
           attachments: attachmentAccess,
+          skillScope: {
+            userDid: req.identity.userDid,
+            sessionId: req.sessionId,
+            ...(sessionRoomId ? { roomId: sessionRoomId } : {}),
+            currentAudience,
+          },
           ...(ixoTools ? { ixoTools } : {}),
           onTurnEnd: (dispose) => turnDisposables.add(dispose),
           markDispatched,

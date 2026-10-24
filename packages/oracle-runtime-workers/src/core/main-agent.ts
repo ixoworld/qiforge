@@ -76,7 +76,12 @@ import { toolEffectOf } from './middlewares/tool-marks';
 import { isHarnessLimitError } from './turn-budget';
 import { collectSubAgentsWithFallback } from './sub-agent-fallback';
 import { computeSubAgentToolName, scopeToolCallIds } from './subagent-as-tool';
-import { resolveTurnToolAccess, withoutWithheldExamples } from './tool-access';
+import {
+  resolveTurnToolAccess,
+  unmetToolRequirements,
+  withoutWithheldExamples,
+} from './tool-access';
+import { guardSkillExecution } from './plugins/skills/capsule-inspection';
 import { wrapPluginTool } from './wrap-plugin-tool';
 import { renderSurfaceSection } from '../delivery/prompt';
 import { createReturnDirectFirstMiddleware } from './middlewares/return-direct-first';
@@ -188,9 +193,14 @@ export async function createMainAgent(
     ? new Set<string>(catalog.map(({ name }) => name))
     : new Set<string>();
   const reservedForOther = (pluginName: string, name: string): boolean =>
-    nativeNames.has(name) && pluginName !== 'ixo-tools';
-  const turnTools = (hooks?.turnTools ?? []).filter(
-    ({ tool }) => !nativeNames.has(tool.name),
+    (nativeNames.has(name) && pluginName !== 'ixo-tools') ||
+    (availablePlugins.has('skills') &&
+      name === 'inspect_skill' &&
+      pluginName !== 'skills');
+  let turnTools = (hooks?.turnTools ?? []).filter(
+    ({ tool }) =>
+      !nativeNames.has(tool.name) &&
+      !(availablePlugins.has('skills') && tool.name === 'inspect_skill'),
   );
   const returnDirectNames = new Set(
     turnTools.filter((t) => t.returnDirect).map((t) => t.tool.name),
@@ -423,7 +433,8 @@ export async function createMainAgent(
     has: hasCapability,
     logger: ambient.logger,
   });
-  const allTools = toolAccess.tools;
+  const unguardedTools = toolAccess.tools;
+  let allTools = unguardedTools;
   const compiledNativeNames = new Set(
     allTools
       .filter(({ pluginName }) => pluginName === 'ixo-tools')
@@ -447,7 +458,7 @@ export async function createMainAgent(
           }
         }
       : undefined;
-  const subAgentEntries = toolAccess.subAgents;
+  let subAgentEntries = toolAccess.subAgents;
   if (toolAccess.withheldToolNames.size > 0)
     ambient.logger.log(
       `[main-agent] admin tools withheld from ${requestCtx.user.did} (delegation does not grant them): ${[...toolAccess.withheldToolNames].join(', ')}`,
@@ -460,6 +471,67 @@ export async function createMainAgent(
     const missing = unmetManifestRequirements(manifest, hasCapability);
     if (missing.length > 0) unmetRequirements.set(pluginName, missing);
   }
+  const inspectTool = unguardedTools.find(
+    ({ pluginName, tool }) =>
+      pluginName === 'skills' &&
+      tool.name === 'inspect_skill' &&
+      !unmetRequirements.has(pluginName),
+  )?.tool;
+  const currentSkillInventory = async (
+    ctx: RuntimeContext,
+  ): Promise<PluginTool[]> => {
+    const has = ctx.ucan.hasCapability;
+    const nativeDiscovery = await ctx.ixoTools
+      ?.discover()
+      .catch(() => undefined);
+    const nativeAvailable = new Set<string>(
+      nativeDiscovery?.status === 'available' ? nativeDiscovery.tools : [],
+    );
+    return unguardedTools
+      .filter(({ pluginName, tool }) => {
+        const manifest = manifestEntries.find(
+          (entry) => entry.pluginName === pluginName,
+        )?.manifest;
+        if (manifest && unmetManifestRequirements(manifest, has).length > 0)
+          return false;
+        if (unmetToolRequirements(pluginName, tool, has).length > 0)
+          return false;
+        if (pluginName === 'ixo-tools' && !nativeAvailable.has(tool.name))
+          return false;
+        const visibility =
+          tool.visibility ?? manifest?.visibility ?? 'on-demand';
+        return visibility === 'always' || ctx.loadedPlugins.has(pluginName);
+      })
+      .map(({ tool }) => tool);
+  };
+  allTools = unguardedTools.map((entry) => ({
+    ...entry,
+    tool: guardSkillExecution(
+      entry.tool,
+      currentSkillInventory,
+      inspectTool?.handler,
+    ),
+  }));
+  turnTools = turnTools.map((entry) => ({
+    ...entry,
+    tool: guardSkillExecution(
+      entry.tool,
+      currentSkillInventory,
+      inspectTool?.handler,
+    ),
+  }));
+  subAgentEntries = subAgentEntries.map((entry) => ({
+    ...entry,
+    subAgent: {
+      ...entry.subAgent,
+      tools: (Array.isArray(entry.subAgent.tools)
+        ? entry.subAgent.tools
+        : entry.subAgent.tools(buildCtx)
+      ).map((tool) =>
+        guardSkillExecution(tool, currentSkillInventory, inspectTool?.handler),
+      ),
+    },
+  }));
   // The router predicts before the tools are collected (see
   // `routableCandidates`): its preload of a plugin left with nothing, or of
   // one whose requirements the delegation does not meet, is void, for the

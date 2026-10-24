@@ -147,12 +147,21 @@ describe('SandboxPlugin (Workers port)', () => {
     );
   });
 
-  it('mints the full header set: Bearer + X-Auth-Type + X-Skills-Invocation + x-os-* + x-us-*', async () => {
+  it('keeps secret values out of discovery and injects them only on execution', async () => {
     const plugin = new SandboxPlugin({ mcpClientFactory: factory });
-    await plugin.getRequestTools(makeCtx());
+    const ctx = makeCtx();
+    const tools = await plugin.getRequestTools(ctx);
 
     expect(capturedConfigs.length).toBe(1);
     expect(headersOf(capturedConfigs[0])).toEqual({
+      Authorization: 'Bearer sandbox-token',
+      'X-Auth-Type': 'ucan',
+      'X-Skills-Invocation': 'skills-token',
+    });
+    await tools
+      .find((tool) => tool.name === 'sandbox_run')
+      ?.handler({ code: 'true' }, ctx);
+    expect(headersOf(capturedConfigs[1])).toEqual({
       Authorization: 'Bearer sandbox-token',
       'X-Auth-Type': 'ucan',
       'X-Skills-Invocation': 'skills-token',
