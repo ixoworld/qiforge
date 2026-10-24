@@ -115,6 +115,7 @@ lifetime are in [operations](docs/operations.md).
 | [frontend-bridge](docs/frontend-bridge.md) | Browser tools and AG-UI actions over the socket: one invocation, one socket, unknown outcomes |
 | [pod-creator](docs/pod-creator.md)         | The POD Creator plugin: roles, state in `ctx.kv`, the create path and its launch gate         |
 | [ixo-transaction](docs/ixo-transaction.md) | The opt-in wallet-signing plugin: chain ids, signing outcomes, the mainnet receipt rule       |
+| [ixo-tools](docs/ixo-tools.md)             | Opt-in IXO account, credits, files, memory and off-ramp reads with current authority checks   |
 | [testing](docs/testing.md)                 | Unit, harness e2e, the devnet feature matrix, stress                                          |
 | [load-tests](docs/load-tests.md)           | Measurements and the findings that shaped the gateway                                         |
 

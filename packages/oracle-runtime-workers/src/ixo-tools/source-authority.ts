@@ -1,13 +1,28 @@
 import type { HostFacts } from '@ixo/agent-tools';
 import type { SourceAuthority, SourceConfig } from '@ixo/agent-tools-sources';
-import type { RuntimeContext, UcanDelegation } from '../plugin-api/types';
+import { abilityCovers, resourceCovers } from '../core/runtime-context';
+import type { DelegatedCapability } from '../do/ucan-service';
+import type { RuntimeContext } from '../plugin-api/types';
+
+export type IxoSourceUcan = Pick<
+  RuntimeContext['ucan'],
+  | 'hasSigningKey'
+  | 'createInvocationFromDelegation'
+  | 'resolveServiceDid'
+  | 'getServiceDelegation'
+>;
+export type CurrentSourceDelegation = Readonly<{
+  raw: string;
+  revision?: object;
+  capabilities: readonly DelegatedCapability[];
+}>;
 
 export function createIxoSourceAuthority(input: {
-  ucan: RuntimeContext['ucan'];
+  ucan: IxoSourceUcan;
   context: HostFacts;
   origins: SourceConfig['origins'];
   storeUrl: string;
-  currentDelegation: () => Promise<UcanDelegation | null>;
+  currentDelegation: () => Promise<CurrentSourceDelegation | null>;
 }): SourceAuthority {
   const context = Object.freeze({ ...input.context });
   const origins = Object.freeze({ ...input.origins });
@@ -41,6 +56,12 @@ export function createIxoSourceAuthority(input: {
     yellowcard: audience(origins.yellowcard),
   });
   const storeAudience = audience(storeUrl);
+  async function stillCurrent(
+    before: CurrentSourceDelegation,
+  ): Promise<boolean> {
+    const after = await input.currentDelegation();
+    return after?.raw === before.raw && after.revision === before.revision;
+  }
   async function turnInvocation(
     candidate: HostFacts,
     service: 'subscriptions' | 'memory' | 'yellowcard',
@@ -49,7 +70,15 @@ export function createIxoSourceAuthority(input: {
     requireContext(candidate);
     if (!input.ucan.hasSigningKey()) return null;
     const delegation = await input.currentDelegation();
-    if (!delegation?.raw) return null;
+    if (
+      !delegation?.raw ||
+      !delegation.capabilities.some(
+        (grant) =>
+          resourceCovers(grant.with, capability.with) &&
+          abilityCovers(grant.can, capability.can),
+      )
+    )
+      return null;
     const result = await input.ucan.createInvocationFromDelegation(
       delegation.raw,
       audiences[service],
@@ -57,6 +86,7 @@ export function createIxoSourceAuthority(input: {
       { maxTtlSeconds: 60 },
     );
     if ('error' in result) throw new Error('IXO source invocation unavailable');
+    if (!(await stillCurrent(delegation))) return null;
     return result.invocation;
   }
   const authority: SourceAuthority = {
@@ -80,14 +110,13 @@ export function createIxoSourceAuthority(input: {
       }),
     vfs: async (candidate, action) => {
       requireContext(candidate);
-      if (
-        !input.ucan.hasSigningKey() ||
-        !(await input.currentDelegation())?.raw
-      )
-        return null;
+      if (!input.ucan.hasSigningKey()) return null;
+      const current = await input.currentDelegation();
+      if (!current?.raw) return null;
       const can = action === 'list' ? 'fs/list' : 'fs/read';
       if ((await input.ucan.resolveServiceDid(storeUrl)) !== storeAudience)
         throw new Error('VFS delegation audience mismatch');
+      if (!(await stillCurrent(current))) return null;
       const delegation = await input.ucan.getServiceDelegation(
         context.userDid,
         {
@@ -97,6 +126,7 @@ export function createIxoSourceAuthority(input: {
           fresh: true,
         },
       );
+      if (!(await stillCurrent(current))) return null;
       if ('error' in delegation) {
         if (delegation.error === 'no-delegation') return null;
         throw new Error('VFS delegation unavailable');
@@ -110,6 +140,7 @@ export function createIxoSourceAuthority(input: {
       );
       if ('error' in result)
         throw new Error('VFS source invocation unavailable');
+      if (!(await stillCurrent(current))) return null;
       return result.invocation;
     },
   };

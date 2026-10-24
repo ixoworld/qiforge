@@ -8,6 +8,7 @@ import {
   type StructuredTool,
 } from 'langchain';
 import { z } from 'zod';
+import { catalog } from '@ixo/agent-tools';
 import type {
   PluginContext,
   PluginManifest,
@@ -83,6 +84,7 @@ import { CREATE_ARTIFACT_TOOL } from '../artifacts/tool';
 import type { SessionSurface } from '../plugin-api/types';
 
 import { taskExecutionProfile } from './execution-profile';
+import type { CurrentToolAvailability } from './current-tool-availability';
 import { prepareDomainContext } from './domain-context';
 
 const PLUGIN_LOGGER_COMPONENT = 'main-agent';
@@ -181,7 +183,15 @@ export async function createMainAgent(
       : delivery
         ? { kind: 'stream' }
         : undefined;
-  const turnTools = hooks?.turnTools ?? [];
+  const nativeInstalled = availablePlugins.has('ixo-tools');
+  const nativeNames = nativeInstalled
+    ? new Set<string>(catalog.map(({ name }) => name))
+    : new Set<string>();
+  const reservedForOther = (pluginName: string, name: string): boolean =>
+    nativeNames.has(name) && pluginName !== 'ixo-tools';
+  const turnTools = (hooks?.turnTools ?? []).filter(
+    ({ tool }) => !nativeNames.has(tool.name),
+  );
   const returnDirectNames = new Set(
     turnTools.filter((t) => t.returnDirect).map((t) => t.tool.name),
   );
@@ -325,8 +335,14 @@ export async function createMainAgent(
   // subject's anchored domain documents become a prompt block and two
   // read tools. It grants nothing and gates nothing (see domain-context/).
   const bootSubAgents = registries.subAgents.collectBoot(buildCtx);
+  const collectTools = nativeInstalled
+    ? Promise.all([
+        registries.tools.collectBoot(buildCtx),
+        registries.tools.collectRequest(rtCtx),
+      ]).then(([boot, request]) => [...boot, ...request])
+    : registries.tools.collect(buildCtx, rtCtx);
   const [allCollectedTools, requestSubAgents, domain] = await Promise.all([
-    registries.tools.collect(buildCtx, rtCtx),
+    collectTools,
     registries.subAgents.collectRequest(rtCtx),
     domainContext?.mode === 'observe' && domainResolver
       ? prepareDomainContext({
@@ -341,7 +357,9 @@ export async function createMainAgent(
         })
       : undefined,
   ]);
-  const domainTools = domain?.tools ?? [];
+  const domainTools = (domain?.tools ?? []).filter(
+    (tool) => !nativeNames.has(tool.name),
+  );
   // A request-time tool or sub-agent never takes a name the server already
   // uses this turn, so a client-declared name cannot shadow a server tool or
   // overwrite its effect and repeatable classification below. The domain
@@ -349,24 +367,44 @@ export async function createMainAgent(
   // name cannot be caught at boot: it is dropped for those turns instead of
   // being bound twice.
   const unshadowed = dropShadowingRequestEntries({
-    tools: allCollectedTools,
-    requestSubAgents,
+    tools: allCollectedTools.filter(
+      ({ pluginName, tool }) => !reservedForOther(pluginName, tool.name),
+    ),
+    requestSubAgents: requestSubAgents.filter(
+      ({ pluginName, subAgent }) =>
+        !reservedForOther(pluginName, computeSubAgentToolName(subAgent.name)),
+    ),
     runtimeNames: domainTools.map((t) => t.name),
     reservedNames: [
       ...META_TOOL_NAMES,
       READ_RESULT_TOOL_NAME,
       ...turnTools.map(({ tool }) => tool.name),
       ...allCollectedTools
-        .filter(({ origin }) => origin === 'boot')
+        .filter(
+          ({ origin, pluginName, tool }) =>
+            origin === 'boot' && !reservedForOther(pluginName, tool.name),
+        )
         .map(({ tool }) => tool.name),
-      ...bootSubAgents.map(({ subAgent }) =>
-        computeSubAgentToolName(subAgent.name),
-      ),
+      ...bootSubAgents
+        .filter(
+          ({ pluginName, subAgent }) =>
+            !reservedForOther(
+              pluginName,
+              computeSubAgentToolName(subAgent.name),
+            ),
+        )
+        .map(({ subAgent }) => computeSubAgentToolName(subAgent.name)),
     ],
     logger: ambient.logger,
   });
   const collectedTools = unshadowed.tools;
-  const collectedSubAgents = [...bootSubAgents, ...unshadowed.requestSubAgents];
+  const collectedSubAgents = [
+    ...bootSubAgents.filter(
+      ({ pluginName, subAgent }) =>
+        !reservedForOther(pluginName, computeSubAgentToolName(subAgent.name)),
+    ),
+    ...unshadowed.requestSubAgents,
+  ];
   // The user's delegation decides what the model may see, by one rule: a
   // manifest's `requires` per plugin (below), a tool's plane per tool here.
   const hasCapability = (resource: string, action: string): boolean =>
@@ -386,6 +424,29 @@ export async function createMainAgent(
     logger: ambient.logger,
   });
   const allTools = toolAccess.tools;
+  const compiledNativeNames = new Set(
+    allTools
+      .filter(({ pluginName }) => pluginName === 'ixo-tools')
+      .map(({ tool }) => tool.name),
+  );
+  const currentToolAvailability: CurrentToolAvailability | undefined =
+    nativeInstalled
+      ? async (pluginName) => {
+          if (pluginName !== 'ixo-tools') return undefined;
+          try {
+            const discovery = await rtCtx.ixoTools?.discover();
+            return discovery?.status === 'available'
+              ? new Set(
+                  discovery.tools.filter((name) =>
+                    compiledNativeNames.has(name),
+                  ),
+                )
+              : new Set<string>();
+          } catch {
+            return new Set<string>();
+          }
+        }
+      : undefined;
   const subAgentEntries = toolAccess.subAgents;
   if (toolAccess.withheldToolNames.size > 0)
     ambient.logger.log(
@@ -457,6 +518,7 @@ export async function createMainAgent(
       toolRegistry: turnToolSummaries(toolAccess.tools),
       toolAccess: {
         ...toolAccess,
+        ...(currentToolAvailability ? { currentToolAvailability } : {}),
         preloadedOnly: new Set(
           [...(turnPreloads ?? [])].filter((name) => !threadLoaded.has(name)),
         ),
@@ -732,6 +794,7 @@ export async function createMainAgent(
       preloadedPlugins: turnPreloads,
       unmetRequirements,
       withheldToolNames: toolAccess.withheldToolNames,
+      ...(currentToolAvailability ? { currentToolAvailability } : {}),
       logger: ambient.logger,
     }),
     userContextStateMiddleware(),

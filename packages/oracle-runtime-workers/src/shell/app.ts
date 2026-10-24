@@ -922,13 +922,17 @@ export function createShell(
       );
     // Node's revokeDelegationForUser clears the cache so downstream minting
     // stops NOW, not at the cache TTL. Same here: drop the object's copy.
-    await userStub(c.env, auth.userDid)
-      .clearDelegation(auth.userDid)
-      .catch((err: unknown) => {
-        console.warn(
-          `[shell] could not clear ${auth.userDid}'s cached delegation: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      });
+    try {
+      await userStub(c.env, auth.userDid).clearDelegation(auth.userDid);
+    } catch (err) {
+      console.warn(
+        `[shell] could not clear ${auth.userDid}'s cached delegation: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return c.json(
+        { ok: false, message: 'Could not persist delegation revocation' },
+        503,
+      );
+    }
     return c.json({ ok: true });
   });
 

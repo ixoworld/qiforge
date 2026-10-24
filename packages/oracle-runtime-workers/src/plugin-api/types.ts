@@ -10,6 +10,7 @@ import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import type { UserPreferences } from '../core/state';
 import type { AttachmentViewSurface } from '../attachments/view';
 import type { DeliveryConfig } from '../delivery/profile';
+import type { IxoToolsSurface } from '../ixo-tools/surface';
 
 /**
  * Route shape returned by `OraclePlugin.getAuthExcludedRoutes()`. Paths are
@@ -513,6 +514,8 @@ export type SessionSurface =
   | { kind: 'chat'; surface: string; label: string };
 
 export interface RuntimeContext<TConfig = MergedConfig> {
+  /** Turn-bound native IXO read tools, forwarded only for the matching host scope. */
+  ixoTools?: IxoToolsSurface;
   /** Authenticated user identity (validated by core auth middleware). */
   user: {
     did: string;

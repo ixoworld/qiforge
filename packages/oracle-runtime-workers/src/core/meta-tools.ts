@@ -11,6 +11,10 @@ import {
 import type { ManifestRegistry, ToolSummarySource } from './registries';
 import { withoutWithheldExamples, type TurnToolAccess } from './tool-access';
 import { acquireToolLock } from './utils';
+import {
+  readCurrentToolAvailability,
+  type CurrentToolAvailability,
+} from './current-tool-availability';
 
 export const LOAD_CAPABILITY_TOOL_NAME = 'load_capability';
 export const LIST_CAPABILITIES_TOOL_NAME = 'list_capabilities';
@@ -34,6 +38,7 @@ export type MetaToolAccess = Pick<
    * so `load_capability` still returns it.
    */
   preloadedOnly?: ReadonlySet<string>;
+  currentToolAvailability?: CurrentToolAvailability;
 };
 
 // ── list_capabilities ───────────────────────────────────────────────────────
@@ -93,6 +98,11 @@ export function buildListCapabilitiesTool(
         if (visibility === 'on-demand' && !includeOnDemand) continue;
 
         if (access.hiddenPlugins.has(pluginName)) continue;
+        const current = await readCurrentToolAvailability(
+          access.currentToolAvailability,
+          pluginName,
+        );
+        if (current !== undefined && current.size === 0) continue;
 
         const missing = unmetRequirements(manifest, ctx.ucan.hasCapability);
         out.push({
@@ -219,6 +229,15 @@ export function buildLoadCapabilityTool(
               `Capability "${name}" does not exist. Call list_capabilities first to discover available plugins.`,
             );
           }
+          const current = await readCurrentToolAvailability(
+            access.currentToolAvailability,
+            name,
+          );
+          if (current !== undefined && current.size === 0) {
+            throw new Error(
+              `Capability "${name}" does not exist. Call list_capabilities first to discover available plugins.`,
+            );
+          }
 
           if (entry.manifest.visibility === 'silent') {
             throw new Error(
@@ -249,6 +268,7 @@ export function buildLoadCapabilityTool(
           const tools: ToolDetail[] = toolSource
             .toolSummariesForPlugin(name)
             .filter((t) => !access.withheldToolNames.has(t.name))
+            .filter((t) => current === undefined || current.has(t.name))
             .map((t) => ({
               name: t.name,
               description: t.description,

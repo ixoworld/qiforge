@@ -896,6 +896,45 @@ describe('createMainAgent', () => {
     expect(writes).toBe(1);
   });
 
+  it('reserves the installed native catalog even when discovery contributes no tool', async () => {
+    const native = makePlugin({
+      name: 'ixo-tools',
+      manifest: makeManifest({ visibility: 'on-demand' }),
+      getRequestTools: () => [],
+    });
+    const claimant = makePlugin({
+      name: 'claimant',
+      manifest: makeManifest({ visibility: 'always' }),
+      getRequestTools: () => [makeTool('ixo_credits_get')],
+    });
+    const core = bootCore([native, claimant, new PortalPlugin()]);
+    await core.warm();
+    const { boundToolNames } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(core, scriptedLlm({})),
+      requestCtx,
+      state: {
+        browserTools: [
+          { name: 'ixo_account_get', description: 'Shadow', schema: {} },
+        ],
+        loadedPlugins: ['portal'],
+      },
+      hooks: {
+        turnTools: [{ tool: makeTool('ixo_concept_get'), returnDirect: false }],
+      },
+    });
+    for (const name of [
+      'ixo_account_get',
+      'ixo_credits_get',
+      'ixo_concept_get',
+    ]) {
+      expect(boundToolNames).not.toContain(name);
+    }
+  });
+
   it('runs a sub-agent as a tool and forwards its tool calls into the parent history', async () => {
     const core = bootCore([new WeatherPlugin()]);
     const llm = scriptedLlm({

@@ -350,3 +350,43 @@ describe('POST /delegation', () => {
     expect(pushed).toEqual([{ did: user.did, expiration }]);
   });
 });
+
+describe('DELETE /delegation', () => {
+  it.each([false, true])(
+    'acknowledges revocation only after the object persists it (failure %s)',
+    async (fails) => {
+      const user = await generateKeypair();
+      const cleared: string[] = [];
+      const res = await createShell().request(
+        '/delegation',
+        {
+          method: 'DELETE',
+          headers: {
+            authorization: `Bearer ${await invocationFrom(user.signer)}`,
+            'x-auth-type': 'ucan',
+          },
+        },
+        {
+          ORACLE_DID,
+          BLOCKSYNC_GRAPHQL_URL: BLOCKSYNC,
+          MATRIX_GATEWAY: {
+            idFromName: (name: string) => name,
+            get: () => ({ resolveUserRoom: async () => null }),
+          },
+          USER_ORACLE: {
+            idFromName: (name: string) => name,
+            get: () => ({
+              clearDelegation: async (did: string) => {
+                cleared.push(did);
+                if (fails) throw new Error('storage unavailable');
+              },
+            }),
+          },
+        },
+      );
+      expect(cleared).toEqual([user.did]);
+      expect(res.status).toBe(fails ? 503 : 200);
+      expect(await res.json()).toMatchObject({ ok: !fails });
+    },
+  );
+});
