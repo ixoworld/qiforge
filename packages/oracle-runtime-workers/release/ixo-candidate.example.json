@@ -1,0 +1,163 @@
+{
+  "schemaVersion": 1,
+  "gateVersion": 1,
+  "gateSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "components": {
+    "qiforge": "0000000000000000000000000000000000000000",
+    "companion": "0000000000000000000000000000000000000000",
+    "authHub": "0000000000000000000000000000000000000000",
+    "subscriptions": "0000000000000000000000000000000000000000",
+    "memory": "0000000000000000000000000000000000000000",
+    "vfs": "0000000000000000000000000000000000000000",
+    "yellowcard": "0000000000000000000000000000000000000000",
+    "knowledge": "0000000000000000000000000000000000000000"
+  },
+  "runtime": {
+    "version": "0.22.0",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "catalog": {
+    "version": "2.0.0",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "model": {
+    "id": "REPLACE_WITH_PROVIDER_OBSERVED_MODEL",
+    "promptSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "modules": [
+    "ixo_account_get",
+    "ixo_credits_get",
+    "ixo_concept_get",
+    "ixo_error_explain",
+    "ixo_files_find",
+    "ixo_offramp_options",
+    "ixo_offramp_quote",
+    "ixo_operation_get",
+    "ixo_memory_personal_search",
+    "ixo_memory_oracle_search"
+  ],
+  "capsules": [
+    {
+      "id": "public:compose-topic",
+      "authorCommit": "0000000000000000000000000000000000000000",
+      "cid": "Qmaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "rollbackCid": "Qmbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "public:error-resolver",
+      "authorCommit": "0000000000000000000000000000000000000000",
+      "cid": "Qmaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "rollbackCid": "Qmbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "public:facilitate-topic",
+      "authorCommit": "0000000000000000000000000000000000000000",
+      "cid": "Qmaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "rollbackCid": "Qmbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "public:ixo-jev-search",
+      "authorCommit": "0000000000000000000000000000000000000000",
+      "cid": "Qmaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "rollbackCid": "Qmbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "public:ixo-yellowcard",
+      "authorCommit": "0000000000000000000000000000000000000000",
+      "cid": "Qmaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "rollbackCid": "Qmbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "public:qi-library",
+      "authorCommit": "0000000000000000000000000000000000000000",
+      "cid": "Qmaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "rollbackCid": "Qmbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "private:design-proposal",
+      "authorCommit": "0000000000000000000000000000000000000000",
+      "cid": "Qmaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "rollbackCid": "Qmbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "private:invoice-creator",
+      "authorCommit": "0000000000000000000000000000000000000000",
+      "cid": "Qmaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "rollbackCid": "Qmbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "private:ixo-artefact-library",
+      "authorCommit": "0000000000000000000000000000000000000000",
+      "cid": "Qmaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "rollbackCid": "Qmbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "private:ixo-product-demo-video",
+      "authorCommit": "0000000000000000000000000000000000000000",
+      "cid": "Qmaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "rollbackCid": "Qmbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "private:mcda",
+      "authorCommit": "0000000000000000000000000000000000000000",
+      "cid": "Qmaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "rollbackCid": "Qmbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "private:recruitment-research",
+      "authorCommit": "0000000000000000000000000000000000000000",
+      "cid": "Qmaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "rollbackCid": "Qmbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "networks": {
+    "devnet": {
+      "resource": "https://devnet.example.org/v1/mcp",
+      "clientIds": ["REPLACE_WITH_REGISTERED_CLIENT"],
+      "rollback": {
+        "companionCommit": "0000000000000000000000000000000000000000",
+        "runtimeCommit": "0000000000000000000000000000000000000000",
+        "oracleVersion": "REPLACE",
+        "gatewayVersion": "REPLACE",
+        "configSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "authPolicyRevision": "REPLACE"
+      }
+    },
+    "testnet": {
+      "resource": "https://testnet.example.org/v1/mcp",
+      "clientIds": ["REPLACE_WITH_REGISTERED_CLIENT"],
+      "rollback": {
+        "companionCommit": "0000000000000000000000000000000000000000",
+        "runtimeCommit": "0000000000000000000000000000000000000000",
+        "oracleVersion": "REPLACE",
+        "gatewayVersion": "REPLACE",
+        "configSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "authPolicyRevision": "REPLACE"
+      }
+    },
+    "mainnet": {
+      "resource": "https://mainnet.example.org/v1/mcp",
+      "clientIds": ["REPLACE_WITH_REGISTERED_CLIENT"],
+      "rollback": {
+        "companionCommit": "0000000000000000000000000000000000000000",
+        "runtimeCommit": "0000000000000000000000000000000000000000",
+        "oracleVersion": "REPLACE",
+        "gatewayVersion": "REPLACE",
+        "configSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "authPolicyRevision": "REPLACE"
+      }
+    }
+  }
+}

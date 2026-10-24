@@ -16,6 +16,7 @@ import { createHash } from 'node:crypto';
 import {
   evaluateConformance,
   SUITES,
+  SOURCE_PATHS,
   TOOLS,
 } from './ixo-conformance-report.mjs';
 
@@ -63,29 +64,7 @@ const sha = (path) =>
   existsSync(path)
     ? createHash('sha256').update(readFileSync(path)).digest('hex')
     : null;
-const sourcePaths = [
-  'packages/agent-tools/src/catalog.ts',
-  'packages/agent-tools/src/host.ts',
-  'packages/oracle-runtime-workers/src/ixo-tools/surface.ts',
-  'packages/oracle-runtime-workers/src/ixo-tools/lifetime.ts',
-  'packages/oracle-runtime-workers/src/ixo-tools/turn-host.ts',
-  'packages/oracle-runtime-workers/src/ixo-tools/mcp/auth.ts',
-  'packages/oracle-runtime-workers/src/ixo-tools/mcp/index.ts',
-  'packages/oracle-runtime-workers/src/index.ts',
-  'packages/oracle-runtime-workers/src/do/user-oracle-do.ts',
-  'packages/oracle-runtime-workers/src/ixo-tools/mcp/protocol.ts',
-  'packages/oracle-runtime-workers/src/do/ixo-mcp.ts',
-  'packages/oracle-runtime-workers/src/plugins/ixo-tools/ixo-tools.plugin.ts',
-  'patches/@langchain__mcp-adapters@1.1.4.patch',
-  'pnpm-lock.yaml',
-  'packages/oracle-runtime-workers/test/ixo-tools-fixtures.ts',
-  'packages/oracle-runtime-workers/vitest.config.ts',
-  'packages/oracle-runtime-workers/scripts/verify-ixo-conformance.mjs',
-  'packages/oracle-runtime-workers/scripts/ixo-conformance-report.mjs',
-  'packages/oracle-runtime-workers/scripts/ixo-conformance-report.test.mjs',
-  'turbo.json',
-  ...SUITES.map((file) => `packages/oracle-runtime-workers/test/${file}`),
-];
+const sourcePaths = SOURCE_PATHS;
 const sourceDigests = Object.fromEntries(
   sourcePaths.map((path) => [path, sha(resolve(repoDir, path))]),
 );
