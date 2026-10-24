@@ -207,17 +207,17 @@ export default {
       compatibilityDate: '2026-08-20',
       compatibilityFlags: ['nodejs_compat'],
       outboundService: async (request) => {
-        const url = new URL(request.url);
+        const url = new globalThis.URL(request.url);
         outboundOrigins.push(url.origin);
         if (url.origin === 'https://registry-redirect.example')
-          return new Response(null, {
+          return new globalThis.Response(null, {
             status: 307,
             headers: { Location: 'https://other.example/canary' },
           });
         assert.equal(url.origin, 'https://registry.example');
         assert.equal(url.searchParams.get('path'), 'SKILL.md');
         assert.equal(request.headers.has('Authorization'), false);
-        return Response.json({
+        return globalThis.Response.json({
           cid: 'QmYwAPJzv5CZsnAzt8auVTLWHtUAwKPWyVYFQnwxKZ3Uez',
           visibility: 'public',
           skillName: 'example',
