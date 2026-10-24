@@ -1,3 +1,4 @@
+import type { sessionAttachments } from '../attachments/receipts';
 import type {
   TopicDeliverableCommand,
   TopicDeliverableResult,
@@ -721,6 +722,16 @@ export interface StorageStatus {
  * piped straight to the client.
  */
 export interface UserOracleObject extends Rpc.DurableObjectBranded {
+  attachmentInventory(
+    identity: TurnIdentity,
+    sessionId: string,
+  ): ReturnType<ReturnType<typeof sessionAttachments>['inventory']>;
+  attachmentReceiptCurrent(
+    identity: TurnIdentity,
+    sessionId: string,
+    reference: string,
+    revision: string,
+  ): Promise<boolean>;
   topicDeliverable(
     identity: TurnIdentity,
     operationId: string,

@@ -1,3 +1,12 @@
+import {
+  receiveAttachments,
+  sessionAttachments,
+} from '../attachments/receipts';
+import {
+  contentDigest,
+  retainedMemory,
+  type MemoryStamp,
+} from '../memory/retained-context';
 import { ChannelTurns } from '../channels/turns';
 import { assertChannelAttemptAllowed } from '../channels/auth';
 import {
@@ -357,6 +366,7 @@ type TurnBuildBody = Pick<
 /** The run an attempt's agent build belongs to. */
 interface TurnBuildRun {
   runId: string;
+  receivedAt?: string;
   abortController: AbortController;
   /** A recovery attempt: no new input, the graph continues from the checkpoint. */
   resumed: boolean;
@@ -566,6 +576,7 @@ const META_LAST_ACCESS = 'meta:lastAccessAt';
  * `POST /delegation` — the same place the Node runtime reads it from.
  */
 const META_DELEGATION = 'meta:delegation';
+const META_MEMORY_GENERATION = 'meta:memoryGeneration';
 /**
  * `false` only when no run can be active: written at a boot that found
  * none, turned `true` before the first run row an instance creates (once
@@ -963,6 +974,84 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
     /** First-turn user-context prefetch (built lazily, see `startUserContextPrefetch`). */
     private userContextFetcher: UserContextFetcher | null = null;
+    private memoryGeneration = 0;
+    private memoryGenerationReady: Promise<void> | undefined;
+
+    private async loadMemoryGeneration(): Promise<void> {
+      this.memoryGenerationReady ??= this.ctx.storage
+        .get<number>(META_MEMORY_GENERATION)
+        .then((generation) => {
+          this.memoryGeneration = generation ?? 0;
+        });
+      await this.memoryGenerationReady;
+    }
+
+    private async advanceMemoryGeneration(): Promise<number> {
+      await this.loadMemoryGeneration();
+      const generation = ++this.memoryGeneration;
+      this.userContextFetcher?.invalidateAll();
+      await this.ctx.storage.put(META_MEMORY_GENERATION, generation);
+      return generation;
+    }
+
+    private async memoryStamp(
+      params: UserContextFetchParams,
+    ): Promise<MemoryStamp | undefined> {
+      await this.loadMemoryGeneration();
+      const raw = this.delegations.get(params.userDid)?.raw;
+      const settings = this.userContextSettings();
+      if (!raw || !settings || !this.ambient) return undefined;
+      const delegation = await readDelegation(raw);
+      if (
+        !this.ambient.ucan.hasCapability(
+          {
+            ...delegation,
+            capabilities: delegation.capabilities.map((capability) => ({
+              resource: capability.with,
+              action: capability.can,
+            })),
+          },
+          'ixo:memory',
+          'memory/search',
+        )
+      )
+        return undefined;
+      const grantRevision = await contentDigest(raw);
+      return {
+        userDid: params.userDid,
+        oracleDid: this.env.ORACLE_DID,
+        network: String(this.core.validatedEnv['NETWORK']),
+        sourceOrigin: new URL(settings.engineUrl).origin,
+        roomId: params.roomId,
+        sessionId: params.sessionId,
+        grantRevision,
+        generation: this.memoryGeneration,
+      };
+    }
+
+    private async currentMemory(
+      value: unknown,
+      sessionId: string,
+    ): Promise<UserContextData> {
+      const memory = retainedMemory(value);
+      const settings = this.userContextSettings();
+      if (
+        !memory ||
+        !settings ||
+        !this.userDid ||
+        sessionId.startsWith(TASK_SESSION_PREFIX)
+      )
+        return {};
+      const roomId =
+        this.sessionRooms.get(sessionId) ??
+        (await this.sessions?.getSession(sessionId))?.roomId;
+      if (!roomId || roomId !== memory.stamp.roomId) return {};
+      return this.userContextFetcherFor(settings).current(value, {
+        sessionId,
+        roomId,
+        userDid: this.userDid,
+      });
+    }
 
     /**
      * Transcripts captured BEFORE a session is deleted, keyed by session id:
@@ -1241,6 +1330,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * and an upload per request would replace the daily one.
      */
     private async onDelegationReplaced(): Promise<void> {
+      await this.advanceMemoryGeneration();
       const failures =
         (await this.ctx.storage.get<number>(META_FLUSH_FAILURES)) ?? 0;
       if (failures === 0) return;
@@ -1370,6 +1460,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     private async boot(userDid: string): Promise<void> {
+      await this.loadMemoryGeneration();
       const stored = await this.ctx.storage.get<string>(META_USER_DID);
       if (stored && stored !== userDid)
         throw new Error(`Object bound to ${stored}, not ${userDid}`);
@@ -1765,6 +1856,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       }
       this.saver = new SqliteSaver(liveDb, undefined, {
         oracleName: this.core.identity.name,
+        filterUserContext: (value, sessionId) =>
+          this.currentMemory(value, sessionId),
+        memoryGeneration: () => this.memoryGeneration,
       });
       await this.saver.setup();
       this.sessions = new SessionsStore(liveDb);
@@ -3154,9 +3248,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         logger: console,
       });
       const indexer = this.historyIndexer;
+      let generation = this.memoryGeneration;
       this.ctx.waitUntil(
         indexer
-          .process(sessionId)
+          .process(
+            sessionId,
+            () => this.memoryGeneration === generation,
+            async () => {
+              generation = await this.advanceMemoryGeneration();
+            },
+          )
           .catch((err: unknown) => {
             console.error(
               `[user-do] session-history indexing failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
@@ -3207,9 +3308,19 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               const userDid = this.userDid;
               if (!ambient || !userDid)
                 throw new Error('the user object is not booted');
-              return ambient.ucan.mintInvocation(userDid, target, opts);
+              const raw = this.delegations.get(userDid)?.raw;
+              if (!raw) throw new Error('memory grant unavailable');
+              const result = await ambient.ucan.createInvocationFromDelegation(
+                raw,
+                target.did,
+                { can: opts?.can ?? 'memory/search', with: target.capability },
+                { maxTtlSeconds: 60 },
+              );
+              if ('error' in result) throw new Error(result.error);
+              return result.invocation;
             },
           },
+          stamp: (params) => this.memoryStamp(params),
           logger: console,
         },
         {
@@ -3224,19 +3335,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return this.userContextFetcher;
     }
 
-    /**
-     * Start a turn's user-context prefetch — stale-while-revalidate, as the
-     * Node AgentBuilder does it. A thread's context is fixed on first
-     * contact: a thread whose checkpoint already holds a gathered context
-     * never waits and never takes a newer answer; it only refreshes the
-     * room's cache in the background (a no-op while the cache is fresh), so
-     * the NEXT session in the room starts from it. First contact — including
-     * a thread whose earlier first turn got nothing (timeout, failure, skip)
-     * — waits for the gather, at most the cap. Returns the step the build
-     * awaits right before the agent is built, or null where this turn
-     * writes no context. Nothing here throws; every gather is handed to
-     * `ctx.waitUntil`, so one that outlives the cap still fills the cache.
-     */
+    /** Start one bounded personal-profile gather or validate a retained checkpoint. */
     private startUserContextPrefetch(input: {
       sessionId: string;
       roomId: string | undefined;
@@ -3275,7 +3374,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         !ambient.ucan.hasCapability(
           input.delegation,
           MEMORY_CAPABILITY.resource,
-          MEMORY_CAPABILITY.action,
+          'memory/search',
         )
       ) {
         return skipped('no-memory-grant');
@@ -3294,9 +3393,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             );
           }),
         );
-      if (hasUserContext(input.prior)) {
-        keepGathering();
-        return null;
+      if (retainedMemory(input.prior)) {
+        return async () => this.currentMemory(input.prior, input.sessionId);
       }
       const pending = fetcher
         .fetch(params)
@@ -3376,6 +3474,39 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           ? { lastAt: new Date(status.lastAt).toISOString() }
           : {}),
       };
+    }
+
+    async attachmentInventory(identity: TurnIdentity, sessionId: string) {
+      await this.ready(identity);
+      return this.attachmentReceipts().inventory({
+        userDid: identity.userDid,
+        sessionId,
+      });
+    }
+
+    async attachmentReceiptCurrent(
+      identity: TurnIdentity,
+      sessionId: string,
+      reference: string,
+      revision: string,
+    ): Promise<boolean> {
+      await this.ready(identity);
+      return this.attachmentReceipts().current(
+        { userDid: identity.userDid, sessionId },
+        reference,
+        revision,
+      );
+    }
+
+    private attachmentReceipts() {
+      if (!this.userDid) throw new Error('user object is not ready');
+      return sessionAttachments({
+        userDid: this.userDid,
+        messages: async (sessionId) =>
+          (await this.sessions?.getSession(sessionId))
+            ? this.saver?.listThreadMessages(sessionId)
+            : undefined,
+      });
     }
 
     async listMessages(
@@ -3492,6 +3623,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * state, which the shell has already cleared.
      */
     async clearDelegation(userDid: string): Promise<void> {
+      await this.advanceMemoryGeneration();
+      for (const controller of this.aborts.values()) controller.abort();
       this.delegations.delete(userDid);
       this.delegationMissUntil = 0;
       await this.ctx.storage.delete(META_DELEGATION);
@@ -4793,6 +4926,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         },
         {
           runId: live.runId,
+          receivedAt: live.record.startedAt,
           abortController: live.abort,
           resumed: !freshInput,
           continuation: freshInput ? null : live.continuation,
@@ -6055,17 +6189,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // which is a tool result to the main agent. Wrapped tools are capped
       // inside the wrapper (already under the cap by the time it runs).
       const capMiddleware = createResultCapMiddleware(resultCap);
-      // A successful memory write drops the room's prefetched context, so
-      // the next session gathers again (this thread keeps its own).
-      const userContextInvalidation =
-        sessionRoomId && this.userContextSettings()
-          ? createUserContextInvalidationMiddleware({
-              roomId: sessionRoomId,
-              invalidate: (roomId) =>
-                this.userContextFetcher?.invalidate(roomId),
-              logger: console,
-            })
-          : null;
+      // Persist the invalidation before the tool can change the source.
+      const userContextInvalidation = sessionRoomId
+        ? createUserContextInvalidationMiddleware({
+            roomId: sessionRoomId,
+            invalidate: async () => {
+              await this.advanceMemoryGeneration();
+            },
+            logger: console,
+          })
+        : null;
 
       // Chat delivery: a channel or Matrix turn replies as short messages and
       // may hand long content to `create_artifact` (bound only when artefact
@@ -6100,7 +6233,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             () => run.onProgress?.(USER_CONTEXT_PROGRESS_STEP),
             abortController.signal,
           )
-        : undefined;
+        : {};
 
       const built = await createMainAgent({
         executionProfile: req.executionProfile,
@@ -6133,6 +6266,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           markDispatched,
         },
         hooks: {
+          validateUserContext: (value) =>
+            suppliedContextOnly ||
+            (req.client === 'matrix' && req.roomKind === 'group')
+              ? Promise.resolve({})
+              : this.currentMemory(value, req.sessionId),
           // Drives the Matrix `work_status` card (one step per model/tool
           // call); a no-op for turns that registered no card (HTTP, tasks).
           middlewares: this.workStatus
@@ -6192,7 +6330,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         state: {
           ...(suppliedContextOnly ? {} : priorState),
           userPreferences,
-          ...(userContext ? { userContext } : {}),
+          userContext: userContext ?? {},
           ...metadataBuildState(meta, priorMeta),
           // The client-declared surface: the portal and AG-UI plugins turn
           // these into tools at build time (`getRequestTools` reads
@@ -6210,9 +6348,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         toolSurfaces.set(name, surface);
       for (const name of built.subAgentToolNames) subAgentToolNames.add(name);
 
+      const humanMessageId = crypto.randomUUID();
+      const attachmentReceipts = await receiveAttachments({
+        userDid: req.identity.userDid,
+        sessionId: req.sessionId,
+        messageId: humanMessageId,
+        receivedAt: run.receivedAt ?? turnAt.toISOString(),
+        metas: prepared?.metas ?? [],
+      });
       const attachmentKwargs =
         prepared && prepared.metas.length > 0
-          ? { attachment: prepared.metas[0], attachments: prepared.metas }
+          ? {
+              attachment: prepared.metas[0],
+              attachments: prepared.metas,
+              attachmentReceipts,
+            }
           : {};
       // Node's `MessagesService` metadata for room messages: who spoke
       // (the group-chat tools and prompts read it), and in a group room the
@@ -6249,6 +6399,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const stateInput = {
         messages: [
           new HumanMessage({
+            id: humanMessageId,
             content,
             additional_kwargs: {
               timestamp: turnAt.toISOString(),
@@ -6278,9 +6429,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         ],
         config: { did: req.identity.userDid },
         client: req.client,
-        // First contact's gathered context is checkpointed with the turn,
-        // every slot present; later turns write nothing and keep it.
-        ...(userContext ? { userContext } : {}),
+        // An explicit empty value replaces an unsafe retained profile.
+        userContext: userContext ?? {},
         ...metadataGraphInput(meta, priorMeta),
         ...surface.input,
       };

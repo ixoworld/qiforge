@@ -300,10 +300,14 @@ describe('session-history indexing around task runs', () => {
       sessionId: 's_new',
       roomId: '!main:example.org',
     });
-    expect(o.indexed.mock.calls).toEqual([['s_chat']]);
+    expect(o.indexed.mock.calls).toEqual([
+      ['s_chat', expect.any(Function), expect.any(Function)],
+    ]);
     // The realtime drain and session deletion go through the same gate.
     await o.call('scheduleHistoryIndexing', TASK_SESSION);
-    expect(o.indexed.mock.calls).toEqual([['s_chat']]);
+    expect(o.indexed.mock.calls).toEqual([
+      ['s_chat', expect.any(Function), expect.any(Function)],
+    ]);
   });
 });
 

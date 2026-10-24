@@ -1,3 +1,7 @@
+import {
+  attachmentReceiptSchema,
+  type AttachmentReceipt,
+} from '../attachments/receipts';
 /**
  * Message serialization helpers shared with the Node runtime's
  * `@ixo/sqlite-saver` (ported from its `utils.ts`). The wire format of the
@@ -265,6 +269,7 @@ export interface CleanAdditionalKwargs {
   reasoningDetails?: ReasoningDetail[];
   attachment?: AttachmentMeta;
   attachments?: AttachmentMeta[];
+  attachmentReceipts?: AttachmentReceipt[];
   // Group-chat speaker + threading metadata (the gating middleware needs these across turns).
   senderDid?: string;
   senderMatrixUserId?: string;
@@ -364,6 +369,10 @@ export function cleanAdditionalKwargs(
   // Kept so a run resumed after the summary still knows what this turn ran.
   const carry = cappedTurnCarry(additionalKwargs[TURN_CARRY_KWARG]);
   if (carry !== undefined) cleaned[TURN_CARRY_KWARG] = carry;
+  const receipts = attachmentReceiptSchema
+    .array()
+    .safeParse(additionalKwargs.attachmentReceipts);
+  if (receipts.success) cleaned.attachmentReceipts = receipts.data;
   if (isAttachmentMeta(additionalKwargs.attachment))
     cleaned.attachment = additionalKwargs.attachment;
   if (

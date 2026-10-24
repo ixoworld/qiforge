@@ -179,7 +179,11 @@ export class SessionHistoryIndexer {
    * `failed` (upload failed after retries). Concurrent calls for the same
    * session collapse into one.
    */
-  async process(sessionId: string): Promise<IndexOutcome> {
+  async process(
+    sessionId: string,
+    current: () => boolean = () => true,
+    beforeWrite?: () => Promise<void>,
+  ): Promise<IndexOutcome> {
     const { logger } = this.deps;
     if (!this.enabled) {
       logger.log(
@@ -197,7 +201,12 @@ export class SessionHistoryIndexer {
     try {
       for (let attempt = 1; attempt <= this.maxRetries; attempt += 1) {
         try {
-          const outcome = await this.processOnce(sessionId);
+          if (!current()) return 'skipped';
+          const outcome = await this.processOnce(
+            sessionId,
+            current,
+            beforeWrite,
+          );
           if (outcome === 'processed') {
             logger.log(
               `[history-indexer] indexed session ${sessionId} into the memory engine`,
@@ -223,7 +232,11 @@ export class SessionHistoryIndexer {
     }
   }
 
-  private async processOnce(sessionId: string): Promise<IndexOutcome> {
+  private async processOnce(
+    sessionId: string,
+    current: () => boolean,
+    beforeWrite?: () => Promise<void>,
+  ): Promise<IndexOutcome> {
     const { deps } = this;
     const { logger } = deps;
     const memoryEngineUrl = deps.memoryEngineUrl!.replace(/\/+$/, '');
@@ -300,7 +313,10 @@ export class SessionHistoryIndexer {
       return 'skipped';
     }
 
+    if (!current()) return 'skipped';
     if (transformed.length > 0) {
+      await beforeWrite?.();
+      if (!current()) return 'skipped';
       const res = await this.fetchImpl(`${memoryEngineUrl}/messages`, {
         method: 'POST',
         headers: {
@@ -318,6 +334,7 @@ export class SessionHistoryIndexer {
           `memory engine rejected the conversation (${res.status}): ${text.slice(0, 200)}`,
         );
       }
+      if (!current()) return 'skipped';
       deps.onIndexed?.(roomId);
     }
 

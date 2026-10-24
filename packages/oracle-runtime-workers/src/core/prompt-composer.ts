@@ -291,7 +291,9 @@ function collectRichestSummaries(typed: TypedUserContext): Map<string, string> {
  * Render the memory-context block — empty string when nothing is populated.
  * Cross-bucket dedup + guardrail budgeting are always applied.
  */
-function buildContextBlock(userContext: UserContextData | undefined): string {
+export function buildContextBlock(
+  userContext: UserContextData | undefined,
+): string {
   if (!userContext) return '';
   const typed = userContext as TypedUserContext;
 

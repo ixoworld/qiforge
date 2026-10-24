@@ -645,93 +645,32 @@ A → B`), prunes hard and retries once.
 
 ### Turns: user-context prefetch
 
-The first turn of a conversation is pre-loaded with the user's memory: the
-object fetches the six context slots (`identity`, `work`, `goals`,
-`interests`, `relationships`, `recent`) from the memory engine with one
-`POST /search-enhanced-batch` and the prompt composer renders them, so the
-agent does not have to call `search_memory_engine` to know who it is talking
-to. Settings and the measured latencies are in
-[configuration](configuration.md#first-turn-memory-prefetch).
+Personal memory prefetch uses one six-query `/agent/search-batch` request.
+Search and retained-reference requests refuse all redirects, including redirects
+within the configured origin. Workers uses manual redirect handling and rejects
+the non-success response.
+The search waits at most `USER_CONTEXT_PREFETCH_CAP_MS`; a late result can warm
+the bounded room cache while the grant and local generation are unchanged.
 
-- **Waiting.** A thread with no checkpointed `userContext` (first contact)
-  waits for the result for at most 3 s (`USER_CONTEXT_PREFETCH_CAP_MS`);
-  after that the turn runs without it and the request keeps going in the
-  background, so the room's cache has it for the next session. The thread
-  that missed it stays on first contact and asks again on its next turn (a
-  cache hit or a negative-cache skip answers at once). A thread that already
-  carries a checkpointed context never waits and never changes: its later
-  turns only refresh the room's cache (`refresh()`, a no-op while the cache
-  is fresh, and it records no `skipped` outcome), and the refreshed answer
-  reaches the user's next session. A cold engine space (the first request
-  after 120 s idle) costs about 2.2 s, so a user who comes back after a
-  pause can see the first answer delayed by that much, and a slower cold open
-  misses the first answer. An aborted turn stops waiting at once; its gather
-  continues in the background.
-- **Progress step.** A Portal turn that is still waiting 300 ms into first
-  contact sends a `router.update` frame with the step `Recalling your
-memories…`. The client SDK does not render `router.update` frames yet, so
-  users see nothing until it does; other surfaces (Matrix, Channels) get no
-  step.
-- **Group rooms** (a Matrix turn in a group room) never prefetch; the
-  first-contact line reads `outcome=skipped reason=group-room`.
-- **Cache life.** 5 minutes per room (`USER_CONTEXT_CACHE_TTL_MS`), but an
-  answer with no memories at all lives 30 s, so a user who has just started
-  using memory is not shown "nothing" for 5 minutes. The room's entry is
-  dropped (and any gather still running is detached from it) after a
-  successful `add_memory`, `delete_episode`, `delete_edge`, `clear` or
-  `add_oracle_knowledge` memory-engine tool call, and after a session-history upload to
-  the engine completes. The engine caches identical queries for 15 s and
-  cognifies asynchronously, so a gather right after a write can still come
-  back without it.
-- **Log lines** (prefix `[user-context]`, never user content):
-  `first contact room=… session=… outcome=<cached|fresh|timeout|failed|skipped|aborted> [reason=…] waited=Nms`
-  (warn, once per thread: what its first-contact turn was given and how long
-  it waited; the one line to grep when reading logs at warn level and above.
-  A first contact that fetches nothing prints it too, with `waited=0ms` and
-  the reason: `no-room`, `disabled` (`USER_CONTEXT_PREFETCH=off` or no
-  `MEMORY_ENGINE_URL`), `not-booted`, `group-room`, `no-memory-grant`, or the
-  fetcher's `no-signing-key`, `no-invocation`, `recently-failed`; a `failed`
-  outcome carries its reason the same way. Task-run and supplied-context
-  turns print nothing, and a thread that already holds a context prints
-  nothing on its later turns),
-  `cache hit room=… age=…ms keys=N` (served from the room's cache, no
-  request), `fetched in N ms for room=… (identity=f12/e8/p3/c1, work=…,
-recent=missing)` (per slot: rendered fact, entity, episode and community
-  counts; `missing` is a slot the engine did not return or that failed),
-  `exceeded Nms cap for room=…; continuing in the background`,
-  `slot <label> failed (<status_code>)` (warn: one slot of the batch failed,
-  the others are used; the engine's detail text is not logged at this
-  level), `gather for room=… unsettled after Nms; starting a new one`
-  (warn: a gather was still unsettled 5 s past its own 30 s request timeout,
-  so it was abandoned and a new one started; its late answer, if any, is
-  dropped. It should not happen and is worth a look),
-  `failed for room=…: <reason> (not retried for 60s)` and the fetcher's own
-  `skipped: …` (no engine URL, no signing key, no invocation, a recent
-  failure). A user with no `ixo:memory` delegation gets
-  `first contact … outcome=skipped reason=no-memory-grant` on every first
-  turn and is not slowed. If every one of the six slots fails the batch
-  counts as `failed` (`every slot failed`), not as an empty answer.
-- **`GET /debug/context?session=<id>`** carries `userContext` for the
-  session's room (the user room when `session` is absent): `enabled`,
-  `room`, `cached`, `ageMs` (of the cached result), `inFlight`,
-  `lastOutcome` (`cached`, `fresh`, `timeout`, `failed` or `skipped`),
-  `lastReason` (with `failed` and `skipped`; for an HTTP failure
-  `memory engine answered <status>`, never the engine's body), `lastMs` and
-  `lastSlots` (the per-slot counts of the last fetch; present only while the
-  last outcome is `fresh`) and `lastAt`. `lastOutcome: timeout` right after
-  a first turn is the cap being hit, not an error. The block is always
-  present; `enabled` is true only when `USER_CONTEXT_PREFETCH` is not `off`
-  and `MEMORY_ENGINE_URL` is set (a task session or a missing delegation
-  does not change it; those turns just make no request).
-- **`failed` versus `skipped`.** `failed` is a request that went wrong (HTTP
-  error, network error, abort, a malformed answer, every slot failing); the
-  room is then skipped for 60 s (`lastOutcome: failed`, then `skipped` with
-  `recently-failed`) instead of paying the cap on every turn. `skipped`
-  makes no request at all.
-- **Stored size.** Every stored string is cut to 400 characters, and a
-  context over 16 KB loses episodes (then entity summaries) until it fits.
-  The prompt block is capped at 2000 characters, so normal data renders as
-  before.
+Every model call, including a resumed durable graph, checks retained fact
+references against the current source. An unavailable engine, revoked grant,
+changed fact or tombstone suppresses the block. The runtime also suppresses
+uncited legacy checkpoints. A failed check is not an empty remembered profile.
+`/debug/context` reports the gather's cache and last outcome; it is not a receipt
+that a particular prompt disclosed current memory.
+
+Before memory writes, deletes and delegation revocation, the user object
+persists a new local generation. Old gathers, cached profiles, retained
+checkpoint text and queued history jobs cannot pass the subsequent prompt
+and save gates. Revocation aborts active turns. An in-flight request already
+sent to the source cannot be recalled. Session deletion remains archival
+history indexing, not memory erasure.
+
+The Portal progress event and search-cap, negative-cache and LRU settings are
+unchanged. Matrix group rooms and supplied-context tasks never receive personal
+prefetch. See [configuration](configuration.md#first-turn-memory-prefetch) for
+the source contract and retention bounds. Local scripted-model tests do not
+establish hosted latency or deployment acceptance.
 
 ### Turns: attachments
 

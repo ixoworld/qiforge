@@ -277,3 +277,40 @@ describe('SessionHistoryIndexer', () => {
     expect(h.calls).toHaveLength(1);
   });
 });
+
+describe('history indexing generation barrier', () => {
+  it('drops an obsolete queued job before preparing any upload', async () => {
+    const h = harness();
+    expect(await h.indexer.process('s1', () => false)).toBe('skipped');
+    expect(h.calls).toEqual([]);
+    expect(h.processed).toEqual([]);
+  });
+  it('drops a job invalidated while it obtains its service invocation', async () => {
+    let current = true;
+    const h = harness({
+      ucan: {
+        hasSigningKey: () => true,
+        resolveServiceDid: async () => 'did:web:memory.test',
+        mintInvocation: async () => {
+          current = false;
+          return 'invocation';
+        },
+      },
+    });
+    expect(await h.indexer.process('s1', () => current)).toBe('skipped');
+    expect(h.calls).toEqual([]);
+    expect(h.processed).toEqual([]);
+  });
+  it('does not retry an old generation after a failed upload', async () => {
+    let current = true;
+    const h = harness({
+      responses: [{ status: 500 }],
+      sleep: async () => {
+        current = false;
+      },
+    });
+    expect(await h.indexer.process('s1', () => current)).toBe('skipped');
+    expect(h.calls).toHaveLength(1);
+    expect(h.processed).toEqual([]);
+  });
+});

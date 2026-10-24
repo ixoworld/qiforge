@@ -15,6 +15,7 @@ import type {
   ModelRole,
   OracleIdentity,
   PluginTool,
+  UserContextData,
 } from '../plugin-api/types';
 import type { DeliveryProfile } from '../delivery/types';
 import type {
@@ -68,6 +69,7 @@ export type MainAgentRequestContext = z.infer<
  * (model selection, prompt section snippets) out of the runtime.
  */
 export interface MainAgentHooks {
+  validateUserContext?: (value: unknown) => Promise<UserContextData>;
   /** Optional model resolver. Default: `ambient.llm.get`. */
   resolveModel?: (
     role: ModelRole,

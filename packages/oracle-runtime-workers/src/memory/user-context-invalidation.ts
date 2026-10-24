@@ -1,15 +1,4 @@
-/**
- * Drops a room's prefetched user context (`UserContextFetcher.invalidate`)
- * after a tool call that changed the user's memory succeeded, so the next
- * session in the room gathers again instead of reading the pre-write answer
- * for the rest of the cache TTL. It never changes the current thread: a
- * thread keeps the context it got on first contact.
- *
- * Applied as a tool middleware to the main agent and every sub-agent; a
- * failed call (thrown, or an error `ToolMessage`) leaves the cache alone.
- */
 import { type AgentMiddleware, createMiddleware } from 'langchain';
-import { isErrorResult } from '../core/middlewares/tool-marks';
 import { NOOP_LOGGER } from '../core/utils';
 import type { Logger } from '../plugin-api/types';
 import {
@@ -32,7 +21,7 @@ export const MEMORY_WRITE_TOOL_NAMES: readonly string[] = [
 export interface UserContextInvalidationOptions {
   /** The turn's oracle room: the prefetch cache key. */
   roomId: string;
-  invalidate: (roomId: string) => void;
+  invalidate: (roomId: string) => void | Promise<void>;
   /** Tool names that invalidate (default `MEMORY_WRITE_TOOL_NAMES`). */
   toolNames?: Iterable<string>;
   logger?: Logger;
@@ -46,20 +35,14 @@ export function createUserContextInvalidationMiddleware(
   return createMiddleware({
     name: 'UserContextInvalidation',
     wrapToolCall: async (request, handler) => {
-      const output = await handler(request);
       const toolName = request.toolCall.name;
-      if (names.has(toolName) && !isErrorResult(output)) {
-        try {
-          options.invalidate(options.roomId);
-          logger.log(
-            `[user-context] invalidated room=${options.roomId} after ${toolName}`,
-          );
-        } catch (err) {
-          logger.warn(
-            `[user-context] could not invalidate room=${options.roomId}: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
+      if (names.has(toolName)) {
+        await options.invalidate(options.roomId);
+        logger.log(
+          `[user-context] invalidated room=${options.roomId} before ${toolName}`,
+        );
       }
+      const output = await handler(request);
       return output;
     },
   });
