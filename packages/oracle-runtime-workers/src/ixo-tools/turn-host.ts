@@ -64,6 +64,17 @@ export function createTurnIxoTools(input: TurnIxoToolsInput): IxoToolsBinding {
     return tool && !grantsTool(after, tool) ? null : after;
   }
   function bindHost(invokingTool?: ToolName) {
+    let initialDelegation: VerifiedIxoDelegation | undefined;
+    async function readDelegation() {
+      const delegation = await currentDelegation(invokingTool);
+      if (!delegation || !invokingTool) return delegation;
+      // Every source and result check must use the invocation's original grant.
+      initialDelegation ??= delegation;
+      return delegation.raw === initialDelegation.raw &&
+        delegation.revision === initialDelegation.revision
+        ? delegation
+        : null;
+    }
     const sources = createIXOSourceAdapters({
       network: context.network,
       origins: input.config.origins,
@@ -74,14 +85,14 @@ export function createTurnIxoTools(input: TurnIxoToolsInput): IxoToolsBinding {
         context,
         origins: input.config.origins,
         storeUrl: input.config.storeUrl,
-        currentDelegation: () => currentDelegation(invokingTool),
+        currentDelegation: readDelegation,
       }),
       ...(input.fetch ? { fetch: input.fetch } : {}),
     });
     const host = createAgentToolsHost({
       ...sources,
       readGrants: async () => {
-        const delegation = await currentDelegation();
+        const delegation = await readDelegation();
         if (!delegation) return [];
         return catalog
           .filter(({ name }) => grantsTool(delegation, name))
