@@ -443,6 +443,16 @@ describe('stall retry rules', () => {
     expect(findProviderStall(new Error('other'))).toBeNull();
   });
 
+  it('preserves stall classification through the full middleware stack and terminates cycles', () => {
+    let wrapped: Error = stall;
+    for (let depth = 0; depth < 20; depth += 1)
+      wrapped = new Error('middleware', { cause: wrapped });
+    expect(findProviderStall(wrapped)).toBe(stall);
+    const cycle = new Error('cycle');
+    cycle.cause = cycle;
+    expect(findProviderStall(cycle)).toBeNull();
+  });
+
   it('stops LangChain from retrying a stall the guard gave up on', () => {
     const handler = stallAwareFailedAttemptHandler();
     expect(() =>

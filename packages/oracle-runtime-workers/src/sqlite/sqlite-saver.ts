@@ -56,6 +56,8 @@ import {
 } from './serialization';
 
 export interface SqliteSaverOptions {
+  filterUserContext?: (value: unknown, sessionId: string) => Promise<unknown>;
+  memoryGeneration?: () => number;
   /**
    * Newest checkpoints retained per thread after each `put`. LangGraph writes
    * one checkpoint per super-step and never deletes them; without a cap a
@@ -269,7 +271,7 @@ export class SqliteSaver extends BaseCheckpointSaver {
   constructor(
     db: DoSqliteDatabase,
     serde?: SerializerProtocol,
-    options: SqliteSaverOptions = {},
+    private readonly options: SqliteSaverOptions = {},
   ) {
     super(serde);
     this.db = db;
@@ -780,7 +782,24 @@ export class SqliteSaver extends BaseCheckpointSaver {
     if (typeof checkpointNs !== 'string')
       throw new Error('"checkpoint_ns" must be a string.');
 
-    const { checkpoint, messages } = removeMessagesFromCheckpoint(checkpointIn);
+    const generation = this.options.memoryGeneration?.();
+    const safeContext = this.options.filterUserContext
+      ? await this.options.filterUserContext(
+          checkpointIn.channel_values.userContext,
+          threadId,
+        )
+      : checkpointIn.channel_values.userContext;
+    const { checkpoint, messages } = removeMessagesFromCheckpoint(
+      this.options.filterUserContext
+        ? {
+            ...checkpointIn,
+            channel_values: {
+              ...checkpointIn.channel_values,
+              userContext: safeContext,
+            },
+          }
+        : checkpointIn,
+    );
     const [[type1, serializedCheckpoint], [type2, serializedMetadata]] =
       await Promise.all([
         this.serde.dumpsTyped(checkpoint),
@@ -798,9 +817,17 @@ export class SqliteSaver extends BaseCheckpointSaver {
     );
     // Metadata stays uncompressed: `list()` filters it SQL-side via
     // `json(CAST(metadata AS TEXT))`. It is small (source/step/parents).
-    const storedCheckpoint = await compressForStorage(serializedCheckpoint);
+    let storedCheckpoint = await compressForStorage(serializedCheckpoint);
 
     await this.db.transaction(async () => {
+      if (generation !== this.options.memoryGeneration?.()) {
+        const cleared = {
+          ...checkpoint,
+          channel_values: { ...checkpoint.channel_values, userContext: {} },
+        };
+        const [, serialized] = await this.serde.dumpsTyped(cleared);
+        storedCheckpoint = await compressForStorage(serialized);
+      }
       await this.db.run(
         `INSERT OR REPLACE INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,

@@ -87,7 +87,9 @@ export class ProviderStallError extends Error {
  */
 export function findProviderStall(error: unknown): ProviderStallError | null {
   let current: unknown = error;
-  for (let depth = 0; depth < 8; depth += 1) {
+  const seen = new Set<object>();
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
     if (current instanceof ProviderStallError) return current;
     if (!current || typeof current !== 'object' || !('cause' in current))
       return null;

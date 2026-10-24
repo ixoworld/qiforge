@@ -1,8 +1,4 @@
-/**
- * The prefetch-cache invalidation middleware on a real `createAgent` loop:
- * a successful memory write invalidates the turn's room once; an error
- * result, a thrown tool and an unrelated tool do not.
- */
+/** Memory mutations invalidate before execution, including failed attempts. */
 import { HumanMessage, ToolMessage } from '@langchain/core/messages';
 import { tool } from '@langchain/core/tools';
 import { createAgent, FakeToolCallingModel } from 'langchain';
@@ -61,7 +57,9 @@ async function runCall(
     middleware: [
       createUserContextInvalidationMiddleware({
         roomId: ROOM,
-        invalidate: (roomId) => invalidated.push(roomId),
+        invalidate: (roomId) => {
+          invalidated.push(roomId);
+        },
         ...(options.toolNames ? { toolNames: options.toolNames } : {}),
         logger: {
           log: (m: unknown) => logs.push(String(m)),
@@ -97,24 +95,24 @@ describe('createUserContextInvalidationMiddleware', () => {
       const { invalidated, logs } = await runCall(name, 'ok');
       expect(invalidated).toEqual([ROOM]);
       expect(logs).toContain(
-        `[user-context] invalidated room=${ROOM} after ${name}`,
+        `[user-context] invalidated room=${ROOM} before ${name}`,
       );
     },
   );
 
-  it('an error result does not invalidate', async () => {
+  it('an error result retains the pre-mutation invalidation', async () => {
     const { invalidated, ran } = await runCall(
       MEMORY_ADD_MCP_NAME,
       'error-result',
     );
     expect(ran).toEqual([MEMORY_ADD_MCP_NAME]);
-    expect(invalidated).toEqual([]);
+    expect(invalidated).toEqual([ROOM]);
   });
 
-  it('a thrown tool does not invalidate', async () => {
+  it('a thrown tool retains the pre-mutation invalidation', async () => {
     const { invalidated, ran } = await runCall(MEMORY_ADD_MCP_NAME, 'throw');
     expect(ran).toEqual([MEMORY_ADD_MCP_NAME]);
-    expect(invalidated).toEqual([]);
+    expect(invalidated).toEqual([ROOM]);
   });
 
   it('a read or an unrelated tool does not invalidate', async () => {

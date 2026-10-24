@@ -802,60 +802,64 @@ existing capability checks. Provenance and its diagnostics are described in
 
 ## First-turn memory prefetch
 
-The user object fills `state.userContext` (the six slots the prompt composer
-renders: `identity`, `work`, `goals`, `interests`, `relationships`,
-`recent`) from the memory engine, so the first answer of a conversation
-already knows the user. One `POST {MEMORY_ENGINE_URL}/search-enhanced-batch`
-carries the six queries; it is authorized with a UCAN invocation for
-`ixo:memory` / `memory/*` minted from the user's delegation (the service DID
-comes from the engine's `/.well-known/did.json`), with the oracle room in
-`x-room-id`. The request starts as soon as the turn's room is known, so it
-overlaps the preferences read, attachment handling and the capability router
-(request admission runs before the build and is not part of the overlap).
+One `POST {MEMORY_ENGINE_URL}/agent/search-batch` carries six personal-only
+queries for identity, work, goals, interests, relationships and recent activity.
+Oracle knowledge remains an explicit on-demand read. Each request uses a fresh
+60-second `memory/search` invocation over `ixo:memory`, derived from the current
+user delegation. The resolved service DID must match the configured origin's
+did:web identity. These routes require the Memory Engine agent-read contract;
+legacy enhanced-search responses are not accepted.
 
-- **Who waits.** A thread with no checkpointed `userContext` (first contact)
-  waits for the result for at most `USER_CONTEXT_PREFETCH_CAP_MS`, and the
-  result is written to the thread once. A thread that already has one never
-  waits and never changes: its later turns only refresh the room's cache in
-  the background, so a gather that outlives the cap, or a refreshed answer,
-  reaches the user's next session (within `USER_CONTEXT_CACHE_TTL_MS`), not
-  the running thread. A thread that got nothing on first contact (timeout,
-  failure, skip) asks again on its next turn. A gather still unsettled 5 s
-  past its request timeout (30 s) is abandoned: the next turn starts a new
-  one instead of joining it, and the abandoned one's late answer is dropped.
-- **Cache.** Per room, at most 64 rooms per object, lost when the object is
-  evicted. An answer with memories lives `USER_CONTEXT_CACHE_TTL_MS`; an
-  answer with none (valid, "no memory yet") lives 30 s so a first memory
-  shows up quickly. The room's entry is dropped after a memory write tool
-  call and after a session-history upload completes. The engine's own 15 s
-  result cache and asynchronous cognify can still return a just-written
-  memory late. A failed request (HTTP error, network error, timeout, a
-  malformed answer, or all six slots failing) is remembered for 60 s and
-  skipped, not retried on every turn.
-- **No request** when `USER_CONTEXT_PREFETCH=off`, `MEMORY_ENGINE_URL` is
-  unset, the user has no `ixo:memory` delegation (not remembered: the next
-  turn tries again), the turn is a supplied-context or task session, the turn
-  is in a Matrix group room (the reply goes to every member), or the turn has
-  no oracle room.
-- **Stored size.** Each slot keeps only what the prompt renders; a slot with
-  nothing in it is dropped; every stored string is cut to 400 characters and
-  a whole context over 16 KB loses episodes, then entity summaries, until it
-  fits. On first contact the thread's `userContext` carries all six keys
-  (`{}` for a slot with nothing).
-  The rendered block is capped at 2000 characters.
-- **Failure reasons** shown in `/debug/context` and the logs carry no engine
-  response body.
-- **Progress.** A Portal turn waiting past 300 ms on first contact sends a
-  `router.update` step (`Recalling your memories…`); the client SDK does not
-  render those frames yet.
+The gather retains the 3-second default blocking cap, one in-flight gather per
+room, and 64-room LRU. A timed-out gather can warm the cache only while its local
+generation and grant remain unchanged. Positive results live for the configured
+cache TTL, empty bounded results for 30 seconds, and failures for 60 seconds.
+An empty result is never evidence that the user has no memories.
 
-Measured on devnet (engine 1.0.0-develop.8, a real user space of 345
-episodes plus the Companion's public knowledge, uncached, from inside the
-cluster): the six-query batch takes p50 439 ms and p95 550 ms (a space of 183
-episodes: p50 362 ms), and 648 ms p50 from outside over the public URL. The
-engine replays identical queries from a 15 s cache. A cold open, the first
-request after the engine evicted an idle space (120 s), took 2.2 s. The 3 s
-default cap therefore fits a warm engine with margin and a cold open
-narrowly; lower it, or set `USER_CONTEXT_PREFETCH_CAP_MS=0`, to trade the first
-answer's memory for latency. Behaviour operators see:
-[operations](operations.md#turns-user-context-prefetch).
+Checkpointed profiles carry exact fact references and SHA-256 revisions, the
+user, oracle, network, room, session, fixed source origin, effective grant digest
+and durable local generation. Before every model call, including a graph resumed
+with null input, the runtime checks all retained references in one bounded
+`/agent/references/check` request with a fresh invocation. It checks the grant
+and generation again after the response. Missing, denied, changed, deleted or
+unavailable evidence suppresses the retained block. Legacy uncited profiles are
+suppressed. Checkpoint saves use the same source check and reject context that
+crossed a local generation change while serializing.
+
+Memory write/delete tools increment and persist the local generation before
+calling the source, even if that call later fails. This invalidates the current
+thread's next prompt and the room cache. Delegation revocation also advances the
+generation and aborts active turns. History uploads advance it before dispatch;
+queued jobs and retries from an older generation are dropped. Deleting a session
+still archives its history to memory. It is not memory erasure, and an already
+sent source request or already disclosed text cannot be retracted.
+
+Only exact fact text is retained, with no episodes, summaries or synthesis.
+Facts that would exceed the 16 KB context budget, including citations, are
+omitted whole. The rendered memory block remains capped at 2000 characters.
+A failed positional search slot does not erase successful slots. The prefetch
+is disabled for supplied-context tasks, task sessions, Matrix group rooms,
+missing rooms, missing grants and `USER_CONTEXT_PREFETCH=off`.
+
+A Portal first contact waiting past 300 ms emits `Recalling your memories…`.
+The current-source check is bounded by the configured prefetch cap (at least
+1 ms), and fails closed. Source responses are not included in failure logs.
+Historical latency measurements for the enhanced-search endpoint do not measure
+this contract; no hosted acceptance is asserted by local tests.
+
+## Session attachment receipts
+
+The shared Portal/HTTP and Matrix turn builder stamps attachment metadata with
+an immutable digest, user DID, session ID, human message ID and host receipt time.
+The receipt is serialized atomically with that human message. The timestamp is
+when QiForge received the attachment message, never the original media upload
+time. Metadata without a trusted receipt makes attachment inventory partial.
+
+Trusted callers use `attachmentInventory(identity, sessionId)` and
+`attachmentReceiptCurrent(identity, sessionId, reference, revision)` on the user
+object. The private `sessionAttachments` port exposes `inventory(context)` and
+`current(context, reference, revision)` for source adapters. Both re-read the
+current session transcript, verify each receipt's metadata digest and binding,
+and refuse a different owner. Inventory revisions include the complete flag
+and exact receipt set. They cannot certify file bytes, original upload time or
+attachments absent from a legacy transcript.

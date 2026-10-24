@@ -1,5 +1,10 @@
+import { contentDigest, retainedMemory } from '../memory/retained-context';
 import { env, runInDurableObject } from 'cloudflare:test';
-import { AIMessage, type BaseMessage } from '@langchain/core/messages';
+import {
+  AIMessage,
+  HumanMessage,
+  type BaseMessage,
+} from '@langchain/core/messages';
 import type { ChatResult } from '@langchain/core/outputs';
 import type { StructuredTool } from '@langchain/core/tools';
 import {
@@ -31,7 +36,7 @@ import { SessionsStore } from '../sqlite/sessions-store';
 import { SqliteSaver } from '../sqlite/sqlite-saver';
 import type { SqliteTestDO } from '../sqlite/test-do';
 import { TASK_SESSION_PREFIX } from '../tasks/scheduler';
-import type { TurnRequest } from './contracts';
+import type { TurnRequest, UserOracleObject } from './contracts';
 import { RunCoordinator } from './run-coordinator';
 import type { RunFrame } from './run-buffer';
 import { storedRunRequest, type StoredRunRequest } from './run-request';
@@ -65,7 +70,7 @@ const ENGINE = 'https://memory-engine.example';
 const ENGINE_DID = 'did:web:memory-engine.example';
 const ROOM = '!oracle-room:example.org';
 const GROUP_ROOM = '!group-room:example.org';
-const BATCH_PATH = '/search-enhanced-batch';
+const BATCH_PATH = '/agent/search-batch';
 const CONTEXT_HEADING = '## What you know about the user';
 const PROGRESS_STEP = 'Recalling your memories…';
 
@@ -110,31 +115,32 @@ type EngineMode =
   | { kind: 'hang' };
 
 /** Six `/search-enhanced` answers in query order, one fact per given slot. */
-function batchResults(facts: Partial<Record<UserContextSlot, string>>) {
-  return USER_CONTEXT_SLOTS.map((slot) => {
-    const fact = facts[slot];
-    return {
-      total_results: {
-        facts: fact ? 1 : 0,
-        entities: 0,
-        episodes: 0,
-        communities: 0,
-      },
-      facts: fact
-        ? [
-            {
-              uuid: `${slot}-fact`,
-              name: 'FACT',
-              fact,
-              created_at: '2026-10-01T00:00:00Z',
-            },
-          ]
-        : [],
-      entities: [],
-      episodes: [],
-      communities: [],
-    };
-  });
+async function batchResults(facts: Partial<Record<UserContextSlot, string>>) {
+  const scope = {
+    userDid: USER_DID,
+    oracleDid: ORACLE_DID,
+    knowledgeScope: 'personal',
+  };
+  return Promise.all(
+    USER_CONTEXT_SLOTS.map(async (slot) => {
+      const text = facts[slot];
+      return {
+        representation: 1,
+        scope,
+        observedAt: new Date().toISOString(),
+        facts: text
+          ? [
+              {
+                reference: `memory:fact:personal:${slot}`,
+                revision: await contentDigest(text),
+                text,
+                scope,
+              },
+            ]
+          : [],
+      };
+    }),
+  );
 }
 
 class FakeEngine {
@@ -177,15 +183,46 @@ class FakeEngine {
       return Response.json({ id: ENGINE_DID });
     // Session-history upload (the history indexer).
     if (url.pathname === '/messages') return Response.json({ ok: true });
+    if (this.mode.kind === 'status')
+      return new Response('engine failure', { status: this.mode.status });
+    if (url.pathname === '/agent/references/check') {
+      const parsed = z
+        .object({
+          references: z.array(
+            z.object({ reference: z.string(), revision: z.string() }),
+          ),
+        })
+        .parse(await request.json());
+      const current = (await batchResults(this.facts)).flatMap(
+        (result) => result.facts,
+      );
+      return Response.json({
+        representation: 1,
+        scope: {
+          userDid: USER_DID,
+          oracleDid: ORACLE_DID,
+          knowledgeScope: 'personal',
+        },
+        observedAt: new Date().toISOString(),
+        valid: parsed.references.every((ref) =>
+          current.some(
+            (fact) =>
+              fact.reference === ref.reference &&
+              fact.revision === ref.revision,
+          ),
+        ),
+      });
+    }
     if (url.pathname !== BATCH_PATH)
       return new Response('not stubbed', { status: 404 });
     const mode = this.mode;
-    if (mode.kind === 'status')
-      return new Response('engine failure', { status: mode.status });
     if (mode.kind === 'hang')
       await new Promise<void>((resolve) => this.held.push(resolve));
     else if (mode.delayMs) await sleep(mode.delayMs);
-    return Response.json({ results: batchResults(this.facts) });
+    return Response.json({
+      representation: 1,
+      results: await batchResults(this.facts),
+    });
   }
 }
 
@@ -386,6 +423,11 @@ async function userObject(
     state,
     makeEnv({ ...objectEnv, BLOCKSYNC_GRAPHQL_URL: '' }),
   ]);
+  if (!(host instanceof Oracle)) throw new Error('invalid user object');
+  const attachmentRpc: Pick<
+    UserOracleObject,
+    'attachmentInventory' | 'attachmentReceiptCurrent'
+  > = host;
   const gateway = fakeGateway();
   Object.defineProperty(host, 'ctx', { value: ctx });
   Object.defineProperty(host, 'gateway', { get: () => gateway });
@@ -455,6 +497,7 @@ async function userObject(
       executionProfile?: TurnRequest['executionProfile'];
       /** Abort the run this long after it starts; the agent may never run. */
       abortAfterMs?: number;
+      attachments?: TurnRequest['attachments'];
     } = {},
   ) => {
     const roomId = options.matrix === 'group' ? GROUP_ROOM : ROOM;
@@ -473,6 +516,7 @@ async function userObject(
       identity: { ...identity, timezone: 'UTC' },
       sessionId,
       message: 'What do you know about me?',
+      ...(options.attachments ? { attachments: options.attachments } : {}),
       client,
       requestId,
       ...(options.matrix ? { roomId, roomKind: options.matrix } : {}),
@@ -557,6 +601,74 @@ async function userObject(
     checkpointedContext,
     model,
     memoryWrites: () => memoryWrites,
+    revoke: () => call('clearDelegation', USER_DID),
+    inventory: (sessionId: string) =>
+      attachmentRpc.attachmentInventory({ userDid: USER_DID }, sessionId),
+    prepareResume: async (sessionId: string, group = false) => {
+      const prepared = await call(
+        'prepareTurn',
+        {
+          identity,
+          sessionId,
+          requestId: 'resume',
+          client: group ? 'matrix' : 'portal',
+          ...(group ? { roomKind: 'group', roomId: ROOM } : {}),
+          message: 'resume',
+        },
+        { message: 'resume' },
+        {
+          runId: 'resume',
+          abortController: new AbortController(),
+          resumed: true,
+          continuation: null,
+        },
+      );
+      if (typeof prepared !== 'object' || prepared === null)
+        throw new Error('no prepared turn');
+      const agent: unknown = Reflect.get(prepared, 'agent');
+      const config: unknown = Reflect.get(prepared, 'config');
+      if (typeof agent !== 'object' || agent === null)
+        throw new Error('no agent');
+      if (typeof config !== 'object' || config === null)
+        throw new Error('no graph config');
+      const update: unknown = Reflect.get(agent, 'updateState');
+      const invoke: unknown = Reflect.get(agent, 'invoke');
+      if (typeof update !== 'function' || typeof invoke !== 'function')
+        throw new Error('no resumable graph');
+      await Reflect.apply(update, agent, [
+        config,
+        { messages: [new HumanMessage('continue')] },
+        '__start__',
+      ]);
+      return async () => {
+        const before = model.calls.length;
+        await Reflect.apply(invoke, agent, [null, config]);
+        return (
+          model.calls.slice(before).find((entry) => entry.agent)?.system ?? ''
+        );
+      };
+    },
+    advance: () => call('advanceMemoryGeneration'),
+    seedLegacy: async (sessionId: string) => {
+      const tuple = await saver().getTuple({
+        configurable: { thread_id: sessionId },
+      });
+      if (!tuple) throw new Error('no checkpoint');
+      const legacy = new SqliteSaver(db());
+      await legacy.put(
+        tuple.config,
+        {
+          ...tuple.checkpoint,
+          channel_values: {
+            ...tuple.checkpoint.channel_values,
+            userContext: {
+              identity: { facts: [{ fact: 'UNCITED_LEGACY_SECRET' }] },
+            },
+          },
+        },
+        tuple.metadata ?? { source: 'update', step: 0, parents: {} },
+      );
+    },
     /** Hand the session's transcript to the history indexer. */
     indexHistory: (sessionId: string) =>
       call('scheduleHistoryIndexing', sessionId),
@@ -627,21 +739,13 @@ describe('user-context prefetch in a user-object turn', () => {
       // A fast engine never shows the progress step.
       expect(first.steps).not.toContain(PROGRESS_STEP);
 
-      // Every slot is checkpointed; the empty ones as empty sections.
-      expect(await o.checkpointedContext('s1')).toEqual({
-        identity: {
-          facts: [{ fact: FAVOURITE_SEA }],
-          total_results: { facts: 1, entities: 0, episodes: 0, communities: 0 },
-        },
-        work: {
-          facts: [{ fact: WORKS_AT }],
-          total_results: { facts: 1, entities: 0, episodes: 0, communities: 0 },
-        },
-        goals: {},
-        interests: {},
-        relationships: {},
-        recent: {},
-      });
+      const retained = retainedMemory(await o.checkpointedContext('s1'));
+      expect(retained?.facts.map((fact) => fact.text)).toEqual([
+        FAVOURITE_SEA,
+        WORKS_AT,
+      ]);
+      expect(retained?.stamp.userDid).toBe(USER_DID);
+      expect(retained?.stamp.generation).toBeGreaterThan(0);
 
       const status = await o.status('s1');
       expect(status).toMatchObject({
@@ -666,79 +770,27 @@ describe('user-context prefetch in a user-object turn', () => {
     });
   });
 
-  it('keeps a thread on its first-contact context: later turns never wait or adopt, the refresh serves the next session', async () => {
-    await withObject(
-      'user-context-later-turns',
-      { env: { USER_CONTEXT_CACHE_TTL_MS: 1000 } },
-      async (o) => {
-        const warn = vi.spyOn(console, 'warn');
+  it.each(['deletion', 'refinement'])(
+    'suppresses old facts in the next composed prompt and checkpoint after external %s',
+    async (change) => {
+      await withObject(`user-context-external-${change}`, {}, async (o) => {
         await o.turn('s1', 'r1');
-        expect(o.engine.batches).toHaveLength(1);
-        const firstContext = await o.checkpointedContext('s1');
-        await o.drain();
-        await sleep(1100); // the room's cached answer expires
-
-        // The engine now hangs: the turn must not wait on it.
-        o.engine.mode = { kind: 'hang' };
-        const second = await o.turn('s1', 'r2');
-        expect(second.outcome.status).toBe('finished');
-        expect(second.system).toContain(factLine(FAVOURITE_SEA));
-        expect(second.steps).not.toContain(PROGRESS_STEP);
-        // One background refresh.
-        expect(o.engine.batches).toHaveLength(2);
-        expect(await o.status('s1')).toMatchObject({
-          cached: false,
-          inFlight: true,
-        });
-
-        // A turn while the refresh runs joins it instead of asking again.
-        const third = await o.turn('s1', 'r3');
-        expect(third.system).toContain(factLine(FAVOURITE_SEA));
-        expect(o.engine.batches).toHaveLength(2);
-
-        // The engine answers: the user changed jobs and forgot the sea.
-        o.engine.facts = { goals: LEARNING };
-        o.engine.release();
-        await o.drain();
-        expect(await o.status('s1')).toMatchObject({
-          cached: true,
-          inFlight: false,
-          lastOutcome: 'fresh',
-        });
-
-        // The thread keeps the context it got on first contact: no request
-        // (the cache is fresh), no newer answer in the prompt or checkpoint.
-        const fourth = await o.turn('s1', 'r4');
-        expect(o.engine.batches).toHaveLength(2);
-        expect(fourth.system).toContain(factLine(FAVOURITE_SEA));
-        expect(fourth.system).not.toContain(LEARNING);
-        expect(await o.checkpointedContext('s1')).toEqual(firstContext);
-        // Four turns, one first contact: later turns log no such line.
-        const [contact, ...more] = firstContacts(warn.mock.calls, 's1');
-        expect(more).toEqual([]);
-        expect(contact).toMatch(/ outcome=fresh waited=\d+ms$/);
-
-        // The next session's first turn starts from the refreshed answer.
-        const next = await o.turn('s2', 'r5');
-        expect(o.engine.batches).toHaveLength(2);
-        expect(next.system).toContain(
-          `${label('goals')}\n_Facts:_\n${factLine(LEARNING)}`,
-        );
+        o.engine.facts =
+          change === 'deletion'
+            ? {}
+            : { identity: 'The user now prefers the Baltic.' };
+        const next = await o.turn('s1', 'r2');
         expect(next.system).not.toContain(FAVOURITE_SEA);
         expect(next.system).not.toContain(WORKS_AT);
-        expect(await o.status('s2')).toMatchObject({ lastOutcome: 'cached' });
-        expect(firstContacts(warn.mock.calls, 's2')).toEqual([
-          expect.stringMatching(/ outcome=cached waited=\d+ms$/),
-        ]);
-        expect(firstContacts(warn.mock.calls, 's1')).toHaveLength(1);
-        expect(await o.checkpointedContext('s2')).toMatchObject({
-          identity: {},
-          work: {},
-          goals: { facts: [{ fact: LEARNING }] },
-        });
-      },
-    );
-  });
+        expect(await o.checkpointedContext('s1')).toEqual({});
+        expect(
+          o.engine.requests.some(
+            (request) => request.pathname === '/agent/references/check',
+          ),
+        ).toBe(true);
+      });
+    },
+  );
 
   it('goes ahead at the cap on a slow first turn and serves the late answer from the cache next time', async () => {
     const engine = new FakeEngine();
@@ -804,7 +856,7 @@ describe('user-context prefetch in a user-object turn', () => {
           lastOutcome: 'failed',
         });
         // Nothing was checkpointed: the next turn is still a first contact.
-        expect(await o.checkpointedContext('s1')).toBeUndefined();
+        expect(await o.checkpointedContext('s1')).toEqual({});
 
         await o.drain();
         const second = await o.turn('s1', 'r2');
@@ -963,10 +1015,7 @@ describe('user-context prefetch in a user-object turn', () => {
       expect(second.outcome.status).toBe('finished');
       expect(o.memoryWrites()).toBe(1);
       expect(await o.status('s1')).toMatchObject({ cached: false });
-      // This thread keeps its own context.
-      expect(await o.checkpointedContext('s1')).toMatchObject({
-        identity: { facts: [{ fact: FAVOURITE_SEA }] },
-      });
+      expect(await o.checkpointedContext('s1')).toEqual({});
       await o.drain();
 
       const next = await o.turn('s2', 'r3');
@@ -975,6 +1024,118 @@ describe('user-context prefetch in a user-object turn', () => {
       expect(await o.status('s2')).toMatchObject({ lastOutcome: 'fresh' });
     });
   });
+
+  it('rejects legacy uncited retained checkpoint text', async () => {
+    await withObject('user-context-legacy-checkpoint', {}, async (o) => {
+      await o.turn('s1', 'r1');
+      await o.seedLegacy('s1');
+      const next = await o.turn('s1', 'r2');
+      expect(next.system).not.toContain('UNCITED_LEGACY_SECRET');
+      expect(JSON.stringify(await o.checkpointedContext('s1'))).not.toContain(
+        'UNCITED_LEGACY_SECRET',
+      );
+    });
+  });
+
+  it('invalidates a detached late fetch before it can reach a prompt or checkpoint', async () => {
+    const engine = new FakeEngine();
+    engine.mode = { kind: 'hang' };
+    await withObject(
+      'user-context-late-generation',
+      { env: { USER_CONTEXT_PREFETCH_CAP_MS: 30 } },
+      async (o) => {
+        const first = await o.turn('s1', 'r1');
+        expect(first.system).not.toContain(FAVOURITE_SEA);
+        await o.advance();
+        engine.release();
+        await o.drain();
+        expect(await o.status('s1')).toMatchObject({ cached: false });
+        expect(await o.checkpointedContext('s1')).toEqual({});
+      },
+      engine,
+    );
+  });
+
+  it.each(['deleted', 'revoked'])(
+    'suppresses retained memory when a checkpoint resumes after %s',
+    async (cause) => {
+      await withObject(`user-context-resume-${cause}`, {}, async (o) => {
+        await o.turn('s1', 'r1');
+        const resume = await o.prepareResume('s1');
+        expect(JSON.stringify(await o.checkpointedContext('s1'))).toContain(
+          FAVOURITE_SEA,
+        );
+        if (cause === 'deleted') o.engine.facts = {};
+        else o.engine.mode = { kind: 'status', status: 403 };
+        expect(JSON.stringify(await o.checkpointedContext('s1'))).toContain(
+          FAVOURITE_SEA,
+        );
+        const system = await resume();
+        expect(system).toContain('You are');
+        expect(system).not.toContain(FAVOURITE_SEA);
+        expect(system).not.toContain(WORKS_AT);
+        expect(await o.checkpointedContext('s1')).toEqual({});
+      });
+    },
+  );
+
+  it('does not reintroduce a direct-room profile when its checkpoint resumes in a group', async () => {
+    await withObject('user-context-group-resume', {}, async (o) => {
+      await o.turn('s1', 'r1');
+      const resume = await o.prepareResume('s1', true);
+      expect(JSON.stringify(await o.checkpointedContext('s1'))).toContain(
+        FAVOURITE_SEA,
+      );
+      const system = await resume();
+      expect(system).toContain('You are');
+      expect(system).not.toContain(FAVOURITE_SEA);
+    });
+  });
+
+  it.each(['portal', 'matrix'])(
+    'persists a trusted receipt with the inbound %s human message',
+    async (surface) => {
+      await withObject(`user-attachment-receipt-${surface}`, {}, async (o) => {
+        const before = Date.now();
+        await o.turn('s1', 'r1', {
+          ...(surface === 'matrix' ? { matrix: 'direct' } : {}),
+          attachments: [
+            {
+              filename: 'archive.bin',
+              mimetype: 'application/octet-stream',
+              mxcUri: 'mxc://example/file',
+            },
+          ],
+        });
+        const inventory = z
+          .object({
+            complete: z.boolean(),
+            receipts: z.array(
+              z.object({
+                name: z.string(),
+                userDid: z.string(),
+                sessionId: z.string(),
+                messageId: z.string(),
+                revision: z.string(),
+                receivedAt: z.string(),
+              }),
+            ),
+          })
+          .parse(await o.inventory('s1'));
+        expect(inventory.complete).toBe(true);
+        expect(inventory.receipts).toHaveLength(1);
+        expect(inventory.receipts[0]).toMatchObject({
+          name: 'archive.bin',
+          userDid: USER_DID,
+          sessionId: 's1',
+          revision: expect.stringMatching(/^sha256:/),
+        });
+        expect(
+          Date.parse(inventory.receipts[0]?.receivedAt ?? ''),
+        ).toBeGreaterThanOrEqual(before);
+      });
+    },
+  );
 
   it('indexing session history drops the room cache', async () => {
     await withObject('user-context-invalidate-history', {}, async (o) => {

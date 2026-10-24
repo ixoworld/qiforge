@@ -983,9 +983,14 @@ describe('storage operations per request and turn', () => {
         try {
           const first = await turn();
           expect(new Set(first)).toEqual(
-            new Set(['meta:delegation', 'meta:dirty', 'meta:flushAt']),
+            new Set([
+              'meta:delegation',
+              'meta:memoryGeneration',
+              'meta:dirty',
+              'meta:flushAt',
+            ]),
           );
-          expect(first).toHaveLength(3);
+          expect(first).toHaveLength(4);
           expect(await turn()).toEqual([]);
           expect(deletes).not.toHaveBeenCalled();
           // The upload is still scheduled for the first write's deadline.

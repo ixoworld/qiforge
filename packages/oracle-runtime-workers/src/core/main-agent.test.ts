@@ -272,6 +272,54 @@ describe('createRuntimeCore', () => {
 // ── createMainAgent end-to-end ──────────────────────────────────────────────
 
 describe('createMainAgent', () => {
+  it('uses live checkpoint memory and never restores construction-time context', async () => {
+    const core = bootCore();
+    await core.warm();
+    const llm = scriptedLlm({ main: [[], [], []] });
+    const validate = vi.fn(async (value: unknown) => {
+      const parsed = z.record(z.string(), z.unknown()).safeParse(value);
+      return parsed.success ? parsed.data : {};
+    });
+    const { agent } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(core, llm),
+      requestCtx,
+      state: {
+        userContext: {
+          identity: { facts: [{ fact: 'Captured old profile' }] },
+        },
+      },
+      checkpointer: new MemorySaver(),
+      hooks: { validateUserContext: validate },
+    });
+    const config = { configurable: { thread_id: 'live-memory' } };
+    const current = {
+      identity: { facts: [{ fact: 'Current checkpoint profile' }] },
+    };
+    await agent.updateState(
+      config,
+      { messages: [new HumanMessage('continue')], userContext: current },
+      '__start__',
+    );
+    await agent.invoke(null, config);
+    expect(validate).toHaveBeenLastCalledWith(current);
+    await agent.updateState(
+      config,
+      { messages: [new HumanMessage('continue')], userContext: {} },
+      '__start__',
+    );
+    await agent.invoke(null, config);
+    expect(validate).toHaveBeenLastCalledWith({});
+    await agent.invoke(
+      { messages: [new HumanMessage('new thread')] },
+      { configurable: { thread_id: 'absent-memory' } },
+    );
+    expect(validate).toHaveBeenLastCalledWith(undefined);
+  });
+
   it('runs a tool-calling turn: load_capability → on-demand weather tool → final answer', async () => {
     const core = bootCore();
     await core.warm();
