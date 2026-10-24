@@ -6,6 +6,9 @@ import {
 } from './ixo-tools';
 import { createTurnIxoTools } from '../ixo-tools/turn-host';
 import { readIxoToolsConfig } from '../ixo-tools/config';
+import { handleIxoMcp, type IxoMcpConfig } from '../ixo-tools/mcp';
+import { createMcpIxoTools } from './ixo-mcp';
+import { userObjectName } from './contracts';
 import {
   receiveAttachments,
   sessionAttachments,
@@ -645,6 +648,7 @@ export interface OracleWorkerHooks {
 
 export interface UserOracleDOOptions {
   core: (env: OracleWorkerEnv) => RuntimeCore;
+  ixoToolsMcp?: IxoMcpConfig;
   hooks?: OracleWorkerHooks;
   /**
    * Observe-only domain context (docs/configuration.md). Absent or `off`:
@@ -4600,6 +4604,72 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     // ── HTTP surface (used by the shell for streaming turns) ─────────────
+
+    async handleIxoMcp(request: Request): Promise<Response> {
+      const config = opts.ixoToolsMcp;
+      if (!config) return new Response('Not found', { status: 404 });
+      return handleIxoMcp(request, {
+        config,
+        secret: this.env.IXO_MCP_RESOURCE_CLIENT_SECRET,
+        surfaceFor: async (authorization) => {
+          const userDid = authorization.principal.sub;
+          const expectedName = userObjectName(userDid, this.env.ORACLE_DID);
+          if (this.ctx.id.name !== expectedName)
+            throw new Error('MCP owner mismatch');
+          const stored = await this.ctx.storage.get<string>(META_USER_DID);
+          if (
+            (stored && stored !== userDid) ||
+            (this.userDid && this.userDid !== userDid)
+          )
+            throw new Error('MCP owner mismatch');
+          if (!this.core.availablePlugins.has('ixo-tools'))
+            throw new Error('IXO tools are not installed');
+          await this.hydrateDelegation(userDid);
+          const native = createCurrentIxoDelegationReader({
+            userDid,
+            auth: authConfigFromEnv(this.env),
+            delegations: this.delegations,
+          });
+          const currentAudience = async (): Promise<'private' | 'shared'> => {
+            if (authorization.client.disclosure !== 'private') return 'shared';
+            try {
+              const room = await this.gateway.resolveUserRoom(userDid);
+              if (!room) return 'shared';
+              return createCurrentIxoAudienceReader({
+                client: 'mcp',
+                userDid,
+                roomId: room.roomId,
+                sessionId: 'mcp',
+                blocksyncUri: this.env.BLOCKSYNC_GRAPHQL_URL,
+                participants: (roomId) =>
+                  this.gateway.ixoToolsParticipants(roomId),
+              })();
+            } catch {
+              return 'shared';
+            }
+          };
+          const ucan =
+            this.ucan ??
+            new WorkersUcanService({
+              oracleDid: this.env.ORACLE_DID,
+              signingMnemonic: await this.resolveSigningMnemonic(),
+              logger: console,
+            });
+          const binding = await createMcpIxoTools({
+            authorization,
+            oracleDid: this.env.ORACLE_DID,
+            network: z
+              .enum(['mainnet', 'testnet', 'devnet'])
+              .parse(this.core.validatedEnv.NETWORK),
+            config: readIxoToolsConfig(this.core.validatedEnv),
+            ucan: ucan.forTurn(userDid, undefined),
+            currentVerifiedDelegation: native,
+            currentAudience,
+          });
+          return binding.tools;
+        },
+      });
+    }
 
     override async fetch(request: Request): Promise<Response> {
       this.installDebugTimerTracker();

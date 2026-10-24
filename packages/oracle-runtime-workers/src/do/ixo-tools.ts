@@ -131,7 +131,7 @@ const ownerDocumentSchema = z.object({
 });
 
 export function createCurrentIxoAudienceReader(input: {
-  client: 'portal' | 'matrix' | 'channel';
+  client: 'portal' | 'matrix' | 'channel' | 'mcp';
   sessionId: string;
   roomId: string;
   userDid: string;
@@ -152,7 +152,7 @@ export function createCurrentIxoAudienceReader(input: {
     try {
       let ownerMatrixId =
         input.client === 'matrix' ? input.ownerMatrixId : undefined;
-      if (input.client === 'portal') {
+      if (input.client === 'portal' || input.client === 'mcp') {
         if (!input.userDid.startsWith('did:ixo:') || !input.blocksyncUri)
           return 'shared';
         const response = await (input.fetch ?? fetch)(input.blocksyncUri, {

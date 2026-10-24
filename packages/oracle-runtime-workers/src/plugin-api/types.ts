@@ -694,7 +694,7 @@ export interface RuntimeContext<TConfig = MergedConfig> {
       delegationCar: string,
       serviceUrl: string,
       capability: { can: string; with: string; nb?: Record<string, unknown> },
-      options?: { maxTtlSeconds?: number },
+      options?: { maxTtlSeconds?: number; expiresAt?: number },
     ) => Promise<{ invocation: string } | { error: string }>;
     /**
      * Mint a SELF-SIGNED invocation — issued by this oracle with NO proof

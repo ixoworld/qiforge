@@ -72,6 +72,7 @@ export interface OracleWorkerEnv {
   CHANNEL_SERVICE_DID?: string;
   AUTH_HUB?: Fetcher;
   AUTH_HUB_URL?: string;
+  IXO_MCP_RESOURCE_CLIENT_SECRET?: string;
   AUTH_HUB_CHANNEL_SERVICE_KEY?: string;
 
   // --- matrix -------------------------------------------------------------
@@ -722,6 +723,7 @@ export interface StorageStatus {
  * piped straight to the client.
  */
 export interface UserOracleObject extends Rpc.DurableObjectBranded {
+  handleIxoMcp(request: Request): Promise<Response>;
   attachmentInventory(
     identity: TurnIdentity,
     sessionId: string,
