@@ -37,6 +37,7 @@ jobs:
       - run: pnpm --filter @ixo/oracle-runtime-workers typecheck
       - run: pnpm --filter @ixo/oracle-runtime-workers test:core
       - run: pnpm --filter @ixo/oracle-runtime-workers test
+      - run: pnpm --filter @ixo/oracle-runtime-workers test:ixo-release
       - run: pnpm --filter @ixo/oracle-runtime-workers test:ixo-conformance
       - uses: actions/upload-artifact@v4
         if: always()
