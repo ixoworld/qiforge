@@ -1033,6 +1033,9 @@ export interface MatrixGatewayObject extends Rpc.DurableObjectBranded {
     content: JsonString,
     opts?: { txnId?: string },
   ): Promise<string>;
+  ixoToolsParticipants(
+    roomId: string,
+  ): Promise<{ oracleMatrixId: string; joined: string[] } | null>;
   /** Resolve the canonical user↔oracle room for a user DID (alias lookup, cached). */
   resolveUserRoom(
     userDid: string,

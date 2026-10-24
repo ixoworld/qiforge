@@ -29,7 +29,15 @@ function setup() {
   const resolveServiceDid = vi
     .fn(runtime.ucan.resolveServiceDid)
     .mockResolvedValue('did:web:store.ixo.test');
-  const currentDelegation = vi.fn(async () => ({ raw: 'current-proof' }));
+  const currentDelegation = vi.fn(async () => ({
+    raw: 'current-proof',
+    capabilities: [
+      { with: 'ixo:subscriptions', can: 'subscriptions/read' },
+      { with: 'ixo:memory', can: 'memory/search' },
+      { with: 'ixo:yellowcard', can: 'yellowcard/agent-read' },
+      { with: 'ixo:yellowcard', can: 'yellowcard/agent-quote' },
+    ],
+  }));
   const authority = createIxoSourceAuthority({
     ucan: {
       ...runtime.ucan,
@@ -84,7 +92,7 @@ describe('trusted IXO source authority', () => {
         { maxTtlSeconds: 60 },
       ],
     ]);
-    expect(f.currentDelegation).toHaveBeenCalledTimes(4);
+    expect(f.currentDelegation).toHaveBeenCalledTimes(8);
   });
   it('requires a fresh VFS store lookup and never widens a restricted resource', async () => {
     const f = setup();
@@ -122,7 +130,7 @@ describe('trusted IXO source authority', () => {
       f.authority.memory({ ...context, sessionId: 'other' }),
     ).rejects.toThrow('context mismatch');
     await f.authority.memory(context);
-    f.currentDelegation.mockResolvedValue({ raw: '' });
+    f.currentDelegation.mockResolvedValue({ raw: '', capabilities: [] });
     expect(await f.authority.memory(context)).toBeNull();
     expect(f.createInvocationFromDelegation).toHaveBeenCalledTimes(1);
   });
@@ -135,4 +143,44 @@ describe('trusted IXO source authority', () => {
     f.getServiceDelegation.mockResolvedValue({ error: 'no-delegation' });
     expect(await f.authority.vfs(context, 'list')).toBeNull();
   });
+});
+
+it('does not mint source authority from native-only consent', async () => {
+  const f = setup();
+  f.currentDelegation.mockResolvedValue({
+    raw: 'native-only',
+    capabilities: [
+      { with: 'ixo:agent-tools', can: 'agent-tools/ixo_account_get' },
+    ],
+  });
+  expect(await f.authority.subscriptions(context)).toBeNull();
+  expect(f.createInvocationFromDelegation).not.toHaveBeenCalled();
+});
+
+it('discards a credential minted after revocation', async () => {
+  const f = setup();
+  f.createInvocationFromDelegation.mockImplementation(async () => {
+    f.currentDelegation.mockResolvedValue({ raw: '', capabilities: [] });
+    return { invocation: 'must-not-use' };
+  });
+  expect(await f.authority.subscriptions(context)).toBeNull();
+});
+
+it('does not mint after a revocation during VFS delegation lookup', async () => {
+  const f = setup();
+  f.getServiceDelegation.mockImplementation(async () => {
+    f.currentDelegation.mockResolvedValue({ raw: '', capabilities: [] });
+    return { token: 'stale-proof', with: 'ixo:filesystem' };
+  });
+  expect(await f.authority.vfs(context, 'read')).toBeNull();
+  expect(f.createInvocationFromDelegation).not.toHaveBeenCalled();
+});
+
+it('does not use a VFS credential minted after revocation', async () => {
+  const f = setup();
+  f.createInvocationFromDelegation.mockImplementation(async () => {
+    f.currentDelegation.mockResolvedValue({ raw: '', capabilities: [] });
+    return { invocation: 'must-not-use' };
+  });
+  expect(await f.authority.vfs(context, 'read')).toBeNull();
 });

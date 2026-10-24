@@ -4,6 +4,10 @@ import { z } from 'zod';
 import type { Logger, PluginManifest } from '../../plugin-api/types';
 import { describeRequirements, type CapabilityRequirement } from '../manifest';
 import { NOOP_LOGGER } from '../utils';
+import {
+  readCurrentToolAvailability,
+  type CurrentToolAvailability,
+} from '../current-tool-availability';
 
 type Visibility = NonNullable<PluginManifest['visibility']>;
 
@@ -50,6 +54,7 @@ export interface CapabilityGateMiddlewareOptions {
    * cannot make it available.
    */
   withheldToolNames?: ReadonlySet<string>;
+  currentToolAvailability?: CurrentToolAvailability;
   /** Optional logger; defaults to a no-op. */
   logger?: Logger;
 }
@@ -115,15 +120,29 @@ export const createCapabilityGateMiddleware = (
     // No `contextSchema`: the gate reads only `state.loadedPlugins`, and
     // declaring one would make LangChain reject every invocation that omits
     // `context` — the tool wrapper already carries the request context.
-    wrapModelCall: (request, handler) => {
+    wrapModelCall: async (request, handler) => {
       const loaded = new Set<string>(request.state.loadedPlugins ?? []);
+      const current = new Map<string, ReadonlySet<string> | undefined>();
+      for (const plugin of new Set(pluginByToolName.values())) {
+        current.set(
+          plugin,
+          await readCurrentToolAvailability(
+            options.currentToolAvailability,
+            plugin,
+          ),
+        );
+      }
       const filtered = request.tools.filter((t) => {
         // LangChain types `tools` as `(ServerTool | ClientTool)[]`, where
         // `ServerTool` is `Record<string, unknown>` — so `t.name` widens to
         // `unknown`. Narrow at runtime; unknown-named tools pass through.
         const name = typeof t.name === 'string' ? t.name : undefined;
         if (!name) return true;
+        const plugin = pluginByToolName.get(name);
         return (
+          (!plugin ||
+            current.get(plugin) === undefined ||
+            current.get(plugin)?.has(name) === true) &&
           options.withheldToolNames?.has(name) !== true &&
           unmetFor(name) === null &&
           gatingPlugin(name, loaded) === null
@@ -145,8 +164,23 @@ export const createCapabilityGateMiddleware = (
     // an earlier step of this run counts; a `load_capability` issued in the
     // same model response as the gated call does not (both run on the state
     // from before either), and the model is told to call again.
-    wrapToolCall: (request, handler) => {
+    wrapToolCall: async (request, handler) => {
       const name = request.toolCall.name;
+      const owner = pluginByToolName.get(name);
+      const current = owner
+        ? await readCurrentToolAvailability(
+            options.currentToolAvailability,
+            owner,
+          )
+        : undefined;
+      if (current !== undefined && !current.has(name)) {
+        return new ToolMessage({
+          content: `Tool "${name}" is not available in this conversation, so the call was not run.`,
+          tool_call_id: request.toolCall.id ?? '',
+          name,
+          status: 'error',
+        });
+      }
       if (options.withheldToolNames?.has(name)) {
         logger.warn(
           `[CapabilityGateMiddleware] refused a call to ${name}: an admin tool the user's delegation does not grant`,

@@ -1,3 +1,11 @@
+import { z } from 'zod';
+import {
+  CurrentDelegationMap,
+  createCurrentIxoDelegationReader,
+  createCurrentIxoAudienceReader,
+} from './ixo-tools';
+import { createTurnIxoTools } from '../ixo-tools/turn-host';
+import { readIxoToolsConfig } from '../ixo-tools/config';
 import {
   receiveAttachments,
   sessionAttachments,
@@ -903,7 +911,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * events of one request (a soft then a hard prune) never race.
      */
     private contextStatsWrites: Promise<void> = Promise.resolve();
-    private readonly delegations = new Map<string, CachedDelegation>();
+    private readonly delegations = new CurrentDelegationMap<CachedDelegation>();
+    private delegationWrite: Promise<void> = Promise.resolve();
     /** Epoch-ms until which a room-state delegation lookup is not retried. */
     private delegationMissUntil = 0;
     private dirty = false;
@@ -1196,6 +1205,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.adoptHibernatedSockets();
       let delegationReplaced = false;
       if (identity.ucanDelegation) {
+        const generation = this.delegations.generation;
         // Clients (the Portal's SDK) send their cached delegation with every
         // request; a token this object has not seen is a re-authorization.
         const known =
@@ -1203,26 +1213,28 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           (await this.ctx.storage.get<StoredDelegation>(META_DELEGATION))?.raw;
         delegationReplaced = known !== identity.ucanDelegation;
         const cached = this.delegations.get(identity.userDid);
-        if (
+        if (generation !== this.delegations.generation) {
+          delegationReplaced = false;
+        } else if (
           cached?.raw !== identity.ucanDelegation ||
           typeof cached.expiration !== 'number'
-        )
-          this.delegations.set(
-            identity.userDid,
-            await this.delegationRecord(
-              identity.ucanDelegation,
-              identity.ucanDelegationExpiration,
-            ),
+        ) {
+          const record = await this.delegationRecord(
+            identity.ucanDelegation,
+            identity.ucanDelegationExpiration,
           );
-        // Remember a new one for turns that arrive without the header.
-        if (delegationReplaced)
-          await this.ctx.storage.put(META_DELEGATION, {
-            raw: identity.ucanDelegation,
-            at: Date.now(),
-            ...(typeof identity.ucanDelegationExpiration === 'number'
-              ? { expiration: identity.ucanDelegationExpiration }
-              : {}),
-          } satisfies StoredDelegation);
+          if (generation === this.delegations.generation) {
+            this.delegations.set(identity.userDid, record);
+            if (delegationReplaced)
+              await this.persistDelegation(this.delegations.generation, {
+                raw: identity.ucanDelegation,
+                at: Date.now(),
+                ...(typeof identity.ucanDelegationExpiration === 'number'
+                  ? { expiration: identity.ucanDelegationExpiration }
+                  : {}),
+              });
+          } else delegationReplaced = false;
+        }
       } else if (!this.delegations.has(identity.userDid)) {
         await this.hydrateDelegation(identity.userDid);
       }
@@ -1360,6 +1372,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       userDid: string,
       options: { minRemainingSeconds?: number } = {},
     ): Promise<void> {
+      if (this.delegations.get(userDid)?.raw === '') return;
+      let generation = this.delegations.generation;
+      await this.delegationWrite;
+      if (generation !== this.delegations.generation) return;
       const nowSeconds = Math.floor(Date.now() / 1000);
       const margin = options.minRemainingSeconds ?? 0;
       const live = (
@@ -1369,10 +1385,17 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         (typeof d?.expiration !== 'number' || d.expiration > nowSeconds);
       const cached =
         await this.ctx.storage.get<StoredDelegation>(META_DELEGATION);
+      if (generation !== this.delegations.generation) return;
+      if (cached?.raw === '' && cached.expiration === 0) {
+        this.delegations.set(userDid, { raw: '', expiration: 0 });
+        return;
+      }
       let held: CachedDelegation | null = null;
       if (live(cached)) {
         held = await this.delegationRecord(cached.raw, cached.expiration);
+        if (generation !== this.delegations.generation) return;
         this.delegations.set(userDid, held);
+        generation = this.delegations.generation;
         if (
           margin === 0 ||
           (typeof held.expiration === 'number' &&
@@ -1380,6 +1403,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         )
           return;
       }
+      if (generation !== this.delegations.generation) return;
       if (!held && Date.now() < this.delegationMissUntil) return;
       try {
         const room = await this.gateway.resolveUserRoom(userDid);
@@ -1418,8 +1442,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             (typeof record.expiration === 'number' &&
               record.expiration > (held.expiration ?? 0))
           ) {
+            if (generation !== this.delegations.generation) return;
             this.delegations.set(userDid, record);
-            await this.ctx.storage.put(META_DELEGATION, deposited);
+            await this.persistDelegation(
+              this.delegations.generation,
+              deposited,
+            );
             console.log(
               `[user-do] delegation for ${userDid} loaded from the deposited room state (${held ? 'the held copy was inside the margin' : 'header-less turn'})`,
             );
@@ -3603,31 +3631,46 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       raw: string,
       expiration?: number,
     ): Promise<void> {
-      this.delegations.set(
-        userDid,
-        await this.delegationRecord(raw, expiration),
-      );
+      const generation = this.delegations.generation;
+      const record = await this.delegationRecord(raw, expiration);
+      if (generation !== this.delegations.generation) return;
+      this.delegations.set(userDid, record);
       this.delegationMissUntil = 0;
-      await this.ctx.storage.put(META_DELEGATION, {
+      await this.persistDelegation(this.delegations.generation, {
         raw,
         at: Date.now(),
         ...(typeof expiration === 'number' ? { expiration } : {}),
-      } satisfies StoredDelegation);
+      });
       await this.onDelegationReplaced();
     }
 
     /**
      * The user revoked their delegation: forget the cached copy so plugin
      * mints stop at once (Node's `revokeDelegationForUser` clears its cache
-     * for the same reason). The next header-less turn re-reads the room
-     * state, which the shell has already cleared.
+     * for the same reason). Keep a tombstone so header-less turns cannot
+     * restore a stale durable or room-state copy, even if this write fails.
      */
     async clearDelegation(userDid: string): Promise<void> {
-      await this.advanceMemoryGeneration();
-      for (const controller of this.aborts.values()) controller.abort();
-      this.delegations.delete(userDid);
+      const revoked = { raw: '', expiration: 0, at: Date.now() };
+      this.delegations.set(userDid, revoked);
       this.delegationMissUntil = 0;
-      await this.ctx.storage.delete(META_DELEGATION);
+      for (const controller of this.aborts.values()) controller.abort();
+      await Promise.all([
+        this.persistDelegation(this.delegations.generation, revoked),
+        this.advanceMemoryGeneration(),
+      ]);
+    }
+
+    private persistDelegation(
+      generation: object,
+      record: StoredDelegation,
+    ): Promise<void> {
+      const write = this.delegationWrite.then(async () => {
+        if (this.delegations.generation !== generation) return;
+        await this.ctx.storage.put(META_DELEGATION, record);
+      });
+      this.delegationWrite = write.catch(() => undefined);
+      return write;
     }
 
     async finishWorkStatus(
@@ -3714,10 +3757,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       expiration?: number;
       source: 'memory' | 'storage' | 'none';
     }> {
+      if (this.delegations.get(userDid)?.raw === '')
+        return { present: false, source: 'none' };
       const stored =
         await this.ctx.storage.get<StoredDelegation>(META_DELEGATION);
       const inMemory = this.delegations.get(userDid);
-      if (inMemory) {
+      if (inMemory?.raw === '') return { present: false, source: 'none' };
+      if (inMemory?.raw) {
         const expiration = inMemory.expiration ?? stored?.expiration;
         return {
           present: true,
@@ -6235,6 +6281,44 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           )
         : {};
 
+      const ixoTimezone = req.identity.timezone;
+      const ixoTools =
+        core.availablePlugins.has('ixo-tools') && sessionRoomId && ixoTimezone
+          ? await (async () => {
+              const currentAudience = createCurrentIxoAudienceReader({
+                client: req.client,
+                sessionId: req.sessionId,
+                roomId: sessionRoomId,
+                userDid: req.identity.userDid,
+                ownerMatrixId: req.identity.matrixUserId,
+                blocksyncUri: this.env.BLOCKSYNC_GRAPHQL_URL,
+                participants: (roomId) =>
+                  this.gateway.ixoToolsParticipants(roomId),
+              });
+              return createTurnIxoTools({
+                context: {
+                  userDid: req.identity.userDid,
+                  oracleDid: this.env.ORACLE_DID,
+                  network: z
+                    .enum(['mainnet', 'testnet', 'devnet'])
+                    .parse(core.validatedEnv.NETWORK),
+                  sessionId: req.sessionId,
+                  roomId: sessionRoomId,
+                  timezone: ixoTimezone,
+                  visibility: await currentAudience(),
+                },
+                config: readIxoToolsConfig(core.validatedEnv),
+                ucan: ambient.ucan,
+                currentVerifiedDelegation: createCurrentIxoDelegationReader({
+                  userDid: req.identity.userDid,
+                  auth: authConfigFromEnv(this.env),
+                  delegations: this.delegations,
+                }),
+                currentAudience,
+                attachments: this.attachmentReceipts(),
+              });
+            })()
+          : undefined;
       const built = await createMainAgent({
         executionProfile: req.executionProfile,
         registries: core.registries,
@@ -6262,6 +6346,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           ...ambient,
           llm: meteredLlm,
           attachments: attachmentAccess,
+          ...(ixoTools ? { ixoTools } : {}),
           onTurnEnd: (dispose) => turnDisposables.add(dispose),
           markDispatched,
         },

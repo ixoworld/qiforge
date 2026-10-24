@@ -42,6 +42,7 @@ export * from './user-preferences';
 export * from './portal';
 export * from './agui';
 export * from './ixo-transaction';
+export * from './ixo-tools';
 export * from './pod-creator';
 
 export const memoryPlugin = new MemoryPlugin();
