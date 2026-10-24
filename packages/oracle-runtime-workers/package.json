@@ -19,6 +19,7 @@
     "test": "vitest run",
     "test:core": "vitest run --config vitest.core.config.ts",
     "test:native-package": "node scripts/verify-native-package.mjs",
+    "test:ixo-conformance": "node --test scripts/ixo-conformance-report.test.mjs && node scripts/verify-ixo-conformance.mjs",
     "lint": "eslint 'src/**/*.ts'"
   },
   "main": "src/index.ts",

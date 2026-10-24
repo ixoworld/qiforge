@@ -245,7 +245,7 @@ describe('IXO MCP confidential active introspection', () => {
       }),
     () => new Response('{}', { headers: { 'content-type': 'text/html' } }),
   ])(
-    'fails closed on redirect or invalid backchannel bytes',
+    'fails closed on redirect or invalid backchannel bytes case %#',
     async (response) => {
       const fetcher = vi.fn(async () => response());
       vi.stubGlobal('fetch', fetcher);

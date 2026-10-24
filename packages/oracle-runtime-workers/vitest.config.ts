@@ -1,4 +1,5 @@
 import { dirname, resolve } from 'node:path';
+import { appendFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 
@@ -37,6 +38,14 @@ export default defineConfig({
     }),
   ],
   test: {
+    onConsoleLog(log) {
+      const target = process.env.IXO_CONFORMANCE_OBSERVATIONS_FILE;
+      const prefix = 'IXO_CONFORMANCE_OBSERVATION ';
+      if (target && log.startsWith(prefix)) {
+        const observation = JSON.parse(log.slice(prefix.length));
+        appendFileSync(target, `${JSON.stringify(observation)}\n`);
+      }
+    },
     include: ['src/**/*.test.ts', 'test/**/*.test.ts'],
     // Most bundled-plugin unit tests are plain-Node suites (they vi.mock the
     // MCP / composio SDKs, which the workerd module-fallback service cannot
