@@ -14,6 +14,7 @@ export type IxoSourceUcan = Pick<
 export type CurrentSourceDelegation = Readonly<{
   raw: string;
   revision?: object;
+  expiration?: number;
   capabilities: readonly DelegatedCapability[];
 }>;
 
@@ -56,6 +57,20 @@ export function createIxoSourceAuthority(input: {
     yellowcard: audience(origins.yellowcard),
   });
   const storeAudience = audience(storeUrl);
+  function mintOptions(delegation: CurrentSourceDelegation) {
+    if (
+      delegation.expiration !== undefined &&
+      (!Number.isFinite(delegation.expiration) ||
+        delegation.expiration <= Date.now() / 1000)
+    )
+      return null;
+    return {
+      maxTtlSeconds: 60,
+      ...(delegation.expiration !== undefined
+        ? { expiresAt: delegation.expiration }
+        : {}),
+    };
+  }
   async function stillCurrent(
     before: CurrentSourceDelegation,
   ): Promise<boolean> {
@@ -79,11 +94,13 @@ export function createIxoSourceAuthority(input: {
       )
     )
       return null;
+    const options = mintOptions(delegation);
+    if (!options) return null;
     const result = await input.ucan.createInvocationFromDelegation(
       delegation.raw,
       audiences[service],
       capability,
-      { maxTtlSeconds: 60 },
+      options,
     );
     if ('error' in result) throw new Error('IXO source invocation unavailable');
     if (!(await stillCurrent(delegation))) return null;
@@ -132,11 +149,13 @@ export function createIxoSourceAuthority(input: {
         throw new Error('VFS delegation unavailable');
       }
       if (delegation.with !== 'ixo:filesystem') return null;
+      const options = mintOptions(current);
+      if (!options) return null;
       const result = await input.ucan.createInvocationFromDelegation(
         delegation.token,
         audiences.vfs,
         { can, with: 'ixo:filesystem' },
-        { maxTtlSeconds: 60 },
+        options,
       );
       if ('error' in result)
         throw new Error('VFS source invocation unavailable');

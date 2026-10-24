@@ -291,7 +291,7 @@ export class WorkersUcanService {
     delegationCar: string,
     serviceUrlOrDid: string,
     capability: { can: string; with: string; nb?: Record<string, unknown> },
-    options: { maxTtlSeconds?: number } = {},
+    options: { maxTtlSeconds?: number; expiresAt?: number } = {},
   ): Promise<MintResult> {
     if (!this.opts.signingMnemonic)
       return {
@@ -338,6 +338,13 @@ export class WorkersUcanService {
       // turn, so a 60 s token expired under long tool calls.
       let expiration =
         nowSeconds + (options.maxTtlSeconds ?? MAX_INVOCATION_TTL_SECONDS);
+      if (options.expiresAt !== undefined) {
+        if (!Number.isFinite(options.expiresAt))
+          return { error: 'Invalid invocation expiry ceiling' };
+        expiration = Math.min(expiration, Math.floor(options.expiresAt));
+      }
+      if (expiration <= nowSeconds)
+        return { error: 'Invocation authority expired' };
       const delegationExp =
         typeof delegation.expiration === 'number' &&
         isFinite(delegation.expiration)

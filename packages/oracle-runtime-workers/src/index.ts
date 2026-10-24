@@ -31,6 +31,7 @@ import { MatrixGatewayDO } from './matrix/gateway-do';
 import {
   createShell,
   gateway,
+  userStub,
   type ListModelsOptions,
   type PluginRoute,
 } from './shell/app';
@@ -40,6 +41,17 @@ import { sweepExpiredArtifacts } from './artifacts/sweep';
 import { feedbackConfigFromEnv } from './feedback/config';
 import { LinearFeedbackSink } from './feedback/linear-sink';
 import type { DomainContextOptions } from './core/domain-context';
+import {
+  authenticateIxoMcp,
+  handleIxoMcpMetadata,
+  isIxoMcpResource,
+  ixoMcpMetadataUrl,
+  parseIxoMcpConfig,
+  prepareIxoMcpRequest,
+  withIxoMcpResponse,
+  type IxoMcpConfigInput,
+} from './ixo-tools/mcp';
+export type { IxoMcpConfigInput } from './ixo-tools/mcp';
 
 export * from './plugin-api';
 export * from './plugins';
@@ -222,6 +234,7 @@ export {
 } from './llm/chatgpt-oauth';
 
 export interface CreateOracleWorkerOptions {
+  ixoToolsMcp?: IxoMcpConfigInput;
   config: OracleConfig;
   plugins?: OraclePlugin[];
   features?: RuntimeCoreOptions['features'];
@@ -302,6 +315,17 @@ export interface OracleWorker {
 export function createOracleWorker(
   opts: CreateOracleWorkerOptions,
 ): OracleWorker {
+  const ixoMcp = opts.ixoToolsMcp
+    ? parseIxoMcpConfig(opts.ixoToolsMcp)
+    : undefined;
+  if (ixoMcp) {
+    const reserved = [
+      '/v1/mcp',
+      '/.well-known/oauth-protected-resource/v1/mcp',
+    ];
+    if ((opts.routes ?? []).some((route) => reserved.includes(route.path)))
+      throw new Error('Host route conflicts with IXO MCP ingress');
+  }
   // One core per isolate per env object. Isolates are reused across requests
   // (cheap), evicted under pressure (rebuilt on demand) — same lifetime the
   // Node runtime's boot caches had, minus the process.
@@ -320,6 +344,15 @@ export function createOracleWorker(
         decisionProviderPolicy: opts.decisionProviderPolicy,
         logger: console,
       });
+      if (
+        ixoMcp &&
+        core.pluginRoutes.some((route) =>
+          ['/v1/mcp', '/.well-known/oauth-protected-resource/v1/mcp'].includes(
+            route.path,
+          ),
+        )
+      )
+        throw new Error('Plugin route conflicts with IXO MCP ingress');
       cores.set(env, core);
     }
     return core;
@@ -355,6 +388,7 @@ export function createOracleWorker(
 
   const UserOracleDO = createUserOracleDO({
     core: coreFor,
+    ...(ixoMcp ? { ixoToolsMcp: ixoMcp } : {}),
     ...(opts.hooks ? { hooks: opts.hooks } : {}),
     ...(opts.domainContext ? { domainContext: opts.domainContext } : {}),
   });
@@ -364,6 +398,25 @@ export function createOracleWorker(
     MatrixGatewayDO,
     core: coreFor,
     fetch: async (request, env, ctx) => {
+      if (ixoMcp) {
+        if (request.url === ixoMcpMetadataUrl(ixoMcp))
+          return handleIxoMcpMetadata(request, ixoMcp);
+        if (isIxoMcpResource(request, ixoMcp)) {
+          const preflight = prepareIxoMcpRequest(request, ixoMcp);
+          if (preflight) return preflight;
+          const authentication = await authenticateIxoMcp(
+            request,
+            ixoMcp,
+            env.IXO_MCP_RESOURCE_CLIENT_SECRET,
+          );
+          if (!authentication.ok)
+            return withIxoMcpResponse(authentication.response, request, ixoMcp);
+          return userStub(
+            env,
+            authentication.authorization.principal.sub,
+          ).handleIxoMcp(request);
+        }
+      }
       // Make sure the Matrix bot is running; the call is idempotent and cheap
       // once started. Done in the background so it never delays a request.
       ctx.waitUntil(
