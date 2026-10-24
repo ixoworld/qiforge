@@ -29,6 +29,7 @@ import { reportsUnknownOutcome } from '@ixo/common/ai/frontend-bridge';
 import { type AIMessageChunk, ToolMessage } from '@langchain/core/messages';
 import { harnessLimitOf, type HarnessLimitError } from '../core/turn-budget';
 import { RunBuffer, type RunFrame } from './run-buffer';
+import { providerModelEvidence } from '../llm/model-evidence';
 
 /** Where the producer puts frames — a `RunBuffer`, or a test sink. */
 export interface FrameSink {
@@ -403,6 +404,8 @@ export async function runTurnFrames(
       if (evt.event === 'on_chat_model_end') {
         if (isInternalModelEvent(evt)) continue;
         const output = (evt.data as { output?: AIMessageChunk })?.output;
+        const model = providerModelEvidence(output, evt.run_id);
+        if (model) write('model', model);
         for (const call of output?.tool_calls ?? []) {
           if (call.id)
             pendingCalls.set(call.id, {
