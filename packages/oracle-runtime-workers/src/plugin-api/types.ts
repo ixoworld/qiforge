@@ -712,7 +712,12 @@ export interface RuntimeContext<TConfig = MergedConfig> {
      */
     getServiceDelegation: (
       userDid: string,
-      opts: { storeUrl: string; resource: string; requiredAbility: string },
+      opts: {
+        storeUrl: string;
+        resource: string;
+        requiredAbility: string;
+        fresh?: boolean;
+      },
     ) => Promise<
       | { token: string; with: string }
       | { error: 'no-delegation' | 'store-error'; detail?: string }

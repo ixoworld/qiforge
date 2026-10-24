@@ -254,7 +254,7 @@ if (result.status === 'available') {
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), {
     runtime: 'workerd',
-    availableAmount: '123456789012345678901.001',
+    availableAmount: '123456789012345678901001',
     invalidArguments: 'invalid_arguments',
     forgedContext: 'invalid_context',
     revoked: 'grant_missing',

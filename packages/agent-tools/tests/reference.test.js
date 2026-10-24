@@ -42,7 +42,7 @@ const response = (value, source, overrides = {}) => ({
 });
 const credits = (overrides = {}) => ({
   lookupStatus: 'confirmed',
-  amount: '123456789012345678901.001',
+  amount: '123456789012345678901001',
   denomination: 'upay',
   decimals: 3,
   ledger: 'subscription_credits',
@@ -314,7 +314,7 @@ test('confirmed credits preserve exact amount, ledger, denomination, and selecte
   const result = await host.invoke(token, 'ixo_credits_get', {});
   assert.equal(result.status, 'available');
   assert.deepEqual(result.value, {
-    amount: '123456789012345678901.001',
+    amount: '123456789012345678901001',
     denomination: 'upay',
     decimals: 3,
     ledger: 'subscription_credits',
@@ -355,6 +355,7 @@ test('numeric or incomplete credit amounts are not accepted', async () => {
     credits({ decimals: 6 }),
     credits({ decimals: -1 }),
     credits({ amount: '1e9' }),
+    credits({ amount: '1234.001' }),
   ]) {
     const { host, token } = fixture('ixo_credits_get', () =>
       response(value, 'subscriptions'),
@@ -640,6 +641,7 @@ test('coverage cannot contradict matches, receipts, or itself', async () => {
     revision: 'rev-1',
     name: 'photo.jpg',
     uploadedAt: '2026-10-23T10:00:00Z',
+    timeBasis: 'vfs_created',
     indexedText: false,
   };
   const responses = [
@@ -708,6 +710,7 @@ test('unindexed PDF remains a file match with exact source and revision', async 
     revision: 'rev-1',
     name: 'budget.pdf',
     uploadedAt: '2026-10-23T10:00:00Z',
+    timeBasis: 'vfs_created',
     indexedText: false,
   };
   const { host, token } = fixture('ixo_files_find', () =>

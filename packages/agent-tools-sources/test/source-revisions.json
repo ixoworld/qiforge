@@ -1,0 +1,43 @@
+{
+  "catalog": "2.0.0",
+  "sourceEnvelope": 1,
+  "sources": {
+    "subscriptions": {
+      "repository": "ixoworld/subscriptions-service",
+      "revision": "1c184ffd97bbb7c070d91b56cc3a88126c993a00",
+      "pullRequest": "https://github.com/ixoworld/subscriptions-service/pull/89",
+      "contract": "src/schemas/subscription.ts"
+    },
+    "canonicalTopic": {
+      "repository": "ixoworld/ixo-docs",
+      "revision": "abeb42ac23363e641eb11b228b6f27339f65ad1b",
+      "pullRequest": "https://github.com/ixoworld/ixo-docs/pull/11",
+      "sha256": "2eed6d29d09002930b46f4d473c362a9cf86daeb14f44ba7ed7bb9ec2ab2b77d"
+    },
+    "vfs": {
+      "repository": "ixoworld/ixo-virtual-filesystem",
+      "revision": "61dea145f998346ad28e6bf2d0e8b624591ab1aa",
+      "pullRequest": "https://github.com/ixoworld/ixo-virtual-filesystem/pull/27",
+      "contract": "docs/agent-observations.md"
+    },
+    "memory": {
+      "repository": "ixoworld/memory-engine-graphiti",
+      "revision": "64f2ca075079e7f1fe54ab854f8559dd6e298385",
+      "pullRequest": "https://github.com/ixoworld/memory-engine-graphiti/pull/65",
+      "contract": "memory-engine-ts/docs/agent-reads.md"
+    },
+    "yellowcard": {
+      "repository": "ixoworld/yellowcard-worker",
+      "revision": "646ae21f89ea18ce2a0669bdc09838e4f7356294",
+      "pullRequest": "https://github.com/ixoworld/yellowcard-worker/pull/23",
+      "contract": "docs/agent-reads.md",
+      "migrations": ["0011_agent_quotes.sql", "0012_offramp_network.sql"]
+    }
+  },
+  "acceptance": {
+    "local": "Source handler and adapter protocol tests; installed package workerd invocation.",
+    "hostedAdapters": "NOT_RUN",
+    "modelIntentEvaluation": "NOT_RUN",
+    "release": "NOT_RUN"
+  }
+}

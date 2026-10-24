@@ -41,7 +41,7 @@ const credits = () =>
   source(
     {
       lookupStatus: 'confirmed',
-      amount: '9007199254740993.001',
+      amount: '9007199254740993001',
       denomination: 'upay',
       decimals: 3,
       ledger: 'subscription_credits',
@@ -70,7 +70,7 @@ function latch() {
 }
 
 test('versions and frozen projections expose exactly the documented read descriptors', () => {
-  expect(CATALOG_VERSION).toBe('1.0.0');
+  expect(CATALOG_VERSION).toBe('2.0.0');
   expect(SOURCE_ENVELOPE_VERSION).toBe(1);
   for (const [index, tool] of nativeTools().entries()) {
     expect(Object.keys(tool).sort()).toEqual([
@@ -248,7 +248,7 @@ test('parsed response is owned before post-retrieval authorization can mutate it
   });
   const result = await host.invoke(token, 'ixo_credits_get', {});
   expect(result.status).toBe('available');
-  expect(result.value.amount).toBe('9007199254740993.001');
+  expect(result.value.amount).toBe('9007199254740993001');
   expect(result.evidence[0].reference).toBe('record-1');
   expect(Object.isFrozen(raw)).toBe(false);
 });
