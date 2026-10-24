@@ -4611,7 +4611,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return handleIxoMcp(request, {
         config,
         secret: this.env.IXO_MCP_RESOURCE_CLIENT_SECRET,
-        surfaceFor: async (authorization) => {
+        surfaceFor: async (authorization, lifetimeSignal) => {
           const userDid = authorization.principal.sub;
           const expectedName = userObjectName(userDid, this.env.ORACLE_DID);
           if (this.ctx.id.name !== expectedName)
@@ -4657,6 +4657,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             });
           const binding = await createMcpIxoTools({
             authorization,
+            lifetimeSignal,
             oracleDid: this.env.ORACLE_DID,
             network: z
               .enum(['mainnet', 'testnet', 'devnet'])
@@ -6367,6 +6368,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         core.availablePlugins.has('ixo-tools') && sessionRoomId && ixoTimezone
           ? await (async () => {
               return createTurnIxoTools({
+                lifetimeSignal: abortController.signal,
                 context: {
                   userDid: req.identity.userDid,
                   oracleDid: this.env.ORACLE_DID,

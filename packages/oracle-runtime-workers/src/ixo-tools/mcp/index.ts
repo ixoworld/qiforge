@@ -19,5 +19,6 @@ export {
   handleIxoMcpMetadata,
   prepareIxoMcpRequest,
   withIxoMcpResponse,
+  withIxoMcpLifetime,
   type IxoMcpHandlerInput,
 } from './protocol';

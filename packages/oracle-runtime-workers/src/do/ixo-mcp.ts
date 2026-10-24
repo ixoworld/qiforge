@@ -52,6 +52,7 @@ export async function createMcpIxoTools(input: {
   currentVerifiedDelegation: TurnIxoToolsInput['currentVerifiedDelegation'];
   currentAudience: TurnIxoToolsInput['currentAudience'];
   fetch?: typeof fetch;
+  lifetimeSignal?: AbortSignal;
 }) {
   const context = await mcpContext({
     ...input,
@@ -65,6 +66,7 @@ export async function createMcpIxoTools(input: {
   })}`;
   return createTurnIxoTools({
     context,
+    lifetimeSignal: input.lifetimeSignal,
     config: input.config,
     ucan: input.ucan,
     currentAudience: input.currentAudience,

@@ -36,7 +36,7 @@ Client disclosure defaults to shared. Private disclosure requires explicit opera
 
 The ingress uses the pinned official MCP SDK 1.30.0 `Server` and `WebStandardStreamableHTTPServerTransport`. Every POST gets a fresh server and JSON-response transport. Initialization negotiates a supported protocol version. Initialized notifications return 202. Tools/list filters the canonical MCP descriptors through current native discovery. Tools/call invokes those same shared handlers and returns their typed result in both text and `structuredContent`.
 
-The endpoint supports POST and a bounded unauthenticated OPTIONS preflight. It rejects incoming MCP session IDs, unsupported protocol-version headers, unapproved browser origins, non-JSON content and JSON bodies above 64 KiB. GET event streams, transport sessions, event replay and DELETE session termination are unsupported. The SDK still validates JSON-RPC envelopes and advertised Accept types.
+The endpoint supports POST and a bounded unauthenticated OPTIONS preflight. Tool discovery returns one complete page of currently visible descriptors, without `nextCursor`. Any supplied discovery cursor, including an empty cursor, returns JSON-RPC invalid params. File search has no continuation cursor and retains its explicit source coverage limits. It rejects incoming MCP session IDs and replay headers, unsupported protocol-version headers, unapproved browser origins, non-JSON content and JSON bodies above 64 KiB. GET event streams, transport sessions, event replay and DELETE session termination are unsupported. The SDK still validates JSON-RPC envelopes and advertised Accept types.
 
 Protected-resource metadata is available at `/.well-known/oauth-protected-resource/v1/mcp`. Unauthorized responses include its URL in the Bearer challenge. Responses use no-store. CORS permits only configured exact origins and exposes the challenge and protocol-version headers. Internal source exceptions and credentials are not returned to clients.
 
@@ -51,3 +51,13 @@ The portable cross-repository proof in `test/ixo-mcp-composed/README.md` runs th
 The non-chat MCP context has no chat history or attachment access. File search can still read authorized VFS metadata, but reports incomplete attachment coverage and cannot conclude that an upload is absent from chat. Ordinary and VFS invocations carry an absolute expiry ceiling bounded by both OAuth and native authority, as well as the sixty-second cap.
 
 Auth Hub migration 0030 invalidates existing authorization codes and refresh tokens across legacy OAuth resources. Its release requires a planned client reauthorization. Deployment and credential provisioning remain separate approval gates.
+
+## Cancellation and deadlines
+
+The native turn and each MCP POST own separate cancellation lifetimes. The shared tool surface keeps the same signatures. Its constructor binds the caller lifetime into grant checks and source fetches, preserving each source's existing timeout. Native handlers also check their invoking turn's abort signal before and after tool work.
+
+A request or tool operation has a thirty-second deadline. An already aborted request starts no authorization or tool work. An observed request abort returns HTTP 499 with `request_cancelled`; deadline expiry returns HTTP 504 with `request_timeout`. Both responses contain no domain payload and use no-store. Completed values cannot escape after the lifetime ends. Source fetches that honor AbortSignal can stop; arbitrary callbacks and already dispatched downstream work cannot be forcibly terminated or undone.
+
+Cancellation notifications on a later POST cannot address an earlier request-local SDK server. The server accepts unmatched notifications with 202 and ignores them. The tested SDK and LangChain callers can cancel their own pending promise and discard late results. This does not prove that their HTTP transport aborts the source request. A dropped connection is not a protocol cancellation, and hosted Worker-to-owner abort propagation remains unverified.
+
+Stage-eight conformance records native and actual MCP client behavior separately from these server-side limits. No transport session, shared cancellation registry, replay history, or result cursor is introduced.
