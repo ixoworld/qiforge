@@ -92,6 +92,21 @@ try {
     await readFile(join(installed, 'package.json'), 'utf8'),
   );
   assert.equal(manifest.exports['./ixo-tools'], './src/ixo-tools/index.ts');
+  assert.equal(manifest.dependencies['@modelcontextprotocol/sdk'], '1.30.0');
+  for (const file of [
+    'src/index.ts',
+    'src/do/ixo-mcp.ts',
+    'src/ixo-tools/mcp/index.ts',
+    'src/ixo-tools/mcp/auth.ts',
+    'src/ixo-tools/mcp/config.ts',
+    'src/ixo-tools/mcp/protocol.ts',
+  ]) {
+    assert.equal(
+      await readFile(join(installed, file), 'utf8'),
+      await readFile(join(root, file), 'utf8'),
+      `Packed source differs: ${file}`,
+    );
+  }
   await writeFile(
     join(scratch, 'consumer.ts'),
     `
@@ -101,7 +116,12 @@ import { SkillsPlugin } from '@ixo/oracle-runtime-workers/skills';
 const skills = new SkillsPlugin();
 const root = new RootPlugin();
 const native = new NativePlugin();
-const oracle = createOracleWorker({config: {name: 'Consumer'}, plugins: [root]});
+const oracle = createOracleWorker({config: {name: 'Consumer'}, plugins: [root], ixoToolsMcp: {
+  resource: 'https://consumer.example/v1/mcp',
+  issuer: 'https://auth.example',
+  resourceClientId: 'resource-client',
+  clients: [{clientId: 'client-a'}],
+}});
 void [oracle, native, skills];
 `,
   );
