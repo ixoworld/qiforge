@@ -1413,6 +1413,18 @@ describe('a run ending, as the user-wide listing sees it', () => {
     expect(duringClose).toEqual({ listed: [], rowStatus: 'running' });
   });
 
+  it('a channel cancellation stops exactly its run and leaves a later turn running on replay', async () => {
+    const h = harness();
+    const first = await h.begin('channel-first');
+    const next = await h.begin('channel-next', 'enqueue');
+    await h.runs.abortById(first.live.runId);
+    expect((await h.store.get(first.live.runId))?.status).toBe('aborted');
+    await h.runs.abortById(first.live.runId);
+    expect(next.live.abort.signal.aborted).toBe(false);
+    h.attempts.at(-1)!.finish({ status: 'finished', text: 'corrected' });
+    await next.live.done;
+  });
+
   it('abortSessionSettled answers once the stopped run has ended and left the live records', async () => {
     const h = harness();
     // The attempt winds down 30 ms after its abort signal, not at once.

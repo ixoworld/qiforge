@@ -6,6 +6,9 @@ import { parseReplyPlan, planText } from '../delivery/schema';
 import type { ReplyPlan } from '../delivery/types';
 import {
   ChannelError,
+  ChannelControlResult,
+  type ChannelControlInput,
+  type ChannelReplyContext,
   channelRequestHash,
   channelRunId,
   StaleSessionError,
@@ -79,6 +82,7 @@ export interface ChannelTurnsHost {
    * usable delegation for this oracle: none, or one too close to expiry.
    */
   requireDelegation(identity: TurnIdentity): Promise<void>;
+  stopRun(runId: string): Promise<void>;
   getRun(runId: string): Promise<RunRecord | undefined>;
   /** The Reply Plan (JSON) a finished run was built into, if any. */
   getPlan(runId: string): Promise<string | null>;
@@ -197,6 +201,14 @@ export class ChannelTurns {
       await this.db.run(
         'CREATE INDEX IF NOT EXISTS idx_channel_requests_created ON channel_requests(created_at)',
       );
+      await this.db.run(`CREATE TABLE IF NOT EXISTS channel_controls (
+        binding_id TEXT NOT NULL, request_id TEXT NOT NULL, request_hash TEXT NOT NULL,
+        result TEXT, created_at INTEGER NOT NULL, PRIMARY KEY(binding_id, request_id)
+      )`);
+      await this.db.run(`CREATE TABLE IF NOT EXISTS channel_cancellations (
+        binding_id TEXT NOT NULL, request_id TEXT NOT NULL, created_at INTEGER NOT NULL,
+        PRIMARY KEY(binding_id, request_id)
+      )`);
       await this.db.run(`CREATE TABLE IF NOT EXISTS channel_sessions (
         binding_id TEXT PRIMARY KEY, session_id TEXT NOT NULL
       )`);
@@ -205,6 +217,182 @@ export class ChannelTurns {
       throw error;
     });
     return this.setupPromise;
+  }
+
+  /** SQLite admission is serialized; stopping runs and Matrix I/O never hold that lock. */
+  async control(
+    identity: TurnIdentity,
+    input: ChannelControlInput,
+    requestHash: string,
+  ): Promise<ChannelControlResult> {
+    if (
+      !identity.channel ||
+      identity.channel.bindingId !== input.bindingId ||
+      identity.channel.bindingRevision !== input.bindingRevision ||
+      identity.channel.provider !== input.provider
+    )
+      throw new ChannelError(
+        403,
+        'Channel identity does not match this request',
+        'identity_mismatch',
+      );
+    if (input.command.kind === 'status' && input.cancelRequestIds.length)
+      throw new ChannelError(
+        400,
+        'A status request cannot cancel work',
+        'invalid_request',
+      );
+    const savedResult = await this.serialize(async () => {
+      await this.setup();
+      const saved = await this.db.get<{
+        request_hash: string;
+        result: string | null;
+      }>(
+        'SELECT request_hash,result FROM channel_controls WHERE binding_id=? AND request_id=?',
+        [input.bindingId, input.requestId],
+      );
+      if (saved && saved.request_hash !== requestHash)
+        throw new ChannelError(
+          409,
+          'Control request changed',
+          'request_conflict',
+        );
+      if (saved?.result)
+        return ChannelControlResult.parse(JSON.parse(saved.result));
+      await this.assertNotCancelled(input);
+      await this.db.run(
+        'INSERT OR IGNORE INTO channel_controls(binding_id,request_id,request_hash,created_at) VALUES(?,?,?,?)',
+        [input.bindingId, input.requestId, requestHash, this.now()],
+      );
+      await this.host.changed();
+      return null;
+    });
+    if (savedResult) return savedResult;
+    // Refused destinations leave the existing binding and its work untouched.
+    if (input.command.kind === 'resume')
+      await this.host.assertSession(identity, input.command.sessionId);
+    if (input.command.kind === 'new')
+      await this.host.requireDelegation(identity);
+    await this.serialize(async () => {
+      await this.assertNotCancelled(input);
+      for (const requestId of input.cancelRequestIds)
+        await this.db.run(
+          'INSERT OR IGNORE INTO channel_cancellations(binding_id,request_id,created_at) VALUES(?,?,?)',
+          [input.bindingId, requestId, this.now()],
+        );
+      await this.host.changed();
+    });
+    for (const requestId of input.cancelRequestIds) {
+      const runId = await channelRunId(input.bindingId, requestId);
+      await this.host.stopRun(runId);
+      const run = await this.host.getRun(runId);
+      if (run && !TERMINAL_STATUSES.has(run.status))
+        throw new ChannelError(
+          503,
+          'The cancelled run is still stopping',
+          'unavailable',
+        );
+    }
+    let replacement: string | undefined;
+    if (input.command.kind === 'new') {
+      replacement = await this.host.createSession(
+        identity,
+        `channel-reset-${await channelRequestHash(JSON.stringify([input.bindingId, input.requestId]))}`,
+      );
+      await this.host.assertSession(identity, replacement);
+    } else if (input.command.kind === 'resume')
+      replacement = input.command.sessionId;
+    return this.serialize(async () => {
+      // A later stop can cancel this control while its Matrix call is outstanding.
+      await this.assertNotCancelled(input);
+      const completed = await this.db.get<{ result: string | null }>(
+        'SELECT result FROM channel_controls WHERE binding_id=? AND request_id=?',
+        [input.bindingId, input.requestId],
+      );
+      if (completed?.result)
+        return ChannelControlResult.parse(JSON.parse(completed.result));
+      if (replacement)
+        await this.db.run(
+          'INSERT INTO channel_sessions(binding_id,session_id) VALUES(?,?) ON CONFLICT(binding_id) DO UPDATE SET session_id=excluded.session_id',
+          [input.bindingId, replacement],
+        );
+      const result: ChannelControlResult = {
+        requestId: input.requestId,
+        sessionId: replacement ?? (await this.boundSession(input.bindingId)),
+        command: input.command.kind,
+      };
+      await this.db.run(
+        'UPDATE channel_controls SET result=? WHERE binding_id=? AND request_id=?',
+        [JSON.stringify(result), input.bindingId, input.requestId],
+      );
+      await this.host.changed();
+      return result;
+    });
+  }
+
+  async isCancelled(
+    input: Pick<ChannelTurnInput, 'bindingId' | 'requestId'>,
+  ): Promise<boolean> {
+    await this.setup();
+    return Boolean(
+      await this.db.get(
+        'SELECT 1 FROM channel_cancellations WHERE binding_id=? AND request_id=?',
+        [input.bindingId, input.requestId],
+      ),
+    );
+  }
+
+  private async assertNotCancelled(
+    input: Pick<ChannelTurnInput, 'bindingId' | 'requestId'>,
+  ): Promise<void> {
+    if (await this.isCancelled(input))
+      throw new ChannelError(
+        409,
+        'This message was cancelled by its owner',
+        'request_cancelled',
+      );
+  }
+
+  private async replyContext(
+    input: ChannelTurnInput,
+    sessionId: string,
+  ): Promise<ChannelReplyContext | undefined> {
+    const reference = input.replyTo;
+    if (!reference) return undefined;
+    if (reference.kind === 'unavailable') return { kind: 'unavailable' };
+    const receipt = await this.receipt({
+      ...input,
+      requestId: reference.requestId,
+    });
+    if (!receipt || receipt.session_id !== sessionId)
+      return { kind: 'unavailable' };
+    const run = await this.host.getRun(receipt.run_id);
+    if (!run) return { kind: 'unavailable' };
+    let text: string;
+    if (reference.author === 'user') text = this.host.requestOf(run).message;
+    else {
+      if (run.status !== 'finished') return { kind: 'unavailable' };
+      const reply = await this.reply(run.runId, run.partialText ?? '');
+      const chunk = reference.partId
+        ? /^(.*)\.([1-9]\d*)$/.exec(reference.partId)
+        : null;
+      const matched =
+        reference.partId && reply.plan
+          ? (reply.plan.parts.find((p) => p.partId === reference.partId) ??
+            (chunk?.[1]
+              ? reply.plan.parts.find((p) => p.partId === chunk[1])
+              : undefined))
+          : undefined;
+      if (reference.partId && reply.plan && !matched)
+        return { kind: 'unavailable' };
+      text = matched ? planText({ parts: [matched] }) : reply.rendered;
+    }
+    return {
+      kind: 'resolved',
+      requestId: reference.requestId,
+      author: reference.author,
+      text: text.slice(0, 16000),
+    };
   }
 
   /**
@@ -367,6 +555,15 @@ export class ChannelTurns {
        )`,
       [before, CHANNEL_PRUNE_BATCH],
     );
+    let controlsPruned = 0;
+    for (const table of ['channel_controls', 'channel_cancellations']) {
+      const pruned = await this.db.run(
+        `DELETE FROM ${table} WHERE rowid IN (SELECT rowid FROM ${table} WHERE created_at<? LIMIT ?)`,
+        [before, CHANNEL_PRUNE_BATCH],
+      );
+      controlsPruned += pruned.changes;
+    }
+    if (controlsPruned) await this.host.changed();
     const tombstones = await this.host.pruneTombstones(
       before,
       CHANNEL_PRUNE_BATCH,
@@ -383,6 +580,7 @@ export class ChannelTurns {
     const owedAt = typeof owed?.at === 'number' ? owed.at : null;
     if (owedAt !== null && owedAt <= now) this.kick();
     if (
+      controlsPruned >= CHANNEL_PRUNE_BATCH ||
       receipts.changes >= CHANNEL_PRUNE_BATCH ||
       tombstones >= CHANNEL_PRUNE_BATCH
     )
@@ -414,6 +612,7 @@ export class ChannelTurns {
     runId: string,
   ): Promise<Received> {
     await this.setup();
+    await this.assertNotCancelled(input);
     // Checked before a receipt is written: the receipt of a pruned run is
     // gone (run-store.ts), and a new one must not take its place.
     if (await this.host.wasPruned(runId))
@@ -571,6 +770,7 @@ export class ChannelTurns {
     sessionId: string,
   ): Promise<ChannelTurnResponse> {
     await this.setup();
+    await this.assertNotCancelled(input);
     let receipt = await this.receipt(input);
     if (!receipt) {
       // A concurrent copy of this request was refused and dropped the
@@ -630,6 +830,7 @@ export class ChannelTurns {
       [session, runId],
     );
     await this.host.changed();
+    const replyContext = await this.replyContext(input, session);
     const started = await this.host.begin(runId, {
       identity,
       sessionId: session,
@@ -641,6 +842,8 @@ export class ChannelTurns {
         provider: input.provider,
         bindingId: input.bindingId,
         remoteMessageRef: input.remoteMessageRef,
+        ...(replyContext ? { replyContext } : {}),
+        ...(input.replyTo ? { replyTo: input.replyTo } : {}),
       },
     });
     this.kick();

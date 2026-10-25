@@ -4,6 +4,7 @@ import type { ChannelTurnsTestDO } from './test-do';
 import {
   CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
   type ChannelTurnInput,
+  type ChannelControlInput,
 } from './contract';
 import type { ReplyPlan } from '../delivery/types';
 import { RUN_RETENTION_MS } from '../do/run-store';
@@ -658,5 +659,184 @@ describe('channel record pruning', () => {
       result: { status: 'running' },
     });
     expect(await stub.count()).toBe(2);
+  });
+});
+
+describe('channel quotes and controls', () => {
+  const stop: ChannelControlInput = {
+    provider: 'whatsapp',
+    bindingId: message.bindingId,
+    bindingRevision: 1,
+    requestId: 'wa:stop',
+    cancelRequestIds: [message.requestId],
+    command: { kind: 'stop' },
+  };
+  it('cancels before a delayed turn arrives and never runs that request', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('cancel-before-turn');
+    expect((await stub.control(stop)).ok).toBe(true);
+    expect(await stub.submit(message)).toMatchObject({
+      ok: false,
+      code: 'request_cancelled',
+    });
+    expect(await stub.count()).toBe(0);
+    await stub.reopen();
+    expect(await stub.submit(message)).toMatchObject({
+      ok: false,
+      code: 'request_cancelled',
+    });
+  });
+  it('stops the named run and replays a new-session control without switching again', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('cancel-and-new');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    const command: ChannelControlInput = { ...stop, command: { kind: 'new' } };
+    const fresh = await stub.control(command);
+    if (!fresh.ok) throw new Error('Control rejected');
+    expect(fresh.result.sessionId).not.toBe(first.result.sessionId);
+    expect((await stub.run(first.result.runId))?.status).toBe('aborted');
+    const next = await stub.submit({ ...message, requestId: 'wa:after-new' });
+    expect(next).toMatchObject({
+      ok: true,
+      result: { sessionId: fresh.result.sessionId },
+    });
+    await stub.reopen();
+    expect(await stub.control(command)).toEqual(fresh);
+    expect(
+      await stub.control({ ...command, command: { kind: 'stop' } }),
+    ).toMatchObject({ ok: false, code: 'request_conflict' });
+    expect(
+      await stub.submit({ ...message, bindingId: 'chb_other' }),
+    ).toMatchObject({ ok: true });
+  });
+  it('allows a later stop to cancel a session switch while Matrix is unavailable', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName(
+      'stop-hanging-session-switch',
+    );
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.blockSessionCreation(true);
+    const changing = stub.control({
+      ...stop,
+      requestId: 'wa:new-pending',
+      cancelRequestIds: [],
+      command: { kind: 'new' },
+    });
+    try {
+      await expect
+        .poll(async () => (await stub.hostCalls()).createSession)
+        .toBe(2);
+      const stopped = await stub.control({
+        ...stop,
+        requestId: 'wa:stop-switch',
+        cancelRequestIds: ['wa:new-pending'],
+      });
+      expect(stopped).toMatchObject({
+        ok: true,
+        result: { sessionId: first.result.sessionId },
+      });
+    } finally {
+      await stub.blockSessionCreation(false);
+    }
+    expect(await changing).toMatchObject({
+      ok: false,
+      code: 'request_cancelled',
+    });
+    expect(await stub.boundSession(message.bindingId)).toBe(
+      first.result.sessionId,
+    );
+  });
+
+  it('resumes an owned conversation and leaves the current session unchanged on refusal', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('resume-conversation');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    const fresh = await stub.control({
+      ...stop,
+      requestId: 'wa:new',
+      command: { kind: 'new' },
+    });
+    if (!fresh.ok) throw new Error('Control rejected');
+    expect(
+      await stub.control({
+        ...stop,
+        requestId: 'wa:bad-resume',
+        command: { kind: 'resume', sessionId: '$victim' },
+      }),
+    ).toMatchObject({ ok: false, code: 'session_not_found' });
+    expect(await stub.boundSession(message.bindingId)).toBe(
+      fresh.result.sessionId,
+    );
+    expect(
+      await stub.control({
+        ...stop,
+        requestId: 'wa:resume',
+        command: { kind: 'resume', sessionId: first.result.sessionId },
+      }),
+    ).toMatchObject({
+      ok: true,
+      result: { sessionId: first.result.sessionId },
+    });
+  });
+  it('resolves the selected canonical reply part and refuses a quote from another binding or session', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('canonical-quote');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.finish(first.result.runId, {
+      v: 1,
+      parts: [
+        { partId: 'p1', kind: 'text', text: 'Use Friday.' },
+        { partId: 'p2', kind: 'text', text: 'Should I draft it?' },
+      ],
+    });
+    const quoted = await stub.submit({
+      ...message,
+      requestId: 'wa:quote',
+      message: 'Yes',
+      replyTo: {
+        kind: 'known',
+        requestId: message.requestId,
+        author: 'oracle',
+        partId: 'p2',
+      },
+    });
+    if (!quoted.ok) throw new Error('Turn rejected');
+    const req = JSON.parse((await stub.run(quoted.result.runId))!.request);
+    expect(req.channel.replyContext).toEqual({
+      kind: 'resolved',
+      requestId: message.requestId,
+      author: 'oracle',
+      text: 'Should I draft it?',
+    });
+    const foreign = await stub.submit({
+      ...message,
+      bindingId: 'chb_other',
+      requestId: 'wa:foreign',
+      replyTo: {
+        kind: 'known',
+        requestId: message.requestId,
+        author: 'oracle',
+      },
+    });
+    if (!foreign.ok) throw new Error('Turn rejected');
+    expect(
+      JSON.parse((await stub.run(foreign.result.runId))!.request).channel
+        .replyContext,
+    ).toEqual({ kind: 'unavailable' });
+    await stub.control({
+      ...stop,
+      requestId: 'wa:new',
+      cancelRequestIds: [],
+      command: { kind: 'new' },
+    });
+    const old = await stub.submit({
+      ...message,
+      requestId: 'wa:old-quote',
+      replyTo: { kind: 'known', requestId: message.requestId, author: 'user' },
+    });
+    if (!old.ok) throw new Error('Turn rejected');
+    expect(
+      JSON.parse((await stub.run(old.result.runId))!.request).channel
+        .replyContext,
+    ).toEqual({ kind: 'unavailable' });
   });
 });

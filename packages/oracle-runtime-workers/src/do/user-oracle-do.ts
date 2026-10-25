@@ -1,3 +1,11 @@
+import {
+  channelReplyNote,
+  CHANNEL_REPLY_NOTE_KWARG,
+} from '../channels/replies';
+import type {
+  ChannelControlInput,
+  ChannelControlOutcome,
+} from '../channels/contract';
 import { ChannelTurns } from '../channels/turns';
 import { assertChannelAttemptAllowed } from '../channels/auth';
 import {
@@ -1870,6 +1878,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             );
           }
         },
+        stopRun: (runId) => this.runs!.abortById(runId),
         getRun: (runId) => this.runStore!.get(runId),
         getPlan: (runId) => this.runStore!.getPlan(runId),
         wasPruned: (runId) => this.runStore!.wasChannelRunPruned(runId),
@@ -2802,54 +2811,87 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return toSummary(row);
     }
 
+    private async readyChannel(identity: TurnIdentity): Promise<void> {
+      if (identity.ucanDelegation)
+        throw new ChannelError(
+          403,
+          'Channel grants cannot become tool authority',
+          'channel_grant_not_tool_authority',
+        );
+      // The shell (the only caller) checked the binding just before.
+      // The 900 s margin is checked by admission, for a NEW request only
+      // (and again as its run starts): a poll of a run that exists
+      // answers its status whatever the delegation's state. Before a
+      // COLD object boots, though, a delegation must be live (present,
+      // unexpired): the boot may load the owner copy under it, and a user
+      // without one must get `delegation_required`, not a boot failure.
+      // Hydration reads the stored copy, then the deposited room state
+      // (re-read when the stored copy is inside the margin).
+      if (!this.db) {
+        const live = (): boolean => {
+          const held = this.delegations.get(identity.userDid);
+          return (
+            Boolean(held?.raw) &&
+            (typeof held?.expiration !== 'number' ||
+              held.expiration > Math.floor(Date.now() / 1000))
+          );
+        };
+        if (!live())
+          await this.hydrateDelegation(identity.userDid, {
+            minRemainingSeconds: CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
+          });
+        if (!live()) throw delegationRequiredError();
+      }
+      try {
+        await this.ready(identity);
+      } catch (error) {
+        // A delegation that lacks the file-storage grant over
+        // `/.oracles` cannot load the owner copy: the user must
+        // authorize again, exactly as without a delegation. (Boot throws
+        // the failure as its RPC envelope, so it is parsed, not matched
+        // by class.)
+        if (parseOwnerCopyFailure(error)?.code === 'NO_VFS_DELEGATION')
+          throw delegationRequiredError();
+        throw error;
+      }
+    }
+
+    async channelControl(
+      identity: TurnIdentity,
+      input: ChannelControlInput,
+      requestHash: string,
+    ): Promise<ChannelControlOutcome> {
+      try {
+        await this.readyChannel(identity);
+        return {
+          ok: true,
+          result: await this.channelTurns!.control(
+            identity,
+            input,
+            requestHash,
+          ),
+        };
+      } catch (error) {
+        const refusal =
+          error instanceof ChannelError ? error : classifyChannelFailure(error);
+        if (refusal)
+          return {
+            ok: false,
+            status: refusal.status,
+            code: refusal.code,
+            message: refusal.message,
+          };
+        throw error;
+      }
+    }
+
     async channelTurn(
       identity: TurnIdentity,
       input: ChannelTurnInput,
       requestHash: string,
     ): Promise<ChannelTurnOutcome> {
       try {
-        if (identity.ucanDelegation)
-          throw new ChannelError(
-            403,
-            'Channel grants cannot become tool authority',
-            'channel_grant_not_tool_authority',
-          );
-        // The shell (the only caller) checked the binding just before.
-        // The 900 s margin is checked by admission, for a NEW request only
-        // (and again as its run starts): a poll of a run that exists
-        // answers its status whatever the delegation's state. Before a
-        // COLD object boots, though, a delegation must be live (present,
-        // unexpired): the boot may load the owner copy under it, and a user
-        // without one must get `delegation_required`, not a boot failure.
-        // Hydration reads the stored copy, then the deposited room state
-        // (re-read when the stored copy is inside the margin).
-        if (!this.db) {
-          const live = (): boolean => {
-            const held = this.delegations.get(identity.userDid);
-            return (
-              Boolean(held?.raw) &&
-              (typeof held?.expiration !== 'number' ||
-                held.expiration > Math.floor(Date.now() / 1000))
-            );
-          };
-          if (!live())
-            await this.hydrateDelegation(identity.userDid, {
-              minRemainingSeconds: CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
-            });
-          if (!live()) throw delegationRequiredError();
-        }
-        try {
-          await this.ready(identity);
-        } catch (error) {
-          // A delegation that lacks the file-storage grant over
-          // `/.oracles` cannot load the owner copy: the user must
-          // authorize again, exactly as without a delegation. (Boot throws
-          // the failure as its RPC envelope, so it is parsed, not matched
-          // by class.)
-          if (parseOwnerCopyFailure(error)?.code === 'NO_VFS_DELEGATION')
-            throw delegationRequiredError();
-          throw error;
-        }
+        await this.readyChannel(identity);
         return {
           ok: true,
           result: await this.channelTurns!.submit(identity, input, requestHash),
@@ -3226,8 +3268,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
     /**
      * Start a turn's user-context prefetch — stale-while-revalidate, as the
-     * Node AgentBuilder does it. A thread's context is fixed on first
-     * contact: a thread whose checkpoint already holds a gathered context
+     * Node AgentBuilder does it. Channel turns adopt the current bounded
+     * room-cache answer on each turn; completed channel history invalidates
+     * that cache. Other clients keep the first-contact policy: a thread
+     * whose checkpoint already holds a gathered context
      * never waits and never takes a newer answer; it only refreshes the
      * room's cache in the background (a no-op while the cache is fresh), so
      * the NEXT session in the room starts from it. First contact — including
@@ -3294,7 +3338,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             );
           }),
         );
-      if (hasUserContext(input.prior)) {
+      if (hasUserContext(input.prior) && input.client !== 'channel') {
         keepGathering();
         return null;
       }
@@ -4676,6 +4720,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const stored = JSON.parse(live.record.request) as StoredRunRequest;
       const req = stored.turn;
       if (req.client === 'channel') {
+        if (
+          req.channel &&
+          (await this.channelTurns!.isCancelled({
+            bindingId: req.channel.bindingId,
+            requestId: req.requestId,
+          }))
+        )
+          return { status: 'aborted', text: '' };
         await this.ctx.storage.sync();
         // The binding was checked as the request was admitted; a queued or
         // recovered attempt starts later and checks it again.
@@ -5124,7 +5176,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // into the user's oracle room in the background: never awaited here, so
       // the session's next queued run starts at once. Without the handle (a
       // reset dropped it mid-run) the next poll or alarm mirrors it.
-      if (record.client === 'channel') this.channelTurns?.deliverReply();
+      if (record.client === 'channel') {
+        this.channelTurns?.deliverReply();
+        if (outcome.status === 'finished')
+          this.scheduleHistoryIndexing(record.sessionId);
+      }
       if (!record.taskRunId || !this.taskScheduler) return;
       if (this.taskScheduler.isRunActive(record.taskRunId)) return;
       if (outcome.status === 'finished')
@@ -6245,7 +6301,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const timeNote = suppliedContextOnly
         ? undefined
         : renderTurnTimeNote(turnAt, req.identity.timezone);
-      const content = timeNote ? withTurnTimeNote(spoken, timeNote) : spoken;
+      const replyNote = channelReplyNote(req.channel?.replyContext);
+      const referenced = replyNote
+        ? withTurnTimeNote(spoken, replyNote)
+        : spoken;
+      const content = timeNote
+        ? withTurnTimeNote(referenced, timeNote)
+        : referenced;
       const stateInput = {
         messages: [
           new HumanMessage({
@@ -6253,11 +6315,17 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             additional_kwargs: {
               timestamp: turnAt.toISOString(),
               ...(timeNote ? { [TURN_TIME_NOTE_KWARG]: timeNote } : {}),
+              ...(replyNote ? { [CHANNEL_REPLY_NOTE_KWARG]: replyNote } : {}),
               oracleName: core.identity.name,
               msgFromMatrixRoom: req.client === 'matrix',
               ...speakerKwargs,
               ...(req.channel
-                ? { 'org.ixo.qi.origin': channelOrigin(req.channel) }
+                ? {
+                    'org.ixo.qi.origin': channelOrigin(req.channel),
+                    ...(req.channel.replyTo
+                      ? { 'org.ixo.qi.reply': req.channel.replyTo }
+                      : {}),
+                  }
                 : {}),
               ...attachmentKwargs,
             },
@@ -6381,7 +6449,18 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             txnId: req.channel
               ? `channel-${await channelRequestHash(JSON.stringify([req.identity.userDid, req.channel.bindingId, req.requestId, who]))}`
               : mirrorTxnId(req.sessionId, req.requestId, who),
-            ...(req.channel ? { origin: req.channel } : {}),
+            ...(req.channel
+              ? {
+                  origin: {
+                    provider: req.channel.provider,
+                    bindingId: req.channel.bindingId,
+                    remoteMessageRef: req.channel.remoteMessageRef,
+                    ...(who === 'user' && req.channel.replyTo
+                      ? { replyTo: req.channel.replyTo }
+                      : {}),
+                  },
+                }
+              : {}),
           };
         },
         label,

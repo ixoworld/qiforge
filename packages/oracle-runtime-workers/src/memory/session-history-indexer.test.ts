@@ -146,6 +146,43 @@ describe('SessionHistoryIndexer', () => {
     expect(h.processed).toEqual([['s1', 4]]);
   });
 
+  it('indexes the final tail when another turn completes during an upload', async () => {
+    let count = 0;
+    const messages: HistoryMessage[] = [{ type: 'human', content: 'First' }];
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const posted: string[] = [];
+    const h = harness({
+      getSession: async () => ({
+        roomId: '!room:x',
+        lastProcessedCount: count,
+      }),
+      listMessages: async () => messages.slice(),
+      setProcessedCount: async (_id, n) => {
+        count = n;
+      },
+      fetchImpl: async (_url, init) => {
+        posted.push(String(init?.body));
+        if (posted.length === 1) await held;
+        return new Response('{}');
+      },
+    });
+    const first = h.indexer.process('continuous');
+    while (posted.length === 0)
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    messages.push({ type: 'human', content: 'Last decision' });
+    expect(await h.indexer.process('continuous')).toBe('skipped');
+    release();
+    await first;
+    expect(posted).toHaveLength(2);
+    expect(JSON.parse(posted[1]!).messages).toMatchObject([
+      { content: 'Last decision' },
+    ]);
+    expect(count).toBe(2);
+  });
+
   it('only sends messages after lastProcessedCount and skips when nothing is new', async () => {
     const h = harness({
       session: { title: 't', roomId: '!r', lastProcessedCount: 3 },

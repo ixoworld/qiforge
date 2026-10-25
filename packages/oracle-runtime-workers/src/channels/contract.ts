@@ -9,6 +9,51 @@ import type { ReplyPlan } from '../delivery/types';
  */
 export const ChannelProviderId = z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/);
 
+export const ChannelReplyReference = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('unavailable') }),
+  z.strictObject({
+    kind: z.literal('known'),
+    requestId: z.string().min(1).max(180),
+    author: z.enum(['user', 'oracle']),
+    partId: z.string().min(1).max(128).optional(),
+  }),
+]);
+export type ChannelReplyReference = z.infer<typeof ChannelReplyReference>;
+export type ChannelReplyContext =
+  | { kind: 'unavailable' }
+  | {
+      kind: 'resolved';
+      requestId: string;
+      author: 'user' | 'oracle';
+      text: string;
+    };
+export const ChannelControlBody = z.strictObject({
+  provider: ChannelProviderId,
+  bindingId: z.string().regex(/^chb_[A-Za-z0-9_-]{1,120}$/),
+  bindingRevision: z.number().int().positive().safe(),
+  requestId: z.string().min(1).max(180),
+  cancelRequestIds: z.array(z.string().min(1).max(180)).max(64),
+  command: z.discriminatedUnion('kind', [
+    z.strictObject({ kind: z.literal('stop') }),
+    z.strictObject({ kind: z.literal('status') }),
+    z.strictObject({ kind: z.literal('new') }),
+    z.strictObject({
+      kind: z.literal('resume'),
+      sessionId: z.string().min(1).max(255),
+    }),
+  ]),
+});
+export type ChannelControlInput = z.infer<typeof ChannelControlBody>;
+export const ChannelControlResult = z.strictObject({
+  requestId: z.string(),
+  sessionId: z.string().nullable(),
+  command: z.enum(['stop', 'new', 'resume', 'status']),
+});
+export type ChannelControlResult = z.infer<typeof ChannelControlResult>;
+export type ChannelControlOutcome =
+  | { ok: true; result: ChannelControlResult }
+  | Exclude<ChannelTurnOutcome, { ok: true }>;
+
 export const ChannelTurnBody = z.strictObject({
   provider: ChannelProviderId,
   bindingId: z.string().regex(/^chb_[A-Za-z0-9_-]{1,120}$/),
@@ -17,6 +62,7 @@ export const ChannelTurnBody = z.strictObject({
   remoteMessageRef: z.string().regex(/^hmac:[a-f0-9]{64}$/),
   sessionId: z.string().min(1).max(255).optional(),
   message: z.string().min(1).max(16_000),
+  replyTo: ChannelReplyReference.optional(),
   /**
    * Which kind of oracle the gateway believes it addresses. `companion` is
    * the legacy value; the gateway sends `oracle`. Both are accepted.
@@ -133,6 +179,7 @@ export type ChannelErrorCode =
   | 'storage_unauthorized'
   | 'session_not_found'
   | 'request_conflict'
+  | 'request_cancelled'
   | 'session_conflict'
   | 'room_not_encrypted'
   | 'room_unavailable'

@@ -453,6 +453,17 @@ export class RunCoordinator {
     return stopped;
   }
 
+  /** Stop exactly the run a channel control names; never a later turn. */
+  async abortById(runId: string): Promise<void> {
+    const run = this.live.get(runId);
+    if (!run) return;
+    if (run.record.status === 'queued') await this.cancelQueued(run, 'aborted');
+    else {
+      this.abortRun(run, 'aborted');
+      await withinGrace(this.graceMs, run.done);
+    }
+  }
+
   /**
    * End every run of the session: the executing attempt is aborted, queued
    * runs and runs waiting for a recovery attempt are closed, and messages

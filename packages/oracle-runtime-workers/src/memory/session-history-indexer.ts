@@ -6,7 +6,8 @@
  * Policy (identical to Node):
  *  - Runs in the background when a session is CREATED (indexes the most
  *    recent previous session) and when a session is DELETED (indexes it
- *    before it goes). The request never waits for, or fails on, indexing.
+ *    before it goes), on the last realtime disconnection, and after each
+ *    finished channel run. The request never waits for, or fails on, indexing.
  *  - Only messages after the session's `lastProcessedCount` are sent, then
  *    the count is advanced — a session is never indexed twice.
  *  - Speakers get real identities (the user's preferred name / the oracle's
@@ -142,6 +143,8 @@ function describe(err: unknown): string {
 
 export class SessionHistoryIndexer {
   private readonly inFlight = new Set<string>();
+  private readonly rerun = new Set<string>();
+  private readonly uploading = new Set<string>();
 
   private readonly fetchImpl: typeof fetch;
 
@@ -177,7 +180,8 @@ export class SessionHistoryIndexer {
    * Index a session's unprocessed messages. Never throws: outcomes are
    * `processed`, `skipped` (nothing to do / prerequisites missing) or
    * `failed` (upload failed after retries). Concurrent calls for the same
-   * session collapse into one.
+   * session collapse into one; a completion during an upload schedules a
+   * second pass for the newly completed tail.
    */
   async process(sessionId: string): Promise<IndexOutcome> {
     const { logger } = this.deps;
@@ -188,8 +192,9 @@ export class SessionHistoryIndexer {
       return 'skipped';
     }
     if (this.inFlight.has(sessionId)) {
+      if (this.uploading.has(sessionId)) this.rerun.add(sessionId);
       logger.log(
-        `[history-indexer] session ${sessionId} is already being indexed, skipping`,
+        `[history-indexer] session ${sessionId} is already being indexed, scheduling another pass`,
       );
       return 'skipped';
     }
@@ -220,6 +225,10 @@ export class SessionHistoryIndexer {
       return 'failed';
     } finally {
       this.inFlight.delete(sessionId);
+      this.uploading.delete(sessionId);
+      // A channel turn may finish while the previous upload is in flight.
+      // Keep that final tail attached to this promise and its waitUntil.
+      if (this.rerun.delete(sessionId)) await this.process(sessionId);
     }
   }
 
@@ -301,6 +310,7 @@ export class SessionHistoryIndexer {
     }
 
     if (transformed.length > 0) {
+      this.uploading.add(sessionId);
       const res = await this.fetchImpl(`${memoryEngineUrl}/messages`, {
         method: 'POST',
         headers: {

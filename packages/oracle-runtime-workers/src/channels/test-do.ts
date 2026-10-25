@@ -8,6 +8,8 @@ import {
   requireChannelDelegation,
   type ChannelDelegation,
   type ChannelTurnInput,
+  type ChannelControlInput,
+  type ChannelControlOutcome,
   type ChannelTurnOutcome,
   ChannelError,
   StaleSessionError,
@@ -24,6 +26,8 @@ export class ChannelTurnsTestDO extends DurableObject {
   /** Host calls made since the object loaded. */
   private calls = { assertSession: 0, changed: 0, createSession: 0 };
   private mirrorMode: MirrorMode = 'ok';
+  private holdSessionCreation = false;
+  private pendingSessions: (() => void)[] = [];
   /** Mirrors held by `hang`, released by `setMirror` with another mode. */
   private held: (() => void)[] = [];
   /** Wake-ups the turns asked for (`scheduleRetry`), epoch ms. */
@@ -39,13 +43,20 @@ export class ChannelTurnsTestDO extends DurableObject {
     this.turns = new ChannelTurns(db, {
       createSession: async (_identity, marker) => {
         this.calls.createSession += 1;
+        if (this.holdSessionCreation)
+          await new Promise<void>((resolve) =>
+            this.pendingSessions.push(resolve),
+          );
         return `$${marker}`;
       },
       assertSession: async (_identity, sessionId) => {
         this.calls.assertSession += 1;
         if ((await this.deletedSessions()).includes(sessionId))
           throw new StaleSessionError('Session deleted');
-        if (!sessionId.startsWith('$channel-session-'))
+        if (
+          !sessionId.startsWith('$channel-session-') &&
+          !sessionId.startsWith('$channel-reset-')
+        )
           throw new ChannelError(404, 'Session not owned', 'session_not_found');
       },
       requireDelegation: async () =>
@@ -53,6 +64,10 @@ export class ChannelTurnsTestDO extends DurableObject {
           await this.delegation(),
           Math.floor(this.nowMs / 1000),
         ),
+      stopRun: async (runId) => {
+        if (await runs.get(runId))
+          await runs.close(runId, { status: 'aborted' });
+      },
       getRun: (runId) => runs.get(runId),
       getPlan: (runId) => runs.getPlan(runId),
       wasPruned: (runId) => runs.wasChannelRunPruned(runId),
@@ -124,7 +139,9 @@ export class ChannelTurnsTestDO extends DurableObject {
     return result ? { ok: true, result } : null;
   }
 
-  private identity(input: ChannelTurnInput) {
+  private identity(
+    input: Pick<ChannelTurnInput, 'provider' | 'bindingId' | 'bindingRevision'>,
+  ) {
     return {
       userDid: 'did:ixo:user',
       channel: {
@@ -184,6 +201,30 @@ export class ChannelTurnsTestDO extends DurableObject {
   /** Advance the clock without reopening the database. */
   async advance(ms: number): Promise<void> {
     this.nowMs += ms;
+  }
+
+  async control(input: ChannelControlInput): Promise<ChannelControlOutcome> {
+    try {
+      return {
+        ok: true,
+        result: await (
+          await this.ready()
+        ).control(
+          this.identity(input),
+          input,
+          await channelRequestHash(JSON.stringify(input)),
+        ),
+      };
+    } catch (error) {
+      if (error instanceof ChannelError)
+        return {
+          ok: false,
+          status: error.status,
+          code: error.code,
+          message: error.message,
+        };
+      throw error;
+    }
   }
 
   async submit(input: ChannelTurnInput): Promise<ChannelTurnOutcome> {
@@ -333,6 +374,12 @@ export class ChannelTurnsTestDO extends DurableObject {
       ))!.n;
     }
     return counts;
+  }
+
+  async blockSessionCreation(blocked: boolean): Promise<void> {
+    this.holdSessionCreation = blocked;
+    if (!blocked)
+      for (const release of this.pendingSessions.splice(0)) release();
   }
 
   async hostCalls(): Promise<{

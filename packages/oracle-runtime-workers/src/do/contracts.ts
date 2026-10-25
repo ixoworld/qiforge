@@ -1,4 +1,10 @@
 import type {
+  ChannelControlInput,
+  ChannelControlOutcome,
+  ChannelReplyContext,
+  ChannelReplyReference,
+} from '../channels/contract';
+import type {
   TopicDeliverableCommand,
   TopicDeliverableResult,
 } from '../tasks/topic-deliverables';
@@ -372,6 +378,8 @@ export interface TurnRequest {
     provider: string;
     bindingId: string;
     remoteMessageRef: string;
+    replyContext?: ChannelReplyContext;
+    replyTo?: ChannelReplyReference;
   };
   executionProfile?: TaskExecutionProfile;
   identity: TurnIdentity;
@@ -726,6 +734,11 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
     operationId: string,
     command: TopicDeliverableCommand,
   ): Promise<TopicDeliverableResult>;
+  channelControl(
+    identity: TurnIdentity,
+    input: ChannelControlInput,
+    requestHash: string,
+  ): Promise<ChannelControlOutcome>;
   channelTurn(
     identity: TurnIdentity,
     input: ChannelTurnInput,

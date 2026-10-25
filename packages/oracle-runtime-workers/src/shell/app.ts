@@ -7,6 +7,7 @@ import {
 import {
   ChannelError,
   ChannelTurnBody,
+  ChannelControlBody,
   channelRequestHash,
   readChannelBody,
 } from '../channels/contract';
@@ -422,6 +423,74 @@ export function createShell(
         default: c.env.DEFAULT_MODEL ?? null,
       },
     );
+  });
+
+  app.post('/channels/control', async (c) => {
+    try {
+      if (!c.env.CHANNEL_SERVICE_DID)
+        throw new ChannelError(
+          503,
+          'Channels are not configured',
+          'not_configured',
+        );
+      const raw = await readChannelBody(c.req.raw);
+      let json: unknown;
+      try {
+        json = JSON.parse(raw);
+      } catch {
+        throw new ChannelError(400, 'Invalid JSON request', 'invalid_request');
+      }
+      const parsed = ChannelControlBody.safeParse(json);
+      if (!parsed.success)
+        throw new ChannelError(
+          400,
+          'Invalid channel control',
+          'invalid_request',
+        );
+      const identity = await authenticateChannel(
+        c.req.raw.headers,
+        raw,
+        parsed.data,
+        channelAuthConfig(c.env),
+      );
+      if (
+        c.env.RATE_LIMIT &&
+        !(
+          await c.env.RATE_LIMIT.limit({
+            key: rateLimitKey(c.env, 'channel', identity.userDid),
+          })
+        ).success
+      )
+        throw new ChannelError(429, 'Too many requests', 'rate_limited');
+      await assertActiveChannelBindingCached(identity, c.env);
+      const outcome = await userStub(c.env, identity.userDid).channelControl(
+        identity,
+        parsed.data,
+        await channelRequestHash(raw),
+      );
+      return outcome.ok
+        ? c.json(outcome.result)
+        : c.json(
+            { code: outcome.code, message: outcome.message },
+            outcome.status,
+          );
+    } catch (error) {
+      if (error instanceof ChannelError)
+        return c.json(
+          { code: error.code, message: error.message },
+          error.status,
+        );
+      console.error(
+        `[channels] control failed: ${describeChannelFailure(error)}`,
+      );
+      return c.json(
+        {
+          code: 'unavailable',
+          message: 'Channel control is temporarily unavailable',
+        },
+        503,
+      );
+    }
   });
 
   app.post('/channels/turn', async (c) => {

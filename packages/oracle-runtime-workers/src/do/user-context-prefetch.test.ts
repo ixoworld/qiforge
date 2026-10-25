@@ -35,6 +35,10 @@ import type { TurnRequest } from './contracts';
 import { RunCoordinator } from './run-coordinator';
 import type { RunFrame } from './run-buffer';
 import { storedRunRequest, type StoredRunRequest } from './run-request';
+import {
+  channelRequestHash,
+  type ChannelControlInput,
+} from '../channels/contract';
 import { createUserOracleDO } from './user-oracle-do';
 
 /**
@@ -452,6 +456,7 @@ async function userObject(
     options: {
       /** A Matrix turn in `roomKind`'s room (`ROOM`, or `GROUP_ROOM` for a group). */
       matrix?: 'direct' | 'group';
+      channel?: boolean;
       executionProfile?: TurnRequest['executionProfile'];
       /** Abort the run this long after it starts; the agent may never run. */
       abortAfterMs?: number;
@@ -468,7 +473,11 @@ async function userObject(
       });
     const runs = field('runs');
     if (!(runs instanceof RunCoordinator)) throw new Error('not booted');
-    const client = options.matrix ? 'matrix' : 'portal';
+    const client = options.channel
+      ? 'channel'
+      : options.matrix
+        ? 'matrix'
+        : 'portal';
     const request: TurnRequest = {
       identity: { ...identity, timezone: 'UTC' },
       sessionId,
@@ -476,6 +485,15 @@ async function userObject(
       client,
       requestId,
       ...(options.matrix ? { roomId, roomKind: options.matrix } : {}),
+      ...(options.channel
+        ? {
+            channel: {
+              provider: 'whatsapp',
+              bindingId: 'chb_context',
+              remoteMessageRef: `hmac:${'a'.repeat(64)}`,
+            },
+          }
+        : {}),
       ...(options.executionProfile
         ? { executionProfile: options.executionProfile }
         : {}),
@@ -508,7 +526,11 @@ async function userObject(
     const agentCall = options.executionProfile
       ? turnCalls[0]
       : turnCalls.find((c) => c.agent);
-    if (!agentCall && options.abortAfterMs === undefined)
+    if (
+      !agentCall &&
+      options.abortAfterMs === undefined &&
+      outcome.status !== 'aborted'
+    )
       throw new Error('the agent was never called');
     const steps = frames
       .filter((f) => f.event === 'router.update')
@@ -552,6 +574,31 @@ async function userObject(
   return {
     engine,
     turn,
+    async cancel(requestId: string): Promise<void> {
+      const control: ChannelControlInput = {
+        provider: 'whatsapp',
+        bindingId: 'chb_context',
+        bindingRevision: 1,
+        requestId: `stop:${requestId}`,
+        cancelRequestIds: [requestId],
+        command: { kind: 'stop' },
+      };
+      const outcome = await call(
+        'channelControl',
+        {
+          userDid: USER_DID,
+          channel: {
+            callerDid: 'did:web:channel.test',
+            provider: 'whatsapp',
+            bindingId: 'chb_context',
+            bindingRevision: 1,
+          },
+        },
+        control,
+        await channelRequestHash(JSON.stringify(control)),
+      );
+      expect(outcome).toMatchObject({ ok: true });
+    },
     drain,
     status,
     checkpointedContext,
@@ -945,6 +992,44 @@ describe('user-context prefetch in a user-object turn', () => {
       },
       engine,
     );
+  });
+
+  it('does not call the model for a channel request cancelled before execution', async () => {
+    await withObject('user-context-cancelled-channel', {}, async (o) => {
+      await o.cancel('cancelled-before-start');
+      const result = await o.turn('s-cancelled', 'cancelled-before-start', {
+        channel: true,
+      });
+      expect(result.outcome.status).toBe('aborted');
+      expect(o.model.calls).toEqual([]);
+      expect(o.engine.batches).toEqual([]);
+    });
+  });
+
+  it('refreshes memory in a continuous channel session and incrementally indexes finished turns', async () => {
+    await withObject('user-context-continuous-channel', {}, async (o) => {
+      const first = await o.turn('s-channel', 'channel-r1', { channel: true });
+      expect(first.system).toContain(factLine(FAVOURITE_SEA));
+      await o.drain();
+      expect(
+        o.engine.requests.filter((r) => r.pathname === '/messages'),
+      ).toHaveLength(1);
+      o.engine.facts = { goals: LEARNING };
+      const next = await o.turn('s-channel', 'channel-r2', { channel: true });
+      expect(next.system).toContain(factLine(LEARNING));
+      expect(next.system).not.toContain(FAVOURITE_SEA);
+      expect(next.system).not.toContain(WORKS_AT);
+      await o.drain();
+      expect(
+        o.engine.requests.filter((r) => r.pathname === '/messages'),
+      ).toHaveLength(2);
+      o.engine.mode = { kind: 'status', status: 503 };
+      const degraded = await o.turn('s-channel', 'channel-r3', {
+        channel: true,
+      });
+      expect(degraded.outcome.status).toBe('finished');
+      expect(degraded.system).toContain(factLine(LEARNING));
+    });
   });
 
   it('a memory write in a turn drops the room cache, so the next session gathers again', async () => {
