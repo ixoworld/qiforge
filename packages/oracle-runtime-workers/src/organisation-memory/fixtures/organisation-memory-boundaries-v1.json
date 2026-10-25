@@ -1,16 +1,73 @@
 {
   "version": 1,
   "cases": [
-    {"name": "resource at maximum", "field": "resourceId", "repeat": "r", "length": 1024, "valid": true},
-    {"name": "resource above maximum", "field": "resourceId", "repeat": "r", "length": 1025, "valid": false},
-    {"name": "empty resource", "field": "resourceId", "value": "", "valid": false},
-    {"name": "canonical domain", "field": "domainDid", "value": "did:ixo:entity:0123456789abcdef0123456789abcdef", "valid": true},
-    {"name": "short domain", "field": "domainDid", "value": "did:ixo:entity:org", "valid": false},
-    {"name": "uppercase domain", "field": "domainDid", "value": "did:ixo:entity:0123456789ABCDEF0123456789ABCDEF", "valid": false},
-    {"name": "long domain", "field": "domainDid", "value": "did:ixo:entity:0123456789abcdef0123456789abcdef0", "valid": false},
-    {"name": "nonhex domain", "field": "domainDid", "value": "did:ixo:entity:0123456789abcdef0123456789abcdeg", "valid": false},
-    {"name": "canonical oracle entity", "field": "oracleEntityDid", "value": "did:ixo:entity:abcdef0123456789abcdef0123456789", "valid": true},
-    {"name": "short oracle entity", "field": "oracleEntityDid", "value": "did:ixo:entity:oracle", "valid": false},
-    {"name": "uppercase oracle entity", "field": "oracleEntityDid", "value": "did:ixo:entity:ABCDEF0123456789ABCDEF0123456789", "valid": false}
+    {
+      "name": "resource at maximum",
+      "field": "resourceId",
+      "repeat": "r",
+      "length": 1024,
+      "valid": true
+    },
+    {
+      "name": "resource above maximum",
+      "field": "resourceId",
+      "repeat": "r",
+      "length": 1025,
+      "valid": false
+    },
+    {
+      "name": "empty resource",
+      "field": "resourceId",
+      "value": "",
+      "valid": false
+    },
+    {
+      "name": "canonical domain",
+      "field": "domainDid",
+      "value": "did:ixo:entity:0123456789abcdef0123456789abcdef",
+      "valid": true
+    },
+    {
+      "name": "short domain",
+      "field": "domainDid",
+      "value": "did:ixo:entity:org",
+      "valid": false
+    },
+    {
+      "name": "uppercase domain",
+      "field": "domainDid",
+      "value": "did:ixo:entity:0123456789ABCDEF0123456789ABCDEF",
+      "valid": false
+    },
+    {
+      "name": "long domain",
+      "field": "domainDid",
+      "value": "did:ixo:entity:0123456789abcdef0123456789abcdef0",
+      "valid": false
+    },
+    {
+      "name": "nonhex domain",
+      "field": "domainDid",
+      "value": "did:ixo:entity:0123456789abcdef0123456789abcdeg",
+      "valid": false
+    },
+    {
+      "name": "canonical oracle entity",
+      "field": "oracleEntityDid",
+      "value": "did:ixo:entity:abcdef0123456789abcdef0123456789",
+      "valid": true
+    },
+    {
+      "name": "short oracle entity",
+      "field": "oracleEntityDid",
+      "value": "did:ixo:entity:oracle",
+      "valid": false
+    },
+    {
+      "name": "uppercase oracle entity",
+      "field": "oracleEntityDid",
+      "value": "did:ixo:entity:ABCDEF0123456789ABCDEF0123456789",
+      "valid": false
+    }
   ]
 }
