@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { WorkersUcanService } from '../do/ucan-service';
+import { MEMORY_CAPABILITY } from '../plugins/delegated-capabilities';
 import { ImportError, type ImportChunk, type ImportBody } from './contract';
 import type { ChunkOutcome, ImportTransport } from './ledger';
 import { boundedJson, noRedirectFetch, publicUrl } from './network';
@@ -101,7 +102,7 @@ export async function createImportTransport(options: {
     const minted = await options.ucan.createInvocationFromDelegation(
       options.delegation,
       memory.id,
-      { can: 'memory/*', with: 'ixo:memory' },
+      { can: MEMORY_CAPABILITY.action, with: MEMORY_CAPABILITY.resource },
       { maxTtlSeconds: 60 },
     );
     if (!('invocation' in minted))
@@ -159,10 +160,22 @@ export async function createImportTransport(options: {
       visibility: ImportBody['visibility'],
     ): Promise<ChunkOutcome> {
       const id = ++sequence;
+      let requestHeaders: Record<string, string>;
+      try {
+        requestHeaders = await sessionHeaders();
+      } catch {
+        // Minting failed (e.g. the request grant expired mid-batch): nothing
+        // left the Worker, so this chunk was not sent.
+        return {
+          id: chunk.id,
+          state: 'not_submitted',
+          code: 'memory_invocation_unavailable',
+        };
+      }
       try {
         const response = await noRedirectFetch(fetcher, url, {
           method: 'POST',
-          headers: await sessionHeaders(),
+          headers: requestHeaders,
           signal: AbortSignal.timeout(20_000),
           body: JSON.stringify({
             jsonrpc: '2.0',
@@ -183,7 +196,9 @@ export async function createImportTransport(options: {
         });
         if (!response.ok) {
           await response.body?.cancel().catch(() => undefined);
-          return [400, 401, 403, 404, 405, 413, 422].includes(response.status)
+          return [400, 401, 403, 404, 405, 413, 422, 429].includes(
+            response.status,
+          )
             ? {
                 id: chunk.id,
                 state: 'rejected',

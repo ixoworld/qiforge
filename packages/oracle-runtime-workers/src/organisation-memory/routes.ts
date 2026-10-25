@@ -1,3 +1,4 @@
+/* eslint-disable no-console -- console IS the logger on Workers (Logs/observability). */
 import type { Hono } from 'hono';
 import type { OracleWorkerEnv } from '../do/contracts';
 import { userObjectName } from '../do/contracts';
@@ -6,13 +7,14 @@ import { authenticateImport } from './auth';
 import {
   ImportError,
   IMPORT_LIMITS,
+  importNetwork,
   parseImportBody,
   parseStatusBody,
   sha256,
   type ImportCommand,
   type ImportResult,
 } from './contract';
-import { verifyDestination } from './destination';
+import { assertDeployment, verifyDestination } from './destination';
 import { boundedBytes, publicUrl } from './network';
 
 export type ImportRpcResult =
@@ -23,22 +25,37 @@ function configuration(env: OracleWorkerEnv) {
   if (
     env.ORGANISATION_MEMORY_IMPORT_ENABLED !== 'true' ||
     !/^did:ixo:ixo1[a-z0-9]+$/.test(env.ORACLE_DID) ||
-    !env.ORACLE_ENTITY_DID?.startsWith('did:ixo:entity:') ||
-    !env.NETWORK
+    !env.ORACLE_ENTITY_DID?.startsWith('did:ixo:entity:')
   )
     return null;
   try {
     publicUrl(env.BLOCKSYNC_GRAPHQL_URL);
+    // The memory plugin's URL, which the import's transport requires to be
+    // public HTTPS: without it every admitted import would fail to start.
+    if (typeof env.MEMORY_MCP_URL !== 'string') return null;
+    publicUrl(env.MEMORY_MCP_URL);
   } catch {
     return null;
   }
   return {
     oracleDid: env.ORACLE_DID,
     oracleEntityDid: env.ORACLE_ENTITY_DID,
-    network: env.NETWORK,
+    network: importNetwork(env),
     blocksyncUrl: env.BLOCKSYNC_GRAPHQL_URL,
   };
 }
+
+const SIGNING_KEY_FOUND_TTL_MS = 5 * 60_000;
+const SIGNING_KEY_MISSING_TTL_MS = 30_000;
+/**
+ * The account-room signer check, per isolate. The capabilities route is
+ * public, and each check is an RPC to the single gateway object, which
+ * re-reads Matrix room state for as long as it finds no mnemonic.
+ */
+const signingKeyChecks = new Map<
+  string,
+  { available: Promise<boolean>; expiresAt: number }
+>();
 
 async function signingKeyAvailable(env: OracleWorkerEnv): Promise<boolean> {
   if (
@@ -46,15 +63,21 @@ async function signingKeyAvailable(env: OracleWorkerEnv): Promise<boolean> {
     env.ORACLE_SIGNING_MNEMONIC.trim()
   )
     return true;
-  try {
-    return Boolean(
-      await env.MATRIX_GATEWAY.get(
-        env.MATRIX_GATEWAY.idFromName(env.ORACLE_DID),
-      ).getOracleSigningMnemonic(),
-    );
-  } catch {
-    return false;
-  }
+  const cached = signingKeyChecks.get(env.ORACLE_DID);
+  if (cached && cached.expiresAt > Date.now()) return cached.available;
+  const check = {
+    available: (async () =>
+      Boolean(
+        await env.MATRIX_GATEWAY.get(
+          env.MATRIX_GATEWAY.idFromName(env.ORACLE_DID),
+        ).getOracleSigningMnemonic(),
+      ))().catch(() => false),
+    expiresAt: Date.now() + SIGNING_KEY_MISSING_TTL_MS,
+  };
+  signingKeyChecks.set(env.ORACLE_DID, check);
+  if (await check.available)
+    check.expiresAt = Date.now() + SIGNING_KEY_FOUND_TTL_MS;
+  return check.available;
 }
 
 export function registerImportRoutes(
@@ -65,7 +88,7 @@ export function registerImportRoutes(
       version: 1,
       enabled:
         Boolean(configuration(c.env)) && (await signingKeyAvailable(c.env)),
-      network: c.env.NETWORK ?? 'mainnet',
+      network: importNetwork(c.env),
       oracleEntityDid: c.env.ORACLE_ENTITY_DID ?? '',
       oracleDid: c.env.ORACLE_DID,
       storageScope: 'oracle',
@@ -132,16 +155,23 @@ export function registerImportRoutes(
           });
           command = { operation, body, requestDigest: body.requestDigest };
         }
+        // Status polls spend their own budget, so reconciling a lost submit
+        // never pushes the next submit into 429.
         if (
           c.env.RATE_LIMIT &&
           !(
             await c.env.RATE_LIMIT.limit({
-              key: `${config.oracleDid}|memory-import|${command.body.userDid}`,
+              key: `${config.oracleDid}|memory-import${operation === 'status' ? '-status' : ''}|${command.body.userDid}`,
             })
           ).success
         )
           return c.json({ code: 'rate_limited' }, 429);
-        await verifyDestination(command.body, config);
+        // Writing needs current domain authority. A status read returns the
+        // caller's own receipt, whose stored scope the ledger re-checks, so
+        // it stays readable while Blocksync or the config host is down.
+        if (command.operation === 'submit')
+          await verifyDestination(command.body, config);
+        else assertDeployment(command.body, config);
         const id = c.env.USER_ORACLE.idFromName(
           userObjectName(command.body.userDid, config.oracleDid),
         );
@@ -155,6 +185,14 @@ export function registerImportRoutes(
       } catch (error) {
         if (error instanceof ImportError)
           return c.json({ code: error.code }, error.status);
+        // The cause only, never the request or its tokens.
+        console.error(
+          `[memory-import] ${operation} failed unexpectedly: ${
+            error instanceof Error
+              ? `${error.name}: ${error.message}`.slice(0, 300)
+              : typeof error
+          }`,
+        );
         // The RPC can disconnect after dispatch. A 503 never asserts no effect.
         return c.json({ code: 'memory_import_unavailable' }, 503);
       }

@@ -21,10 +21,8 @@ interface RecordMetadata {
   resourceId: string;
   hashes: { id: string; contentSha256: string; sourceSha256: string }[];
 }
-export type ChunkOutcome = Exclude<
-  ChunkReceipt,
-  { state: 'dispatching' } | { state: 'not_submitted' }
->;
+/** A transport's verdict; `not_submitted` means nothing left the Worker. */
+export type ChunkOutcome = Exclude<ChunkReceipt, { state: 'dispatching' }>;
 export interface ImportTransport {
   add(
     chunk: ImportChunk,
@@ -119,17 +117,30 @@ export class ImportLedger {
         };
   }
 
+  /**
+   * Settles a record whose writer is gone (the object restarted). A codeless
+   * `not_submitted` chunk means "not reached yet" only while a writer runs;
+   * afterwards it can never be sent, so it gets a terminal code.
+   */
   private async recover(
     txn: MetadataTransaction,
     key: string,
     record: RecordMetadata,
   ): Promise<void> {
-    if (!record.receipt.chunks.some((chunk) => chunk.state === 'dispatching'))
+    if (
+      !record.receipt.chunks.some(
+        (chunk) =>
+          chunk.state === 'dispatching' ||
+          (chunk.state === 'not_submitted' && !chunk.code),
+      )
+    )
       return;
     record.receipt.chunks = record.receipt.chunks.map((chunk) =>
       chunk.state === 'dispatching'
         ? { id: chunk.id, state: 'unknown', code: 'dispatch_interrupted' }
-        : chunk,
+        : chunk.state === 'not_submitted' && !chunk.code
+          ? { id: chunk.id, state: 'not_submitted', code: 'writer_interrupted' }
+          : chunk,
     );
     await txn.put(key, record);
   }
@@ -175,11 +186,13 @@ export class ImportLedger {
     let transport: ImportTransport;
     try {
       transport = await prepare();
-    } catch {
+    } catch (error) {
+      const code =
+        error instanceof ImportError ? error.code : 'preparation_failed';
       record.receipt.chunks = record.receipt.chunks.map(({ id }) => ({
         id,
         state: 'not_submitted',
-        code: 'preparation_failed',
+        code,
       }));
       await this.storage.put(key, record);
       return result(record.receipt);
@@ -197,7 +210,21 @@ export class ImportLedger {
         };
       }
       await this.saveChunk(key, record, outcome);
-      if (outcome.state === 'unknown') break;
+      if (outcome.state === 'unknown' || outcome.state === 'not_submitted')
+        break;
+    }
+    // Chunks the stopped batch never reached are final, not pending.
+    if (
+      record.receipt.chunks.some(
+        (chunk) => chunk.state === 'not_submitted' && !chunk.code,
+      )
+    ) {
+      record.receipt.chunks = record.receipt.chunks.map((chunk) =>
+        chunk.state === 'not_submitted' && !chunk.code
+          ? { id: chunk.id, state: 'not_submitted', code: 'batch_stopped' }
+          : chunk,
+      );
+      await this.storage.put(key, record);
     }
     return result(record.receipt);
   }

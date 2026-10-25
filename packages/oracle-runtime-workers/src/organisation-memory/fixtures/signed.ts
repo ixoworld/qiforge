@@ -25,6 +25,7 @@ export async function signedFixture(
     grantExpiry?: number;
     capabilities?: Capability[];
     audience?: string;
+    grantAudience?: string;
     facts?: Record<string, string | number>[];
   } = {},
 ) {
@@ -40,7 +41,7 @@ export async function signedFixture(
   const grant = await serializeDelegation(
     await createDelegation({
       issuer: signer,
-      audience: options.audience ?? ORACLE_DID,
+      audience: options.grantAudience ?? options.audience ?? ORACLE_DID,
       capabilities: options.capabilities ?? [
         { can: 'memory/*', with: 'ixo:memory' },
       ],

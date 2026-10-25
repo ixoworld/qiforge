@@ -1,6 +1,7 @@
 import { ImportLedger } from '../organisation-memory/ledger';
 import {
   ImportError,
+  importNetwork,
   type ImportCommand,
 } from '../organisation-memory/contract';
 import { createImportTransport } from '../organisation-memory/transport';
@@ -4162,7 +4163,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           command.body.userDid !== userDid ||
           command.body.oracleDid !== this.env.ORACLE_DID ||
           command.body.oracleEntityDid !== this.env.ORACLE_ENTITY_DID ||
-          command.body.network !== this.env.NETWORK
+          command.body.network !== importNetwork(this.env)
         )
           throw new ImportError(403, 'deployment_mismatch');
         const storedUser = await this.ctx.storage.get<string>(META_USER_DID);
@@ -4172,25 +4173,51 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         const ledger = this.organisationMemoryLedger;
         if (command.operation === 'status')
           return { ok: true, result: await ledger.status(command.body) };
+        let roomId: string | undefined;
+        const prepare = async () => {
+          // The import needs only the oracle signer. Booting would load the
+          // user's working copy, which needs a live stored chat delegation
+          // the request-local grant deliberately does not depend on.
+          const ucan =
+            this.ucan ??
+            new WorkersUcanService({
+              oracleDid: this.env.ORACLE_DID,
+              signingMnemonic: await this.resolveSigningMnemonic(),
+              logger: console,
+            });
+          const url = this.core.validatedEnv['MEMORY_MCP_URL'];
+          if (typeof url !== 'string' || !ucan.hasSigningKey())
+            throw new ImportError(503, 'memory_not_configured');
+          const room = await this.gateway.resolveUserRoom(userDid);
+          if (!room?.roomId)
+            throw new ImportError(503, 'user_room_unavailable');
+          roomId = room.roomId;
+          return createImportTransport({
+            url,
+            userRoom: room.roomId,
+            delegation: command.delegation,
+            ucan,
+          });
+        };
         const result = await ledger.submit(
           command.body,
           command.requestDigest,
-          async () => {
-            await this.ready({ userDid }, { recordAccess: false });
-            const url = this.core.validatedEnv['MEMORY_MCP_URL'];
-            if (typeof url !== 'string' || !this.ucan?.hasSigningKey())
-              throw new ImportError(503, 'memory_not_configured');
-            const room = await this.gateway.resolveUserRoom(userDid);
-            if (!room?.roomId)
-              throw new ImportError(503, 'user_room_unavailable');
-            return createImportTransport({
-              url,
-              userRoom: room.roomId,
-              delegation: command.delegation,
-              ucan: this.ucan,
-            });
-          },
+          () =>
+            prepare().catch((error: unknown) => {
+              console.warn(
+                `[user-do] memory import ${command.body.requestId} could not start: ${error instanceof Error ? error.message : String(error)}`,
+              );
+              throw error;
+            }),
         );
+        // As after a chat oracle-knowledge write: the room's prefetched
+        // context includes shared knowledge and may now be stale.
+        if (
+          roomId &&
+          result.outcome === 'received' &&
+          result.receipt.chunks.some((chunk) => chunk.state === 'queued')
+        )
+          this.userContextFetcher?.invalidate(roomId);
         return { ok: true, result };
       } catch (error) {
         return error instanceof ImportError
