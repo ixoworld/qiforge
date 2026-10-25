@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { verifyDestination } from './destination';
-import { parseImportBody, sha256 } from './contract';
+import { ImportError, parseImportBody, sha256 } from './contract';
 import { publicUrl } from './network';
 import fixture from './fixtures/v1.json';
 
@@ -21,11 +21,16 @@ async function chainFixture(
     redirect?: boolean;
     duplicate?: boolean;
     changedBytes?: boolean;
+    missing?: string;
+    rawConfig?: string;
+    serviceEndpoint?: string;
   } = {},
 ) {
-  const raw = JSON.stringify({
-    granteeAddress: options.account ?? 'ixo1oraclefixture',
-  });
+  const raw =
+    options.rawConfig ??
+    JSON.stringify({
+      granteeAddress: options.account ?? 'ixo1oraclefixture',
+    });
   const resource = {
     id: '{id}#orz',
     type: 'oracleAuthZConfig',
@@ -58,7 +63,7 @@ async function chainFixture(
         {
           id: '{id}#api',
           type: 'oracleService',
-          serviceEndpoint: 'https://oracle.test',
+          serviceEndpoint: options.serviceEndpoint ?? 'https://oracle.test',
         },
       ],
     },
@@ -69,7 +74,10 @@ async function chainFixture(
       const query = JSON.parse(String(init?.body));
       return Response.json({
         data: {
-          entity: entities.find((entity) => entity.id === query.variables.id),
+          entity:
+            query.variables.id === options.missing
+              ? null
+              : entities.find((entity) => entity.id === query.variables.id),
         },
       });
     }
@@ -96,20 +104,48 @@ describe('current exact-domain authority', () => {
       ),
     ).resolves.toBeUndefined();
   });
+  it('reads a config document saved with a BOM, as the Portal does', async () => {
+    await expect(
+      verifyDestination(
+        body,
+        config,
+        await chainFixture({
+          rawConfig: `\ufeff${JSON.stringify({ granteeAddress: 'ixo1oraclefixture' })}`,
+        }),
+      ),
+    ).resolves.toBeUndefined();
+  });
+  it('accepts an oracle service registered with a trailing slash, as the Portal does', async () => {
+    await expect(
+      verifyDestination(
+        body,
+        config,
+        await chainFixture({ serviceEndpoint: 'https://oracle.test/' }),
+      ),
+    ).resolves.toBeUndefined();
+  });
   it.each([
-    { owner: 'ixo1other' },
-    { linkedOracle: 'did:ixo:entity:other' },
-    { proof: '' },
-    { changedBytes: true },
-    { account: 'ixo1anotheroracle' },
-    { duplicate: true },
-    { redirect: true },
-  ])(
-    'refuses another domain, altered proof, wrong account or redirect %j',
-    async (options) => {
-      await expect(
-        verifyDestination(body, config, await chainFixture(options)),
-      ).rejects.toThrow();
+    [{ owner: 'ixo1other' }, 'exact_domain_control_required'],
+    [{ linkedOracle: 'did:ixo:entity:other' }, 'oracle_not_associated'],
+    [{ proof: '' }, 'oracle_config_proof_required'],
+    [{ changedBytes: true }, 'oracle_config_hash_mismatch'],
+    [{ account: 'ixo1anotheroracle' }, 'oracle_account_mismatch'],
+    [{ duplicate: true }, 'oracle_config_proof_required'],
+    [{ redirect: true }, 'redirect_refused'],
+    [{ missing: body.domainDid }, 'exact_domain_control_required'],
+    [{ missing: body.oracleEntityDid }, 'not_an_oracle'],
+    [{ rawConfig: 'not json' }, 'oracle_account_mismatch'],
+    [{ serviceEndpoint: 'https://oracle.test/api' }, 'invalid_destination_url'],
+  ] satisfies [Parameters<typeof chainFixture>[0], string][])(
+    'refuses %j with %s',
+    async (options, code) => {
+      const refusal = verifyDestination(
+        body,
+        config,
+        await chainFixture(options),
+      );
+      await expect(refusal).rejects.toBeInstanceOf(ImportError);
+      await expect(refusal).rejects.toThrow(code);
     },
   );
   it('rejects network/entity/account deployment mismatch before fetching', async () => {

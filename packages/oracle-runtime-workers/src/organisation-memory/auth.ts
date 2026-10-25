@@ -4,6 +4,7 @@ import {
   parseDelegation,
   type DIDKeyResolver,
 } from '@ixo/ucan';
+import { MEMORY_CAPABILITY } from '../plugins/delegated-capabilities';
 import {
   ImportError,
   boundFacts,
@@ -13,6 +14,11 @@ import {
 } from './contract';
 
 const OracleAuth = defineCapability({ can: '*', protocol: 'ixo:' });
+/**
+ * The Portal mints its grant with exactly the 300 s ceiling, so a client
+ * clock running ahead of the Worker would push it over. Allow that much.
+ */
+const GRANT_CLOCK_SKEW_SECONDS = 30;
 export interface ImportAuthConfig {
   oracleDid: string;
   didResolver: DIDKeyResolver;
@@ -72,7 +78,9 @@ export async function authenticateImport(
     facts?.length !== 1 ||
     !fact ||
     Object.entries(expected).some(([key, value]) => fact[key] !== value) ||
-    Object.keys(fact).some((key) => !(key in expected) && key !== 'nonce')
+    Object.keys(fact).some(
+      (key) => !Object.hasOwn(expected, key) && key !== 'nonce',
+    )
   )
     throw new ImportError(403, 'invocation_binding_mismatch');
   if (operation === 'status') return undefined;
@@ -89,13 +97,13 @@ export async function authenticateImport(
     grant.audience.did() !== config.oracleDid ||
     grant.proofs.length !== 0 ||
     grant.capabilities.length !== 1 ||
-    cap?.can !== 'memory/*' ||
-    cap.with !== 'ixo:memory' ||
+    cap?.can !== MEMORY_CAPABILITY.action ||
+    cap.with !== MEMORY_CAPABILITY.resource ||
     (cap.nb && Object.keys(cap.nb).length !== 0) ||
     !grant.expiration ||
     !Number.isFinite(grant.expiration) ||
     grant.expiration <= now ||
-    grant.expiration > now + 300
+    grant.expiration > now + 300 + GRANT_CLOCK_SKEW_SECONDS
   )
     throw new ImportError(403, 'memory_grant_scope_mismatch');
   return rawGrant;

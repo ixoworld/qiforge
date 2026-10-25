@@ -22,7 +22,9 @@ describe('dedicated memory MCP transport', () => {
       | 'disconnect'
       | 'malformed'
       | 'sse'
-      | 'redirect',
+      | 'redirect'
+      | 'throttled'
+      | 'expired-grant',
   ) {
     const signed = await signedFixture();
     const memoryDid = (await generateKeypair()).did;
@@ -80,6 +82,8 @@ describe('dedicated memory MCP transport', () => {
         throw new Error('Connection dropped after enqueue');
       if (mode === 'server-error')
         return new Response('bad gateway', { status: 502 });
+      if (mode === 'throttled')
+        return new Response('slow down', { status: 429 });
       if (mode === 'redirect')
         return new Response(null, {
           status: 307,
@@ -114,14 +118,22 @@ describe('dedicated memory MCP transport', () => {
         );
       return Response.json(response);
     };
+    const ucan = new WorkersUcanService({
+      oracleDid: ORACLE_DID,
+      signingMnemonic: ORACLE_MNEMONIC,
+    });
+    let mints = 0;
     const client = await createImportTransport({
       url: 'https://memory.test/mcp',
       userRoom: '!server-derived:matrix.test',
       delegation: signed.grant,
-      ucan: new WorkersUcanService({
-        oracleDid: ORACLE_DID,
-        signingMnemonic: ORACLE_MNEMONIC,
-      }),
+      ucan: {
+        // The handshake mints twice; afterwards the grant has "expired".
+        createInvocationFromDelegation: async (...args) =>
+          mode === 'expired-grant' && ++mints > 2
+            ? { error: 'Delegation expired' }
+            : ucan.createInvocationFromDelegation(...args),
+      },
       fetcher,
     });
     const chunk = signed.body.chunks[0];
@@ -170,6 +182,24 @@ describe('dedicated memory MCP transport', () => {
   });
   it('records explicit upstream refusal', async () => {
     expect((await transport('refused')).outcome.state).toBe('rejected');
+  });
+  it('records an upstream 429 as a refusal', async () => {
+    const result = await transport('throttled');
+    expect(result.effects).toBe(1);
+    expect(result.outcome).toEqual({
+      id: result.chunk.id,
+      state: 'rejected',
+      code: 'upstream_http_429',
+    });
+  });
+  it('records a chunk it could not mint for as not submitted', async () => {
+    const result = await transport('expired-grant');
+    expect(result.effects).toBe(0);
+    expect(result.outcome).toEqual({
+      id: result.chunk.id,
+      state: 'not_submitted',
+      code: 'memory_invocation_unavailable',
+    });
   });
   it('cancels an SSE stream once the matching response arrives', async () => {
     let cancelled = false;

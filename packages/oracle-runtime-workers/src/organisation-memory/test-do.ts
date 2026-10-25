@@ -12,23 +12,33 @@ export class MemoryImportTestDO extends DurableObject {
   private ledger = new ImportLedger(this.ctx.storage);
   async submit(
     body: ImportBody,
-    mode: 'queued' | 'partial' | 'refused' = 'queued',
+    mode: 'queued' | 'partial' | 'refused' | 'unsent' | 'unprepared' = 'queued',
   ) {
     return this.ledger.submit(
       body,
       await sha256(JSON.stringify(body)),
-      async () => ({
-        add: async (chunk) => {
-          const calls =
-            ((await this.ctx.storage.get<number>('calls')) ?? 0) + 1;
-          await this.ctx.storage.put('calls', calls);
-          if (mode === 'partial' && calls === 2)
-            throw new Error('connection lost');
-          return mode === 'refused'
-            ? { id: chunk.id, state: 'rejected', code: 'upstream_refused' }
-            : { id: chunk.id, state: 'queued', queuePosition: calls };
-        },
-      }),
+      async () => {
+        if (mode === 'unprepared')
+          throw new ImportError(503, 'user_room_unavailable');
+        return {
+          add: async (chunk) => {
+            if (mode === 'unsent' && chunk.id !== body.chunks[0]?.id)
+              return {
+                id: chunk.id,
+                state: 'not_submitted',
+                code: 'memory_invocation_unavailable',
+              };
+            const calls =
+              ((await this.ctx.storage.get<number>('calls')) ?? 0) + 1;
+            await this.ctx.storage.put('calls', calls);
+            if (mode === 'partial' && calls === 2)
+              throw new Error('connection lost');
+            return mode === 'refused'
+              ? { id: chunk.id, state: 'rejected', code: 'upstream_refused' }
+              : { id: chunk.id, state: 'queued', queuePosition: calls };
+          },
+        };
+      },
     );
   }
   async count() {

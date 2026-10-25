@@ -78,6 +78,11 @@ describe('durable organisation memory admission', () => {
       'unknown',
       'not_submitted',
     ]);
+    expect(outcome.receipt.chunks[2]).toEqual({
+      id: 'three',
+      state: 'not_submitted',
+      code: 'batch_stopped',
+    });
     expect(await stub.count()).toBe(2);
     expect(
       await stub.status({
@@ -87,6 +92,69 @@ describe('durable organisation memory admission', () => {
     ).toEqual(outcome);
     expect(await stub.submit(batch)).toEqual(outcome);
     expect(await stub.count()).toBe(2);
+  });
+  function batchOf(ids: string[]) {
+    const chunk = body.chunks[0];
+    if (!chunk) throw new Error('Fixture empty');
+    return { ...body, chunks: ids.map((id) => ({ ...chunk, id })) };
+  }
+  async function statusOf(batch: typeof body) {
+    return {
+      ...status,
+      requestDigest: await sha256(JSON.stringify(batch)),
+    };
+  }
+  it('stops at a chunk that was never sent and records it as not submitted', async () => {
+    const stub = env.MEMORY_IMPORT_TEST.getByName(crypto.randomUUID());
+    const batch = batchOf(['one', 'two', 'three']);
+    const outcome = await stub.submit(batch, 'unsent');
+    if (outcome.outcome !== 'received') throw new Error('Missing receipt');
+    expect(outcome.receipt.chunks).toEqual([
+      { id: 'one', state: 'queued', queuePosition: 1 },
+      {
+        id: 'two',
+        state: 'not_submitted',
+        code: 'memory_invocation_unavailable',
+      },
+      { id: 'three', state: 'not_submitted', code: 'batch_stopped' },
+    ]);
+    expect(await stub.count()).toBe(1);
+  });
+  it('continues past explicit refusals', async () => {
+    const stub = env.MEMORY_IMPORT_TEST.getByName(crypto.randomUUID());
+    const outcome = await stub.submit(batchOf(['one', 'two']), 'refused');
+    if (outcome.outcome !== 'received') throw new Error('Missing receipt');
+    expect(outcome.receipt.chunks.map((c) => c.state)).toEqual([
+      'rejected',
+      'rejected',
+    ]);
+    expect(await stub.count()).toBe(2);
+  });
+  it('keeps the preparation failure code', async () => {
+    const stub = env.MEMORY_IMPORT_TEST.getByName(crypto.randomUUID());
+    const outcome = await stub.submit(batchOf(['one', 'two']), 'unprepared');
+    if (outcome.outcome !== 'received') throw new Error('Missing receipt');
+    expect(outcome.receipt.chunks).toEqual([
+      { id: 'one', state: 'not_submitted', code: 'user_room_unavailable' },
+      { id: 'two', state: 'not_submitted', code: 'user_room_unavailable' },
+    ]);
+    expect(await stub.count()).toBe(0);
+  });
+  it('marks chunks an interrupted writer never reached as final', async () => {
+    const stub = env.MEMORY_IMPORT_TEST.getByName(crypto.randomUUID());
+    const batch = batchOf(['one', 'two', 'three']);
+    await stub.submit(batch);
+    const batchStatus = await statusOf(batch);
+    await stub.reopenWithDispatch(batchStatus);
+    const receipt = await stub.status(batchStatus);
+    if (receipt.outcome !== 'received') throw new Error('Missing receipt');
+    expect(receipt.receipt.chunks).toEqual([
+      { id: 'one', state: 'unknown', code: 'dispatch_interrupted' },
+      { id: 'two', state: 'not_submitted', code: 'writer_interrupted' },
+      { id: 'three', state: 'not_submitted', code: 'writer_interrupted' },
+    ]);
+    expect(await stub.submit(batch)).toEqual(receipt);
+    expect(await stub.count()).toBe(3);
   });
   it('status not found performs no submission', async () => {
     const stub = env.MEMORY_IMPORT_TEST.getByName(crypto.randomUUID());

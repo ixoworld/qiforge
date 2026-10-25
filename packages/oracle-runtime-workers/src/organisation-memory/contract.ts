@@ -95,6 +95,10 @@ export class ImportError extends Error {
     super(code);
   }
 }
+/** The deployment's network, with the env schema's default. */
+export function importNetwork(env: { NETWORK?: string }): string {
+  return env.NETWORK ?? 'mainnet';
+}
 export async function sha256(raw: string | Uint8Array): Promise<string> {
   const bytes = typeof raw === 'string' ? new TextEncoder().encode(raw) : raw;
   const digest = await crypto.subtle.digest('SHA-256', bytes);

@@ -83,9 +83,6 @@ export const baseEnvSchema = z.object({
    * back to `ORACLE_DID` when unset (see `createRuntimeCore`).
    */
   ORACLE_ENTITY_DID: z.string().min(1).optional(),
-  ORGANISATION_MEMORY_IMPORT_ENABLED: z
-    .enum(['true', 'false'])
-    .default('false'),
   NETWORK: z.enum(['mainnet', 'testnet', 'devnet']).default('mainnet'),
 
   // --- auth ---------------------------------------------------------------

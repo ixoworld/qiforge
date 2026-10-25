@@ -419,6 +419,8 @@ Built on the Workers runtime with no Node counterpart; none will be added to
 the deprecated Node runtime:
 
 - **IXO Channels ingress** (`POST /channels/turn`) — [channels](channels.md).
+- **Organisation memory imports** (`/memory/imports*`) —
+  [organisation memory imports](organisation-memory-import.md).
 - **Chat delivery and artefacts** (Reply Plans, `create_artifact`, the
   `/a/:id` links, the R2 sweep) — [chat delivery](chat-delivery.md).
 - **Request admission** (`getRequestAdmission`, `getRequestMiddlewares`) —

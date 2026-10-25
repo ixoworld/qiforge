@@ -19,7 +19,8 @@ export function publicUrl(raw: string, originOnly = false): URL {
     host.includes(':') ||
     /^[\d.]+$/.test(host) ||
     /(?:^|\.)(localhost|local|internal|localhost\.localdomain)$/.test(host) ||
-    (originOnly && raw !== url.origin)
+    // As the Portal resolves the endpoint: an origin, optionally with "/".
+    (originOnly && url.pathname !== '/')
   )
     throw new ImportError(503, 'invalid_destination_url');
   return url;
