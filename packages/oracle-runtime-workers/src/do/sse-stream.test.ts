@@ -849,3 +849,181 @@ describe('runTurnFrames BYO model refused by the provider', () => {
     expect(byo.calls).toBe(1);
   });
 });
+
+describe('createSseTurnStream provider-model evidence', () => {
+  const models = (sse: string) =>
+    sse
+      .split('\n\n')
+      .filter((frame) => frame.startsWith('event: model\n'))
+      .map((frame) => {
+        const data = frame
+          .split('\n')
+          .find((line) => line.startsWith('data: '));
+        return JSON.parse(data!.slice(6));
+      });
+
+  it('retains the observed model and callback ID for each completed outer call', async () => {
+    async function* events(): AsyncGenerator<unknown> {
+      yield {
+        event: 'on_chat_model_end',
+        run_id: 'call-first',
+        metadata: { ls_model_name: 'requested' },
+        data: {
+          output: new AIMessageChunk({
+            content: '',
+            response_metadata: {
+              model_name: 'provider/first',
+              private: 'credential-fixture',
+            },
+          }),
+        },
+      };
+      yield {
+        event: 'on_chat_model_end',
+        run_id: 'call-second',
+        data: {
+          output: new AIMessageChunk({
+            content: '',
+            response_metadata: { model: 'provider/fallback' },
+          }),
+        },
+      };
+    }
+    const mirrored: string[] = [];
+    const logs: string[] = [];
+    const sse = await new Response(
+      createSseTurnStream({
+        events: events(),
+        sessionId: 's1',
+        requestId: 'r1',
+        abortController: new AbortController(),
+        mirror: (name) => mirrored.push(name),
+        log: (message) => logs.push(message),
+      }),
+    ).text();
+    expect(models(sse)).toEqual([
+      {
+        modelId: 'provider/first',
+        evidence: 'provider_response',
+        callId: 'call-first',
+      },
+      {
+        modelId: 'provider/fallback',
+        evidence: 'provider_response',
+        callId: 'call-second',
+      },
+    ]);
+    expect(sse).not.toContain('credential-fixture');
+    expect(sse).not.toContain('requested');
+    expect(mirrored).not.toContain('model');
+    expect(logs).toEqual([]);
+  });
+
+  it('omits internal and summarizer response models', async () => {
+    async function* events(): AsyncGenerator<unknown> {
+      for (const marker of [
+        { tags: ['internal'] },
+        { tags: ['summarization'] },
+        { metadata: { lc_source: 'summarization' } },
+      ]) {
+        yield {
+          event: 'on_chat_model_end',
+          run_id: 'internal-call',
+          ...marker,
+          data: {
+            output: new AIMessageChunk({
+              content: '',
+              response_metadata: { model_name: 'private-helper' },
+            }),
+          },
+        };
+      }
+    }
+    const sse = await new Response(
+      createSseTurnStream({
+        events: events(),
+        sessionId: 's1',
+        requestId: 'r1',
+        abortController: new AbortController(),
+      }),
+    ).text();
+    expect(models(sse)).toEqual([]);
+    expect(sse).not.toContain('private-helper');
+  });
+
+  it('does not attest requested IDs, user text, tool output or unfinished model chunks', async () => {
+    async function* events(): AsyncGenerator<unknown> {
+      yield {
+        event: 'on_chat_model_end',
+        run_id: 'no-response-model',
+        metadata: { model_name: 'requested' },
+        data: { output: new AIMessageChunk({ content: '' }) },
+      };
+      yield {
+        event: 'on_chat_model_end',
+        run_id: 'user-content',
+        data: {
+          output: new HumanMessage({
+            content: 'model_name: invented',
+            response_metadata: { model_name: 'invented' },
+          }),
+        },
+      };
+      yield {
+        event: 'on_chat_model_end',
+        run_id: 'tool-content',
+        data: {
+          output: new ToolMessage({
+            content: '{"modelId":"invented"}',
+            tool_call_id: 'tool-1',
+            response_metadata: { model_name: 'invented' },
+          }),
+        },
+      };
+      yield {
+        event: 'on_chat_model_stream',
+        run_id: 'unfinished',
+        data: {
+          chunk: new AIMessageChunk({
+            content: '',
+            response_metadata: { model_name: 'unfinished' },
+          }),
+        },
+      };
+    }
+    const sse = await new Response(
+      createSseTurnStream({
+        events: events(),
+        sessionId: 's1',
+        requestId: 'r1',
+        abortController: new AbortController(),
+      }),
+    ).text();
+    expect(models(sse)).toEqual([]);
+  });
+
+  it('does not put unsafe response identifiers on the stream', async () => {
+    async function* events(): AsyncGenerator<unknown> {
+      yield {
+        event: 'on_chat_model_end',
+        run_id: 'unsafe-call',
+        data: {
+          output: new AIMessageChunk({
+            content: '',
+            response_metadata: { model_name: 'model\nsecret-marker' },
+          }),
+        },
+      };
+    }
+    const sse = await new Response(
+      createSseTurnStream({
+        events: events(),
+        sessionId: 's1',
+        requestId: 'r1',
+        abortController: new AbortController(),
+      }),
+    ).text();
+    expect(models(sse)).toEqual([]);
+    expect(sse).not.toContain('secret-marker');
+  });
+});
