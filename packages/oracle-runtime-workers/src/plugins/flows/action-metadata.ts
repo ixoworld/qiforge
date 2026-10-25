@@ -744,7 +744,7 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
   },
   'qi/http.request': {
     summary:
-      'Performs an HTTP request to an external endpoint (via the configured http service, falling back to native fetch) and returns status plus parsed JSON data. No on-chain side-effect, but it does call out to a third-party URL.',
+      'Performs a confirmed HTTP request through the host HTTP service and returns status, response data, and a request receipt. Use qi/http.fetch for new read-only GET/HEAD steps. Mutations never fall back to native fetch.',
     whenToUse: [
       'A flow needs to call an external API or webhook.',
       'You want to fetch or POST data to an off-chain service and use its response downstream (read {{block.output.data}} / {{block.response.*}}).',
@@ -754,7 +754,6 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'endpoint',
         portType: 'string',
-        required: true,
         description:
           'The request URL. Either endpoint or its alias `url` must be provided; run() throws "HTTP request action requires an endpoint or url input" if neither resolves to a non-empty string.',
       },
@@ -785,7 +784,7 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         kind: 'endpoint',
         description:
-          'The target endpoint URL (and any auth headers/credentials it needs) — ask the user; never invent an endpoint.',
+          'The target public HTTPS endpoint or its url alias. Credentials must use a host-managed binding; never request secrets in chat or put them in action inputs.',
       },
     ],
   },

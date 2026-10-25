@@ -1,19 +1,57 @@
-import { getAllActions } from '@ixo/editor/core';
+import { generateActionManifest, getAllActions } from '@ixo/editor/core';
 import { describe, expect, it } from 'vitest';
 import { makeRuntimeContext } from '../../core/test-fixtures';
 import { ACTION_METADATA } from './action-metadata';
-import { actionCategory, listActions } from './actions';
+import { actionCategory, describeAction, listActions } from './actions';
 import { FLOWS_OPERATING_GUIDE } from './prompts';
 import { requirements } from './linkage';
 import { someEventCapableActionType, someActionType } from './test-support';
 import { buildAuthoringTools } from './tools/authoring';
+import { buildListActionsTool } from './tools/discovery';
 
 describe('action catalogue', () => {
-  it('has a metadata entry for every registry action', () => {
-    const missing = getAllActions()
-      .map((a) => a.type)
-      .filter((type) => !ACTION_METADATA[type]?.summary);
-    expect(missing).toEqual([]);
+  it('identifies the exact installed catalog contract in tool responses', async () => {
+    const manifest = generateActionManifest();
+    expect(
+      await buildListActionsTool().handler(
+        { tag: 'wallet' },
+        makeRuntimeContext(),
+      ),
+    ).toMatchObject({
+      registryVersion: manifest.registryVersion,
+      manifestDigest: manifest.manifestDigest,
+    });
+  });
+  it('discovers every authorable registry action by its category tag with a useful description', () => {
+    for (const action of getAllActions().filter(
+      (action) => !action.hiddenFromAuthoring,
+    )) {
+      expect(
+        listActions({ tag: actionCategory(action.type) }).some(
+          (entry) => entry.action === action.type,
+        ),
+      ).toBe(true);
+      expect(describeAction(action.type)?.summary).toBeTruthy();
+      expect(describeAction(action.type)?.inputsDeclared).toBe(true);
+    }
+  });
+
+  it('exposes wallet balance output and the complete transfer inputs', () => {
+    expect(describeAction('qi/wallet.balance')).toMatchObject({
+      requiredServices: ['wallet'],
+      sideEffect: false,
+    });
+    expect(
+      describeAction('qi/wallet.balance')?.outputs.map((field) => field.name),
+    ).toContain('amount');
+    const transfer = describeAction('qi/wallet.fund');
+    expect(transfer?.inputs.map((field) => field.name)).toEqual(
+      expect.arrayContaining(['address', 'amount', 'denom', 'fromAddress']),
+    );
+    expect(
+      transfer?.inputs.find((field) => field.name === 'amount')?.type,
+    ).toBe('number | string');
+    expect(transfer?.requiresConfirmation).toBe(true);
   });
 
   it("marks an input required only when the registry's schema does", () => {
@@ -41,7 +79,9 @@ describe('action catalogue', () => {
     expect(claims.every((a) => a.action.startsWith('qi/claim.'))).toBe(true);
     expect(claims.every((a) => a.category === 'claim')).toBe(true);
     expect(listActions({ category: 'no-such-category' })).toEqual([]);
-    expect(listActions().length).toBe(getAllActions().length);
+    expect(listActions().length).toBe(
+      getAllActions().filter((action) => !action.hiddenFromAuthoring).length,
+    );
   });
 
   it('derives the category from the action name', () => {

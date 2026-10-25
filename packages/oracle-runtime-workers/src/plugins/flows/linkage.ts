@@ -11,7 +11,7 @@ import type { Doc as YDoc } from 'yjs';
 import type { ActionDefinition } from '@ixo/editor/core';
 import { getAllActions } from '@ixo/editor/core';
 import { ACTION_METADATA, type ActionRequirement } from './action-metadata';
-import { getActionDef, isFormAction } from './actions';
+import { describeAction, getActionDef, isFormAction } from './actions';
 import { formOutputFields } from './forms';
 import { inferPortType, isCorePortType } from './port-types';
 import { readFlowSpec } from './read';
@@ -48,8 +48,17 @@ function overlayInputPortType(
   actionType: string,
   input: string,
 ): string | undefined {
-  return ACTION_METADATA[actionType]?.inputPorts?.find((p) => p.path === input)
-    ?.portType;
+  const field = describeAction(actionType)?.inputs.find(
+    (field) => field.name === input,
+  );
+  if (field?.type.includes(' | ')) return undefined;
+  return (
+    ACTION_METADATA[actionType]?.inputPorts?.find((p) => p.path === input)
+      ?.portType ??
+    (field && field.type !== 'unknown'
+      ? inferPortType(input, field.type)
+      : undefined)
+  );
 }
 
 /** The port type an input expects: overlay if declared, else inferred from the input name. */
@@ -143,5 +152,14 @@ export function compatibleActions(
 export function requirements(action: string): ActionRequirement[] {
   const def = getActionDef(action);
   if (!def) return [];
-  return ACTION_METADATA[def.type]?.requires ?? [];
+  const declared = ACTION_METADATA[def.type]?.requires;
+  if (declared) return declared;
+  return (describeAction(action)?.inputs ?? [])
+    .filter((field) => field.required)
+    .map((field) => ({
+      kind: field.name,
+      description: /pin|secret|mnemonic/i.test(field.name)
+        ? 'Collected by the portal at runtime; never ask for secrets in chat.'
+        : field.description || `Required input: ${field.name}`,
+    }));
 }

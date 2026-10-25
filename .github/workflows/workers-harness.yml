@@ -17,10 +17,21 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           run_install: false
+      # TypeScript treats aliased source under node_modules as external when
+      # pnpm prepares the git editor dependency. Keep its build store outside it.
+      - name: Configure pnpm source build store
+        run: pnpm config set store-dir "$RUNNER_TEMP/pnpm-store"
+
       - uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'
           cache: 'pnpm'
+      - name: Load read-only Portal editor key
+        uses: webfactory/ssh-agent@a6f90b1f127823b31d4d4a8d96047790581349bd
+        with:
+          ssh-private-key: ${{ secrets.PORTAL_EDITOR_READ_KEY }}
+          log-public-key: false
+
       - run: pnpm install --frozen-lockfile
       # The Workers runtime resolves @ixo/ucan, @ixo/common/ai/decisions and
       # @ixo/ixo-transaction through their built `dist`, so they (and their
