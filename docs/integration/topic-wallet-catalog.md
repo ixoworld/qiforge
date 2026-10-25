@@ -27,3 +27,13 @@ in `docs/audits/flow-action-catalog.md` in the Portal PR. Companion must pin the
 matching QiForge revision before end-to-end testing. No package version or green
 build establishes authenticated Topic binding, signing, broadcast, or receipt
 acceptance; record those separately on testnet.
+
+## Private editor access in CI
+
+The CI and Workers harness jobs load `PORTAL_EDITOR_READ_KEY` through the pinned
+SSH-agent action before installing packages. Its deploy-key comment routes only
+the Portal repository through SSH, including the HTTPS URL in the frozen lockfile.
+The key grants read-only access to `ixoworld/ixo-portal`; it has no write or deploy
+authority. QiForge and Companion use separate keys held in repository secrets.
+Local private-key files were deleted after verifying source access. Rotate by
+replacing the consumer secret and revoking its matching Portal deploy key.
