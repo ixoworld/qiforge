@@ -67,7 +67,7 @@ minimumReleaseAgeExclude:
 # Packages allowed to run install/build scripts. Replaces onlyBuiltDependencies,
 # which pnpm v11 removed. These are native/postinstall-heavy deps we trust.
 allowBuilds:
-  '@ixo/editor@git+https://github.com/ixoworld/ixo-portal.git#51650948f88c77bd16eb2c779be2b9b3213abdbb&path:/packages/editor': true
+  '@ixo/editor@git+https://github.com/ixoworld/ixo-portal.git#94b743b4d1ab0c514417b3204134aa1940b36771&path:/packages/editor': true
   '@ixo/matrix-sdk-crypto-nodejs': true
   '@matrix-org/matrix-sdk-crypto-nodejs': true
   '@nestjs/core': true

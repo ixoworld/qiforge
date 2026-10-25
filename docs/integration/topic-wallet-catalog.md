@@ -1,7 +1,7 @@
 # Portal wallet Flow catalog
 
 Both runtimes pin the editor to Portal commit
-`51650948f88c77bd16eb2c779be2b9b3213abdbb`, the source in
+`94b743b4d1ab0c514417b3204134aa1940b36771`, the source in
 [Portal PR #2016](https://github.com/ixoworld/ixo-portal/pull/2016). The exact git
 source is permitted to prepare its built package in `pnpm-workspace.yaml`.
 BlockNote's server utility and Yjs are aligned with that editor. Replace the git
