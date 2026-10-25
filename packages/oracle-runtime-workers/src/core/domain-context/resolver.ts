@@ -39,6 +39,7 @@ import type {
   DomainTransport,
 } from './types';
 import { domainValidator } from './validator';
+import { isProfessionalPublicationIntent } from './professional-observations';
 
 export const DEFAULT_ANCHOR_TTL_MS = 300_000;
 /** A shared anchor lookup owns this timeout; one cancelled subscriber never cancels it. */
@@ -424,7 +425,8 @@ export class DomainContextResolver {
       if (
         !['anchored', 'runtime'].includes(
           String(record(front.conformance).profile),
-        )
+        ) &&
+        !isProfessionalPublicationIntent(front, did)
       )
         throw new Error('unanchored-profile');
       snapshot.status = 'verified';

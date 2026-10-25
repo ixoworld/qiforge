@@ -9,6 +9,10 @@ export type {
   DomainSnapshot,
   DomainTransport,
 } from './types';
+export type {
+  ProfessionalOracleObservation,
+  ObservationOptions,
+} from './generated/oracle-observations';
 export {
   ANCHOR_LOOKUP_TIMEOUT_MS,
   DEFAULT_ANCHOR_TTL_MS,

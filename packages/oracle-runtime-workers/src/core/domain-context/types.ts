@@ -7,9 +7,12 @@
  */
 import type { DomainDocument } from '@ixo/domain.md/workers';
 import type { RuntimeContext } from '../../plugin-api/types';
+import type { ObservationOptions } from './generated/oracle-observations';
 
 export interface DomainContextOptions {
   mode: 'off' | 'observe';
+  /** Opt-in advisory findings. Sink failures never affect context loading or agent operations. */
+  professionalObservations?: ObservationOptions;
   /** How long a resolved IID anchor is reused before Blocksync is asked again. Default 300 000. */
   anchorTtlMs?: number;
   /** Extra https origins documents may be fetched from (the VFS, Matrix and IPFS gateway origins are added). */

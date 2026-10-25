@@ -25,6 +25,7 @@ import type {
   DomainContextProvenance,
 } from './types';
 import { domainValidator } from './validator';
+import professionalPublication from './fixtures/professional-published.json';
 
 const BLOCKSYNC = 'https://iid.example/graphql';
 const ORACLE = 'did:ixo:entity:oracle';
@@ -155,6 +156,239 @@ function invoke(
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe('prepareDomainContext: advisory professional integration', () => {
+  it('loads exact final bytes produced by Domain Runtime without inventing an anchor timestamp', async () => {
+    const { domainDid, index, domainCid } = professionalPublication;
+    const net = await network({ [domainDid]: index });
+    expect(net.anchors.get(domainDid)?.cid).toBe(domainCid);
+    const emit = vi.fn();
+    const work: Promise<void>[] = [];
+    const result = await prepare(new DomainContextResolver(), {
+      oracleDid: domainDid,
+      subjectDid: null,
+      options: {
+        ...OPTIONS,
+        professionalObservations: {
+          mode: 'advisory',
+          emit,
+          schedule: (p) => {
+            work.push(p);
+          },
+        },
+      },
+    });
+    await Promise.all(work);
+    expect(result.provenance[0]).toMatchObject({
+      status: 'verified',
+      cid: domainCid,
+    });
+    expect(result.prompt).toContain('x-professional-oracle');
+    expect(emit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        governingRevision: {
+          domainDid,
+          configuredRevision: null,
+          loadedRevision: domainCid,
+        },
+        assessment: 'insufficient_evidence',
+      }),
+    );
+  });
+
+  it.each(['no-anchor', 'generic-draft', 'wrong-anchor-intent'])(
+    'does not load a professional publication with %s',
+    async (failure) => {
+      const { domainDid } = professionalPublication;
+      const parsed = await domainValidator.parseDomain(
+        professionalPublication.index,
+      );
+      if (!parsed.document) throw new Error('Published fixture failed parsing');
+      const front = structuredClone(parsed.document.frontmatter);
+      if (failure === 'generic-draft') delete front['x-professional-oracle'];
+      if (failure === 'wrong-anchor-intent')
+        front.documents = {
+          ...record(front.documents),
+          anchoring: {
+            ...record(record(front.documents).anchoring),
+            reference: `${ORACLE}#dom`,
+          },
+        };
+      const body = professionalPublication.index
+        .split(/^---$/m)
+        .slice(2)
+        .join('---');
+      const source = `---\n${JSON.stringify(front)}\n---${body}`;
+      const net = await network({ [domainDid]: source });
+      if (failure === 'no-anchor') net.anchors.delete(domainDid);
+      const result = await prepare(new DomainContextResolver(), {
+        oracleDid: domainDid,
+        subjectDid: null,
+      });
+      expect(result.provenance[0]?.status).not.toBe('verified');
+      expect(result.prompt).not.toContain('x-professional-oracle');
+    },
+  );
+
+  it('does not claim an anchored revision was loaded when its bytes fail integrity checks', async () => {
+    const net = await network({ [ORACLE]: domainFor(ORACLE) });
+    const anchor = net.anchors.get(ORACLE)!;
+    net.files.set(anchor.uri, 'tampered bytes');
+    const emit = vi.fn();
+    const work: Promise<void>[] = [];
+    const result = await prepare(new DomainContextResolver(), {
+      subjectDid: null,
+      options: {
+        ...OPTIONS,
+        professionalObservations: {
+          mode: 'advisory',
+          emit,
+          schedule: (p) => {
+            work.push(p);
+          },
+        },
+      },
+    });
+    await Promise.all(work);
+    expect(result.provenance[0]?.status).toBe('invalid');
+    expect(emit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        assessment: 'insufficient_evidence',
+        governingRevision: {
+          domainDid: ORACLE,
+          configuredRevision: null,
+          loadedRevision: null,
+        },
+      }),
+    );
+    expect(result.tools).toHaveLength(2);
+  });
+
+  it('loads method documents through existing permissions and preserves the prompt when the sink rejects', async () => {
+    const method = await linkedDocument(
+      'method-evidence',
+      'Professional method text.',
+    );
+    const source = withFrontmatter(
+      (front) => {
+        front['x-professional-oracle'] = {
+          version: '1',
+          observation: { mode: 'advisory', modelAssessments: false },
+          serviceScope: {
+            summary: 'Evidence verification',
+            exclusions: [],
+            protocols: [],
+          },
+          methods: [
+            { id: 'method:evidence', documentRef: method.id, resourceRefs: [] },
+          ],
+          rulePractices: [
+            {
+              ruleRef: 'norm:evidence',
+              documentRef: method.id,
+              implementationStatus: 'manual',
+            },
+          ],
+        };
+      },
+      withPass1([method], domainFor(ORACLE)),
+    );
+    await network({ [ORACLE]: source }, [method]);
+    const resolver = new DomainContextResolver();
+    const baseline = await prepare(resolver, { subjectDid: null });
+    const emitted = vi.fn(() => {
+      throw new Error('sink failure');
+    });
+    const work: Promise<void>[] = [];
+    const observed = await prepare(resolver, {
+      subjectDid: null,
+      options: {
+        ...OPTIONS,
+        professionalObservations: {
+          mode: 'advisory',
+          emit: emitted,
+          schedule: (p) => {
+            work.push(p);
+          },
+        },
+      },
+    });
+    await Promise.all(work);
+    expect(observed.prompt).toBe(baseline.prompt);
+    expect(observed.pins).toEqual(baseline.pins);
+    expect(observed.tools.map((t) => t.name)).toEqual(
+      baseline.tools.map((t) => t.name),
+    );
+    expect(emitted).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: 'advisory',
+        ruleRef: 'norm:evidence',
+        assessment: 'consistent',
+      }),
+    );
+    expect(observed.provenance[0]?.documentsRead).toContainEqual({
+      id: method.id,
+      cid: method.cid,
+    });
+  });
+
+  it('keeps the existing fallback and records the actual revision', async () => {
+    const net = await network({ [ORACLE]: domainFor(ORACLE) });
+    const pinnedCid = await cidOf(
+      new TextEncoder().encode('unavailable revision'),
+    );
+    const emit = vi.fn();
+    const work: Promise<void>[] = [];
+    const result = await prepare(new DomainContextResolver(), {
+      subjectDid: null,
+      pins: {
+        [ORACLE]: {
+          cid: pinnedCid,
+          uri: 'https://docs.example/missing.md',
+          private: false,
+        },
+      },
+      options: {
+        ...OPTIONS,
+        professionalObservations: {
+          mode: 'advisory',
+          emit,
+          schedule: (p) => {
+            work.push(p);
+          },
+        },
+      },
+    });
+    await Promise.all(work);
+    expect(result.provenance[0]?.status).toBe('verified');
+    expect(emit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        governingRevision: {
+          domainDid: ORACLE,
+          configuredRevision: pinnedCid,
+          loadedRevision: net.anchors.get(ORACLE)?.cid,
+        },
+      }),
+    );
+  });
+
+  it('does not wait for an observer that never settles', async () => {
+    await network({ [ORACLE]: domainFor(ORACLE) });
+    let release: (() => void) | undefined;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const result = await prepare(new DomainContextResolver(), {
+      subjectDid: null,
+      options: {
+        ...OPTIONS,
+        professionalObservations: { mode: 'advisory', emit: () => pending },
+      },
+    });
+    expect(result.tools).toHaveLength(2);
+    release?.();
+  });
 });
 
 describe('prepareDomainContext: prompt block', () => {

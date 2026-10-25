@@ -22,6 +22,7 @@ import { INDEX_MAX_BYTES, LINKED_DOCUMENT_MAX_BYTES } from './integrity';
 import type { DomainContextResolver } from './resolver';
 import { DEFAULT_ANCHOR_TTL_MS } from './resolver';
 import { createDomainTransport } from './transport';
+import { observeProfessionalContext } from './professional-observations';
 import type {
   DomainContextOptions,
   DomainContextPins,
@@ -220,6 +221,8 @@ export async function prepareDomainContext(input: {
    * a document to `documentsRead` after this function returned.
    */
   onProvenance?: (provenance: DomainContextProvenance[]) => void;
+  /** A restored attempt must not produce a new assessment. */
+  replay?: boolean;
 }): Promise<{
   prompt: string;
   tools: StructuredTool[];
@@ -266,6 +269,18 @@ export async function prepareDomainContext(input: {
     }),
   );
   const byDid = new Map(snapshots.map((snapshot) => [snapshot.did, snapshot]));
+  const observe = () => {
+    const snapshot = byDid.get(input.oracleDid);
+    if (snapshot)
+      observeProfessionalContext({
+        snapshot,
+        configuredRevision: input.pins?.[snapshot.did]?.cid,
+        runId: ctx.session.requestId,
+        options: options.professionalObservations,
+        background: ctx.background,
+        replay: input.replay,
+      });
+  };
 
   // Briefs: a brief over the budget is omitted with a finding, never cut.
   const briefs = new Map<string, string | undefined>();
@@ -338,6 +353,7 @@ export async function prepareDomainContext(input: {
     inert(JSON.stringify({ pass1Documents: excerpts })),
     DOMAIN_CONTEXT_CLOSE,
   ].join('\n');
+  observe();
 
   const pins: DomainContextPins = {};
   for (const snapshot of snapshots)
@@ -380,8 +396,10 @@ export async function prepareDomainContext(input: {
     if (entry.cid) {
       const before = snapshot.documentsRead?.length ?? 0;
       recordRead(snapshot, entry.id, entry.cid);
-      if ((snapshot.documentsRead?.length ?? 0) !== before)
+      if ((snapshot.documentsRead?.length ?? 0) !== before) {
         input.onProvenance?.(snapshots.map(provenance));
+        observe();
+      }
     }
     return JSON.stringify({
       domain: snapshot.did,

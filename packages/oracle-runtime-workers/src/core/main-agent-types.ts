@@ -195,6 +195,7 @@ export interface MainAgentArgs {
   domainResolver?: DomainContextResolver;
   /** Anchors a resumed durable run started with: the same revisions again. */
   domainPins?: DomainContextPins;
+  domainReplay?: boolean;
   /**
    * Called with the turn's updated provenance when `read_domain_document`
    * reads a document the turn had not read yet.

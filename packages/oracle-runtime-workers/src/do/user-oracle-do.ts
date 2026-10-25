@@ -6120,6 +6120,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           ? {
               domainContext: opts.domainContext,
               domainResolver: this.domainResolver,
+              domainReplay: run.resumed,
               onDomainProvenance: (provenance: DomainContextProvenance[]) =>
                 void this.reportDomainContext(req, provenance),
               ...(run.domainPins ? { domainPins: run.domainPins } : {}),
