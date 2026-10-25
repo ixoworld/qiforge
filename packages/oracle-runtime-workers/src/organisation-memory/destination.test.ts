@@ -24,6 +24,7 @@ async function chainFixture(
     missing?: string;
     rawConfig?: string;
     serviceEndpoint?: string;
+    domainType?: string;
   } = {},
 ) {
   const raw =
@@ -40,7 +41,7 @@ async function chainFixture(
   const entities = [
     {
       id: body.domainDid,
-      type: 'dao',
+      type: options.domainType ?? 'dao',
       owner: options.owner ?? 'ixo1ownerfixture',
       controller: options.controller ?? [],
       linkedEntity: [
@@ -101,6 +102,15 @@ describe('current exact-domain authority', () => {
         body,
         config,
         await chainFixture({ owner: 'ixo1other', controller: [body.userDid] }),
+      ),
+    ).resolves.toBeUndefined();
+  });
+  it('accepts an oracle linked from a domain that is itself an oracle, as the Portal does', async () => {
+    await expect(
+      verifyDestination(
+        body,
+        config,
+        await chainFixture({ domainType: 'oracle/oracle' }),
       ),
     ).resolves.toBeUndefined();
   });

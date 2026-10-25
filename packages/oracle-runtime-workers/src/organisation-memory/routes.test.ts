@@ -17,6 +17,7 @@ const env = {
   ORACLE_ENTITY_DID: fixture.body.oracleEntityDid,
   NETWORK: 'testnet',
   BLOCKSYNC_GRAPHQL_URL: 'https://blocksync.test/graphql',
+  MEMORY_MCP_URL: 'https://memory.test/mcp',
   ORACLE_SIGNING_MNEMONIC: ORACLE_MNEMONIC,
   UCAN_ALLOW_BARE_DELEGATION_AUTH: 'true',
 };
@@ -38,10 +39,12 @@ describe('fixed organisation memory HTTP routes', () => {
       limits: { maxChunks: 25, maxChunkBytes: 12000, maxBodyBytes: 262144 },
     });
   });
-  it('fails closed when enabled without a signing key or entity', async () => {
+  it('fails closed when enabled without a signing key, entity or usable memory URL', async () => {
     for (const changed of [
       { ORACLE_ENTITY_DID: '' },
       { ORACLE_SIGNING_MNEMONIC: undefined },
+      { MEMORY_MCP_URL: undefined },
+      { MEMORY_MCP_URL: 'http://localhost:8000/mcp' },
     ]) {
       const response = await createShell().request(
         '/memory/imports/capabilities',

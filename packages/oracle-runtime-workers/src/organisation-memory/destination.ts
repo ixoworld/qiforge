@@ -88,15 +88,16 @@ export async function verifyDestination(
     !domain.controller.some((controller) => callerForms.includes(controller))
   )
     throw new ImportError(403, 'exact_domain_control_required');
+  // As the Portal offers destinations: the domain's `oracle/oracle` links,
+  // or the domain itself when it is an oracle.
   const isOracle =
     domain.type === 'oracle' || domain.type.startsWith('oracle/');
   if (
-    isOracle
-      ? domain.id !== body.oracleEntityDid
-      : !domain.linkedEntity.some(
-          (link) =>
-            link.id === body.oracleEntityDid && link.type === 'oracle/oracle',
-        )
+    !(isOracle && domain.id === body.oracleEntityDid) &&
+    !domain.linkedEntity.some(
+      (link) =>
+        link.id === body.oracleEntityDid && link.type === 'oracle/oracle',
+    )
   )
     throw new ImportError(403, 'oracle_not_associated');
   const oracle =

@@ -30,6 +30,10 @@ function configuration(env: OracleWorkerEnv) {
     return null;
   try {
     publicUrl(env.BLOCKSYNC_GRAPHQL_URL);
+    // The memory plugin's URL, which the import's transport requires to be
+    // public HTTPS: without it every admitted import would fail to start.
+    if (typeof env.MEMORY_MCP_URL !== 'string') return null;
+    publicUrl(env.MEMORY_MCP_URL);
   } catch {
     return null;
   }
