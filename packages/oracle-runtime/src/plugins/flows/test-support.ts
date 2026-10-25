@@ -39,9 +39,13 @@ export function someActionType(): string {
 }
 
 /** A registry action that can source an `onEvent` trigger (event-capable, with a `can`). */
-export function someEventCapableActionType(): string {
+export function someEventCapableActionType(event?: string): string {
   const match = getAllActions().find(
-    (a) => typeof typeToCan(a.type) === 'string' && isEventCapable(a),
+    (a) =>
+      typeof typeToCan(a.type) === 'string' &&
+      isEventCapable(a) &&
+      (event === undefined ||
+        a.events?.some((declared) => declared.name === event)),
   );
   if (!match) throw new Error('no event-capable action in the registry');
   return match.type;

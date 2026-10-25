@@ -89,7 +89,7 @@ describe('readFlowSpec: multi-source round-trip', () => {
     // The compiled `props.trigger` may carry the short step id (older editor)
     // or the prefixed block id (current editor remaps on compile); the
     // agent-facing read must return the short step id either way.
-    const action = someEventCapableActionType();
+    const action = someEventCapableActionType('form.submitted');
     const doc = buildDoc({
       title: 'Event read',
       steps: [
