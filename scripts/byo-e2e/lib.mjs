@@ -70,7 +70,9 @@ export async function apiJson(path, init = {}) {
   const res = await api(path, init);
   const text = await res.text();
   if (!res.ok) {
-    throw new Error(`${init.method ?? 'GET'} ${path} -> ${res.status}: ${text.slice(0, 400)}`);
+    throw new Error(
+      `${init.method ?? 'GET'} ${path} -> ${res.status}: ${text.slice(0, 400)}`,
+    );
   }
   try {
     return JSON.parse(text);
@@ -100,7 +102,9 @@ export async function sendMessage({ sessionId, message, model, onEvent }) {
   });
   if (!res.ok || !res.body) {
     const text = await res.text();
-    throw new Error(`POST /messages/${sessionId} -> ${res.status}: ${text.slice(0, 400)}`);
+    throw new Error(
+      `POST /messages/${sessionId} -> ${res.status}: ${text.slice(0, 400)}`,
+    );
   }
 
   const result = {
@@ -157,7 +161,9 @@ export function summarize(label, result) {
   console.log(`\n=== ${label}`);
   console.log(`events: ${JSON.stringify(eventCounts)}`);
   console.log(`reasoning chars: ${result.reasoning.length}`);
-  console.log(`text: ${result.text.slice(0, 300)}${result.text.length > 300 ? '…' : ''}`);
+  console.log(
+    `text: ${result.text.slice(0, 300)}${result.text.length > 300 ? '…' : ''}`,
+  );
   if (result.errors.length > 0) {
     console.log(`ERRORS: ${JSON.stringify(result.errors).slice(0, 500)}`);
   }
