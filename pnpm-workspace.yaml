@@ -35,11 +35,7 @@ overrides:
   '@langchain/core': '1.1.48'
   '@langchain/langgraph': '1.4.17'
   '@langchain/langgraph-checkpoint': '1.1.5'
-  # @ixo/editor 6.0.1 pins yjs 13.6.27 exactly while @blocknote/*, @ixo/matrix-crdt,
-  # y-protocols and the Workers runtime resolve 13.6.32; two copies in one
-  # Workers bundle break yjs's instanceof checks ("Yjs was already imported").
-  # Collapse to one copy until @ixo/editor widens its pin.
-  yjs: '13.6.32'
+  yjs: '13.6.33'
   '@langchain/langgraph-checkpoint-sqlite': '1.0.4'
   '@langchain/langgraph-checkpoint-validation': '1.1.1'
   '@langchain/langgraph-supervisor': '1.0.3'
@@ -71,6 +67,7 @@ minimumReleaseAgeExclude:
 # Packages allowed to run install/build scripts. Replaces onlyBuiltDependencies,
 # which pnpm v11 removed. These are native/postinstall-heavy deps we trust.
 allowBuilds:
+  '@ixo/editor@git+https://github.com/ixoworld/ixo-portal.git#51650948f88c77bd16eb2c779be2b9b3213abdbb&path:/packages/editor': true
   '@ixo/matrix-sdk-crypto-nodejs': true
   '@matrix-org/matrix-sdk-crypto-nodejs': true
   '@nestjs/core': true

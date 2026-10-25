@@ -2,6 +2,7 @@
  * Discovery tools (spec §3.1) — enumerate and describe the available actions.
  * These read only the action catalog, so they never connect to a flow room.
  */
+import { generateActionManifest } from '@ixo/editor/core';
 import { z } from 'zod';
 import type { MatrixClient } from 'matrix-js-sdk';
 import { tool } from '../../../plugin-api/tool-helper';
@@ -45,7 +46,12 @@ export function buildListActionsTool(): PluginTool {
     async (args) => {
       try {
         const { category, tag } = listActionsSchema.parse(args);
-        return { actions: listActions({ category, tag }) };
+        const manifest = generateActionManifest();
+        return {
+          actions: listActions({ category, tag }),
+          registryVersion: manifest.registryVersion,
+          manifestDigest: manifest.manifestDigest,
+        };
       } catch (err) {
         return toToolError(err);
       }

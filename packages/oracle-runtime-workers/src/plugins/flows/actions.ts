@@ -57,6 +57,9 @@ export interface ActionDescription {
   hooks: string[];
   isForm: boolean;
   requiresConfirmation: boolean;
+  requiredServices: string[];
+  executionOwner: string;
+  sideEffect: boolean;
 }
 
 /** Resolve a friendly `action` (registry type, or a `can`) to its definition. */
@@ -65,7 +68,16 @@ export function getActionDef(action: string): ActionDefinition | undefined {
 }
 
 function overlayFor(def: ActionDefinition): OverlayEntry {
-  return ACTION_METADATA[def.type] ?? {};
+  const overlay = ACTION_METADATA[def.type] ?? {};
+  const category = actionCategory(def.type);
+  const summary =
+    overlay.summary || def.description || def.displayName || def.type;
+  return {
+    ...overlay,
+    summary,
+    whenToUse: overlay.whenToUse ?? [summary],
+    tags: [...new Set([category, ...(overlay.tags ?? [])])],
+  };
 }
 
 /**
@@ -91,7 +103,10 @@ export function isFormAction(def: ActionDefinition): boolean {
 
 type InputSchemaShape =
   | {
-      properties?: Record<string, { type?: string; description?: string }>;
+      properties?: Record<
+        string,
+        { type?: string | string[]; description?: string }
+      >;
       required?: string[];
     }
   | undefined;
@@ -122,7 +137,11 @@ function inputFields(
     const required = new Set(schema?.required ?? []);
     return Object.entries(props).map(([name, spec]) => ({
       name,
-      type: typeof spec?.type === 'string' ? spec.type : 'unknown',
+      type: Array.isArray(spec?.type)
+        ? spec.type.join(' | ')
+        : typeof spec?.type === 'string'
+          ? spec.type
+          : 'unknown',
       required: required.has(name),
       description: spec?.description,
     }));
@@ -168,6 +187,7 @@ export function listActions(filter?: {
   const category = filter?.category?.toLowerCase();
   const result: ActionSummary[] = [];
   for (const def of getAllActions()) {
+    if (def.hiddenFromAuthoring) continue;
     const overlay = overlayFor(def);
     if (filter?.tag && !(overlay.tags ?? []).includes(filter.tag)) continue;
     if (category && actionCategory(def.type) !== category) continue;
@@ -204,5 +224,8 @@ export function describeAction(action: string): ActionDescription | null {
     hooks: [...HOOK_TYPES],
     isForm: isFormAction(def),
     requiresConfirmation: def.defaultRequiresConfirmation,
+    requiredServices: def.requiredServices ?? [],
+    executionOwner: def.executionOwner ?? 'agent',
+    sideEffect: def.sideEffect,
   };
 }
