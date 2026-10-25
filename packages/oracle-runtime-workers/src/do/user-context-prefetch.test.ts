@@ -742,47 +742,58 @@ describe('user-context prefetch in a user-object turn', () => {
 
   it('goes ahead at the cap on a slow first turn and serves the late answer from the cache next time', async () => {
     const engine = new FakeEngine();
-    engine.mode = { kind: 'answer', delayMs: 5000 };
+    engine.mode = { kind: 'hang' };
     await withObject(
       'user-context-slow-engine',
       { env: { USER_CONTEXT_PREFETCH_CAP_MS: 800 } },
       async (o) => {
-        const warn = vi.spyOn(console, 'warn');
-        const first = await o.turn('s1', 'r1');
-        expect(first.outcome.status).toBe('finished');
-        expect(first.elapsedMs).toBeGreaterThanOrEqual(800);
-        expect(first.elapsedMs).toBeLessThan(5000);
-        const [contact, ...more] = firstContacts(warn.mock.calls, 's1');
-        expect(more).toEqual([]);
-        const waited = Number(
-          /^.* outcome=timeout waited=(\d+)ms$/.exec(contact ?? '')?.[1],
-        );
-        expect(waited).toBeGreaterThanOrEqual(800);
-        expect(waited).toBeLessThan(5000);
-        expect(first.system).not.toContain(CONTEXT_HEADING);
-        // Waiting past the grace is reported to the Portal.
-        expect(first.steps).toContain(PROGRESS_STEP);
-        expect(await o.status('s1')).toMatchObject({
-          lastOutcome: 'timeout',
-          inFlight: true,
-        });
+        vi.useFakeTimers();
+        try {
+          const warn = vi.spyOn(console, 'warn');
+          const pending = o.turn('s1', 'r1');
+          await vi.advanceTimersByTimeAsync(0);
+          expect(o.engine.batches).toHaveLength(1);
+          await vi.advanceTimersByTimeAsync(799);
+          expect(o.model.calls).toHaveLength(0);
+          expect(firstContacts(warn.mock.calls, 's1')).toEqual([]);
+          await vi.advanceTimersByTimeAsync(1);
+          const first = await pending;
+          expect(first.outcome.status).toBe('finished');
+          expect(first.elapsedMs).toBe(800);
+          const [contact, ...more] = firstContacts(warn.mock.calls, 's1');
+          expect(more).toEqual([]);
+          const waited = Number(
+            /^.* outcome=timeout waited=(\d+)ms$/.exec(contact ?? '')?.[1],
+          );
+          expect(waited).toBe(800);
+          expect(first.system).not.toContain(CONTEXT_HEADING);
+          // Waiting past the grace is reported to the Portal.
+          expect(first.steps).toContain(PROGRESS_STEP);
+          expect(await o.status('s1')).toMatchObject({
+            lastOutcome: 'timeout',
+            inFlight: true,
+          });
 
-        await o.drain(); // the late answer lands in the cache
-        expect(await o.status('s1')).toMatchObject({
-          cached: true,
-          lastOutcome: 'fresh',
-        });
+          o.engine.release();
+          await o.drain(); // the late answer lands in the cache
+          expect(await o.status('s1')).toMatchObject({
+            cached: true,
+            lastOutcome: 'fresh',
+          });
 
-        // A new session's first turn: served from the cache, no request.
-        const next = await o.turn('s2', 'r2');
-        expect(o.engine.batches).toHaveLength(1);
-        expect(next.system).toContain(factLine(FAVOURITE_SEA));
-        expect(next.steps).not.toContain(PROGRESS_STEP);
-        expect(await o.status('s2')).toMatchObject({ lastOutcome: 'cached' });
-        expect(firstContacts(warn.mock.calls, 's2')).toEqual([
-          expect.stringMatching(/ outcome=cached waited=\d+ms$/),
-        ]);
-        expect(firstContacts(warn.mock.calls, 's1')).toHaveLength(1);
+          // A new session's first turn: served from the cache, no request.
+          const next = await o.turn('s2', 'r2');
+          expect(o.engine.batches).toHaveLength(1);
+          expect(next.system).toContain(factLine(FAVOURITE_SEA));
+          expect(next.steps).not.toContain(PROGRESS_STEP);
+          expect(await o.status('s2')).toMatchObject({ lastOutcome: 'cached' });
+          expect(firstContacts(warn.mock.calls, 's2')).toEqual([
+            expect.stringMatching(/ outcome=cached waited=\d+ms$/),
+          ]);
+          expect(firstContacts(warn.mock.calls, 's1')).toHaveLength(1);
+        } finally {
+          vi.useRealTimers();
+        }
       },
       engine,
     );
