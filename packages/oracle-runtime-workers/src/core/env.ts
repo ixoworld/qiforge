@@ -3,6 +3,7 @@ import {
   decisionProviderEnvShape,
 } from '@ixo/common/ai/decisions';
 import { z } from 'zod';
+import { channelRoutingEnvShape } from '../channels/routing';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin';
 import type { Logger } from '../plugin-api/types';
 import { NOOP_LOGGER } from './utils';
@@ -251,6 +252,7 @@ export const baseEnvSchema = z.object({
   // runtime consumer of Decisions. It predicts the on-demand plugin a message
   // needs and preloads it for the turn; it needs a `DECISION_PROVIDER`.
   ...capabilityRouterEnvShape,
+  ...channelRoutingEnvShape,
 
   // --- durable runs (docs/plans/durable-runs.md) ---------------------------
   // Parsed by `runDurabilityConfig` (src/do/run-store.ts) with defaults:

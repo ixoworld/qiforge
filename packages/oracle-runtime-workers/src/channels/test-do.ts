@@ -3,6 +3,8 @@ import { DoSqliteDatabase, type SqlRow } from '../sqlite/database';
 import { RunStore, type RunRecord } from '../do/run-store';
 import type { ReplyPlan } from '../delivery/types';
 import { ChannelTurns } from './turns';
+import { DecisionRuntime } from '@ixo/common/ai/decisions';
+import type { ChannelRoutingMode } from './routing';
 import {
   channelRequestHash,
   requireChannelDelegation,
@@ -32,6 +34,13 @@ export class ChannelTurnsTestDO extends DurableObject {
   private held: (() => void)[] = [];
   /** Wake-ups the turns asked for (`scheduleRetry`), epoch ms. */
   private retries: number[] = [];
+  private routingMode: ChannelRoutingMode = 'off';
+  private routingBindings: string[] = [];
+  private routeChoice = 'thread_0';
+  private routeProbability = 0.99;
+  private routeHeld: (() => void)[] = [];
+  private holdRouting = false;
+  private failNextBegin = false;
 
   private async ready(): Promise<ChannelTurns> {
     if (this.turns) return this.turns;
@@ -72,6 +81,14 @@ export class ChannelTurnsTestDO extends DurableObject {
       getPlan: (runId) => runs.getPlan(runId),
       wasPruned: (runId) => runs.wasChannelRunPruned(runId),
       begin: async (runId, request) => {
+        if (this.failNextBegin) {
+          this.failNextBegin = false;
+          throw new ChannelError(
+            503,
+            'Simulated restart before begin',
+            'unavailable',
+          );
+        }
         await runs.create({
           runId,
           sessionId: request.sessionId,
@@ -123,6 +140,52 @@ export class ChannelTurnsTestDO extends DurableObject {
       pruneTombstones: (before, limit) =>
         runs.pruneChannelTombstones(before, limit),
       now: () => this.nowMs,
+      routing: {
+        mode: this.routingMode,
+        bindings: this.routingBindings,
+        minProbability: 0.9,
+        ownsSession: async (sessionId) =>
+          sessionId.startsWith('$channel-') &&
+          !(await this.deletedSessions()).includes(sessionId),
+        observe: () => undefined,
+        evaluator: new DecisionRuntime(undefined, {
+          provider: 'test',
+          model: 'scripted-routing',
+          evaluate: async (request) => {
+            await this.ctx.storage.put('routing-inputs', [
+              ...((await this.ctx.storage.get<string[]>('routing-inputs')) ??
+                []),
+              JSON.stringify(request.state),
+            ]);
+            if (this.holdRouting)
+              await new Promise<void>((resolve) =>
+                this.routeHeld.push(resolve),
+              );
+            if (this.routeChoice === 'error')
+              throw new Error('Provider unavailable');
+            const question = request.questions.destination;
+            if (question?.kind !== 'choice') throw new Error('Expected choice');
+            const keys = Object.keys(question.options);
+            return {
+              answers: {
+                destination: {
+                  kind: 'choice',
+                  value: this.routeChoice,
+                  confidence: this.routeProbability,
+                  probabilities: Object.fromEntries(
+                    keys.map((key) => [
+                      key,
+                      key === this.routeChoice
+                        ? this.routeProbability
+                        : (1 - this.routeProbability) / (keys.length - 1),
+                    ]),
+                  ),
+                },
+              },
+            };
+          },
+        }),
+      },
     });
     return this.turns;
   }
@@ -392,6 +455,43 @@ export class ChannelTurnsTestDO extends DurableObject {
 
   async count(): Promise<number> {
     return (await this.ctx.storage.get<number>('executions')) ?? 0;
+  }
+
+  async configureRouting(
+    mode: ChannelRoutingMode,
+    bindings: string[] = [],
+  ): Promise<void> {
+    if (this.turns) await this.turns.whenIdle();
+    this.routingMode = mode;
+    this.routingBindings = bindings;
+    await this.reopen();
+  }
+
+  async routeAs(choice: string, probability = 0.99): Promise<void> {
+    this.routeChoice = choice;
+    this.routeProbability = probability;
+  }
+
+  async routingInputs(): Promise<string[]> {
+    return (await this.ctx.storage.get<string[]>('routing-inputs')) ?? [];
+  }
+
+  async blockRouting(blocked: boolean): Promise<void> {
+    this.holdRouting = blocked;
+    if (!blocked) for (const release of this.routeHeld.splice(0)) release();
+  }
+
+  async failBeginOnce(): Promise<void> {
+    this.failNextBegin = true;
+  }
+
+  async indexedSessions(): Promise<string[]> {
+    await this.ready();
+    return (
+      await this.db!.exec<{ session_id: string }>(
+        'SELECT session_id FROM channel_thread_index',
+      )
+    ).map((row) => row.session_id);
   }
 
   async reset(): Promise<void> {

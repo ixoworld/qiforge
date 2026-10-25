@@ -61,6 +61,8 @@ export const ChannelTurnBody = z.strictObject({
   requestId: z.string().min(1).max(180),
   remoteMessageRef: z.string().regex(/^hmac:[a-f0-9]{64}$/),
   sessionId: z.string().min(1).max(255).optional(),
+  /** An explicit correction stays in its current session, even with routing enabled. */
+  sessionPolicy: z.literal('continue').optional(),
   message: z.string().min(1).max(16_000),
   replyTo: ChannelReplyReference.optional(),
   /**

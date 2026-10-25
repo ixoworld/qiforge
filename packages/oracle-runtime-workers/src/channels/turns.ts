@@ -16,6 +16,18 @@ import {
   type ChannelTurnResponse,
 } from './contract';
 import { isRoomForbidden } from './failures';
+import {
+  ambiguousThreadText,
+  channelSessionDecision,
+  CHANNEL_THREAD_LIMIT,
+  decideChannelRoute,
+  routeAssignmentSchema,
+  selectChannelCandidates,
+  type ChannelRouteAssignment,
+  type ChannelRouteObservation,
+  type ChannelRoutingOptions,
+  type ChannelThreadCandidate,
+} from './routing';
 
 interface ReceiptRow extends Record<string, string | number | null> {
   binding_id: string;
@@ -38,6 +50,7 @@ interface ReceiptRow extends Record<string, string | number | null> {
   mirror_retry_at: number | null;
   /** Epoch ms the receipt was written (rows from before the column: its migration). */
   created_at: number | null;
+  routing_json: string | null;
 }
 
 /**
@@ -70,6 +83,7 @@ const errorText = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
 export interface ChannelTurnsHost {
+  routing?: ChannelRoutingOptions;
   createSession(identity: TurnIdentity, markerTxnId: string): Promise<string>;
   /**
    * Throws `StaleSessionError` when the object holds no such session (it
@@ -111,6 +125,10 @@ export interface ChannelTurnsHost {
 type Received =
   | { kind: 'run'; response: ChannelTurnResponse }
   | { kind: 'new'; sessionId: string | null };
+interface PreparedChannelTurn {
+  sessionId: string;
+  routing?: ChannelRouteAssignment;
+}
 
 /**
  * Durable channel requests. A request is admitted in three steps, so the
@@ -139,11 +157,16 @@ export class ChannelTurns {
   private draining: Promise<void> | null = null;
   /** A pass was asked for while one ran: run another when it ends. */
   private drainAgain = false;
+  private readonly routingLanes = new Map<string, Promise<unknown>>();
 
   constructor(
     private readonly db: DoSqliteDatabase,
     private readonly host: ChannelTurnsHost,
   ) {}
+
+  private get routing(): ChannelRoutingOptions | undefined {
+    return this.host.routing;
+  }
 
   private now(): number {
     return this.host.now?.() ?? Date.now();
@@ -190,6 +213,8 @@ export class ChannelTurns {
         );
       await add('mirror_failures', 'INTEGER NOT NULL DEFAULT 0');
       await add('mirror_retry_at', 'INTEGER');
+      await add('routing_json', 'TEXT');
+      await add('routing_observation', 'TEXT');
       if (await add('created_at', 'INTEGER'))
         await this.db.run(
           'UPDATE channel_requests SET created_at = ? WHERE created_at IS NULL',
@@ -212,6 +237,26 @@ export class ChannelTurns {
       await this.db.run(`CREATE TABLE IF NOT EXISTS channel_sessions (
         binding_id TEXT PRIMARY KEY, session_id TEXT NOT NULL
       )`);
+      const sessionColumns = await this.db.exec<{ name: string }>(
+        'PRAGMA table_info(channel_sessions)',
+      );
+      for (const [name, definition] of [
+        ['generation', 'INTEGER NOT NULL DEFAULT 0'],
+        ['force_next', 'INTEGER NOT NULL DEFAULT 0'],
+      ]) {
+        if (!sessionColumns.some((column) => column.name === name))
+          await this.db.run(
+            `ALTER TABLE channel_sessions ADD COLUMN ${name} ${definition}`,
+          );
+      }
+      if (this.routing?.mode !== undefined && this.routing.mode !== 'off') {
+        await this.db.run(`CREATE TABLE IF NOT EXISTS channel_thread_index (
+          binding_id TEXT NOT NULL, binding_revision INTEGER NOT NULL, session_id TEXT NOT NULL,
+          topic TEXT NOT NULL, recent_user TEXT NOT NULL, recent_reply TEXT NOT NULL,
+          last_run_id TEXT NOT NULL, updated_at INTEGER NOT NULL,
+          PRIMARY KEY(binding_id, binding_revision, session_id)
+        )`);
+      }
     })().catch((error: unknown) => {
       this.setupPromise = undefined;
       throw error;
@@ -313,7 +358,7 @@ export class ChannelTurns {
         return ChannelControlResult.parse(JSON.parse(completed.result));
       if (replacement)
         await this.db.run(
-          'INSERT INTO channel_sessions(binding_id,session_id) VALUES(?,?) ON CONFLICT(binding_id) DO UPDATE SET session_id=excluded.session_id',
+          'INSERT INTO channel_sessions(binding_id,session_id,generation,force_next) VALUES(?,?,1,1) ON CONFLICT(binding_id) DO UPDATE SET session_id=excluded.session_id,generation=channel_sessions.generation+1,force_next=1',
           [input.bindingId, replacement],
         );
       const result: ChannelControlResult = {
@@ -405,7 +450,30 @@ export class ChannelTurns {
     return next;
   }
 
-  async submit(
+  submit(
+    identity: TurnIdentity,
+    input: ChannelTurnInput,
+    requestHash: string,
+  ): Promise<ChannelTurnResponse> {
+    if (!this.routingEnabled(input))
+      return this.submitTurn(identity, input, requestHash);
+    // Classifier/Matrix I/O is ordered per binding, outside the admission
+    // lock. Controls and other bindings can still make progress.
+    const prior = this.routingLanes.get(input.bindingId) ?? Promise.resolve();
+    const next = prior
+      .catch(() => undefined)
+      .then(() => this.submitTurn(identity, input, requestHash));
+    this.routingLanes.set(input.bindingId, next);
+    void next
+      .finally(() => {
+        if (this.routingLanes.get(input.bindingId) === next)
+          this.routingLanes.delete(input.bindingId);
+      })
+      .catch(() => undefined);
+    return next;
+  }
+
+  private async submitTurn(
     identity: TurnIdentity,
     input: ChannelTurnInput,
     requestHash: string,
@@ -430,9 +498,9 @@ export class ChannelTurns {
         this.receive(input, requestHash, runId),
       );
       if (received.kind === 'run') return received.response;
-      let sessionId: string;
+      let prepared: PreparedChannelTurn;
       try {
-        sessionId = await this.prepare(identity, input, received.sessionId);
+        prepared = await this.prepare(identity, input, received.sessionId);
       } catch (error) {
         const stale =
           error instanceof StaleSessionError && received.sessionId !== null;
@@ -451,7 +519,7 @@ export class ChannelTurns {
         throw error;
       }
       return this.serialize(() =>
-        this.start(identity, input, requestHash, runId, sessionId),
+        this.start(identity, input, requestHash, runId, prepared),
       );
     }
   }
@@ -501,7 +569,42 @@ export class ChannelTurns {
     text: string,
   ): Promise<{ plan: ReplyPlan | null; rendered: string }> {
     const plan = parseReplyPlan(await this.host.getPlan(runId));
-    return { plan, rendered: plan ? planText(plan) : text };
+    const row = await this.db.get<{ routing_json: string | null }>(
+      'SELECT routing_json FROM channel_requests WHERE run_id=?',
+      [runId],
+    );
+    const route = row?.routing_json
+      ? routeAssignmentSchema.parse(JSON.parse(row.routing_json))
+      : undefined;
+    const notice =
+      route?.mode === 'on' && route.destination.kind === 'new'
+        ? 'Started a separate conversation.'
+        : route?.mode === 'on' &&
+            route.destination.kind === 'session' &&
+            route.destination.sessionId !== route.baseline
+          ? 'Returning to an earlier conversation.'
+          : undefined;
+    if (!notice) return { plan, rendered: plan ? planText(plan) : text };
+    const decorated =
+      plan && plan.parts.length < 999
+        ? {
+            ...plan,
+            parts: [
+              {
+                partId: 'channel_thread_notice',
+                kind: 'text' as const,
+                text: notice,
+              },
+              ...plan.parts,
+            ],
+          }
+        : null;
+    return {
+      plan: decorated,
+      rendered: decorated
+        ? planText(decorated)
+        : `${notice}\n\n${plan ? planText(plan) : text}`,
+    };
   }
 
   /**
@@ -515,6 +618,17 @@ export class ChannelTurns {
       // A first message still opening a session must not hand the deleted
       // one to the binding's next message.
       this.opening.clear();
+      if (
+        await this.db.get(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='channel_thread_index'",
+        )
+      ) {
+        const removed = await this.db.run(
+          'DELETE FROM channel_thread_index WHERE session_id=?',
+          [sessionId],
+        );
+        if (removed.changes) await this.host.changed();
+      }
       const released = await this.db.run(
         'DELETE FROM channel_sessions WHERE session_id = ?',
         [sessionId],
@@ -605,6 +719,242 @@ export class ChannelTurns {
     return binding?.session_id ?? null;
   }
 
+  private routingEnabled(input: ChannelTurnInput): boolean {
+    return Boolean(
+      this.routing &&
+      this.routing.mode !== 'off' &&
+      (!this.routing.bindings.length ||
+        this.routing.bindings.includes(input.bindingId)),
+    );
+  }
+
+  private async routingState(
+    bindingId: string,
+  ): Promise<{ generation: number; force_next: number }> {
+    return (
+      (await this.db.get<{ generation: number; force_next: number }>(
+        'SELECT generation,force_next FROM channel_sessions WHERE binding_id=?',
+        [bindingId],
+      )) ?? { generation: 0, force_next: 0 }
+    );
+  }
+
+  private async indexThread(
+    input: ChannelTurnInput,
+    sessionId: string,
+    runId: string,
+    at = this.now(),
+  ): Promise<void> {
+    await this.db.run(
+      `INSERT INTO channel_thread_index
+      (binding_id,binding_revision,session_id,topic,recent_user,recent_reply,last_run_id,updated_at)
+      VALUES(?,?,?,?,?,'',?,?) ON CONFLICT(binding_id,binding_revision,session_id)
+      DO UPDATE SET recent_user=excluded.recent_user,last_run_id=excluded.last_run_id,updated_at=excluded.updated_at`,
+      [
+        input.bindingId,
+        input.bindingRevision,
+        sessionId,
+        input.message.slice(0, 300),
+        input.message.slice(0, 800),
+        runId,
+        at,
+      ],
+    );
+    await this.db.run(
+      `DELETE FROM channel_thread_index WHERE binding_id=? AND rowid NOT IN
+      (SELECT rowid FROM channel_thread_index WHERE binding_id=? ORDER BY updated_at DESC,rowid DESC LIMIT ?)`,
+      [input.bindingId, input.bindingId, CHANNEL_THREAD_LIMIT],
+    );
+    await this.host.changed();
+  }
+
+  private async routingCandidates(
+    input: ChannelTurnInput,
+    baseline: string,
+  ): Promise<ChannelThreadCandidate[]> {
+    const routing = this.routing;
+    if (!routing) return [];
+    // Seed existing channel sessions when an operator first enables routing.
+    // The canonical stored request supplies revision isolation for older receipts.
+    const prior = await this.db.exec<{ session_id: string; run_id: string }>(
+      `SELECT session_id,run_id,MAX(rowid) AS last_row FROM channel_requests
+      WHERE binding_id=? AND session_id IS NOT NULL GROUP BY session_id
+      ORDER BY last_row DESC LIMIT ?`,
+      [input.bindingId, CHANNEL_THREAD_LIMIT],
+    );
+    for (const row of prior.reverse()) {
+      const indexed = await this.db.get<{ last_run_id: string }>(
+        'SELECT last_run_id FROM channel_thread_index WHERE binding_id=? AND binding_revision=? AND session_id=?',
+        [input.bindingId, input.bindingRevision, row.session_id],
+      );
+      if (indexed?.last_run_id === row.run_id) continue;
+      const run = await this.host.getRun(row.run_id);
+      if (!run) continue;
+      const request = this.host.requestOf(run);
+      if (request.channel?.routingClarification) continue;
+      if (
+        request.identity.channel?.bindingRevision !== input.bindingRevision ||
+        request.channel?.bindingId !== input.bindingId
+      )
+        continue;
+      await this.indexThread(
+        { ...input, message: request.message },
+        row.session_id,
+        row.run_id,
+        Date.parse(run.updatedAt),
+      );
+    }
+    const indexed = await this.db.exec<{
+      session_id: string;
+      topic: string;
+      recent_user: string;
+      recent_reply: string;
+      last_run_id: string;
+    }>(
+      'SELECT * FROM channel_thread_index WHERE binding_id=? AND binding_revision=? ORDER BY updated_at DESC,rowid DESC LIMIT ?',
+      [input.bindingId, input.bindingRevision, CHANNEL_THREAD_LIMIT],
+    );
+    const candidates: ChannelThreadCandidate[] = [];
+    for (const row of indexed) {
+      if (!(await routing.ownsSession(row.session_id))) continue;
+      const run = await this.host.getRun(row.last_run_id);
+      candidates.push({
+        sessionId: row.session_id,
+        topic: row.topic,
+        recentUser: row.recent_user,
+        recentReply:
+          run?.status === 'finished'
+            ? (run.partialText ?? '').slice(0, 800)
+            : row.recent_reply,
+        status: run?.status ?? 'history',
+      });
+    }
+    return selectChannelCandidates(candidates, input.message, baseline);
+  }
+
+  private async assignRoute(
+    _identity: TurnIdentity,
+    input: ChannelTurnInput,
+    baseline: string,
+  ): Promise<ChannelRouteAssignment | undefined> {
+    const receipt = await this.receipt(input);
+    if (receipt?.routing_json)
+      return routeAssignmentSchema.parse(JSON.parse(receipt.routing_json));
+    const routing = this.routing;
+    if (!this.routingEnabled(input) || !routing || routing.mode === 'off')
+      return undefined;
+    const mode = routing.mode;
+    const state = await this.routingState(input.bindingId);
+    const assignment: ChannelRouteAssignment = {
+      mode,
+      baseline,
+      generation: state.generation,
+      destination: { kind: 'session', sessionId: baseline },
+      reason: 'first-turn',
+    };
+    const recordObservation = async (observation: ChannelRouteObservation) => {
+      const scoped = { ...observation, mode };
+      await this.db.run(
+        'UPDATE channel_requests SET routing_observation=? WHERE binding_id=? AND request_id=?',
+        [JSON.stringify(scoped), input.bindingId, input.requestId],
+      );
+      await this.host.changed();
+      routing.observe({ ...scoped, requestId: input.requestId });
+    };
+    let evaluate: (() => Promise<ChannelRouteObservation>) | undefined;
+    if (state.force_next || input.sessionPolicy === 'continue')
+      assignment.reason = 'explicit-control';
+    else if (input.replyTo) {
+      assignment.reason = 'quoted-message';
+      const referenced =
+        input.replyTo.kind === 'known'
+          ? await this.receipt({ ...input, requestId: input.replyTo.requestId })
+          : undefined;
+      const run = referenced
+        ? await this.host.getRun(referenced.run_id)
+        : undefined;
+      const request = run ? this.host.requestOf(run) : undefined;
+      const session = referenced?.session_id;
+      if (
+        session &&
+        request?.identity.channel?.bindingRevision === input.bindingRevision &&
+        (await routing.ownsSession(session)) &&
+        (await this.replyContext(input, session))?.kind === 'resolved'
+      ) {
+        if (mode === 'on')
+          assignment.destination = { kind: 'session', sessionId: session };
+      } else if (mode === 'on')
+        assignment.destination = { kind: 'clarify', text: ambiguousThreadText };
+    } else {
+      const candidates = await this.routingCandidates(input, baseline);
+      if (candidates.length) {
+        const evidence = {
+          message: input.message,
+          currentSessionId: baseline,
+          candidates,
+        };
+        const evidenceHash = await channelRequestHash(
+          JSON.stringify(channelSessionDecision.prepare(evidence)),
+        );
+        const evaluateCandidates =
+          async (): Promise<ChannelRouteObservation> => {
+            const started = this.now();
+            try {
+              const evaluation = await routing.evaluator.evaluate(
+                channelSessionDecision,
+                evidence,
+              );
+              return {
+                ...decideChannelRoute(
+                  evaluation,
+                  candidates,
+                  routing.minProbability,
+                ),
+                evidenceHash,
+                latencyMs: this.now() - started,
+              };
+            } catch {
+              return {
+                mode,
+                reason: 'provider-unavailable',
+                evidenceHash,
+                latencyMs: this.now() - started,
+                destination: {
+                  kind: 'clarify',
+                  text: 'I could not determine which conversation this belongs to. Please reply to the relevant message, or use /new to start a separate conversation.',
+                },
+              };
+            }
+          };
+        evaluate = evaluateCandidates;
+        if (mode === 'on') {
+          const observation = await evaluateCandidates();
+          assignment.reason = observation.reason;
+          assignment.destination = observation.destination ?? {
+            kind: 'clarify',
+            text: ambiguousThreadText,
+          };
+          await recordObservation(observation);
+        } else assignment.reason = 'shadow';
+      }
+    }
+    await this.serialize(async () => {
+      await this.assertNotCancelled(input);
+      await this.db.run(
+        'UPDATE channel_requests SET routing_json=? WHERE binding_id=? AND request_id=? AND routing_json IS NULL',
+        [JSON.stringify(assignment), input.bindingId, input.requestId],
+      );
+      await this.host.changed();
+    });
+    if (mode === 'shadow' && evaluate)
+      this.host.keepAlive(
+        evaluate()
+          .then(recordObservation)
+          .catch(() => undefined),
+      );
+    return assignment;
+  }
+
   /** Step 1 (under the lock): the receipt, and the run if there is one. */
   private async receive(
     input: ChannelTurnInput,
@@ -651,7 +1001,13 @@ export class ChannelTurns {
       return { kind: 'new', sessionId: receipt.session_id };
     }
     const bound = await this.boundSession(input.bindingId);
-    if (bound && input.sessionId && bound !== input.sessionId) {
+    if (
+      bound &&
+      input.sessionId &&
+      bound !== input.sessionId &&
+      !receipt.routing_json &&
+      !(this.routingEnabled(input) && this.routing?.mode === 'on')
+    ) {
       await this.dropReceipt(runId);
       throw new ChannelError(
         409,
@@ -671,14 +1027,38 @@ export class ChannelTurns {
     identity: TurnIdentity,
     input: ChannelTurnInput,
     sessionId: string | null,
-  ): Promise<string> {
+  ): Promise<PreparedChannelTurn> {
     await this.host.requireDelegation(identity);
     const session =
       sessionId ??
       (await this.boundSession(input.bindingId)) ??
       (await this.openSession(identity, input));
     await this.host.assertSession(identity, session);
-    return session;
+    const routing = await this.assignRoute(identity, input, session);
+    if (!routing) return { sessionId: session };
+    const destination = routing.destination;
+    const selected =
+      destination.kind === 'new'
+        ? ((await this.receipt(input))?.session_id ??
+          (await this.host.createSession(
+            identity,
+            `channel-session-${await channelRequestHash(JSON.stringify([input.bindingId, input.requestId]))}`,
+          )))
+        : destination.kind === 'session'
+          ? destination.sessionId
+          : routing.baseline;
+    try {
+      await this.host.assertSession(identity, selected);
+    } catch (error) {
+      if (error instanceof StaleSessionError)
+        throw new ChannelError(
+          404,
+          'The selected conversation no longer exists; send a new message',
+          'session_not_found',
+        );
+      throw error;
+    }
+    return { sessionId: selected, routing };
   }
 
   /**
@@ -715,13 +1095,16 @@ export class ChannelTurns {
   private async refuse(runId: string): Promise<boolean> {
     await this.setup();
     if (await this.host.getRun(runId)) return true;
-    await this.dropReceipt(runId);
+    await this.dropReceipt(runId, true);
     return false;
   }
 
-  private async dropReceipt(runId: string): Promise<void> {
+  private async dropReceipt(
+    runId: string,
+    preserveRouting = false,
+  ): Promise<void> {
     const dropped = await this.db.run(
-      'DELETE FROM channel_requests WHERE run_id = ?',
+      `DELETE FROM channel_requests WHERE run_id = ?${preserveRouting ? ' AND routing_json IS NULL' : ''}`,
       [runId],
     );
     if (dropped.changes > 0) await this.host.changed();
@@ -767,8 +1150,9 @@ export class ChannelTurns {
     input: ChannelTurnInput,
     requestHash: string,
     runId: string,
-    sessionId: string,
+    prepared: PreparedChannelTurn,
   ): Promise<ChannelTurnResponse> {
+    const { sessionId, routing } = prepared;
     await this.setup();
     await this.assertNotCancelled(input);
     let receipt = await this.receipt(input);
@@ -789,7 +1173,21 @@ export class ChannelTurns {
         'request_conflict',
       );
     let session = receipt.session_id ?? sessionId;
-    if (!receipt.session_id) {
+    if (!receipt.session_id && routing) {
+      const state = await this.routingState(input.bindingId);
+      if (state.generation !== routing.generation) {
+        await this.db.run(
+          'INSERT OR IGNORE INTO channel_cancellations(binding_id,request_id,created_at) VALUES(?,?,?)',
+          [input.bindingId, input.requestId, this.now()],
+        );
+        await this.host.changed();
+        await this.assertNotCancelled(input);
+      }
+      await this.db.run(
+        'INSERT INTO channel_sessions(binding_id,session_id) VALUES(?,?) ON CONFLICT(binding_id) DO UPDATE SET session_id=excluded.session_id,force_next=0',
+        [input.bindingId, sessionId],
+      );
+    } else if (!receipt.session_id) {
       await this.db.run(
         'INSERT OR IGNORE INTO channel_sessions (binding_id, session_id) VALUES (?, ?)',
         [input.bindingId, sessionId],
@@ -830,6 +1228,12 @@ export class ChannelTurns {
       [session, runId],
     );
     await this.host.changed();
+    await this.db.run(
+      'UPDATE channel_sessions SET force_next=0 WHERE binding_id=?',
+      [input.bindingId],
+    );
+    if (this.routingEnabled(input) && routing?.destination.kind !== 'clarify')
+      await this.indexThread(input, session, runId);
     const replyContext = await this.replyContext(input, session);
     const started = await this.host.begin(runId, {
       identity,
@@ -844,6 +1248,9 @@ export class ChannelTurns {
         remoteMessageRef: input.remoteMessageRef,
         ...(replyContext ? { replyContext } : {}),
         ...(input.replyTo ? { replyTo: input.replyTo } : {}),
+        ...(routing?.destination.kind === 'clarify'
+          ? { routingClarification: routing.destination.text }
+          : {}),
       },
     });
     this.kick();
@@ -949,6 +1356,17 @@ export class ChannelTurns {
       // run in that gap. Left as it is; a receipt whose run never began is
       // pruned with the others (`housekeeping`).
       if (!record) continue;
+      if (
+        this.routing &&
+        this.routing.mode !== 'off' &&
+        record.status === 'finished'
+      ) {
+        await this.db.run(
+          'UPDATE channel_thread_index SET recent_reply=? WHERE last_run_id=?',
+          [(record.partialText ?? '').slice(0, 800), row.run_id],
+        );
+        await this.host.changed();
+      }
       const request = this.host.requestOf(record);
       let author: 'user' | 'oracle' = 'user';
       try {

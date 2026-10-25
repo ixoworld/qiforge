@@ -297,6 +297,12 @@ tool, and the capability router's Decision is its own trace with the turn's
 | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` (secret) | Only for `cloudflare-jev` **without** the `AI` binding: the account and Workers AI token for the REST API. With `"ai": { "binding": "AI" }` declared in `wrangler.jsonc` the binding is used and neither is needed.                                                                                                                                                                        |
 | `CAPABILITY_ROUTER`                                      | Capability router, the runtime's own Decision (requires a `DECISION_PROVIDER`). `off` (default) never evaluates; `shadow` evaluates off the turn's path and logs `[capability-router-shadow]` verdicts for accuracy measurement; `on` awaits the verdict before the first model call and preloads the predicted on-demand plugin's tools for that turn only. Any failure preloads nothing. |
 
+### Channel conversation routing
+
+`CHANNEL_SEMANTIC_ROUTING=off|shadow|on` defaults to `off` and applies exclusively to authenticated channel turns. Companion's Portal and Matrix sessions keep explicit selection. `shadow` observes asynchronously without routing; `on` applies clear assignments and produces tool-free clarification when ambiguous or unavailable. `CHANNEL_SEMANTIC_ROUTING_BINDINGS` optionally limits the mode to comma-separated test binding IDs; empty means all channel bindings. `CHANNEL_SEMANTIC_ROUTING_MIN_PROBABILITY` defaults to `0.9` (range `0.5..1`), with an additional `0.2` winner margin. Thresholds are experimental.
+
+The router uses the existing Decision provider, with a 1.5-second evaluation budget. It never infers cancellation or approval. It is independent of `CAPABILITY_ROUTER`. See [channel routing](channel-routing.md) for the full pilot recipe, dedicated provider selection, rollback behavior, evidence, and limits.
+
 ### Anonymous response feedback
 
 Users can send anonymous free-text feedback about one completed Agent reply

@@ -11,6 +11,7 @@ import { FakeToolCallingModel } from 'langchain';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { createRuntimeCore } from '../core';
+import type { DecisionAdapter } from '@ixo/common/ai/decisions';
 import { CONTEXT_SECTION_LABELS } from '../core/prompt-composer';
 import { makeEnv } from '../core/test-fixtures';
 import {
@@ -37,6 +38,7 @@ import type { RunFrame } from './run-buffer';
 import { storedRunRequest, type StoredRunRequest } from './run-request';
 import {
   channelRequestHash,
+  type ChannelTurnInput,
   type ChannelControlInput,
 } from '../channels/contract';
 import { createUserOracleDO } from './user-oracle-do';
@@ -289,8 +291,15 @@ function fakeGateway() {
     getOracleSigningMnemonic: async () => null,
     getOracleSecretsKey: async () => null,
     resolveUserRoom: async () => ({ roomId: ROOM }),
-    getRoomStateEvent: async () => null,
-    sendText: async () => '$event',
+    getRoomStateEvent: async (_roomId: string, type: string) =>
+      type === 'm.room.encryption'
+        ? JSON.stringify({ algorithm: 'm.megolm.v1.aes-sha2' })
+        : null,
+    sendText: async (
+      _roomId: string,
+      _text: string,
+      options?: { txnId?: string },
+    ) => `$${options?.txnId ?? 'event'}`,
     sendEvent: async () => '$event',
   };
 }
@@ -339,6 +348,7 @@ interface ObjectOptions {
   /** Extra env (the `USER_CONTEXT_*` knobs). */
   env?: Record<string, unknown>;
   delegation?: string;
+  decisionAdapter?: DecisionAdapter;
 }
 
 async function userObject(
@@ -357,6 +367,7 @@ async function userObject(
   const core = createRuntimeCore({
     config: { name: 'Test' },
     env: makeEnv(objectEnv),
+    decisionAdapter: opts.decisionAdapter,
     // The memory plugin declares MEMORY_ENGINE_URL; its MCP surface is one
     // stub write tool under the upstream name.
     plugins: [
@@ -574,6 +585,56 @@ async function userObject(
   return {
     engine,
     turn,
+    async channelTurn(
+      message: string,
+      requestId: string,
+      extra: Partial<Pick<ChannelTurnInput, 'sessionId' | 'replyTo'>> = {},
+    ) {
+      const input: ChannelTurnInput = {
+        provider: 'whatsapp',
+        bindingId: 'chb_context',
+        bindingRevision: 1,
+        requestId,
+        remoteMessageRef: `hmac:${'a'.repeat(64)}`,
+        message,
+        context: { kind: 'companion' },
+        ...extra,
+      };
+      const identity = {
+        userDid: USER_DID,
+        channel: {
+          callerDid: 'did:web:channel.test',
+          provider: input.provider,
+          bindingId: input.bindingId,
+          bindingRevision: 1,
+        },
+      };
+      const hash = await channelRequestHash(JSON.stringify(input));
+      const parse = z.object({
+        ok: z.literal(true),
+        result: z.object({
+          sessionId: z.string(),
+          runId: z.string(),
+          status: z.string(),
+          text: z.string().optional(),
+        }),
+      });
+      parse.parse(await call('channelTurn', identity, input, hash));
+      await drain();
+      return parse.parse(await call('channelTurn', identity, input, hash))
+        .result;
+    },
+    async transcriptText(sessionId: string) {
+      const tuple = await saver().getTuple({
+        configurable: { thread_id: sessionId },
+      });
+      const messages: unknown = tuple?.checkpoint.channel_values.messages;
+      return Array.isArray(messages)
+        ? messages
+            .map((message) => textOf(Reflect.get(message, 'content')))
+            .join('\n')
+        : '';
+    },
     async cancel(requestId: string): Promise<void> {
       const control: ChannelControlInput = {
         provider: 'whatsapp',
@@ -1004,6 +1065,73 @@ describe('user-context prefetch in a user-object turn', () => {
       expect(o.model.calls).toEqual([]);
       expect(o.engine.batches).toEqual([]);
     });
+  });
+
+  it('routes authenticated channel turns while Portal stays explicit, and persists clarification without calling an agent or tools', async () => {
+    let decisions = 0;
+    const decisionAdapter: DecisionAdapter = {
+      provider: 'test',
+      model: 'channel-router',
+      evaluate: async (request) => {
+        decisions++;
+        const question = request.questions.destination;
+        if (question?.kind !== 'choice')
+          throw new Error('Expected routing choice');
+        const { message } = z
+          .object({ message: z.string() })
+          .parse(request.state);
+        const value = message === 'Yes' ? 'ambiguous' : 'new_thread';
+        const keys = Object.keys(question.options);
+        return {
+          answers: {
+            destination: {
+              kind: 'choice',
+              value,
+              confidence: 0.99,
+              probabilities: Object.fromEntries(
+                keys.map((key) => [
+                  key,
+                  key === value ? 0.99 : 0.01 / (keys.length - 1),
+                ]),
+              ),
+            },
+          },
+        };
+      },
+    };
+    await withObject(
+      'channel-router-versus-portal',
+      { env: { CHANNEL_SEMANTIC_ROUTING: 'on' }, decisionAdapter },
+      async (o) => {
+        await o.turn('portal-one', 'portal-r1');
+        await o.turn('portal-one', 'portal-r2');
+        expect(decisions).toBe(0);
+        const application = await o.channelTurn(
+          'Help with my application',
+          'wa:application',
+        );
+        expect(application.status).toBe('finished');
+        const trip = await o.channelTurn('A separate trip', 'wa:trip', {
+          sessionId: application.sessionId,
+        });
+        expect(trip.status).toBe('finished');
+        expect(trip.sessionId).not.toBe(application.sessionId);
+        expect(trip.text).toContain('Started a separate conversation.');
+        const calls = o.model.calls.length;
+        const clarification = await o.channelTurn('Yes', 'wa:yes', {
+          sessionId: trip.sessionId,
+        });
+        expect(clarification.status).toBe('finished');
+        expect(clarification.text).toContain('Which conversation');
+        expect(o.model.calls).toHaveLength(calls);
+        expect(o.memoryWrites()).toBe(0);
+        expect(await o.transcriptText(trip.sessionId)).toContain(
+          'Which conversation',
+        );
+        await o.turn('portal-one', 'portal-r3');
+        expect(decisions).toBe(2);
+      },
+    );
   });
 
   it('refreshes memory in a continuous channel session and incrementally indexes finished turns', async () => {

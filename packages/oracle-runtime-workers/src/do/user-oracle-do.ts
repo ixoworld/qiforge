@@ -7,6 +7,7 @@ import type {
   ChannelControlOutcome,
 } from '../channels/contract';
 import { ChannelTurns } from '../channels/turns';
+import { channelRoutingConfig } from '../channels/routing';
 import { assertChannelAttemptAllowed } from '../channels/auth';
 import {
   CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
@@ -1824,6 +1825,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         beforeCreate: () => this.markRunsMaybeActive(),
       });
 
+      const channelRouting = channelRoutingConfig.parse(this.core.validatedEnv);
       this.channelTurns = new ChannelTurns(liveDb, {
         createSession: async (identity, markerTxnId) => {
           const roomId = await this.resolveMainRoomId(identity.userDid);
@@ -1911,6 +1913,24 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         keepAlive: (work) => this.ctx.waitUntil(work),
         pruneTombstones: (before, limit) =>
           this.runStore!.pruneChannelTombstones(before, limit),
+        routing: {
+          mode: channelRouting.CHANNEL_SEMANTIC_ROUTING,
+          bindings: channelRouting.CHANNEL_SEMANTIC_ROUTING_BINDINGS.split(',')
+            .map((binding) => binding.trim())
+            .filter(Boolean),
+          minProbability:
+            channelRouting.CHANNEL_SEMANTIC_ROUTING_MIN_PROBABILITY,
+          evaluator: this.core.decisions,
+          ownsSession: async (sessionId) => {
+            const session = await this.sessions!.getSession(sessionId);
+            const roomId = await this.resolveMainRoomId(userDid);
+            return Boolean(
+              sessionId.startsWith('$') && roomId && session?.roomId === roomId,
+            );
+          },
+          observe: (observation) =>
+            console.log(`[channel-routing] ${JSON.stringify(observation)}`),
+        },
       });
 
       const core = this.core;
@@ -4698,6 +4718,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * input whatever its disposition.
      */
     private runRequestJson(req: TurnRequest, stored: StoredRunRequest): string {
+      if (req.client === 'channel' && req.channel?.routingClarification)
+        return JSON.stringify({
+          ...stored,
+          disposition: {
+            kind: 'direct-read',
+            text: req.channel.routingClarification,
+            title: 'Conversation clarification',
+            messageId: `direct:${req.sessionId}:${req.requestId}:ai`,
+          },
+        });
       const admissible =
         admissionApplies(req) &&
         this.core.plugins.some((plugin) => plugin.getRequestAdmission);
@@ -5054,6 +5084,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         timestamp: new Date().toISOString(),
         oracleName: this.core.identity.name,
         msgFromMatrixRoom: req.client === 'matrix',
+        ...(req.client === 'channel' && req.channel
+          ? {
+              'org.ixo.qi.origin': channelOrigin(req.channel),
+              ...(req.channel.replyTo
+                ? { 'org.ixo.qi.reply': req.channel.replyTo }
+                : {}),
+            }
+          : {}),
         ...(req.client === 'matrix'
           ? {
               senderDid: req.identity.userDid,
