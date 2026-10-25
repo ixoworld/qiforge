@@ -1,3 +1,4 @@
+export { MemoryImportTestDO } from '../src/organisation-memory/test-do';
 export { ChannelTurnsTestDO } from '../src/channels/test-do';
 export { ArtifactStoreTestDO } from '../src/artifacts/test-do';
 export { FeedbackTestDO } from '../src/feedback/test-do';

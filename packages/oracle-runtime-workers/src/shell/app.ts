@@ -1,3 +1,4 @@
+import { registerImportRoutes } from '../organisation-memory/routes';
 import {
   authenticateChannel,
   assertActiveChannelBindingCached,
@@ -502,6 +503,8 @@ export function createShell(
       );
     }
   });
+
+  registerImportRoutes(app);
 
   // --- auth ------------------------------------------------------------------
   app.use('*', async (c, next) => {
