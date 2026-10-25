@@ -17,6 +17,11 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           run_install: false
+      # TypeScript treats aliased source under node_modules as external when
+      # pnpm prepares the git editor dependency. Keep its build store outside it.
+      - name: Configure pnpm source build store
+        run: pnpm config set store-dir "$RUNNER_TEMP/pnpm-store"
+
       - uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'
