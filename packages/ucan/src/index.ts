@@ -87,7 +87,12 @@ export {
 
 export {
   createUCANValidator,
+  resourceNamesIssuer,
+  DEFAULT_PROOF_CHAIN_LIMITS,
+  DEFAULT_MAX_ERROR_MESSAGE_CHARS,
   type CreateValidatorOptions,
+  type ValidateInvocationOptions,
+  type ProofChainLimits,
   type ValidateResult,
   type UCANValidator,
 } from './validator/validator.js';
@@ -159,4 +164,4 @@ export {
 // Version
 // =============================================================================
 
-export const VERSION = '2.2.0';
+export const VERSION = '2.3.0';
