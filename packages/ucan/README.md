@@ -210,27 +210,33 @@ createUCANValidator(options: CreateValidatorOptions): Promise<UCANValidator>
 
 Create a framework-agnostic validator.
 
-| Option              | Type                 | Description                                                               |
-| ------------------- | -------------------- | ------------------------------------------------------------------------- |
-| `serverDid`         | `string`             | Server's DID (any method supported)                                       |
-| `rootIssuers`       | `string[]`           | DIDs that can self-issue capabilities (`'*'`: accept any verified root)   |
-| `didResolver`       | `DIDKeyResolver`     | Resolver for non-`did:key` DIDs                                           |
-| `invocationStore`   | `InvocationStore`    | Custom store for replay protection                                        |
-| `revocationChecker` | `RevocationChecker`  | Check the verified proof chain against a revocation registry (see below)  |
-| `revocationFailure` | `'open' \| 'closed'` | What to do if the checker itself fails. Default `'closed'`                |
-| `requireExpiration` | `boolean`            | Reject tokens with unbounded expiry. Default `false`; recommended in prod |
+| Option                   | Type                                 | Description                                                                                                                                                                    |
+| ------------------------ | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `serverDid`              | `string`                             | Server's DID (any method supported)                                                                                                                                            |
+| `rootIssuers`            | `string[]`                           | DIDs that can self-issue capabilities (`'*'`: accept any verified root)                                                                                                        |
+| `didResolver`            | `DIDKeyResolver`                     | Resolver for non-`did:key` DIDs                                                                                                                                                |
+| `invocationStore`        | `InvocationStore`                    | Custom store for replay protection                                                                                                                                             |
+| `revocationChecker`      | `RevocationChecker`                  | Check the verified proof chain against a revocation registry (see below)                                                                                                       |
+| `revocationFailure`      | `'open' \| 'closed'`                 | What to do if the checker itself fails. Default `'closed'`                                                                                                                     |
+| `requireExpiration`      | `boolean`                            | Reject tokens with unbounded expiry. Default `false`; recommended in prod                                                                                                      |
+| `proofChainLimits`       | `Partial<ProofChainLimits> \| false` | Bounds on a token's raw proof tree, checked before any verification. Default `DEFAULT_PROOF_CHAIN_LIMITS` (10 deep, 32 nodes, 16 proofs per link, 8 issuers); `false` disables |
+| `maxErrorMessageChars`   | `number`                             | Longest `error.message` returned (cut, then `…`). Default 1,024                                                                                                                |
+| `maxCapabilities`        | `number`                             | Most capabilities an invocation may carry. Default unlimited; set 1 when you mint one per invocation                                                                           |
+| `allowUniversalResource` | `boolean`                            | Accept a capability on `ucan:*` anywhere in a token. Default `true`; set `false` when your definitions reason about resources                                                  |
 
 #### Methods
 
-| Method                                                | Description                                                   |
-| ----------------------------------------------------- | ------------------------------------------------------------- |
-| `validate(invocationBase64, capabilityDef, resource)` | Validate an invocation against a capability definition        |
-| `validateDelegation(delegationBase64)`                | Validate a standalone delegation (signature, audience, chain) |
+| Method                                                          | Description                                                                                             |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `validate(invocationBase64, capabilityDef, resource, options?)` | Validate an invocation against a capability definition; `options.expect` pins the authorised capability |
+| `validateDelegation(delegationBase64)`                          | Validate a standalone delegation (signature, audience, chain)                                           |
 
 **`validate()`** validates a full invocation — checks signature, capability matching, caveats, replay protection, and resource authorization.
 
 - The reported `capability` (`can`, `with`, `nb`) and the resource check come from the capability ucanto actually authorised. An invocation may carry several capabilities; an unproven one is never reported, wherever it sits in the list. `nb` is the value read through the capability definition's `nb` schema (the value its `derives` checked): caveat fields the schema does not declare are not returned, and it is `undefined` when no caveat is set.
-- Besides `rootIssuers`, an issuer may self-issue on a resource whose URI names its DID exactly or as a whole segment — the DID starts the URI or follows `:` or `/`, and ends it or is followed by `/` (`ixo:tenant/did:key:z6Mk…` or `ixo:tenant/did:key:z6Mk…/files`). A DID that is only a prefix of the named one does not match.
+- Pass `{ expect: { can, with } }` as the fourth argument when you read the capability from the invocation yourself and route by it: the authorised `can`/`with` must then equal it exactly (no `/*` tolerance), else `UNAUTHORIZED`. Set `maxCapabilities: 1` on the validator when every client mints one capability per invocation.
+- Besides `rootIssuers`, an issuer may self-issue on a resource whose **authority** is its DID: the whole resource, the part after the scheme (`ixo:did:key:z6Mk…`, `ixo:tenant:did:key:z6Mk…`, optionally followed by `/path`), or the first path segment under a named authority (`ixo:tenant/did:key:z6Mk…/files`). A DID deeper in the path does not count (`ixo:filesystem/alice/did:key:z6Mk…` is Alice's resource that mentions the DID), and neither does a DID that is only a prefix of the named one.
+- Before any signature is verified or DID resolved, the token's raw proof tree must fit `proofChainLimits` (else `INVALID_FORMAT`) and, with `allowUniversalResource: false`, must not carry a capability on `ucan:*` (else `UNAUTHORIZED`). Within one call every DID is resolved once, however many links it issues.
 - The invocation's CID is reserved in the replay store before verification starts, released again if validation fails, and kept until the invocation's own expiry (plus one minute) when it succeeds; a token without expiry keeps the store's default TTL.
 
 **`validateDelegation()`** validates a standalone delegation token — verifies the cryptographic signature of every delegation in the proof chain, checks audience matches `serverDid`, validates the validity window over every proof (the earliest expiry and the latest not-before; a not-before in the future fails with `UNAUTHORIZED`), and ensures chain consistency (each proof's audience matches the child delegation's issuer). Supports `did:key` issuers natively and non-`did:key` issuers (e.g. `did:ixo`) via the configured `didResolver`.
@@ -250,7 +256,7 @@ Both methods return a `ValidateResult`:
 | `facts`          | `Record<string, unknown>[] \| undefined` | Facts attached to the invocation/delegation. Undefined if none.                                       |
 | `error`          | `object`                                 | Error with `code` and `message` (on failure)                                                          |
 
-Error codes: `INVALID_FORMAT`, `INVALID_SIGNATURE`, `UNAUTHORIZED`, `REPLAY`, `EXPIRED`, `CAVEAT_VIOLATION`, `REVOKED`, `REVOCATION_CHECK_FAILED`.
+Error codes: `INVALID_FORMAT`, `INVALID_SIGNATURE`, `UNAUTHORIZED`, `REPLAY`, `EXPIRED`, `CAVEAT_VIOLATION`, `REVOKED`, `REVOCATION_CHECK_FAILED`. `error.message` is at most `maxErrorMessageChars` long.
 
 ### Revocation
 

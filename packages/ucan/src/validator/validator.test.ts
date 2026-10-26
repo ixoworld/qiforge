@@ -2332,17 +2332,35 @@ describe('UCAN Validator', () => {
       const serialized = await serializeInvocation(invocation);
 
       const seen: string[][] = [];
+      const revocationChecker = {
+        check: async (cids: string[]) => {
+          seen.push(cids);
+          return cids.includes(realGrant.cid.toString())
+            ? [realGrant.cid.toString()]
+            : [];
+        },
+      };
+
+      // Under the default proof-chain limits a link with 41 proofs is refused
+      // before anything is verified or checked.
+      const bounded = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*'],
+        revocationChecker,
+      });
+      const refused = await bounded.validate(
+        serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+      expect(refused.error?.code).toBe('INVALID_FORMAT');
+      expect(seen).toHaveLength(0);
+
       const validator = await createUCANValidator({
         serverDid: server.did,
         rootIssuers: ['*'],
-        revocationChecker: {
-          check: async (cids) => {
-            seen.push(cids);
-            return cids.includes(realGrant.cid.toString())
-              ? [realGrant.cid.toString()]
-              : [];
-          },
-        },
+        proofChainLimits: { maxProofsPerLink: 64, maxNodes: 64 },
+        revocationChecker,
       });
 
       const result = await validator.validate(

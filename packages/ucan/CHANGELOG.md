@@ -1,5 +1,20 @@
 # @ixo/ucan
 
+## 2.3.0
+
+### Minor Changes
+
+- Chain-walk hardening that services kept re-implementing on top of the validator, now in the validator. Every item is backward compatible: the defaults only refuse tokens no real client produces, and the new rules are opt-in.
+
+  - **Proof-chain shape limits.** `validate()` and `validateDelegation()` bound the RAW proof tree of a token before any signature is verified or DID resolved: at most 10 links deep, 32 nodes visited, 16 proofs on one link and 8 distinct issuers (`DEFAULT_PROOF_CHAIN_LIMITS`). ucanto verifies every proof it reaches and backtracks through every path with no de-duplication, so a 5 KB token that references the same proof blocks three-wide at every level cost seconds of CPU and produced a multi-megabyte error. A token over a bound fails with `INVALID_FORMAT`. Override single bounds with `proofChainLimits: { maxProofsPerLink: 64 }`, or disable the check with `proofChainLimits: false`. Invalid values throw a `RangeError` when the validator is created. New exports: `ProofChainLimits`, `DEFAULT_PROOF_CHAIN_LIMITS`.
+  - **Bounded error messages.** `error.message` is cut at `maxErrorMessageChars` (default 1,024, `DEFAULT_MAX_ERROR_MESSAGE_CHARS`) and then ends with `…`. ucanto's messages can enumerate every explored path of a proof tree. Real messages are far shorter and unchanged.
+  - **Capability pinning.** `validate()` takes a fourth, optional argument `{ expect: { can?, with? } }`: the capability ucanto authorised must equal it exactly (no `/*` tolerance), else `UNAUTHORIZED`. ucanto authorises the first capability it can prove, which may not be the one a service read from the invocation and routes by. New export: `ValidateInvocationOptions`.
+  - **Capability count.** `maxCapabilities` (default unlimited) refuses an invocation carrying more capabilities than that with `INVALID_FORMAT`, before any verification. A service that mints one capability per invocation sets 1.
+  - **Universal resource.** `allowUniversalResource: false` refuses a capability on ucanto's universal resource `ucan:*` anywhere in a token or its proof chain with `UNAUTHORIZED`. Default `true` (unchanged behaviour).
+  - **DID resolution memoised per validation.** Within one `validate()` or `validateDelegation()` call each DID is resolved once, however many links it issues (an owner who attached every grant it holds, an agent that re-shared twice). Nothing is cached across calls; the resolvers' own `cacheTtlMs` remains the cross-request cache.
+  - **Resource-scoped self-issue names the authority only.** An issuer outside `rootIssuers` may self-issue on a resource whose AUTHORITY is its DID: the whole resource, the part after the scheme (`ixo:did:key:z6Mk…`, `ixo:tenant:did:key:z6Mk…`, optionally followed by `/path`), or the first path segment under a named authority (`ixo:tenant/did:key:z6Mk…/files`). Before, a DID matched as a whole segment at ANY depth, so a resource that merely mentioned the issuer deeper in its path (`ixo:filesystem/alice/did:key:z6Mk…`, Alice's folder shared with that DID) let the issuer self-issue on it and be reported as its root. Visible to callers: a DID below the first path segment no longer self-issues. `resourceNamesIssuer` is exported.
+  - `VERSION` now reports the package version (`2.3.0`; it said `2.2.0` since 2.2.0).
+
 ## 2.2.1
 
 ### Patch Changes
