@@ -650,7 +650,12 @@ object fetches the six context slots (`identity`, `work`, `goals`,
 `interests`, `relationships`, `recent`) from the memory engine with one
 `POST /search-enhanced-batch` and the prompt composer renders them, so the
 agent does not have to call `search_memory_engine` to know who it is talking
-to. Settings and the measured latencies are in
+to. The request carries the user's UCAN invocation, the oracle room
+(`x-room-id`) and the oracle's domain entity (`x-oracle-entity-did:
+<ORACLE_ENTITY_DID>`, also every query's `oracle_dids`), which the engine
+keys the user's space and the shared knowledge by
+([memory engine contract](configuration.md#memory-engine-contract)).
+Settings and the measured latencies are in
 [configuration](configuration.md#first-turn-memory-prefetch).
 
 - **Waiting.** A thread with no checkpointed `userContext` (first contact)
@@ -690,7 +695,7 @@ memories…`. The client SDK does not render `router.update` frames yet, so
   A first contact that fetches nothing prints it too, with `waited=0ms` and
   the reason: `no-room`, `disabled` (`USER_CONTEXT_PREFETCH=off` or no
   `MEMORY_ENGINE_URL`), `not-booted`, `group-room`, `no-memory-grant`, or the
-  fetcher's `no-signing-key`, `no-invocation`, `recently-failed`; a `failed`
+  fetcher's `no-entity`, `no-signing-key`, `no-invocation`, `recently-failed`; a `failed`
   outcome carries its reason the same way. Task-run and supplied-context
   turns print nothing, and a thread that already holds a context prints
   nothing on its later turns),
@@ -707,7 +712,11 @@ recent=missing)` (per slot: rendered fact, entity, episode and community
   dropped. It should not happen and is worth a look),
   `failed for room=…: <reason> (not retried for 60s)` and the fetcher's own
   `skipped: …` (no engine URL, no signing key, no invocation, a recent
-  failure). A user with no `ixo:memory` delegation gets
+  failure; a missing or malformed `ORACLE_ENTITY_DID` is warned about once
+  per user object, `skipped: ORACLE_ENTITY_DID is not a domain entity DID …`,
+  and every first contact then reads `reason=no-entity`). The session-history
+  indexer logs the same condition once as `[history-indexer] ORACLE_ENTITY_DID
+  is not a domain entity DID …` and uploads nothing. A user with no `ixo:memory` delegation gets
   `first contact … outcome=skipped reason=no-memory-grant` on every first
   turn and is not slowed. If every one of the six slots fails the batch
   counts as `failed` (`every slot failed`), not as an empty answer.
@@ -1435,18 +1444,35 @@ The constants named here are listed in
   `sandbox_write_blob` reports `success: false` for a failed write. A
   sandbox connect reads the user's secrets with one room-state read
   (`ctx.secrets.getAll()`).
-- **Memory.** `memory-engine__add_oracle_knowledge` is in the default tool
-  surface, so every user's agent lists it, and the Memory Engine decides who
-  may use it: the call is refused (`Forbidden: …`) unless the calling user is
-  a domain member of an entity whose linked entities include the oracle DID.
-  From memory engine 1.5.0 a domain member is a `controller` or the `owner`
-  of that entity, the `id` of a `linkedEntity` with `service: matrix` and
-  `relationship: admin` (not `support`), or a member with positive voting
-  power of a DAO group (`did:ixo:wasm:…`) among those; legacy `did:x:zQ3…`
-  keys count as their `did:ixo:<address>` account. Engine 1.4.x admitted
-  controllers and the owner only. The engine caches the member set for
+- **Memory.** The Memory Engine keys everything by the oracle's domain
+  entity: every request names it in `x-oracle-entity-did`
+  (`ORACLE_ENTITY_DID`), the user's personal space is per (user, entity)
+  and the shared knowledge is the entity's. The engine refuses a request
+  without the header (`400 ENTITY_HEADER_MISSING` / `ENTITY_HEADER_INVALID`),
+  an entity whose on-chain document does not list the oracle's agent
+  account (`ORACLE_DID`) as a `linkedEntity` with `service: matrix` and
+  `relationship: admin` (`403 ENTITY_NOT_VOUCHED`), and, fail closed, an
+  entity it could not read from Blocksync with nothing usable cached
+  (`403 ENTITY_UNVERIFIED`); there is no fallback to the agent DID. The
+  runtime refuses to boot the memory plugin without a well-formed
+  `ORACLE_ENTITY_DID` (`did:ixo:entity:` followed by 32 lower-case hex
+  characters), and the prefetch and the
+  history upload send nothing without one
+  ([memory engine contract](configuration.md#memory-engine-contract)).
+  `memory-engine__add_oracle_knowledge` is in the default tool surface, so
+  every user's agent lists it, and the Memory Engine decides who may use
+  it: the call is refused (`Forbidden: …`) unless the calling user is a
+  domain member of the oracle's entity itself: a `controller` or the
+  `owner` of that entity, the `id` of one of its `linkedEntity` items with
+  `service: matrix` and `relationship: admin` (not `support`), or a member
+  with positive voting power of a DAO group (`did:ixo:wasm:…`) among those;
+  legacy `did:x:zQ3…` keys count as their `did:ixo:<address>` account. The
+  engine caches the entity's document (members and vouched agents) for
   5 min and refuses while Blocksync is unreachable and nothing cached is
-  usable. The call is also refused without
+  usable. Because of that cache, an agent removed from the entity's
+  `matrix` / `admin` links keeps access for up to 5 minutes, and for up to
+  15 minutes during a Blocksync outage (the stale entry is served while
+  Blocksync cannot be read). The call is also refused without
   `confirmed_insertion_from_user: true`. The agent has to confirm the scope
   with the user first: `public` knowledge is read by every user of the
   oracle, `private` by its domain members only. A fork that does not want

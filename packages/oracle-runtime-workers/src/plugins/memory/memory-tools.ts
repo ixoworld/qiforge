@@ -28,8 +28,9 @@ export const MEMORY_CLEAR_MCP_NAME = 'memory-engine__clear';
  * destructive `clear` stays in the default set. `add_oracle_knowledge` is in
  * the set so the controllers and owners of any oracle can grow its shared
  * knowledge from chat without a per-oracle code change: the Memory Engine
- * itself checks on chain that the caller controls or owns an entity linked to
- * the oracle and refuses everyone else, so listing the tool for every user
+ * itself checks on chain that the caller is a member (controller, owner,
+ * Matrix admin or DAO member) of the oracle's domain entity and refuses
+ * everyone else, so listing the tool for every user
  * costs one tool description and grants nothing. Forks that want a different
  * surface (drop `clear`, add `delete_edge`) pass an explicit list via plugin
  * options.
@@ -370,7 +371,8 @@ function buildLazyUpstreamTools(
 
 /**
  * Default factory: authenticates with the per-request UCAN headers from
- * {@link buildMemoryHeaders}, then serves the upstream tool list.
+ * {@link buildMemoryHeaders} (which name the oracle's domain entity,
+ * `entityDid`), then serves the upstream tool list.
  *
  * The first request per isolate connects and lists tools exactly like the
  * old always-fetch path, then snapshots the definitions. Subsequent requests
@@ -384,9 +386,10 @@ function buildLazyUpstreamTools(
  */
 export function createDefaultMemoryMcpFactory(
   memoryMcpUrl: string,
+  entityDid: string,
 ): MemoryMcpFactory {
   return async (runCtx) => {
-    const headers = await buildMemoryHeaders(runCtx, memoryMcpUrl);
+    const headers = await buildMemoryHeaders(runCtx, memoryMcpUrl, entityDid);
     if (!headers) return null;
 
     const cached = toolDefsCache.get(memoryMcpUrl);

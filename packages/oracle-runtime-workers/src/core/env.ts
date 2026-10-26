@@ -129,7 +129,10 @@ export const baseEnvSchema = z.object({
   ORACLE_DID: z.string().min(1),
   /**
    * On-chain entity DID surfaced to the agent as `identity.entityDid`. Falls
-   * back to `ORACLE_DID` when unset (see `createRuntimeCore`).
+   * back to `ORACLE_DID` when unset (see `createRuntimeCore`) for rooms and
+   * feedback. The memory plugin redeclares it as required
+   * (`did:ixo:entity:<32 hex>`): the Memory Engine keys every space by it and
+   * never receives the fallback.
    */
   ORACLE_ENTITY_DID: z.string().min(1).optional(),
   NETWORK: z.enum(['mainnet', 'testnet', 'devnet']).default('mainnet'),
