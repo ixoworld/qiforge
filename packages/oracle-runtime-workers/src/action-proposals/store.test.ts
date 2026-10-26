@@ -501,6 +501,7 @@ describe('durable action proposals', () => {
           },
         }),
       );
+    expect(await s.outcomes(OWNER, 'session-1', 'run-1')).toHaveLength(20);
   });
   it('indexes the alarm queries', async () => {
     const s = stub('plans');
