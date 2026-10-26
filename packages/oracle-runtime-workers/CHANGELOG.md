@@ -1,5 +1,13 @@
 # @ixo/oracle-runtime-workers
 
+## 0.24.0
+
+### Minor Changes
+
+- [#403](https://github.com/ixoworld/qiforge/pull/403) [`375c6ee`](https://github.com/ixoworld/qiforge/commit/375c6ee0ab17941febe1e8863daff83893020061) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Memory is keyed by the oracle's domain entity (Memory Engine 2.0.0, live on testnet and mainnet; devnet from `1.0.0-develop.10`). Every Memory Engine request (the memory plugin's MCP tools, the first-turn prefetch, the session-history upload and `GET /debug/memory-schema`) now carries `x-oracle-entity-did: <ORACLE_ENTITY_DID>`, and the prefetch batch sends `oracle_dids: [ORACLE_ENTITY_DID]` instead of the agent DID. The value is always the configured `ORACLE_ENTITY_DID`, never the core's fallback to `ORACLE_DID`, which stays for room aliases and feedback only. Without a well-formed entity the prefetch and the history indexer send nothing and each log one warning per user object (prefetch skip reason `no-entity`), and the debug route answers with an error.
+
+  **Breaking for oracles without `ORACLE_ENTITY_DID`.** The memory plugin's `configSchema` now requires `ORACLE_ENTITY_DID` shaped `did:ixo:entity:` followed by 32 lower-case hex characters: an oracle that sets `MEMORY_MCP_URL` but no entity (or an account DID such as `did:ixo:ixo1…` in its place) fails at boot with `Plugin 'memory' env validation failed for 'ORACLE_ENTITY_DID': …`. Set it to the oracle's domain entity, and make sure that entity's on-chain document lists the oracle's agent account (`ORACLE_DID`) as a `linkedEntity` with `service: 'matrix'` and `relationship: 'admin'`; the entity-keyed Memory Engine refuses requests from an agent its entity does not list. `qiforge-cli create-entity` already writes the oracle account as a `matrix` / `admin` linked entity on the entity it creates, so a new oracle is vouched for without a manual step; an entity created another way needs that link added by one of its controllers. Oracles that do not load the memory plugin are unaffected. API changes for forks: `buildMemoryHeaders(runCtx, memoryMcpUrl, entityDid)` and `createDefaultMemoryMcpFactory(memoryMcpUrl, entityDid)` take the entity as a new required argument, and a custom `MemoryPluginOptions.mcpFactory` receives it as its second argument. `MEMORY_ENTITY_HEADER` and `ORACLE_ENTITY_DID_PATTERN` are exported.
+
 ## 0.23.0
 
 ### Minor Changes
