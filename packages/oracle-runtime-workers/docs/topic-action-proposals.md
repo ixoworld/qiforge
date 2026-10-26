@@ -21,7 +21,7 @@ Both `ACTION_PROPOSALS_ENABLED` and `ACTION_TOPIC_PROPOSALS_ENABLED` must be `tr
 
 ## Running on Workers
 
-`@ixo/topic-protocol` builds its JSON-schema validators with Ajv, which generates code from strings; Cloudflare Workers forbid that, and `1.0.0-rc.7` compiles at module load, so a Worker bundling it fails at boot. The runtime requires a release with precompiled validators (`1.0.0-rc.8`, [topic-protocol PR 37](https://github.com/ixoworld/topic-protocol/pull/37)). `src/core/topic-protocol-runtime.test.ts` (Node project only) imports the pinned package and validates with it in a child process started with `--disallow-code-generation-from-strings`, and fails the suite on a build that would not run.
+`@ixo/topic-protocol` builds its JSON-schema validators with Ajv, which generates code from strings; Cloudflare Workers forbid that, and `1.0.0-rc.7` compiles at module load, so a Worker bundling it fails at boot. The runtime pins `1.0.0-rc.8` from the npm registry, the release with precompiled validators ([topic-protocol PR 37](https://github.com/ixoworld/topic-protocol/pull/37)). `src/core/topic-protocol-runtime.test.ts` (Node project only) imports the pinned package and validates with it in a child process started with `--disallow-code-generation-from-strings`, and fails the suite on a build that would not run.
 
 ## Authority and execution
 
@@ -46,7 +46,7 @@ An effect that has started never becomes pending again. A missing permit respons
 
 The first adapter creates a standard discussion draft in an existing selected room. Other kinds, custom profiles, project/task recipes, invitations, room creation, automatic acceptance, funding and program mutation are outside this adapter. They require clarification rather than silent conversion to a discussion.
 
-The shared `@ixo/ixo-transaction/topic-create-plan` encoder uses `@ixo/topic-protocol` 1.0.0-rc.7. It freezes the canonical v4 body, resolved shape, explicit participants and roles, title, tags, temporal mode, owner identity, generated IDs, proposal marker and evaluation time. Only independently verified root/body event references are substituted into later transport envelopes. The canonical Portal repository compares these values before writing.
+The shared `@ixo/ixo-transaction/topic-create-plan` encoder uses `@ixo/topic-protocol` 1.0.0-rc.8, which still ships topic shape release `1.0.0-rc.7` (`TOPIC_SHAPE_RELEASE`): the plan's `protocol` and its shape `sourceVersion` name that shape release, not the package version, and move only with a new shape release (a test pins it). It freezes the canonical v4 body, resolved shape, explicit participants and roles, title, tags, temporal mode, owner identity, generated IDs, proposal marker and evaluation time. Only independently verified root/body event references are substituted into later transport envelopes. The canonical Portal repository compares these values before writing.
 
 The journal contains `anchor`, `body`, `operation` and `snapshot` steps. Every step requires its own one-use permit and verified predecessors. Topic operations use the protocol's `m.reference` relation. Bounded history reads must include canonical operation relations and refuse incomplete or forked evidence. A successful receipt records the actual verified Matrix root, body, operation and state event IDs. It does not fabricate a transaction hash or assert that participants joined a room.
 

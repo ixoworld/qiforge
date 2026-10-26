@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { TOPIC_SHAPE_RELEASE } from '@ixo/topic-protocol';
 import { bech32 } from '@scure/base';
 import {
   prepareCreatePlan,
@@ -406,4 +407,12 @@ it('preserves same-collection member and claim-specific constraints when replaci
   expect(
     EvaluateClaimConstraints.toJSON(decodedEvaluate.constraints[1]!),
   ).toEqual(EvaluateClaimConstraints.toJSON(claim));
+});
+
+describe('topic shape release', () => {
+  it('pins plans to the shape release the installed protocol package ships', () => {
+    // The plan's `protocol` literal and its `sourceVersion`s are this
+    // release; a package that moves it must move them (and the Portal) too.
+    expect(TOPIC_SHAPE_RELEASE).toBe('1.0.0-rc.7');
+  });
 });
