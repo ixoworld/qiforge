@@ -267,9 +267,6 @@ export function unwrapCloudflareEnvelope(
 ): unknown {
   if (!isRecord(payload)) return payload;
 
-  const looksLikeEnvelope = 'success' in payload || 'result' in payload;
-  if (!looksLikeEnvelope) return payload;
-
   if (payload.success === false) {
     throw new JevDecisionError(
       provider,
@@ -281,15 +278,33 @@ export function unwrapCloudflareEnvelope(
     );
   }
 
-  if (!('result' in payload)) {
-    throw new JevDecisionError(
-      provider,
-      'Jev response envelope did not contain a result.',
-      { status },
-    );
+  let result = payload;
+  const inferenceEnvelope = provider === 'cloudflare' && 'state' in payload;
+  if (!inferenceEnvelope && ('success' in payload || 'result' in payload)) {
+    if (!('result' in payload)) {
+      throw new JevDecisionError(
+        provider,
+        'Jev response envelope did not contain a result.',
+        { status },
+      );
+    }
+    const unwrapped: unknown = payload.result;
+    if (!isRecord(unwrapped)) return unwrapped;
+    result = unwrapped;
   }
 
-  return payload.result;
+  if (provider === 'cloudflare' && 'state' in result) {
+    if (result.state !== 'Completed' || !('result' in result)) {
+      throw new JevDecisionError(
+        provider,
+        'Cloudflare Jev inference did not return a completed result.',
+        { status },
+      );
+    }
+    return result.result;
+  }
+
+  return result;
 }
 
 export function parseJevResult(
