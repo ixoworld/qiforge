@@ -129,17 +129,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * is Alice's resource that happens to mention the DID, for example a folder
  * shared with it), and neither does a DID that is only a prefix of the named
  * one (`did:web:victim.co` inside `…/did:web:victim.com`) or part of a longer
- * segment.
+ * segment. When the authority is itself a DID (`ixo:did:key:alice/…`) the
+ * resource is that DID's, and the first path segment is not consulted. Query
+ * and fragment are not part of the authority.
  */
 export function resourceNamesIssuer(resource: string, issuer: string): boolean {
   if (!issuer) return false;
   if (resource === issuer) return true;
+  // A resource that is itself a DID names exactly that DID.
+  if (resource.startsWith('did:')) return false;
   const schemeEnd = resource.indexOf(':');
   if (schemeEnd === -1) return false;
-  const rest = resource.slice(schemeEnd + 1);
+  const rest = resource.slice(schemeEnd + 1).split(/[?#]/, 1)[0] ?? '';
   const slash = rest.indexOf('/');
   const authority = slash === -1 ? rest : rest.slice(0, slash);
+  if (authority === '') return false;
   if (authority === issuer || authority.endsWith(`:${issuer}`)) return true;
+  // An authority that is (or ends in) some DID names that DID's resource; a
+  // DID in the path below it is somebody else's.
+  if (authority.startsWith('did:') || authority.includes(':did:')) return false;
   if (slash === -1) return false;
   const path = rest.slice(slash + 1);
   const nextSlash = path.indexOf('/');
@@ -156,11 +164,13 @@ export function resourceNamesIssuer(resource: string, issuer: string): boolean {
  * signature is verified or any DID resolved.
  *
  * ucanto verifies every proof it reaches and backtracks through every path
- * when one fails, without de-duplicating shared nodes, so a small token whose
- * proofs reference the same blocks several times at every level costs
- * exponential CPU and produces an error message that enumerates every path.
- * Counts are over VISITS (a node reached through two parents counts twice),
- * which is what the verification work is proportional to.
+ * when one fails, without de-duplicating shared nodes, and it branches on
+ * every capability of a proof that could match, so a small token whose proofs
+ * reference the same blocks several times at every level, or repeat a
+ * capability a few times per link, costs exponential CPU and produces an error
+ * message that enumerates every path. Counts are over VISITS (a node reached
+ * through two parents counts twice), which is what the verification work is
+ * proportional to; `maxPaths` bounds the product of those branch factors.
  */
 export interface ProofChainLimits {
   /** Delegation links below the token itself (the token is depth 0). */
@@ -169,20 +179,36 @@ export interface ProofChainLimits {
   maxNodes: number;
   /** Proofs attached to any single delegation (or to the token). */
   maxProofsPerLink: number;
-  /** Distinct issuer DIDs over the whole tree (each one is a DID resolution). */
+  /** Capabilities on any single delegation (or on the token). */
+  maxCapabilitiesPerLink: number;
+  /**
+   * Distinct issuer DIDs over the whole tree. Each is a DID resolution (the
+   * resolver is memoised per validation; validateDelegation() also resolves
+   * proof audiences, which maxNodes bounds).
+   */
   maxIssuers: number;
+  /**
+   * Upper bound on the authorization paths ucanto may explore for the token:
+   * the token's capability count times the sum over its proofs of (that
+   * proof's capability count times its own paths), a leaf counting 1. Three
+   * capabilities repeated at each of ten links is 3^11 paths from 11 nodes.
+   */
+  maxPaths: number;
 }
 
 /**
  * Defaults, generous for real chains: a user → agent → sub-agent re-share is
- * 2–3 deep with one issuer per link, and a client that attaches every grant
- * it holds at one scope attaches a handful.
+ * 2–3 deep with one issuer per link; a client that attaches every grant it
+ * holds at one scope attaches a handful, each with its own parent; a bundled
+ * grant for several services carries a capability per service.
  */
 export const DEFAULT_PROOF_CHAIN_LIMITS: Readonly<ProofChainLimits> = {
   maxDepth: 10,
-  maxNodes: 32,
+  maxNodes: 64,
   maxProofsPerLink: 16,
-  maxIssuers: 8,
+  maxCapabilitiesPerLink: 32,
+  maxIssuers: 16,
+  maxPaths: 512,
 };
 
 /**
@@ -204,11 +230,15 @@ function resolveProofChainLimits(
   option: Partial<ProofChainLimits> | false | undefined,
 ): ProofChainLimits | null {
   if (option === false) return null;
-  const limits = { ...DEFAULT_PROOF_CHAIN_LIMITS, ...option };
+  const limits: ProofChainLimits = { ...DEFAULT_PROOF_CHAIN_LIMITS };
   for (const key of Object.keys(
     DEFAULT_PROOF_CHAIN_LIMITS,
   ) as (keyof ProofChainLimits)[]) {
-    positiveInteger(limits[key], `proofChainLimits.${key}`);
+    // An undefined key (the usual env-wiring shape) keeps the default.
+    const value = option?.[key];
+    if (value !== undefined) {
+      limits[key] = positiveInteger(value, `proofChainLimits.${key}`);
+    }
   }
   return limits;
 }
@@ -226,7 +256,8 @@ function asChainNode(node: unknown): RawChainNode | null {
 /**
  * Walk the raw proof tree of `root` and return a short reason when its shape
  * exceeds `limits`, else null. A proof that travelled as a bare CID link (its
- * block not embedded) has no issuer and no proofs; it counts as one node.
+ * block not embedded) has no issuer, capabilities or proofs; it counts as one
+ * node and one path.
  */
 function proofChainShapeError(
   root: unknown,
@@ -234,31 +265,57 @@ function proofChainShapeError(
 ): string | null {
   let visits = 0;
   const issuers = new Set<string>();
-  const walk = (value: unknown, depth: number): string | null => {
+  let reason: string | null = null;
+  const fail = (why: string): number => {
+    reason ??= why;
+    return Infinity;
+  };
+  /** Paths through `value` (see ProofChainLimits.maxPaths), or Infinity once a bound failed. */
+  const walk = (value: unknown, depth: number): number => {
     const node = asChainNode(value);
-    if (!node) return null;
+    if (!node) return 1;
     if (depth > limits.maxDepth) {
-      return `Proof chain is deeper than ${limits.maxDepth} links`;
+      return fail(`Proof chain is deeper than ${limits.maxDepth} links`);
     }
     if (++visits > limits.maxNodes) {
-      return `Proof chain has more than ${limits.maxNodes} nodes`;
+      return fail(`Proof chain has more than ${limits.maxNodes} nodes`);
     }
     const issuer = node.issuer?.did?.();
     if (typeof issuer === 'string') issuers.add(issuer);
     if (issuers.size > limits.maxIssuers) {
-      return `Proof chain involves more than ${limits.maxIssuers} issuers`;
+      return fail(
+        `Proof chain involves more than ${limits.maxIssuers} issuers`,
+      );
+    }
+    const capabilities = Array.isArray(node.capabilities)
+      ? node.capabilities.length
+      : 0;
+    if (capabilities > limits.maxCapabilitiesPerLink) {
+      return fail(
+        `A delegation carries more than ${limits.maxCapabilitiesPerLink} capabilities`,
+      );
     }
     const proofs = Array.isArray(node.proofs) ? node.proofs : [];
     if (proofs.length > limits.maxProofsPerLink) {
-      return `A delegation carries more than ${limits.maxProofsPerLink} proofs`;
+      return fail(
+        `A delegation carries more than ${limits.maxProofsPerLink} proofs`,
+      );
     }
+    let below = 0;
     for (const proof of proofs) {
-      const reason = walk(proof, depth + 1);
-      if (reason) return reason;
+      below += walk(proof, depth + 1);
+      if (below > limits.maxPaths) break;
     }
-    return null;
+    const paths = Math.max(1, capabilities) * Math.max(1, below);
+    if (paths > limits.maxPaths) {
+      return fail(
+        `Proof chain allows more than ${limits.maxPaths} authorization paths`,
+      );
+    }
+    return paths;
   };
-  return walk(root, 0);
+  walk(root, 0);
+  return reason;
 }
 
 /** ucanto's universal resource: a capability on it matches any resource. */
@@ -266,14 +323,21 @@ const UNIVERSAL_RESOURCE = 'ucan:*';
 
 /**
  * True when the token or any proof in its raw tree carries a capability on
- * `ucan:*`. Call only after proofChainShapeError() accepted the tree.
+ * `ucan:*`. Each block is visited once (keyed by CID: ucanto materialises a
+ * new Delegation object per parent, so object identity would not de-duplicate
+ * a shared block), so this stays linear in the token size even with the shape
+ * limits disabled.
  */
 function chainUsesUniversalResource(root: unknown): boolean {
-  const seen = new Set<object>();
+  const seen = new Set<string>();
   const walk = (value: unknown): boolean => {
     const node = asChainNode(value);
-    if (!node || seen.has(node)) return false;
-    seen.add(node);
+    if (!node) return false;
+    const cid = nodeCid(node);
+    if (cid !== undefined) {
+      if (seen.has(cid)) return false;
+      seen.add(cid);
+    }
     for (const cap of Array.isArray(node.capabilities)
       ? node.capabilities
       : []) {
@@ -287,8 +351,27 @@ function chainUsesUniversalResource(root: unknown): boolean {
   return walk(root);
 }
 
+/** Cut `message` to at most `max` characters, the last one `…` when cut. */
 function clipMessage(message: string, max: number): string {
-  return message.length > max ? `${message.slice(0, max)}…` : message;
+  if (message.length <= max) return message;
+  let end = max - 1;
+  // Do not split a surrogate pair.
+  const last = message.charCodeAt(end - 1);
+  if (end > 0 && last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return `${message.slice(0, end)}…`;
+}
+
+/**
+ * The form ucanto reports a resource in: `URI.match` reads it through the URL
+ * parser, so `IXO:company/A` is reported as `ixo:company/A`. A value that is
+ * not a URL is compared as given.
+ */
+function canonicalResource(value: string): string {
+  try {
+    return new URL(value).href;
+  } catch {
+    return value;
+  }
 }
 
 /**
@@ -463,9 +546,9 @@ export interface CreateValidatorOptions {
   proofChainLimits?: Partial<ProofChainLimits> | false;
 
   /**
-   * Longest `error.message` returned (longer messages are cut and end with
-   * `…`). Default DEFAULT_MAX_ERROR_MESSAGE_CHARS (1,024). ucanto's messages
-   * can enumerate every explored path of a proof tree.
+   * Longest `error.message` returned; a longer message is cut to this length
+   * and ends with `…`. Default DEFAULT_MAX_ERROR_MESSAGE_CHARS (1,024).
+   * ucanto's messages can enumerate every explored path of a proof tree.
    */
   maxErrorMessageChars?: number;
 
@@ -494,9 +577,11 @@ export interface ValidateInvocationOptions {
   /**
    * The capability the caller read from the invocation and will act on. After
    * ucanto authorised the invocation, its authorised `can` and/or `with` must
-   * equal these exactly (no wildcard tolerance), else the result is
-   * 'UNAUTHORIZED'. Without it, `with` is still checked against `resource`
-   * (exact, or a `/*` / `:*` wildcard prefix) as before.
+   * equal these exactly (no wildcard tolerance; `with` in URL-canonical form,
+   * as ucanto reports it), else the result is 'UNAUTHORIZED'. Without it,
+   * `with` is still checked against `resource` (exact, or a `/*` / `:*`
+   * wildcard prefix) as before. `nb` is not pinned: act on `result.capability`
+   * and set `maxCapabilities: 1` when the invocation must carry one.
    */
   expect?: { can?: string; with?: string };
 }
@@ -1173,10 +1258,12 @@ export async function createUCANValidator(
     // act on: ucanto authorises the first capability it can prove, and a
     // caller that routes by the invocation's first capability must never act
     // on a different one than the one proven here. Exact match, no wildcard
-    // tolerance.
+    // tolerance; `with` is compared in the form ucanto reports it (see
+    // canonicalResource).
     if (
       (expect?.can !== undefined && validatedCap.can !== expect.can) ||
-      (expect?.with !== undefined && validatedCap.with !== expect.with)
+      (expect?.with !== undefined &&
+        validatedCap.with !== canonicalResource(expect.with))
     ) {
       return {
         ok: false,

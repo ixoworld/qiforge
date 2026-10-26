@@ -95,9 +95,11 @@ describe('proof-chain shape limits', () => {
   it('exports generous defaults', () => {
     expect(DEFAULT_PROOF_CHAIN_LIMITS).toEqual({
       maxDepth: 10,
-      maxNodes: 32,
+      maxNodes: 64,
       maxProofsPerLink: 16,
-      maxIssuers: 8,
+      maxCapabilitiesPerLink: 32,
+      maxIssuers: 16,
+      maxPaths: 512,
     });
     expect(DEFAULT_MAX_ERROR_MESSAGE_CHARS).toBe(1024);
   });
@@ -163,7 +165,7 @@ describe('proof-chain shape limits', () => {
     expect(Date.now() - started).toBeLessThan(500);
     expect(result.ok).toBe(false);
     expect(result.error?.code).toBe('INVALID_FORMAT');
-    expect(result.error?.message).toMatch(/Proof chain has more than 32 nodes/);
+    expect(result.error?.message).toMatch(/Proof chain has more than 64 nodes/);
   });
 
   it('refuses a chain deeper than maxDepth and a link with more than maxProofsPerLink proofs', async () => {
@@ -270,6 +272,113 @@ describe('proof-chain shape limits', () => {
     expect(result.error?.message).toMatch(/deeper than 1 links/);
   });
 
+  it('bounds authorization paths: 3 repeated capabilities at each of 10 links is refused from 11 nodes', async () => {
+    const server = await keygen();
+    const validator = await createUCANValidator({
+      serverDid: server.did,
+      rootIssuers: ['*'],
+    });
+    // ucanto branches on every capability of a proof that could match, so the
+    // work is 3^11 paths for a token well inside the node/depth/issuer bounds.
+    const issuers = [await keygen(), await keygen(), await keygen()];
+    const top = await keygen();
+    let holder = top;
+    let proof: Awaited<ReturnType<typeof Client.delegate>> | undefined;
+    for (let i = 0; i < 10; i++) {
+      const next = issuers[i % 3]!;
+      proof = await Client.delegate({
+        issuer: holder.signer,
+        audience: next.signer,
+        capabilities: [
+          { can: 'test/read' as const, with: RESOURCE },
+          { can: 'test/read' as const, with: RESOURCE },
+          { can: 'test/read' as const, with: RESOURCE },
+        ],
+        proofs: proof ? [proof] : [],
+      });
+      holder = next;
+    }
+    const serialized = await invoke(holder.signer, server.did, [proof!]);
+    expect(serialized.length).toBeLessThan(8_000);
+
+    const started = Date.now();
+    const result = await validator.validate(serialized, TestRead, RESOURCE);
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(result.error?.code).toBe('INVALID_FORMAT');
+    expect(result.error?.message).toMatch(/more than 512 authorization paths/);
+  });
+
+  it('bounds capabilities per link', async () => {
+    const server = await keygen();
+    const validator = await createUCANValidator({
+      serverDid: server.did,
+      rootIssuers: ['*'],
+      proofChainLimits: { maxCapabilitiesPerLink: 2 },
+    });
+    const owner = await keygen();
+    const agent = await keygen();
+    const bundle = await Client.delegate({
+      issuer: owner.signer,
+      audience: agent.signer,
+      capabilities: [
+        { can: 'test/read' as const, with: RESOURCE },
+        { can: 'test/write' as const, with: RESOURCE },
+        { can: 'test/read' as const, with: 'ixo:other' as const },
+      ],
+    });
+    const result = await validator.validate(
+      await invoke(agent.signer, server.did, [bundle]),
+      TestRead,
+      RESOURCE,
+    );
+    expect(result.error?.code).toBe('INVALID_FORMAT');
+    expect(result.error?.message).toMatch(/more than 2 capabilities/);
+  });
+
+  it('keeps the default for an override key that is undefined', async () => {
+    const server = await keygen();
+    const validator = await createUCANValidator({
+      serverDid: server.did,
+      rootIssuers: ['*'],
+      proofChainLimits: { maxDepth: undefined, maxNodes: 3 },
+    });
+    const chain = await linearChain(server.did, 3); // 4 nodes
+    const result = await validator.validate(
+      chain.serialized,
+      TestRead,
+      RESOURCE,
+    );
+    expect(result.error?.message).toMatch(/more than 3 nodes/);
+  });
+
+  it('accepts a proof that travelled as a bare CID link (counts as one node)', async () => {
+    const server = await keygen();
+    const validator = await createUCANValidator({
+      serverDid: server.did,
+      rootIssuers: ['*'],
+    });
+    const root = await keygen();
+    const agent = await keygen();
+    const rootToAgent = await grant(root.signer, agent.signer);
+    // Attach the parent's CID only, not its block: the chain cannot be
+    // verified, but the walk must not throw.
+    const invocation = Client.invoke({
+      issuer: agent.signer,
+      audience: ed25519.Verifier.parse(server.did),
+      capability: { can: 'test/read' as const, with: RESOURCE },
+      proofs: [rootToAgent.cid],
+    });
+    const result = await validator.validate(
+      await serializeInvocation(invocation),
+      TestRead,
+      RESOURCE,
+    );
+    // The chain cannot be proven; what matters is that the walk returned a
+    // result instead of throwing.
+    expect(result.ok).toBe(false);
+    expect(['UNAUTHORIZED', 'INVALID_FORMAT']).toContain(result.error?.code);
+  });
+
   it('rejects invalid limit values when the validator is created', async () => {
     const server = await keygen();
     await expect(
@@ -310,7 +419,7 @@ describe('error message length', () => {
     const result = await validator.validate(serialized, TestRead, RESOURCE);
     expect(result.ok).toBe(false);
     expect(result.error?.code).toBe('UNAUTHORIZED');
-    expect(result.error?.message).toHaveLength(25);
+    expect(result.error?.message).toHaveLength(24);
     expect(result.error?.message.endsWith('…')).toBe(true);
     expect(result.error?.message.startsWith('Invocation addressed')).toBe(true);
   });
@@ -435,6 +544,45 @@ describe('capability count and pinning', () => {
     expect(pinned.ok).toBe(false);
     expect(pinned.error?.code).toBe('UNAUTHORIZED');
   });
+
+  it('expect: compares `with` in the URL-canonical form ucanto reports', async () => {
+    const server = await keygen();
+    const validator = await createUCANValidator({
+      serverDid: server.did,
+      rootIssuers: ['*'],
+    });
+    const user = await keygen();
+    // The token says `IXO:company/A`; ucanto reports `ixo:company/A`. A caller
+    // that read the raw string still pins the same resource.
+    const token = (nonce: string) =>
+      invoke(
+        user.signer,
+        server.did,
+        [],
+        'test/read',
+        'IXO:company/A' as `ixo:${string}`,
+        nonce,
+      );
+    const raw = await validator.validate(
+      await token('1'),
+      TestRead,
+      'ixo:company/A',
+      {
+        expect: { with: 'IXO:company/A' },
+      },
+    );
+    expect(raw.ok).toBe(true);
+    expect(raw.capability?.with).toBe('ixo:company/A');
+    const other = await validator.validate(
+      await token('2'),
+      TestRead,
+      'ixo:company/A',
+      {
+        expect: { with: 'ixo:company/B' },
+      },
+    );
+    expect(other.error?.code).toBe('UNAUTHORIZED');
+  });
 });
 
 describe('universal resource ucan:*', () => {
@@ -485,6 +633,38 @@ describe('universal resource ucan:*', () => {
     expect(
       (await validator.validate(chain.serialized, TestRead, RESOURCE)).ok,
     ).toBe(true);
+  });
+
+  it('stays linear in the token size with the shape limits off (shared blocks are visited once)', async () => {
+    const server = await keygen();
+    const validator = await createUCANValidator({
+      serverDid: server.did,
+      rootIssuers: ['*'],
+      allowUniversalResource: false,
+      proofChainLimits: false,
+    });
+    const owner = await keygen();
+    const attacker = await keygen();
+    // `ucan:*` sits at the bottom of a tree that references the same block
+    // three times at each of ten levels (3^10 paths, 12 distinct blocks).
+    let level = await Client.delegate({
+      issuer: owner.signer,
+      audience: attacker.signer,
+      capabilities: [{ can: 'test/read' as const, with: 'ucan:*' as const }],
+    });
+    for (let i = 0; i < 10; i++) {
+      level = await grant(attacker.signer, attacker.signer, [
+        level,
+        level,
+        level,
+      ]);
+    }
+    const serialized = await invoke(attacker.signer, server.did, [level]);
+    const started = Date.now();
+    const result = await validator.validate(serialized, TestRead, RESOURCE);
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(result.error?.code).toBe('UNAUTHORIZED');
+    expect(result.error?.message).toMatch(/ucan:\*/);
   });
 
   it('applies to validateDelegation() as well', async () => {
@@ -608,6 +788,18 @@ describe('resource-scoped self-issue names the authority only', () => {
     expect(resourceNamesIssuer(`ixo:tenant:${did}`, did)).toBe(true);
     expect(resourceNamesIssuer(`ixo:tenant/${did}`, did)).toBe(true);
     expect(resourceNamesIssuer(`ixo:tenant/${did}/files`, did)).toBe(true);
+
+    // A DID authority names that DID's resource; the first path segment is
+    // not consulted, and query/fragment are not part of the authority.
+    const alice = 'did:key:z6MkAlice';
+    expect(resourceNamesIssuer(`ixo:${alice}/${did}`, did)).toBe(false);
+    expect(resourceNamesIssuer(`${alice}/${did}`, did)).toBe(false);
+    expect(resourceNamesIssuer(`ixo:${alice}:${did}`, did)).toBe(true); // authority ends in the DID
+    expect(resourceNamesIssuer(`ixo:tenant:${alice}/${did}`, did)).toBe(false);
+    expect(resourceNamesIssuer(`ixo:${alice}?q=:${did}`, did)).toBe(false);
+    expect(resourceNamesIssuer(`ixo:${alice}#${did}`, did)).toBe(false);
+    expect(resourceNamesIssuer(`ixo:/${did}`, did)).toBe(false); // empty authority
+    expect(resourceNamesIssuer(`ixo:${did}?x=1`, did)).toBe(true);
 
     // Deeper than the first path segment: someone else's resource that
     // mentions the DID (a folder shared with it).
