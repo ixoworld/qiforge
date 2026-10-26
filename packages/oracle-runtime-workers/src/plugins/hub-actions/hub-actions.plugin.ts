@@ -30,7 +30,15 @@ const operationSchema = z.discriminatedUnion('kind', [
   z.strictObject({
     kind: z.literal('ixo.bank.send.v1'),
     chainId: z.string().min(1).max(100),
-    network: z.enum(['ixo testnet', 'ixo devnet']),
+    // No network list of the runtime's own: which network a transfer may
+    // use is the oracle account's capability (`hub_action_capabilities`),
+    // checked against it before the Hub is called; the shared protocol
+    // parser and the Hub's own chain check decide the rest.
+    network: z
+      .string()
+      .min(1)
+      .max(100)
+      .describe('The network hub_action_capabilities names for this oracle.'),
     fromAddress: z
       .string()
       .regex(/^ixo1[023456789acdefghjklmnpqrstuvwxyz]{38,59}$/),
@@ -178,7 +186,7 @@ const manifest: PluginManifest = {
   summary:
     'Prepare a registered operation for owner review and read its verified status.',
   whenToUse: [
-    'The user requests a supported form submission, testnet transfer, or exact private resource review.',
+    'The user requests a supported form submission, transfer, or exact private resource review.',
   ],
   whenNotToUse: [
     'Signing, executing, or treating a resource open as acceptance.',
