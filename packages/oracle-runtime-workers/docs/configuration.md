@@ -212,6 +212,8 @@ oracle script in a gateway split).
 | `AUTH_HUB_CHANNEL_SERVICE_KEY` | with the route   | Dedicated credential (secret) sent as `x-channels-service-key` when the runtime asks Auth Hub whether a channel binding is active. Never an operator credential.                                                   |
 | `AUTH_HUB`                     | one of these two | **Binding**, not a var: a Cloudflare service binding to Auth Hub (`"services": [{ "binding": "AUTH_HUB", "service": "<auth hub worker>" }]`). Used in preference to `AUTH_HUB_URL` when both are set.              |
 | `AUTH_HUB_URL`                 | one of these two | Auth Hub's origin when there is no service binding. Must be `https`.                                                                                                                                               |
+| `HUB_ACTIONS_ENABLED`          | no               | Set to `true` on the oracle script to enable Auth Hub action preparation, status recovery, and the callback route. Unset is disabled.                                                                              |
+| `AUTH_HUB_ACTION_OUTCOME_KEY`  | with callbacks   | Separate secret provisioned for the Hub account's outbound outcome delivery. Auth Hub sends it as `x-auth-hub-outcome-key`; it is never the oracle-to-Hub channel service key.                                     |
 
 Without the key, or without both `AUTH_HUB` and `AUTH_HUB_URL`, binding
 validation is "not configured": a new channel turn gets `503` and nothing is

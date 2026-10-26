@@ -1,4 +1,5 @@
 import type { ActionOutcomeWire } from '@ixo/ixo-transaction/topic-proposals';
+import type { ActionOutcomeV1 } from '@ixo/action-protocol';
 import { z } from 'zod';
 import type { ReplyPlan } from '../delivery/types';
 
@@ -78,6 +79,7 @@ export interface ChannelTurnResponse {
    */
   plan?: ReplyPlan;
   actionOutcomes?: ActionOutcomeWire[];
+  hubActionOutcomes?: ActionOutcomeV1[];
 }
 
 export type ChannelErrorStatus =
