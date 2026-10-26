@@ -291,7 +291,7 @@ fails the whole turn). Outcomes arrive as `ixo.auth-outcome/2`; `expired` and
 `failed` and `declined`, so a poll stops refreshing them. Gateways that read
 `hubActionOutcomes` must accept the v2 envelope.
 
-Protocol package `0.4.0` supports exact signed statements, Gmail connection/removal
+Protocol package `0.4.1` supports exact signed statements, Gmail connection/removal
 and one reviewed plain-text email, Google Calendar connection/removal and one
 reviewed event, document read-access requests, and new private text files.
 `hub_action_options` requests `ixo.auth-options/2` and obtains confirmed connections,

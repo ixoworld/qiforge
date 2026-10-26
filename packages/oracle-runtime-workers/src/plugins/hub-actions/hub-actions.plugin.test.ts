@@ -475,4 +475,86 @@ describe('Hub actions Workers plugin', () => {
       priorActionId: 'D'.repeat(32),
     });
   });
+
+  it('passes a mainnet transfer through to the Hub when the account capability names mainnet', async () => {
+    const SIGNER = 'ixo1qyqszqgpqyqszqgpqyqszqgpqyqszqgpdxlvf0';
+    const RECIPIENT = 'ixo1qgpqyqszqgpqyqszqgpqyqszqgpqyqszuzefze';
+    const transfer = {
+      kind: 'ixo.bank.send.v1' as const,
+      chainId: 'ixo-5',
+      network: 'ixo mainnet' as const,
+      fromAddress: SIGNER,
+      toAddress: RECIPIENT,
+      amountBaseUnits: '1000000',
+      denom: 'uixo' as const,
+      feeBaseUnits: '5000',
+      memo: '',
+    };
+    let sent: Record<string, unknown> | undefined;
+    const client = new HubActionClient({
+      origin: 'https://hub.test',
+      key: 'oracle-secret',
+      fetcher: {
+        fetch: async (request) => {
+          if (request.method === 'GET')
+            return Response.json({
+              version: 'ixo.auth-capabilities/2',
+              accountId: 'account-three',
+              oracleDid: 'did:ixo:oracle',
+              network: 'ixo mainnet',
+              resourceOrigin: null,
+              operations: ['ixo.bank.send.v1'],
+              transfer: { maxAmountUixo: '10000000', maxFeeUixo: '100000' },
+              forms: [],
+            });
+          sent = (await request.json()) as Record<string, unknown>;
+          return Response.json({ reference });
+        },
+      },
+    });
+    const ctx = makeRuntimeContext({
+      config: { HUB_ACTIONS_ENABLED: 'true' },
+      user: {
+        did: `did:ixo:${SIGNER}`,
+        matrixUserId: '@owner:test',
+        ucanDelegation: { raw: 'delegation' },
+      },
+      session: {
+        id: 'session-three',
+        client: 'channel',
+        requestId: 'request-three',
+        runId: 'run-three',
+        channel: {
+          provider: 'whatsapp',
+          bindingId: 'chb_three',
+          bindingRevision: 4,
+        },
+      },
+      toolCallId: 'tool-mainnet',
+      hubActions: {
+        capabilities: () => client.capabilities(),
+        options: async () => options,
+        request: (input) =>
+          prepareHubAction(
+            client,
+            {
+              reserve: async (_origin, _operation, expiry) => expiry,
+              record: async (_origin, ref) => ref,
+            },
+            input,
+            1_770_000_000_000,
+          ),
+        status: async () => null,
+      },
+    });
+    const tool = new HubActionsPlugin()
+      .getTools()
+      .find((item) => item.name === 'request_hub_action');
+    if (!tool) throw new Error('request tool missing');
+    expect(tool.schema.safeParse({ operation: transfer }).success).toBe(true);
+    expect(await tool.handler({ operation: transfer }, ctx)).toMatchObject({
+      status: 'prepared',
+    });
+    expect(sent?.operation).toEqual(transfer);
+  });
 });
