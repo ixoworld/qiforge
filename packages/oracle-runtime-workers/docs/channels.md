@@ -217,6 +217,11 @@ the active binding again before calling Auth Hub. The model cannot supply those
 identity fields or approve an action. The existing `prepare_action` Portal card
 path remains available independently.
 
+The contract is `@ixo/action-protocol` 0.4.1 from npm. This runtime does
+not declare protocol version 2 on its Hub calls, so Auth Hub answers in v1:
+the three operation kinds above, `ixo.auth-capabilities/1` and
+`ixo.auth-outcome/1`, the envelope gateway PR 19 parses.
+
 The oracle uses `AUTH_HUB_URL` (an HTTPS origin) and
 `AUTH_HUB_CHANNEL_SERVICE_KEY` to create and read operations; both are
 required (the `AUTH_HUB` binding alone is not enough), and the plugin's tools
