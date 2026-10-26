@@ -206,14 +206,23 @@ user's oracle session; the authorization model, retries and replies are in
 [channels](channels.md). Set these on the script that serves HTTP (the
 oracle script in a gateway split).
 
-| Binding or variable            | Required         | Meaning                                                                                                                                                                                                            |
-| ------------------------------ | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `CHANNEL_SERVICE_DID`          | to enable        | The channel service DID allowed to invoke this deployment, or a comma-separated list of them (trimmed, empties dropped, duplicates removed). Unset or empty = the route answers `503 Channels are not configured`. |
-| `AUTH_HUB_CHANNEL_SERVICE_KEY` | with the route   | Dedicated credential (secret) sent as `x-channels-service-key` when the runtime asks Auth Hub whether a channel binding is active. Never an operator credential.                                                   |
-| `AUTH_HUB`                     | one of these two | **Binding**, not a var: a Cloudflare service binding to Auth Hub (`"services": [{ "binding": "AUTH_HUB", "service": "<auth hub worker>" }]`). Used in preference to `AUTH_HUB_URL` when both are set.              |
-| `AUTH_HUB_URL`                 | one of these two | Auth Hub's origin when there is no service binding. Must be `https`.                                                                                                                                               |
-| `HUB_ACTIONS_ENABLED`          | no               | Set to `true` on the oracle script to enable Auth Hub action preparation, status recovery, and the callback route. Unset is disabled.                                                                              |
-| `AUTH_HUB_ACTION_OUTCOME_KEY`  | with callbacks   | Separate secret provisioned for the Hub account's outbound outcome delivery. Auth Hub sends it as `x-auth-hub-outcome-key`; it is never the oracle-to-Hub channel service key.                                     |
+| Binding or variable            | Required         | Meaning                                                                                                                                                                                                                                                                                            |
+| ------------------------------ | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CHANNEL_SERVICE_DID`          | to enable        | The channel service DID allowed to invoke this deployment, or a comma-separated list of them (trimmed, empties dropped, duplicates removed). Unset or empty = the route answers `503 Channels are not configured`.                                                                                 |
+| `AUTH_HUB_CHANNEL_SERVICE_KEY` | with the route   | Dedicated credential (secret) sent as `x-channels-service-key` when the runtime asks Auth Hub whether a channel binding is active. Never an operator credential.                                                                                                                                   |
+| `AUTH_HUB`                     | one of these two | **Binding**, not a var: a Cloudflare service binding to Auth Hub (`"services": [{ "binding": "AUTH_HUB", "service": "<auth hub worker>" }]`). Used in preference to `AUTH_HUB_URL` when both are set.                                                                                              |
+| `AUTH_HUB_URL`                 | one of these two | Auth Hub's origin when there is no service binding. Must be `https`.                                                                                                                                                                                                                               |
+| `HUB_ACTIONS_ENABLED`          | no               | Set to `true` on the oracle script to enable Auth Hub action preparation (any-token bank sends included), status recovery, and the signed outcome callback route. Needs `AUTH_HUB_URL` and `AUTH_HUB_CHANNEL_SERVICE_KEY` as well (the `AUTH_HUB` binding alone is not enough). Unset is disabled. |
+
+Auth Hub signs its outcome callbacks (`POST /api/internal/actions/outcomes`)
+with the `#key-0` Ed25519 key of its did:web document; there is no shared
+callback secret (`AUTH_HUB_ACTION_OUTCOME_KEY` is gone, and an
+`x-auth-hub-outcome-key` header the Hub still sends during the transition is
+ignored). The Hub DID is derived from `AUTH_HUB_URL` (`did:web:<host>`), and
+its document is read from `${AUTH_HUB_URL}/.well-known/did.json` (through
+`AUTH_HUB` when bound), cached for an hour per isolate. The signature must be
+for this oracle's own origin (the origin of the request URL, which must be the
+https oracle URL registered on the Hub channel account), within 300 s.
 
 Without the key, or without both `AUTH_HUB` and `AUTH_HUB_URL`, binding
 validation is "not configured": a new channel turn gets `503` and nothing is

@@ -1,4 +1,5 @@
 import {
+  OUTCOME_SIGNATURE_HEADERS,
   outcomeAudience,
   publicKeyFromDidDocument,
   verifyOutcomeRequest,
@@ -15,6 +16,8 @@ import { boundedBytes } from '../core/domain-context/transport';
 
 /** How long the Hub's DID document is trusted per isolate. */
 export const HUB_DID_CACHE_MS = 60 * 60_000;
+/** The soonest a failed signature reads the Hub's DID document again. */
+export const HUB_DID_REFRESH_MIN_MS = 60_000;
 /** The largest DID document read. */
 const HUB_DID_MAX_BYTES = 64 * 1024;
 
@@ -37,14 +40,14 @@ async function hubDidDocument(
   fetcher: { fetch(request: Request): Promise<Response> } | undefined,
   now: number,
   fresh: boolean,
-): Promise<unknown> {
+): Promise<{ document: unknown; at: number }> {
   const url = new URL('/.well-known/did.json', hubUrl);
   const cached = didDocuments.get(url.href);
-  if (!fresh && cached && now - cached.at < HUB_DID_CACHE_MS)
-    return cached.document;
+  if (!fresh && cached && now - cached.at < HUB_DID_CACHE_MS) return cached;
   const request = new Request(url, {
     headers: { accept: 'application/did+json, application/json' },
-    redirect: 'error',
+    // workerd has no `redirect: 'error'`; a redirect is not ok below.
+    redirect: 'manual',
     signal: AbortSignal.timeout(5_000),
   });
   const response = await (fetcher ? fetcher.fetch(request) : fetch(request));
@@ -53,15 +56,20 @@ async function hubDidDocument(
   const document: unknown = JSON.parse(
     new TextDecoder().decode(await boundedBytes(response, HUB_DID_MAX_BYTES)),
   );
-  didDocuments.set(url.href, { document, at: now });
-  return document;
+  const entry = { document, at: now };
+  didDocuments.set(url.href, entry);
+  return entry;
 }
 
 /**
  * Whether `rawBody` with `headers` is a callback the configured Hub signed
  * for `audience` (this oracle's https origin) within the allowed clock skew.
- * A key the cached document does not name is looked up once more (a Hub
- * key rotation); anything else that fails is false.
+ * The key comes from the Hub's DID document, cached for an hour. A Hub key
+ * rotation (same `#key-0` id, new key) is picked up by reading the document
+ * again when the cached key does not verify a callback that names the Hub's
+ * key id, at most once per `HUB_DID_REFRESH_MIN_MS` (a stream of forged
+ * callbacks cannot turn into a stream of Hub reads). Anything that fails is
+ * false.
  */
 export async function verifyHubOutcomeCallback(input: {
   hubUrl: string;
@@ -81,15 +89,14 @@ export async function verifyHubOutcomeCallback(input: {
     return false;
   }
   const keyId = `${hubDid}#key-0`;
+  if (input.headers.get(OUTCOME_SIGNATURE_HEADERS.keyId) !== keyId)
+    return false;
   for (const fresh of [false, true]) {
+    let entry: { document: unknown; at: number };
     let publicKey: Uint8Array;
     try {
-      const document = await hubDidDocument(
-        input.hubUrl,
-        input.fetcher,
-        nowMs,
-        fresh,
-      );
+      entry = await hubDidDocument(input.hubUrl, input.fetcher, nowMs, fresh);
+      const document = entry.document;
       if (
         !document ||
         typeof document !== 'object' ||
@@ -107,14 +114,22 @@ export async function verifyHubOutcomeCallback(input: {
       }
       continue;
     }
-    return verifyOutcomeRequest({
-      rawBody: input.rawBody,
-      headers: input.headers,
-      publicKey,
-      expectedKeyId: keyId,
-      expectedAudience: audience,
-      now: Math.floor(nowMs / 1000),
-    });
+    let verified: boolean;
+    try {
+      verified = await verifyOutcomeRequest({
+        rawBody: input.rawBody,
+        headers: input.headers,
+        publicKey,
+        expectedKeyId: keyId,
+        expectedAudience: audience,
+        now: Math.floor(nowMs / 1000),
+      });
+    } catch {
+      // A key WebCrypto refuses to import is a failed check, not a 500.
+      verified = false;
+    }
+    if (verified || fresh || nowMs - entry.at < HUB_DID_REFRESH_MIN_MS)
+      return verified;
   }
   return false;
 }

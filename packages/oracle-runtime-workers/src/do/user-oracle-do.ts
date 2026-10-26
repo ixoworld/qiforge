@@ -55,6 +55,7 @@ import {
   type ActionCapabilitiesV1,
   type HubActionOptionsV3,
   parseOperation,
+  v1Receipt,
   type ActionOperationV1,
   type ActionOutcomeV1,
 } from '@ixo/action-protocol';
@@ -3216,11 +3217,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         this.markDirty();
         await this.requestHousekeeping(Date.now() + 1000);
       }
-      const hubActionOutcomes = await this.hubOutcomesForRun(
-        ownerDid,
-        result.sessionId,
-        result.runId,
-      );
+      // The gateway parses with @ixo/action-protocol 0.4.1, whose bank
+      // receipt is exact: the 0.5.0 `denom`/`amountBaseUnits` fields are
+      // dropped here (the owner-facing amount line comes from
+      // hub_action_status instead), so the emitted shape stays 0.4.1.
+      const hubActionOutcomes = (
+        await this.hubOutcomesForRun(ownerDid, result.sessionId, result.runId)
+      ).map((outcome) => ({ ...outcome, receipt: v1Receipt(outcome.receipt) }));
       return {
         ...result,
         ...(actionOutcomes.length ? { actionOutcomes } : {}),

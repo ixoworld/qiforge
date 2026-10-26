@@ -665,7 +665,9 @@ describe('Hub actions in the owner object', () => {
           message: expect.stringContaining(words),
         });
       // The per-denom cap from the capabilities (read once, then cached).
-      h.hubState.limits = [{ denom: usdc.denom, maxAmountBaseUnits: '1300000' }];
+      h.hubState.limits = [
+        { denom: usdc.denom, maxAmountBaseUnits: '1300000' },
+      ];
       expect(await transfer(usdc.denom, '1.5')).toMatchObject({
         message: expect.stringContaining('at most 1300000 base units'),
       });
@@ -712,6 +714,30 @@ describe('Hub actions in the owner object', () => {
       ).toMatchObject({
         outcome: { status: 'succeeded' },
         summary: `Transfer of 1.25 USDC (${usdc.denom}) confirmed on chain. Transaction ${'f'.repeat(64)}, block 120.`,
+      });
+      // The channel poll emits the 0.4.1 receipt shape the gateway parses:
+      // no denom or amount fields.
+      await h.store.recordOutcome(h.outcomes.get(reference(9).id)!);
+      const emitted = await call<ChannelTurnResponse>(
+        h.host,
+        'withActionOutcomes',
+        OWNER,
+        {
+          requestId: 'request-run-pay',
+          runId: 'run-pay',
+          sessionId: SESSION,
+          status: 'finished',
+        },
+      );
+      expect(emitted.hubActionOutcomes?.[0]?.receipt).toEqual({
+        kind: 'ixo.bank.send.v1',
+        actionId: reference(9).id,
+        revision: 1,
+        digest,
+        chainId: 'pandora-77',
+        txHash: 'f'.repeat(64),
+        height: 120,
+        code: 0,
       });
       // The Hub refusing at preparation reaches the model in clear words.
       h.hubState.prepare = 'insufficient_funds';

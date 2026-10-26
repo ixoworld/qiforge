@@ -206,9 +206,9 @@ Companion's `feat/workers-runtime` deployment must adopt the released runtime an
 
 # Auth Hub action review (disabled by default)
 
-`HUB_ACTIONS_ENABLED=true` adds the on-demand `request_hub_action` and
-`hub_action_status` tools plus read-only `hub_action_capabilities` and
-`hub_action_options`. Discover
+`HUB_ACTIONS_ENABLED=true` adds the on-demand `request_hub_action`,
+`request_hub_transfer` and `hub_action_status` tools plus read-only
+`hub_action_capabilities` and `hub_action_options`. Discover
 capabilities first: Auth Hub returns enabled kinds, exact registered form field
 descriptors, transfer limits and the configured network. The request tool
 accepts a strictly typed candidate operation from
@@ -218,9 +218,11 @@ the active binding again before calling Auth Hub. The model cannot supply those
 identity fields or approve an action. The existing `prepare_action` Portal card
 path remains available independently.
 
-The contract is `@ixo/action-protocol` 0.4.1 from npm. This runtime
-declares protocol version 2 on its Hub calls (see below), so it needs a
-gateway that parses `ixo.auth-outcome/2` (gateway PR 20).
+The contract is `@ixo/action-protocol` 0.5.0 from npm. This runtime
+declares protocol version 3 on its Hub calls (see below). Outcomes still
+arrive as `ixo.auth-outcome/2`, so it needs a gateway that parses that
+envelope (gateway PR 20); the bank receipts it hands the gateway keep the
+0.4.1 shape (see [bank transfers](#bank-transfers-any-token)).
 
 The oracle uses `AUTH_HUB_URL` (an HTTPS origin) and
 `AUTH_HUB_CHANNEL_SERVICE_KEY` to create and read operations; both are
@@ -256,11 +258,26 @@ The callback does not count as user access. Hub rows (requests, references,
 outcomes) are pruned from the alarm, at most hourly, 30 days after their
 review expired.
 
-Auth Hub can post the same typed event to `/api/internal/actions/outcomes` with
-the separate `x-auth-hub-outcome-key` credential, configured on the oracle as
-`AUTH_HUB_ACTION_OUTCOME_KEY`. The callback is disabled when that secret is
-absent. The receiver checks the event against its stored original reference
-and confirms it through Auth Hub's authenticated status API before storing it.
+Auth Hub can post the same typed event to `/api/internal/actions/outcomes`,
+signed with its service DID key: `x-auth-hub-timestamp` (unix seconds),
+`x-auth-hub-key-id` (`did:web:<hub host>#key-0`) and `x-auth-hub-signature`
+(base64url Ed25519 over `${timestamp}.${audience}.${sha256hex(rawBody)}`).
+The route is on when `HUB_ACTIONS_ENABLED=true`, `AUTH_HUB_URL` and
+`AUTH_HUB_CHANNEL_SERVICE_KEY` are set, and answers `401` otherwise. The Hub
+DID comes from `AUTH_HUB_URL` (never from the request); its document is read
+from `${AUTH_HUB_URL}/.well-known/did.json` (https only, at most 64 KB, no
+redirects, through `AUTH_HUB` when bound), must carry that exact DID, and is
+cached for one hour per isolate. A signature the cached key does not verify
+reads the document once more (a key rotation), at most once a minute. The
+audience is the origin of the incoming request URL, so a callback signed for
+another oracle, or delivered to another hostname this Worker also serves,
+fails. The timestamp must be within 300 s. There is no shared callback secret
+any more (`AUTH_HUB_ACTION_OUTCOME_KEY` is removed); an
+`x-auth-hub-outcome-key` header the Hub still sends during its transition is
+ignored, never required. A valid signature is not trusted on its own: the
+receiver checks the event against its stored original reference, dedupes by
+action id and sequence, and confirms it through Auth Hub's authenticated
+status API before storing it.
 Neither a callback nor a model turn executes a transfer. Hub-owned native
 transfer events remain status only. A resource open is not treated as
 acceptance or submission.
@@ -279,15 +296,18 @@ and expiry in Unix **seconds**. Persist both before POST. The same key must
 reuse identical bytes on retry. `status(reference.id)` is an authenticated
 owner-scoped recovery read; an operation reference alone is never completion.
 The `@ixo/oracle-runtime-workers/hub-actions/request` subpath implements these
-checks for hosts with a durable `reserve`/`record` store. Protocol versions are
-`ixo.auth-action/1`, `ixo.auth-capabilities/1` and `ixo.auth-outcome/1`;
-unsupported kinds and versions fail closed.
+checks for hosts with a durable `reserve`/`record` store. Envelope versions
+are `ixo.auth-action/1`, `ixo.auth-capabilities/2`, `ixo.auth-outcome/2` and
+`ixo.auth-options/3`; unsupported kinds and versions fail closed.
 
-The runtime declares protocol version 2 (`?version=2`) on the capabilities,
-prepare and status calls: without it Auth Hub answers v1 (the three P1 kinds
-only, v1-filtered outcomes) and refuses a P2 prepare with
-`protocol_version_required`, and it stores the version per action for the
-outcomes it pushes. Pairing: runtime #381 must run with gateway PR 20 (it accepts the v2
+The runtime declares protocol version 3 (`?version=3`) on the capabilities,
+prepare, status and options calls. Version 3 is the 0.5.0 contract:
+capabilities with per-denom `transfer.limits`, any-denom bank sends, receipts
+with `denom` and `amountBaseUnits`, options with the owner's tokens. Version 2
+callers (runtime 0.23.0) keep the 0.4.1 shapes; without a version Auth Hub
+answers v1 (the three P1 kinds only, v1-filtered outcomes) and refuses a P2
+prepare with `protocol_version_required`. The Hub stores the version per
+action for the outcomes it pushes. Pairing: this runtime must run with gateway PR 20 (it accepts the v2
 envelopes and the P2 receipt kinds); gateway PR 19 understands only
 `ixo.auth-outcome/1` and must never run against this runtime (a v2 outcome
 fails the whole turn). Outcomes arrive as `ixo.auth-outcome/2`; `expired` and
@@ -295,18 +315,59 @@ fails the whole turn). Outcomes arrive as `ixo.auth-outcome/2`; `expired` and
 `failed` and `declined`, so a poll stops refreshing them. Gateways that read
 `hubActionOutcomes` must accept the v2 envelope.
 
-Protocol package `0.4.1` supports exact signed statements, Gmail connection/removal
-and one reviewed plain-text email, Google Calendar connection/removal and one
-reviewed event, document read-access requests, and new private text files.
-`hub_action_options` requests `ixo.auth-options/2` and obtains confirmed connections,
-requestable document identifiers and existing action resources for the current
-owner and channel binding. Each connection carries its `gmail` or `calendar`
+Protocol package `0.5.0` supports bank sends of any listed token, exact signed
+statements, Gmail connection/removal and one reviewed plain-text email, Google
+Calendar connection/removal and one reviewed event, document read-access
+requests, and new private text files. `hub_action_options` requests
+`ixo.auth-options/3` and obtains confirmed connections, requestable document
+identifiers, existing action resources and the owner's bank tokens for the
+current owner and channel binding; an older options version is refused. Each connection carries its `gmail` or `calendar`
 service; do not use a profile-only Gmail connection for sending. Old Hub clients
 still receive Calendar-only options version 1 by default. The tool accepts no
 model-supplied identity. The shared
 `operationJsonSchema` is the tool schema source; there is no second runtime
 operation catalogue. Capability and options reads may be used by any registered
 oracle account with the compatible channel adapter.
+
+## Bank transfers (any token)
+
+`request_hub_transfer` prepares an `ixo.bank.send.v1` review; the generic
+`request_hub_action` refuses bank sends. The model supplies only the
+recipient, a token `denom` copied from `hub_action_options` `transfer.tokens`
+(at most 50: `denom`, `symbol`, `decimals`, `verified`, `balanceBaseUnits`),
+a decimal `amount` in that token's display units and an optional memo. The
+owner object then reads the options again (the balance must be current),
+refuses a denom that is not in the list (it never guesses an `ibc/…` hash),
+and converts the amount to base units with the listed `decimals` using
+integer arithmetic. It refuses more fraction digits than the token has, a
+zero amount, an amount above the balance, and, from the capabilities, an
+amount above the per-denom `transfer.limits` cap (`maxAmountBaseUnits`; a
+legacy `maxAmountUixo` caps only `uixo`). These are client-side pre-checks:
+Auth Hub enforces its own. The network is the account's capability, the
+chain id this Worker's `IXO_TRANSACTION_CHAIN_ID_*` for that network, the
+sender the owner's account. No fee is sent: Auth Hub simulates gas and sets
+the fee. A token that is not `verified` has `decimals` 0, so its amounts are
+base units; the model is told to name its full denom and say it is
+unverified (anyone controlling a factory or cw20 token can call it "USDC").
+
+Auth Hub can refuse a transfer at preparation with `400
+{error, reason?}`. `simulation_failed`, `fee_above_ceiling` and
+`insufficient_funds` reach the model as `{status: 'unavailable', reason}` in
+plain words (with the Hub's reason, at most 200 characters). Any other `400`
+is a transport error.
+
+The owner object stores the token (denom, symbol, decimals, verified) next to
+the prepared action. `hub_action_status` returns `{status: 'known', outcome,
+summary?}`, where `summary` is the owner-facing line for a bank receipt, for
+example `Transfer of 1.25 USDC (ibc/…) confirmed on chain. Transaction …,
+block …`, or `… was not included on chain (expired not included)`. A
+verified token shows its symbol (and its full denom unless it is `uixo`); an
+unverified token, or a receipt whose denom differs from the stored token,
+shows base units and the full denom with an "unverified token" marker. The
+`hubActionOutcomes` a channel poll returns to the gateway drop the receipt's
+`denom` and `amountBaseUnits` (the gateway parses the exact 0.4.1 bank
+receipt), so nothing new reaches the gateway. A transfer review is the same
+`hub-action` Reply Plan part as any other Hub review.
 
 The owner completes each review in Auth Hub. Gmail and Calendar setup return a fresh
 review with the account and scopes selected at Google; setup alone does not
@@ -335,7 +396,7 @@ rejected (for example `Invalid fromAddress`). The Gmail service requires fresh i
 attestations and confirmed proxy no-retry behavior; missing evidence disables
 the journey. Local conformance fixtures do not establish those activation gates.
 
-Both shared packages come from the npm registry: `@ixo/action-protocol` 0.4.1
+Both shared packages come from the npm registry: `@ixo/action-protocol` 0.5.0
 and `@ixo/topic-protocol` 1.0.0-rc.8 (the Worker-safe build with precompiled
 validators), pinned exactly in the runtime and in `@ixo/ixo-transaction`. No
 workspace override or vendored archive remains, and `prepublishOnly` refuses

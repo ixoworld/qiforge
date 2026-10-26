@@ -643,7 +643,9 @@ describe('Hub actions Workers plugin', () => {
       status: 'unavailable',
       reason: 'The transfer is incomplete (Invalid toAddress).',
     });
-    transfer.mockRejectedValueOnce(new Error('Hub action request returned 503'));
+    transfer.mockRejectedValueOnce(
+      new Error('Hub action request returned 503'),
+    );
     await expect(tool.handler(input, ctx)).rejects.toThrow('503');
     const portal = makeRuntimeContext({
       ...ctx,

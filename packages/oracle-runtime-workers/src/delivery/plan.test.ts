@@ -119,6 +119,35 @@ describe('draftReplyPlan', () => {
     });
     expect(parseReplyPlan(JSON.stringify(plan))).toEqual(plan);
     expect(planText(plan)).toContain(actionReference.url);
+    // A transfer review is the same structured part.
+    expect(
+      draftReplyPlan({
+        steps: [
+          {
+            text: 'Review the transfer.',
+            toolCalls: [
+              { id: 'pay-call', name: 'request_hub_transfer', args: {} },
+            ],
+          },
+        ],
+        toolResults: new Map([
+          [
+            'pay-call',
+            JSON.stringify({
+              status: 'prepared',
+              actionReference,
+              summary: 'Review form',
+            }),
+          ],
+        ]),
+        limits: limits(),
+        canSpill: false,
+      }),
+    ).toContainEqual({
+      kind: 'hub-action',
+      actionReference,
+      summary: 'Review form',
+    });
   });
   it('drops narration before a tool call but keeps substantive text written before one', () => {
     const plan = draftReplyPlan({

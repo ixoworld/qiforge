@@ -1,0 +1,10 @@
+---
+'@ixo/oracle-runtime-workers': minor
+---
+
+Hub actions on `@ixo/action-protocol` 0.5.0:
+
+- Any-token bank sends: the new `request_hub_transfer` tool prepares an `ixo.bank.send.v1` review from a token the owner's `hub_action_options` (`ixo.auth-options/3`, `transfer.tokens`) lists and a decimal display amount. The runtime converts to base units with the listed decimals (unverified tokens: base units), refuses a denom that is not listed, too many decimals, zero, an amount above the balance or above the per-denom capability cap, and sends no fee (Auth Hub simulates it). `request_hub_action` no longer takes bank sends. Auth Hub's `simulation_failed`, `fee_above_ceiling` and `insufficient_funds` refusals reach the model in plain words, and `hub_action_status` adds an owner-facing `summary` line for bank receipts (symbol for verified tokens, full denom and an "unverified token" marker otherwise). Channel polls keep handing the gateway the 0.4.1 bank receipt shape.
+- Every Hub operation call (capabilities, prepare, status, options) declares protocol version 3.
+- Signed outcome callbacks: `/api/internal/actions/outcomes` verifies the Hub's `#key-0` Ed25519 signature from `${AUTH_HUB_URL}/.well-known/did.json` (cached one hour) for this oracle's request origin, and is on whenever `HUB_ACTIONS_ENABLED`, `AUTH_HUB_URL` and `AUTH_HUB_CHANNEL_SERVICE_KEY` are set. **Breaking for operators:** `AUTH_HUB_ACTION_OUTCOME_KEY` is removed; an `x-auth-hub-outcome-key` header is ignored.
+- No per-user usage caps: the Hub-action caps (2 per run, 5 per hour, 10 per day) and the action-proposal caps (8 per run, 16 open per owner) are removed. Hub actions still need a run started by an inbound channel message, and one Gmail send stays in flight per mailbox.

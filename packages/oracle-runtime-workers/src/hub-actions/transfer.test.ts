@@ -153,14 +153,18 @@ describe('Hub transfer refusals', () => {
         'The account does not hold enough to cover this transfer and its network fee.',
     });
     expect(
-      hubTransferRefusal({ error: 'simulation_failed', reason: 'x'.repeat(500) })
-        ?.message,
+      hubTransferRefusal({
+        error: 'simulation_failed',
+        reason: 'x'.repeat(500),
+      })?.message,
     ).toBe(
       `Auth Hub simulated this transfer and it would fail on chain: ${'x'.repeat(200)}.`,
     );
     expect(
       hubTransferRefusal({ error: 'fee_above_ceiling', reason: '  ' })?.message,
-    ).toBe("The network fee for this transfer is above this oracle's fee limit.");
+    ).toBe(
+      "The network fee for this transfer is above this oracle's fee limit.",
+    );
   });
 
   it('returns null for anything else', () => {
