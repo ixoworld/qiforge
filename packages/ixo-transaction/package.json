@@ -24,7 +24,12 @@
       "import": "./dist/react/index.js",
       "default": "./dist/react/index.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./action-proposals": {
+      "types": "./dist/action-proposals.d.ts",
+      "import": "./dist/action-proposals.js",
+      "default": "./dist/action-proposals.js"
+    }
   },
   "files": [
     "dist"
@@ -36,6 +41,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@scure/base": "2.2.0",
     "zod": "^4.4.3"
   },
   "peerDependencies": {

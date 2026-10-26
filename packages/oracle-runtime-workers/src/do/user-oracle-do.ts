@@ -1,3 +1,20 @@
+import type { ChannelTurnResponse } from '../channels/contract';
+import { refreshActionProposal } from '../action-proposals/reconcile';
+import { assertActionProposalPolicy } from '../action-proposals/policy';
+import {
+  chainIdConfigSchema,
+  chainIdsFromConfig,
+} from '../plugins/ixo-transaction/chain-ids';
+import { actionOutcome } from '@ixo/ixo-transaction/action-proposals';
+import {
+  ActionProposalConflict,
+  ActionProposalStore,
+  type ProposalCommand,
+} from '../action-proposals/store';
+import type {
+  ActionProposal,
+  ActionProposalSubject,
+} from '@ixo/ixo-transaction/action-proposals';
 import { ChannelTurns } from '../channels/turns';
 import { assertChannelAttemptAllowed } from '../channels/auth';
 import {
@@ -476,6 +493,14 @@ const ACCESS_PERSIST_INTERVAL_MS = 60 * 60_000;
 const TITLE_TIMEOUT_MS = 15_000;
 /** A new sweep of expired ambient blobs starts at most this often per instance. */
 const BLOB_SWEEP_INTERVAL_MS = 60 * 60_000;
+/**
+ * Wall time the alarm's action-card tick may spend on chain lookups (two at
+ * most, run together); an abort counts as an RPC outage (the card stays
+ * `unknown`, its attempt spent).
+ */
+const ACTION_TICK_BUDGET_MS = 15_000;
+/** The card retention sweep runs at most this often per instance. */
+const ACTION_PRUNE_INTERVAL_MS = 60 * 60_000;
 /** The Blocksync lookup of the user's homeserver is abandoned after this long (the fallback applies). */
 const HOMESERVER_LOOKUP_TIMEOUT_MS = 3_000;
 /** Set once the legacy Matrix copy has been removed (or found absent): no more lookups. */
@@ -864,6 +889,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private resultStore: ResultStore | null = null;
     /** Chat delivery's artefacts; null when no bucket is bound (see `canShare` for new ones). */
     private artifacts: ArtifactStore | null = null;
+    private actionProposals: ActionProposalStore | null = null;
+    /** When this instance last ran the card retention sweep (at most hourly). */
+    private lastActionPruneAt: number | null = null;
     /** Text `view_attachment` extracted, per session (`attachments/view-cache.ts`). */
     private attachmentTextCache: AttachmentTextCacheStore | null = null;
     /**
@@ -1767,6 +1795,18 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         oracleName: this.core.identity.name,
       });
       await this.saver.setup();
+      // A card store this build cannot open must not take the user's whole
+      // object down: the feature is unavailable for this user, the rest works.
+      try {
+        const actionProposals = new ActionProposalStore(liveDb);
+        await actionProposals.setup();
+        this.actionProposals = actionProposals;
+      } catch (err) {
+        this.actionProposals = null;
+        console.error(
+          `[action-proposals] store unavailable for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
       this.sessions = new SessionsStore(liveDb);
       await this.sessions.setup();
       this.matrixLedger = new MatrixTurnLedger(liveDb);
@@ -1984,6 +2024,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         logger: console,
       });
       this.ambient = createAmbientServices({
+        actionProposals: {
+          create: (subject) => this.prepareActionProposal(subject),
+        },
         ...(this.taskScheduler ? { tasks: this.taskScheduler.surface } : {}),
         preferences: this.preferences,
         kv: new SqliteUserKv(liveDb),
@@ -2061,6 +2104,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.runs = null;
       this.resultStore = null;
       this.artifacts = null;
+      this.actionProposals = null;
       this.attachmentTextCache = null;
       this.domainContextStore = null;
       // Its store is bound to the database just dropped: a caller that sees
@@ -2468,6 +2512,24 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         }
       }
 
+      // Action cards: look up recorded transactions the chain has not
+      // confirmed yet, close cards claimed and never executed, post the
+      // receipts that are due, drop old cards. It runs after the flush and
+      // the task scheduler (a slow chain RPC must not delay a user's task)
+      // under one wall budget, and before the eviction check (its deadline
+      // keeps the copy). One bad row must not stop what follows, so the tick
+      // is guarded like its neighbours.
+      try {
+        const actionAt = await this.tickActionProposals();
+        if (actionAt !== undefined)
+          deadlines.push(Math.max(actionAt, now + 1000));
+      } catch (err) {
+        console.error(
+          `[user-do] action proposal tick failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        deadlines.push(now + 60_000);
+      }
+
       // Legacy-blob compaction: one bounded batch per tick until the whole
       // file is codec-compressed (see sqlite/blob-compactor.ts). A flush in
       // flight holds a snapshot of the file, which the compactor's swap-in
@@ -2852,7 +2914,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         }
         return {
           ok: true,
-          result: await this.channelTurns!.submit(identity, input, requestHash),
+          result: await this.withActionOutcomes(
+            identity.userDid,
+            await this.channelTurns!.submit(identity, input, requestHash),
+          ),
         };
       } catch (error) {
         // A failure retrying cannot fix (the room refused the oracle, the
@@ -2894,7 +2959,41 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const result = await this.channelTurns.poll(identity, input, requestHash);
       if (!result) return null;
       await this.recordAccess();
-      return { ok: true, result };
+      return {
+        ok: true,
+        result: await this.withActionOutcomes(identity.userDid, result),
+      };
+    }
+
+    private async withActionOutcomes(
+      ownerDid: string,
+      result: ChannelTurnResponse,
+    ): Promise<ChannelTurnResponse> {
+      if (result.status !== 'finished' || !this.actionProposals) return result;
+      const proposals = await this.actionProposals.forRun(
+        ownerDid,
+        result.sessionId,
+        result.runId,
+      );
+      const actionOutcomes = [];
+      let attempted = false;
+      for (const proposal of proposals) {
+        const refreshed: Awaited<ReturnType<typeof refreshActionProposal>> =
+          attempted
+            ? { proposal, attempted: false }
+            : await refreshActionProposal(
+                this.actionProposals,
+                proposal,
+                this.actionProposalRpc(proposal),
+              );
+        attempted ||= refreshed.attempted;
+        actionOutcomes.push(actionOutcome(refreshed.proposal));
+      }
+      if (attempted) {
+        this.markDirty();
+        await this.requestHousekeeping(Date.now() + 1000);
+      }
+      return actionOutcomes.length ? { ...result, actionOutcomes } : result;
     }
 
     async listSessions(
@@ -3034,10 +3133,232 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return deleted;
     }
 
+    private async prepareActionProposal(
+      subject: ActionProposalSubject,
+    ): Promise<ActionProposal> {
+      const userDid = this.userDid;
+      if (this.env.ACTION_PROPOSALS_ENABLED !== 'true' || !userDid)
+        throw new Error('Action proposal preparation unavailable');
+      const store = this.requireActionProposals();
+      // The owner object's own policy, whichever plugin prepared the card:
+      // this owner signs from their own account, off mainnet, on a chain the
+      // Worker is configured for and can verify against, stamped now, within
+      // the expiry window.
+      assertActionProposalPolicy(subject, {
+        ownerDid: userDid,
+        chainIds: chainIdsFromConfig(chainIdConfigSchema.parse(this.env)),
+        rpc: this.actionProposalRpcs(),
+        now: store.now(),
+      });
+      const record = await this.runStore!.get(subject.origin.runId);
+      if (!record) throw new Error('Action proposal origin unavailable');
+      const request = (JSON.parse(record.request) as StoredRunRequest).turn;
+      if (
+        request.identity.userDid !== subject.ownerDid ||
+        request.sessionId !== subject.origin.sessionId
+      )
+        throw new Error('Action proposal origin mismatch');
+      // A card names one person's wallet; a group room would show its link
+      // and its receipt to everyone in the room. The gateway marks every
+      // Matrix turn, so an unmarked one is refused rather than trusted.
+      if (request.client === 'matrix' && request.roomKind !== 'direct')
+        throw new ActionProposalConflict(
+          'Action cards are prepared in direct chats only',
+        );
+      let origin = null;
+      if (request.sessionId.startsWith('$')) {
+        const roomId =
+          request.roomId ??
+          this.sessionRooms.get(request.sessionId) ??
+          (await this.sessions!.getSession(request.sessionId))?.roomId ??
+          (
+            await retryGateway(() =>
+              this.gateway.resolveUserRoom(subject.ownerDid),
+            )
+          )?.roomId;
+        if (!roomId) throw new Error('Action proposal room unavailable');
+        origin = {
+          sessionId: request.sessionId,
+          roomId,
+          client: request.client,
+          ...(request.channel ? { channel: request.channel } : {}),
+        };
+      }
+      const proposal = await store.create(subject, origin);
+      this.markDirty();
+      return proposal;
+    }
+
+    /** The card store, or the one error every card route answers when boot could not open it. */
+    private requireActionProposals(): ActionProposalStore {
+      if (!this.actionProposals)
+        throw new Error('Action proposals are unavailable for this user');
+      return this.actionProposals;
+    }
+
+    /** The chain RPC per network, as configured. */
+    private actionProposalRpcs(): Record<
+      'devnet' | 'testnet' | 'mainnet',
+      string | undefined
+    > {
+      return {
+        devnet: this.env.ACTION_PROPOSALS_RPC_DEVNET,
+        testnet: this.env.ACTION_PROPOSALS_RPC_TESTNET,
+        mainnet: this.env.ACTION_PROPOSALS_RPC_MAINNET,
+      };
+    }
+
     /**
-     * `GET /artifacts/:id` — the canonical copy, for its owner. `url` is
-     * present only while the share link still works.
+     * The alarm's share of action cards: at most two chain lookups (run
+     * together) for cards whose transaction is recorded but unconfirmed (so
+     * a card the user signed and walked away from still gets its receipt
+     * once the chain has indexed it), closing claimed cards whose execution
+     * window passed with no transaction, the receipts due now (posted in the
+     * background: their schedule already moved forward, so a crash cannot
+     * post one sooner), and the retention sweep, at most hourly. All of it
+     * shares `ACTION_TICK_BUDGET_MS` of wall time. Returns the earliest
+     * moment any of it is due again.
      */
+    private async tickActionProposals(): Promise<number | undefined> {
+      if (!this.userDid || !this.actionProposals) return undefined;
+      const store = this.actionProposals;
+      const userDid = this.userDid;
+      const budget = new AbortController();
+      const timer = setTimeout(() => budget.abort(), ACTION_TICK_BUDGET_MS);
+      try {
+        const due = await store.dueVerifications(userDid);
+        const settled = await Promise.allSettled(
+          due.map((proposal) =>
+            refreshActionProposal(
+              store,
+              proposal,
+              this.actionProposalRpc(proposal),
+              fetch,
+              budget.signal,
+            ),
+          ),
+        );
+        for (const result of settled) {
+          if (result.status === 'fulfilled') {
+            if (result.value.attempted) this.markDirty();
+          } else
+            console.warn(
+              `[action-proposals] verification failed for ${userDid}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
+            );
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+      if ((await store.closeUnexecuted(userDid)) > 0) this.markDirty();
+      const now = store.now();
+      const lastPruneAt = this.lastActionPruneAt ?? null;
+      if (
+        lastPruneAt === null ||
+        now - lastPruneAt >= ACTION_PRUNE_INTERVAL_MS
+      ) {
+        this.lastActionPruneAt = now;
+        if ((await store.prune(userDid)) > 0) this.markDirty();
+      }
+      const receiptAt = await this.mirrorActionReceipts(true);
+      const next = [
+        receiptAt,
+        await store.nextVerificationAt(userDid),
+        await store.nextUnexecutedCloseAt(userDid),
+      ].filter((at): at is number => at !== undefined);
+      return next.length ? Math.min(...next) : undefined;
+    }
+
+    /**
+     * Take the receipts due now and post them. `detach` hands the posts to
+     * `ctx.waitUntil` (the alarm does not wait on a slow room); otherwise
+     * they are awaited.
+     */
+    private async mirrorActionReceipts(
+      detach = false,
+    ): Promise<number | undefined> {
+      if (!this.userDid || !this.actionProposals) return undefined;
+      const store = this.actionProposals;
+      const receipts = await store.takeReceipts(this.userDid);
+      if (receipts.length) this.markDirty();
+      const posting = this.postActionReceipts(store, receipts);
+      if (detach) this.ctx.waitUntil(posting);
+      else await posting;
+      return store.nextReceiptAttempt(this.userDid);
+    }
+
+    private async postActionReceipts(
+      store: ActionProposalStore,
+      receipts: Awaited<ReturnType<ActionProposalStore['takeReceipts']>>,
+    ): Promise<void> {
+      for (const { proposal, origin } of receipts) {
+        try {
+          if (
+            proposal.lifecycle.status !== 'succeeded' &&
+            proposal.lifecycle.status !== 'failed'
+          )
+            continue;
+          const status =
+            proposal.lifecycle.status === 'succeeded'
+              ? 'confirmed on chain'
+              : 'failed on chain';
+          const text = `${proposal.title} ${status}. Transaction ${proposal.lifecycle.transactionHash}. Block ${proposal.lifecycle.height}. Code ${proposal.lifecycle.code}.`;
+          await this.replayToRoom(
+            {
+              ...origin,
+              identity: { userDid: proposal.ownerDid },
+              message: '',
+              requestId: `action-receipt:${proposal.id}:${proposal.digest}`,
+            },
+            text,
+            'oracle',
+            true,
+          );
+          await store.receiptMirrored(proposal.ownerDid, proposal.id);
+          this.markDirty();
+        } catch (error) {
+          console.warn(
+            '[action-proposals] receipt mirror pending',
+            error instanceof Error ? error.message : 'mirror failed',
+          );
+        }
+      }
+    }
+
+    private actionProposalRpc(proposal: ActionProposal): string | undefined {
+      return this.actionProposalRpcs()[proposal.action.network];
+    }
+    async actionProposal(
+      identity: TurnIdentity,
+      id: string,
+      command?: ProposalCommand,
+    ): Promise<string | null> {
+      await this.ready(identity);
+      const store = this.requireActionProposals();
+      try {
+        let result = command
+          ? await store.transition(identity.userDid, id, command)
+          : await store.get(identity.userDid, id);
+        if (command && result) this.markDirty();
+        if (command?.kind === 'reconcile' && result) {
+          const refreshed = await refreshActionProposal(
+            store,
+            result,
+            this.actionProposalRpc(result),
+          );
+          result = refreshed.proposal;
+          if (refreshed.attempted) {
+            this.markDirty();
+            await this.requestHousekeeping(Date.now() + 1000);
+          }
+        }
+        return result ? JSON.stringify({ ok: true, proposal: result }) : null;
+      } catch (error) {
+        if (error instanceof ActionProposalConflict)
+          return JSON.stringify({ ok: false, error: error.message });
+        throw error;
+      }
+    }
+
     async artifact(
       identity: TurnIdentity,
       artifactId: string,
@@ -6185,6 +6506,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             id: req.sessionId,
             client: req.client,
             requestId: req.requestId,
+            runId: run.runId,
             roomId: sessionRoomId,
           },
           model: effectiveModel,
@@ -6342,8 +6664,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       req: TurnRequest,
       text: string,
       who: 'user' | 'oracle',
+      receipt = false,
     ): Promise<void> {
-      if (req.client === 'matrix') return Promise.resolve();
+      if (req.client === 'matrix' && !receipt) return Promise.resolve();
       if (req.sessionId.startsWith(SYNTHETIC_SESSION_PREFIX))
         return Promise.resolve();
       // A local session id has no marker event to thread on: the user had
@@ -6358,6 +6681,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         req.sessionId,
         async () => {
           const roomId =
+            (receipt ? req.roomId : undefined) ??
             this.sessionRooms.get(req.sessionId) ??
             req.roomId ??
             (await this.sessions?.getSession(req.sessionId))?.roomId ??
@@ -6385,7 +6709,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           };
         },
         label,
-        req.client === 'channel',
+        req.client === 'channel' || receipt,
       );
     }
 

@@ -1,7 +1,6 @@
 /**
  * The oracle side of this package must never be able to sign or broadcast:
- * its runtime dependency is `zod` alone, and the root entry point imports
- * nothing but `zod` and its own modules. The wallet SDK and the client SDK
+ * its runtime dependencies validate schemas and decode addresses. The wallet SDK and the client SDK
  * are reachable only from `./react`, which runs in the user's Portal.
  */
 import { readdirSync, readFileSync } from 'node:fs';
@@ -81,18 +80,21 @@ describe('the module specifier scan', () => {
 });
 
 describe('no signing capability on the oracle side', () => {
-  it('depends on zod only at runtime', () => {
-    expect(Object.keys(readManifest().dependencies ?? {})).toEqual(['zod']);
+  it('depends only on schema validation and address encoding at runtime', () => {
+    expect(Object.keys(readManifest().dependencies ?? {}).sort()).toEqual([
+      '@scure/base',
+      'zod',
+    ]);
   });
 
-  it('imports only zod outside ./react', () => {
+  it('imports only validation and encoding outside ./react', () => {
     const files = sourceFiles(join(root, 'src')).filter(
       (file) => !file.includes(`${join('src', 'react')}`),
     );
     expect(files.length).toBeGreaterThan(0);
     const foreign = files.flatMap((file) =>
       importedModules(file)
-        .filter((specifier) => specifier !== 'zod')
+        .filter((specifier) => !['zod', '@scure/base'].includes(specifier))
         .map((specifier) => `${file}: ${specifier}`),
     );
     expect(foreign).toEqual([]);

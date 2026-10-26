@@ -549,7 +549,9 @@ export async function createOracleApp(
           // `CACHE_CHECKPOINTER_SAVER` is on (the build calls this hook twice
           // per turn), otherwise builds a fresh one — same as before.
           const saver = await checkpointSync.getUserCheckpointer(userDid);
-          // CI can install two @langchain/core copies, so the two saver types differ there.
+          // The build tsconfig can resolve two @langchain/core copies, so the
+          // two saver types differ there while the lint program sees one.
+          // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- needed by `tsc -p tsconfig.build.json`, not by the lint program
           return saver as unknown as BaseCheckpointSaver;
         },
       }

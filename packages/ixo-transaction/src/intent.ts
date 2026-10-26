@@ -19,6 +19,7 @@ export type IntentResult = {
 };
 
 const MODULE_ALIASES: Record<string, string> = {
+  bank: 'bank',
   entity: 'entity',
   domain: 'entity',
   iid: 'iid',

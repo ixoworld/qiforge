@@ -1,3 +1,7 @@
+import type {
+  ActionProposal,
+  ActionProposalSubject,
+} from '@ixo/ixo-transaction/action-proposals';
 import type { TaskExecutionProfile } from '../core/execution-profile';
 import type {
   DecisionDefinition,
@@ -530,6 +534,7 @@ export interface RuntimeContext<TConfig = MergedConfig> {
     client: 'portal' | 'matrix' | 'slack' | 'channel';
     wsId?: string;
     requestId: string;
+    runId?: string;
     roomId?: string;
     /**
      * Where the reply lands. `stream` is the Portal; `chat` is a chat app
@@ -723,6 +728,10 @@ export interface RuntimeContext<TConfig = MergedConfig> {
    * Bounded semantic decisions. A decision only returns structured judgment;
    * policy, authority checks, and side effects remain outside this primitive.
    */
+  actionProposals?: {
+    create(subject: ActionProposalSubject): Promise<ActionProposal>;
+  };
+
   decisions: {
     evaluate<TSchema extends z.ZodType>(
       definition: DecisionDefinition<TSchema>,

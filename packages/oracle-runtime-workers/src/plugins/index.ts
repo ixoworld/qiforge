@@ -1,3 +1,5 @@
+import { ActionProposalsPlugin } from './action-proposals/action-proposals.plugin';
+export { ActionProposalsPlugin } from './action-proposals/action-proposals.plugin';
 /**
  * Bundled Workers-runtime plugins — ports of the Node runtime's MCP / fetch
  * plugins. Each is gated the same way as on Node: `autoDetect` on its env
@@ -66,6 +68,7 @@ export const tasksPlugin = TasksPlugin;
  * instances instead of using these singletons.
  */
 export const BUNDLED_WORKERS_PLUGINS = [
+  new ActionProposalsPlugin(),
   memoryPlugin,
   sandboxPlugin,
   firecrawlPlugin,
