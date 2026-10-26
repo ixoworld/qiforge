@@ -1,3 +1,12 @@
+import type {
+  TopicActionProposal,
+  TopicProposalSubject,
+} from '@ixo/ixo-transaction/topic-proposals';
+import type { TopicCandidate } from '../action-proposals/topic-prepare';
+import type {
+  ActionProposal,
+  ActionProposalSubject,
+} from '@ixo/ixo-transaction/action-proposals';
 import type { TaskExecutionProfile } from '../core/execution-profile';
 import type {
   DecisionDefinition,
@@ -10,6 +19,12 @@ import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import type { UserPreferences } from '../core/state';
 import type { AttachmentViewSurface } from '../attachments/view';
 import type { DeliveryConfig } from '../delivery/profile';
+import type {
+  ActionOperationV1,
+  ActionReferenceV1,
+  ActionOutcomeV1,
+  ActionCapabilitiesV1,
+} from '@ixo/action-protocol';
 
 /**
  * Route shape returned by `OraclePlugin.getAuthExcludedRoutes()`. Paths are
@@ -548,6 +563,13 @@ export interface RuntimeContext<TConfig = MergedConfig> {
     client: 'portal' | 'matrix' | 'slack' | 'channel';
     wsId?: string;
     requestId: string;
+    runId?: string;
+    /** Authenticated channel identity captured by the runtime for this turn. */
+    channel?: {
+      provider: string;
+      bindingId: string;
+      bindingRevision: number;
+    };
     roomId?: string;
     /**
      * Where the reply lands. `stream` is the Portal; `chat` is a chat app
@@ -741,6 +763,38 @@ export interface RuntimeContext<TConfig = MergedConfig> {
    * Bounded semantic decisions. A decision only returns structured judgment;
    * policy, authority checks, and side effects remain outside this primitive.
    */
+  actionProposals?: {
+    create(subject: ActionProposalSubject): Promise<ActionProposal>;
+    prepareTopic?(input: {
+      candidate: TopicCandidate;
+      origin: TopicProposalSubject['origin'];
+      evidenceRefs: string[];
+    }): Promise<TopicActionProposal>;
+  };
+
+  /** Host-owned action coordinator. It accepts only runtime-derived channel context. */
+  hubActions?: {
+    capabilities(): Promise<ActionCapabilitiesV1>;
+    options(input: {
+      ownerDid: string;
+      provider: string;
+      bindingId: string;
+      bindingRevision: number;
+    }): Promise<import('@ixo/action-protocol').HubActionOptionsV2>;
+    request(input: {
+      ownerDid: string;
+      sessionId: string;
+      runId: string;
+      requestId: string;
+      provider: string;
+      bindingId: string;
+      bindingRevision: number;
+      requestKey: string;
+      operation: ActionOperationV1;
+    }): Promise<ActionReferenceV1>;
+    status(ownerDid: string, actionId: string): Promise<ActionOutcomeV1 | null>;
+  };
+
   decisions: {
     evaluate<TSchema extends z.ZodType>(
       definition: DecisionDefinition<TSchema>,

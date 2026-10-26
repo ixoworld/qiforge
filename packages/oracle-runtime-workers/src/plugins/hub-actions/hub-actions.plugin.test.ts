@@ -1,0 +1,560 @@
+import { describe, expect, it, vi } from 'vitest';
+import { makeRuntimeContext } from '../../core/test-fixtures';
+import { HubActionsPlugin } from './hub-actions.plugin';
+import { HubActionClient } from '../../hub-actions/client';
+import { prepareHubAction } from '../../hub-actions/request';
+import type { HubActionOptionsV2, P2Operation } from '@ixo/action-protocol';
+import { HubActionRefused } from '../../hub-actions/store';
+
+const id = 'C'.repeat(32);
+const reference = {
+  version: 'ixo.auth-action/1' as const,
+  id,
+  accountId: 'account-three',
+  bindingId: 'chb_three',
+  bindingRevision: 4,
+  revision: 1,
+  digest: 'c'.repeat(64),
+  url: `https://hub.test/a/${id}`,
+  expiresAt: 1999999999999,
+  title: 'Review form',
+};
+const operation = {
+  kind: 'form.submit.v1' as const,
+  formId: 'form-three',
+  destination: 'registered-form',
+  fields: [
+    {
+      id: 'answer',
+      label: 'Answer',
+      type: 'text' as const,
+      required: true,
+      value: 'Yes',
+      source: 'user' as const,
+    },
+  ],
+  declaration: null,
+};
+const options: HubActionOptionsV2 = {
+  version: 'ixo.auth-options/2',
+  accountId: 'account-three',
+  ownerDid: 'did:ixo:owner',
+  bindingId: 'chb_three',
+  bindingRevision: 4,
+  connections: [],
+  targets: [],
+  resources: [],
+};
+
+describe('Hub actions Workers plugin', () => {
+  it('uses only runtime channel identity and original tool invocation', async () => {
+    const request = vi.fn(async () => reference);
+    const ctx = makeRuntimeContext({
+      config: { HUB_ACTIONS_ENABLED: 'true' },
+      user: {
+        did: 'did:ixo:owner',
+        matrixUserId: '@owner:test',
+        ucanDelegation: { raw: 'delegation' },
+      },
+      session: {
+        id: 'session-three',
+        client: 'channel',
+        requestId: 'request-three',
+        runId: 'run-three',
+        channel: {
+          provider: 'whatsapp',
+          bindingId: 'chb_three',
+          bindingRevision: 4,
+        },
+      },
+      toolCallId: 'tool-three',
+      hubActions: {
+        options: async () => options,
+        capabilities: async () => ({
+          version: 'ixo.auth-capabilities/1',
+          accountId: 'account-three',
+          oracleDid: 'did:ixo:oracle',
+          network: null,
+          resourceOrigin: null,
+          operations: ['form.submit.v1'],
+          transfer: null,
+          forms: [
+            {
+              formId: 'form-three',
+              destination: 'registered-form',
+              fields: [
+                { id: 'answer', label: 'Answer', type: 'text', required: true },
+              ],
+              declaration: null,
+            },
+          ],
+        }),
+        request,
+        status: async () => null,
+      },
+    });
+    const tool = new HubActionsPlugin()
+      .getTools()
+      .find((item) => item.name === 'request_hub_action');
+    if (!tool) throw new Error('request tool missing');
+    expect(await tool.handler({ operation }, ctx)).toEqual({
+      status: 'prepared',
+      actionReference: reference,
+      summary: 'Review form',
+    });
+    expect(request).toHaveBeenCalledWith({
+      ownerDid: 'did:ixo:owner',
+      sessionId: 'session-three',
+      runId: 'run-three',
+      requestId: 'request-three',
+      provider: 'whatsapp',
+      bindingId: 'chb_three',
+      bindingRevision: 4,
+      // A fixed-length digest of run and tool call (the Hub allows 120
+      // characters; a channel run id alone is 72).
+      requestKey: Array.from(
+        new Uint8Array(
+          await crypto.subtle.digest(
+            'SHA-256',
+            new TextEncoder().encode('run-three:tool-three'),
+          ),
+        ),
+        (b) => b.toString(16).padStart(2, '0'),
+      ).join(''),
+      operation,
+    });
+    const other = makeRuntimeContext({
+      ...ctx,
+      session: { ...ctx.session, channel: undefined },
+    });
+    expect(await tool.handler({ operation }, other)).toMatchObject({
+      status: 'unavailable',
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends epoch-second expiry through the real tool and HTTP adapter', async () => {
+    let sent: Record<string, unknown> | undefined;
+    const client = new HubActionClient({
+      origin: 'https://hub.test',
+      key: 'oracle-secret',
+      fetcher: {
+        fetch: async (request) => {
+          if (request.method === 'GET')
+            return Response.json({
+              version: 'ixo.auth-capabilities/1',
+              accountId: 'account-three',
+              oracleDid: 'did:ixo:oracle',
+              network: null,
+              resourceOrigin: null,
+              operations: ['form.submit.v1'],
+              transfer: null,
+              forms: [
+                {
+                  formId: 'form-three',
+                  destination: 'registered-form',
+                  fields: [
+                    {
+                      id: 'answer',
+                      label: 'Answer',
+                      type: 'text',
+                      required: true,
+                    },
+                  ],
+                  declaration: null,
+                },
+              ],
+            });
+          sent = (await request.json()) as Record<string, unknown>;
+          return Response.json({ reference });
+        },
+      },
+    });
+    const ctx = makeRuntimeContext({
+      config: { HUB_ACTIONS_ENABLED: 'true' },
+      user: {
+        did: 'did:ixo:owner',
+        matrixUserId: '@owner:test',
+        ucanDelegation: { raw: 'delegation' },
+      },
+      session: {
+        id: 'session-three',
+        client: 'channel',
+        requestId: 'request-three',
+        runId: 'run-three',
+        channel: {
+          provider: 'whatsapp',
+          bindingId: 'chb_three',
+          bindingRevision: 4,
+        },
+      },
+      toolCallId: 'tool-three',
+      hubActions: {
+        options: async () => options,
+        capabilities: () => client.capabilities(),
+        request: (input) =>
+          prepareHubAction(
+            client,
+            {
+              reserve: async (_origin, _operation, expiry) => expiry,
+              record: async (_origin, ref) => ref,
+            },
+            input,
+            1_770_000_000_000,
+          ),
+        status: async () => null,
+      },
+    });
+    const tool = new HubActionsPlugin()
+      .getTools()
+      .find((item) => item.name === 'request_hub_action');
+    if (!tool) throw new Error('request tool missing');
+    expect(await tool.handler({ operation }, ctx)).toMatchObject({
+      status: 'prepared',
+    });
+    expect(sent?.expiresAt).toBe(1_770_000_900);
+    expect(sent?.bindingId).toBe('chb_three');
+  });
+
+  it('takes service discovery identity from the verified channel context', async () => {
+    const discover = vi.fn(async () => options);
+    const ctx = makeRuntimeContext({
+      config: { HUB_ACTIONS_ENABLED: 'true' },
+      user: {
+        did: options.ownerDid,
+        matrixUserId: '@owner:test',
+        ucanDelegation: { raw: 'delegation' },
+      },
+      session: {
+        id: 'session-three',
+        client: 'channel',
+        runId: 'run-three',
+        requestId: 'request-three',
+        channel: {
+          provider: 'whatsapp',
+          bindingId: options.bindingId,
+          bindingRevision: options.bindingRevision,
+        },
+      },
+      hubActions: {
+        capabilities: async () => {
+          throw new Error('not called');
+        },
+        options: discover,
+        request: async () => reference,
+        status: async () => null,
+      },
+    });
+    const tool = new HubActionsPlugin()
+      .getTools()
+      .find((item) => item.name === 'hub_action_options');
+    if (!tool) throw new Error('Options tool missing');
+    expect(await tool.handler({}, ctx)).toEqual(options);
+    expect(discover).toHaveBeenCalledWith({
+      ownerDid: options.ownerDid,
+      provider: 'whatsapp',
+      bindingId: options.bindingId,
+      bindingRevision: 4,
+    });
+    await tool.handler(
+      {},
+      makeRuntimeContext({
+        ...ctx,
+        session: { ...ctx.session, client: 'portal' },
+      }),
+    );
+    expect(discover).toHaveBeenCalledTimes(1);
+  });
+
+  it.each<P2Operation>([
+    {
+      kind: 'gmail.connect.v1',
+      purpose: 'Send emails I review',
+      connectionId: null,
+      accountLabel: null,
+      scopes: [],
+    },
+    {
+      kind: 'gmail.disconnect.v1',
+      connectionId: 'gmail-one',
+      accountLabel: 'alex@example.test',
+    },
+    {
+      kind: 'gmail.message.send.v1',
+      connectionId: 'gmail-one',
+      accountLabel: 'alex@example.test',
+      to: 'sam@example.test',
+      subject: 'Garden plans',
+      body: 'Let’s meet on Tuesday.\nBring your ideas.',
+    },
+    {
+      kind: 'statement.sign.v1',
+      statement: 'These are my words.',
+      purpose: 'Keep a signed record',
+      audienceId: 'self',
+    },
+    {
+      kind: 'calendar.connect.v1',
+      purpose: 'Add events I review',
+      connectionId: null,
+      accountLabel: null,
+      scopes: [],
+    },
+    {
+      kind: 'calendar.disconnect.v1',
+      connectionId: 'connection-one',
+      accountLabel: 'alex@example.test',
+    },
+    {
+      kind: 'calendar.event.create.v1',
+      connectionId: 'connection-one',
+      accountLabel: 'alex@example.test',
+      calendarId: 'primary',
+      title: 'Planning',
+      description: '',
+      startsAt: '2099-11-03T02:00:00Z',
+      endsAt: '2099-11-03T02:30:00Z',
+      timeZone: 'Asia/Singapore',
+    },
+    {
+      kind: 'vfs.access.request.v1',
+      targetId: 'target-one',
+      title: 'Project notes',
+      ability: 'read',
+      purpose: 'Review the notes',
+    },
+    {
+      kind: 'vfs.text.save.v1',
+      filename: 'notes.txt',
+      text: 'Keep these exact words.',
+    },
+  ])('uses the shared tool schema for $kind', (candidate) => {
+    const tool = new HubActionsPlugin()
+      .getTools()
+      .find((item) => item.name === 'request_hub_action');
+    if (!tool) throw new Error('Request tool missing');
+    expect(tool.schema.safeParse({ operation: candidate }).success).toBe(true);
+    expect(
+      tool.schema.safeParse({
+        operation: { ...candidate, executorUrl: 'https://evil.test' },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('registers only with the flag, the Hub URL and the oracle key', () => {
+    const plugin = new HubActionsPlugin();
+    expect(plugin.autoDetect({ HUB_ACTIONS_ENABLED: 'true' })).toBe(false);
+    expect(
+      plugin.autoDetect({
+        HUB_ACTIONS_ENABLED: 'true',
+        AUTH_HUB_URL: 'https://hub.test',
+      }),
+    ).toBe(false);
+    expect(
+      plugin.autoDetect({
+        HUB_ACTIONS_ENABLED: 'true',
+        AUTH_HUB_URL: 'https://hub.test',
+        AUTH_HUB_CHANNEL_SERVICE_KEY: 'oracle-secret',
+      }),
+    ).toBe(true);
+  });
+
+  it.each([
+    ['limit', 'unavailable'],
+    ['expired', 'expired'],
+  ] as const)(
+    'answers a %s refusal with a typed result the model can relay',
+    async (kind, status) => {
+      const ctx = makeRuntimeContext({
+        config: { HUB_ACTIONS_ENABLED: 'true' },
+        session: {
+          id: 'session-three',
+          client: 'channel',
+          requestId: 'request-three',
+          runId: 'run-three',
+          channel: {
+            provider: 'whatsapp',
+            bindingId: 'chb_three',
+            bindingRevision: 4,
+          },
+        },
+        toolCallId: 'tool-three',
+        hubActions: {
+          capabilities: async () => {
+            throw new Error('unused');
+          },
+          options: async () => {
+            throw new Error('unused');
+          },
+          request: async () => {
+            throw new HubActionRefused(kind, `refused: ${kind}`);
+          },
+          status: async () => null,
+        },
+      });
+      const tool = new HubActionsPlugin()
+        .getTools()
+        .find((item) => item.name === 'request_hub_action');
+      if (!tool) throw new Error('request tool missing');
+      expect(await tool.handler({ operation }, ctx)).toEqual({
+        status,
+        reason: `refused: ${kind}`,
+      });
+    },
+  );
+
+  it('names the field the protocol refused and the earlier action that blocks a send', async () => {
+    const ctx = makeRuntimeContext({
+      config: { HUB_ACTIONS_ENABLED: 'true' },
+      session: {
+        id: 'session-three',
+        client: 'channel',
+        requestId: 'request-three',
+        runId: 'run-three',
+        channel: {
+          provider: 'whatsapp',
+          bindingId: 'chb_three',
+          bindingRevision: 4,
+        },
+      },
+      toolCallId: 'tool-three',
+      hubActions: {
+        capabilities: async () => {
+          throw new Error('unused');
+        },
+        options: async () => options,
+        request: async () => {
+          throw new HubActionRefused(
+            'refused',
+            'An earlier email is unconfirmed',
+            'D'.repeat(32),
+          );
+        },
+        status: async () => null,
+      },
+    });
+    const tool = new HubActionsPlugin()
+      .getTools()
+      .find((item) => item.name === 'request_hub_action');
+    if (!tool) throw new Error('request tool missing');
+    const bad = await tool.handler(
+      {
+        operation: {
+          kind: 'ixo.bank.send.v1',
+          chainId: 'pandora-8',
+          network: 'ixo testnet',
+          fromAddress: 'x',
+          toAddress: 'x',
+          amountBaseUnits: '1',
+          denom: 'uixo',
+          feeBaseUnits: '0',
+          memo: '',
+        },
+      },
+      ctx,
+    );
+    expect(bad).toMatchObject({ status: 'unavailable' });
+    expect(JSON.stringify(bad)).toMatch(/Invalid/);
+    expect(
+      await tool.handler(
+        {
+          operation: {
+            kind: 'gmail.message.send.v1',
+            connectionId: 'gmail-one',
+            accountLabel: 'alex@example.test',
+            to: 'sam@example.test',
+            subject: 'Garden plans',
+            body: 'See you Tuesday.',
+          },
+        },
+        ctx,
+      ),
+    ).toEqual({
+      status: 'unavailable',
+      reason: 'An earlier email is unconfirmed',
+      priorActionId: 'D'.repeat(32),
+    });
+  });
+
+  it('passes a mainnet transfer through to the Hub when the account capability names mainnet', async () => {
+    const SIGNER = 'ixo1qyqszqgpqyqszqgpqyqszqgpqyqszqgpdxlvf0';
+    const RECIPIENT = 'ixo1qgpqyqszqgpqyqszqgpqyqszqgpqyqszuzefze';
+    const transfer = {
+      kind: 'ixo.bank.send.v1' as const,
+      chainId: 'ixo-5',
+      network: 'ixo mainnet' as const,
+      fromAddress: SIGNER,
+      toAddress: RECIPIENT,
+      amountBaseUnits: '1000000',
+      denom: 'uixo' as const,
+      feeBaseUnits: '5000',
+      memo: '',
+    };
+    let sent: Record<string, unknown> | undefined;
+    const client = new HubActionClient({
+      origin: 'https://hub.test',
+      key: 'oracle-secret',
+      fetcher: {
+        fetch: async (request) => {
+          if (request.method === 'GET')
+            return Response.json({
+              version: 'ixo.auth-capabilities/2',
+              accountId: 'account-three',
+              oracleDid: 'did:ixo:oracle',
+              network: 'ixo mainnet',
+              resourceOrigin: null,
+              operations: ['ixo.bank.send.v1'],
+              transfer: { maxAmountUixo: '10000000', maxFeeUixo: '100000' },
+              forms: [],
+            });
+          sent = (await request.json()) as Record<string, unknown>;
+          return Response.json({ reference });
+        },
+      },
+    });
+    const ctx = makeRuntimeContext({
+      config: { HUB_ACTIONS_ENABLED: 'true' },
+      user: {
+        did: `did:ixo:${SIGNER}`,
+        matrixUserId: '@owner:test',
+        ucanDelegation: { raw: 'delegation' },
+      },
+      session: {
+        id: 'session-three',
+        client: 'channel',
+        requestId: 'request-three',
+        runId: 'run-three',
+        channel: {
+          provider: 'whatsapp',
+          bindingId: 'chb_three',
+          bindingRevision: 4,
+        },
+      },
+      toolCallId: 'tool-mainnet',
+      hubActions: {
+        capabilities: () => client.capabilities(),
+        options: async () => options,
+        request: (input) =>
+          prepareHubAction(
+            client,
+            {
+              reserve: async (_origin, _operation, expiry) => expiry,
+              record: async (_origin, ref) => ref,
+            },
+            input,
+            1_770_000_000_000,
+          ),
+        status: async () => null,
+      },
+    });
+    const tool = new HubActionsPlugin()
+      .getTools()
+      .find((item) => item.name === 'request_hub_action');
+    if (!tool) throw new Error('request tool missing');
+    expect(tool.schema.safeParse({ operation: transfer }).success).toBe(true);
+    expect(await tool.handler({ operation: transfer }, ctx)).toMatchObject({
+      status: 'prepared',
+    });
+    expect(sent?.operation).toEqual(transfer);
+  });
+});

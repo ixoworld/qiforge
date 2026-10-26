@@ -42,6 +42,14 @@ export const mainAgentRequestContextSchema = z.object({
     id: z.string(),
     client: z.enum(['portal', 'matrix', 'slack', 'channel']),
     requestId: z.string(),
+    runId: z.string().optional(),
+    channel: z
+      .object({
+        provider: z.string(),
+        bindingId: z.string(),
+        bindingRevision: z.number().int().positive(),
+      })
+      .optional(),
     wsId: z.string().optional(),
     roomId: z.string().optional(),
   }),

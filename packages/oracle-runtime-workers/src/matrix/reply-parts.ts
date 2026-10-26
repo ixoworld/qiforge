@@ -60,10 +60,16 @@ export function replyPartContent(part: ReplyPart): {
       body: part.text,
       formattedBody: renderRoomMarkdown(part.text),
     };
-  const { title, url } = part.artifact;
+  const { title, url } =
+    part.kind === 'action'
+      ? part.action
+      : part.kind === 'hub-action'
+        ? { title: part.summary, url: part.actionReference.url }
+        : part.artifact;
+  const label = part.kind === 'artifact' ? 'Open document' : 'Review action';
   return {
     body: `${title}\n${url}`,
-    formattedBody: `<p><strong>${escapeHtml(title)}</strong><br><a href="${escapeHtml(url)}">Open document</a></p>`,
+    formattedBody: `<p><strong>${escapeHtml(title)}</strong><br><a href="${escapeHtml(url)}">${label}</a></p>`,
   };
 }
 

@@ -300,6 +300,8 @@ export async function createMainAgent(
         id: requestCtx.session.id,
         client: requestCtx.session.client,
         requestId: requestCtx.session.requestId,
+        runId: requestCtx.session.runId,
+        channel: requestCtx.session.channel,
         wsId: requestCtx.session.wsId,
         roomId: requestCtx.session.roomId,
         ...(surface ? { surface } : {}),

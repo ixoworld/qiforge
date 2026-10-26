@@ -104,12 +104,12 @@ function withEncodedAuthorization(
  */
 export function resolveProtoCodec(typeUrl: string): ProtoJsonCodec {
   const segments = typeUrl.replace(/^\//, '').split('.');
-  if (segments[0] !== 'ixo') {
+  if (segments[0] !== 'ixo' && segments[0] !== 'cosmos') {
     throw new Error(
-      `Unsupported typeUrl namespace (expected ixo.*): ${typeUrl}`,
+      `Unsupported typeUrl namespace (expected ixo.* or cosmos.*): ${typeUrl}`,
     );
   }
-  const current = walk(ixo, segments.slice(1));
+  const current = walk(segments[0] === 'ixo' ? ixo : cosmos, segments.slice(1));
   if (!hasFromJSON(current)) {
     throw new Error(`No fromJSON codec found for ${typeUrl}`);
   }
