@@ -1,3 +1,5 @@
+import type { ImportCommand } from '../organisation-memory/contract';
+import type { ImportRpcResult } from '../organisation-memory/routes';
 import type {
   TopicDeliverableCommand,
   TopicDeliverableResult,
@@ -49,6 +51,7 @@ import type { DomainContextProvenance } from '../core/domain-context';
 
 /** Bindings every oracle Worker must declare (see the example `wrangler.jsonc`). */
 export interface OracleWorkerEnv {
+  ORGANISATION_MEMORY_IMPORT_ENABLED?: string;
   TOPIC_DELIVERABLES_ENABLED?: string;
   USER_ORACLE: DurableObjectNamespace<UserOracleObject>;
   MATRIX_GATEWAY: DurableObjectNamespace<MatrixGatewayObject>;
@@ -721,6 +724,10 @@ export interface StorageStatus {
  * piped straight to the client.
  */
 export interface UserOracleObject extends Rpc.DurableObjectBranded {
+  organisationMemoryImport(
+    userDid: string,
+    command: ImportCommand,
+  ): Promise<ImportRpcResult>;
   topicDeliverable(
     identity: TurnIdentity,
     operationId: string,

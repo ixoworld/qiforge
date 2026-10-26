@@ -6,6 +6,10 @@ The complete, runnable reference is
 `wrangler.devnet.jsonc` + `wrangler.gateway.devnet.jsonc` (the two-script
 layout of the devnet oracle) and `.dev.vars.example`.
 
+Direct reviewed document ingestion is disabled by default. See
+[organisation memory imports](organisation-memory-import.md) for
+`ORGANISATION_MEMORY_IMPORT_ENABLED`, signed request requirements, and durable receipts.
+
 ## Wrangler config
 
 Both scripts need:

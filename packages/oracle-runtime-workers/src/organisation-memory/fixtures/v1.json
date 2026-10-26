@@ -1,0 +1,67 @@
+{
+  "body": {
+    "version": 1,
+    "requestId": "d49f80fb-0507-4a81-85dc-cd8b51110101",
+    "domainDid": "did:ixo:entity:11111111111111111111111111111111",
+    "oracleEntityDid": "did:ixo:entity:22222222222222222222222222222222",
+    "oracleDid": "did:ixo:ixo1oraclefixture",
+    "network": "testnet",
+    "userDid": "did:ixo:ixo1ownerfixture",
+    "appId": "organisation-memory",
+    "resourceId": "did:ixo:entity:11111111111111111111111111111111#app:organisation-memory",
+    "visibility": "private",
+    "chunks": [
+      {
+        "id": "source-1-1",
+        "sourceName": "policy.md",
+        "sourceSha256": "8c682f8e987416983c7f37d9d8a090a78eb238028aeb3ed9f5ae579f3110391b",
+        "locator": "Paragraph 1",
+        "content": "Reviewed policy: rail travel is approved. 🌱",
+        "contentSha256": "b40c38b04b8c063bf59ee20e54d4fc76dc1f2ca771fd6fd4bdb9a6b731cec863"
+      }
+    ]
+  },
+  "rawBody": "{\"version\":1,\"requestId\":\"d49f80fb-0507-4a81-85dc-cd8b51110101\",\"domainDid\":\"did:ixo:entity:11111111111111111111111111111111\",\"oracleEntityDid\":\"did:ixo:entity:22222222222222222222222222222222\",\"oracleDid\":\"did:ixo:ixo1oraclefixture\",\"network\":\"testnet\",\"userDid\":\"did:ixo:ixo1ownerfixture\",\"appId\":\"organisation-memory\",\"resourceId\":\"did:ixo:entity:11111111111111111111111111111111#app:organisation-memory\",\"visibility\":\"private\",\"chunks\":[{\"id\":\"source-1-1\",\"sourceName\":\"policy.md\",\"sourceSha256\":\"8c682f8e987416983c7f37d9d8a090a78eb238028aeb3ed9f5ae579f3110391b\",\"locator\":\"Paragraph 1\",\"content\":\"Reviewed policy: rail travel is approved. 🌱\",\"contentSha256\":\"b40c38b04b8c063bf59ee20e54d4fc76dc1f2ca771fd6fd4bdb9a6b731cec863\"}]}",
+  "requestDigest": "126ac198045783913706031ba675cf1c4baa26e7aaedff939f058f0820251198",
+  "statusBody": {
+    "version": 1,
+    "requestId": "d49f80fb-0507-4a81-85dc-cd8b51110101",
+    "requestDigest": "126ac198045783913706031ba675cf1c4baa26e7aaedff939f058f0820251198",
+    "domainDid": "did:ixo:entity:11111111111111111111111111111111",
+    "oracleEntityDid": "did:ixo:entity:22222222222222222222222222222222",
+    "oracleDid": "did:ixo:ixo1oraclefixture",
+    "network": "testnet",
+    "userDid": "did:ixo:ixo1ownerfixture",
+    "appId": "organisation-memory",
+    "resourceId": "did:ixo:entity:11111111111111111111111111111111#app:organisation-memory"
+  },
+  "rawStatusBody": "{\"version\":1,\"requestId\":\"d49f80fb-0507-4a81-85dc-cd8b51110101\",\"requestDigest\":\"126ac198045783913706031ba675cf1c4baa26e7aaedff939f058f0820251198\",\"domainDid\":\"did:ixo:entity:11111111111111111111111111111111\",\"oracleEntityDid\":\"did:ixo:entity:22222222222222222222222222222222\",\"oracleDid\":\"did:ixo:ixo1oraclefixture\",\"network\":\"testnet\",\"userDid\":\"did:ixo:ixo1ownerfixture\",\"appId\":\"organisation-memory\",\"resourceId\":\"did:ixo:entity:11111111111111111111111111111111#app:organisation-memory\"}",
+  "submitFacts": {
+    "kind": "ixo.organisation-memory.invocation",
+    "version": 1,
+    "operation": "submit",
+    "bodyDigest": "126ac198045783913706031ba675cf1c4baa26e7aaedff939f058f0820251198",
+    "requestId": "d49f80fb-0507-4a81-85dc-cd8b51110101",
+    "requestDigest": "126ac198045783913706031ba675cf1c4baa26e7aaedff939f058f0820251198",
+    "domainDid": "did:ixo:entity:11111111111111111111111111111111",
+    "oracleEntityDid": "did:ixo:entity:22222222222222222222222222222222",
+    "oracleDid": "did:ixo:ixo1oraclefixture",
+    "network": "testnet",
+    "userDid": "did:ixo:ixo1ownerfixture",
+    "path": "/memory/imports"
+  },
+  "statusFacts": {
+    "kind": "ixo.organisation-memory.invocation",
+    "version": 1,
+    "operation": "status",
+    "bodyDigest": "db741bda58729ca88a92281811a7a197c862ced06257705f0aa9d235cd0750c2",
+    "requestId": "d49f80fb-0507-4a81-85dc-cd8b51110101",
+    "requestDigest": "126ac198045783913706031ba675cf1c4baa26e7aaedff939f058f0820251198",
+    "domainDid": "did:ixo:entity:11111111111111111111111111111111",
+    "oracleEntityDid": "did:ixo:entity:22222222222222222222222222222222",
+    "oracleDid": "did:ixo:ixo1oraclefixture",
+    "network": "testnet",
+    "userDid": "did:ixo:ixo1ownerfixture",
+    "path": "/memory/imports/status"
+  }
+}

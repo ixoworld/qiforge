@@ -1,3 +1,10 @@
+import { ImportLedger } from '../organisation-memory/ledger';
+import {
+  ImportError,
+  type ImportCommand,
+} from '../organisation-memory/contract';
+import { createImportTransport } from '../organisation-memory/transport';
+import type { ImportRpcResult } from '../organisation-memory/routes';
 import { ChannelTurns } from '../channels/turns';
 import { assertChannelAttemptAllowed } from '../channels/auth';
 import {
@@ -4140,6 +4147,56 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      */
     async debugAbortObject(): Promise<void> {
       this.ctx.abort('debug reset requested');
+    }
+
+    private organisationMemoryLedger?: ImportLedger;
+
+    async organisationMemoryImport(
+      userDid: string,
+      command: ImportCommand,
+    ): Promise<ImportRpcResult> {
+      try {
+        if (this.env.ORGANISATION_MEMORY_IMPORT_ENABLED !== 'true')
+          throw new ImportError(503, 'memory_import_disabled');
+        if (
+          command.body.userDid !== userDid ||
+          command.body.oracleDid !== this.env.ORACLE_DID ||
+          command.body.oracleEntityDid !== this.env.ORACLE_ENTITY_DID ||
+          command.body.network !== this.env.NETWORK
+        )
+          throw new ImportError(403, 'deployment_mismatch');
+        const storedUser = await this.ctx.storage.get<string>(META_USER_DID);
+        if (storedUser && storedUser !== userDid)
+          throw new ImportError(403, 'caller_mismatch');
+        this.organisationMemoryLedger ??= new ImportLedger(this.ctx.storage);
+        const ledger = this.organisationMemoryLedger;
+        if (command.operation === 'status')
+          return { ok: true, result: await ledger.status(command.body) };
+        const result = await ledger.submit(
+          command.body,
+          command.requestDigest,
+          async () => {
+            await this.ready({ userDid }, { recordAccess: false });
+            const url = this.core.validatedEnv['MEMORY_MCP_URL'];
+            if (typeof url !== 'string' || !this.ucan?.hasSigningKey())
+              throw new ImportError(503, 'memory_not_configured');
+            const room = await this.gateway.resolveUserRoom(userDid);
+            if (!room?.roomId)
+              throw new ImportError(503, 'user_room_unavailable');
+            return createImportTransport({
+              url,
+              userRoom: room.roomId,
+              delegation: command.delegation,
+              ucan: this.ucan,
+            });
+          },
+        );
+        return { ok: true, result };
+      } catch (error) {
+        return error instanceof ImportError
+          ? { ok: false, status: error.status, code: error.code }
+          : { ok: false, status: 503, code: 'memory_import_uncertain' };
+      }
     }
 
     async debugMemorySchema(userDid: string): Promise<MemorySchemaDebug> {
