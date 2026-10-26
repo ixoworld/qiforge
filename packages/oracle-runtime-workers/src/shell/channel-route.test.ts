@@ -172,6 +172,73 @@ afterEach(() => {
   clearChannelBindingCache();
 });
 
+describe('POST /api/internal/actions/outcomes', () => {
+  it('requires the separate Hub callback secret before routing by owner', async () => {
+    const turn = await signedTurn();
+    const base = environment(turn, false).env;
+    const record = vi.fn(async () => undefined);
+    const env = {
+      ...base,
+      HUB_ACTIONS_ENABLED: 'true',
+      AUTH_HUB_ACTION_OUTCOME_KEY: 'x'.repeat(40),
+      USER_ORACLE: {
+        idFromName: (name: string) => name,
+        get: () => ({ recordHubActionOutcome: record }),
+      },
+    };
+    const id = 'D'.repeat(32);
+    const outcome = {
+      version: 'ixo.auth-outcome/1',
+      eventId: 'event-shell',
+      ownerDid: USER_DID,
+      reference: {
+        version: 'ixo.auth-action/1',
+        id,
+        accountId: 'account-shell',
+        bindingId: 'chb_shell',
+        bindingRevision: 1,
+        revision: 1,
+        digest: 'a'.repeat(64),
+        url: `https://hub.test/a/${id}`,
+        expiresAt: 1999999999999,
+        title: 'Review form',
+      },
+      authorizedRevision: 1,
+      authorizedDigest: 'a'.repeat(64),
+      sequence: 1,
+      status: 'declined',
+      receipt: null,
+      occurredAt: 1770000000001,
+    };
+    const shell = createShell();
+    const send = (key?: string) =>
+      shell.request(
+        '/api/internal/actions/outcomes',
+        {
+          method: 'POST',
+          headers: key ? { 'x-auth-hub-outcome-key': key } : {},
+          body: JSON.stringify(outcome),
+        },
+        env,
+      );
+    expect((await send()).status).toBe(401);
+    expect((await send('wrong')).status).toBe(401);
+    expect(record).not.toHaveBeenCalled();
+    const accepted = await send('x'.repeat(40));
+    expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toEqual({
+      accepted: true,
+      eventId: outcome.eventId,
+      accountId: outcome.reference.accountId,
+      actionId: id,
+      revision: outcome.authorizedRevision,
+      digest: outcome.authorizedDigest,
+      sequence: outcome.sequence,
+    });
+    expect(record).toHaveBeenCalledWith(outcome);
+  });
+});
+
 describe('POST /channels/turn rate limit', () => {
   it('answers 429 over the limit without calling the Auth Hub', async () => {
     const turn = await signedTurn();

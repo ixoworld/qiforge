@@ -212,6 +212,8 @@ oracle script in a gateway split).
 | `AUTH_HUB_CHANNEL_SERVICE_KEY` | with the route   | Dedicated credential (secret) sent as `x-channels-service-key` when the runtime asks Auth Hub whether a channel binding is active. Never an operator credential.                                                   |
 | `AUTH_HUB`                     | one of these two | **Binding**, not a var: a Cloudflare service binding to Auth Hub (`"services": [{ "binding": "AUTH_HUB", "service": "<auth hub worker>" }]`). Used in preference to `AUTH_HUB_URL` when both are set.              |
 | `AUTH_HUB_URL`                 | one of these two | Auth Hub's origin when there is no service binding. Must be `https`.                                                                                                                                               |
+| `HUB_ACTIONS_ENABLED`          | no               | Set to `true` on the oracle script to enable Auth Hub action preparation, status recovery, and the callback route. Unset is disabled.                                                                              |
+| `AUTH_HUB_ACTION_OUTCOME_KEY`  | with callbacks   | Separate secret provisioned for the Hub account's outbound outcome delivery. Auth Hub sends it as `x-auth-hub-outcome-key`; it is never the oracle-to-Hub channel service key.                                     |
 
 Without the key, or without both `AUTH_HUB` and `AUTH_HUB_URL`, binding
 validation is "not configured": a new channel turn gets `503` and nothing is
@@ -349,11 +351,12 @@ prepared from a conversation, signed by the owner in the Portal, verified on
 chain. Off by default; `validateEnv` refuses the Worker when the feature is on
 without its origin and RPC, or with an unsafe URL.
 
-| Variable                                              | Meaning                                                                                                                                                                                             |
-| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ACTION_PROPOSALS_ENABLED`                            | `'true'` lets `prepare_action` prepare cards. Default `'false'`; reads, reconciliation, outcome polling and receipts work regardless.                                                               |
-| `ACTION_PROPOSALS_PORTAL_ORIGIN`                      | The trusted Portal origin for `/a/<id>` links: `https`, host only, no path. Required when enabled.                                                                                                  |
-| `ACTION_PROPOSALS_RPC_DEVNET`, `_TESTNET`, `_MAINNET` | Chain RPC base URL per network for verification: `https`, no credentials, query or fragment (a `/rpc/` path is fine). Devnet or testnet required when enabled; mainnet cards are refused by policy. |
+| Variable                                              | Meaning                                                                                                                                                                                                                |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ACTION_PROPOSALS_ENABLED`                            | `'true'` lets `prepare_action` prepare cards. Default `'false'`; reads, reconciliation, outcome polling and receipts work regardless.                                                                                  |
+| `ACTION_PROPOSALS_PORTAL_ORIGIN`                      | The trusted Portal origin for `/a/<id>` links: `https`, host only, no path. Required when enabled.                                                                                                                     |
+| `ACTION_PROPOSALS_RPC_DEVNET`, `_TESTNET`, `_MAINNET` | Chain RPC base URL per network for verification: `https`, no credentials, query or fragment (a `/rpc/` path is fine). Devnet or testnet required when enabled; mainnet cards are refused by policy.                    |
+| `ACTION_TOPIC_PROPOSALS_ENABLED`                      | `'true'` adds the topic cards ([topic-action-proposals](topic-action-proposals.md)): discussion drafts and claim-access grants, their claims and step permits. Default `'false'`; requires `ACTION_PROPOSALS_ENABLED`. |
 
 ### Ops and misc
 

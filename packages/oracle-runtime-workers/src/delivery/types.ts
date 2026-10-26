@@ -1,4 +1,5 @@
 import type { ActionReference } from '@ixo/ixo-transaction/action-proposals';
+import type { ActionReferenceV1 } from '@ixo/action-protocol';
 /**
  * Chat delivery: how a finished turn reaches a chat surface (an IXO Channels
  * provider such as WhatsApp, or a Matrix room) as a few short messages and
@@ -72,13 +73,20 @@ export interface ArtifactRef {
 export type ReplyPart =
   | { partId: string; kind: 'text'; text: string }
   | { partId: string; kind: 'artifact'; artifact: ArtifactRef }
-  | { partId: string; kind: 'action'; action: ActionReference };
+  | { partId: string; kind: 'action'; action: ActionReference }
+  | {
+      partId: string;
+      kind: 'hub-action';
+      actionReference: ActionReferenceV1;
+      summary: string;
+    };
 
 /** A part before it is numbered: what a plan is assembled from. */
 export type ReplyContent =
   | { kind: 'text'; text: string }
   | { kind: 'artifact'; artifact: ArtifactRef }
-  | { kind: 'action'; action: ActionReference };
+  | { kind: 'action'; action: ActionReference }
+  | { kind: 'hub-action'; actionReference: ActionReferenceV1; summary: string };
 
 /** What a chat surface delivers for one finished run, in delivery order. */
 export interface ReplyPlan {

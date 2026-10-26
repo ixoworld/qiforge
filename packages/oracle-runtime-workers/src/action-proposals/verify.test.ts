@@ -134,3 +134,96 @@ describe('chain verified action outcomes', () => {
     ).toHaveLength(1);
   });
 });
+
+it('verifies exact ordered topic grant bytes, memo and real nonzero chain outcomes', async () => {
+  const { buildTopicGrant } = await import('@ixo/ixo-transaction/topic-grants');
+  const { verifyTopicGrantTransaction } = await import('./verify');
+  const { SIGNER, RECIPIENT } = await import('./fixtures/proposal');
+  const messages = [
+    buildTopicGrant({
+      role: 'submit',
+      ownerAddress: SIGNER,
+      entityDid: 'did:ixo:entity:test',
+      adminAddress: SIGNER,
+      granteeAddress: RECIPIENT,
+      collectionId: '1',
+      agentQuota: '5',
+      expiresAt: '2027-10-18T10:00:00.000Z',
+    }),
+    buildTopicGrant({
+      role: 'evaluate',
+      ownerAddress: SIGNER,
+      entityDid: 'did:ixo:entity:test',
+      adminAddress: SIGNER,
+      granteeAddress: RECIPIENT,
+      collectionId: '1',
+      agentQuota: '2',
+      expiresAt: '2027-10-18T10:00:00.000Z',
+      beforeDate: '2027-10-17T10:00:00.000Z',
+    }),
+  ];
+  const effect = {
+    kind: 'chain' as const,
+    chainId: 'pandora-8',
+    signerAddress: SIGNER,
+    memo: 'Qi topic access fixture',
+    messages,
+  };
+  const body = TxBody.encode(
+    TxBody.fromPartial({
+      memo: effect.memo,
+      messages: messages.map((message) => ({
+        typeUrl: message.typeUrl,
+        value: Uint8Array.from(atob(message.valueBase64), (c) =>
+          c.charCodeAt(0),
+        ),
+      })),
+    }),
+    new protobuf.Writer(),
+  ).finish();
+  const raw = TxRaw.encode(
+    TxRaw.fromPartial({ bodyBytes: body, signatures: [new Uint8Array([1])] }),
+    new protobuf.Writer(),
+  ).finish();
+  const hash = Array.from(
+    new Uint8Array(await crypto.subtle.digest('SHA-256', raw)),
+    (c) => c.toString(16).padStart(2, '0'),
+  )
+    .join('')
+    .toUpperCase();
+  const fetcher: typeof fetch = async (input) =>
+    String(input).endsWith('/status')
+      ? Response.json({ result: { node_info: { network: 'pandora-8' } } })
+      : Response.json({
+          result: {
+            hash,
+            height: '99',
+            tx: btoa(Array.from(raw, (c) => String.fromCharCode(c)).join('')),
+            tx_result: { code: 17 },
+          },
+        });
+  expect(
+    await verifyTopicGrantTransaction(
+      effect,
+      hash,
+      'https://rpc.test/rpc/',
+      fetcher,
+    ),
+  ).toMatchObject({ transactionHash: hash, height: 99, code: 17 });
+  await expect(
+    verifyTopicGrantTransaction(
+      { ...effect, messages: [...messages].reverse() },
+      hash,
+      'https://rpc.test',
+      fetcher,
+    ),
+  ).rejects.toThrow('subject mismatch');
+  await expect(
+    verifyTopicGrantTransaction(
+      { ...effect, memo: 'Different' },
+      hash,
+      'https://rpc.test',
+      fetcher,
+    ),
+  ).rejects.toThrow('memo mismatch');
+});

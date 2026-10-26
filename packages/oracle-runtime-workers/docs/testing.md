@@ -99,6 +99,8 @@ More suites added with the same fixes:
 | `src/plugins/flows/input-policy.test.ts`                                                                                            | Secret inputs accept only a reference to an output of a step the flow has; every catalogue port flagged `secret` is refused as a literal.                                                                                                                                                                                                                                                                                                                           |
 | `src/plugins/tasks/tasks.plugin.test.ts`                                                                                            | The approval hint reads the user's reply under the turn-time note.                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `src/action-proposals/store.test.ts`, `verify.test.ts`, `receipts.test.ts`, `src/plugins/action-proposals/action-proposals.test.ts` | Action cards: one atomic claim across devices, the memo pins a transaction to its card and one hash to one card, verification and receipt cooldowns double and give up, quarantine, retention, group-room and mainnet refusals, and the evidence rules (clock times, `CARBON-10`, `uixo`, the tail of `1 500` are not evidence); the pre-release table shape is rebuilt; a hash the verifier rejected can be replaced; a card whose network lost its RPC backs off. |
+| `src/action-proposals/topic-store.test.ts`, `topic-authority.test.ts`, `src/core/topic-read-budget.test.ts`                         | Topic cards: one claim and one device-bound permit across devices and restarts, the card expiry on a never-sent step and the execution window after it, the grant lock following the other card's step (revoked included), verified Matrix receipts, forged senders refused, revocation, replay of the same invocation; canonical topic authority from a real Portal fixture.                                                                                       |
+| `src/core/topic-protocol-runtime.test.ts` (Node project only)                                                                       | The pinned `@ixo/topic-protocol` imports and validates in a Node child process started with `--disallow-code-generation-from-strings`, the Workers restriction; a build that compiles validators at run time fails here before it fails a Worker at boot.                                                                                                                                                                                                           |
 
 `src/plugins/mcp-tool-adapter.test.ts` runs a real MCP client and server
 over `InMemoryTransport` (the runtime's devDependency
@@ -221,3 +223,21 @@ GET /matrix/status   # instanceId unchanged, sendScheduler.failed 0, rateLimited
 config for checking whether an MCP round trip leaves an object resident:
 deploy it with that config, call `/mcp-opt/timeout` vs `/mcp-opt/own`, and
 compare `instanceId` after 45 s idle. Delete the deployed copy afterwards.
+
+# Auth Hub action integration
+
+The focused `src/hub-actions` Workers tests exercise the packed shared protocol
+through real `Request`/`Response` objects and persist action/outcome rows in a
+SQLite Durable Object across reopen. The plugin core test verifies that the
+request tool uses runtime channel identity and refuses a turn without it.
+`src/delivery/plan.test.ts` checks direct structured Reply Plan projection.
+These tests use local fixtures; full signed transfer, registered form submission,
+and private resource return need the coordinated Hub and gateway acceptance run.
+
+The Hub action client requests service-tagged options version 2 and refuses a
+legacy untagged response. The plugin uses the shared schema for Gmail connection,
+removal and one plain-text email; only runtime identity and the original channel
+turn supply its owner and binding. The coordinated Hub `scripts/conformance`
+harness runs the actual HTTP client, owner review and connector routes for two
+oracles. It substitutes external DID/provider and scope-attestation evidence;
+it does not send real email or prove live Google/WhatsApp acceptance.

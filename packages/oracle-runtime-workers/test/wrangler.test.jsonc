@@ -27,7 +27,8 @@
   ],
   "durable_objects": {
     "bindings": [
-      {"name":"ACTION_PROPOSAL_TEST","class_name":"ActionProposalTestDO"},
+      { "name": "ACTION_PROPOSAL_TEST", "class_name": "ActionProposalTestDO" },
+      { "name": "HUB_ACTION_TEST", "class_name": "HubActionTestDO" },
       { "name": "CHANNEL_TURNS_TEST", "class_name": "ChannelTurnsTestDO" },
       { "name": "SQLITE_TEST", "class_name": "SqliteTestDO" },
       { "name": "TASKS_TEST", "class_name": "TasksTestDO" },
@@ -47,7 +48,8 @@
     { "tag": "v3", "new_sqlite_classes": ["ResultStoreTestDO"] },
     { "tag": "v4", "new_sqlite_classes": ["ChannelTurnsTestDO"] },
     { "tag": "v5", "new_sqlite_classes": ["ArtifactStoreTestDO"] },
-    {"tag":"v7","new_sqlite_classes":["ActionProposalTestDO"]},
+    { "tag": "v7", "new_sqlite_classes": ["ActionProposalTestDO"] },
     { "tag": "v6", "new_sqlite_classes": ["FeedbackTestDO"] },
+    { "tag": "v8", "new_sqlite_classes": ["HubActionTestDO"] },
   ],
 }

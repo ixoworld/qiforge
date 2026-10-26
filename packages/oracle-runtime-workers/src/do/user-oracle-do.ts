@@ -1,10 +1,31 @@
+import { digestTopicProposalEffect } from '../action-proposals/topic-store';
+import {
+  chainIdsFromConfig,
+  chainIdConfigSchema,
+} from '../plugins/ixo-transaction/chain-ids';
+import { TopicProposalStore } from '../action-proposals/topic-store';
+import {
+  prepareTopicSubject,
+  type TopicCandidate,
+} from '../action-proposals/topic-prepare';
+import {
+  assertTopicDependencies,
+  reconcileTopicReferences,
+  type TopicVerificationContext,
+} from '../action-proposals/topic-verify';
+import { topicExpectedEffect } from '../action-proposals/topic-effects';
+import {
+  topicActionOutcome,
+  type ActionProposalWire,
+  type TopicActionProposal,
+  type TopicProposalSubject,
+  type BeginTopicStep,
+  type TopicReceiptReferences,
+} from '@ixo/ixo-transaction/topic-proposals';
 import type { ChannelTurnResponse } from '../channels/contract';
 import { refreshActionProposal } from '../action-proposals/reconcile';
 import { assertActionProposalPolicy } from '../action-proposals/policy';
-import {
-  chainIdConfigSchema,
-  chainIdsFromConfig,
-} from '../plugins/ixo-transaction/chain-ids';
+import { TopicReadUnavailable } from '../action-proposals/topic-errors';
 import { actionOutcome } from '@ixo/ixo-transaction/action-proposals';
 import {
   ActionProposalConflict,
@@ -16,7 +37,25 @@ import type {
   ActionProposalSubject,
 } from '@ixo/ixo-transaction/action-proposals';
 import { ChannelTurns } from '../channels/turns';
-import { assertChannelAttemptAllowed } from '../channels/auth';
+import { HubActionClient } from '../hub-actions/client';
+import { prepareHubAction } from '../hub-actions/request';
+import {
+  HUB_CHECK_AFTER_EXPIRY_MS,
+  HubActionRefused,
+  HubActionStore,
+  TERMINAL_HUB_STATUSES,
+} from '../hub-actions/store';
+import {
+  canonicalJson,
+  type ActionCapabilitiesV1,
+  type HubActionOptionsV2,
+  type ActionOperationV1,
+  type ActionOutcomeV1,
+} from '@ixo/action-protocol';
+import {
+  assertActiveChannelBinding,
+  assertChannelAttemptAllowed,
+} from '../channels/auth';
 import {
   CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
   ChannelError,
@@ -365,6 +404,59 @@ import {
 } from './ucan-service';
 import type { UcanDelegation, UserContextData } from '../plugin-api/types';
 
+/**
+ * The gateway's topic read errors that describe what the homeserver
+ * returned rather than a read that failed (`MatrixGatewayDO.getTopicEvent`
+ * / `getTopicHistory`).
+ */
+const GATEWAY_TOPIC_FACTS = new Set([
+  'Topic event room binding mismatch',
+  'Topic history event room binding mismatch',
+  'Topic history event has no ID',
+]);
+
+/**
+ * The transfer card store failed to open for this owner: every transfer
+ * route is told to retry later, with the reason in the log.
+ */
+function storeUnavailable(id: string): {
+  ok: false;
+  kind: 'unavailable';
+  error: string;
+} {
+  console.warn(`[action-proposals] ${id} refused: card store unavailable`);
+  return {
+    ok: false,
+    kind: 'unavailable',
+    error: 'Action cards are unavailable',
+  };
+}
+
+/**
+ * A topic command's refusal, for the shell: a `conflict` is the card or an
+ * authority it was sealed on having changed (the Portal re-reads and
+ * retries), `unavailable` is a room, DID or chain read that failed and may
+ * succeed later. Anything else is a bug and surfaces as one.
+ */
+function topicRefusal(
+  error: unknown,
+  id: string,
+): { ok: false; kind: 'conflict' | 'unavailable'; error: string } {
+  if (error instanceof ActionProposalConflict)
+    return { ok: false, kind: 'conflict', error: error.message };
+  if (error instanceof TopicReadUnavailable) {
+    console.warn(
+      `[topic-actions] ${id} authority unavailable: ${error.message}`,
+    );
+    return {
+      ok: false,
+      kind: 'unavailable',
+      error: 'Topic authority is unavailable',
+    };
+  }
+  throw error;
+}
+
 /** What one attempt's agent build reads from the request body. */
 type TurnBuildBody = Pick<
   TurnBody,
@@ -501,6 +593,14 @@ const BLOB_SWEEP_INTERVAL_MS = 60 * 60_000;
 const ACTION_TICK_BUDGET_MS = 15_000;
 /** The card retention sweep runs at most this often per instance. */
 const ACTION_PRUNE_INTERVAL_MS = 60 * 60_000;
+/** How long the Hub's capabilities answer is reused per object. */
+const HUB_CAPABILITIES_CACHE_MS = 60_000;
+/** How long a `hub_action_options` answer vouches for a Gmail connection. */
+const HUB_OPTIONS_REUSE_MS = 10 * 60_000;
+/** A channel poll waits this long for Auth Hub, once per poll at most. */
+const HUB_POLL_TIMEOUT_MS = 3_000;
+/** How long a passed topic authority read is reused for the same card. */
+const TOPIC_AUTHORITY_MEMO_MS = 30_000;
 /** The Blocksync lookup of the user's homeserver is abandoned after this long (the fallback applies). */
 const HOMESERVER_LOOKUP_TIMEOUT_MS = 3_000;
 /** Set once the legacy Matrix copy has been removed (or found absent): no more lookups. */
@@ -890,6 +990,19 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     /** Chat delivery's artefacts; null when no bucket is bound (see `canShare` for new ones). */
     private artifacts: ArtifactStore | null = null;
     private actionProposals: ActionProposalStore | null = null;
+    private hubActionStore: HubActionStore | null = null;
+    private hubActionClient: HubActionClient | null = null;
+    /** The Hub's capabilities for this oracle account, reused for `HUB_CAPABILITIES_CACHE_MS`. */
+    private hubCapabilities: {
+      value: ActionCapabilitiesV1;
+      at: number;
+    } | null = null;
+    /** The last `hub_action_options` answer for this owner (Gmail connection checks). */
+    private lastHubOptions: { value: HubActionOptionsV2; at: number } | null =
+      null;
+    private topicProposals: TopicProposalStore | null = null;
+    /** `assertTopicDependenciesMemo`: card id and digest -> when it passed. */
+    private topicAuthorityMemo: Map<string, number> | undefined;
     /** When this instance last ran the card retention sweep (at most hourly). */
     private lastActionPruneAt: number | null = null;
     /** Text `view_attachment` extracted, per session (`attachments/view-cache.ts`). */
@@ -1795,6 +1908,26 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         oracleName: this.core.identity.name,
       });
       await this.saver.setup();
+      if (this.env.HUB_ACTIONS_ENABLED === 'true') {
+        try {
+          if (!this.env.AUTH_HUB_URL || !this.env.AUTH_HUB_CHANNEL_SERVICE_KEY)
+            throw new Error('Hub URL and oracle service key are required');
+          const store = new HubActionStore(liveDb);
+          await store.setup();
+          this.hubActionStore = store;
+          this.hubActionClient = new HubActionClient({
+            origin: this.env.AUTH_HUB_URL,
+            key: this.env.AUTH_HUB_CHANNEL_SERVICE_KEY,
+            fetcher: this.env.AUTH_HUB,
+          });
+        } catch (error) {
+          this.hubActionStore = null;
+          this.hubActionClient = null;
+          console.error(
+            `[hub-actions] unavailable: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
       // A card store this build cannot open must not take the user's whole
       // object down: the feature is unavailable for this user, the rest works.
       try {
@@ -1805,6 +1938,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         this.actionProposals = null;
         console.error(
           `[action-proposals] store unavailable for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      try {
+        const topicProposals = new TopicProposalStore(liveDb);
+        await topicProposals.setup();
+        this.topicProposals = topicProposals;
+      } catch (err) {
+        this.topicProposals = null;
+        console.error(
+          `[topic-actions] store unavailable for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
       this.sessions = new SessionsStore(liveDb);
@@ -2024,8 +2167,30 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         logger: console,
       });
       this.ambient = createAmbientServices({
+        ...(this.hubActionStore && this.hubActionClient
+          ? {
+              hubActions: {
+                capabilities: () => this.cachedHubCapabilities(),
+                options: (input) => this.hubActionOptions(input),
+                request: (input: {
+                  ownerDid: string;
+                  sessionId: string;
+                  runId: string;
+                  requestId: string;
+                  provider: string;
+                  bindingId: string;
+                  bindingRevision: number;
+                  requestKey: string;
+                  operation: ActionOperationV1;
+                }) => this.requestHubAction(input),
+                status: (ownerDid: string, actionId: string) =>
+                  this.statusHubAction(ownerDid, actionId),
+              },
+            }
+          : {}),
         actionProposals: {
           create: (subject) => this.prepareActionProposal(subject),
+          prepareTopic: (input) => this.prepareTopicProposal(input),
         },
         ...(this.taskScheduler ? { tasks: this.taskScheduler.surface } : {}),
         preferences: this.preferences,
@@ -2105,6 +2270,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.resultStore = null;
       this.artifacts = null;
       this.actionProposals = null;
+      this.hubActionStore = null;
+      this.hubActionClient = null;
+      this.hubCapabilities = null;
+      this.lastHubOptions = null;
+      this.topicProposals = null;
       this.attachmentTextCache = null;
       this.domainContextStore = null;
       // Its store is bound to the database just dropped: a caller that sees
@@ -2969,31 +3139,353 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       ownerDid: string,
       result: ChannelTurnResponse,
     ): Promise<ChannelTurnResponse> {
-      if (result.status !== 'finished' || !this.actionProposals) return result;
-      const proposals = await this.actionProposals.forRun(
-        ownerDid,
-        result.sessionId,
-        result.runId,
-      );
+      if (result.status !== 'finished') return result;
       const actionOutcomes = [];
       let attempted = false;
-      for (const proposal of proposals) {
-        const refreshed: Awaited<ReturnType<typeof refreshActionProposal>> =
-          attempted
-            ? { proposal, attempted: false }
-            : await refreshActionProposal(
-                this.actionProposals,
+      // Each store on its own: the other one failing to open must not hide
+      // this one's cards from the poll.
+      const store = this.actionProposals;
+      if (store)
+        for (const proposal of await store.forRun(
+          ownerDid,
+          result.sessionId,
+          result.runId,
+        )) {
+          const refreshed: Awaited<ReturnType<typeof refreshActionProposal>> =
+            attempted
+              ? { proposal, attempted: false }
+              : await refreshActionProposal(
+                  store,
+                  proposal,
+                  this.actionProposalRpc(proposal),
+                );
+          attempted ||= refreshed.attempted;
+          actionOutcomes.push(actionOutcome(refreshed.proposal));
+        }
+      const topics = this.topicProposals;
+      if (topics) {
+        let cards: TopicActionProposal[] = [];
+        try {
+          cards = await topics.forRun(ownerDid, result.sessionId, result.runId);
+        } catch (error) {
+          console.error(
+            `[topic-actions] cards of run ${result.runId} unreadable: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        for (const proposal of cards) {
+          let refreshed = proposal;
+          // A card whose reference row this build cannot read is reported as
+          // it stands and taken off the verification schedule; the turn
+          // result is not failed over it.
+          try {
+            const refs = await topics.references(ownerDid, proposal.id);
+            if (
+              !attempted &&
+              refs.length &&
+              (await topics.claimVerification(ownerDid, proposal.id))
+            ) {
+              attempted = true;
+              refreshed = await reconcileTopicReferences(
+                topics,
                 proposal,
-                this.actionProposalRpc(proposal),
+                { v: 2, references: refs },
+                this.topicVerificationContext(proposal),
+                true,
               );
-        attempted ||= refreshed.attempted;
-        actionOutcomes.push(actionOutcome(refreshed.proposal));
+            }
+          } catch (error) {
+            await topics.quarantineVerification(ownerDid, proposal.id, error);
+          }
+          actionOutcomes.push(topicActionOutcome(refreshed));
+        }
       }
       if (attempted) {
         this.markDirty();
         await this.requestHousekeeping(Date.now() + 1000);
       }
-      return actionOutcomes.length ? { ...result, actionOutcomes } : result;
+      const hubActionOutcomes = await this.hubOutcomesForRun(
+        ownerDid,
+        result.sessionId,
+        result.runId,
+      );
+      return {
+        ...result,
+        ...(actionOutcomes.length ? { actionOutcomes } : {}),
+        ...(hubActionOutcomes.length ? { hubActionOutcomes } : {}),
+      };
+    }
+
+    private async hubActionOptions(input: {
+      ownerDid: string;
+      provider: string;
+      bindingId: string;
+      bindingRevision: number;
+    }) {
+      if (!this.hubActionClient || input.ownerDid !== this.userDid)
+        throw new Error('Hub action options are unavailable for this owner');
+      await assertActiveChannelBinding(
+        {
+          userDid: input.ownerDid,
+          channel: {
+            provider: input.provider,
+            bindingId: input.bindingId,
+            bindingRevision: input.bindingRevision,
+          },
+        },
+        this.env,
+      );
+      const options = await this.hubActionClient.options(input);
+      if (
+        options.ownerDid !== input.ownerDid ||
+        options.bindingId !== input.bindingId ||
+        options.bindingRevision !== input.bindingRevision
+      )
+        throw new Error(
+          'Hub action options do not match this owner and binding',
+        );
+      this.lastHubOptions = { value: options, at: Date.now() };
+      return options;
+    }
+
+    /**
+     * A Gmail operation that names a connection must name one the owner's
+     * options list (service, id and label), from the last
+     * `hub_action_options` read when it is recent, else a fresh one. One
+     * Gmail send in flight per mailbox: while an earlier send to the same
+     * connection or account label is authorized, submitted or unknown, a
+     * new one is refused with that action's id.
+     */
+    private async assertGmailOperationAllowed(input: {
+      ownerDid: string;
+      provider: string;
+      bindingId: string;
+      bindingRevision: number;
+      operation: ActionOperationV1;
+    }): Promise<void> {
+      const operation = input.operation;
+      if (
+        operation.kind !== 'gmail.message.send.v1' &&
+        operation.kind !== 'gmail.disconnect.v1'
+      )
+        return;
+      const cached = this.lastHubOptions ?? null;
+      const options =
+        cached &&
+        Date.now() - cached.at < HUB_OPTIONS_REUSE_MS &&
+        cached.value.ownerDid === input.ownerDid &&
+        cached.value.bindingId === input.bindingId &&
+        cached.value.bindingRevision === input.bindingRevision
+          ? cached.value
+          : await this.hubActionOptions(input);
+      if (
+        !options.connections.some(
+          (c) =>
+            c.service === 'gmail' &&
+            c.id === operation.connectionId &&
+            c.label === operation.accountLabel,
+        )
+      )
+        throw new HubActionRefused(
+          'refused',
+          "That Gmail connection is not one of this owner's; read hub_action_options and use a listed connection.",
+        );
+      if (operation.kind !== 'gmail.message.send.v1') return;
+      const prior = await this.hubActionStore?.gmailSendInFlight(
+        input.ownerDid,
+        operation.connectionId,
+        operation.accountLabel,
+      );
+      if (prior)
+        throw new HubActionRefused(
+          'refused',
+          `An earlier email from this mailbox (action ${prior}) is still in flight or unconfirmed; wait for its outcome, or ask the owner to check Gmail's Sent folder, before preparing another.`,
+          prior,
+        );
+    }
+
+    /** The Hub's capabilities, cached per object for `HUB_CAPABILITIES_CACHE_MS`. */
+    private async cachedHubCapabilities(): Promise<ActionCapabilitiesV1> {
+      const client = this.hubActionClient;
+      if (!client) throw new Error('Hub actions are unavailable');
+      const now = Date.now();
+      const cached = this.hubCapabilities ?? null;
+      if (cached && now - cached.at < HUB_CAPABILITIES_CACHE_MS)
+        return cached.value;
+      const value = await client.capabilities();
+      this.hubCapabilities = { value, at: now };
+      return value;
+    }
+
+    private async requestHubAction(input: {
+      ownerDid: string;
+      sessionId: string;
+      runId: string;
+      requestId: string;
+      provider: string;
+      bindingId: string;
+      bindingRevision: number;
+      requestKey: string;
+      operation: ActionOperationV1;
+    }) {
+      const store = this.hubActionStore;
+      const client = this.hubActionClient;
+      if (!store || !client || input.ownerDid !== this.userDid)
+        throw new Error('Hub actions are unavailable for this channel');
+      // Only a run an inbound channel message started may prepare a review:
+      // a scheduled or background run has no user asking for it.
+      const record = await this.runStore?.get(input.runId);
+      const turn = record
+        ? (JSON.parse(record.request) as StoredRunRequest).turn
+        : null;
+      if (
+        !turn ||
+        turn.client !== 'channel' ||
+        !turn.channel?.remoteMessageRef ||
+        turn.identity.userDid !== input.ownerDid ||
+        turn.sessionId !== input.sessionId ||
+        turn.sessionId.startsWith(SYNTHETIC_SESSION_PREFIX)
+      )
+        throw new HubActionRefused(
+          'limit',
+          'Reviews are prepared only in reply to a message from the user.',
+        );
+      await assertActiveChannelBinding(
+        {
+          userDid: input.ownerDid,
+          channel: {
+            provider: input.provider,
+            bindingId: input.bindingId,
+            bindingRevision: input.bindingRevision,
+          },
+        },
+        this.env,
+      );
+      await this.assertGmailOperationAllowed(input);
+      const reference = await prepareHubAction(
+        {
+          capabilities: () => this.cachedHubCapabilities(),
+          request: (body) => client.request(body),
+        },
+        {
+          reserve: async (origin, operation, expiresAt) => {
+            const reserved = await store.reserve(origin, operation, expiresAt);
+            this.markDirty();
+            return reserved;
+          },
+          record: (origin, reference) => store.record(origin, reference),
+          byRequestKey: (key) => store.byRequestKey(key),
+        },
+        input,
+      );
+      this.markDirty();
+      return reference;
+    }
+
+    private async statusHubAction(
+      ownerDid: string,
+      actionId: string,
+      timeoutMs?: number,
+    ): Promise<ActionOutcomeV1 | null> {
+      const held = await this.hubActionStore?.get(ownerDid, actionId);
+      if (!held || !this.hubActionClient) return null;
+      const status = await this.hubActionClient.status(actionId, timeoutMs);
+      if (
+        status.ownerDid !== ownerDid ||
+        canonicalJson(status.reference) !== canonicalJson(held.reference)
+      )
+        throw new Error('Hub status does not match the prepared action');
+      if (status.outcome) {
+        if (
+          status.revision !== status.outcome.authorizedRevision ||
+          status.digest !== status.outcome.authorizedDigest
+        )
+          return null;
+        if (await this.hubActionStore!.recordOutcome(status.outcome))
+          this.markDirty();
+      }
+      return status.outcome;
+    }
+
+    /**
+     * The run's Hub outcomes for a channel poll: stored outcomes first
+     * (callback-delivered ones included, so a Hub outage hides nothing
+     * already known), then at most ONE status refresh per poll, only for an
+     * action with no terminal outcome whose backoff (15 s doubling to
+     * 10 min) has passed, with a 3 s timeout. The newer outcome by
+     * sequence wins.
+     */
+    private async hubOutcomesForRun(
+      ownerDid: string,
+      sessionId: string,
+      runId: string,
+    ): Promise<ActionOutcomeV1[]> {
+      const store = this.hubActionStore;
+      if (!store) return [];
+      const now = Date.now();
+      let refreshed = false;
+      const current: ActionOutcomeV1[] = [];
+      for (const row of await store.runState(ownerDid, sessionId, runId)) {
+        let latest = row.latest;
+        if (
+          !refreshed &&
+          this.hubActionClient &&
+          !(latest && TERMINAL_HUB_STATUSES.has(latest.status)) &&
+          row.nextCheckAt <= now &&
+          row.reference.expiresAt * 1000 + HUB_CHECK_AFTER_EXPIRY_MS > now
+        ) {
+          refreshed = true;
+          // The attempt is spent before the read: a Hub that hangs is
+          // asked again only after the backoff.
+          await store.scheduleCheck(row.reference.id, row.checkAttempts);
+          // The schedule is SQLite state the owner copy must carry (else a
+          // restored copy asks the Hub again at once). Only a poll that
+          // refreshed writes it, at most one per poll.
+          this.markDirty();
+          try {
+            const fresh = await this.statusHubAction(
+              ownerDid,
+              row.reference.id,
+              HUB_POLL_TIMEOUT_MS,
+            );
+            if (fresh && (!latest || fresh.sequence > latest.sequence))
+              latest = fresh;
+          } catch (error) {
+            console.warn(
+              `[hub-actions] status recovery unavailable for ${row.reference.id}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+        if (latest) current.push(latest);
+      }
+      return current;
+    }
+
+    async recordHubActionOutcome(input: ActionOutcomeV1): Promise<void> {
+      if (this.env.HUB_ACTIONS_ENABLED !== 'true')
+        throw new Error('Hub actions disabled');
+      // A Hub callback is not the user: it must not count as access (that
+      // would delay idle eviction).
+      await this.ready({ userDid: input.ownerDid }, { recordAccess: false });
+      const held = await this.hubActionStore?.get(
+        input.ownerDid,
+        input.reference.id,
+      );
+      if (!held || !this.hubActionClient) throw new Error('Unknown Hub action');
+      const remote = await this.hubActionClient.status(input.reference.id);
+      if (
+        !remote.outcome ||
+        remote.ownerDid !== input.ownerDid ||
+        canonicalJson(remote.reference) !== canonicalJson(held.reference) ||
+        canonicalJson(input.reference) !== canonicalJson(held.reference) ||
+        remote.outcome.sequence < input.sequence ||
+        (remote.outcome.sequence === input.sequence &&
+          canonicalJson(remote.outcome) !== canonicalJson(input))
+      )
+        throw new Error(
+          'Hub outcome was not confirmed by authenticated status',
+        );
+      if (await this.hubActionStore!.recordOutcome(remote.outcome))
+        this.markDirty();
     }
 
     async listSessions(
@@ -3133,6 +3625,211 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return deleted;
     }
 
+    /**
+     * `assertTopicDependencies`, remembered per card (id and digest) for
+     * `TOPIC_AUTHORITY_MEMO_MS` after it passed (or after preparation read
+     * the same facts): prepare, claim and begin within seconds of each other
+     * read the room, history and chain once, not three times. Only a pass
+     * is remembered; a refusal re-reads.
+     */
+    private async assertTopicDependenciesMemo(
+      proposal: TopicActionProposal,
+    ): Promise<void> {
+      const key = `${proposal.id}:${proposal.digest}`;
+      const now = Date.now();
+      const passed = this.topicAuthorityMemo?.get(key);
+      if (passed !== undefined && now - passed < TOPIC_AUTHORITY_MEMO_MS)
+        return;
+      await assertTopicDependencies(
+        proposal,
+        this.topicVerificationContext(proposal),
+      );
+      this.rememberTopicAuthority(key, Date.now());
+    }
+    private rememberTopicAuthority(key: string, at: number): void {
+      const memo = (this.topicAuthorityMemo ??= new Map());
+      for (const [k, t] of memo)
+        if (at - t >= TOPIC_AUTHORITY_MEMO_MS) memo.delete(k);
+      memo.set(key, at);
+    }
+
+    private topicVerificationContext(
+      proposal: TopicActionProposal,
+    ): TopicVerificationContext {
+      // The gateway's errors arrive as plain errors over the stub. Most are
+      // reads that failed (oversized state, timed-out history, a room it
+      // cannot read, an event it cannot decrypt yet); the few that describe
+      // what the homeserver returned (an event bound to another room, an
+      // event without an id) are facts about the reference.
+      const read = async <T>(run: () => Promise<T>): Promise<T> => {
+        try {
+          return await run();
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          throw GATEWAY_TOPIC_FACTS.has(message)
+            ? new ActionProposalConflict(message)
+            : new TopicReadUnavailable(message);
+        }
+      };
+      // Room state and history are lists of events; anything else from the
+      // gateway is a read that failed, not content for the contract to judge.
+      const readList = (raw: string): unknown[] => {
+        const value: unknown = JSON.parse(raw);
+        if (!Array.isArray(value))
+          throw new TopicReadUnavailable('Topic read is not a list of events');
+        return value;
+      };
+      return {
+        reader: {
+          state: async (room) =>
+            readList(await read(() => this.gateway.getTopicRoomState(room))),
+          event: async (room, id, opts) => {
+            const raw = await read(() =>
+              this.gateway.getTopicEvent(room, id, opts),
+            );
+            return raw ? JSON.parse(raw) : null;
+          },
+          history: async (room, root, opts) =>
+            readList(
+              await read(() => this.gateway.getTopicHistory(room, root, opts)),
+            ),
+        },
+        blocksync: this.env.BLOCKSYNC_GRAPHQL_URL,
+        rpc: this.actionProposalRpc(proposal),
+      };
+    }
+    private async prepareTopicProposal(input: {
+      candidate: TopicCandidate;
+      origin: TopicProposalSubject['origin'];
+      evidenceRefs: string[];
+    }): Promise<TopicActionProposal> {
+      const topics = this.topicProposals;
+      if (
+        this.env.ACTION_PROPOSALS_ENABLED !== 'true' ||
+        this.env.ACTION_TOPIC_PROPOSALS_ENABLED !== 'true' ||
+        !this.userDid ||
+        !topics
+      )
+        throw new Error('Topic preparation unavailable');
+      const record = await this.runStore!.get(input.origin.runId);
+      if (!record) throw new Error('Originating run unavailable');
+      const request = (JSON.parse(record.request) as StoredRunRequest).turn;
+      if (
+        request.identity.userDid !== this.userDid ||
+        request.sessionId !== input.origin.sessionId
+      )
+        throw new Error('Topic origin mismatch');
+      const candidateDigest = await digestTopicProposalEffect(input.candidate);
+      const prior = await topics.replayPreparation(
+        this.userDid,
+        input.origin,
+        input.candidate,
+        input.evidenceRefs,
+      );
+      if (prior) return prior;
+      // The caps before the authority read it would waste (create checks
+      // them again, atomically).
+      await topics.assertCapacity(
+        this.userDid,
+        input.origin.sessionId,
+        input.origin.runId,
+      );
+      const rpc = {
+        devnet: this.env.ACTION_PROPOSALS_RPC_DEVNET,
+        testnet: this.env.ACTION_PROPOSALS_RPC_TESTNET,
+        mainnet: this.env.ACTION_PROPOSALS_RPC_MAINNET,
+      }[input.candidate.network];
+      const chainId = chainIdsFromConfig(chainIdConfigSchema.parse(this.env))[
+        input.candidate.network
+      ];
+      const subject = await prepareTopicSubject(
+        input.candidate,
+        [...input.evidenceRefs, `candidate:${candidateDigest}`],
+        {
+          ownerDid: this.userDid,
+          ...input.origin,
+          blocksync: this.env.BLOCKSYNC_GRAPHQL_URL,
+          rpc,
+          chainId,
+          reader: {
+            state: async (room) =>
+              JSON.parse(await this.gateway.getTopicRoomState(room)),
+            event: async (room, id, opts) => {
+              const raw = await this.gateway.getTopicEvent(room, id, opts);
+              return raw ? JSON.parse(raw) : null;
+            },
+            history: async (room, root, opts) =>
+              JSON.parse(await this.gateway.getTopicHistory(room, root, opts)),
+          },
+        },
+      );
+      const roomId =
+        request.roomId ??
+        (await this.sessions!.getSession(request.sessionId))?.roomId;
+      const origin =
+        request.sessionId.startsWith('$') && roomId
+          ? {
+              sessionId: request.sessionId,
+              roomId,
+              client: request.client,
+              ...(request.channel ? { channel: request.channel } : {}),
+            }
+          : null;
+      const p = await topics.create(subject, origin);
+      this.markDirty();
+      // Preparation just read and sealed every fact the claim re-checks.
+      this.rememberTopicAuthority(`${p.id}:${p.digest}`, Date.now());
+      return p;
+    }
+    /** Both switches: topic cards may be claimed and their steps permitted. */
+    private topicExecutionEnabled(): boolean {
+      return (
+        this.env.ACTION_PROPOSALS_ENABLED === 'true' &&
+        this.env.ACTION_TOPIC_PROPOSALS_ENABLED === 'true'
+      );
+    }
+    async beginTopicStep(
+      identity: TurnIdentity,
+      id: string,
+      input: BeginTopicStep,
+    ): Promise<string | null> {
+      await this.ready(identity);
+      const store = this.topicProposals;
+      if (!store)
+        return JSON.stringify(
+          topicRefusal(new TopicReadUnavailable('topic store unavailable'), id),
+        );
+      try {
+        const proposal = await store.get(identity.userDid, id);
+        if (!proposal) return null;
+        // Switching the feature off stops new permits; reads, reconciliation
+        // and receipts of cards already in flight keep working.
+        if (!this.topicExecutionEnabled())
+          throw new ActionProposalConflict(
+            'Topic action execution is disabled',
+          );
+        // The local refusals first (not claimed, expired, out of order,
+        // another executor); the ten second authority read only for a step
+        // that could actually start.
+        await store.assertBeginnable(identity.userDid, id, input);
+        // A step whose reference is recorded is spoken for: no new permit,
+        // and no authority read to find that out.
+        if (await store.hasReference(identity.userDid, id, input.step))
+          return JSON.stringify({
+            ok: true,
+            result: { status: 'already_started', proposal },
+          });
+        await this.assertTopicDependenciesMemo(proposal);
+        const effect = await topicExpectedEffect(proposal, input.step);
+        const result = await store.begin(identity.userDid, id, input, effect);
+        this.markDirty();
+        return result ? JSON.stringify({ ok: true, result }) : null;
+      } catch (error) {
+        return JSON.stringify(topicRefusal(error, id));
+      }
+    }
+
     private async prepareActionProposal(
       subject: ActionProposalSubject,
     ): Promise<ActionProposal> {
@@ -3220,70 +3917,162 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * moment any of it is due again.
      */
     private async tickActionProposals(): Promise<number | undefined> {
-      if (!this.userDid || !this.actionProposals) return undefined;
-      const store = this.actionProposals;
+      if (!this.userDid) return undefined;
       const userDid = this.userDid;
+      // Each store on its own: the other one failing to open must not stop
+      // this one's verifications, receipts or retention.
+      const store = this.actionProposals;
+      const topics = this.topicProposals;
       const budget = new AbortController();
       const timer = setTimeout(() => budget.abort(), ACTION_TICK_BUDGET_MS);
-      try {
-        const due = await store.dueVerifications(userDid);
-        const settled = await Promise.allSettled(
-          due.map((proposal) =>
-            refreshActionProposal(
-              store,
-              proposal,
-              this.actionProposalRpc(proposal),
-              fetch,
-              budget.signal,
-            ),
-          ),
-        );
-        for (const result of settled) {
-          if (result.status === 'fulfilled') {
-            if (result.value.attempted) this.markDirty();
-          } else
+      const settle = (
+        label: string,
+        results: PromiseSettledResult<unknown>[],
+      ) => {
+        for (const result of results)
+          if (result.status === 'rejected')
             console.warn(
-              `[action-proposals] verification failed for ${userDid}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
+              `[${label}] verification failed for ${userDid}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
             );
-        }
+      };
+      try {
+        await Promise.all([
+          (async () => {
+            if (!store) return;
+            const due = await store.dueVerifications(userDid);
+            const settled = await Promise.allSettled(
+              due.map(async (proposal) => {
+                const refreshed = await refreshActionProposal(
+                  store,
+                  proposal,
+                  this.actionProposalRpc(proposal),
+                  fetch,
+                  budget.signal,
+                );
+                if (refreshed.attempted) this.markDirty();
+              }),
+            );
+            settle('action-proposals', settled);
+          })(),
+          // Topic cards with started steps the room or chain has not
+          // confirmed yet: reconcile their recorded references on the same
+          // cooldown, under the same budget. Guarded on its own: a topic
+          // card's trouble must not hold up the transfer receipts below.
+          (async () => {
+            if (!topics) return;
+            try {
+              const due = await topics.dueVerifications(userDid);
+              const settled = await Promise.allSettled(
+                due.map(async (proposal) => {
+                  // The attempt is spent before the references are read: a
+                  // reference row this build cannot parse is quarantined,
+                  // not retried every second.
+                  if (!(await topics.claimVerification(userDid, proposal.id)))
+                    return;
+                  this.markDirty();
+                  try {
+                    const refs = await topics.references(userDid, proposal.id);
+                    if (refs.length)
+                      await reconcileTopicReferences(
+                        topics,
+                        proposal,
+                        { v: 2, references: refs },
+                        {
+                          ...this.topicVerificationContext(proposal),
+                          signal: budget.signal,
+                        },
+                        true,
+                      );
+                  } catch (error) {
+                    await topics.quarantineVerification(
+                      userDid,
+                      proposal.id,
+                      error,
+                    );
+                  }
+                }),
+              );
+              settle('topic-actions', settled);
+            } catch (err) {
+              console.error(
+                `[topic-actions] tick failed for ${userDid}: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          })(),
+        ]);
       } finally {
         clearTimeout(timer);
       }
-      if ((await store.closeUnexecuted(userDid)) > 0) this.markDirty();
-      const now = store.now();
+      if (store && (await store.closeUnexecuted(userDid)) > 0) this.markDirty();
+      const now = store?.now() ?? Date.now();
       const lastPruneAt = this.lastActionPruneAt ?? null;
       if (
         lastPruneAt === null ||
         now - lastPruneAt >= ACTION_PRUNE_INTERVAL_MS
       ) {
         this.lastActionPruneAt = now;
-        if ((await store.prune(userDid)) > 0) this.markDirty();
+        if (store && (await store.prune(userDid)) > 0) this.markDirty();
+        try {
+          if (topics && (await topics.prune(userDid)) > 0) this.markDirty();
+        } catch (err) {
+          console.error(
+            `[topic-actions] prune failed for ${userDid}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        // Hub action rows (requests, references, outcomes) 30 days after
+        // their review expired.
+        try {
+          if (this.hubActionStore && (await this.hubActionStore.prune()) > 0)
+            this.markDirty();
+        } catch (err) {
+          console.error(
+            `[hub-actions] prune failed for ${userDid}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
       }
       const receiptAt = await this.mirrorActionReceipts(true);
       const next = [
         receiptAt,
-        await store.nextVerificationAt(userDid),
-        await store.nextUnexecutedCloseAt(userDid),
+        store ? await store.nextVerificationAt(userDid) : undefined,
+        store ? await store.nextUnexecutedCloseAt(userDid) : undefined,
+        topics ? await topics.nextVerificationAt(userDid) : undefined,
       ].filter((at): at is number => at !== undefined);
       return next.length ? Math.min(...next) : undefined;
     }
 
     /**
-     * Take the receipts due now and post them. `detach` hands the posts to
-     * `ctx.waitUntil` (the alarm does not wait on a slow room); otherwise
-     * they are awaited.
+     * Take the receipts due now (both card stores) and post them. `detach`
+     * hands the posts to `ctx.waitUntil` (the alarm does not wait on a slow
+     * room); otherwise they are awaited.
      */
     private async mirrorActionReceipts(
       detach = false,
     ): Promise<number | undefined> {
-      if (!this.userDid || !this.actionProposals) return undefined;
+      if (!this.userDid) return undefined;
       const store = this.actionProposals;
-      const receipts = await store.takeReceipts(this.userDid);
-      if (receipts.length) this.markDirty();
-      const posting = this.postActionReceipts(store, receipts);
+      const topics = this.topicProposals;
+      const receipts = store ? await store.takeReceipts(this.userDid) : [];
+      const topicReceipts = topics
+        ? await topics.takeReceipts(this.userDid)
+        : [];
+      if (receipts.length || topicReceipts.length) this.markDirty();
+      const posting = Promise.all([
+        store ? this.postActionReceipts(store, receipts) : undefined,
+        topics ? this.postTopicReceipts(topics, topicReceipts) : undefined,
+      ]).then(() => undefined);
       if (detach) this.ctx.waitUntil(posting);
       else await posting;
-      return store.nextReceiptAttempt(this.userDid);
+      const due = store
+        ? await store.nextReceiptAttempt(this.userDid)
+        : undefined;
+      const topicDue = topics
+        ? await topics.nextReceiptAttempt(this.userDid)
+        : undefined;
+      return due === undefined
+        ? topicDue
+        : topicDue === undefined
+          ? due
+          : Math.min(due, topicDue);
     }
 
     private async postActionReceipts(
@@ -3324,16 +4113,134 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       }
     }
 
-    private actionProposalRpc(proposal: ActionProposal): string | undefined {
+    private async postTopicReceipts(
+      topics: TopicProposalStore,
+      receipts: Awaited<ReturnType<TopicProposalStore['takeReceipts']>>,
+    ): Promise<void> {
+      for (const { proposal, origin } of receipts) {
+        try {
+          const receipt = proposal.lifecycle.receipt;
+          if (!receipt) continue;
+          const text =
+            receipt.kind === 'topic-created'
+              ? `${proposal.title} created. Room ${receipt.roomId}. Topic ${receipt.topicId}. Root ${receipt.rootEventId}.`
+              : `${proposal.title} ${receipt.kind === 'topic-access-granted' ? 'confirmed' : 'failed'} on chain. Transaction ${receipt.transactionHash}. Block ${receipt.height}. Code ${receipt.code}.`;
+          await this.replayToRoom(
+            {
+              ...origin,
+              identity: { userDid: proposal.ownerDid },
+              message: '',
+              requestId: `action-receipt:${proposal.id}:${proposal.digest}`,
+            },
+            text,
+            'oracle',
+            true,
+          );
+          await topics.receiptMirrored(proposal.ownerDid, proposal.id);
+          this.markDirty();
+        } catch (error) {
+          console.warn(
+            '[topic-actions] receipt mirror pending',
+            error instanceof Error ? error.message : 'mirror failed',
+          );
+        }
+      }
+    }
+
+    private actionProposalRpc(
+      proposal: ActionProposalWire,
+    ): string | undefined {
       return this.actionProposalRpcs()[proposal.action.network];
     }
     async actionProposal(
       identity: TurnIdentity,
       id: string,
-      command?: ProposalCommand,
+      command?:
+        | ProposalCommand
+        | { kind: 'topic-reconcile'; input: TopicReceiptReferences },
     ): Promise<string | null> {
       await this.ready(identity);
-      const store = this.requireActionProposals();
+      const topics = this.topicProposals;
+      const topic = topics ? await topics.get(identity.userDid, id) : null;
+      if (topics && topic) {
+        try {
+          let result = topic;
+          let topicAttempted = false;
+          const verification = {
+            ...this.topicVerificationContext(topic),
+            onAttempt: () => {
+              topicAttempted = true;
+            },
+          };
+          if (command?.kind === 'topic-reconcile')
+            result = await reconcileTopicReferences(
+              topics,
+              topic,
+              command.input,
+              verification,
+            );
+          else if (command) {
+            if (command.kind === 'reconcile')
+              throw new ActionProposalConflict(
+                'Topic reconciliation requires references',
+              );
+            if (command.kind === 'claim') {
+              if (!this.topicExecutionEnabled())
+                throw new ActionProposalConflict(
+                  'Topic action execution is disabled',
+                );
+              // The local refusals first (already consumed, changed,
+              // expired): the remote authority read only for a claim that
+              // could succeed.
+              await topics.assertClaimable(
+                identity.userDid,
+                id,
+                command.digest,
+              );
+              await this.assertTopicDependenciesMemo(topic);
+            }
+            const next = await topics.transition(
+              identity.userDid,
+              id,
+              command.kind,
+              command.digest,
+            );
+            if (!next) return null;
+            result = next;
+          } else {
+            const refs = await topics.references(identity.userDid, id);
+            if (refs.length)
+              result = await reconcileTopicReferences(
+                topics,
+                topic,
+                { v: 2, references: refs },
+                verification,
+              );
+          }
+          if (command || topicAttempted) {
+            this.markDirty();
+            await this.requestHousekeeping(Date.now() + 1000);
+          }
+          return JSON.stringify({ ok: true, proposal: result });
+        } catch (error) {
+          return JSON.stringify(topicRefusal(error, id));
+        }
+      }
+      // Without the topic store an id the transfer store does not know may
+      // be a topic card: the Portal is told to retry, not that the card is
+      // gone. Without the transfer store, the same for the other side.
+      const unknownCard = () =>
+        topics
+          ? null
+          : JSON.stringify(
+              topicRefusal(
+                new TopicReadUnavailable('topic store unavailable'),
+                id,
+              ),
+            );
+      if (command?.kind === 'topic-reconcile') return unknownCard();
+      const store = this.actionProposals;
+      if (!store) return JSON.stringify(storeUnavailable(id));
       try {
         let result = command
           ? await store.transition(identity.userDid, id, command)
@@ -3351,10 +4258,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             await this.requestHousekeeping(Date.now() + 1000);
           }
         }
-        return result ? JSON.stringify({ ok: true, proposal: result }) : null;
+        return result
+          ? JSON.stringify({ ok: true, proposal: result })
+          : unknownCard();
       } catch (error) {
         if (error instanceof ActionProposalConflict)
-          return JSON.stringify({ ok: false, error: error.message });
+          return JSON.stringify({
+            ok: false,
+            kind: 'conflict',
+            error: error.message,
+          });
         throw error;
       }
     }
@@ -6507,6 +7420,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             client: req.client,
             requestId: req.requestId,
             runId: run.runId,
+            ...(req.channel?.bindingRevision
+              ? {
+                  channel: {
+                    provider: req.channel.provider,
+                    bindingId: req.channel.bindingId,
+                    bindingRevision: req.channel.bindingRevision,
+                  },
+                }
+              : {}),
             roomId: sessionRoomId,
           },
           model: effectiveModel,
