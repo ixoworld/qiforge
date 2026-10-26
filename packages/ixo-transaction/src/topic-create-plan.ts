@@ -108,6 +108,13 @@ export const CreatePlanInputSchema = z
   })
   .strict();
 export type CreatePlanInput = z.infer<typeof CreatePlanInputSchema>;
+/**
+ * `protocol` and every `sourceVersion` below name the topic SHAPE release
+ * (`TOPIC_SHAPE_RELEASE`), not the package version: package 1.0.0-rc.8
+ * still ships shape release 1.0.0-rc.7 (and refuses an unknown one with
+ * SHAPE_SOURCE_NOT_FOUND). It is part of every sealed plan's digest and of
+ * the Portal's strict parser, so it moves only with a new shape release.
+ */
 export type TopicCreatePlan = CreatePlanInput & {
   v: 1;
   encoderVersion: 'portal-create-plan/1';
