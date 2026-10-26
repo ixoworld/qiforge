@@ -132,13 +132,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * segment. When the authority is itself a DID (`ixo:did:key:alice/…`) the
  * resource is that DID's alone: it must equal the issuer, and the first path
  * segment is not consulted (`did:web:alice.com:did:key:zBob` is a DID Alice
- * controls, not Bob's). The rule is strictly tighter than the one in 2.2.1.
+ * controls, not Bob's). A resource with a query or fragment never self-issues
+ * unless it equals the issuer. The rule is strictly tighter than the one in
+ * 2.2.1.
  */
 export function resourceNamesIssuer(resource: string, issuer: string): boolean {
   if (!issuer) return false;
   if (resource === issuer) return true;
   // A resource that is itself a DID names exactly that DID.
   if (resource.startsWith('did:')) return false;
+  // A query or fragment never carries authority; a DID inside one
+  // (`ixo:tenant?x=:did:…`) must not self-issue.
+  if (resource.includes('?') || resource.includes('#')) return false;
   const schemeEnd = resource.indexOf(':');
   if (schemeEnd === -1) return false;
   const rest = resource.slice(schemeEnd + 1);

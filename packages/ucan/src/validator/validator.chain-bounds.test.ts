@@ -918,6 +918,9 @@ describe('resource-scoped self-issue names the authority only', () => {
     expect(resourceNamesIssuer(`ixo:${alice}#${did}`, did)).toBe(false);
     expect(resourceNamesIssuer(`ixo:/${did}`, did)).toBe(false); // empty authority
     expect(resourceNamesIssuer(`ixo:${did}?x=1`, did)).toBe(false);
+    expect(resourceNamesIssuer(`ixo:tenant?x=:${did}`, did)).toBe(false);
+    expect(resourceNamesIssuer(`ixo:tenant#:${did}`, did)).toBe(false);
+    expect(resourceNamesIssuer(`ixo:tenant/${did}?x=1`, did)).toBe(false);
 
     // Deeper than the first path segment: someone else's resource that
     // mentions the DID (a folder shared with it).
