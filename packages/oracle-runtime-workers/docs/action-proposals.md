@@ -55,12 +55,9 @@ creation. A card asked for in a Matrix **group room** is refused (`Action
 cards are prepared in direct chats only`): a card names one person's wallet
 and its link and receipt would be visible to the whole room.
 
-**Caps** (`src/action-proposals/store.ts`): one agent run prepares at most
-8 cards (`Too many action cards in this request…`), and an owner has at most
-16 open ones: `prepared` in the last 20 minutes, `claimed`, or `unknown` with
-no hash (`Too many action cards are open…`). Both refusals reach the model as
-`clarification_required`; a resumed tool call returns its original card and
-is never refused.
+**No usage caps.** The owner object does not limit how many cards a run or
+an owner prepares; every card still needs the owner's own review and
+signature. A resumed tool call returns its original card.
 
 ## Evidence before the model
 

@@ -229,9 +229,9 @@ are offered only when the flag, the URL and the key are all set.
 
 Only a run an inbound channel message started may prepare a review (its run
 record carries the channel's `remoteMessageRef`; a scheduled or background run
-is refused). Each prepare is capped: 2 per agent run, 5 per user per hour and
-10 per user per day (`HUB_ACTIONS_PER_*` in `src/hub-actions/store.ts`); a
-retry of the same tool call is not a new prepare. A refusal reaches the model
+is refused): that is provenance, not a usage cap, and there are no per-run or
+per-user prepare caps (every action still needs the owner's review in Auth
+Hub). A retry of the same tool call is the same prepare. A refusal reaches the model
 as `{ status: 'unavailable' | 'expired', reason }`. Auth Hub's capabilities
 are cached per owner object for 60 s. The Hub's idempotency key is the
 SHA-256 hex of `runId:toolCallId` (fixed length). A retry whose reserved

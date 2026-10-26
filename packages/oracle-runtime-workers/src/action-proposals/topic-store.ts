@@ -24,9 +24,6 @@ import {
   ActionProposalConflict,
   ACTION_PROPOSAL_RETENTION_MS,
   ACTION_PROPOSAL_UNRESOLVED_RETENTION_MS,
-  ACTION_PROPOSALS_OPEN_PER_OWNER,
-  ACTION_PROPOSALS_PER_RUN,
-  OPEN_PREPARED_MS,
   RECEIPT_MAX_ATTEMPTS,
   RECEIPT_RETRY_BASE_MS,
   RECEIPT_RETRY_MAX_MS,
@@ -163,11 +160,6 @@ export class TopicProposalStore {
       }
       if (Date.parse(subject.expiresAt) <= this.now())
         throw new ActionProposalConflict('Proposal expired');
-      await this.assertCapacity(
-        subject.ownerDid,
-        subject.origin.sessionId,
-        subject.origin.runId,
-      );
       const steps: TopicStepId[] =
         subject.action.name === 'create_topic'
           ? ['anchor', 'body', 'operation', 'snapshot']
@@ -200,40 +192,6 @@ export class TopicProposalStore {
         );
       return TopicProposalV2Schema.parse({ ...subject, digest, lifecycle });
     });
-  }
-  /**
-   * At most `ACTION_PROPOSALS_PER_RUN` cards per run and
-   * `ACTION_PROPOSALS_OPEN_PER_OWNER` open ones (prepared in the last 20
-   * minutes, or claimed / unknown in the last two hours: the claim window
-   * plus the execution window). The owner object runs this before the
-   * authority read a refused card would waste; `create` runs it again.
-   */
-  async assertCapacity(
-    owner: string,
-    sessionId: string,
-    runId: string,
-  ): Promise<void> {
-    const now = this.now();
-    const run = await this.db.get<{ n: number }>(
-      `SELECT COUNT(*) AS n FROM topic_action_proposals WHERE owner_did=? AND session_id=? AND run_id=?`,
-      [owner, sessionId, runId],
-    );
-    if ((run?.n ?? 0) >= ACTION_PROPOSALS_PER_RUN)
-      throw new ActionProposalConflict(
-        'Too many action cards in this request; finish the open ones first',
-      );
-    const open = await this.db.get<{ n: number }>(
-      `SELECT COUNT(*) AS n FROM topic_action_proposals WHERE owner_did=? AND ((status='prepared' AND created_at>?) OR (status IN ('claimed','unknown') AND created_at>?))`,
-      [
-        owner,
-        now - OPEN_PREPARED_MS,
-        now - OPEN_PREPARED_MS - TOPIC_EXECUTION_WINDOW_MS - 40 * 60_000,
-      ],
-    );
-    if ((open?.n ?? 0) >= ACTION_PROPOSALS_OPEN_PER_OWNER)
-      throw new ActionProposalConflict(
-        'Too many action cards are open; finish or decline them first',
-      );
   }
   async get(owner: string, id: string): Promise<TopicActionProposal | null> {
     const row = await this.db.get<{

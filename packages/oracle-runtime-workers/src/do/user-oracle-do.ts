@@ -3728,13 +3728,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         input.evidenceRefs,
       );
       if (prior) return prior;
-      // The caps before the authority read it would waste (create checks
-      // them again, atomically).
-      await topics.assertCapacity(
-        this.userDid,
-        input.origin.sessionId,
-        input.origin.runId,
-      );
       const rpc = {
         devnet: this.env.ACTION_PROPOSALS_RPC_DEVNET,
         testnet: this.env.ACTION_PROPOSALS_RPC_TESTNET,

@@ -489,31 +489,18 @@ describe('durable action proposals', () => {
     // Quarantined: no deadline left in the past.
     expect(await s.nextClose(OWNER)).toBeUndefined();
   });
-  it('caps cards per run and open cards per owner', async () => {
-    const s = stub('caps');
-    const subject = (run: number, call: number) =>
-      proposalSubject({
-        origin: {
-          sessionId: 'session-1',
-          runId: `run-${run}`,
-          invocationId: `run-${run}:call-${call}`,
-        },
-      });
-    for (let call = 0; call < 8; call++) await s.create(subject(1, call));
-    await expect(s.create(subject(1, 8))).rejects.toThrow(
-      'Too many action cards in this request',
-    );
-    for (let call = 0; call < 8; call++) await s.create(subject(2, call));
-    await expect(s.create(subject(3, 0))).rejects.toThrow(
-      'Too many action cards are open',
-    );
-    // Expired prepared cards no longer count as open.
-    await s.setNow(NOW + 21 * 60_000);
-    await s.create({
-      ...subject(3, 0),
-      createdAt: new Date(NOW + 21 * 60_000).toISOString(),
-      expiresAt: new Date(NOW + 36 * 60_000).toISOString(),
-    });
+  it('prepares any number of cards per run and per owner (no usage caps)', async () => {
+    const s = stub('no-caps');
+    for (let call = 0; call < 20; call++)
+      await s.create(
+        proposalSubject({
+          origin: {
+            sessionId: 'session-1',
+            runId: 'run-1',
+            invocationId: `run-1:call-${call}`,
+          },
+        }),
+      );
   });
   it('indexes the alarm queries', async () => {
     const s = stub('plans');
