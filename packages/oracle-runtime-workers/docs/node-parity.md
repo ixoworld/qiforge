@@ -233,10 +233,25 @@ runtime since then exist only here; they are listed under
   oracle did, so an oracle's controllers had no way to grow its shared
   knowledge from chat. The Workers default surface includes the tool. The
   Memory Engine, not the runtime, gates it: a caller that is not a domain
-  member of an entity linked to the oracle DID (controller, owner, `matrix`
-  / `admin` linked entity, or a member of their DAO groups; engine 1.5.0) is
-  refused on chain, and the tool needs the user's explicit confirmation. See
+  member of the oracle's domain entity (controller, owner, `matrix` /
+  `admin` linked entity, or a member of its DAO groups) is refused on chain,
+  and the tool needs the user's explicit confirmation. See
   [operations](operations.md#bundled-plugins-what-they-refuse).
+- **Memory is keyed by the domain entity.** The Node runtime sent the
+  memory engine its agent DID (`ORACLE_DID`, the UCAN invoker) and the
+  engine derived the user's space and the shared knowledge from it. The
+  Workers runtime names the oracle's domain entity on every engine request
+  (`x-oracle-entity-did: <ORACLE_ENTITY_DID>`, and
+  `oracle_dids: [ORACLE_ENTITY_DID]` in the prefetch batch), so memory is
+  kept per (user, entity) and survives a change of the oracle's agent
+  account. The memory plugin requires `ORACLE_ENTITY_DID` (`did:ixo:entity:`
+  followed by 32 lower-case hex characters) and the boot fails without it; the core's fallback of the entity to `ORACLE_DID`
+  (rooms, feedback) is never sent to the engine. The engine accepts the
+  entity only when its on-chain document lists the agent account as a
+  `matrix` / `admin` linked entity. The Node runtime sends no entity
+  header, and an entity-keyed engine refuses such requests, so a Node
+  oracle gets no memory from it. See
+  [configuration](configuration.md#memory-engine-contract).
 - **Anonymous response feedback.** Ported from the Node implementation
   proposed in qiforge pull request 224 (never merged into the Node runtime).
   One feedback per user per Agent reply:

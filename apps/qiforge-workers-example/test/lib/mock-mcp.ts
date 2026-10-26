@@ -13,11 +13,18 @@
  * The same server answers the engine's REST `POST /search-enhanced-batch`
  * (what the runtime's first-turn user-context prefetch calls with
  * `MEMORY_ENGINE_URL`): six slots in query order, the stored memories
- * returned as facts in the first (identity) and last (recent) slot.
+ * returned as facts in the first (identity) and last (recent) slot. And it
+ * accepts the session-history indexer's `POST /messages` upload (recorded,
+ * answered 202 `{ accepted: <message count> }`, nothing stored) unless
+ * `state.historyUploads` is `'refuse'`, which answers 503 so the runtime
+ * treats the upload as failed (recorded with `refused: true`).
  *
  * Also serves `/.well-known/did.json` (the oracle resolves the service DID
  * from the MCP URL's origin before minting), and `GET /__test/state` exposing
- * every recorded request + tool call for assertions.
+ * every recorded request + tool call for assertions. Each recorded request
+ * keeps the auth headers, `x-room-id` and `x-oracle-entity-did` (the domain
+ * entity the real engine keys every memory space by), and a batch request
+ * also its queries' `oracle_dids`.
  */
 import { randomBytes } from 'node:crypto';
 import {
@@ -38,8 +45,19 @@ export interface RecordedRequest {
   authorization?: string;
   xAuthType?: string;
   xRoomId?: string;
+  /** `x-oracle-entity-did`: the oracle's domain entity (`ORACLE_ENTITY_DID`). */
+  xOracleEntityDid?: string;
   /** `/search-enhanced-batch` only: how many queries the batch carried. */
   queryCount?: number;
+  /** `/messages` only: how many messages the history upload carried. */
+  messageCount?: number;
+  /** `/messages` only: the mock refused it (`state.historyUploads`). */
+  refused?: boolean;
+  /**
+   * `/search-enhanced-batch` only: every query's `oracle_dids`, in query
+   * order (a query without a string-array `oracle_dids` records `[]`).
+   */
+  oracleDids?: string[][];
 }
 
 export interface RecordedToolCall {
@@ -63,6 +81,14 @@ export interface MockMcpState {
    * turn still fills the room's cache for the next session.
    */
   batchDelayMs: number;
+  /**
+   * Whether `POST /messages` (the session-history upload the runtime sends
+   * for the previous session whenever a new one is created) is accepted
+   * (default) or refused with 503. An accepted upload makes the runtime drop
+   * the room's prefetched user context, so a drill that asserts on that
+   * cache refuses uploads for the duration of the assertion.
+   */
+  historyUploads: 'accept' | 'refuse';
   /**
    * Printed by `search_memory_engine` and never by the batch endpoint, so an
    * answer containing it came over the MCP wire even when a cached
@@ -273,6 +299,8 @@ function searchSlot(
 interface BatchQuery {
   query: string;
   strategy: string;
+  /** The entity DIDs the query searches (wire name `oracle_dids`). */
+  oracleDids: string[];
 }
 
 /** The queries of a `/search-enhanced-batch` body; undefined when malformed. */
@@ -296,13 +324,25 @@ function batchQueries(body: unknown): BatchQuery[] | undefined {
       typeof q.strategy === 'string'
         ? q.strategy
         : 'balanced';
-    return { query, strategy };
+    const oracleDids =
+      q !== null &&
+      typeof q === 'object' &&
+      'oracle_dids' in q &&
+      Array.isArray(q.oracle_dids)
+        ? q.oracle_dids.filter(
+            (d: unknown): d is string => typeof d === 'string',
+          )
+        : [];
+    return { query, strategy, oracleDids };
   });
 }
 
 function recordedHeaders(
   req: IncomingMessage,
-): Pick<RecordedRequest, 'authorization' | 'xAuthType' | 'xRoomId'> {
+): Pick<
+  RecordedRequest,
+  'authorization' | 'xAuthType' | 'xRoomId' | 'xOracleEntityDid'
+> {
   return {
     ...(req.headers.authorization
       ? { authorization: req.headers.authorization }
@@ -312,6 +352,9 @@ function recordedHeaders(
       : {}),
     ...(typeof req.headers['x-room-id'] === 'string'
       ? { xRoomId: req.headers['x-room-id'] }
+      : {}),
+    ...(typeof req.headers['x-oracle-entity-did'] === 'string'
+      ? { xOracleEntityDid: req.headers['x-oracle-entity-did'] }
       : {}),
   };
 }
@@ -326,6 +369,7 @@ export async function startMockMcpServer(port: number): Promise<MockMcpServer> {
     memories: [],
     batchServesMemories: true,
     batchDelayMs: 0,
+    historyUploads: 'accept',
     lookupReference: `LOOKUP-${randomBytes(4).toString('hex')}`,
   };
 
@@ -348,6 +392,7 @@ export async function startMockMcpServer(port: number): Promise<MockMcpServer> {
         state.memories.length = 0;
         state.batchServesMemories = true;
         state.batchDelayMs = 0;
+        state.historyUploads = 'accept';
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
         return;
@@ -368,7 +413,12 @@ export async function startMockMcpServer(port: number): Promise<MockMcpServer> {
           pathname: url.pathname,
           rpcMethods: [],
           ...recordedHeaders(req),
-          ...(queries ? { queryCount: queries.length } : {}),
+          ...(queries
+            ? {
+                queryCount: queries.length,
+                oracleDids: queries.map((q) => q.oracleDids),
+              }
+            : {}),
         });
         if (!queries) {
           res.writeHead(422, { 'content-type': 'application/json' });
@@ -391,6 +441,45 @@ export async function startMockMcpServer(port: number): Promise<MockMcpServer> {
             ),
           }),
         );
+        return;
+      }
+      if (url.pathname === '/messages') {
+        if (req.method !== 'POST') {
+          res.writeHead(405, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'POST only' }));
+          return;
+        }
+        const raw: Buffer[] = [];
+        for await (const chunk of req) raw.push(chunk as Buffer);
+        const body: unknown = JSON.parse(Buffer.concat(raw).toString('utf8'));
+        const messages =
+          body !== null &&
+          typeof body === 'object' &&
+          'messages' in body &&
+          Array.isArray(body.messages)
+            ? body.messages
+            : undefined;
+        const refused = state.historyUploads === 'refuse';
+        state.requests.push({
+          method: req.method,
+          pathname: url.pathname,
+          rpcMethods: [],
+          ...recordedHeaders(req),
+          ...(messages ? { messageCount: messages.length } : {}),
+          ...(refused ? { refused: true } : {}),
+        });
+        if (refused) {
+          res.writeHead(503, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'history uploads refused' }));
+          return;
+        }
+        if (!messages) {
+          res.writeHead(422, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'body needs a `messages` array' }));
+          return;
+        }
+        res.writeHead(202, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ accepted: messages.length }));
         return;
       }
       if (url.pathname !== '/mcp') {

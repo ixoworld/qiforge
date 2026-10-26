@@ -144,17 +144,17 @@ chain for `sign_ixo_transaction` and for the POD Creator's
 
 ### Identity and auth
 
-| Variable                              | Required | Meaning                                                                                                                                                                                                                                                |
-| ------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ORACLE_NAME`                         | yes      | Display name (device names, replies).                                                                                                                                                                                                                  |
-| `ORACLE_DID`                          | yes      | UCAN audience — the DID users address invocations and delegations to; routes user objects.                                                                                                                                                             |
-| `ORACLE_ENTITY_DID`                   | no       | On-chain entity DID; forms the oracle half of the user ↔ oracle room alias (falls back to the DID).                                                                                                                                                    |
-| `NETWORK`                             | no       | `mainnet` / `testnet` / `devnet`; picks defaults for the VFS and UCAN store URLs.                                                                                                                                                                      |
-| `BLOCKSYNC_GRAPHQL_URL`               | yes      | Blocksync GraphQL endpoint for `did:ixo` key resolution and users' homeserver lookup.                                                                                                                                                                  |
-| `UCAN_AUTH_MAX_TTL_SECONDS`           | no       | Maximum lifetime accepted for a user auth invocation (default 900).                                                                                                                                                                                    |
-| `UCAN_ALLOW_BARE_DELEGATION_AUTH`     | no       | `true` lets an `x-ucan-delegation` without an invocation authenticate (the legacy fallback, logged per HTTP request and per socket CONNECT as `[auth] … authenticated with a bare delegation`). Off by default: requests must carry a UCAN invocation. |
-| `UCAN_REAUTH_PROMPT_THROTTLE_SECONDS` | no       | Minimum time between two `delegation_required` prompts a Matrix turn posts for one user without a usable delegation (default 21600 = 6 h; anything not a positive number keeps the default). See [operations](operations.md#best-effort-room-posts).   |
-| `ORACLE_SIGNING_MNEMONIC`             | no       | Ed25519 mnemonic the oracle signs downstream UCAN invocations with (secret). Unset = read from the account room like the Node runtime (needs `MATRIX_ACCOUNT_ROOM_ID` + `MATRIX_VALUE_PIN`; see first-time setup).                                     |
+| Variable                              | Required   | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ORACLE_NAME`                         | yes        | Display name (device names, replies).                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `ORACLE_DID`                          | yes        | UCAN audience — the DID users address invocations and delegations to; routes user objects.                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `ORACLE_ENTITY_DID`                   | for memory | The oracle's on-chain domain entity DID (`did:ixo:entity:` followed by 32 lower-case hex characters). Forms the oracle half of the user ↔ oracle room alias and names the oracle in feedback and room events (those fall back to `ORACLE_DID`). Required when the memory plugin is loaded: the Memory Engine keys every memory space by it, so the boot fails without a well-formed one, and the engine never receives the `ORACLE_DID` fallback. See [Memory engine contract](#memory-engine-contract). |
+| `NETWORK`                             | no         | `mainnet` / `testnet` / `devnet`; picks defaults for the VFS and UCAN store URLs.                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `BLOCKSYNC_GRAPHQL_URL`               | yes        | Blocksync GraphQL endpoint for `did:ixo` key resolution and users' homeserver lookup.                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `UCAN_AUTH_MAX_TTL_SECONDS`           | no         | Maximum lifetime accepted for a user auth invocation (default 900).                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `UCAN_ALLOW_BARE_DELEGATION_AUTH`     | no         | `true` lets an `x-ucan-delegation` without an invocation authenticate (the legacy fallback, logged per HTTP request and per socket CONNECT as `[auth] … authenticated with a bare delegation`). Off by default: requests must carry a UCAN invocation.                                                                                                                                                                                                                                                   |
+| `UCAN_REAUTH_PROMPT_THROTTLE_SECONDS` | no         | Minimum time between two `delegation_required` prompts a Matrix turn posts for one user without a usable delegation (default 21600 = 6 h; anything not a positive number keeps the default). See [operations](operations.md#best-effort-room-posts).                                                                                                                                                                                                                                                     |
+| `ORACLE_SIGNING_MNEMONIC`             | no         | Ed25519 mnemonic the oracle signs downstream UCAN invocations with (secret). Unset = read from the account room like the Node runtime (needs `MATRIX_ACCOUNT_ROOM_ID` + `MATRIX_VALUE_PIN`; see first-time setup).                                                                                                                                                                                                                                                                                       |
 
 ### Matrix
 
@@ -338,11 +338,11 @@ example) per address; declare the dedicated binding to get the Node runtime's
 
 ### Memory prefetch
 
-| Variable                       | Meaning                                                                                                                                                                                                                                                                                                         |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `USER_CONTEXT_PREFETCH`        | `on` (default) or `off`. `off` makes no first-turn memory prefetch at all; the memory tools still work. Needs `MEMORY_ENGINE_URL` (the memory plugin's engine origin) and the user's `ixo:memory` delegation; without either no request is made. See [First-turn memory prefetch](#first-turn-memory-prefetch). |
-| `USER_CONTEXT_PREFETCH_CAP_MS` | How long a first turn waits for the prefetch. Default `3000`, `0` to `30000`. `0` never waits: the gather runs in the background and the turn uses the room's cached answer if there is one, otherwise none.                                                                                                    |
-| `USER_CONTEXT_CACHE_TTL_MS`    | How long a room's result is reused by later sessions. Default `300000` (5 min), `1000` to `3600000`.                                                                                                                                                                                                            |
+| Variable                       | Meaning                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `USER_CONTEXT_PREFETCH`        | `on` (default) or `off`. `off` makes no first-turn memory prefetch at all; the memory tools still work. Needs `MEMORY_ENGINE_URL` (the memory plugin's engine origin), `ORACLE_ENTITY_DID` and the user's `ixo:memory` delegation; without any of them no request is made. See [First-turn memory prefetch](#first-turn-memory-prefetch). |
+| `USER_CONTEXT_PREFETCH_CAP_MS` | How long a first turn waits for the prefetch. Default `3000`, `0` to `30000`. `0` never waits: the gather runs in the background and the turn uses the room's cached answer if there is one, otherwise none.                                                                                                                              |
+| `USER_CONTEXT_CACHE_TTL_MS`    | How long a room's result is reused by later sessions. Default `300000` (5 min), `1000` to `3600000`.                                                                                                                                                                                                                                      |
 
 ### Action proposals
 
@@ -816,6 +816,54 @@ domain is reported in the provenance and the turn continues with the
 existing capability checks. Provenance and its diagnostics are described in
 [operations](operations.md#domain-context-rollout-diagnostics).
 
+## Memory engine contract
+
+The Memory Engine keeps memory per (user, domain entity): the user's
+personal space is derived from the user's DID and `ORACLE_ENTITY_DID`, and
+the shared knowledge spaces (`add_oracle_knowledge`, public and private) are
+the entity's. The oracle's agent account (`ORACLE_DID`, the UCAN invoker)
+never keys a space. Every engine request the runtime makes carries:
+
+- `Authorization: Bearer <invocation>` + `X-Auth-Type: ucan`: an
+  `ixo:memory` / `memory/*` invocation minted from the user's delegation;
+- `x-oracle-entity-did: <ORACLE_ENTITY_DID>`, always the configured value,
+  never the `ORACLE_DID` fallback the core uses for rooms and feedback;
+- `x-room-id` when the user ↔ oracle room is known.
+
+That holds on all four paths: the memory plugin's MCP tools
+(`buildMemoryHeaders`), the [first-turn prefetch](#first-turn-memory-prefetch)
+(which also sends `oracle_dids: [ORACLE_ENTITY_DID]` in every batch query),
+the session-history upload (`POST /messages`) and `GET /debug/memory-schema`.
+This contract is Memory Engine 2.0.0's (devnet `1.0.0-develop.10` and later):
+an older engine keys spaces by the agent DID and answers the prefetch's
+`oracle_dids: [ORACLE_ENTITY_DID]` with 403, and a 2.0.0 engine answers a
+runtime older than this one (no header) with `400 ENTITY_HEADER_MISSING`, so
+runtime and engine move together. The engine refuses a request without the
+header or with a malformed one, and
+refuses an entity whose on-chain document does not list the oracle's agent
+account as a `linkedEntity` with `service: 'matrix'` and
+`relationship: 'admin'` (the link the rooms appservice already uses), so
+every oracle with memory must carry that link. The members allowed to write
+or delete shared knowledge, read the private space or search another
+entity's space are the members of that entity itself (controllers, owner,
+Matrix admin links, DAO members with voting power). `qiforge-cli
+create-entity` already writes the oracle account as a `matrix` / `admin`
+linked entity on the entity it creates, so a new oracle is vouched for
+without a manual step; an entity created another way needs that link added
+by one of its controllers.
+
+The memory plugin's `configSchema` therefore requires `ORACLE_ENTITY_DID`
+(`did:ixo:entity:` followed by 32 lower-case hex characters): an oracle with `MEMORY_MCP_URL` and no
+entity fails at boot with
+`Plugin 'memory' env validation failed for 'ORACLE_ENTITY_DID': …`. Because
+the plugin redeclares a core variable, every boot with the memory plugin logs
+`[boot] env key 'ORACLE_ENTITY_DID' is defined by both 'core' and 'memory';
+'memory' wins.`: expected, the plugin's stricter schema applies. The
+prefetch, the history upload and the debug route read the merged env
+directly (another plugin may declare `MEMORY_ENGINE_URL`); without a
+well-formed entity they send nothing, and the prefetch and the indexer each
+log one warning per user object.
+
 ## First-turn memory prefetch
 
 The user object fills `state.userContext` (the six slots the prompt composer
@@ -824,8 +872,10 @@ renders: `identity`, `work`, `goals`, `interests`, `relationships`,
 already knows the user. One `POST {MEMORY_ENGINE_URL}/search-enhanced-batch`
 carries the six queries; it is authorized with a UCAN invocation for
 `ixo:memory` / `memory/*` minted from the user's delegation (the service DID
-comes from the engine's `/.well-known/did.json`), with the oracle room in
-`x-room-id`. The request starts as soon as the turn's room is known, so it
+comes from the engine's `/.well-known/did.json`), with the oracle's domain
+entity in `x-oracle-entity-did` and in every query's `oracle_dids`, and the
+oracle room in `x-room-id` (see [Memory engine contract](#memory-engine-contract)).
+The request starts as soon as the turn's room is known, so it
 overlaps the preferences read, attachment handling and the capability router
 (request admission runs before the build and is not part of the overlap).
 
@@ -849,7 +899,8 @@ overlaps the preferences read, attachment handling and the capability router
   malformed answer, or all six slots failing) is remembered for 60 s and
   skipped, not retried on every turn.
 - **No request** when `USER_CONTEXT_PREFETCH=off`, `MEMORY_ENGINE_URL` is
-  unset, the user has no `ixo:memory` delegation (not remembered: the next
+  unset, `ORACLE_ENTITY_DID` is unset or not a domain entity DID (skip
+  reason `no-entity`, one warning per user object), the user has no `ixo:memory` delegation (not remembered: the next
   turn tries again), the turn is a supplied-context or task session, the turn
   is in a Matrix group room (the reply goes to every member), or the turn has
   no oracle room.
