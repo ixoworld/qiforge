@@ -20,6 +20,9 @@ const SILENT: Logger = {
   error: () => undefined,
 };
 
+/** The oracle's configured domain entity (`ORACLE_ENTITY_DID`). */
+const ENTITY_DID = 'did:ixo:entity:0123456789abcdef0123456789abcdef';
+
 interface Harness {
   indexer: SessionHistoryIndexer;
   calls: Array<{ url: string; init: RequestInit }>;
@@ -49,6 +52,7 @@ function harness(
   };
   const deps: SessionHistoryIndexerDeps = {
     memoryEngineUrl: 'https://memory.test/',
+    entityDid: ENTITY_DID,
     getSession: async () =>
       overrides.session ?? { title: 'Trip planning', roomId: '!room:x' },
     listMessages: async () =>
@@ -115,7 +119,7 @@ describe('transformMessagesToMemoryEngineFormat', () => {
 });
 
 describe('SessionHistoryIndexer', () => {
-  it('posts the unprocessed transcript to <MEMORY_ENGINE_URL>/messages with UCAN + room headers and advances the watermark', async () => {
+  it('posts the unprocessed transcript to <MEMORY_ENGINE_URL>/messages with UCAN + entity + room headers and advances the watermark', async () => {
     const h = harness();
     await expect(h.indexer.process('s1')).resolves.toBe('processed');
     expect(h.calls).toHaveLength(1);
@@ -124,6 +128,7 @@ describe('SessionHistoryIndexer', () => {
     expect(h.calls[0]!.init.headers).toEqual({
       Authorization: 'Bearer INVOCATION',
       'X-Auth-Type': 'ucan',
+      'x-oracle-entity-did': ENTITY_DID,
       'x-room-id': '!room:x',
       'Content-Type': 'application/json',
     });
@@ -216,6 +221,21 @@ describe('SessionHistoryIndexer', () => {
     expect(h.indexer.enabled).toBe(false);
     await expect(h.indexer.process('s1')).resolves.toBe('skipped');
     expect(h.calls).toHaveLength(0);
+  });
+
+  it('skips without ORACLE_ENTITY_DID — no mint, no upload, the watermark stays — and warns once', async () => {
+    const warnings: string[] = [];
+    const h = harness({
+      entityDid: undefined,
+      logger: { ...SILENT, warn: (msg) => warnings.push(String(msg)) },
+    });
+    await expect(h.indexer.process('s1')).resolves.toBe('skipped');
+    await expect(h.indexer.process('s2')).resolves.toBe('skipped');
+    expect(h.calls).toHaveLength(0);
+    expect(h.minted).toEqual([]);
+    expect(h.processed).toEqual([]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('ORACLE_ENTITY_DID');
   });
 
   it('retries a rejected upload 2× with the configured pause, then reports failure without moving the watermark', async () => {

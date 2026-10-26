@@ -14,12 +14,16 @@ import {
   fetchMemoryTools,
   type MemoryMcpFactory,
 } from './memory-tools';
+import { oracleEntityDidSchema } from './memory-entity';
 
 const configSchema = z.object({
   MEMORY_MCP_URL: z.string().url('MEMORY_MCP_URL must be a valid HTTP(S) URL.'),
   MEMORY_ENGINE_URL: z
     .string()
     .url('MEMORY_ENGINE_URL must be a valid HTTP(S) URL.'),
+  // The Memory Engine keys every space by the oracle's domain entity; an
+  // oracle without one gets no memory at all, so it fails at boot instead.
+  ORACLE_ENTITY_DID: oracleEntityDidSchema,
 });
 
 const manifest: PluginManifest = {
@@ -51,9 +55,11 @@ const manifest: PluginManifest = {
 export interface MemoryPluginOptions {
   /**
    * Override the MCP-tools factory. Defaults to an HTTP MCP client against
-   * `MEMORY_MCP_URL` authenticated with a per-request UCAN invocation.
+   * `MEMORY_MCP_URL` authenticated with a per-request UCAN invocation and
+   * the oracle's domain entity (`ORACLE_ENTITY_DID`, the engine's
+   * `x-oracle-entity-did` header).
    */
-  mcpFactory?: (memoryMcpUrl: string) => MemoryMcpFactory;
+  mcpFactory?: (memoryMcpUrl: string, entityDid: string) => MemoryMcpFactory;
   /**
    * Filter the upstream tool surface. Defaults to {@link DEFAULT_MEMORY_TOOLS}
    * (search + add + add-oracle-knowledge + delete-episode + clear). Pass an
@@ -62,9 +68,15 @@ export interface MemoryPluginOptions {
   selectedTools?: readonly string[];
 }
 
-function resolveMemoryUrl(config: MergedConfig): string {
+function resolveMemoryConfig(config: MergedConfig): {
+  memoryMcpUrl: string;
+  entityDid: string;
+} {
   const parsed = configSchema.parse(config);
-  return parsed.MEMORY_MCP_URL;
+  return {
+    memoryMcpUrl: parsed.MEMORY_MCP_URL,
+    entityDid: parsed.ORACLE_ENTITY_DID,
+  };
 }
 
 /**
@@ -90,7 +102,10 @@ export class MemoryPlugin extends OraclePlugin {
 
   override readonly autoDetectHint = 'MEMORY_MCP_URL';
 
-  private readonly mcpFactory: (memoryMcpUrl: string) => MemoryMcpFactory;
+  private readonly mcpFactory: (
+    memoryMcpUrl: string,
+    entityDid: string,
+  ) => MemoryMcpFactory;
 
   private readonly selectedTools: readonly string[];
 
@@ -107,8 +122,8 @@ export class MemoryPlugin extends OraclePlugin {
   }
 
   override async getRequestTools(rtCtx: RuntimeContext): Promise<PluginTool[]> {
-    const memoryUrl = resolveMemoryUrl(rtCtx.config);
-    const factory = this.mcpFactory(memoryUrl);
+    const { memoryMcpUrl, entityDid } = resolveMemoryConfig(rtCtx.config);
+    const factory = this.mcpFactory(memoryMcpUrl, entityDid);
     return fetchMemoryTools(rtCtx, factory, this.selectedTools);
   }
 

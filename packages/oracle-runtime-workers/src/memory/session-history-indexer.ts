@@ -16,7 +16,10 @@
  *  - Auth is the oracle's two-hop UCAN invocation minted from the user's
  *    delegation (`ixo:memory` / `memory/*`) — no delegation, no indexing.
  *  - Endpoint: `POST <MEMORY_ENGINE_URL>/messages` with `x-room-id`, as
- *    `@ixo/common`'s `MemoryEngineService.processConversationHistory`.
+ *    `@ixo/common`'s `MemoryEngineService.processConversationHistory`, plus
+ *    `x-oracle-entity-did`: the engine keys the user's space by the oracle's
+ *    domain entity (`ORACLE_ENTITY_DID`). Without one nothing is indexed
+ *    (one warning per indexer) and the watermark stays put.
  *  - A per-session lock prevents overlapping runs; a failed upload is
  *    retried 3× with a 10 s pause (Node's numbers).
  *
@@ -24,6 +27,7 @@
  * preferred name is set; here the fallback is the literal "Me" straight away.
  */
 import type { Logger } from '../plugin-api/types';
+import { MEMORY_ENTITY_HEADER } from '../plugins/memory/memory-entity';
 
 export interface HistoryMessage {
   /** LangChain message type: `human` | `ai` | `tool` | `system`. */
@@ -53,6 +57,12 @@ export interface SpeakerLabels {
 export interface SessionHistoryIndexerDeps {
   /** `MEMORY_ENGINE_URL`; undefined disables indexing (memory plugin absent). */
   memoryEngineUrl: string | undefined;
+  /**
+   * The configured `ORACLE_ENTITY_DID` (a well-formed domain entity DID),
+   * sent as `x-oracle-entity-did`. Never the `ORACLE_DID` fallback:
+   * undefined → every session is `skipped`.
+   */
+  entityDid: string | undefined;
   getSession(sessionId: string): Promise<IndexableSession | undefined>;
   /** The session transcript, summarisation bookkeeping already removed. */
   listMessages(sessionId: string): Promise<HistoryMessage[]>;
@@ -153,6 +163,9 @@ export class SessionHistoryIndexer {
 
   private readonly requestTimeoutMs: number;
 
+  /** The missing-entity warning has been logged (it is logged once). */
+  private warnedNoEntity = false;
+
   constructor(private readonly deps: SessionHistoryIndexerDeps) {
     this.fetchImpl = deps.fetchImpl ?? fetch.bind(globalThis);
     this.sleep =
@@ -187,6 +200,16 @@ export class SessionHistoryIndexer {
       );
       return 'skipped';
     }
+    const entityDid = this.deps.entityDid;
+    if (!entityDid) {
+      if (!this.warnedNoEntity) {
+        this.warnedNoEntity = true;
+        logger.warn(
+          `[history-indexer] ORACLE_ENTITY_DID is not a domain entity DID (did:ixo:entity:<32 hex>); the memory engine keys every space by it, so session history is not indexed`,
+        );
+      }
+      return 'skipped';
+    }
     if (this.inFlight.has(sessionId)) {
       logger.log(
         `[history-indexer] session ${sessionId} is already being indexed, skipping`,
@@ -197,7 +220,7 @@ export class SessionHistoryIndexer {
     try {
       for (let attempt = 1; attempt <= this.maxRetries; attempt += 1) {
         try {
-          const outcome = await this.processOnce(sessionId);
+          const outcome = await this.processOnce(sessionId, entityDid);
           if (outcome === 'processed') {
             logger.log(
               `[history-indexer] indexed session ${sessionId} into the memory engine`,
@@ -223,7 +246,10 @@ export class SessionHistoryIndexer {
     }
   }
 
-  private async processOnce(sessionId: string): Promise<IndexOutcome> {
+  private async processOnce(
+    sessionId: string,
+    entityDid: string,
+  ): Promise<IndexOutcome> {
     const { deps } = this;
     const { logger } = deps;
     const memoryEngineUrl = deps.memoryEngineUrl!.replace(/\/+$/, '');
@@ -306,6 +332,7 @@ export class SessionHistoryIndexer {
         headers: {
           Authorization: `Bearer ${invocation}`,
           'X-Auth-Type': 'ucan',
+          [MEMORY_ENTITY_HEADER]: entityDid,
           'x-room-id': roomId,
           'Content-Type': 'application/json',
         },

@@ -93,7 +93,11 @@ starts one `POST /search-enhanced-batch` as soon as the turn's room is known
 (`UserContextFetcher`, `src/memory/user-context-fetcher.ts`), so it overlaps
 the preferences read, the attachments and the capability router (request
 admission runs before the build and is not part of that overlap), and awaits
-it for at most `USER_CONTEXT_PREFETCH_CAP_MS`. The result is written to the
+it for at most `USER_CONTEXT_PREFETCH_CAP_MS`. Like every memory-engine
+request it names the oracle's domain entity (`x-oracle-entity-did`, and the
+queries' `oracle_dids`), which the engine keys every memory space by
+([memory engine contract](configuration.md#memory-engine-contract)); without
+`ORACLE_ENTITY_DID` nothing is fetched. The result is written to the
 thread's `userContext` channel once, on first contact, and rendered by the
 prompt composer. A thread's context is stable for the thread's life: later
 turns never wait and never adopt a cached or refreshed answer, they only
@@ -319,7 +323,11 @@ migrate a deployment between layouts is in
 
 The Durable Object only ever holds a **working copy**. The durable file the
 user owns is `/.oracles/<oracleDid>/state.db.gz` in the user's IXO VFS — the
-system of record.
+system of record. qiforge's own state stays under the agent account's folder
+(`/.oracles/<ORACLE_DID>/`). The Memory Engine keeps its own owner copy of the
+user's memory beside it, keyed by the oracle's domain entity:
+`/.oracles/<ORACLE_ENTITY_DID>/memory.tar.gz` (the engine writes and restores
+it; the runtime never touches it).
 
 - **One delegation, no other grant channel.** Every VFS request is a
   single-use invocation minted from the delegation the user deposited for

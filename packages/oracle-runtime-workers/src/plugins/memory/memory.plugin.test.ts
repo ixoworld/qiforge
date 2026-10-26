@@ -4,7 +4,8 @@ import {
   createUnsignedUcanAdapter,
   type UcanAdapter,
 } from '../../core/runtime-context';
-import { makeRuntimeContext } from '../../core/test-fixtures';
+import { createRuntimeCore } from '../../core';
+import { makeEnv, makeRuntimeContext } from '../../core/test-fixtures';
 import type { RuntimeContext } from '../../plugin-api/types';
 import {
   clearMemoryToolDefsCache,
@@ -61,6 +62,8 @@ function serverConfigOf(
 }
 
 const MEMORY_URL = 'https://memory.example/mcp';
+/** The oracle's configured domain entity (`ORACLE_ENTITY_DID`). */
+const ENTITY_DID = 'did:ixo:entity:0123456789abcdef0123456789abcdef';
 
 function makeCtx(overrides: Partial<UcanAdapter> = {}): RuntimeContext {
   const ucan: UcanAdapter = {
@@ -78,6 +81,7 @@ function makeCtx(overrides: Partial<UcanAdapter> = {}): RuntimeContext {
         config: {
           MEMORY_MCP_URL: MEMORY_URL,
           MEMORY_ENGINE_URL: 'https://engine.example',
+          ORACLE_ENTITY_DID: ENTITY_DID,
         },
       },
       runConfig: {
@@ -154,7 +158,7 @@ describe('MemoryPlugin (Workers port)', () => {
     expect(add?.schema).toBe(upstreamAdd?.schema);
   });
 
-  it('sends the two-hop UCAN header set (Bearer + X-Auth-Type + x-room-id)', async () => {
+  it('sends the two-hop UCAN header set (Bearer + X-Auth-Type + x-oracle-entity-did + x-room-id)', async () => {
     const plugin = new MemoryPlugin();
     await plugin.getRequestTools(makeCtx());
 
@@ -166,10 +170,23 @@ describe('MemoryPlugin (Workers port)', () => {
       Authorization: 'Bearer mem-token',
       'X-Auth-Type': 'ucan',
       'User-Agent': 'LangChain-MCP-Client/1.0',
+      'x-oracle-entity-did': ENTITY_DID,
       'x-room-id': '!room:example.org',
     });
     // The defs-listing client is closed once the definitions are snapshotted.
     expect(clientRecords[0]?.closed).toBe(true);
+  });
+
+  it('hands a custom factory the configured entity', async () => {
+    const seen: Array<[string, string]> = [];
+    const plugin = new MemoryPlugin({
+      mcpFactory: (url, entityDid) => {
+        seen.push([url, entityDid]);
+        return async () => [];
+      },
+    });
+    await plugin.getRequestTools(makeCtx());
+    expect(seen).toEqual([[MEMORY_URL, ENTITY_DID]]);
   });
 
   it('proxies a happy-path call to the upstream tool', async () => {
@@ -204,6 +221,61 @@ describe('MemoryPlugin (Workers port)', () => {
     );
     expect(tools).toEqual([]);
     expect(clientRecords.length).toBe(0);
+  });
+
+  describe('ORACLE_ENTITY_DID at boot', () => {
+    const memoryEnv = (entity: Record<string, unknown>) => {
+      const env = makeEnv({
+        MEMORY_MCP_URL: MEMORY_URL,
+        MEMORY_ENGINE_URL: 'https://engine.example',
+        ...entity,
+      });
+      if (!('ORACLE_ENTITY_DID' in entity)) delete env.ORACLE_ENTITY_DID;
+      return env;
+    };
+    const boot = (env: Record<string, unknown>) =>
+      createRuntimeCore({
+        config: { name: 'X' },
+        plugins: [new MemoryPlugin()],
+        env,
+      });
+
+    it('refuses to boot a memory oracle without one, naming the variable', () => {
+      expect(() => boot(memoryEnv({}))).toThrow(
+        /Plugin 'memory' env validation failed for 'ORACLE_ENTITY_DID': ORACLE_ENTITY_DID is required by the memory plugin/,
+      );
+    });
+
+    it.each([
+      [
+        'the agent account DID',
+        'did:ixo:ixo1seyngesnj6673qqzf0um4e6c2rutfsrafc9tw3',
+      ],
+      ['a non-hex entity', 'did:ixo:entity:oracle1'],
+      ['upper-case hex', 'did:ixo:entity:0123456789ABCDEF0123456789ABCDEF'],
+      ['33 hex digits', 'did:ixo:entity:0123456789abcdef0123456789abcdef0'],
+    ])('refuses %s as the entity', (_label, bad) => {
+      expect(() => boot(memoryEnv({ ORACLE_ENTITY_DID: bad }))).toThrow(
+        /Plugin 'memory' env validation failed for 'ORACLE_ENTITY_DID': ORACLE_ENTITY_DID must be the oracle's domain entity DID/,
+      );
+    });
+
+    it('boots with a well-formed entity', () => {
+      const core = boot(memoryEnv({ ORACLE_ENTITY_DID: ENTITY_DID }));
+      expect(core.validatedEnv.ORACLE_ENTITY_DID).toBe(ENTITY_DID);
+      expect(core.identity.entityDid).toBe(ENTITY_DID);
+    });
+
+    it('leaves ORACLE_ENTITY_DID optional when the memory plugin is not loaded', () => {
+      const env = makeEnv();
+      delete env.ORACLE_ENTITY_DID;
+      const core = createRuntimeCore({
+        config: { name: 'X' },
+        plugins: [],
+        env,
+      });
+      expect(core.identity.entityDid).toBe(env.ORACLE_DID);
+    });
   });
 
   it('exposes userProfile shared state backed by state.userContext', () => {
