@@ -99,7 +99,7 @@ describe('proof-chain shape limits', () => {
       maxProofsPerLink: 16,
       maxCapabilitiesPerLink: 32,
       maxIssuers: 16,
-      maxPaths: 512,
+      maxWork: 1024,
     });
     expect(DEFAULT_MAX_ERROR_MESSAGE_CHARS).toBe(1024);
   });
@@ -272,7 +272,7 @@ describe('proof-chain shape limits', () => {
     expect(result.error?.message).toMatch(/deeper than 1 links/);
   });
 
-  it('bounds authorization paths: 3 repeated capabilities at each of 10 links is refused from 11 nodes', async () => {
+  it('bounds verification work: 3 repeated capabilities at each of 10 links is refused from 11 nodes', async () => {
     const server = await keygen();
     const validator = await createUCANValidator({
       serverDid: server.did,
@@ -305,7 +305,106 @@ describe('proof-chain shape limits', () => {
     const result = await validator.validate(serialized, TestRead, RESOURCE);
     expect(Date.now() - started).toBeLessThan(500);
     expect(result.error?.code).toBe('INVALID_FORMAT');
-    expect(result.error?.message).toMatch(/more than 512 authorization paths/);
+    expect(result.error?.message).toMatch(
+      /more than 1024 units of verification work/,
+    );
+  });
+
+  it('bounds verification work by depth too: a wide top over a long tail is refused', async () => {
+    const server = await keygen();
+    const validator = await createUCANValidator({
+      serverDid: server.did,
+      rootIssuers: ['*'],
+    });
+    // 32 capabilities on the invocation, 16 on its first proof, then a 9-link
+    // tail whose top grant does not match: 32 × 16 paths, each verified at
+    // every one of ~10 links (about 4.6 k signature checks, ~5 s) while the
+    // path count alone stays at 512.
+    const top = await keygen();
+    let holder = top;
+    let proof: Awaited<ReturnType<typeof Client.delegate>> | undefined;
+    for (let i = 0; i < 9; i++) {
+      const next = await keygen();
+      proof = await Client.delegate({
+        issuer: holder.signer,
+        audience: next.signer,
+        capabilities: [
+          {
+            can: (i === 0 ? 'test/write' : 'test/read') as 'test/read',
+            with: RESOURCE,
+          },
+        ],
+        proofs: proof ? [proof] : [],
+      });
+      holder = next;
+    }
+    const agent = await keygen();
+    const wide = await Client.delegate({
+      issuer: holder.signer,
+      audience: agent.signer,
+      capabilities: Array.from({ length: 16 }, () => ({
+        can: 'test/read' as const,
+        with: RESOURCE,
+      })),
+      proofs: [proof!],
+    });
+    const invocation = await Client.delegate({
+      issuer: agent.signer,
+      audience: ed25519.Verifier.parse(server.did),
+      capabilities: Array.from({ length: 32 }, () => ({
+        can: 'test/read' as const,
+        with: RESOURCE,
+      })),
+      proofs: [wide],
+    });
+    const serialized = await serializeDelegation(invocation);
+    expect(serialized.length).toBeLessThan(10_000);
+
+    const started = Date.now();
+    const result = await validator.validate(serialized, TestRead, RESOURCE);
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(result.error?.code).toBe('INVALID_FORMAT');
+    expect(result.error?.message).toMatch(/verification work/);
+  });
+
+  it('charges real shapes little work: a 3-link chain is 4, a 10-capability bundle two links deep about 120', async () => {
+    const server = await keygen();
+    const validator = await createUCANValidator({
+      serverDid: server.did,
+      rootIssuers: ['*'],
+      proofChainLimits: { maxWork: 130 },
+    });
+    const chain = await linearChain(server.did, 3);
+    expect(
+      (await validator.validate(chain.serialized, TestRead, RESOURCE)).ok,
+    ).toBe(true);
+
+    const owner = await keygen();
+    const oracle = await keygen();
+    const agent = await keygen();
+    const bundle = Array.from({ length: 10 }, (_, i) => ({
+      can: (i === 0 ? 'test/read' : 'test/write') as 'test/read',
+      with: RESOURCE,
+    }));
+    const toOracle = await Client.delegate({
+      issuer: owner.signer,
+      audience: oracle.signer,
+      capabilities: bundle,
+    });
+    const toAgent = await Client.delegate({
+      issuer: oracle.signer,
+      audience: agent.signer,
+      capabilities: bundle,
+      proofs: [toOracle],
+    });
+    // work = 1 × (1 + 10 × (1 + 10 × 1)) = 111
+    const result = await validator.validate(
+      await invoke(agent.signer, server.did, [toAgent]),
+      TestRead,
+      RESOURCE,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.proofChain).toEqual([owner.did, oracle.did, agent.did]);
   });
 
   it('bounds capabilities per link', async () => {
@@ -351,7 +450,7 @@ describe('proof-chain shape limits', () => {
     expect(result.error?.message).toMatch(/more than 3 nodes/);
   });
 
-  it('accepts a proof that travelled as a bare CID link (counts as one node)', async () => {
+  it('a proof that travelled as a bare CID link counts as one node and is refused, not thrown on', async () => {
     const server = await keygen();
     const validator = await createUCANValidator({
       serverDid: server.did,
@@ -373,10 +472,24 @@ describe('proof-chain shape limits', () => {
       TestRead,
       RESOURCE,
     );
-    // The chain cannot be proven; what matters is that the walk returned a
-    // result instead of throwing.
+    // The chain cannot be proven (the parent's block is missing); a throw in
+    // the walk would surface as INVALID_FORMAT instead.
     expect(result.ok).toBe(false);
-    expect(['UNAUTHORIZED', 'INVALID_FORMAT']).toContain(result.error?.code);
+    expect(result.error?.code).toBe('UNAUTHORIZED');
+
+    // Same for a delegation handed to validateDelegation().
+    const toServer = await Client.delegate({
+      issuer: agent.signer,
+      audience: ed25519.Verifier.parse(server.did),
+      capabilities: [{ can: 'test/read' as const, with: RESOURCE }],
+      proofs: [rootToAgent.cid],
+    });
+    const delegated = await validator.validateDelegation(
+      await serializeDelegation(toServer),
+    );
+    expect(delegated.ok).toBe(false);
+    expect(delegated.error?.code).toBe('UNAUTHORIZED');
+    expect(delegated.error?.message).toMatch(/Proof chain incomplete/);
   });
 
   it('rejects invalid limit values when the validator is created', async () => {
@@ -789,17 +902,23 @@ describe('resource-scoped self-issue names the authority only', () => {
     expect(resourceNamesIssuer(`ixo:tenant/${did}`, did)).toBe(true);
     expect(resourceNamesIssuer(`ixo:tenant/${did}/files`, did)).toBe(true);
 
-    // A DID authority names that DID's resource; the first path segment is
-    // not consulted, and query/fragment are not part of the authority.
+    // A DID authority names exactly that DID: no suffix match (a did:web may
+    // contain `:did:`), and nothing below it counts. Query and fragment stay
+    // part of the string, as in 2.2.1.
     const alice = 'did:key:z6MkAlice';
+    const aliceWeb = 'did:web:alice.com';
     expect(resourceNamesIssuer(`ixo:${alice}/${did}`, did)).toBe(false);
     expect(resourceNamesIssuer(`${alice}/${did}`, did)).toBe(false);
-    expect(resourceNamesIssuer(`ixo:${alice}:${did}`, did)).toBe(true); // authority ends in the DID
+    expect(resourceNamesIssuer(`ixo:${alice}:${did}`, did)).toBe(false);
+    expect(resourceNamesIssuer(`ixo:${aliceWeb}:${did}`, did)).toBe(false);
+    expect(
+      resourceNamesIssuer(`ixo:${aliceWeb}:${did}`, `${aliceWeb}:${did}`),
+    ).toBe(true);
     expect(resourceNamesIssuer(`ixo:tenant:${alice}/${did}`, did)).toBe(false);
     expect(resourceNamesIssuer(`ixo:${alice}?q=:${did}`, did)).toBe(false);
     expect(resourceNamesIssuer(`ixo:${alice}#${did}`, did)).toBe(false);
     expect(resourceNamesIssuer(`ixo:/${did}`, did)).toBe(false); // empty authority
-    expect(resourceNamesIssuer(`ixo:${did}?x=1`, did)).toBe(true);
+    expect(resourceNamesIssuer(`ixo:${did}?x=1`, did)).toBe(false);
 
     // Deeper than the first path segment: someone else's resource that
     // mentions the DID (a folder shared with it).

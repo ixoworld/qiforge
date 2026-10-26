@@ -130,8 +130,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * shared with it), and neither does a DID that is only a prefix of the named
  * one (`did:web:victim.co` inside `…/did:web:victim.com`) or part of a longer
  * segment. When the authority is itself a DID (`ixo:did:key:alice/…`) the
- * resource is that DID's, and the first path segment is not consulted. Query
- * and fragment are not part of the authority.
+ * resource is that DID's alone: it must equal the issuer, and the first path
+ * segment is not consulted (`did:web:alice.com:did:key:zBob` is a DID Alice
+ * controls, not Bob's). The rule is strictly tighter than the one in 2.2.1.
  */
 export function resourceNamesIssuer(resource: string, issuer: string): boolean {
   if (!issuer) return false;
@@ -140,14 +141,16 @@ export function resourceNamesIssuer(resource: string, issuer: string): boolean {
   if (resource.startsWith('did:')) return false;
   const schemeEnd = resource.indexOf(':');
   if (schemeEnd === -1) return false;
-  const rest = resource.slice(schemeEnd + 1).split(/[?#]/, 1)[0] ?? '';
+  const rest = resource.slice(schemeEnd + 1);
   const slash = rest.indexOf('/');
   const authority = slash === -1 ? rest : rest.slice(0, slash);
   if (authority === '') return false;
-  if (authority === issuer || authority.endsWith(`:${issuer}`)) return true;
-  // An authority that is (or ends in) some DID names that DID's resource; a
-  // DID in the path below it is somebody else's.
-  if (authority.startsWith('did:') || authority.includes(':did:')) return false;
+  if (authority === issuer) return true;
+  // A DID authority names exactly that DID: no suffix match (a did:web may
+  // legitimately contain `:did:…`), and nothing below it is somebody else's.
+  if (authority.startsWith('did:')) return false;
+  if (authority.endsWith(`:${issuer}`)) return true;
+  if (authority.includes(':did:')) return false;
   if (slash === -1) return false;
   const path = rest.slice(slash + 1);
   const nextSlash = path.indexOf('/');
@@ -170,7 +173,7 @@ export function resourceNamesIssuer(resource: string, issuer: string): boolean {
  * capability a few times per link, costs exponential CPU and produces an error
  * message that enumerates every path. Counts are over VISITS (a node reached
  * through two parents counts twice), which is what the verification work is
- * proportional to; `maxPaths` bounds the product of those branch factors.
+ * proportional to; `maxWork` bounds the product of those branch factors.
  */
 export interface ProofChainLimits {
   /** Delegation links below the token itself (the token is depth 0). */
@@ -188,12 +191,13 @@ export interface ProofChainLimits {
    */
   maxIssuers: number;
   /**
-   * Upper bound on the authorization paths ucanto may explore for the token:
-   * the token's capability count times the sum over its proofs of (that
-   * proof's capability count times its own paths), a leaf counting 1. Three
-   * capabilities repeated at each of ten links is 3^11 paths from 11 nodes.
+   * Upper bound on the verification work ucanto may do for the token: each
+   * node costs its capability count (at least 1) times one plus the work of
+   * its proofs, so a leaf costs its capability count and every path is
+   * charged at every link it passes through. A real 3-link chain is 4; three
+   * capabilities repeated at each of ten links is over 3^11 from 11 nodes.
    */
-  maxPaths: number;
+  maxWork: number;
 }
 
 /**
@@ -208,7 +212,7 @@ export const DEFAULT_PROOF_CHAIN_LIMITS: Readonly<ProofChainLimits> = {
   maxProofsPerLink: 16,
   maxCapabilitiesPerLink: 32,
   maxIssuers: 16,
-  maxPaths: 512,
+  maxWork: 1024,
 };
 
 /**
@@ -257,7 +261,7 @@ function asChainNode(node: unknown): RawChainNode | null {
  * Walk the raw proof tree of `root` and return a short reason when its shape
  * exceeds `limits`, else null. A proof that travelled as a bare CID link (its
  * block not embedded) has no issuer, capabilities or proofs; it counts as one
- * node and one path.
+ * node and one unit of work.
  */
 function proofChainShapeError(
   root: unknown,
@@ -270,7 +274,7 @@ function proofChainShapeError(
     reason ??= why;
     return Infinity;
   };
-  /** Paths through `value` (see ProofChainLimits.maxPaths), or Infinity once a bound failed. */
+  /** Work for `value` (see ProofChainLimits.maxWork), or Infinity once a bound failed. */
   const walk = (value: unknown, depth: number): number => {
     const node = asChainNode(value);
     if (!node) return 1;
@@ -304,15 +308,15 @@ function proofChainShapeError(
     let below = 0;
     for (const proof of proofs) {
       below += walk(proof, depth + 1);
-      if (below > limits.maxPaths) break;
+      if (below > limits.maxWork) break;
     }
-    const paths = Math.max(1, capabilities) * Math.max(1, below);
-    if (paths > limits.maxPaths) {
+    const work = Math.max(1, capabilities) * (1 + below);
+    if (work > limits.maxWork) {
       return fail(
-        `Proof chain allows more than ${limits.maxPaths} authorization paths`,
+        `Proof chain needs more than ${limits.maxWork} units of verification work`,
       );
     }
-    return paths;
+    return work;
   };
   walk(root, 0);
   return reason;
@@ -875,12 +879,15 @@ export async function createUCANValidator(
    * Recursively traverses the first proof of each delegation.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- delegation type from Delegation.extract() is complex
-  function buildProofChain(delegation: any): string[] {
-    if (!delegation?.proofs || delegation.proofs.length === 0) {
+  function buildProofChain(delegation: any): string[] | null {
+    // A proof that travelled as a bare CID link (block not embedded) has no
+    // issuer: the chain is incomplete and has no structural root.
+    if (typeof delegation?.issuer?.did !== 'function') return null;
+    if (!delegation.proofs || delegation.proofs.length === 0) {
       return [delegation.issuer.did()];
     }
     const parentChain = buildProofChain(delegation.proofs[0]);
-    return [...parentChain, delegation.issuer.did()];
+    return parentChain && [...parentChain, delegation.issuer.did()];
   }
 
   /**
@@ -1092,6 +1099,16 @@ export async function createUCANValidator(
     // Recursively verify proofs
     if (delegation.proofs && delegation.proofs.length > 0) {
       for (const proof of delegation.proofs) {
+        if (typeof proof?.audience?.did !== 'function') {
+          return {
+            ok: false,
+            error: {
+              code: 'UNAUTHORIZED',
+              message:
+                'Proof chain incomplete: a proof block is not embedded in the token',
+            },
+          };
+        }
         // Chain consistency: proof's audience should match this delegation's issuer
         const proofAudience: string = proof.audience.did();
         if (proofAudience !== issuerDid) {
@@ -1158,8 +1175,10 @@ export async function createUCANValidator(
     // verification. Self-issued invocations (no proofs) are unaffected:
     // their structural root IS the invoker, so canIssue accepts them.
     const wildcard = options.rootIssuers.includes('*');
+    // An incomplete chain (a proof block missing from the token) has no
+    // structural root: nobody is accepted as one, so the chain is refused.
     const structuralRoot = wildcard
-      ? buildProofChain(invocation)[0]
+      ? buildProofChain(invocation)?.[0]
       : undefined;
 
     // Server verifier is resolved lazily (first call resolves, subsequent calls use cache)
@@ -1581,7 +1600,7 @@ export async function createUCANValidator(
       if (revocation) return revocation;
 
       // 8. Success — return delegation details
-      const proofChain = buildProofChain(delegation);
+      const proofChain = buildProofChain(delegation) ?? undefined;
       const cap = delegation.capabilities?.[0];
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- delegation type from Delegation.extract() is complex
       const facts = (delegation as any).facts as
