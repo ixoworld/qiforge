@@ -1,5 +1,42 @@
 # @ixo/oracle-runtime-workers
 
+## 0.23.0
+
+### Minor Changes
+
+- [#381](https://github.com/ixoworld/qiforge/pull/381) [`02f293c`](https://github.com/ixoworld/qiforge/commit/02f293cc55da175cbc50d9de9939bad007306ed2) Thanks [@ig-shaun](https://github.com/ig-shaun)! - Add `hub_action_options` (service-tagged v2 discovery of the owner's
+  connections and targets) and prepare Gmail connect, disconnect and one
+  plain-text email send, plus signed-statement, Calendar, document-access-request
+  and private-text operations, from verified channel turns. Derive the tool
+  schema from action-protocol 0.4.1 (declaring protocol version 2 to Auth Hub;
+  `ixo.auth-outcome/2` with terminal `expired` / `cancelled`) and retain the original-turn outcome and
+  owner review boundaries. Only one Gmail send per mailbox is in flight at a time
+  (authorized, submitted or unconfirmed), and a Gmail operation must name one of the
+  owner's listed connections.
+
+  Depend on the published `@ixo/action-protocol` 0.4.1 and
+  `@ixo/topic-protocol` 1.0.0-rc.8 (Worker-safe validators) from npm in both
+  consumers; no vendored archive or workspace override remains.
+
+- [#380](https://github.com/ixoworld/qiforge/pull/380) [`b964fdc`](https://github.com/ixoworld/qiforge/commit/b964fdc6a208da4933a52715c4cc0f46df933d7b) Thanks [@ig-shaun](https://github.com/ig-shaun)! - Add an opt-in Auth Hub action plugin for authenticated channel turns. It binds
+  requests to runtime-owned channel identity, projects typed review references into
+  Reply Plans, and recovers typed outcomes on the originating run.
+  Channel polls answer Hub outcomes from SQLite and refresh at most one
+  non-terminal action per poll with backoff; prepares are capped per run, hour
+  and day and only allowed in runs a user message started.
+
+- [#362](https://github.com/ixoworld/qiforge/pull/362) [`5bac08b`](https://github.com/ixoworld/qiforge/commit/5bac08bdf4707f36544a4b94cb02931ae9517610) Thanks [@ig-shaun](https://github.com/ig-shaun)! - Add an opt-in durable action proposal contract and owner lifecycle for conversational token transfers. Bind Portal consent to immutable values, deliver friendly channel action links and scoped verified outcomes, and reuse one canonical Decision-subject hashing implementation across browser and Workers consumers.
+
+  The card's id is the transaction memo (`inputs.memo`, required by the contract) and chain verification accepts no other memo, so one signed transaction confirms exactly one card; a hash is recorded for one card per owner. The owner object enforces the card policy itself (owner, signer, non-mainnet, configured chain id, 15-minute expiry) and refuses cards asked for in group rooms. Evidence checks match whole addresses, amounts with their unit and whole token ids, and ignore the turn-time note. Unconfirmed transactions are re-verified from the alarm with a doubling cooldown, receipts back off and are abandoned or quarantined instead of retrying for ever, finished cards are pruned after 90 days, and the action-card settings are validated at boot. A recorded hash the verifier proved is another transaction may be replaced; a transaction carrying the card's memo with other messages blocks the card (`lifecycle.executionBlockedAt` on the `unknown` card; revoke is the one command it still takes). The field is additive, but the lifecycle schema is strict: a consumer pinned to an earlier build rejects a blocked card, so the Portal must pin a build with this field (this branch or the published 0.2.0) before a runtime with this change serves its cards. `MsgSend` joins the shared message catalogue.
+
+  Topic cards (`ACTION_TOPIC_PROPOSALS_ENABLED`, v2 contract): discussion drafts and claim-access grants run as step journals with one-use permits. The switch gates claims and permits, not reads. The card expiry bounds the first step only and an hour-long execution window after the claim bounds the rest; a started step with no reference is re-permitted to the same executor; a second grant for the same account while one is in flight is refused; a grant is merged into an existing authorization only under its existing expiry; authority fingerprints cover the contract head, the pinned body and room policy, not thread activity; changed authority answers 409 and an unavailable read 503 (every authority read is typed on leaving its budget; 409 bodies carry the runtime's sentences, never schema dumps); a grant reference the verifier proved is another transaction is set aside so the right hash can replace it, while a transaction carrying the card's memo with other messages blocks the card; an object whose topic store failed to open still serves transfer cards, turns and the alarm; unreadable reference rows are quarantined, never retried every second; grant reads run in parallel. Step records and permits carry the identity-only executor (`TopicExecutorIdentitySchema`); the begin-step request adds `deviceId`. `@ixo/ixo-transaction` no longer bundles the chain SDK (peer dependency). The runtime requires a `@ixo/topic-protocol` build with precompiled validators (1.0.0-rc.8 or later); `src/core/topic-protocol-runtime.test.ts` fails the suite on a build that would generate code on Workers.
+
+### Patch Changes
+
+- Updated dependencies [[`02f293c`](https://github.com/ixoworld/qiforge/commit/02f293cc55da175cbc50d9de9939bad007306ed2), [`16fe4e6`](https://github.com/ixoworld/qiforge/commit/16fe4e65f97d57c064e6615e18dfe4ea7527bf25), [`5bac08b`](https://github.com/ixoworld/qiforge/commit/5bac08bdf4707f36544a4b94cb02931ae9517610)]:
+  - @ixo/ixo-transaction@0.2.0
+  - @ixo/common@1.7.1
+
 ## 0.22.0
 
 ### Minor Changes

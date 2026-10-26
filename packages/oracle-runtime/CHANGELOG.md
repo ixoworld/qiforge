@@ -1,5 +1,12 @@
 # @ixo/oracle-runtime
 
+## 1.99.2
+
+### Patch Changes
+
+- Updated dependencies [[`16fe4e6`](https://github.com/ixoworld/qiforge/commit/16fe4e65f97d57c064e6615e18dfe4ea7527bf25), [`5bac08b`](https://github.com/ixoworld/qiforge/commit/5bac08bdf4707f36544a4b94cb02931ae9517610)]:
+  - @ixo/common@1.7.1
+
 ## 1.99.1
 
 ### Patch Changes
