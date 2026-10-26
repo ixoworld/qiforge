@@ -8,9 +8,12 @@ import {
 } from '@ixo/action-protocol';
 import type { DoSqliteDatabase } from '../sqlite/database';
 
-/** Outcomes after which the Hub never reports another for the action. */
+/**
+ * Outcomes after which the Hub never reports another for the action
+ * (`expired` and `cancelled`: never executed, protocol 0.4.0).
+ */
 export const TERMINAL_HUB_STATUSES: ReadonlySet<ActionOutcomeV1['status']> =
-  new Set(['succeeded', 'failed', 'declined']);
+  new Set(['succeeded', 'failed', 'declined', 'expired', 'cancelled']);
 /** Status refreshes of a non-terminal action back off 15 s -> 10 min. */
 export const HUB_CHECK_BASE_MS = 15_000;
 export const HUB_CHECK_MAX_MS = 10 * 60_000;
@@ -23,11 +26,16 @@ export const HUB_ACTIONS_PER_DAY = 10;
 /** Rows are dropped this long after their review expired. */
 const HUB_RETENTION_SECONDS = 30 * 24 * 60 * 60;
 
-/** A refusal the model can act on: a cap reached, or a request that expired. */
+/**
+ * A refusal the model can act on: a cap reached, a request that expired, or
+ * an operation the owner's own state rules out (an unknown connection, an
+ * email whose earlier send is unconfirmed: `priorActionId`).
+ */
 export class HubActionRefused extends Error {
   constructor(
-    readonly kind: 'limit' | 'expired',
+    readonly kind: 'limit' | 'expired' | 'refused',
     message: string,
+    readonly priorActionId?: string,
   ) {
     super(message);
     this.name = 'HubActionRefused';
@@ -148,6 +156,33 @@ export class HubActionStore {
       }
       return requests.changes + actions.length;
     });
+  }
+
+  /**
+   * The newest Gmail send to the same mailbox (the same `connectionId`, or
+   * the same account label: a reconnect gets a new id) that is still in
+   * flight: approved and not finished, its latest outcome `authorized`,
+   * `submitted` or `unknown` (the connector could not tell whether it
+   * went). Its action id, or null. One Gmail send in flight per mailbox:
+   * while one exists no other email is prepared.
+   */
+  async gmailSendInFlight(
+    ownerDid: string,
+    connectionId: string,
+    accountLabel: string,
+  ): Promise<string | null> {
+    const row = await this.db.get<{ action_id: string }>(
+      `SELECT a.action_id FROM hub_action_requests r JOIN hub_actions a ON a.request_key = r.request_key
+       WHERE r.owner_did = ? AND json_extract(r.operation, '$.kind') = 'gmail.message.send.v1'
+         AND (json_extract(r.operation, '$.connectionId') = ?
+              OR lower(json_extract(r.operation, '$.accountLabel')) = lower(?))
+         AND (SELECT json_extract(o.outcome, '$.status') FROM hub_action_outcomes o
+              WHERE o.action_id = a.action_id ORDER BY o.sequence DESC LIMIT 1)
+             IN ('authorized', 'submitted', 'unknown')
+       ORDER BY r.created_at DESC LIMIT 1`,
+      [ownerDid, connectionId, accountLabel],
+    );
+    return row?.action_id ?? null;
   }
 
   /** The reference already recorded for a request key, if any. */

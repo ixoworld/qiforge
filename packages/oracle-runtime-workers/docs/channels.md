@@ -207,7 +207,8 @@ Companion's `feat/workers-runtime` deployment must adopt the released runtime an
 # Auth Hub action review (disabled by default)
 
 `HUB_ACTIONS_ENABLED=true` adds the on-demand `request_hub_action` and
-`hub_action_status` tools plus read-only `hub_action_capabilities`. Discover
+`hub_action_status` tools plus read-only `hub_action_capabilities` and
+`hub_action_options`. Discover
 capabilities first: Auth Hub returns enabled kinds, exact registered form field
 descriptors, transfer limits and the configured network. The request tool
 accepts a strictly typed candidate operation from
@@ -217,10 +218,9 @@ the active binding again before calling Auth Hub. The model cannot supply those
 identity fields or approve an action. The existing `prepare_action` Portal card
 path remains available independently.
 
-The contract is `@ixo/action-protocol` 0.4.1 from npm. This runtime does
-not declare protocol version 2 on its Hub calls, so Auth Hub answers in v1:
-the three operation kinds above, `ixo.auth-capabilities/1` and
-`ixo.auth-outcome/1`, the envelope gateway PR 19 parses.
+The contract is `@ixo/action-protocol` 0.4.1 from npm. This runtime
+declares protocol version 2 on its Hub calls (see below), so it needs a
+gateway that parses `ixo.auth-outcome/2` (gateway PR 20).
 
 The oracle uses `AUTH_HUB_URL` (an HTTPS origin) and
 `AUTH_HUB_CHANNEL_SERVICE_KEY` to create and read operations; both are
@@ -282,6 +282,64 @@ The `@ixo/oracle-runtime-workers/hub-actions/request` subpath implements these
 checks for hosts with a durable `reserve`/`record` store. Protocol versions are
 `ixo.auth-action/1`, `ixo.auth-capabilities/1` and `ixo.auth-outcome/1`;
 unsupported kinds and versions fail closed.
+
+The runtime declares protocol version 2 (`?version=2`) on the capabilities,
+prepare and status calls: without it Auth Hub answers v1 (the three P1 kinds
+only, v1-filtered outcomes) and refuses a P2 prepare with
+`protocol_version_required`, and it stores the version per action for the
+outcomes it pushes. Pairing: runtime #381 must run with gateway PR 20 (it accepts the v2
+envelopes and the P2 receipt kinds); gateway PR 19 understands only
+`ixo.auth-outcome/1` and must never run against this runtime (a v2 outcome
+fails the whole turn). Outcomes arrive as `ixo.auth-outcome/2`; `expired` and
+`cancelled` (never executed, receipt null) are terminal like `succeeded`,
+`failed` and `declined`, so a poll stops refreshing them. Gateways that read
+`hubActionOutcomes` must accept the v2 envelope.
+
+Protocol package `0.4.1` supports exact signed statements, Gmail connection/removal
+and one reviewed plain-text email, Google Calendar connection/removal and one
+reviewed event, document read-access requests, and new private text files.
+`hub_action_options` requests `ixo.auth-options/2` and obtains confirmed connections,
+requestable document identifiers and existing action resources for the current
+owner and channel binding. Each connection carries its `gmail` or `calendar`
+service; do not use a profile-only Gmail connection for sending. Old Hub clients
+still receive Calendar-only options version 1 by default. The tool accepts no
+model-supplied identity. The shared
+`operationJsonSchema` is the tool schema source; there is no second runtime
+operation catalogue. Capability and options reads may be used by any registered
+oracle account with the compatible channel adapter.
+
+The owner completes each review in Auth Hub. Gmail and Calendar setup return a fresh
+review with the account and scopes selected at Google; setup alone does not
+authorize a connection, email or event. The Gmail review freezes the verified
+sender, one recipient, subject and full message; edits create a new review before
+consent. Gmail permission includes managing drafts, although this action sends
+directly and does not read inbox messages. Connector and VFS services check fresh owner
+proofs and current Hub admission, own their durable effects and return typed
+receipts. An access-request receipt means `pending_owner`, never access granted.
+Private file content opens on its registered separate resource origin; it is
+not included in the Reply Plan or completion notice. Unknown effects are status
+reads on the same action, never a new model execution attempt. A
+`gmail.message.accepted.v1` receipt means Gmail accepted the email for sending;
+it does not prove delivery. A lost send response can remain unknown. The owner
+object enforces one Gmail send in flight per mailbox: while an earlier
+`gmail.message.send.v1` to the same connection id or the same account label
+(a reconnect gets a new id) has the latest outcome `authorized`, `submitted`
+or `unknown`, a new send is refused (`unavailable`, with the earlier action's
+id as `priorActionId`); for an `unknown` one the owner is asked to check
+Gmail's Sent folder. The refusal lifts when that action reaches a terminal
+outcome (or its rows are pruned, 30 days after its review expired). A Gmail send or disconnect must also name a
+connection (service `gmail`, id and label) from the owner's
+`hub_action_options` (the last read within 10 minutes, else a fresh one);
+any other is refused. The tool's refusal names the field the protocol
+rejected (for example `Invalid fromAddress`). The Gmail service requires fresh independently verified scope
+attestations and confirmed proxy no-retry behavior; missing evidence disables
+the journey. Local conformance fixtures do not establish those activation gates.
+
+Both shared packages come from the npm registry: `@ixo/action-protocol` 0.4.1
+and `@ixo/topic-protocol` 1.0.0-rc.8 (the Worker-safe build with precompiled
+validators), pinned exactly in the runtime and in `@ixo/ixo-transaction`. No
+workspace override or vendored archive remains, and `prepublishOnly` refuses
+to publish if one comes back (`scripts/assert-no-vendored-overrides.mjs`).
 
 ```ts
 import { HubActionClient } from '@ixo/oracle-runtime-workers/hub-actions/client';
