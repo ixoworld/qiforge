@@ -14,7 +14,9 @@ operator action with the gates in IXO-5609 / IXO-5618.
 Code: `src/action-proposals/` (store, policy, chain verifier, reconcile),
 `src/plugins/action-proposals/` (the `prepare_action` tool and its evidence
 rules), the `/action-proposals/*` routes in `src/shell/app.ts`, and the
-contract in `@ixo/ixo-transaction/action-proposals`.
+contract in `@ixo/ixo-transaction/action-proposals`. Topic cards (discussion
+drafts, claim-access grants) are the separately switched v2 contract in
+[topic-action-proposals](topic-action-proposals.md).
 
 ## Settings
 

@@ -1,8 +1,13 @@
 import {
+  ActionProposalWireSchema,
+  TopicReceiptReferencesSchema,
+  BeginTopicStepSchema,
+  BeginTopicStepResultSchema,
+} from '@ixo/ixo-transaction/topic-proposals';
+import {
   ActionProposalClaimSchema,
   ActionProposalIdSchema,
   ActionProposalReconcileSchema,
-  ActionProposalRpcSchema,
 } from '@ixo/ixo-transaction/action-proposals';
 import { ActionProposalConflict } from '../action-proposals/store';
 import {
@@ -572,6 +577,21 @@ export function createShell(
     return next();
   });
 
+  // What the owner object answers a proposal command with: the card; a
+  // conflict (the card or the authority it was sealed on changed: the Portal
+  // re-reads and retries, 409); or an authority read that failed and may
+  // succeed later (503, with a generic message).
+  const ProposalReply = z.discriminatedUnion('ok', [
+    z.object({ ok: z.literal(true), proposal: ActionProposalWireSchema }),
+    z.object({
+      ok: z.literal(false),
+      error: z.string(),
+      kind: z.enum(['conflict', 'unavailable']).default('conflict'),
+    }),
+  ]);
+  const refusalStatus = (kind: 'conflict' | 'unavailable') =>
+    kind === 'unavailable' ? 503 : 409;
+
   app.get('/action-proposals/:proposalId', async (c) => {
     c.header('Cache-Control', 'private, no-store');
     c.header('Vary', 'Authorization');
@@ -583,10 +603,10 @@ export function createShell(
       parsed.data,
     );
     if (!proposal) return c.json({ error: 'Proposal not found' }, 404);
-    const result = ActionProposalRpcSchema.parse(JSON.parse(proposal));
+    const result = ProposalReply.parse(JSON.parse(proposal));
     return result.ok
       ? c.json({ proposal: result.proposal })
-      : c.json({ error: result.error }, 409);
+      : c.json({ error: result.error }, refusalStatus(result.kind));
   });
   for (const operation of ['claim', 'reject', 'revoke', 'reconcile'] as const) {
     app.post(
@@ -599,7 +619,10 @@ export function createShell(
         const body = await c.req.json().catch(() => null);
         const parsed = (
           operation === 'reconcile'
-            ? ActionProposalReconcileSchema
+            ? z.union([
+                ActionProposalReconcileSchema,
+                TopicReceiptReferencesSchema,
+              ])
             : ActionProposalClaimSchema
         ).safeParse(body);
         if (!id.success || !parsed.success)
@@ -608,10 +631,15 @@ export function createShell(
         try {
           const command =
             operation === 'reconcile'
-              ? {
-                  kind: operation,
-                  ...ActionProposalReconcileSchema.parse(parsed.data),
-                }
+              ? 'v' in parsed.data
+                ? {
+                    kind: 'topic-reconcile' as const,
+                    input: TopicReceiptReferencesSchema.parse(parsed.data),
+                  }
+                : {
+                    kind: operation,
+                    ...ActionProposalReconcileSchema.parse(parsed.data),
+                  }
               : {
                   kind: operation,
                   ...ActionProposalClaimSchema.parse(parsed.data),
@@ -621,10 +649,10 @@ export function createShell(
             identity.userDid,
           ).actionProposal(identity, id.data, command);
           if (!proposal) return c.json({ error: 'Proposal not found' }, 404);
-          const result = ActionProposalRpcSchema.parse(JSON.parse(proposal));
+          const result = ProposalReply.parse(JSON.parse(proposal));
           return result.ok
             ? c.json({ proposal: result.proposal })
-            : c.json({ error: result.error }, 409);
+            : c.json({ error: result.error }, refusalStatus(result.kind));
         } catch (error) {
           if (
             error instanceof ActionProposalConflict ||
@@ -636,6 +664,41 @@ export function createShell(
       },
     );
   }
+
+  app.post(
+    '/action-proposals/:proposalId/begin-step',
+    limitBody(4096),
+    async (c) => {
+      c.header('Cache-Control', 'private, no-store');
+      c.header('Vary', 'Authorization');
+      const id = ActionProposalIdSchema.safeParse(c.req.param('proposalId'));
+      const body = BeginTopicStepSchema.safeParse(
+        await c.req.json().catch(() => null),
+      );
+      if (!id.success || !body.success)
+        return c.json({ error: 'Invalid topic step command' }, 400);
+      const identity = identityOf(c.get('auth'), c.req.raw.headers);
+      const raw = await userStub(c.env, identity.userDid).beginTopicStep(
+        identity,
+        id.data,
+        body.data,
+      );
+      if (!raw) return c.json({ error: 'Proposal not found' }, 404);
+      const response = z
+        .discriminatedUnion('ok', [
+          z.object({ ok: z.literal(true), result: BeginTopicStepResultSchema }),
+          z.object({
+            ok: z.literal(false),
+            error: z.string(),
+            kind: z.enum(['conflict', 'unavailable']).default('conflict'),
+          }),
+        ])
+        .parse(JSON.parse(raw));
+      return response.ok
+        ? c.json(response.result)
+        : c.json({ error: response.error }, refusalStatus(response.kind));
+    },
+  );
 
   // --- sessions ----------------------------------------------------------------
   app.post('/sessions', async (c) => {

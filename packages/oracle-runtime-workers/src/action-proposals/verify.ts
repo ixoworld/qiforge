@@ -6,6 +6,7 @@ import {
 } from '@ixo/impactxclient-sdk/module/codegen/cosmos/tx/v1beta1/tx.js';
 import { MsgSend } from '@ixo/impactxclient-sdk/module/codegen/cosmos/bank/v1beta1/tx.js';
 import { MsgTransferToken } from '@ixo/impactxclient-sdk/module/codegen/ixo/token/v1beta1/tx.js';
+import type { ExpectedTopicEffect } from '@ixo/ixo-transaction/topic-proposals';
 import type { ActionProposal } from '@ixo/ixo-transaction/action-proposals';
 import { z } from 'zod';
 
@@ -90,6 +91,60 @@ export async function verifyActionTransaction(
   /** The caller's wall budget (the alarm's); each read also stops at 10 s. */
   signal?: AbortSignal,
 ): Promise<VerifiedActionTransaction> {
+  return verifyTransaction(
+    proposal.action.chainId,
+    proposal.action.inputs.messages.map((expected) => {
+      const value =
+        expected.typeUrl === '/cosmos.bank.v1beta1.MsgSend'
+          ? MsgSend.encode(
+              MsgSend.fromJSON(expected.value),
+              new protobuf.Writer(),
+            ).finish()
+          : expected.typeUrl === '/ixo.token.v1beta1.MsgTransferToken'
+            ? MsgTransferToken.encode(
+                MsgTransferToken.fromJSON(expected.value),
+                new protobuf.Writer(),
+              ).finish()
+            : undefined;
+      if (!value) throw new Error('Unsupported message');
+      return { typeUrl: expected.typeUrl, value };
+    }),
+    proposal.id,
+    transactionHash,
+    rpcOrigin,
+    fetcher,
+    signal,
+  );
+}
+export async function verifyTopicGrantTransaction(
+  effect: Extract<ExpectedTopicEffect, { kind: 'chain' }>,
+  transactionHash: string,
+  rpcOrigin: string,
+  fetcher: typeof fetch = fetch,
+  signal?: AbortSignal,
+): Promise<VerifiedActionTransaction> {
+  return verifyTransaction(
+    effect.chainId,
+    effect.messages.map((m) => ({
+      typeUrl: m.typeUrl,
+      value: decode64(m.valueBase64),
+    })),
+    effect.memo,
+    transactionHash,
+    rpcOrigin,
+    fetcher,
+    signal,
+  );
+}
+async function verifyTransaction(
+  chainId: string,
+  messages: { typeUrl: string; value: Uint8Array }[],
+  memo: string,
+  transactionHash: string,
+  rpcOrigin: string,
+  fetcher: typeof fetch,
+  signal?: AbortSignal,
+): Promise<VerifiedActionTransaction> {
   const origin = new URL(rpcOrigin);
   if (
     origin.protocol !== 'https:' ||
@@ -122,7 +177,7 @@ export async function verifyActionTransaction(
     return JSON.parse(text) as unknown;
   };
   const network = await chainNetwork(origin.href, () => request('status'));
-  if (network !== proposal.action.chainId) throw new Error('Chain mismatch');
+  if (network !== chainId) throw new Error('Chain mismatch');
   const tx = TxResponse.parse(
     await request(
       `tx?hash=0x${transactionHash.toUpperCase()}&prove=false`,
@@ -141,31 +196,18 @@ export async function verifyActionTransaction(
   const raw = TxRaw.decode(bytes);
   if (raw.signatures.length === 0) throw new Error('Unsigned transaction');
   const body = TxBody.decode(raw.bodyBytes);
-  const inputs = proposal.action.inputs;
-  // The memo is the card's id: a transaction signed for another card, or
-  // with no card at all, never verifies this one.
-  if (body.memo !== proposal.id) throw new Error('Transaction memo mismatch');
-  if (body.messages.length !== inputs.messages.length)
+  // The memo binds the transaction to its card (the card id for a transfer,
+  // the frozen topic memo for a grant): a transaction signed for another
+  // card, or with no card at all, never verifies this one.
+  if (body.memo !== memo) throw new Error('Transaction memo mismatch');
+  if (body.messages.length !== messages.length)
     throw new Error('Transaction subject mismatch');
-  for (let i = 0; i < inputs.messages.length; i++) {
-    const expected = inputs.messages[i]!;
+  for (let i = 0; i < messages.length; i++) {
     const actual = body.messages[i]!;
-    const expectedBytes =
-      expected.typeUrl === '/cosmos.bank.v1beta1.MsgSend'
-        ? MsgSend.encode(
-            MsgSend.fromJSON(expected.value),
-            new protobuf.Writer(),
-          ).finish()
-        : expected.typeUrl === '/ixo.token.v1beta1.MsgTransferToken'
-          ? MsgTransferToken.encode(
-              MsgTransferToken.fromJSON(expected.value),
-              new protobuf.Writer(),
-            ).finish()
-          : undefined;
+    const expected = messages[i]!;
     if (
-      !expectedBytes ||
       actual.typeUrl !== expected.typeUrl ||
-      !equal(actual.value, expectedBytes)
+      !equal(actual.value, expected.value)
     )
       throw new Error('Transaction subject mismatch');
   }

@@ -123,6 +123,16 @@ describe('validateEnv', () => {
     }
     // Off by default: none of it is required.
     expect(validateEnv(schema, makeEnv(), pluginOwnership).valid).toBe(true);
+    // The topic switch rides on the base switch.
+    const topicOnly = validateEnv(
+      schema,
+      makeEnv({ ACTION_TOPIC_PROPOSALS_ENABLED: 'true' }),
+      pluginOwnership,
+    );
+    expect(topicOnly.valid).toBe(false);
+    expect(topicOnly.errors.map((e) => e.field)).toEqual([
+      'ACTION_TOPIC_PROPOSALS_ENABLED',
+    ]);
   });
 
   it('parses the Worker env object, applies defaults and strips bindings', () => {

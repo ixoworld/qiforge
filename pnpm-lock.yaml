@@ -381,9 +381,15 @@ importers:
 
   packages/ixo-transaction:
     dependencies:
+      '@ixo/topic-protocol':
+        specifier: 1.0.0-rc.8
+        version: 1.0.0-rc.8(ajv@8.20.0)
       '@scure/base':
         specifier: 2.2.0
         version: 2.2.0
+      protobufjs:
+        specifier: ^7.6.5
+        version: 7.6.5
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -688,6 +694,9 @@ importers:
       '@ixo/matrix-crdt':
         specifier: ^1.2.5
         version: 1.3.2(lib0@0.2.117)(matrix-js-sdk@42.2.0)(y-protocols@1.0.7(yjs@13.6.32))(yjs@13.6.32)
+      '@ixo/topic-protocol':
+        specifier: 1.0.0-rc.8
+        version: 1.0.0-rc.8(ajv@8.20.0)
       '@ixo/ucan':
         specifier: workspace:*
         version: link:../ucan
@@ -3475,6 +3484,10 @@ packages:
       react: ^18.0.0 || ^19.0.0
       react-dom: ^18.0.0 || ^19.0.0
 
+  '@ixo/topic-protocol@1.0.0-rc.8':
+    resolution: {integrity: sha512-9GTYibIV68pUTvvLAuoo/ad1rl3R5NBDgybGRbt5H+S8F6AWc7H6ERPhb8QhkK10sGT7H5Ai3OBiIkexpQl0bQ==}
+    engines: {node: '>=22'}
+
   '@ixo/typescript-config@1.0.0':
     resolution: {integrity: sha512-reavFCnQlEY3efgDMBJoUbHJUIhlpFgf/LS0Q1Vqz+y/mbXymItF82unAzcmRFjb5fE+ANgYpj0k22njWs/tzg==}
 
@@ -4403,6 +4416,10 @@ packages:
 
   '@noble/hashes@2.2.0':
     resolution: {integrity: sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg==}
+    engines: {node: '>= 20.19.0'}
+
+  '@noble/hashes@2.4.0':
+    resolution: {integrity: sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA==}
     engines: {node: '>= 20.19.0'}
 
   '@nodelib/fs.scandir@2.1.5':
@@ -13664,7 +13681,7 @@ snapshots:
       '@cosmjs/utils': 0.39.0
       '@noble/ciphers': 2.2.0
       '@noble/curves': 2.2.0
-      '@noble/hashes': 2.2.0
+      '@noble/hashes': 2.4.0
       '@scure/bip39': 2.2.0
 
   '@cosmjs/encoding@0.39.0':
@@ -15781,6 +15798,15 @@ snapshots:
       - ace-builds
       - encoding
 
+  '@ixo/topic-protocol@1.0.0-rc.8(ajv@8.20.0)':
+    dependencies:
+      '@noble/hashes': 2.4.0
+      ajv-formats: 3.0.1(ajv@8.20.0)
+      fast-deep-equal: 3.1.3
+      uuid: 11.1.1
+    transitivePeerDependencies:
+      - ajv
+
   '@ixo/typescript-config@1.0.0': {}
 
   '@ixo/ucan@1.2.3(@cosmjs/crypto@0.39.0)(@cosmjs/encoding@0.39.0)(typescript@5.9.3)':
@@ -16461,6 +16487,8 @@ snapshots:
   '@noble/hashes@1.8.0': {}
 
   '@noble/hashes@2.2.0': {}
+
+  '@noble/hashes@2.4.0': {}
 
   '@nodelib/fs.scandir@2.1.5':
     dependencies:

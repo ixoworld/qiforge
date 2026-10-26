@@ -1,4 +1,4 @@
-import type { ActionOutcome } from '@ixo/ixo-transaction/action-proposals';
+import type { ActionOutcomeWire } from '@ixo/ixo-transaction/topic-proposals';
 import { z } from 'zod';
 import type { ReplyPlan } from '../delivery/types';
 
@@ -77,7 +77,7 @@ export interface ChannelTurnResponse {
    * message for gateways that predate plans.
    */
   plan?: ReplyPlan;
-  actionOutcomes?: ActionOutcome[];
+  actionOutcomes?: ActionOutcomeWire[];
 }
 
 export type ChannelErrorStatus =

@@ -29,6 +29,21 @@
       "types": "./dist/action-proposals.d.ts",
       "import": "./dist/action-proposals.js",
       "default": "./dist/action-proposals.js"
+    },
+    "./topic-proposals": {
+      "types": "./dist/topic-proposals.d.ts",
+      "import": "./dist/topic-proposals.js",
+      "default": "./dist/topic-proposals.js"
+    },
+    "./topic-create-plan": {
+      "types": "./dist/topic-create-plan.d.ts",
+      "import": "./dist/topic-create-plan.js",
+      "default": "./dist/topic-create-plan.js"
+    },
+    "./topic-grants": {
+      "types": "./dist/topic-grants.d.ts",
+      "import": "./dist/topic-grants.js",
+      "default": "./dist/topic-grants.js"
     }
   },
   "files": [
@@ -42,7 +57,9 @@
   },
   "dependencies": {
     "@scure/base": "2.2.0",
-    "zod": "^4.4.3"
+    "zod": "^4.4.3",
+    "@ixo/topic-protocol": "1.0.0-rc.8",
+    "protobufjs": "^7.6.5"
   },
   "peerDependencies": {
     "@ixo/impactxclient-sdk": "^3.0.0",
@@ -50,9 +67,6 @@
     "react": ">=18.0.0"
   },
   "peerDependenciesMeta": {
-    "@ixo/impactxclient-sdk": {
-      "optional": true
-    },
     "@ixo/oracles-client-sdk": {
       "optional": true
     },
