@@ -13,6 +13,6 @@ owner review boundaries. Only one Gmail send per mailbox is in flight at a time
 (authorized, submitted or unconfirmed), and a Gmail operation must name one of the
 owner's listed connections.
 
-Pin the Worker-compatible Topic validator candidate in both consumers. Release
-requires the reviewed action-protocol and Topic Protocol registry artifacts;
-the committed source archives support local and CI validation only.
+Depend on the published `@ixo/action-protocol` 0.4.1 and
+`@ixo/topic-protocol` 1.0.0-rc.8 (Worker-safe validators) from npm in both
+consumers; no vendored archive or workspace override remains.

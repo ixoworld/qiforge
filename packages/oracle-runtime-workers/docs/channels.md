@@ -218,10 +218,9 @@ the active binding again before calling Auth Hub. The model cannot supply those
 identity fields or approve an action. The existing `prepare_action` Portal card
 path remains available independently.
 
-The contract is `@ixo/action-protocol` 0.4.1 from npm. This runtime does
-not declare protocol version 2 on its Hub calls, so Auth Hub answers in v1:
-the three operation kinds above, `ixo.auth-capabilities/1` and
-`ixo.auth-outcome/1`, the envelope gateway PR 19 parses.
+The contract is `@ixo/action-protocol` 0.4.1 from npm. This runtime
+declares protocol version 2 on its Hub calls (see below), so it needs a
+gateway that parses `ixo.auth-outcome/2` (gateway PR 20).
 
 The oracle uses `AUTH_HUB_URL` (an HTTPS origin) and
 `AUTH_HUB_CHANNEL_SERVICE_KEY` to create and read operations; both are
@@ -336,11 +335,11 @@ rejected (for example `Invalid fromAddress`). The Gmail service requires fresh i
 attestations and confirmed proxy no-retry behavior; missing evidence disables
 the journey. Local conformance fixtures do not establish those activation gates.
 
-Both shared packages are source-validation candidates. The action protocol must
-be published before releasing this runtime. The workspace also pins the reviewed
-Topic Protocol Worker validator candidate for the runtime and transaction
-package; see [its provenance and registry release gate](../../../vendor/topic-protocol/README.md).
-No candidate override establishes registry or deployment readiness.
+Both shared packages come from the npm registry: `@ixo/action-protocol` 0.4.1
+and `@ixo/topic-protocol` 1.0.0-rc.8 (the Worker-safe build with precompiled
+validators), pinned exactly in the runtime and in `@ixo/ixo-transaction`. No
+workspace override or vendored archive remains, and `prepublishOnly` refuses
+to publish if one comes back (`scripts/assert-no-vendored-overrides.mjs`).
 
 ```ts
 import { HubActionClient } from '@ixo/oracle-runtime-workers/hub-actions/client';
