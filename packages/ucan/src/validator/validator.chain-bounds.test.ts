@@ -99,7 +99,7 @@ describe('proof-chain shape limits', () => {
       maxProofsPerLink: 16,
       maxCapabilitiesPerLink: 32,
       maxIssuers: 16,
-      maxWork: 1024,
+      maxWork: 256,
     });
     expect(DEFAULT_MAX_ERROR_MESSAGE_CHARS).toBe(1024);
   });
@@ -306,7 +306,7 @@ describe('proof-chain shape limits', () => {
     expect(Date.now() - started).toBeLessThan(500);
     expect(result.error?.code).toBe('INVALID_FORMAT');
     expect(result.error?.message).toMatch(
-      /more than 1024 units of verification work/,
+      /more than 256 units of verification work/,
     );
   });
 
@@ -367,12 +367,11 @@ describe('proof-chain shape limits', () => {
     expect(result.error?.message).toMatch(/verification work/);
   });
 
-  it('charges real shapes little work: a 3-link chain is 4, a 10-capability bundle two links deep about 120', async () => {
+  it('charges real shapes little work: a 3-link chain is 4, a 10-capability bundle two links deep 111, both under the default', async () => {
     const server = await keygen();
     const validator = await createUCANValidator({
       serverDid: server.did,
       rootIssuers: ['*'],
-      proofChainLimits: { maxWork: 130 },
     });
     const chain = await linearChain(server.did, 3);
     expect(

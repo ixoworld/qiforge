@@ -194,8 +194,10 @@ export interface ProofChainLimits {
    * Upper bound on the verification work ucanto may do for the token: each
    * node costs its capability count (at least 1) times one plus the work of
    * its proofs, so a leaf costs its capability count and every path is
-   * charged at every link it passes through. A real 3-link chain is 4; three
-   * capabilities repeated at each of ten links is over 3^11 from 11 nodes.
+   * charged at every link it passes through: about one signature check per
+   * unit, about 1 ms each. A real 3-link chain is 4, a 10-capability grant
+   * re-delegated once is 111; three capabilities repeated at each of ten
+   * links is over 3^11 from 11 nodes.
    */
   maxWork: number;
 }
@@ -212,7 +214,7 @@ export const DEFAULT_PROOF_CHAIN_LIMITS: Readonly<ProofChainLimits> = {
   maxProofsPerLink: 16,
   maxCapabilitiesPerLink: 32,
   maxIssuers: 16,
-  maxWork: 1024,
+  maxWork: 256,
 };
 
 /**
