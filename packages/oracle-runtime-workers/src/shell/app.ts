@@ -78,22 +78,7 @@ import {
 } from '../feedback/submit';
 import { z } from 'zod';
 import { parseOutcome } from '@ixo/action-protocol';
-
-async function equalOutcomeKeys(
-  provided: string | null,
-  expected: string | undefined,
-): Promise<boolean> {
-  if (!provided || !expected || expected.length < 32 || provided.length > 512)
-    return false;
-  const digest = async (value: string) =>
-    new Uint8Array(
-      await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)),
-    );
-  const [a, b] = await Promise.all([digest(provided), digest(expected)]);
-  let difference = 0;
-  for (let i = 0; i < a.length; i++) difference |= (a[i] ?? 0) ^ (b[i] ?? 0);
-  return difference === 0;
-}
+import { verifyHubOutcomeCallback } from '../hub-actions/outcome-signature';
 
 const DebugEventBody = z.object({
   type: z
@@ -455,17 +440,29 @@ export function createShell(
   });
 
   app.use('/api/internal/actions/outcomes', limitBody(64 * 1024));
+  // Auth Hub's signed outcome callbacks: on whenever Hub actions are
+  // configured. The signature is checked against the Hub's own did:web key
+  // (from AUTH_HUB_URL) for this oracle's origin, then the owner object
+  // confirms the outcome through Auth Hub's authenticated status API.
   app.post('/api/internal/actions/outcomes', async (c) => {
     if (
       c.env.HUB_ACTIONS_ENABLED !== 'true' ||
-      !(await equalOutcomeKeys(
-        c.req.header('x-auth-hub-outcome-key') ?? null,
-        c.env.AUTH_HUB_ACTION_OUTCOME_KEY,
-      ))
+      !c.env.AUTH_HUB_URL ||
+      !c.env.AUTH_HUB_CHANNEL_SERVICE_KEY
     )
       return c.json({ code: 'unauthorized' }, 401);
     const body = await c.req.raw.text();
     if (body.length > 64_000) return c.json({ code: 'request_too_large' }, 413);
+    if (
+      !(await verifyHubOutcomeCallback({
+        hubUrl: c.env.AUTH_HUB_URL,
+        rawBody: body,
+        headers: c.req.raw.headers,
+        audience: new URL(c.req.url).origin,
+        ...(c.env.AUTH_HUB ? { fetcher: c.env.AUTH_HUB } : {}),
+      }))
+    )
+      return c.json({ code: 'unauthorized' }, 401);
     try {
       const outcome = parseOutcome(JSON.parse(body));
       await userStub(c.env, outcome.ownerDid).recordHubActionOutcome(outcome);

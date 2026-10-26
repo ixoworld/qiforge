@@ -3,7 +3,7 @@ import { makeRuntimeContext } from '../../core/test-fixtures';
 import { HubActionsPlugin } from './hub-actions.plugin';
 import { HubActionClient } from '../../hub-actions/client';
 import { prepareHubAction } from '../../hub-actions/request';
-import type { HubActionOptionsV2, P2Operation } from '@ixo/action-protocol';
+import type { HubActionOptionsV3, P2Operation } from '@ixo/action-protocol';
 import { HubActionRefused } from '../../hub-actions/store';
 
 const id = 'C'.repeat(32);
@@ -35,8 +35,8 @@ const operation = {
   ],
   declaration: null,
 };
-const options: HubActionOptionsV2 = {
-  version: 'ixo.auth-options/2',
+const options: HubActionOptionsV3 = {
+  version: 'ixo.auth-options/3',
   accountId: 'account-three',
   ownerDid: 'did:ixo:owner',
   bindingId: 'chb_three',
@@ -44,6 +44,7 @@ const options: HubActionOptionsV2 = {
   connections: [],
   targets: [],
   resources: [],
+  transfer: null,
 };
 
 describe('Hub actions Workers plugin', () => {
@@ -90,7 +91,10 @@ describe('Hub actions Workers plugin', () => {
           ],
         }),
         request,
-        status: async () => null,
+        transfer: async () => {
+          throw new Error('unused');
+        },
+        status: async () => ({ outcome: null, summary: null }),
       },
     });
     const tool = new HubActionsPlugin()
@@ -202,7 +206,10 @@ describe('Hub actions Workers plugin', () => {
             input,
             1_770_000_000_000,
           ),
-        status: async () => null,
+        transfer: async () => {
+          throw new Error('unused');
+        },
+        status: async () => ({ outcome: null, summary: null }),
       },
     });
     const tool = new HubActionsPlugin()
@@ -242,7 +249,10 @@ describe('Hub actions Workers plugin', () => {
         },
         options: discover,
         request: async () => reference,
-        status: async () => null,
+        transfer: async () => {
+          throw new Error('unused');
+        },
+        status: async () => ({ outcome: null, summary: null }),
       },
     });
     const tool = new HubActionsPlugin()
@@ -389,7 +399,10 @@ describe('Hub actions Workers plugin', () => {
           request: async () => {
             throw new HubActionRefused(kind, `refused: ${kind}`);
           },
-          status: async () => null,
+          transfer: async () => {
+            throw new Error('unused');
+          },
+          status: async () => ({ outcome: null, summary: null }),
         },
       });
       const tool = new HubActionsPlugin()
@@ -430,7 +443,10 @@ describe('Hub actions Workers plugin', () => {
             'D'.repeat(32),
           );
         },
-        status: async () => null,
+        transfer: async () => {
+          throw new Error('unused');
+        },
+        status: async () => ({ outcome: null, summary: null }),
       },
     });
     const tool = new HubActionsPlugin()
@@ -476,46 +492,67 @@ describe('Hub actions Workers plugin', () => {
     });
   });
 
-  it('passes a mainnet transfer through to the Hub when the account capability names mainnet', async () => {
-    const SIGNER = 'ixo1qyqszqgpqyqszqgpqyqszqgpqyqszqgpdxlvf0';
-    const RECIPIENT = 'ixo1qgpqyqszqgpqyqszqgpqyqszqgpqyqszuzefze';
-    const transfer = {
-      kind: 'ixo.bank.send.v1' as const,
-      chainId: 'ixo-5',
-      network: 'ixo mainnet' as const,
-      fromAddress: SIGNER,
-      toAddress: RECIPIENT,
-      amountBaseUnits: '1000000',
-      denom: 'uixo' as const,
-      feeBaseUnits: '5000',
-      memo: '',
-    };
-    let sent: Record<string, unknown> | undefined;
-    const client = new HubActionClient({
-      origin: 'https://hub.test',
-      key: 'oracle-secret',
-      fetcher: {
-        fetch: async (request) => {
-          if (request.method === 'GET')
-            return Response.json({
-              version: 'ixo.auth-capabilities/2',
-              accountId: 'account-three',
-              oracleDid: 'did:ixo:oracle',
-              network: 'ixo mainnet',
-              resourceOrigin: null,
-              operations: ['ixo.bank.send.v1'],
-              transfer: { maxAmountUixo: '10000000', maxFeeUixo: '100000' },
-              forms: [],
-            });
-          sent = (await request.json()) as Record<string, unknown>;
-          return Response.json({ reference });
+  it('sends no bank transfer through the generic tool, base units and fee included', async () => {
+    const request = vi.fn(async () => reference);
+    const ctx = makeRuntimeContext({
+      config: { HUB_ACTIONS_ENABLED: 'true' },
+      session: {
+        id: 'session-three',
+        client: 'channel',
+        requestId: 'request-three',
+        runId: 'run-three',
+        channel: {
+          provider: 'whatsapp',
+          bindingId: 'chb_three',
+          bindingRevision: 4,
         },
       },
+      toolCallId: 'tool-generic-bank',
+      hubActions: {
+        capabilities: async () => {
+          throw new Error('unused');
+        },
+        options: async () => options,
+        request,
+        transfer: async () => reference,
+        status: async () => ({ outcome: null, summary: null }),
+      },
     });
+    const tool = new HubActionsPlugin()
+      .getTools()
+      .find((item) => item.name === 'request_hub_action');
+    if (!tool) throw new Error('request tool missing');
+    expect(
+      await tool.handler(
+        {
+          operation: {
+            kind: 'ixo.bank.send.v1',
+            chainId: 'ixo-5',
+            network: 'ixo mainnet',
+            fromAddress: 'ixo1qyqszqgpqyqszqgpqyqszqgpqyqszqgpdxlvf0',
+            toAddress: 'ixo1qgpqyqszqgpqyqszqgpqyqszqgpqyqszuzefze',
+            amountBaseUnits: '1000000',
+            denom: 'uixo',
+            feeBaseUnits: '5000',
+            memo: '',
+          },
+        },
+        ctx,
+      ),
+    ).toEqual({
+      status: 'unavailable',
+      reason:
+        'Use request_hub_transfer with a token from hub_action_options for a transfer.',
+    });
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('prepares a transfer from a listed denom and display amount with runtime identity only', async () => {
+    const transfer = vi.fn(async () => reference);
     const ctx = makeRuntimeContext({
       config: { HUB_ACTIONS_ENABLED: 'true' },
       user: {
-        did: `did:ixo:${SIGNER}`,
+        did: 'did:ixo:owner',
         matrixUserId: '@owner:test',
         ucanDelegation: { raw: 'delegation' },
       },
@@ -530,31 +567,118 @@ describe('Hub actions Workers plugin', () => {
           bindingRevision: 4,
         },
       },
-      toolCallId: 'tool-mainnet',
+      toolCallId: 'tool-transfer',
       hubActions: {
-        capabilities: () => client.capabilities(),
+        capabilities: async () => {
+          throw new Error('unused');
+        },
         options: async () => options,
-        request: (input) =>
-          prepareHubAction(
-            client,
-            {
-              reserve: async (_origin, _operation, expiry) => expiry,
-              record: async (_origin, ref) => ref,
-            },
-            input,
-            1_770_000_000_000,
-          ),
-        status: async () => null,
+        request: async () => {
+          throw new Error('unused');
+        },
+        transfer,
+        status: async () => ({ outcome: null, summary: null }),
       },
     });
     const tool = new HubActionsPlugin()
       .getTools()
-      .find((item) => item.name === 'request_hub_action');
-    if (!tool) throw new Error('request tool missing');
-    expect(tool.schema.safeParse({ operation: transfer }).success).toBe(true);
-    expect(await tool.handler({ operation: transfer }, ctx)).toMatchObject({
+      .find((item) => item.name === 'request_hub_transfer');
+    if (!tool) throw new Error('transfer tool missing');
+    const input = {
+      toAddress: 'ixo1qgpqyqszqgpqyqszqgpqyqszqgpqyqszuzefze',
+      denom: `ibc/${'A'.repeat(64)}`,
+      amount: '1.25',
+    };
+    // The model never names base units, a fee, a network or an owner.
+    for (const extra of [
+      { amountBaseUnits: '1250000' },
+      { feeBaseUnits: '5000' },
+      { network: 'ixo mainnet' },
+      { ownerDid: 'did:ixo:other' },
+    ])
+      expect(tool.schema.safeParse({ ...input, ...extra }).success).toBe(false);
+    expect(tool.schema.safeParse({ ...input, amount: '1e6' }).success).toBe(
+      false,
+    );
+    expect(await tool.handler(input, ctx)).toEqual({
       status: 'prepared',
+      actionReference: reference,
+      summary: 'Review form',
     });
-    expect(sent?.operation).toEqual(transfer);
+    expect(transfer).toHaveBeenCalledWith({
+      ownerDid: 'did:ixo:owner',
+      sessionId: 'session-three',
+      runId: 'run-three',
+      requestId: 'request-three',
+      provider: 'whatsapp',
+      bindingId: 'chb_three',
+      bindingRevision: 4,
+      requestKey: Array.from(
+        new Uint8Array(
+          await crypto.subtle.digest(
+            'SHA-256',
+            new TextEncoder().encode('run-three:tool-transfer'),
+          ),
+        ),
+        (b) => b.toString(16).padStart(2, '0'),
+      ).join(''),
+      ...input,
+      memo: '',
+    });
+    // Refusals (the runtime's or the Hub's) and protocol field errors
+    // reach the model in words; anything else stays an error.
+    transfer.mockRejectedValueOnce(
+      new HubActionRefused(
+        'refused',
+        'The account does not hold enough to cover this transfer and its network fee.',
+      ),
+    );
+    expect(await tool.handler(input, ctx)).toEqual({
+      status: 'unavailable',
+      reason:
+        'The account does not hold enough to cover this transfer and its network fee.',
+    });
+    transfer.mockRejectedValueOnce(new TypeError('Invalid toAddress'));
+    expect(await tool.handler(input, ctx)).toEqual({
+      status: 'unavailable',
+      reason: 'The transfer is incomplete (Invalid toAddress).',
+    });
+    transfer.mockRejectedValueOnce(new Error('Hub action request returned 503'));
+    await expect(tool.handler(input, ctx)).rejects.toThrow('503');
+    const portal = makeRuntimeContext({
+      ...ctx,
+      session: { ...ctx.session, client: 'portal', channel: undefined },
+    });
+    expect(await tool.handler(input, portal)).toMatchObject({
+      status: 'unavailable',
+    });
+    expect(transfer).toHaveBeenCalledTimes(4);
+  });
+
+  it('returns the transfer summary line with the status', async () => {
+    const ctx = makeRuntimeContext({
+      config: { HUB_ACTIONS_ENABLED: 'true' },
+      hubActions: {
+        capabilities: async () => {
+          throw new Error('unused');
+        },
+        options: async () => options,
+        request: async () => reference,
+        transfer: async () => reference,
+        status: async () => ({
+          outcome: null,
+          summary: 'Transfer of 1.25 USDC confirmed on chain.',
+        }),
+      },
+    });
+    const tool = new HubActionsPlugin()
+      .getTools()
+      .find((item) => item.name === 'hub_action_status');
+    if (!tool) throw new Error('status tool missing');
+    expect(await tool.handler({ actionId: id }, ctx)).toEqual({
+      status: 'known',
+      outcome: null,
+      summary: 'Transfer of 1.25 USDC confirmed on chain.',
+    });
   });
 });

@@ -36,14 +36,23 @@ export function assertOperationEnabled(
     )
       throw new Error('Hub form does not match the registered target');
   } else if (operation.kind === 'ixo.bank.send.v1') {
-    if (
-      capabilities.network !== operation.network ||
-      !capabilities.transfer ||
-      BigInt(operation.amountBaseUnits) >
-        BigInt(capabilities.transfer.maxAmountUixo) ||
-      BigInt(operation.feeBaseUnits) > BigInt(capabilities.transfer.maxFeeUixo)
-    )
+    if (capabilities.network !== operation.network || !capabilities.transfer)
       throw new Error("Hub transfer is outside this oracle's capability");
+    // A pre-check of the per-denom cap only (the Hub enforces it, and the
+    // fee is the Hub's: it simulates gas and sets it).
+    const transfer = capabilities.transfer;
+    const cap =
+      'limits' in transfer
+        ? transfer.limits.find((limit) => limit.denom === operation.denom)
+            ?.maxAmountBaseUnits
+        : operation.denom === 'uixo'
+          ? transfer.maxAmountUixo
+          : undefined;
+    if (cap !== undefined && BigInt(operation.amountBaseUnits) > BigInt(cap))
+      throw new HubActionRefused(
+        'refused',
+        `This oracle may move at most ${cap} base units of ${operation.denom} per transfer.`,
+      );
   } else if (operation.kind === 'resource.read.v1') {
     if (
       operation.ownerDid !== ownerDid ||

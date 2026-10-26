@@ -29,10 +29,10 @@ const outcome: ActionOutcomeV1 = {
 };
 
 describe('Hub action HTTP client', () => {
-  it('requests service-tagged options for the trusted binding', async () => {
+  it('requests version 3 options (with the owner tokens) for the trusted binding', async () => {
     const requests: Request[] = [];
     const options = {
-      version: 'ixo.auth-options/2',
+      version: 'ixo.auth-options/3',
       accountId: reference.accountId,
       ownerDid: 'did:ixo:second',
       bindingId: reference.bindingId,
@@ -47,6 +47,17 @@ describe('Hub action HTTP client', () => {
       ],
       targets: [],
       resources: [],
+      transfer: {
+        tokens: [
+          {
+            denom: 'uixo',
+            symbol: 'IXO',
+            decimals: 6,
+            verified: true,
+            balanceBaseUnits: '1000000',
+          },
+        ],
+      },
     };
     const client = new HubActionClient({
       origin: 'https://hub.test',
@@ -64,20 +75,20 @@ describe('Hub action HTTP client', () => {
         bindingRevision: reference.bindingRevision,
       }),
     ).toEqual(options);
-    expect(new URL(requests[0]!.url).searchParams.get('version')).toBe('2');
+    expect(new URL(requests[0]!.url).searchParams.get('version')).toBe('3');
     expect(new URL(requests[0]!.url).searchParams.get('bindingId')).toBe(
       'chb_two',
     );
   });
 
-  it('rejects legacy untagged options instead of guessing the connection service', async () => {
+  it('rejects options older than version 3 (no token list) instead of guessing', async () => {
     const client = new HubActionClient({
       origin: 'https://hub.test',
       key: 'oracle-secret',
       fetcher: {
         fetch: async () =>
           Response.json({
-            version: 'ixo.auth-options/1',
+            version: 'ixo.auth-options/2',
             accountId: reference.accountId,
             ownerDid: 'did:ixo:second',
             bindingId: reference.bindingId,
@@ -93,7 +104,7 @@ describe('Hub action HTTP client', () => {
         bindingId: reference.bindingId,
         bindingRevision: reference.bindingRevision,
       }),
-    ).rejects.toThrow('version 2');
+    ).rejects.toThrow('version 3');
   });
   it('sends a registered operation with service authentication and reads its typed outcome', async () => {
     const seen: Request[] = [];
@@ -189,7 +200,7 @@ describe('Hub action HTTP client', () => {
     ).rejects.toThrow();
   });
 
-  it('declares protocol version 2 on capabilities, prepare and status, and reads v2 outcomes', async () => {
+  it('declares protocol version 3 on capabilities, prepare and status, and reads v2 outcomes', async () => {
     const urls: string[] = [];
     const v2 = {
       ...outcome,
@@ -245,9 +256,54 @@ describe('Hub action HTTP client', () => {
     });
     expect((await client.status(id)).outcome).toEqual(v2);
     expect(urls).toEqual([
-      'GET /api/internal/actions/operations/capabilities?version=2',
-      'POST /api/internal/actions/operations?version=2',
-      `GET /api/internal/actions/operations/${id}?version=2`,
+      'GET /api/internal/actions/operations/capabilities?version=3',
+      'POST /api/internal/actions/operations?version=3',
+      `GET /api/internal/actions/operations/${id}?version=3`,
     ]);
+  });
+
+  it('turns a Hub transfer refusal (400) into a refusal the model can relay', async () => {
+    let answer: unknown = {
+      error: 'fee_above_ceiling',
+      reason: 'fee 250000 > 100000',
+    };
+    const client = new HubActionClient({
+      origin: 'https://hub.test',
+      key: 'oracle-secret',
+      fetcher: {
+        fetch: async () => Response.json(answer, { status: 400 }),
+      },
+    });
+    const send = () =>
+      client.request({
+        bindingId: reference.bindingId,
+        bindingRevision: reference.bindingRevision,
+        requestKey: 'k'.repeat(64),
+        expiresAt: 1999999999,
+        operation: {
+          kind: 'ixo.bank.send.v1',
+          chainId: 'pandora-8',
+          network: 'ixo testnet',
+          fromAddress: 'ixo1qyqszqgpqyqszqgpqyqszqgpqyqszqgpdxlvf0',
+          toAddress: 'ixo1qgpqyqszqgpqyqszqgpqyqszqgpqyqszuzefze',
+          amountBaseUnits: '5',
+          denom: 'uixo',
+          memo: '',
+        },
+      });
+    await expect(send()).rejects.toMatchObject({
+      name: 'HubActionRefused',
+      kind: 'refused',
+      message:
+        "The network fee for this transfer is above this oracle's fee limit: fee 250000 > 100000.",
+    });
+    answer = { error: 'simulation_failed' };
+    await expect(send()).rejects.toMatchObject({
+      name: 'HubActionRefused',
+      message: 'Auth Hub simulated this transfer and it would fail on chain.',
+    });
+    // Any other 400 stays a plain transport error.
+    answer = { error: 'invalid_operation' };
+    await expect(send()).rejects.toThrow('Hub action request returned 400');
   });
 });

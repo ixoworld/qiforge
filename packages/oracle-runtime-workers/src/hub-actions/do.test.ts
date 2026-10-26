@@ -92,10 +92,28 @@ async function harness(state: DurableObjectState) {
   const outcomes = new Map<string, ActionOutcomeV1 | null>();
   const calls: string[] = [];
   let mode: HubMode = 'up';
-  const hubState = {
+  const hubState: {
+    bindingActive: boolean;
+    optionsOwner: string;
+    optionsBinding: string;
+    tokens: {
+      denom: string;
+      symbol: string;
+      decimals: number;
+      verified: boolean;
+      balanceBaseUnits: string;
+    }[];
+    limits: { denom: string; maxAmountBaseUnits: string }[];
+    prepare: 'unexpected' | 'ok' | 'insufficient_funds';
+    posted: unknown[];
+  } = {
     bindingActive: true,
     optionsOwner: OWNER,
     optionsBinding: 'chb_one',
+    tokens: [],
+    limits: [],
+    prepare: 'unexpected',
+    posted: [],
   };
   const hub = {
     fetch: async (request: Request): Promise<Response> => {
@@ -106,11 +124,12 @@ async function harness(state: DurableObjectState) {
         return Response.json({ active: hubState.bindingActive });
       if (path === '/api/internal/actions/operations/options')
         return Response.json({
-          version: 'ixo.auth-options/2',
+          version: 'ixo.auth-options/3',
           accountId: 'account-one',
           ownerDid: hubState.optionsOwner,
           bindingId: hubState.optionsBinding,
           bindingRevision: 2,
+          transfer: { tokens: hubState.tokens },
           connections: [
             {
               service: 'gmail',
@@ -122,8 +141,28 @@ async function harness(state: DurableObjectState) {
           targets: [],
           resources: [],
         });
-      if (request.method === 'POST')
-        return new Response('unexpected prepare', { status: 500 });
+      if (path === '/api/internal/actions/operations/capabilities')
+        return Response.json({
+          version: 'ixo.auth-capabilities/2',
+          accountId: 'account-one',
+          oracleDid: 'did:ixo:oracle',
+          network: 'ixo testnet',
+          resourceOrigin: null,
+          operations: ['ixo.bank.send.v1', 'gmail.message.send.v1'],
+          transfer: { limits: hubState.limits, maxFeeUixo: '100000' },
+          forms: [],
+        });
+      if (request.method === 'POST') {
+        if (hubState.prepare === 'unexpected')
+          return new Response('unexpected prepare', { status: 500 });
+        hubState.posted.push(await request.json());
+        if (hubState.prepare === 'insufficient_funds')
+          return Response.json(
+            { error: 'insufficient_funds', reason: 'balance 5 < 7' },
+            { status: 400 },
+          );
+        return Response.json({ reference: reference(9) });
+      }
       if (mode === 'hang')
         return new Promise<Response>((_resolve, reject) =>
           request.signal.addEventListener('abort', () =>
@@ -154,6 +193,7 @@ async function harness(state: DurableObjectState) {
       ORACLE_DID: 'did:ixo:oracle',
       AUTH_HUB_CHANNEL_SERVICE_KEY: 'oracle-secret',
       AUTH_HUB: hub,
+      IXO_TRANSACTION_CHAIN_ID_TESTNET: 'pandora-77',
     },
     runStore,
     actionProposals: null,
@@ -574,6 +614,126 @@ describe('Hub actions in the owner object', () => {
       const next = await send();
       expect(next).toBeInstanceOf(Error);
       expect(next).not.toMatchObject({ name: 'HubActionRefused' });
+    });
+  });
+
+  it('builds an any-token transfer from the listed token and a display amount, with no fee', async () => {
+    await withHub('hub-any-token', async (h) => {
+      await h.channelRun('run-pay');
+      const usdc = {
+        denom: `ibc/${'A'.repeat(64)}`,
+        symbol: 'USDC',
+        decimals: 6,
+        verified: true,
+        balanceBaseUnits: '5000000',
+      };
+      const meme = {
+        denom: 'factory/ixo1creator/meme',
+        symbol: 'USDC',
+        decimals: 0,
+        verified: false,
+        balanceBaseUnits: '1000',
+      };
+      h.hubState.tokens = [usdc, meme];
+      h.hubState.prepare = 'ok';
+      const transfer = (denom: string, amount: string) =>
+        call(h.host, 'transferHubAction', {
+          ownerDid: OWNER,
+          sessionId: SESSION,
+          runId: 'run-pay',
+          requestId: 'request-run-pay',
+          provider: 'whatsapp',
+          bindingId: 'chb_one',
+          bindingRevision: 2,
+          requestKey: 'k'.repeat(64),
+          toAddress: 'ixo1qgpqyqszqgpqyqszqgpqyqszqgpqyqszuzefze',
+          denom,
+          amount,
+          memo: '',
+        }).catch((error: unknown) => error);
+      // Refused before any Hub POST: a denom not in the list, too many
+      // decimals, zero, more than the balance, above the per-denom cap.
+      for (const [denom, amount, words] of [
+        ['ibc/unknown', '1', 'not in the owner'],
+        [usdc.denom, '1.0000001', 'at most 6 digits'],
+        [usdc.denom, '0', 'above zero'],
+        [usdc.denom, '5.000001', 'less than this transfer'],
+        [meme.denom, '1.5', 'whole base units'],
+      ] as const)
+        expect(await transfer(denom, amount)).toMatchObject({
+          name: 'HubActionRefused',
+          message: expect.stringContaining(words),
+        });
+      // The per-denom cap from the capabilities (read once, then cached).
+      h.hubState.limits = [{ denom: usdc.denom, maxAmountBaseUnits: '1300000' }];
+      expect(await transfer(usdc.denom, '1.5')).toMatchObject({
+        message: expect.stringContaining('at most 1300000 base units'),
+      });
+      expect(h.hubState.posted).toEqual([]);
+      // Under the cap: converted deterministically from the listed decimals;
+      // no fee sent; chain id from this Worker's config for the network.
+      expect(await transfer(usdc.denom, '1.25')).toMatchObject({
+        id: reference(9).id,
+      });
+      expect(h.hubState.posted).toHaveLength(1);
+      expect(h.hubState.posted[0]).toMatchObject({
+        operation: {
+          kind: 'ixo.bank.send.v1',
+          network: 'ixo testnet',
+          fromAddress: OWNER.replace('did:ixo:', ''),
+          denom: usdc.denom,
+          amountBaseUnits: '1250000',
+          chainId: 'pandora-77',
+        },
+      });
+      expect(
+        (h.hubState.posted[0] as { operation: Record<string, unknown> })
+          .operation,
+      ).not.toHaveProperty('feeBaseUnits');
+      // The status line names the amount from the stored token.
+      h.outcomes.set(reference(9).id, {
+        ...outcome(reference(9), 2, 'succeeded'),
+        version: 'ixo.auth-outcome/2',
+        receipt: {
+          kind: 'ixo.bank.send.v1',
+          actionId: reference(9).id,
+          revision: 1,
+          digest,
+          chainId: 'pandora-77',
+          txHash: 'f'.repeat(64),
+          height: 120,
+          code: 0,
+          denom: usdc.denom,
+          amountBaseUnits: '1250000',
+        },
+      });
+      expect(
+        await call(h.host, 'hubActionStatusForTool', OWNER, reference(9).id),
+      ).toMatchObject({
+        outcome: { status: 'succeeded' },
+        summary: `Transfer of 1.25 USDC (${usdc.denom}) confirmed on chain. Transaction ${'f'.repeat(64)}, block 120.`,
+      });
+      // The Hub refusing at preparation reaches the model in clear words.
+      h.hubState.prepare = 'insufficient_funds';
+      expect(
+        await call(h.host, 'transferHubAction', {
+          ownerDid: OWNER,
+          sessionId: SESSION,
+          runId: 'run-pay',
+          requestId: 'request-run-pay',
+          provider: 'whatsapp',
+          bindingId: 'chb_one',
+          bindingRevision: 2,
+          requestKey: 'j'.repeat(64),
+          toAddress: 'ixo1qgpqyqszqgpqyqszqgpqyqszqgpqyqszuzefze',
+          denom: meme.denom,
+          amount: '7',
+          memo: '',
+        }).catch((error: unknown) => error),
+      ).toMatchObject({
+        name: 'HubActionRefused',
+        message: expect.stringContaining('not hold enough'),
+      });
     });
   });
 });

@@ -7,6 +7,19 @@ import {
   type ActionReferenceV1,
 } from '@ixo/action-protocol';
 import type { DoSqliteDatabase } from '../sqlite/database';
+import type { TransferToken } from './transfer';
+
+function isTransferToken(value: unknown): value is TransferToken {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.denom === 'string' &&
+    typeof v.symbol === 'string' &&
+    typeof v.decimals === 'number' &&
+    Number.isSafeInteger(v.decimals) &&
+    typeof v.verified === 'boolean'
+  );
+}
 
 /**
  * Outcomes after which the Hub never reports another for the action
@@ -104,6 +117,10 @@ export class HubActionStore {
       await this.db.run(
         `ALTER TABLE hub_actions ADD COLUMN check_attempts INTEGER NOT NULL DEFAULT 0`,
       );
+    // The token a transfer was prepared with (symbol, decimals, verified),
+    // for the owner-facing outcome line.
+    if (!actionColumns.some((c) => c.name === 'token'))
+      await this.db.run(`ALTER TABLE hub_actions ADD COLUMN token TEXT`);
     if (!actionColumns.some((c) => c.name === 'expires_at'))
       await this.db.run(
         `ALTER TABLE hub_actions ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0`,
@@ -179,6 +196,31 @@ export class HubActionStore {
       [ownerDid, connectionId, accountLabel],
     );
     return row?.action_id ?? null;
+  }
+
+  /** Keep the token a transfer was prepared with, for its outcome line. */
+  async setToken(actionId: string, token: TransferToken): Promise<void> {
+    await this.db.run('UPDATE hub_actions SET token = ? WHERE action_id = ?', [
+      JSON.stringify({
+        denom: token.denom,
+        symbol: token.symbol,
+        decimals: token.decimals,
+        verified: token.verified,
+      }),
+      actionId,
+    ]);
+  }
+  async token(
+    ownerDid: string,
+    actionId: string,
+  ): Promise<TransferToken | null> {
+    const row = await this.db.get<{ token: string | null }>(
+      'SELECT token FROM hub_actions WHERE owner_did = ? AND action_id = ?',
+      [ownerDid, actionId],
+    );
+    if (!row?.token) return null;
+    const value: unknown = JSON.parse(row.token);
+    return isTransferToken(value) ? value : null;
   }
 
   /** The reference already recorded for a request key, if any. */

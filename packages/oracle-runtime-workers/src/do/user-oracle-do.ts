@@ -40,6 +40,11 @@ import { ChannelTurns } from '../channels/turns';
 import { HubActionClient } from '../hub-actions/client';
 import { prepareHubAction } from '../hub-actions/request';
 import {
+  bankReceiptSummary,
+  describeAmount,
+  toBaseUnits,
+} from '../hub-actions/transfer';
+import {
   HUB_CHECK_AFTER_EXPIRY_MS,
   HubActionRefused,
   HubActionStore,
@@ -48,7 +53,8 @@ import {
 import {
   canonicalJson,
   type ActionCapabilitiesV1,
-  type HubActionOptionsV2,
+  type HubActionOptionsV3,
+  parseOperation,
   type ActionOperationV1,
   type ActionOutcomeV1,
 } from '@ixo/action-protocol';
@@ -595,6 +601,12 @@ const ACTION_TICK_BUDGET_MS = 15_000;
 const ACTION_PRUNE_INTERVAL_MS = 60 * 60_000;
 /** How long the Hub's capabilities answer is reused per object. */
 const HUB_CAPABILITIES_CACHE_MS = 60_000;
+/** A Hub network name as the chain-id config key it is configured under. */
+const HUB_NETWORK_CHAIN = {
+  'ixo mainnet': 'mainnet',
+  'ixo testnet': 'testnet',
+  'ixo devnet': 'devnet',
+} as const;
 /** How long a `hub_action_options` answer vouches for a Gmail connection. */
 const HUB_OPTIONS_REUSE_MS = 10 * 60_000;
 /** A channel poll waits this long for Auth Hub, once per poll at most. */
@@ -998,7 +1010,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       at: number;
     } | null = null;
     /** The last `hub_action_options` answer for this owner (Gmail connection checks). */
-    private lastHubOptions: { value: HubActionOptionsV2; at: number } | null =
+    private lastHubOptions: { value: HubActionOptionsV3; at: number } | null =
       null;
     private topicProposals: TopicProposalStore | null = null;
     /** `assertTopicDependenciesMemo`: card id and digest -> when it passed. */
@@ -2183,8 +2195,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                   requestKey: string;
                   operation: ActionOperationV1;
                 }) => this.requestHubAction(input),
+                transfer: (input) => this.transferHubAction(input),
                 status: (ownerDid: string, actionId: string) =>
-                  this.statusHubAction(ownerDid, actionId),
+                  this.hubActionStatusForTool(ownerDid, actionId),
               },
             }
           : {}),
@@ -3379,6 +3392,89 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       );
       this.markDirty();
       return reference;
+    }
+
+    /**
+     * A bank send of one of the owner's listed tokens. The token comes from
+     * a fresh options read (its balance must be current), the amount is
+     * converted to base units with the listed decimals (unverified tokens
+     * list 0: base units), refused when zero or above the balance; the
+     * network is the account's capability, the chain id this Worker's own
+     * for that network, the sender the owner's account. No fee is sent: the
+     * Hub simulates gas and sets it.
+     */
+    private async transferHubAction(input: {
+      ownerDid: string;
+      sessionId: string;
+      runId: string;
+      requestId: string;
+      provider: string;
+      bindingId: string;
+      bindingRevision: number;
+      requestKey: string;
+      toAddress: string;
+      denom: string;
+      amount: string;
+      memo: string;
+    }) {
+      const options = await this.hubActionOptions(input);
+      const tokens = options.transfer?.tokens;
+      if (!tokens?.length)
+        throw new HubActionRefused(
+          'refused',
+          'Bank sends are not available for this owner right now (no token list from Auth Hub).',
+        );
+      const token = tokens.find((item) => item.denom === input.denom);
+      if (!token)
+        throw new HubActionRefused(
+          'refused',
+          `That token is not in the owner's list; use a denom exactly as hub_action_options lists it (${tokens
+            .map((item) => item.denom)
+            .slice(0, 10)
+            .join(', ')}).`,
+        );
+      const amountBaseUnits = toBaseUnits(input.amount, token.decimals);
+      if (amountBaseUnits > BigInt(token.balanceBaseUnits))
+        throw new HubActionRefused(
+          'refused',
+          `The owner holds ${describeAmount(token.balanceBaseUnits, token)}, less than this transfer.`,
+        );
+      const capabilities = await this.cachedHubCapabilities();
+      if (!capabilities.network)
+        throw new HubActionRefused(
+          'refused',
+          'Bank sends are not enabled for this oracle account.',
+        );
+      const network = HUB_NETWORK_CHAIN[capabilities.network];
+      const operation = parseOperation({
+        kind: 'ixo.bank.send.v1',
+        chainId: chainIdsFromConfig(chainIdConfigSchema.parse(this.env))[
+          network
+        ],
+        network: capabilities.network,
+        fromAddress: input.ownerDid.replace(/^did:ixo:/, ''),
+        toAddress: input.toAddress,
+        amountBaseUnits: amountBaseUnits.toString(),
+        denom: token.denom,
+        memo: input.memo,
+      });
+      const reference = await this.requestHubAction({ ...input, operation });
+      await this.hubActionStore!.setToken(reference.id, token);
+      return reference;
+    }
+
+    /**
+     * `hub_action_status`: the outcome plus, for a bank send, the
+     * owner-facing line (amount from the token stored at preparation).
+     */
+    private async hubActionStatusForTool(
+      ownerDid: string,
+      actionId: string,
+    ): Promise<{ outcome: ActionOutcomeV1 | null; summary: string | null }> {
+      const outcome = await this.statusHubAction(ownerDid, actionId);
+      if (!outcome) return { outcome, summary: null };
+      const token = await this.hubActionStore!.token(ownerDid, actionId);
+      return { outcome, summary: bankReceiptSummary(outcome.receipt, token) };
     }
 
     private async statusHubAction(
