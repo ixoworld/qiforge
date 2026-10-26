@@ -4,7 +4,7 @@ import {
   bankReceiptSummary,
   describeAmount,
   fromBaseUnits,
-  hubTransferRefusal,
+  hubPrepareRefusal,
   toBaseUnits,
   type TransferToken,
 } from './transfer';
@@ -54,6 +54,9 @@ describe('any-token transfer amounts', () => {
       123456789012345678901234567890n * 10n ** 18n,
     );
     expect(toBaseUnits('7', 0)).toBe(7n);
+    // Trailing zeros carry no value.
+    expect(toBaseUnits('1.50', 1)).toBe(15n);
+    expect(toBaseUnits('7.000', 0)).toBe(7n);
   });
 
   it('refuses too many decimals, zero and anything but a plain decimal', () => {
@@ -61,7 +64,18 @@ describe('any-token transfer amounts', () => {
     expect(() => toBaseUnits('1.5', 0)).toThrow('whole base units');
     expect(() => toBaseUnits('0', 6)).toThrow('above zero');
     expect(() => toBaseUnits('0.000', 6)).toThrow('above zero');
-    for (const bad of ['', '-1', '1e6', '01', '1.', '.5', '1,5', 'NaN', ' 1 2'])
+    for (const bad of [
+      '',
+      '-1',
+      '1e6',
+      '01',
+      '1.',
+      '.5',
+      '1,5',
+      'NaN',
+      ' 1 ',
+      '１',
+    ])
       expect(() => toBaseUnits(bad, 6)).toThrow('plain decimal');
     expect(() => toBaseUnits('9'.repeat(81), 0)).toThrow('plain decimal');
   });
@@ -91,6 +105,17 @@ describe('bank receipt summary', () => {
       ),
     ).toBe(
       `Transfer of 2.5 USDC (${USDC.denom}) confirmed on chain. Transaction ${'f'.repeat(64)}, block 100.`,
+    );
+  });
+
+  it('reads uixo as IXO without a stored token', () => {
+    expect(
+      bankReceiptSummary(
+        bankReceipt({ denom: 'uixo', amountBaseUnits: '1500000' }),
+        null,
+      ),
+    ).toBe(
+      `Transfer of 1.5 IXO confirmed on chain. Transaction ${'f'.repeat(64)}, block 100.`,
     );
   });
 
@@ -144,16 +169,18 @@ describe('bank receipt summary', () => {
   });
 });
 
-describe('Hub transfer refusals', () => {
-  it('maps the three preparation errors and keeps a short reason', () => {
-    expect(hubTransferRefusal({ error: 'insufficient_funds' })).toMatchObject({
+describe('Hub prepare refusals', () => {
+  it('maps the three transfer preparation errors (400) and keeps a short reason', () => {
+    expect(
+      hubPrepareRefusal(400, { error: 'insufficient_funds' }),
+    ).toMatchObject({
       name: 'HubActionRefused',
       kind: 'refused',
       message:
         'The account does not hold enough to cover this transfer and its network fee.',
     });
     expect(
-      hubTransferRefusal({
+      hubPrepareRefusal(400, {
         error: 'simulation_failed',
         reason: 'x'.repeat(500),
       })?.message,
@@ -161,21 +188,44 @@ describe('Hub transfer refusals', () => {
       `Auth Hub simulated this transfer and it would fail on chain: ${'x'.repeat(200)}.`,
     );
     expect(
-      hubTransferRefusal({ error: 'fee_above_ceiling', reason: '  ' })?.message,
+      hubPrepareRefusal(400, { error: 'fee_above_ceiling', reason: '  ' })
+        ?.message,
     ).toBe(
       "The network fee for this transfer is above this oracle's fee limit.",
     );
   });
 
+  it('tells a temporary Hub condition from a deterministic refusal', () => {
+    for (const [status, error] of [
+      [409, 'sequence_mismatch'],
+      [503, 'transfer_unavailable'],
+    ] as const)
+      expect(hubPrepareRefusal(status, { error })?.message).toBe(
+        `Auth Hub is temporarily unavailable for this (${error}); try again shortly.`,
+      );
+    expect(
+      hubPrepareRefusal(409, {
+        error: 'operation_not_enabled',
+        reason: 'bank sends are off',
+      })?.message,
+    ).toBe(
+      'This operation is not available for this account (operation_not_enabled: bank sends are off).',
+    );
+  });
+
   it('returns null for anything else', () => {
-    for (const body of [
-      null,
-      'insufficient_funds',
-      {},
-      { error: 'invalid_operation' },
-      { error: 'toString' },
-      { error: 7 },
-    ])
-      expect(hubTransferRefusal(body)).toBeNull();
+    for (const [status, body] of [
+      [400, null],
+      [400, 'insufficient_funds'],
+      [400, {}],
+      [400, { error: 'invalid_operation' }],
+      [400, { error: 'toString' }],
+      [400, { error: 7 }],
+      [503, { error: 'insufficient_funds' }],
+      [503, { error: 'down' }],
+      [409, { error: 'Not A Code' }],
+      [500, { error: 'sequence_mismatch' }],
+    ] as const)
+      expect(hubPrepareRefusal(status, body)).toBeNull();
   });
 });

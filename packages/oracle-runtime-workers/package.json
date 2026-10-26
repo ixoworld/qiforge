@@ -78,6 +78,7 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@cloudflare/workers-types": "^5.20260825.1",
+    "@ixo/action-protocol-041": "npm:@ixo/action-protocol@0.4.1",
     "@ixo/typescript-config": "workspace:*",
     "@modelcontextprotocol/sdk": "1.30.0",
     "happy-dom": "^19.0.0",

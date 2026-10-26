@@ -189,15 +189,10 @@ async function requestHubTransfer(
       summary: reference.title,
     };
   } catch (error) {
+    // The owner object turns the protocol refusing the operation built
+    // from the model's fields into a refusal; anything else is an error.
     const refused = refusalOf(error);
     if (refused) return refused;
-    // The protocol refusing the built operation (an invalid address) is
-    // the model's to fix, in the protocol's words.
-    if (error instanceof TypeError)
-      return {
-        status: 'unavailable',
-        reason: `The transfer is incomplete (${error.message}).`,
-      };
     throw error;
   }
 }

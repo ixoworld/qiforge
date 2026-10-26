@@ -266,18 +266,28 @@ The route is on when `HUB_ACTIONS_ENABLED=true`, `AUTH_HUB_URL` and
 `AUTH_HUB_CHANNEL_SERVICE_KEY` are set, and answers `401` otherwise. The Hub
 DID comes from `AUTH_HUB_URL` (never from the request); its document is read
 from `${AUTH_HUB_URL}/.well-known/did.json` (https only, at most 64 KB, no
-redirects, through `AUTH_HUB` when bound), must carry that exact DID, and is
-cached for one hour per isolate. A signature the cached key does not verify
-reads the document once more (a key rotation), at most once a minute. The
-audience is the origin of the incoming request URL, so a callback signed for
-another oracle, or delivered to another hostname this Worker also serves,
-fails. The timestamp must be within 300 s. There is no shared callback secret
+redirects, through `AUTH_HUB` when bound), must carry that exact DID and the
+`#key-0` key; only such a document's key is cached, for one hour per isolate.
+The checks that need no key run first: all three headers present, the Hub's
+key id, a well-formed timestamp within 300 s either way, a signature that
+decodes to 64 bytes; a callback failing them causes no Hub read. The document
+is read at most once a minute per isolate, whatever the read's outcome (a Hub
+`503`, a network error, a document for another DID), and concurrent callbacks
+share one read. A signature the cached key does not verify reads it once more
+under the same limit (a key rotation). The audience is the origin of
+`ORACLE_PUBLIC_URL` when it is set (a Worker reachable under several
+hostnames), else the origin of the incoming request URL, so a callback signed
+for another oracle, or for another hostname, fails. There is no shared callback secret
 any more (`AUTH_HUB_ACTION_OUTCOME_KEY` is removed); an
 `x-auth-hub-outcome-key` header the Hub still sends during its transition is
 ignored, never required. A valid signature is not trusted on its own: the
-receiver checks the event against its stored original reference, dedupes by
-action id and sequence, and confirms it through Auth Hub's authenticated
-status API before storing it.
+receiver checks the event against its stored original reference and confirms
+it through Auth Hub's authenticated status API before storing it. A replay of
+an outcome already stored at that action id and sequence, with the same
+content, is acknowledged without a Hub read. Outcomes are compared in the
+0.4.1 receipt shape: an action prepared at protocol version 2 (runtime
+0.23.0) gets its callback without the bank `denom`/`amountBaseUnits`, while
+the confirming status read (version 3) carries them.
 Neither a callback nor a model turn executes a transfer. Hub-owned native
 transfer events remain status only. A resource open is not treated as
 acceptance or submission.
@@ -350,11 +360,19 @@ the fee. A token that is not `verified` has `decimals` 0, so its amounts are
 base units; the model is told to name its full denom and say it is
 unverified (anyone controlling a factory or cw20 token can call it "USDC").
 
-Auth Hub can refuse a transfer at preparation with `400
-{error, reason?}`. `simulation_failed`, `fee_above_ceiling` and
-`insufficient_funds` reach the model as `{status: 'unavailable', reason}` in
-plain words (with the Hub's reason, at most 200 characters). Any other `400`
-is a transport error.
+Auth Hub can refuse a prepare with `{error, reason?}`; these reach the model
+as `{status: 'unavailable', reason}` in plain words (with the Hub's reason, at
+most 200 characters): `400` `simulation_failed`, `fee_above_ceiling` and
+`insufficient_funds` (the transfer as asked cannot go ahead); `409`
+`sequence_mismatch` and `503` `transfer_unavailable` (temporary: try again
+shortly); any other `409` (the operation is not available for this account,
+and a retry gets the same answer). Any other `400` or `503` is a transport
+error. Only the protocol refusing the operation the owner object built from
+the model's fields (an invalid recipient or memo) becomes "The transfer is
+incomplete (…)"; a `TypeError` from anywhere else stays an error.
+
+A transfer runs the turn-origin refusal first (no Hub read for a scheduled
+or background run), then validates the binding once for the whole call.
 
 The owner object stores the token (denom, symbol, decimals, verified) next to
 the prepared action. `hub_action_status` returns `{status: 'known', outcome,
@@ -390,7 +408,8 @@ id as `priorActionId`); for an `unknown` one the owner is asked to check
 Gmail's Sent folder. The refusal lifts when that action reaches a terminal
 outcome (or its rows are pruned, 30 days after its review expired). A Gmail send or disconnect must also name a
 connection (service `gmail`, id and label) from the owner's
-`hub_action_options` (the last read within 10 minutes, else a fresh one);
+`hub_action_options` (the last read within 10 minutes, else a fresh one at
+options version 2, which does not make the Hub read the owner's balances);
 any other is refused. The tool's refusal names the field the protocol
 rejected (for example `Invalid fromAddress`). The Gmail service requires fresh independently verified scope
 attestations and confirmed proxy no-retry behavior; missing evidence disables

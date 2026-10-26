@@ -267,11 +267,12 @@ describe('Hub action HTTP client', () => {
       error: 'fee_above_ceiling',
       reason: 'fee 250000 > 100000',
     };
+    let status = 400;
     const client = new HubActionClient({
       origin: 'https://hub.test',
       key: 'oracle-secret',
       fetcher: {
-        fetch: async () => Response.json(answer, { status: 400 }),
+        fetch: async () => Response.json(answer, { status }),
       },
     });
     const send = () =>
@@ -305,5 +306,61 @@ describe('Hub action HTTP client', () => {
     // Any other 400 stays a plain transport error.
     answer = { error: 'invalid_operation' };
     await expect(send()).rejects.toThrow('Hub action request returned 400');
+    // Temporary: a sequence race (409) or the transfer path down (503).
+    for (const [code, error] of [
+      [409, 'sequence_mismatch'],
+      [503, 'transfer_unavailable'],
+    ] as const) {
+      status = code;
+      answer = { error };
+      await expect(send()).rejects.toMatchObject({
+        name: 'HubActionRefused',
+        message: `Auth Hub is temporarily unavailable for this (${error}); try again shortly.`,
+      });
+    }
+    // Deterministic: any other 409 is not available for this account.
+    status = 409;
+    answer = { error: 'operation_not_enabled' };
+    await expect(send()).rejects.toMatchObject({
+      name: 'HubActionRefused',
+      message:
+        'This operation is not available for this account (operation_not_enabled).',
+    });
+    // A 503 without a mapped code stays a transport error.
+    status = 503;
+    answer = { error: 'maintenance' };
+    await expect(send()).rejects.toThrow('Hub action request returned 503');
+  });
+
+  it('reads connection options at version 2 (no balances read) for the Gmail check', async () => {
+    const urls: URL[] = [];
+    const client = new HubActionClient({
+      origin: 'https://hub.test',
+      key: 'oracle-secret',
+      fetcher: {
+        fetch: async (request) => {
+          urls.push(new URL(request.url));
+          return Response.json({
+            version: 'ixo.auth-options/2',
+            accountId: reference.accountId,
+            ownerDid: 'did:ixo:second',
+            bindingId: reference.bindingId,
+            bindingRevision: reference.bindingRevision,
+            connections: [],
+            targets: [],
+            resources: [],
+          });
+        },
+      },
+    });
+    expect(
+      (
+        await client.connectionOptions({
+          bindingId: reference.bindingId,
+          bindingRevision: reference.bindingRevision,
+        })
+      ).version,
+    ).toBe('ixo.auth-options/2');
+    expect(urls[0]?.searchParams.get('version')).toBe('2');
   });
 });

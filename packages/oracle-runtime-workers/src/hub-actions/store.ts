@@ -10,14 +10,18 @@ import type { DoSqliteDatabase } from '../sqlite/database';
 import type { TransferToken } from './transfer';
 
 function isTransferToken(value: unknown): value is TransferToken {
-  if (!value || typeof value !== 'object') return false;
-  const v = value as Record<string, unknown>;
   return (
-    typeof v.denom === 'string' &&
-    typeof v.symbol === 'string' &&
-    typeof v.decimals === 'number' &&
-    Number.isSafeInteger(v.decimals) &&
-    typeof v.verified === 'boolean'
+    !!value &&
+    typeof value === 'object' &&
+    'denom' in value &&
+    typeof value.denom === 'string' &&
+    'symbol' in value &&
+    typeof value.symbol === 'string' &&
+    'decimals' in value &&
+    typeof value.decimals === 'number' &&
+    Number.isSafeInteger(value.decimals) &&
+    'verified' in value &&
+    typeof value.verified === 'boolean'
   );
 }
 
@@ -470,6 +474,21 @@ export class HubActionStore {
       );
       return true;
     });
+  }
+
+  /** The stored outcome of the owner's action at `sequence`, if any. */
+  async outcomeAt(
+    ownerDid: string,
+    actionId: string,
+    sequence: number,
+  ): Promise<ActionOutcomeV1 | null> {
+    const row = await this.db.get<{ outcome: string }>(
+      `SELECT o.outcome FROM hub_action_outcomes o
+         JOIN hub_actions a ON a.action_id = o.action_id
+        WHERE a.owner_did = ? AND o.action_id = ? AND o.sequence = ?`,
+      [ownerDid, actionId, sequence],
+    );
+    return row ? parseOutcome(JSON.parse(row.outcome)) : null;
   }
 
   async outcomesForRun(

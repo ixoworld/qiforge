@@ -1,6 +1,7 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
 import type { ActionOutcomeV1, ActionReferenceV1 } from '@ixo/action-protocol';
+import { parseOutcome as parseOutcome041 } from '@ixo/action-protocol-041';
 import type { ChannelTurnResponse } from '../channels/contract';
 import { createRuntimeCore } from '../core';
 import { makeEnv } from '../core/test-fixtures';
@@ -106,6 +107,7 @@ async function harness(state: DurableObjectState) {
     limits: { denom: string; maxAmountBaseUnits: string }[];
     prepare: 'unexpected' | 'ok' | 'insufficient_funds';
     posted: unknown[];
+    optionsVersions: string[];
   } = {
     bindingActive: true,
     optionsOwner: OWNER,
@@ -114,6 +116,7 @@ async function harness(state: DurableObjectState) {
     limits: [],
     prepare: 'unexpected',
     posted: [],
+    optionsVersions: [],
   };
   const hub = {
     fetch: async (request: Request): Promise<Response> => {
@@ -122,14 +125,17 @@ async function harness(state: DurableObjectState) {
       if (mode === 'down') return new Response('down', { status: 503 });
       if (path === '/api/internal/channels/validate-binding')
         return Response.json({ active: hubState.bindingActive });
-      if (path === '/api/internal/actions/operations/options')
+      if (path === '/api/internal/actions/operations/options') {
+        // Version 3 adds the owner's tokens (the Hub reads balances for it).
+        const v3 = new URL(request.url).searchParams.get('version') === '3';
+        hubState.optionsVersions.push(v3 ? '3' : '2');
         return Response.json({
-          version: 'ixo.auth-options/3',
+          version: v3 ? 'ixo.auth-options/3' : 'ixo.auth-options/2',
           accountId: 'account-one',
           ownerDid: hubState.optionsOwner,
           bindingId: hubState.optionsBinding,
           bindingRevision: 2,
-          transfer: { tokens: hubState.tokens },
+          ...(v3 ? { transfer: { tokens: hubState.tokens } } : {}),
           connections: [
             {
               service: 'gmail',
@@ -141,6 +147,7 @@ async function harness(state: DurableObjectState) {
           targets: [],
           resources: [],
         });
+      }
       if (path === '/api/internal/actions/operations/capabilities')
         return Response.json({
           version: 'ixo.auth-capabilities/2',
@@ -430,6 +437,24 @@ describe('Hub actions in the owner object', () => {
           },
         }),
       ).rejects.toThrow('only in reply to a message from the user');
+      // A transfer is refused the same way, before any Hub read (no
+      // binding check, no options and balances read).
+      await expect(
+        call(h.host, 'transferHubAction', {
+          ownerDid: OWNER,
+          sessionId: request.sessionId,
+          runId: 'task-run',
+          requestId: request.requestId,
+          provider: 'whatsapp',
+          bindingId: 'chb_one',
+          bindingRevision: 2,
+          requestKey: 'k'.repeat(64),
+          toAddress: 'ixo1qgpqyqszqgpqyqszqgpqyqszqgpqyqszuzefze',
+          denom: 'uixo',
+          amount: '1',
+          memo: '',
+        }),
+      ).rejects.toThrow('only in reply to a message from the user');
       expect(h.calls).toEqual([]);
     });
   });
@@ -548,6 +573,10 @@ describe('Hub actions in the owner object', () => {
       expect(
         h.calls.filter((c) => c.startsWith('POST /api/internal/actions')),
       ).toEqual([]);
+      // The Gmail check reads options at version 2: no token list, so the
+      // Hub does not read the owner's balances for an email.
+      expect(h.hubState.optionsVersions.length).toBeGreaterThan(0);
+      expect(new Set(h.hubState.optionsVersions)).toEqual(new Set(['2']));
     });
   });
 
@@ -678,6 +707,12 @@ describe('Hub actions in the owner object', () => {
         id: reference(9).id,
       });
       expect(h.hubState.posted).toHaveLength(1);
+      // One binding check per transfer (not one per step), version 3
+      // options only.
+      expect(
+        h.calls.filter((c) => c.endsWith('/validate-binding')).length,
+      ).toBe(h.calls.filter((c) => c.endsWith('/options')).length);
+      expect(new Set(h.hubState.optionsVersions)).toEqual(new Set(['3']));
       expect(h.hubState.posted[0]).toMatchObject({
         operation: {
           kind: 'ixo.bank.send.v1',
@@ -692,6 +727,27 @@ describe('Hub actions in the owner object', () => {
         (h.hubState.posted[0] as { operation: Record<string, unknown> })
           .operation,
       ).not.toHaveProperty('feeBaseUnits');
+      // The protocol refusing the operation built from the model's fields
+      // (here the recipient) is a refusal the model can fix.
+      expect(
+        await call(h.host, 'transferHubAction', {
+          ownerDid: OWNER,
+          sessionId: SESSION,
+          runId: 'run-pay',
+          requestId: 'request-run-pay',
+          provider: 'whatsapp',
+          bindingId: 'chb_one',
+          bindingRevision: 2,
+          requestKey: 'i'.repeat(64),
+          toAddress: 'not-an-address',
+          denom: usdc.denom,
+          amount: '1',
+          memo: '',
+        }).catch((error: unknown) => error),
+      ).toMatchObject({
+        name: 'HubActionRefused',
+        message: expect.stringMatching(/^The transfer is incomplete \(Invalid/),
+      });
       // The status line names the amount from the stored token.
       h.outcomes.set(reference(9).id, {
         ...outcome(reference(9), 2, 'succeeded'),
@@ -729,6 +785,14 @@ describe('Hub actions in the owner object', () => {
           status: 'finished',
         },
       );
+      // The gateway's own parser (0.4.1) accepts what the poll emits, and
+      // would have refused the outcome as the Hub sent it.
+      expect(() =>
+        parseOutcome041(emitted.hubActionOutcomes?.[0]),
+      ).not.toThrow();
+      expect(() => parseOutcome041(h.outcomes.get(reference(9).id))).toThrow(
+        'Invalid receipt',
+      );
       expect(emitted.hubActionOutcomes?.[0]?.receipt).toEqual({
         kind: 'ixo.bank.send.v1',
         actionId: reference(9).id,
@@ -760,6 +824,56 @@ describe('Hub actions in the owner object', () => {
         name: 'HubActionRefused',
         message: expect.stringContaining('not hold enough'),
       });
+    });
+  });
+
+  it('confirms a version-2 callback against a version-3 status read, and acks a replay without a Hub read', async () => {
+    await withHub('hub-mixed-level', async (h) => {
+      const ref = await h.prepared(11);
+      const bank = {
+        kind: 'ixo.bank.send.v1' as const,
+        actionId: ref.id,
+        revision: 1,
+        digest,
+        chainId: 'pandora-8',
+        txHash: 'e'.repeat(64),
+        height: 77,
+        code: 0,
+      };
+      const base = outcome(ref, 2, 'succeeded');
+      // The Hub's status read (version 3) carries the 0.5.0 bank fields...
+      h.outcomes.set(ref.id, {
+        ...base,
+        version: 'ixo.auth-outcome/2',
+        receipt: { ...bank, denom: 'uixo', amountBaseUnits: '5' },
+      });
+      // ...while the callback for an action prepared at version 2 does not.
+      const callback: ActionOutcomeV1 = {
+        ...base,
+        version: 'ixo.auth-outcome/2',
+        receipt: bank,
+      };
+      await call(h.host, 'recordHubActionOutcome', callback);
+      const reads = () =>
+        h.calls.filter(
+          (c) => c === `GET /api/internal/actions/operations/${ref.id}`,
+        ).length;
+      expect(reads()).toBe(1);
+      expect(await h.store.outcomeAt(OWNER, ref.id, 2)).toMatchObject({
+        receipt: { denom: 'uixo', amountBaseUnits: '5' },
+      });
+      // The same callback again (a Hub retry): acknowledged from SQLite.
+      await call(h.host, 'recordHubActionOutcome', callback);
+      expect(reads()).toBe(1);
+      // A callback that differs from the stored one is confirmed again,
+      // and refused when the Hub disagrees.
+      await expect(
+        call(h.host, 'recordHubActionOutcome', {
+          ...callback,
+          receipt: { ...bank, code: 5 },
+        }),
+      ).rejects.toThrow('not confirmed');
+      expect(reads()).toBe(2);
     });
   });
 });

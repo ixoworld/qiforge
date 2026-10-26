@@ -220,9 +220,12 @@ callback secret (`AUTH_HUB_ACTION_OUTCOME_KEY` is gone, and an
 `x-auth-hub-outcome-key` header the Hub still sends during the transition is
 ignored). The Hub DID is derived from `AUTH_HUB_URL` (`did:web:<host>`), and
 its document is read from `${AUTH_HUB_URL}/.well-known/did.json` (through
-`AUTH_HUB` when bound), cached for an hour per isolate. The signature must be
-for this oracle's own origin (the origin of the request URL, which must be the
-https oracle URL registered on the Hub channel account), within 300 s.
+`AUTH_HUB` when bound), cached for an hour per isolate and read at most once
+a minute. The signature must be for this oracle's own origin, within 300 s:
+the origin of `ORACLE_PUBLIC_URL` when it is set, else the origin of the
+request URL. Either way it must be the origin of the https oracle URL
+registered on the Hub channel account; set `ORACLE_PUBLIC_URL` when the
+Worker is reachable under more than one hostname.
 
 Without the key, or without both `AUTH_HUB` and `AUTH_HUB_URL`, binding
 validation is "not configured": a new channel turn gets `503` and nothing is

@@ -8,9 +8,10 @@ import {
   type ActionCapabilitiesV1,
   type ActionOutcomeV1,
   type ActionReferenceV1,
+  type HubActionOptionsV2,
   type HubActionOptionsV3,
 } from '@ixo/action-protocol';
-import { hubTransferRefusal } from './transfer';
+import { hubPrepareRefusal } from './transfer';
 
 export interface HubActionStatus {
   reference: ActionReferenceV1;
@@ -83,10 +84,18 @@ export class HubActionClient {
     const response = await (this.transport.fetcher
       ? this.transport.fetcher.fetch(request)
       : fetch(request));
-    if (response.status === 400 && body !== undefined) {
-      // A transfer the Hub refused at preparation (simulation failed, fee
-      // above the ceiling, not enough funds): the model relays the reason.
-      const refusal = hubTransferRefusal(
+    if (
+      body !== undefined &&
+      (response.status === 400 ||
+        response.status === 409 ||
+        response.status === 503)
+    ) {
+      // A prepare the Hub refused with a typed code (a transfer that would
+      // fail, a fee above the ceiling, not enough funds, a busy or
+      // unavailable transfer path, an operation the account may not use):
+      // the model relays it in words.
+      const refusal = hubPrepareRefusal(
+        response.status,
         await response.json().catch(() => null),
       );
       if (refusal) throw refusal;
@@ -144,6 +153,30 @@ export class HubActionClient {
     );
     if (options.version !== 'ixo.auth-options/3')
       throw new Error('Hub action options require version 3');
+    return options;
+  }
+
+  /**
+   * Options version 2 (connections, targets, resources; no token list),
+   * for the Gmail connection check: it does not make the Hub read the
+   * owner's balances.
+   */
+  async connectionOptions(input: {
+    bindingId: string;
+    bindingRevision: number;
+  }): Promise<HubActionOptionsV2> {
+    const query = new URLSearchParams({
+      bindingId: input.bindingId,
+      bindingRevision: String(input.bindingRevision),
+      version: '2',
+    });
+    const options = parseActionOptions(
+      await this.send(
+        `/api/internal/actions/operations/options?${query.toString()}`,
+      ),
+    );
+    if (options.version !== 'ixo.auth-options/2')
+      throw new Error('Hub action options require version 2');
     return options;
   }
 

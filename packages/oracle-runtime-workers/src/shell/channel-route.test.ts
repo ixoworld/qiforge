@@ -26,7 +26,7 @@ import {
   HUB_DID_REFRESH_MIN_MS,
   resetHubDidCache,
 } from '../hub-actions/outcome-signature';
-import { createShell, rateLimitKey } from './app';
+import { callbackAudience, createShell, rateLimitKey } from './app';
 
 const USER_DID = 'did:ixo:ixo1channeluser';
 
@@ -408,6 +408,42 @@ describe('POST /api/internal/actions/outcomes', () => {
     ])
       expect((await post({ ...env, ...off }, headers)).status).toBe(401);
     expect(record).not.toHaveBeenCalled();
+  });
+
+  it('verifies against ORACLE_PUBLIC_URL when it is set, whatever host the request used', async () => {
+    const key = await hubKey();
+    const { env, record } = await routeEnv(() =>
+      didDocument(key.publicKeyMultibase),
+    );
+    const configured = { ...env, ORACLE_PUBLIC_URL: `${ORACLE_ORIGIN}/base/` };
+    const sign = (audience: string) =>
+      signOutcomeRequest({
+        privateKey: key.privateKey,
+        keyId: KEY_ID,
+        audience,
+        rawBody,
+      });
+    const viaAlias = 'https://alias.workers.dev/api/internal/actions/outcomes';
+    expect(
+      (await post(configured, await sign(ORACLE_ORIGIN), rawBody, viaAlias))
+        .status,
+    ).toBe(200);
+    // Signed for the hostname the request used, not the configured one.
+    expect(
+      (
+        await post(
+          configured,
+          await sign('https://alias.workers.dev'),
+          rawBody,
+          viaAlias,
+        )
+      ).status,
+    ).toBe(401);
+    expect(record).toHaveBeenCalledTimes(1);
+    expect(callbackAudience(undefined, viaAlias)).toBe(
+      'https://alias.workers.dev',
+    );
+    expect(callbackAudience('not a url', viaAlias)).toBe('');
   });
 
   it('picks up a rotated Hub key with one fresh DID document read', async () => {

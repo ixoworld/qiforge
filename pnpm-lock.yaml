@@ -773,6 +773,9 @@ importers:
       '@cloudflare/workers-types':
         specifier: ^5.20260825.1
         version: 5.20260825.1
+      '@ixo/action-protocol-041':
+        specifier: npm:@ixo/action-protocol@0.4.1
+        version: '@ixo/action-protocol@0.4.1'
       '@ixo/typescript-config':
         specifier: workspace:*
         version: link:../typescript-config
@@ -3405,6 +3408,10 @@ packages:
   '@istanbuljs/schema@0.1.6':
     resolution: {integrity: sha512-+Sg6GCR/wy1oSmQDFq4LQDAhm3ETKnorxN+y5nbLULOR3P0c14f2Wurzj3/xqPXtasLFfHd5iRFQ7AJt4KH2cw==}
     engines: {node: '>=8'}
+
+  '@ixo/action-protocol@0.4.1':
+    resolution: {integrity: sha512-XrZyu+jJs+qsWFdjEKkdKXHidxXDZJviW6zNwuNbzn7hf9apMRb3NGmv1XDkYgop+4cgWAuBnb7ZWuFxUJyZ1w==}
+    engines: {node: '>=20'}
 
   '@ixo/action-protocol@0.5.0':
     resolution: {integrity: sha512-KnJfwfRGq6bMYQJxYLn/Ka0gmryDtrmDzFwuACoF/3UP+wPAbZubWA32BDDfdOE2l/YjGD6D8zgoWVXHh1Q7pg==}
@@ -15550,6 +15557,8 @@ snapshots:
     optional: true
 
   '@istanbuljs/schema@0.1.6': {}
+
+  '@ixo/action-protocol@0.4.1': {}
 
   '@ixo/action-protocol@0.5.0': {}
 

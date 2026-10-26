@@ -202,6 +202,22 @@ export const BYO_LLM_BODY_BYTES = 64 * 1024;
 export const DEBUG_BODY_BYTES = 64 * 1024;
 
 /** A body cap enforced before the body is buffered: over it, 413 and the handler never runs. */
+/**
+ * The audience a signed Hub outcome callback must be signed for: the origin
+ * of `ORACLE_PUBLIC_URL` when it is set, else the origin of the request URL.
+ * An unparsable public URL yields '' (which never verifies).
+ */
+export function callbackAudience(
+  publicUrl: string | undefined,
+  requestUrl: string,
+): string {
+  try {
+    return new URL(publicUrl || requestUrl).origin;
+  } catch {
+    return '';
+  }
+}
+
 function limitBody(maxSize: number) {
   return bodyLimit({
     maxSize,
@@ -458,7 +474,10 @@ export function createShell(
         hubUrl: c.env.AUTH_HUB_URL,
         rawBody: body,
         headers: c.req.raw.headers,
-        audience: new URL(c.req.url).origin,
+        // The origin the Hub signs for: the configured public URL when
+        // set (a Worker reachable under several hostnames), else the
+        // origin this request came in on.
+        audience: callbackAudience(c.env.ORACLE_PUBLIC_URL, c.req.url),
         ...(c.env.AUTH_HUB ? { fetcher: c.env.AUTH_HUB } : {}),
       }))
     )

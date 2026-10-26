@@ -53,6 +53,7 @@ import {
 import {
   canonicalJson,
   type ActionCapabilitiesV1,
+  type HubActionOptionsV2,
   type HubActionOptionsV3,
   parseOperation,
   v1Receipt,
@@ -607,6 +608,19 @@ const ACTION_PRUNE_INTERVAL_MS = 60 * 60_000;
 /** How long the Hub's capabilities answer is reused per object. */
 const HUB_CAPABILITIES_CACHE_MS = 60_000;
 /** A Hub network name as the chain-id config key it is configured under. */
+/**
+ * Whether two Hub outcomes are the same event. Receipts are compared in the
+ * 0.4.1 shape: an action prepared at protocol version 2 (runtime 0.23.0) gets
+ * its callback without the 0.5.0 bank fields (`denom`, `amountBaseUnits`),
+ * while the confirming status read (version 3) carries them.
+ */
+function sameHubOutcome(a: ActionOutcomeV1, b: ActionOutcomeV1): boolean {
+  return (
+    canonicalJson({ ...a, receipt: v1Receipt(a.receipt) }) ===
+    canonicalJson({ ...b, receipt: v1Receipt(b.receipt) })
+  );
+}
+
 const HUB_NETWORK_CHAIN = {
   'ixo mainnet': 'mainnet',
   'ixo testnet': 'testnet',
@@ -1015,8 +1029,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       at: number;
     } | null = null;
     /** The last `hub_action_options` answer for this owner (Gmail connection checks). */
-    private lastHubOptions: { value: HubActionOptionsV3; at: number } | null =
-      null;
+    private lastHubOptions: {
+      value: HubActionOptionsV2 | HubActionOptionsV3;
+      at: number;
+    } | null = null;
     private topicProposals: TopicProposalStore | null = null;
     /** `assertTopicDependenciesMemo`: card id and digest -> when it passed. */
     private topicAuthorityMemo: Map<string, number> | undefined;
@@ -3235,14 +3251,64 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       };
     }
 
-    private async hubActionOptions(input: {
+    /** `hub_action_options` and the transfer path: version 3, with the owner's tokens. */
+    private async hubActionOptions(
+      input: {
+        ownerDid: string;
+        provider: string;
+        bindingId: string;
+        bindingRevision: number;
+      },
+      bindingChecked = false,
+    ): Promise<HubActionOptionsV3> {
+      const client = this.hubActionClient;
+      if (!client || input.ownerDid !== this.userDid)
+        throw new Error('Hub action options are unavailable for this owner');
+      return this.readHubOptions(input, bindingChecked, (binding) =>
+        client.options(binding),
+      );
+    }
+
+    /**
+     * Read the owner's options for the trusted binding (validated here
+     * unless the caller already validated it in this same call) and keep
+     * the read for the Gmail connection check.
+     */
+    private async readHubOptions<
+      T extends HubActionOptionsV2 | HubActionOptionsV3,
+    >(
+      input: {
+        ownerDid: string;
+        provider: string;
+        bindingId: string;
+        bindingRevision: number;
+      },
+      bindingChecked: boolean,
+      read: (binding: {
+        bindingId: string;
+        bindingRevision: number;
+      }) => Promise<T>,
+    ): Promise<T> {
+      if (!bindingChecked) await this.assertHubBinding(input);
+      const options = await read(input);
+      if (
+        options.ownerDid !== input.ownerDid ||
+        options.bindingId !== input.bindingId ||
+        options.bindingRevision !== input.bindingRevision
+      )
+        throw new Error(
+          'Hub action options do not match this owner and binding',
+        );
+      this.lastHubOptions = { value: options, at: Date.now() };
+      return options;
+    }
+
+    private async assertHubBinding(input: {
       ownerDid: string;
       provider: string;
       bindingId: string;
       bindingRevision: number;
-    }) {
-      if (!this.hubActionClient || input.ownerDid !== this.userDid)
-        throw new Error('Hub action options are unavailable for this owner');
+    }): Promise<void> {
       await assertActiveChannelBinding(
         {
           userDid: input.ownerDid,
@@ -3254,17 +3320,34 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         },
         this.env,
       );
-      const options = await this.hubActionClient.options(input);
+    }
+
+    /**
+     * Only a run an inbound channel message started may prepare a review:
+     * a scheduled or background run has no user asking for it. Checked
+     * before any Hub read.
+     */
+    private async assertHubTurnOrigin(input: {
+      ownerDid: string;
+      sessionId: string;
+      runId: string;
+    }): Promise<void> {
+      const record = await this.runStore?.get(input.runId);
+      const turn = record
+        ? (JSON.parse(record.request) as StoredRunRequest).turn
+        : null;
       if (
-        options.ownerDid !== input.ownerDid ||
-        options.bindingId !== input.bindingId ||
-        options.bindingRevision !== input.bindingRevision
+        !turn ||
+        turn.client !== 'channel' ||
+        !turn.channel?.remoteMessageRef ||
+        turn.identity.userDid !== input.ownerDid ||
+        turn.sessionId !== input.sessionId ||
+        turn.sessionId.startsWith(SYNTHETIC_SESSION_PREFIX)
       )
-        throw new Error(
-          'Hub action options do not match this owner and binding',
+        throw new HubActionRefused(
+          'limit',
+          'Reviews are prepared only in reply to a message from the user.',
         );
-      this.lastHubOptions = { value: options, at: Date.now() };
-      return options;
     }
 
     /**
@@ -3296,7 +3379,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         cached.value.bindingId === input.bindingId &&
         cached.value.bindingRevision === input.bindingRevision
           ? cached.value
-          : await this.hubActionOptions(input);
+          : await this.readHubOptions(input, true, (binding) =>
+              this.hubActionClient!.connectionOptions(binding),
+            );
       if (
         !options.connections.some(
           (c) =>
@@ -3336,50 +3421,32 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return value;
     }
 
-    private async requestHubAction(input: {
-      ownerDid: string;
-      sessionId: string;
-      runId: string;
-      requestId: string;
-      provider: string;
-      bindingId: string;
-      bindingRevision: number;
-      requestKey: string;
-      operation: ActionOperationV1;
-    }) {
+    /**
+     * `checked`: the transfer path already ran the turn-origin refusal and
+     * validated the binding in this same call.
+     */
+    private async requestHubAction(
+      input: {
+        ownerDid: string;
+        sessionId: string;
+        runId: string;
+        requestId: string;
+        provider: string;
+        bindingId: string;
+        bindingRevision: number;
+        requestKey: string;
+        operation: ActionOperationV1;
+      },
+      checked = false,
+    ) {
       const store = this.hubActionStore;
       const client = this.hubActionClient;
       if (!store || !client || input.ownerDid !== this.userDid)
         throw new Error('Hub actions are unavailable for this channel');
-      // Only a run an inbound channel message started may prepare a review:
-      // a scheduled or background run has no user asking for it.
-      const record = await this.runStore?.get(input.runId);
-      const turn = record
-        ? (JSON.parse(record.request) as StoredRunRequest).turn
-        : null;
-      if (
-        !turn ||
-        turn.client !== 'channel' ||
-        !turn.channel?.remoteMessageRef ||
-        turn.identity.userDid !== input.ownerDid ||
-        turn.sessionId !== input.sessionId ||
-        turn.sessionId.startsWith(SYNTHETIC_SESSION_PREFIX)
-      )
-        throw new HubActionRefused(
-          'limit',
-          'Reviews are prepared only in reply to a message from the user.',
-        );
-      await assertActiveChannelBinding(
-        {
-          userDid: input.ownerDid,
-          channel: {
-            provider: input.provider,
-            bindingId: input.bindingId,
-            bindingRevision: input.bindingRevision,
-          },
-        },
-        this.env,
-      );
+      if (!checked) {
+        await this.assertHubTurnOrigin(input);
+        await this.assertHubBinding(input);
+      }
       await this.assertGmailOperationAllowed(input);
       const reference = await prepareHubAction(
         {
@@ -3424,7 +3491,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       amount: string;
       memo: string;
     }) {
-      const options = await this.hubActionOptions(input);
+      if (!this.hubActionStore || input.ownerDid !== this.userDid)
+        throw new Error('Hub actions are unavailable for this channel');
+      await this.assertHubTurnOrigin(input);
+      await this.assertHubBinding(input);
+      const options = await this.hubActionOptions(input, true);
       const tokens = options.transfer?.tokens;
       if (!tokens?.length)
         throw new HubActionRefused(
@@ -3453,20 +3524,34 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           'Bank sends are not enabled for this oracle account.',
         );
       const network = HUB_NETWORK_CHAIN[capabilities.network];
-      const operation = parseOperation({
-        kind: 'ixo.bank.send.v1',
-        chainId: chainIdsFromConfig(chainIdConfigSchema.parse(this.env))[
-          network
-        ],
-        network: capabilities.network,
-        fromAddress: input.ownerDid.replace(/^did:ixo:/, ''),
-        toAddress: input.toAddress,
-        amountBaseUnits: amountBaseUnits.toString(),
-        denom: token.denom,
-        memo: input.memo,
-      });
-      const reference = await this.requestHubAction({ ...input, operation });
-      await this.hubActionStore!.setToken(reference.id, token);
+      const chainId = chainIdsFromConfig(chainIdConfigSchema.parse(this.env))[
+        network
+      ];
+      let operation: ActionOperationV1;
+      try {
+        operation = parseOperation({
+          kind: 'ixo.bank.send.v1',
+          chainId,
+          network: capabilities.network,
+          fromAddress: input.ownerDid.replace(/^did:ixo:/, ''),
+          toAddress: input.toAddress,
+          amountBaseUnits: amountBaseUnits.toString(),
+          denom: token.denom,
+          memo: input.memo,
+        });
+      } catch (error) {
+        // Only the protocol refusing the operation built from the model's
+        // fields (an invalid recipient or memo) is the model's to fix.
+        throw new HubActionRefused(
+          'refused',
+          `The transfer is incomplete (${error instanceof Error ? error.message : String(error)}).`,
+        );
+      }
+      const reference = await this.requestHubAction(
+        { ...input, operation },
+        true,
+      );
+      await this.hubActionStore.setToken(reference.id, token);
       return reference;
     }
 
@@ -3574,15 +3659,24 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         input.reference.id,
       );
       if (!held || !this.hubActionClient) throw new Error('Unknown Hub action');
+      if (canonicalJson(input.reference) !== canonicalJson(held.reference))
+        throw new Error('Hub outcome does not match the prepared action');
+      // A replay of an outcome already confirmed and stored (a Hub retry,
+      // a callback delivered twice) is acknowledged without a Hub read.
+      const stored = await this.hubActionStore!.outcomeAt(
+        input.ownerDid,
+        input.reference.id,
+        input.sequence,
+      );
+      if (stored && sameHubOutcome(stored, input)) return;
       const remote = await this.hubActionClient.status(input.reference.id);
       if (
         !remote.outcome ||
         remote.ownerDid !== input.ownerDid ||
         canonicalJson(remote.reference) !== canonicalJson(held.reference) ||
-        canonicalJson(input.reference) !== canonicalJson(held.reference) ||
         remote.outcome.sequence < input.sequence ||
         (remote.outcome.sequence === input.sequence &&
-          canonicalJson(remote.outcome) !== canonicalJson(input))
+          !sameHubOutcome(remote.outcome, input))
       )
         throw new Error(
           'Hub outcome was not confirmed by authenticated status',

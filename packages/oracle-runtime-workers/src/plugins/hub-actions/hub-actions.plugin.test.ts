@@ -638,11 +638,22 @@ describe('Hub actions Workers plugin', () => {
       reason:
         'The account does not hold enough to cover this transfer and its network fee.',
     });
-    transfer.mockRejectedValueOnce(new TypeError('Invalid toAddress'));
+    transfer.mockRejectedValueOnce(
+      new HubActionRefused(
+        'refused',
+        'The transfer is incomplete (Invalid toAddress).',
+      ),
+    );
     expect(await tool.handler(input, ctx)).toEqual({
       status: 'unavailable',
       reason: 'The transfer is incomplete (Invalid toAddress).',
     });
+    // A TypeError from anywhere else (a malformed Hub answer) is not the
+    // model's to fix: it stays an error.
+    transfer.mockRejectedValueOnce(new TypeError('Invalid reference.url'));
+    await expect(tool.handler(input, ctx)).rejects.toThrow(
+      'Invalid reference.url',
+    );
     transfer.mockRejectedValueOnce(
       new Error('Hub action request returned 503'),
     );
@@ -654,7 +665,7 @@ describe('Hub actions Workers plugin', () => {
     expect(await tool.handler(input, portal)).toMatchObject({
       status: 'unavailable',
     });
-    expect(transfer).toHaveBeenCalledTimes(4);
+    expect(transfer).toHaveBeenCalledTimes(5);
   });
 
   it('returns the transfer summary line with the status', async () => {
