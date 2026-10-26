@@ -382,6 +382,10 @@ import {
   getMemorySchemaDump,
 } from '../plugins/memory/memory-tools';
 import {
+  MEMORY_ENTITY_HEADER,
+  memoryEntityDid,
+} from '../plugins/memory/memory-entity';
+import {
   contentToText,
   isSummarizationMessage,
   pageThreadTranscript,
@@ -4368,6 +4372,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           const v = this.core.validatedEnv['MEMORY_ENGINE_URL'];
           return typeof v === 'string' && v.length > 0 ? v : undefined;
         })(),
+        // The configured entity only: `identity.entityDid` falls back to
+        // `ORACLE_DID`, which the engine refuses as a space key.
+        entityDid: memoryEntityDid(this.core.validatedEnv['ORACLE_ENTITY_DID']),
         getSession: async (id) => {
           const snapshot = this.historySnapshots.get(id);
           const row =
@@ -4456,7 +4463,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.userContextFetcher ??= new UserContextFetcher(
         {
           memoryEngineUrl: settings.engineUrl,
-          oracleDid: this.env.ORACLE_DID,
+          // The configured entity only: `identity.entityDid` falls back to
+          // `ORACLE_DID`, which the engine refuses as a space key.
+          entityDid: memoryEntityDid(
+            this.core.validatedEnv['ORACLE_ENTITY_DID'],
+          ),
           // Looked up per call, not captured: a working-copy reset replaces
           // the ambient services while a gather may still be running.
           ucan: {
@@ -5410,6 +5421,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       if (!ambient || typeof url !== 'string' || url.length === 0) {
         return { error: 'MEMORY_MCP_URL is not configured' };
       }
+      const entityDid = memoryEntityDid(
+        this.core.validatedEnv['ORACLE_ENTITY_DID'],
+      );
+      if (!entityDid) {
+        return {
+          error:
+            'ORACLE_ENTITY_DID is not a domain entity DID (did:ixo:entity:<32 hex>)',
+        };
+      }
       const memoryDid = await ambient.ucan.resolveServiceDid(url);
       if (!memoryDid)
         return { error: 'memory engine DID could not be resolved' };
@@ -5427,6 +5447,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         Authorization: `Bearer ${invocation}`,
         'X-Auth-Type': 'ucan',
         'User-Agent': 'LangChain-MCP-Client/1.0',
+        [MEMORY_ENTITY_HEADER]: entityDid,
         ...(room?.roomId ? { 'x-room-id': room.roomId } : {}),
       };
       try {

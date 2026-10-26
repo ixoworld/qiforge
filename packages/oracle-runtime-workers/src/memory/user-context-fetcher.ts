@@ -9,7 +9,8 @@
  * memory-context block before the model's first call.
  *
  * Policy:
- *  - The result is a function of the room (and the oracle), not the session,
+ *  - The result is a function of the room (and the oracle's domain entity,
+ *    which keys every memory space on the engine), not the session,
  *    so the cache is keyed by room: a new session in the same room reuses it.
  *    Positive entries live `cacheTtlMs` (5 min) in an LRU of `maxCachedRooms`.
  *    A successful batch is cached even when every slot is empty — "no
@@ -25,7 +26,9 @@
  *    a memory write and after session history is indexed.
  *  - A missing signing key or a failed invocation mint is a skip, never a
  *    negative-cache entry: the user may delegate `ixo:memory` before the next
- *    turn.
+ *    turn. So is a missing domain entity (`ORACLE_ENTITY_DID`): the engine
+ *    refuses a request that names none, so none is sent; it is warned about
+ *    once per fetcher.
  *  - One gather per room at a time; a second caller joins it. The blocking
  *    `fetch` waits at most `blockingCapMs`; past the cap the gather keeps
  *    running and fills the cache for later turns (the caller keeps the
@@ -41,6 +44,7 @@
  */
 import type { MemoryContextSection } from '../core/prompt-composer';
 import type { Logger, UserContextData } from '../plugin-api/types';
+import { MEMORY_ENTITY_HEADER } from '../plugins/memory/memory-entity';
 import type {
   ComparisonOperator,
   EntityType,
@@ -99,15 +103,17 @@ const RECENT_WINDOW_DAYS = 90;
  * brittle), `node_labels` only where it discriminates, and the `recent`
  * slot bounded to the last 90 days explicitly (the server's
  * `recent_memory` strategy injects the same lower bound and keeps an
- * existing one).
+ * existing one). `oracle_dids` names the oracle's domain entity.
  */
 export function buildUserContextQueries(
-  oracleDid: string,
+  entityDid: string,
   now: Date,
 ): UserContextQuery[] {
   const recentSince = new Date(now.getTime());
   recentSince.setUTCDate(recentSince.getUTCDate() - RECENT_WINDOW_DAYS);
-  const oracle_dids = [oracleDid];
+  // The wire name predates entity keying; the engine reads its entries as
+  // domain entity DIDs (the knowledge spaces the queries also search).
+  const oracle_dids = [entityDid];
   return [
     {
       oracle_dids,
@@ -471,8 +477,13 @@ function perSlot<T>(
 export interface UserContextFetcherDeps {
   /** `MEMORY_ENGINE_URL`; undefined → every call is `skipped`, no request. */
   memoryEngineUrl: string | undefined;
-  /** `ORACLE_DID` — the knowledge space the queries search (`oracle_dids`). */
-  oracleDid: string;
+  /**
+   * The configured `ORACLE_ENTITY_DID` (a well-formed domain entity DID) —
+   * sent as `x-oracle-entity-did` and as the queries' `oracle_dids`. Never
+   * the `ORACLE_DID` fallback: undefined → every call is `skipped`
+   * (`no-entity`), no request, one warning per fetcher.
+   */
+  entityDid: string | undefined;
   /** The user's UCAN surface, bound to the user's DID by the caller. */
   ucan: {
     hasSigningKey(): boolean;
@@ -515,6 +526,7 @@ const DEFAULT_MAX_CACHED_ROOMS = 64;
 
 export type UserContextSkipReason =
   | 'no-engine-url'
+  | 'no-entity'
   | 'no-signing-key'
   | 'no-invocation'
   | 'recently-failed'
@@ -615,6 +627,9 @@ export class UserContextFetcher {
   private readonly requestTimeoutMs: number;
 
   private readonly maxCachedRooms: number;
+
+  /** The missing-entity warning has been logged (it is logged once). */
+  private warnedNoEntity = false;
 
   constructor(
     private readonly deps: UserContextFetcherDeps,
@@ -773,6 +788,16 @@ export class UserContextFetcher {
       );
       return { kind: 'skipped', reason: 'no-engine-url' };
     }
+    const entityDid = this.deps.entityDid;
+    if (!entityDid) {
+      if (!this.warnedNoEntity) {
+        this.warnedNoEntity = true;
+        logger.warn(
+          `[user-context] skipped: ORACLE_ENTITY_DID is not a domain entity DID (did:ixo:entity:<32 hex>); the memory engine keys every space by it, so no first-turn context is gathered`,
+        );
+      }
+      return { kind: 'skipped', reason: 'no-entity' };
+    }
     if (!roomId) {
       logger.warn(`[user-context] skipped: no oracle room for this turn`);
       return { kind: 'skipped', reason: 'no-room' };
@@ -807,7 +832,7 @@ export class UserContextFetcher {
 
     const entry: InFlightGather = {
       startedAt: this.now(),
-      promise: this.gather(engineUrl, roomId).then(
+      promise: this.gather(engineUrl, entityDid, roomId).then(
         (result) => this.settle(roomId, entry, result),
         (err: unknown) =>
           this.settle(roomId, entry, {
@@ -870,6 +895,7 @@ export class UserContextFetcher {
   /** Mint the invocation, run the batch, map the slots. Never rejects. */
   private async gather(
     engineUrl: string,
+    entityDid: string,
     roomId: string,
   ): Promise<GatherResult> {
     const { logger, ucan } = this.deps;
@@ -905,14 +931,12 @@ export class UserContextFetcher {
         headers: {
           Authorization: `Bearer ${invocation}`,
           'X-Auth-Type': 'ucan',
+          [MEMORY_ENTITY_HEADER]: entityDid,
           'x-room-id': roomId,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          queries: buildUserContextQueries(
-            this.deps.oracleDid,
-            new Date(this.now()),
-          ),
+          queries: buildUserContextQueries(entityDid, new Date(this.now())),
         }),
         signal: AbortSignal.timeout(this.requestTimeoutMs),
       });

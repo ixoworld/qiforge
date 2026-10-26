@@ -23,6 +23,8 @@ import { VfsPlugin } from './vfs';
 const CONFIG = {
   MEMORY_MCP_URL: 'https://memory.example/mcp',
   MEMORY_ENGINE_URL: 'https://engine.example',
+  // The memory plugin requires the oracle's domain entity.
+  ORACLE_ENTITY_DID: 'did:ixo:entity:0123456789abcdef0123456789abcdef',
   SANDBOX_MCP_URL: 'https://sandbox.example/mcp',
   COMPOSIO_API_KEY: 'ck-test',
   COMPOSIO_BASE_URL: 'https://composio.example',
