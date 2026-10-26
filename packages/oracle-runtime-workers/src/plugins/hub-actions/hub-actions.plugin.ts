@@ -176,7 +176,7 @@ const manifest: PluginManifest = {
   summary:
     'Prepare a registered operation for owner review and read its verified status.',
   whenToUse: [
-    'The user requests a registered form submission or a testnet transfer.',
+    'The user requests a registered form submission or a transfer.',
     'The user asks to review an exact private resource or to sign a statement.',
     'The user asks to connect Gmail or Calendar, send a reviewed email or add an event.',
     'The user asks for document access or to save a private note.',
