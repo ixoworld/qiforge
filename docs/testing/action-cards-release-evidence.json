@@ -7,8 +7,8 @@
     "ACTION_TOPIC_PROPOSALS_ENABLED": false
   },
   "sources": {
-    "runtime": "d8109f79a3351accf075dad51b94f35816393f3f",
-    "runtimeBase": "1b151fdf49b33bb2f1e8b213aa6ab2943d86160f",
+    "runtime": "8f29b4d03807efe739707e9cc29f747053513bfb",
+    "runtimeBase": "550e2c7bf5a915392b78ef63121de508c73320d1",
     "upstreamMain": "463425f59f073cb1606efbebdc607f14a69c8ffc",
     "portal": "ded28cdb48482872fd73a790292a8e27c0b46725",
     "gateway": "c7564b573cb4d220b335f11084894658e40af901",
@@ -85,7 +85,7 @@
     "reviewFixes": {
       "date": "2026-10-21",
       "transferBranchHead": "9570bd609b0492c628accec92ad1ac126c7ab3f5",
-      "topicBranchHead": "1b151fdf49b33bb2f1e8b213aa6ab2943d86160f",
+      "topicBranchHead": "550e2c7bf5a915392b78ef63121de508c73320d1",
       "summary": "Review blockers fixed on the PR branches: memo-bound chain verification and one hash per card; owner-object card policy; whole-token evidence rules; guarded alarm with background re-verification, receipt backoff, quarantine and retention; boot validation of ACTION_PROPOSALS_*; topic execution window and permit re-issue; grant merges only under the existing expiry; concurrent grant refusal; 409 vs 503; authority-only fingerprints; parallel grant and history reads. Third pass (topic adapters): the topic store is optional at boot and every owner-object use is guarded; the alarm and the channel poll spend the attempt before reading references and quarantine unreadable rows; every authority read is typed on leaving its budget (transport failures 503, rejected authority content 409 without schema dumps); a grant reference proved to be another transaction is set aside and replaceable, a memo-bound transaction with other messages blocks the card; step records and permits carry the identity-only executor. Transfer cards (362) follow the same rule: a hash proved to be another transaction is replaceable, a transaction carrying the card memo with other messages blocks the card (lifecycle.executionBlockedAt, additive on the unknown variant); the topic capability tests live on the topic branch only, so 362 typechecks alone. Fourth pass: each store independent in the alarm, the channel poll and the receipt mirror; 503 (not 404 or 500) while a store is down; TopicProtocolError and transient reads typed; a hash mismatch is retried, only a memo mismatch sets a reference aside. Fifth pass: a blocked transfer card can be revoked and returns on its listed hash; rejection and block are guarded on the hash they were made for; the topic protocol error is typed by name too; room state and history that are not lists are a failed read; changeset states the strict-schema caveat for the Portal pin. Sixth pass (load review, 2026-10-23): alarm card tick after flush and tasks under one 15 s budget, lookups together, receipts in the background; hash-less claimed transfer cards closed as revoked 60 min after claim; caps of 8 cards per run and 16 open per owner; unresolved cards pruned after 180 days, prune hourly, receipt and created_at indexes; card routes have their own rate-limit scope; topic claim checks locally first and memoises a passed authority read for 30 s; owner-only topic history within the caller deadline (256 events, 2 MB); grant cards hold at most 8 grants; no-origin topic cards are receipt-unavailable; a pre-broadcast hash is accepted with a 30 s first-lookup delay and a two-minute not-found grace, the same hash twice idempotent. Seventh pass (2026-10-23): origin/main 463425f5 (running chats, runtime 0.22.0 released) merged; the unexecuted-close sweep reads due rows only and quarantines unreadable ones; a late hash reopens a card closed by the window; topic chain reads reuse the /status cache. No wire change."
     }
   },
@@ -163,8 +163,8 @@
     },
     {
       "id": "topic-protocol-workers",
-      "status": "open",
-      "needs": "Pin @ixo/topic-protocol 1.0.0-rc.8 (precompiled validators, ixoworld/topic-protocol PR 37) once it is published; packages/oracle-runtime-workers/src/core/topic-protocol-runtime.test.ts must pass. rc.7 compiles validators with Ajv at module load and fails a Worker at boot."
+      "status": "closed",
+      "needs": "Closed 2026-10-26: @ixo/topic-protocol 1.0.0-rc.8 (precompiled validators, ixoworld/topic-protocol PR 37) is on npm and pinned from the registry in both consumers; packages/oracle-runtime-workers/src/core/topic-protocol-runtime.test.ts passes. rc.8 still ships topic shape release 1.0.0-rc.7, so the plan's protocol/sourceVersion literals stay rc.7."
     }
   ]
 }

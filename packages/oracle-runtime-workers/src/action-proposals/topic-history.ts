@@ -227,6 +227,7 @@ export async function readTopicAuthority(
   const shape = resolveEffectiveTopicShape({
     baseRecipe: body.baseRecipe,
     kind: body.kindRef.kind,
+    // The shape release (`TOPIC_SHAPE_RELEASE`), not the package version.
     sourceVersion: '1.0.0-rc.7',
   });
   if (
