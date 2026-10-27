@@ -1,5 +1,18 @@
 # @ixo/oracle-runtime-workers
 
+## 0.25.0
+
+### Minor Changes
+
+- [#402](https://github.com/ixoworld/qiforge/pull/402) [`e24e59d`](https://github.com/ixoworld/qiforge/commit/e24e59d2551c05e4ac247a7fe02d8718963c9148) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Hub actions on `@ixo/action-protocol` 0.5.0:
+
+  - Any-token bank sends: the new `request_hub_transfer` tool prepares an `ixo.bank.send.v1` review from a token the owner's `hub_action_options` (`ixo.auth-options/3`, `transfer.tokens`) lists and a decimal display amount. The runtime converts to base units with the listed decimals (unverified tokens: base units), refuses a denom that is not listed, too many decimals, zero, an amount above the balance or above the per-denom capability cap, and sends no fee (Auth Hub simulates it). `request_hub_action` no longer takes bank sends. Auth Hub's `simulation_failed`, `fee_above_ceiling` and `insufficient_funds` refusals reach the model in plain words, and `hub_action_status` adds an owner-facing `summary` line for bank receipts (symbol for verified tokens, full denom and an "unverified token" marker otherwise). Channel polls keep handing the gateway the 0.4.1 bank receipt shape.
+  - On a chat surface a `prepared` result of `request_hub_action` and `request_hub_transfer` carries a `note`: the user already gets the review as a card with its title and a review button, so the model does not repeat the link or the title, does not say it has not executed or signed anything, and replies with one short line or nothing.
+  - Every Hub operation call (capabilities, prepare, status, options) declares protocol version 3.
+  - Signed outcome callbacks: `/api/internal/actions/outcomes` verifies the Hub's `#key-0` Ed25519 signature from `${AUTH_HUB_URL}/.well-known/did.json` (cached one hour) for this oracle's request origin, and is on whenever `HUB_ACTIONS_ENABLED`, `AUTH_HUB_URL` and `AUTH_HUB_CHANNEL_SERVICE_KEY` are set. **Breaking for operators:** `AUTH_HUB_ACTION_OUTCOME_KEY` is removed; an `x-auth-hub-outcome-key` header is ignored.
+  - No per-user usage caps: the Hub-action caps (2 per run, 5 per hour, 10 per day) and the action-proposal caps (8 per run, 16 open per owner) are removed. Hub actions still need a run started by an inbound channel message, and one Gmail send stays in flight per mailbox.
+  - Hardening: a signed callback's cheap checks (headers, key id, ±300 s timestamp, 64-byte signature) run before any Hub read; the Hub DID document is read at most once a minute per isolate whatever the outcome, concurrent callbacks share one read, and only a document that passes the id and key checks is cached. The callback audience is the origin of `ORACLE_PUBLIC_URL` when set. A replayed, already stored outcome is acknowledged without a Hub read, and callbacks for actions prepared at protocol version 2 are confirmed against version-3 status reads. Hub `409 sequence_mismatch` / `503 transfer_unavailable` read as temporary, any other `409` as not available for the account. The Gmail connection check reads options at version 2 (no balance read). A `uixo` receipt without a stored token still reads as IXO.
+
 ## 0.24.0
 
 ### Minor Changes
