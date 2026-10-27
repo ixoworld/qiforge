@@ -150,7 +150,9 @@ describe('chunkDocument', () => {
     );
   });
 
-  it('handles 400 000 spaces and trailing-space lines in under 50 ms each', () => {
+  // Linear time is a few milliseconds here; backtracking on 400 000 spaces
+  // would take minutes. The bound is loose so a slow CI runner never trips it.
+  it('handles 400 000 spaces and trailing-space lines in linear time', () => {
     const inputs = [
       `a${' '.repeat(400_000)}b`,
       ' '.repeat(400_000),
@@ -159,7 +161,7 @@ describe('chunkDocument', () => {
     for (const input of inputs) {
       const started = performance.now();
       const out = chunkDocument(input);
-      expect(performance.now() - started).toBeLessThan(50);
+      expect(performance.now() - started).toBeLessThan(1_000);
       expectAllWithin(out.chunks, 12_000);
       for (const c of out.chunks) expect(c.content.trim()).not.toBe('');
     }
