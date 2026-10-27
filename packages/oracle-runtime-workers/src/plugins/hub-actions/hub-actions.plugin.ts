@@ -48,13 +48,47 @@ const transferSchema = z.strictObject({
 });
 
 export type HubActionRequestResult =
-  | { status: 'prepared'; actionReference: ActionReferenceV1; summary: string }
+  | {
+      status: 'prepared';
+      actionReference: ActionReferenceV1;
+      summary: string;
+      /** How the review reaches the user; set on a chat surface only. */
+      note?: string;
+    }
   | {
       status: 'unavailable' | 'expired';
       reason: string;
       /** The earlier action that blocks this one (an unconfirmed email). */
       priorActionId?: string;
     };
+
+/**
+ * What a prepared result tells the model on a chat surface. There the
+ * finished run's Reply Plan carries the review as its own `hub-action` part
+ * (a card with the title and a review button; its title linked to the review
+ * in a plain-text rendering), so text that repeats it reaches the user twice.
+ */
+export const HUB_ACTION_CARD_NOTE =
+  'The user is shown this action automatically as a card with its title and a Review action button that opens it in Auth Hub. Do not repeat the link or the title, and do not say that you have not executed or signed anything. Reply with one short line, or nothing.';
+
+/**
+ * A prepared result. Only a chat turn's reply is a Reply Plan, so only a
+ * chat surface gets the note: on the Portal stream no card is added and the
+ * model's own text is the whole reply.
+ */
+function preparedResult(
+  reference: ActionReferenceV1,
+  ctx: RuntimeContext,
+): HubActionRequestResult {
+  return {
+    status: 'prepared',
+    actionReference: reference,
+    summary: reference.title,
+    ...(ctx.session.surface?.kind === 'chat'
+      ? { note: HUB_ACTION_CARD_NOTE }
+      : {}),
+  };
+}
 
 /**
  * The idempotency key the Hub sees: a fixed-length digest of the run and
@@ -134,11 +168,7 @@ async function requestHubAction(
     if (refused) return refused;
     throw error;
   }
-  return {
-    status: 'prepared',
-    actionReference: reference,
-    summary: reference.title,
-  };
+  return preparedResult(reference, ctx);
 }
 
 async function requestHubTransfer(
@@ -183,11 +213,7 @@ async function requestHubTransfer(
       amount: parsed.data.amount,
       memo: parsed.data.memo ?? '',
     });
-    return {
-      status: 'prepared',
-      actionReference: reference,
-      summary: reference.title,
-    };
+    return preparedResult(reference, ctx);
   } catch (error) {
     // The owner object turns the protocol refusing the operation built
     // from the model's fields into a refusal; anything else is an error.

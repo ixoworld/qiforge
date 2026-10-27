@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { makeRuntimeContext } from '../../core/test-fixtures';
-import { HubActionsPlugin } from './hub-actions.plugin';
+import { HUB_ACTION_CARD_NOTE, HubActionsPlugin } from './hub-actions.plugin';
 import { HubActionClient } from '../../hub-actions/client';
 import { prepareHubAction } from '../../hub-actions/request';
 import type { HubActionOptionsV3, P2Operation } from '@ixo/action-protocol';
@@ -666,6 +666,72 @@ describe('Hub actions Workers plugin', () => {
       status: 'unavailable',
     });
     expect(transfer).toHaveBeenCalledTimes(5);
+  });
+
+  it('tells the model on a chat surface that the review card is already delivered', async () => {
+    const chat = makeRuntimeContext({
+      config: { HUB_ACTIONS_ENABLED: 'true' },
+      session: {
+        id: 'session-three',
+        client: 'channel',
+        requestId: 'request-three',
+        runId: 'run-three',
+        channel: {
+          provider: 'whatsapp',
+          bindingId: 'chb_three',
+          bindingRevision: 4,
+        },
+        surface: { kind: 'chat', surface: 'whatsapp', label: 'WhatsApp' },
+      },
+      toolCallId: 'tool-note',
+      hubActions: {
+        capabilities: async () => ({
+          version: 'ixo.auth-capabilities/1',
+          accountId: 'account-three',
+          oracleDid: 'did:ixo:oracle',
+          network: null,
+          resourceOrigin: null,
+          operations: ['form.submit.v1'],
+          transfer: null,
+          forms: [],
+        }),
+        options: async () => options,
+        request: async () => reference,
+        transfer: async () => reference,
+        status: async () => ({ outcome: null, summary: null }),
+      },
+    });
+    const tools = new HubActionsPlugin().getTools();
+    const action = tools.find((item) => item.name === 'request_hub_action');
+    const transfer = tools.find((item) => item.name === 'request_hub_transfer');
+    if (!action || !transfer) throw new Error('request tools missing');
+    const input = {
+      toAddress: 'ixo1qgpqyqszqgpqyqszqgpqyqszqgpqyqszuzefze',
+      denom: 'uixo',
+      amount: '1',
+    };
+    const prepared = {
+      status: 'prepared',
+      actionReference: reference,
+      // The Reply Plan builds its card from a summary equal to the title.
+      summary: reference.title,
+      note: HUB_ACTION_CARD_NOTE,
+    };
+    expect(await action.handler({ operation }, chat)).toEqual(prepared);
+    expect(await transfer.handler(input, chat)).toEqual(prepared);
+    expect(HUB_ACTION_CARD_NOTE).toBe(
+      'The user is shown this action automatically as a card with its title and a Review action button that opens it in Auth Hub. Do not repeat the link or the title, and do not say that you have not executed or signed anything. Reply with one short line, or nothing.',
+    );
+    // A turn without a Reply Plan gets no card, so it gets no note either.
+    const stream = makeRuntimeContext({
+      ...chat,
+      session: { ...chat.session, surface: { kind: 'stream' } },
+    });
+    expect(await transfer.handler(input, stream)).toEqual({
+      status: 'prepared',
+      actionReference: reference,
+      summary: reference.title,
+    });
   });
 
   it('returns the transfer summary line with the status', async () => {

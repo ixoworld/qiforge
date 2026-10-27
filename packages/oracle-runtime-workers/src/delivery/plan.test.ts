@@ -1,5 +1,6 @@
 import { AIMessage, HumanMessage, ToolMessage } from '@langchain/core/messages';
 import { describe, expect, it, vi } from 'vitest';
+import { HUB_ACTION_CARD_NOTE } from '../plugins/hub-actions/hub-actions.plugin';
 import { resolveDeliveryProfile } from './profile';
 import {
   draftReplyPlan,
@@ -119,7 +120,8 @@ describe('draftReplyPlan', () => {
     });
     expect(parseReplyPlan(JSON.stringify(plan))).toEqual(plan);
     expect(planText(plan)).toContain(actionReference.url);
-    // A transfer review is the same structured part.
+    // A transfer review is the same structured part, and the note a chat
+    // surface's prepared result carries does not change it.
     expect(
       draftReplyPlan({
         steps: [
@@ -137,6 +139,7 @@ describe('draftReplyPlan', () => {
               status: 'prepared',
               actionReference,
               summary: 'Review form',
+              note: HUB_ACTION_CARD_NOTE,
             }),
           ],
         ]),

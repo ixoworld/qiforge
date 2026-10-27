@@ -243,8 +243,20 @@ reserves the canonical request and stable expiry before the Hub POST, so an
 interrupted response can be retried with the same key and bytes. It stores each
 immutable initial reference with its original turn in SQLite. The
 finished run's Reply Plan contains a `hub-action` part with a typed
-`actionReference` and short summary. Polling the original `/channels/turn`
-request retrieves `hubActionOutcomes` from SQLite first (callback-delivered
+`actionReference` and short summary (the plan takes it only from a
+`prepared` result whose `summary` equals the reference's title). On a chat
+surface (`ctx.session.surface.kind === 'chat'`, which every channel turn is)
+the `prepared` result of `request_hub_action` and `request_hub_transfer`
+also carries `note`: the user is shown the action automatically as a card
+with its title and a "Review action" button, so the model must not repeat
+the link or the title, must not say it has not executed or signed anything,
+and replies with one short line or nothing. The gateway renders the part as
+that card; gateways that predate plans and the Companion room mirror get the
+title linked to the review (`planText`). A result on the Portal stream has
+no plan and no card, so it carries no note (today both tools refuse anything
+but a channel turn). The model's text is delivered as written; the note is
+the only guard against a reply that repeats the card. Polling the original
+`/channels/turn` request retrieves `hubActionOutcomes` from SQLite first (callback-delivered
 outcomes included, so an Auth Hub outage hides nothing already known). A poll
 then refreshes at most ONE action that has no terminal outcome (`succeeded`,
 `failed`, `declined`) from Auth Hub's authenticated status, with a 3 s timeout

@@ -229,7 +229,8 @@ compare `instanceId` after 45 s idle. Delete the deployed copy afterwards.
 The focused `src/hub-actions` Workers tests exercise the packed shared protocol
 through real `Request`/`Response` objects and persist action/outcome rows in a
 SQLite Durable Object across reopen. The plugin core test verifies that the
-request tool uses runtime channel identity and refuses a turn without it.
+request tool uses runtime channel identity and refuses a turn without it,
+and that a `prepared` result carries the card `note` on a chat surface only.
 `src/delivery/plan.test.ts` checks direct structured Reply Plan projection.
 These tests use local fixtures; full signed transfer, registered form submission,
 and private resource return need the coordinated Hub and gateway acceptance run.
