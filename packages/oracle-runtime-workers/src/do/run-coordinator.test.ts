@@ -1425,6 +1425,27 @@ describe('a run ending, as the user-wide listing sees it', () => {
     await next.live.done;
   });
 
+  it('abortByIds signals every named run, then waits one shared grace even when runs ignore the abort', async () => {
+    const h = harness({}, { graceMs: 100 });
+    // Two attempts never notice their abort signal (a tool call in flight).
+    h.stubborn.add('slow-1');
+    h.stubborn.add('slow-2');
+    const quick = await h.begin('quick', 'interrupt', 's-quick');
+    const slow1 = await h.begin('slow-1', 'interrupt', 's-slow-1');
+    const slow2 = await h.begin('slow-2', 'interrupt', 's-slow-2');
+    const started = Date.now();
+    await h.runs.abortByIds(['slow-1', 'quick', 'slow-2', 'slow-1', 'unknown']);
+    // One grace for all of them, not one per run.
+    expect(Date.now() - started).toBeLessThan(190);
+    for (const run of [quick, slow1, slow2])
+      expect(run.live.abort.signal.aborted).toBe(true);
+    expect((await h.store.get('quick'))?.status).toBe('aborted');
+    expect(h.runs.records().map((r) => r.runId)).toEqual(['slow-1', 'slow-2']);
+    h.attempts[1]!.finish({ status: 'aborted', text: '' });
+    h.attempts[2]!.finish({ status: 'aborted', text: '' });
+    await Promise.all([slow1.live.done, slow2.live.done]);
+  });
+
   it('abortSessionSettled answers once the stopped run has ended and left the live records', async () => {
     const h = harness();
     // The attempt winds down 30 ms after its abort signal, not at once.

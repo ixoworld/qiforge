@@ -248,6 +248,7 @@ export function rateLimitKey(
     | 'user'
     | 'poll'
     | 'channel'
+    | 'channel-control'
     | 'action'
     | 'artifact'
     | 'socket'
@@ -488,7 +489,7 @@ export function createShell(
         c.env.RATE_LIMIT &&
         !(
           await c.env.RATE_LIMIT.limit({
-            key: rateLimitKey(c.env, 'channel', identity.userDid),
+            key: rateLimitKey(c.env, 'channel-control', identity.userDid),
           })
         ).success
       )

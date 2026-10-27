@@ -1,4 +1,4 @@
-import { CHANNEL_REPLY_NOTE_KWARG } from '../channels/replies';
+import { userContent } from '../channels/replies';
 /**
  * Transcript → client DTO. Port of `@ixo/common`'s
  * `transformGraphStateMessageToListMessageResponse` so `GET /messages/:id`
@@ -14,10 +14,6 @@ import {
   isAttachmentViewMessage,
 } from '../attachments/retention';
 import { SUMMARY_PREFIX } from '../core/middlewares/summarization';
-import {
-  stripTurnTimeNote,
-  TURN_TIME_NOTE_KWARG,
-} from '../core/turn-time-note';
 import { ChannelOrigin, ChannelReplyReference } from '../channels/contract';
 import { CREATE_ARTIFACT_TOOL, createArtifactParts } from '../artifacts/tool';
 import { planText } from '../delivery/schema';
@@ -135,13 +131,7 @@ export function contentToText(content: BaseMessage['content']): string {
  */
 export function visibleContent(message: BaseMessage): BaseMessage['content'] {
   if (message.type !== 'human') return message.content;
-  return stripTurnTimeNote(
-    stripTurnTimeNote(
-      message.content,
-      message.additional_kwargs?.[TURN_TIME_NOTE_KWARG],
-    ),
-    message.additional_kwargs?.[CHANNEL_REPLY_NOTE_KWARG],
-  );
+  return userContent(message.content, message.additional_kwargs);
 }
 
 /** `visibleContent` as text (titles, mirrors, indexing). */

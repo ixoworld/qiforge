@@ -151,6 +151,8 @@ function batchResults(facts: Partial<Record<UserContextSlot, string>>) {
 
 class FakeEngine {
   readonly requests: EngineRequest[] = [];
+  /** The message contents of each session-history upload (`POST /messages`). */
+  readonly uploads: string[][] = [];
   mode: EngineMode = { kind: 'answer' };
   facts: Partial<Record<UserContextSlot, string>> = {
     identity: FAVOURITE_SEA,
@@ -185,6 +187,24 @@ class FakeEngine {
             : undefined,
         );
       }
+    }
+    if (url.pathname === '/messages') {
+      const body: unknown = await request.json();
+      const list: unknown =
+        typeof body === 'object' && body !== null
+          ? Reflect.get(body, 'messages')
+          : undefined;
+      this.uploads.push(
+        Array.isArray(list)
+          ? list.map((m: unknown) =>
+              String(
+                typeof m === 'object' && m !== null
+                  ? Reflect.get(m, 'content')
+                  : m,
+              ),
+            )
+          : [],
+      );
     }
     this.requests.push({
       pathname: url.pathname,
@@ -385,6 +405,9 @@ async function userObject(
     ORACLE_SIGNING_MNEMONIC: ORACLE_MNEMONIC,
     MEMORY_ENGINE_URL: ENGINE,
     MEMORY_MCP_URL: `${ENGINE}/mcp`,
+    // A finished channel run indexes at once unless a test sets a quiet
+    // period: `drain` waits for every pending timer.
+    CHANNEL_HISTORY_INDEX_DEBOUNCE_MS: 0,
     ...opts.env,
   };
   const coreEnv = makeEnv(objectEnv);
@@ -1159,17 +1182,21 @@ describe('user-context prefetch in a user-object turn', () => {
         });
         expect(trip.status).toBe('finished');
         expect(trip.sessionId).not.toBe(application.sessionId);
-        expect(trip.text).toContain('Started a separate conversation.');
+        expect(trip.text).toContain(
+          'Starting a fresh topic for this. Send /resume to go back to what we were doing.',
+        );
         const calls = o.model.calls.length;
         const clarification = await o.channelTurn('Yes', 'wa:yes', {
           sessionId: trip.sessionId,
         });
         expect(clarification.status).toBe('finished');
-        expect(clarification.text).toContain('Which conversation');
+        expect(clarification.text).toContain(
+          'Is this about something we discussed earlier?',
+        );
         expect(o.model.calls).toHaveLength(calls);
         expect(o.memoryWrites()).toBe(0);
         expect(await o.transcriptText(trip.sessionId)).toContain(
-          'Which conversation',
+          'Is this about something we discussed earlier?',
         );
         await o.turn('portal-one', 'portal-r3');
         expect(decisions).toBe(2);
@@ -1177,30 +1204,65 @@ describe('user-context prefetch in a user-object turn', () => {
     );
   });
 
-  it('refreshes memory in a continuous channel session and incrementally indexes finished turns', async () => {
-    await withObject('user-context-continuous-channel', {}, async (o) => {
-      const first = await o.turn('s-channel', 'channel-r1', { channel: true });
-      expect(first.system).toContain(factLine(FAVOURITE_SEA));
-      await o.drain();
-      expect(
-        o.engine.requests.filter((r) => r.pathname === '/messages'),
-      ).toHaveLength(1);
-      o.engine.facts = { goals: LEARNING };
-      const next = await o.turn('s-channel', 'channel-r2', { channel: true });
-      expect(next.system).toContain(factLine(LEARNING));
-      expect(next.system).not.toContain(FAVOURITE_SEA);
-      expect(next.system).not.toContain(WORKS_AT);
-      await o.drain();
-      expect(
-        o.engine.requests.filter((r) => r.pathname === '/messages'),
-      ).toHaveLength(2);
-      o.engine.mode = { kind: 'status', status: 503 };
-      const degraded = await o.turn('s-channel', 'channel-r3', {
-        channel: true,
-      });
-      expect(degraded.outcome.status).toBe('finished');
-      expect(degraded.system).toContain(factLine(LEARNING));
-    });
+  it('indexes a channel session once it goes quiet, and later channel turns adopt only a warm room cache', async () => {
+    await withObject(
+      'user-context-continuous-channel',
+      { env: { CHANNEL_HISTORY_INDEX_DEBOUNCE_MS: 1500 } },
+      async (o) => {
+        const turn = (requestId: string) =>
+          o.turn('s-channel', requestId, { channel: true });
+        // First contact waits for the gather, as on every client.
+        const first = await turn('channel-r1');
+        expect(first.system).toContain(factLine(FAVOURITE_SEA));
+        expect(o.engine.batches).toHaveLength(1);
+
+        // Two more finished turns inside the quiet period: they take the
+        // warm cache (no new request) and nothing is uploaded yet.
+        o.engine.facts = { goals: LEARNING };
+        const second = await turn('channel-r2');
+        expect(second.system).toContain(factLine(FAVOURITE_SEA));
+        await turn('channel-r3');
+        expect(o.engine.batches).toHaveLength(1);
+        expect(o.engine.uploads).toHaveLength(0);
+
+        // One upload for the three turns once the session is quiet; it
+        // invalidates the room's cache.
+        await o.drain();
+        expect(o.engine.uploads).toHaveLength(1);
+        expect(o.engine.uploads[0]).toHaveLength(6);
+        expect(await o.status('s-channel')).toMatchObject({ cached: false });
+
+        // A cold cache must not hold the next channel turn: it keeps the
+        // thread's context and refreshes in the background.
+        o.engine.mode = { kind: 'hang' };
+        const cold = await turn('channel-r4');
+        expect(cold.outcome.status).toBe('finished');
+        expect(cold.system).toContain(factLine(FAVOURITE_SEA));
+        expect(cold.system).not.toContain(LEARNING);
+        expect(cold.steps).not.toContain(PROGRESS_STEP);
+        expect(cold.elapsedMs).toBeLessThan(2500);
+        expect(o.engine.batches).toHaveLength(2);
+
+        // The refresh lands; the next turn (inside r4's quiet period, so no
+        // upload invalidates it first) takes the newer answer.
+        o.engine.release();
+        while (!(await o.status('s-channel'))['cached']) await sleep(10);
+        const warm = await turn('channel-r5');
+        expect(warm.system).toContain(factLine(LEARNING));
+        expect(warm.system).not.toContain(FAVOURITE_SEA);
+        expect(o.engine.batches).toHaveLength(2);
+        expect(await o.checkpointedContext('s-channel')).toMatchObject({
+          identity: {},
+          goals: { facts: [{ fact: LEARNING }] },
+        });
+
+        // r4 and r5 go up together, and only they: the tail after the
+        // first upload.
+        await o.drain();
+        expect(o.engine.uploads).toHaveLength(2);
+        expect(o.engine.uploads[1]).toHaveLength(4);
+      },
+    );
   });
 
   it('a memory write in a turn drops the room cache, so the next session gathers again', async () => {

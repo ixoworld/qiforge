@@ -356,11 +356,12 @@ example) per address; declare the dedicated binding to get the Node runtime's
 
 ### Memory prefetch
 
-| Variable                       | Meaning                                                                                                                                                                                                                                                                                                                                   |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `USER_CONTEXT_PREFETCH`        | `on` (default) or `off`. `off` makes no first-turn memory prefetch at all; the memory tools still work. Needs `MEMORY_ENGINE_URL` (the memory plugin's engine origin), `ORACLE_ENTITY_DID` and the user's `ixo:memory` delegation; without any of them no request is made. See [First-turn memory prefetch](#first-turn-memory-prefetch). |
-| `USER_CONTEXT_PREFETCH_CAP_MS` | How long a first turn waits for the prefetch. Default `3000`, `0` to `30000`. `0` never waits: the gather runs in the background and the turn uses the room's cached answer if there is one, otherwise none.                                                                                                                              |
-| `USER_CONTEXT_CACHE_TTL_MS`    | How long a room's result is reused by later sessions. Default `300000` (5 min), `1000` to `3600000`.                                                                                                                                                                                                                                      |
+| Variable                            | Meaning                                                                                                                                                                                                                                                                                                                                                                              |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `USER_CONTEXT_PREFETCH`             | `on` (default) or `off`. `off` makes no first-turn memory prefetch at all; the memory tools still work. Needs `MEMORY_ENGINE_URL` (the memory plugin's engine origin), `ORACLE_ENTITY_DID` and the user's `ixo:memory` delegation; without any of them no request is made. See [First-turn memory prefetch](#first-turn-memory-prefetch).                                            |
+| `USER_CONTEXT_PREFETCH_CAP_MS`      | How long a first turn waits for the prefetch. Default `3000`, `0` to `30000`. `0` never waits: the gather runs in the background and the turn uses the room's cached answer if there is one, otherwise none.                                                                                                                                                                         |
+| `USER_CONTEXT_CACHE_TTL_MS`         | How long a room's result is reused by later sessions. Default `300000` (5 min), `1000` to `3600000`.                                                                                                                                                                                                                                                                                 |
+| `CHANNEL_HISTORY_INDEX_DEBOUNCE_MS` | How long a channel session must be quiet after its last finished run before its new history is indexed (one upload per burst of messages). Default `180000` (3 min), `0` to `600000`; `0` indexes after every finished run. The wait is an in-memory timer that keeps the user object resident until it fires. See [channels](channels.md#quoted-replies-and-conversation-controls). |
 
 ### Action proposals
 
@@ -939,7 +940,10 @@ overlaps the preferences read, attachment handling and the capability router
   waits and never changes: its later turns only refresh the room's cache in
   the background, so a gather that outlives the cap, or a refreshed answer,
   reaches the user's next session (within `USER_CONTEXT_CACHE_TTL_MS`), not
-  the running thread. A thread that got nothing on first contact (timeout,
+  the running thread. A channel thread is the exception: a later turn takes
+  the room's cached answer when the cache holds a live one (never waiting
+  for one; on a miss it keeps its context and the refresh serves a later
+  turn). A thread that got nothing on first contact (timeout,
   failure, skip) asks again on its next turn. A gather still unsettled 5 s
   past its request timeout (30 s) is abandoned: the next turn starts a new
   one instead of joining it, and the abandoned one's late answer is dropped.

@@ -1,8 +1,5 @@
 import type { BaseMessage } from '@langchain/core/messages';
-import {
-  stripTurnTimeNote,
-  TURN_TIME_NOTE_KWARG,
-} from '../../core/turn-time-note';
+import { userContent } from '../../channels/replies';
 import { contentToText } from '../../do/transcript';
 
 /** How many of the user's own messages count as evidence, and how much of each. */
@@ -18,8 +15,10 @@ export const NEGATION =
 
 /**
  * The user's own words from the last few turns. The runtime's time note
- * (`Current time: … 14:05 …`) rides on every message the user sent; it is
- * stripped here so its digits can never stand in for an amount.
+ * (`Current time: … 14:05 …`) rides on every message the user sent, and a
+ * WhatsApp reply carries the quoted message; both are stripped here so
+ * neither the note's digits nor an address or amount the user merely quoted
+ * can stand in for what they typed.
  */
 export function userEvidence(messages: readonly BaseMessage[]): string[] {
   return messages
@@ -27,9 +26,9 @@ export function userEvidence(messages: readonly BaseMessage[]): string[] {
     .slice(-EVIDENCE_MESSAGES)
     .map((m) =>
       contentToText(
-        stripTurnTimeNote(
+        userContent(
           m.content,
-          m.additional_kwargs?.[TURN_TIME_NOTE_KWARG],
+          m.additional_kwargs as Record<string, unknown> | undefined,
         ),
       ).slice(0, EVIDENCE_MESSAGE_CHARS),
     );

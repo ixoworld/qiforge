@@ -1,4 +1,5 @@
 /* eslint-disable no-console -- console IS the logger on Workers (Logs/observability). */
+import type { z } from 'zod';
 import type { DoSqliteDatabase } from '../sqlite/database';
 import type { RunRecord } from '../do/run-store';
 import type { TurnIdentity, TurnRequest } from '../do/contracts';
@@ -82,6 +83,60 @@ const TERMINAL_STATUSES: ReadonlySet<string> = new Set([
 const errorText = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
+/**
+ * How long one routed submission may hold its binding's lane. Classifier
+ * and Matrix calls are bounded on their own; this keeps one that hangs
+ * anyway from holding every later message of the binding.
+ */
+const ROUTING_LANE_DEADLINE_MS = 20_000;
+
+/**
+ * A JSON column written by this module, read back. A row that no longer
+ * parses (written by another version, say) is treated as absent instead of
+ * failing every request that reads it; the warning names only the kind.
+ */
+function readStored<T>(
+  schema: z.ZodType<T>,
+  raw: string,
+  kind: string,
+): T | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    value = undefined;
+  }
+  const parsed = schema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  console.warn(`[channels] ignoring an unreadable stored ${kind}`);
+  return undefined;
+}
+
+/** `work`, refused with a 503 once `ms` passed; the timer never outlives it. */
+async function withDeadline<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new ChannelError(
+                503,
+                'The channel is busy with an earlier message; try again',
+                'unavailable',
+              ),
+            ),
+          ms,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 export interface ChannelTurnsHost {
   routing?: ChannelRoutingOptions;
   createSession(identity: TurnIdentity, markerTxnId: string): Promise<string>;
@@ -96,7 +151,12 @@ export interface ChannelTurnsHost {
    * usable delegation for this oracle: none, or one too close to expiry.
    */
   requireDelegation(identity: TurnIdentity): Promise<void>;
-  stopRun(runId: string): Promise<void>;
+  /**
+   * Abort the named runs (unknown or ended ones are skipped). Signals all
+   * of them first, then waits at most one shared grace; a run may still be
+   * winding down when it resolves.
+   */
+  stopRuns(runIds: readonly string[]): Promise<void>;
   getRun(runId: string): Promise<RunRecord | undefined>;
   /** The Reply Plan (JSON) a finished run was built into, if any. */
   getPlan(runId: string): Promise<string | null>;
@@ -124,7 +184,12 @@ export interface ChannelTurnsHost {
 /** What admission found under the lock, before any Matrix I/O. */
 type Received =
   | { kind: 'run'; response: ChannelTurnResponse }
-  | { kind: 'new'; sessionId: string | null };
+  | {
+      kind: 'new';
+      sessionId: string | null;
+      /** The receipt's stored route assignment, as step 1 read it. */
+      routingJson: string | null;
+    };
 interface PreparedChannelTurn {
   sessionId: string;
   routing?: ChannelRouteAssignment;
@@ -157,7 +222,21 @@ export class ChannelTurns {
   private draining: Promise<void> | null = null;
   /** A pass was asked for while one ran: run another when it ends. */
   private drainAgain = false;
-  private readonly routingLanes = new Map<string, Promise<unknown>>();
+  /**
+   * Routed submissions, ordered per binding: the lane's tail, and the
+   * submission in flight per request id, which a retry of the same request
+   * joins instead of queueing behind itself.
+   */
+  private readonly routingLanes = new Map<
+    string,
+    {
+      tail: Promise<unknown>;
+      requests: Map<
+        string,
+        { requestHash: string; response: Promise<ChannelTurnResponse> }
+      >;
+    }
+  >();
 
   constructor(
     private readonly db: DoSqliteDatabase,
@@ -228,11 +307,37 @@ export class ChannelTurns {
       );
       await this.db.run(`CREATE TABLE IF NOT EXISTS channel_controls (
         binding_id TEXT NOT NULL, request_id TEXT NOT NULL, request_hash TEXT NOT NULL,
-        result TEXT, created_at INTEGER NOT NULL, PRIMARY KEY(binding_id, request_id)
+        result TEXT, replacement_session_id TEXT, created_at INTEGER NOT NULL,
+        PRIMARY KEY(binding_id, request_id)
       )`);
+      if (
+        !(
+          await this.db.exec<{ name: string }>(
+            'PRAGMA table_info(channel_controls)',
+          )
+        ).some((column) => column.name === 'replacement_session_id')
+      )
+        await this.db.run(
+          'ALTER TABLE channel_controls ADD COLUMN replacement_session_id TEXT',
+        );
       await this.db.run(`CREATE TABLE IF NOT EXISTS channel_cancellations (
         binding_id TEXT NOT NULL, request_id TEXT NOT NULL, created_at INTEGER NOT NULL,
         PRIMARY KEY(binding_id, request_id)
+      )`);
+      await this.db.run(
+        'CREATE INDEX IF NOT EXISTS idx_channel_controls_created ON channel_controls(created_at)',
+      );
+      await this.db.run(
+        'CREATE INDEX IF NOT EXISTS idx_channel_cancellations_created ON channel_cancellations(created_at)',
+      );
+      // The sessions a binding has used, per consent revision: what `/resume`
+      // may return to. Not seeded from older data: a session bound before
+      // this table existed is recognised by its request receipts instead
+      // (`usedByBinding`), which hold the same evidence.
+      await this.db.run(`CREATE TABLE IF NOT EXISTS channel_session_bindings (
+        binding_id TEXT NOT NULL, binding_revision INTEGER NOT NULL, session_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY(binding_id, binding_revision, session_id)
       )`);
       await this.db.run(`CREATE TABLE IF NOT EXISTS channel_sessions (
         binding_id TEXT PRIMARY KEY, session_id TEXT NOT NULL
@@ -255,6 +360,13 @@ export class ChannelTurns {
           topic TEXT NOT NULL, recent_user TEXT NOT NULL, recent_reply TEXT NOT NULL,
           last_run_id TEXT NOT NULL, updated_at INTEGER NOT NULL,
           PRIMARY KEY(binding_id, binding_revision, session_id)
+        )`);
+        // How far `channel_requests` was read into the thread index, per
+        // binding and revision: later turns read only the receipts after it.
+        await this.db.run(`CREATE TABLE IF NOT EXISTS channel_thread_seeded (
+          binding_id TEXT NOT NULL, binding_revision INTEGER NOT NULL,
+          seeded_rowid INTEGER NOT NULL,
+          PRIMARY KEY(binding_id, binding_revision)
         )`);
       }
     })().catch((error: unknown) => {
@@ -287,63 +399,104 @@ export class ChannelTurns {
         'A status request cannot cancel work',
         'invalid_request',
       );
-    const savedResult = await this.serialize(async () => {
+    const saved = await this.serialize(async () => {
       await this.setup();
-      const saved = await this.db.get<{
+      const row = await this.db.get<{
         request_hash: string;
         result: string | null;
+        replacement_session_id: string | null;
       }>(
-        'SELECT request_hash,result FROM channel_controls WHERE binding_id=? AND request_id=?',
+        'SELECT request_hash,result,replacement_session_id FROM channel_controls WHERE binding_id=? AND request_id=?',
         [input.bindingId, input.requestId],
       );
-      if (saved && saved.request_hash !== requestHash)
+      if (row && row.request_hash !== requestHash)
         throw new ChannelError(
           409,
           'Control request changed',
           'request_conflict',
         );
-      if (saved?.result)
-        return ChannelControlResult.parse(JSON.parse(saved.result));
+      const result = row?.result
+        ? readStored(ChannelControlResult, row.result, 'control result')
+        : undefined;
+      if (result) return { result };
       await this.assertNotCancelled(input);
-      await this.db.run(
-        'INSERT OR IGNORE INTO channel_controls(binding_id,request_id,request_hash,created_at) VALUES(?,?,?,?)',
-        [input.bindingId, input.requestId, requestHash, this.now()],
-      );
-      await this.host.changed();
-      return null;
+      if (!row) {
+        await this.db.run(
+          'INSERT INTO channel_controls(binding_id,request_id,request_hash,created_at) VALUES(?,?,?,?)',
+          [input.bindingId, input.requestId, requestHash, this.now()],
+        );
+        await this.host.changed();
+      }
+      return { replacement: row?.replacement_session_id ?? undefined };
     });
-    if (savedResult) return savedResult;
-    // Refused destinations leave the existing binding and its work untouched.
-    if (input.command.kind === 'resume')
-      await this.host.assertSession(identity, input.command.sessionId);
-    if (input.command.kind === 'new')
-      await this.host.requireDelegation(identity);
+    if (saved.result) return saved.result;
+    // Refused destinations leave the existing binding and its work
+    // untouched, and take their receipt with them: a corrected body under
+    // the same id is the same control, not a conflict.
+    try {
+      if (input.command.kind === 'resume') {
+        await this.host.assertSession(identity, input.command.sessionId);
+        if (!(await this.usedByBinding(input, input.command.sessionId)))
+          throw new ChannelError(
+            404,
+            'Oracle session not found',
+            'session_not_found',
+          );
+      }
+      if (input.command.kind === 'new')
+        await this.host.requireDelegation(identity);
+    } catch (error) {
+      await this.serialize(async () => {
+        const dropped = await this.db.run(
+          'DELETE FROM channel_controls WHERE binding_id=? AND request_id=? AND result IS NULL',
+          [input.bindingId, input.requestId],
+        );
+        if (dropped.changes > 0) await this.host.changed();
+      });
+      throw error;
+    }
     await this.serialize(async () => {
       await this.assertNotCancelled(input);
+      let reserved = 0;
       for (const requestId of input.cancelRequestIds)
-        await this.db.run(
-          'INSERT OR IGNORE INTO channel_cancellations(binding_id,request_id,created_at) VALUES(?,?,?)',
-          [input.bindingId, requestId, this.now()],
-        );
-      await this.host.changed();
+        reserved += (
+          await this.db.run(
+            'INSERT OR IGNORE INTO channel_cancellations(binding_id,request_id,created_at) VALUES(?,?,?)',
+            [input.bindingId, requestId, this.now()],
+          )
+        ).changes;
+      if (reserved > 0) await this.host.changed();
     });
-    for (const requestId of input.cancelRequestIds) {
-      const runId = await channelRunId(input.bindingId, requestId);
-      await this.host.stopRun(runId);
-      const run = await this.host.getRun(runId);
-      if (run && !TERMINAL_STATUSES.has(run.status))
-        throw new ChannelError(
-          503,
-          'The cancelled run is still stopping',
-          'unavailable',
-        );
-    }
+    // The reservations above are durable and checked before every attempt,
+    // so nothing named can start any more. A run that is still winding down
+    // (a tool call in flight) is not waited for past one shared grace: a
+    // retry of this control could not stop it any sooner.
+    if (input.cancelRequestIds.length)
+      await this.host.stopRuns(
+        await Promise.all(
+          input.cancelRequestIds.map((requestId) =>
+            channelRunId(input.bindingId, requestId),
+          ),
+        ),
+      );
     let replacement: string | undefined;
     if (input.command.kind === 'new') {
-      replacement = await this.host.createSession(
-        identity,
-        `channel-reset-${await channelRequestHash(JSON.stringify([input.bindingId, input.requestId]))}`,
-      );
+      replacement = saved.replacement;
+      if (!replacement) {
+        replacement = await this.host.createSession(
+          identity,
+          `channel-reset-${await channelRequestHash(JSON.stringify([input.bindingId, input.requestId]))}`,
+        );
+        // A retry reuses the session instead of asking Matrix again.
+        const created = replacement;
+        await this.serialize(async () => {
+          const stored = await this.db.run(
+            'UPDATE channel_controls SET replacement_session_id=? WHERE binding_id=? AND request_id=? AND replacement_session_id IS NULL',
+            [created, input.bindingId, input.requestId],
+          );
+          if (stored.changes > 0) await this.host.changed();
+        });
+      }
       await this.host.assertSession(identity, replacement);
     } else if (input.command.kind === 'resume')
       replacement = input.command.sessionId;
@@ -354,13 +507,17 @@ export class ChannelTurns {
         'SELECT result FROM channel_controls WHERE binding_id=? AND request_id=?',
         [input.bindingId, input.requestId],
       );
-      if (completed?.result)
-        return ChannelControlResult.parse(JSON.parse(completed.result));
-      if (replacement)
+      const already = completed?.result
+        ? readStored(ChannelControlResult, completed.result, 'control result')
+        : undefined;
+      if (already) return already;
+      if (replacement) {
         await this.db.run(
           'INSERT INTO channel_sessions(binding_id,session_id,generation,force_next) VALUES(?,?,1,1) ON CONFLICT(binding_id) DO UPDATE SET session_id=excluded.session_id,generation=channel_sessions.generation+1,force_next=1',
           [input.bindingId, replacement],
         );
+        await this.recordSessionBinding(input, replacement);
+      }
       const result: ChannelControlResult = {
         requestId: input.requestId,
         sessionId: replacement ?? (await this.boundSession(input.bindingId)),
@@ -373,6 +530,49 @@ export class ChannelTurns {
       await this.host.changed();
       return result;
     });
+  }
+
+  /** Note that the binding, at its current consent revision, uses `sessionId`. */
+  private async recordSessionBinding(
+    input: Pick<ChannelTurnInput, 'bindingId' | 'bindingRevision'>,
+    sessionId: string,
+  ): Promise<void> {
+    const recorded = await this.db.run(
+      'INSERT OR IGNORE INTO channel_session_bindings(binding_id,binding_revision,session_id,created_at) VALUES(?,?,?,?)',
+      [input.bindingId, input.bindingRevision, sessionId, this.now()],
+    );
+    if (recorded.changes > 0) await this.host.changed();
+  }
+
+  /**
+   * Whether this binding used `sessionId` at its current consent revision:
+   * the only sessions `/resume` may return to. A Portal conversation, or
+   * one this binding used under an earlier consent, is not one of them.
+   */
+  private async usedByBinding(
+    input: Pick<ChannelTurnInput, 'bindingId' | 'bindingRevision'>,
+    sessionId: string,
+  ): Promise<boolean> {
+    if (
+      await this.db.get(
+        'SELECT 1 FROM channel_session_bindings WHERE binding_id=? AND binding_revision=? AND session_id=?',
+        [input.bindingId, input.bindingRevision, sessionId],
+      )
+    )
+      return true;
+    // A session bound before `channel_session_bindings` existed: the stored
+    // request of the binding's latest receipt in it carries the revision.
+    // Revisions only grow, so no older receipt can match when it does not.
+    const latest = await this.db.get<{ run_id: string }>(
+      'SELECT run_id FROM channel_requests WHERE binding_id=? AND session_id=? ORDER BY rowid DESC LIMIT 1',
+      [input.bindingId, sessionId],
+    );
+    const run = latest ? await this.host.getRun(latest.run_id) : undefined;
+    return (
+      run !== undefined &&
+      this.host.requestOf(run).identity.channel?.bindingRevision ===
+        input.bindingRevision
+    );
   }
 
   async isCancelled(
@@ -404,19 +604,27 @@ export class ChannelTurns {
   ): Promise<ChannelReplyContext | undefined> {
     const reference = input.replyTo;
     if (!reference) return undefined;
-    if (reference.kind === 'unavailable') return { kind: 'unavailable' };
+    const unknown: ChannelReplyContext = {
+      kind: 'unavailable',
+      reason: 'unknown',
+    };
+    if (reference.kind === 'unavailable') return unknown;
     const receipt = await this.receipt({
       ...input,
       requestId: reference.requestId,
     });
-    if (!receipt || receipt.session_id !== sessionId)
-      return { kind: 'unavailable' };
+    if (!receipt?.session_id) return unknown;
+    // The quote is this binding's, but its conversation is not the one the
+    // turn runs in (a routed quote whose session could not be selected
+    // lands here too): its text stays out of this conversation.
+    if (receipt.session_id !== sessionId)
+      return { kind: 'unavailable', reason: 'other_conversation' };
     const run = await this.host.getRun(receipt.run_id);
-    if (!run) return { kind: 'unavailable' };
+    if (!run) return unknown;
     let text: string;
     if (reference.author === 'user') text = this.host.requestOf(run).message;
     else {
-      if (run.status !== 'finished') return { kind: 'unavailable' };
+      if (run.status !== 'finished') return unknown;
       const reply = await this.reply(run.runId, run.partialText ?? '');
       const chunk = reference.partId
         ? /^(.*)\.([1-9]\d*)$/.exec(reference.partId)
@@ -428,8 +636,7 @@ export class ChannelTurns {
               ? reply.plan.parts.find((p) => p.partId === chunk[1])
               : undefined))
           : undefined;
-      if (reference.partId && reply.plan && !matched)
-        return { kind: 'unavailable' };
+      if (reference.partId && reply.plan && !matched) return unknown;
       text = matched ? planText({ parts: [matched] }) : reply.rendered;
     }
     return {
@@ -459,14 +666,35 @@ export class ChannelTurns {
       return this.submitTurn(identity, input, requestHash);
     // Classifier/Matrix I/O is ordered per binding, outside the admission
     // lock. Controls and other bindings can still make progress.
-    const prior = this.routingLanes.get(input.bindingId) ?? Promise.resolve();
-    const next = prior
+    let lane = this.routingLanes.get(input.bindingId);
+    if (!lane) {
+      lane = { tail: Promise.resolve(), requests: new Map() };
+      this.routingLanes.set(input.bindingId, lane);
+    }
+    // The gateway retries a request it timed out on: the retry answers with
+    // the submission still in flight instead of queueing behind it.
+    const inFlight = lane.requests.get(input.requestId);
+    if (inFlight?.requestHash === requestHash) return inFlight.response;
+    const owner = lane;
+    const next = owner.tail
       .catch(() => undefined)
-      .then(() => this.submitTurn(identity, input, requestHash));
-    this.routingLanes.set(input.bindingId, next);
+      .then(() =>
+        withDeadline(
+          this.submitTurn(identity, input, requestHash),
+          ROUTING_LANE_DEADLINE_MS,
+        ),
+      );
+    owner.tail = next;
+    if (!inFlight)
+      owner.requests.set(input.requestId, { requestHash, response: next });
     void next
       .finally(() => {
-        if (this.routingLanes.get(input.bindingId) === next)
+        if (owner.requests.get(input.requestId)?.response === next)
+          owner.requests.delete(input.requestId);
+        if (
+          owner.tail === next &&
+          this.routingLanes.get(input.bindingId) === owner
+        )
           this.routingLanes.delete(input.bindingId);
       })
       .catch(() => undefined);
@@ -500,7 +728,12 @@ export class ChannelTurns {
       if (received.kind === 'run') return received.response;
       let prepared: PreparedChannelTurn;
       try {
-        prepared = await this.prepare(identity, input, received.sessionId);
+        prepared = await this.prepare(
+          identity,
+          input,
+          received.sessionId,
+          received.routingJson,
+        );
       } catch (error) {
         const stale =
           error instanceof StaleSessionError && received.sessionId !== null;
@@ -574,15 +807,15 @@ export class ChannelTurns {
       [runId],
     );
     const route = row?.routing_json
-      ? routeAssignmentSchema.parse(JSON.parse(row.routing_json))
+      ? readStored(routeAssignmentSchema, row.routing_json, 'route assignment')
       : undefined;
     const notice =
       route?.mode === 'on' && route.destination.kind === 'new'
-        ? 'Started a separate conversation.'
+        ? 'Starting a fresh topic for this. Send /resume to go back to what we were doing.'
         : route?.mode === 'on' &&
             route.destination.kind === 'session' &&
             route.destination.sessionId !== route.baseline
-          ? 'Returning to an earlier conversation.'
+          ? 'Back to our earlier conversation. Send /resume to go back.'
           : undefined;
     if (!notice) return { plan, rendered: plan ? planText(plan) : text };
     const decorated =
@@ -629,6 +862,11 @@ export class ChannelTurns {
         );
         if (removed.changes) await this.host.changed();
       }
+      const unbound = await this.db.run(
+        'DELETE FROM channel_session_bindings WHERE session_id=?',
+        [sessionId],
+      );
+      if (unbound.changes) await this.host.changed();
       const released = await this.db.run(
         'DELETE FROM channel_sessions WHERE session_id = ?',
         [sessionId],
@@ -774,14 +1012,29 @@ export class ChannelTurns {
   ): Promise<ChannelThreadCandidate[]> {
     const routing = this.routing;
     if (!routing) return [];
-    // Seed existing channel sessions when an operator first enables routing.
-    // The canonical stored request supplies revision isolation for older receipts.
-    const prior = await this.db.exec<{ session_id: string; run_id: string }>(
-      `SELECT session_id,run_id,MAX(rowid) AS last_row FROM channel_requests
-      WHERE binding_id=? AND session_id IS NOT NULL GROUP BY session_id
-      ORDER BY last_row DESC LIMIT ?`,
-      [input.bindingId, CHANNEL_THREAD_LIMIT],
+    // Index the receipts written since the binding's last read: all of them
+    // when an operator first enables routing, then the ones written while
+    // routing was off (routed turns index themselves as they start). The
+    // canonical stored request supplies revision isolation for older receipts.
+    const seeded = await this.db.get<{ seeded_rowid: number }>(
+      'SELECT seeded_rowid FROM channel_thread_seeded WHERE binding_id=? AND binding_revision=?',
+      [input.bindingId, input.bindingRevision],
     );
+    const after = Number(seeded?.seeded_rowid ?? 0);
+    const newest = await this.db.get<{ last: number | null }>(
+      'SELECT MAX(rowid) AS last FROM channel_requests WHERE binding_id=?',
+      [input.bindingId],
+    );
+    const upTo = Number(newest?.last ?? 0);
+    const prior =
+      upTo > after
+        ? await this.db.exec<{ session_id: string; run_id: string }>(
+            `SELECT session_id,run_id,MAX(rowid) AS last_row FROM channel_requests
+            WHERE binding_id=? AND rowid>? AND session_id IS NOT NULL GROUP BY session_id
+            ORDER BY last_row DESC LIMIT ?`,
+            [input.bindingId, after, CHANNEL_THREAD_LIMIT],
+          )
+        : [];
     for (const row of prior.reverse()) {
       const indexed = await this.db.get<{ last_run_id: string }>(
         'SELECT last_run_id FROM channel_thread_index WHERE binding_id=? AND binding_revision=? AND session_id=?',
@@ -803,6 +1056,14 @@ export class ChannelTurns {
         row.run_id,
         Date.parse(run.updatedAt),
       );
+    }
+    if (upTo > after) {
+      await this.db.run(
+        `INSERT INTO channel_thread_seeded(binding_id,binding_revision,seeded_rowid) VALUES(?,?,?)
+        ON CONFLICT(binding_id,binding_revision) DO UPDATE SET seeded_rowid=excluded.seeded_rowid`,
+        [input.bindingId, input.bindingRevision, upTo],
+      );
+      await this.host.changed();
     }
     const indexed = await this.db.exec<{
       session_id: string;
@@ -832,17 +1093,32 @@ export class ChannelTurns {
     return selectChannelCandidates(candidates, input.message, baseline);
   }
 
+  /**
+   * The request's route: the one stored on its receipt, else (routing on
+   * for the binding) a new one, stored before anything runs. `storedJson`
+   * is the receipt's assignment as admission read it, so a turn the router
+   * does not handle (the default) reads nothing more, while an assigned
+   * request keeps its destination across a flag change.
+   */
   private async assignRoute(
-    _identity: TurnIdentity,
     input: ChannelTurnInput,
     baseline: string,
+    storedJson: string | null,
   ): Promise<ChannelRouteAssignment | undefined> {
-    const receipt = await this.receipt(input);
-    if (receipt?.routing_json)
-      return routeAssignmentSchema.parse(JSON.parse(receipt.routing_json));
     const routing = this.routing;
     if (!this.routingEnabled(input) || !routing || routing.mode === 'off')
-      return undefined;
+      return storedJson
+        ? readStored(routeAssignmentSchema, storedJson, 'route assignment')
+        : undefined;
+    // Routed turns of a binding run one at a time (`submit`), so the
+    // receipt read here is current.
+    const receipt = await this.receipt(input);
+    if (receipt?.routing_json)
+      return readStored(
+        routeAssignmentSchema,
+        receipt.routing_json,
+        'route assignment',
+      );
     const mode = routing.mode;
     const state = await this.routingState(input.bindingId);
     const assignment: ChannelRouteAssignment = {
@@ -914,15 +1190,15 @@ export class ChannelTurns {
                 latencyMs: this.now() - started,
               };
             } catch {
+              // A classifier outage (error, timeout, unusable answer) must
+              // not hold the user's message: it stays in the current
+              // conversation, as with routing off.
               return {
                 mode,
                 reason: 'provider-unavailable',
                 evidenceHash,
                 latencyMs: this.now() - started,
-                destination: {
-                  kind: 'clarify',
-                  text: 'I could not determine which conversation this belongs to. Please reply to the relevant message, or use /new to start a separate conversation.',
-                },
+                destination: { kind: 'session', sessionId: baseline },
               };
             }
           };
@@ -962,6 +1238,23 @@ export class ChannelTurns {
     runId: string,
   ): Promise<Received> {
     await this.setup();
+    // A request that has its run is answered from it, also once a stop
+    // named it: a stop that arrived after the run finished must not hide
+    // the reply the user is owed.
+    const existing = await this.receipt(input);
+    if (existing?.session_id && existing.request_hash === requestHash) {
+      const record = await this.host.getRun(runId);
+      if (record)
+        return {
+          kind: 'run',
+          response: await this.respond(
+            input,
+            existing,
+            existing.session_id,
+            record,
+          ),
+        };
+    }
     await this.assertNotCancelled(input);
     // Checked before a receipt is written: the receipt of a pruned run is
     // gone (run-store.ts), and a new one must not take its place.
@@ -998,7 +1291,11 @@ export class ChannelTurns {
             record,
           ),
         };
-      return { kind: 'new', sessionId: receipt.session_id };
+      return {
+        kind: 'new',
+        sessionId: receipt.session_id,
+        routingJson: receipt.routing_json,
+      };
     }
     const bound = await this.boundSession(input.bindingId);
     if (
@@ -1015,7 +1312,11 @@ export class ChannelTurns {
         'session_conflict',
       );
     }
-    return { kind: 'new', sessionId: bound ?? input.sessionId ?? null };
+    return {
+      kind: 'new',
+      sessionId: bound ?? input.sessionId ?? null,
+      routingJson: receipt.routing_json,
+    };
   }
 
   /**
@@ -1027,6 +1328,7 @@ export class ChannelTurns {
     identity: TurnIdentity,
     input: ChannelTurnInput,
     sessionId: string | null,
+    storedRouting: string | null,
   ): Promise<PreparedChannelTurn> {
     await this.host.requireDelegation(identity);
     const session =
@@ -1034,7 +1336,7 @@ export class ChannelTurns {
       (await this.boundSession(input.bindingId)) ??
       (await this.openSession(identity, input));
     await this.host.assertSession(identity, session);
-    const routing = await this.assignRoute(identity, input, session);
+    const routing = await this.assignRoute(input, session, storedRouting);
     if (!routing) return { sessionId: session };
     const destination = routing.destination;
     const selected =
@@ -1042,7 +1344,7 @@ export class ChannelTurns {
         ? ((await this.receipt(input))?.session_id ??
           (await this.host.createSession(
             identity,
-            `channel-session-${await channelRequestHash(JSON.stringify([input.bindingId, input.requestId]))}`,
+            `channel-route-new-${await channelRequestHash(JSON.stringify([input.bindingId, input.requestId]))}`,
           )))
         : destination.kind === 'session'
           ? destination.sessionId
@@ -1152,7 +1454,8 @@ export class ChannelTurns {
     runId: string,
     prepared: PreparedChannelTurn,
   ): Promise<ChannelTurnResponse> {
-    const { sessionId, routing } = prepared;
+    const { sessionId } = prepared;
+    let routing = prepared.routing;
     await this.setup();
     await this.assertNotCancelled(input);
     let receipt = await this.receipt(input);
@@ -1173,21 +1476,29 @@ export class ChannelTurns {
         'request_conflict',
       );
     let session = receipt.session_id ?? sessionId;
-    if (!receipt.session_id && routing) {
-      const state = await this.routingState(input.bindingId);
-      if (state.generation !== routing.generation) {
-        await this.db.run(
-          'INSERT OR IGNORE INTO channel_cancellations(binding_id,request_id,created_at) VALUES(?,?,?)',
-          [input.bindingId, input.requestId, this.now()],
-        );
-        await this.host.changed();
-        await this.assertNotCancelled(input);
-      }
+    if (
+      !receipt.session_id &&
+      routing?.mode === 'on' &&
+      (await this.routingState(input.bindingId)).generation !==
+        routing.generation
+    ) {
+      // An explicit /new or /resume completed while this request was being
+      // classified: the user's choice wins. The request runs as with
+      // routing off, in the session the control bound.
+      await this.db.run(
+        'UPDATE channel_requests SET routing_json=NULL WHERE run_id=?',
+        [runId],
+      );
+      await this.host.changed();
+      routing = undefined;
+      session = (await this.boundSession(input.bindingId)) ?? sessionId;
+    } else if (!receipt.session_id && routing?.mode === 'on') {
       await this.db.run(
         'INSERT INTO channel_sessions(binding_id,session_id) VALUES(?,?) ON CONFLICT(binding_id) DO UPDATE SET session_id=excluded.session_id,force_next=0',
         [input.bindingId, sessionId],
       );
     } else if (!receipt.session_id) {
+      // Routing off, or in shadow (which never switches the session).
       await this.db.run(
         'INSERT OR IGNORE INTO channel_sessions (binding_id, session_id) VALUES (?, ?)',
         [input.bindingId, sessionId],
@@ -1228,8 +1539,9 @@ export class ChannelTurns {
       [session, runId],
     );
     await this.host.changed();
+    await this.recordSessionBinding(input, session);
     await this.db.run(
-      'UPDATE channel_sessions SET force_next=0 WHERE binding_id=?',
+      'UPDATE channel_sessions SET force_next=0 WHERE binding_id=? AND force_next<>0',
       [input.bindingId],
     );
     if (this.routingEnabled(input) && routing?.destination.kind !== 'clarify')
@@ -1362,11 +1674,11 @@ export class ChannelTurns {
         this.routing.mode !== 'off' &&
         record.status === 'finished'
       ) {
-        await this.db.run(
+        const refreshed = await this.db.run(
           'UPDATE channel_thread_index SET recent_reply=? WHERE last_run_id=?',
           [(record.partialText ?? '').slice(0, 800), row.run_id],
         );
-        await this.host.changed();
+        if (refreshed.changes > 0) await this.host.changed();
       }
       const request = this.host.requestOf(record);
       let author: 'user' | 'oracle' = 'user';

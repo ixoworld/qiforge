@@ -26,7 +26,12 @@ export class ChannelTurnsTestDO extends DurableObject {
   private turns?: ChannelTurns;
   private nowMs = Date.now();
   /** Host calls made since the object loaded. */
-  private calls = { assertSession: 0, changed: 0, createSession: 0 };
+  private calls = {
+    assertSession: 0,
+    changed: 0,
+    createSession: 0,
+    stopRuns: 0,
+  };
   private mirrorMode: MirrorMode = 'ok';
   private holdSessionCreation = false;
   private pendingSessions: (() => void)[] = [];
@@ -41,6 +46,7 @@ export class ChannelTurnsTestDO extends DurableObject {
   private routeHeld: (() => void)[] = [];
   private holdRouting = false;
   private failNextBegin = false;
+  private failNextAssertSession = false;
 
   private async ready(): Promise<ChannelTurns> {
     if (this.turns) return this.turns;
@@ -60,11 +66,17 @@ export class ChannelTurnsTestDO extends DurableObject {
       },
       assertSession: async (_identity, sessionId) => {
         this.calls.assertSession += 1;
+        if (this.failNextAssertSession) {
+          this.failNextAssertSession = false;
+          throw new ChannelError(503, 'Homeserver unavailable', 'unavailable');
+        }
         if ((await this.deletedSessions()).includes(sessionId))
           throw new StaleSessionError('Session deleted');
         if (
           !sessionId.startsWith('$channel-session-') &&
-          !sessionId.startsWith('$channel-reset-')
+          !sessionId.startsWith('$channel-reset-') &&
+          !sessionId.startsWith('$channel-route-new-') &&
+          !sessionId.startsWith('$portal-')
         )
           throw new ChannelError(404, 'Session not owned', 'session_not_found');
       },
@@ -73,9 +85,19 @@ export class ChannelTurnsTestDO extends DurableObject {
           await this.delegation(),
           Math.floor(this.nowMs / 1000),
         ),
-      stopRun: async (runId) => {
-        if (await runs.get(runId))
-          await runs.close(runId, { status: 'aborted' });
+      // Like the coordinator: only runs that have not ended are stopped.
+      stopRuns: async (runIds) => {
+        this.calls.stopRuns += 1;
+        for (const runId of runIds) {
+          const run = await runs.get(runId);
+          if (
+            run &&
+            !['finished', 'aborted', 'interrupted', 'failed'].includes(
+              run.status,
+            )
+          )
+            await runs.close(runId, { status: 'aborted' });
+        }
       },
       getRun: (runId) => runs.get(runId),
       getPlan: (runId) => runs.getPlan(runId),
@@ -449,6 +471,7 @@ export class ChannelTurnsTestDO extends DurableObject {
     assertSession: number;
     changed: number;
     createSession: number;
+    stopRuns: number;
   }> {
     return { ...this.calls };
   }
@@ -485,6 +508,10 @@ export class ChannelTurnsTestDO extends DurableObject {
     this.failNextBegin = true;
   }
 
+  async failAssertSessionOnce(): Promise<void> {
+    this.failNextAssertSession = true;
+  }
+
   async indexedSessions(): Promise<string[]> {
     await this.ready();
     return (
@@ -492,6 +519,26 @@ export class ChannelTurnsTestDO extends DurableObject {
         'SELECT session_id FROM channel_thread_index',
       )
     ).map((row) => row.session_id);
+  }
+
+  /** Sessions as a binding knew them before `channel_session_bindings` existed. */
+  async forgetSessionBindings(): Promise<void> {
+    await this.ready();
+    await this.db!.run('DELETE FROM channel_session_bindings');
+  }
+
+  /** A stored JSON column as another version might have left it. */
+  async corruptStored(
+    table: 'channel_requests' | 'channel_controls',
+    requestId: string,
+  ): Promise<void> {
+    await this.ready();
+    await this.db!.run(
+      table === 'channel_requests'
+        ? 'UPDATE channel_requests SET routing_json=\'{"v":9\' WHERE request_id=?'
+        : 'UPDATE channel_controls SET result=\'{"v":9}\' WHERE request_id=?',
+      [requestId],
+    );
   }
 
   async reset(): Promise<void> {

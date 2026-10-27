@@ -352,21 +352,28 @@ describe('channel polls', () => {
     const first = await stub.submit(message);
     if (!first.ok) throw new Error('Turn rejected');
     await stub.settle();
-    // Admission: the receipt, the session binding with the owed mirror;
-    // then, in the background, the user message mirrored.
-    const admitted = { assertSession: 1, changed: 3, createSession: 1 };
+    // Admission: the receipt, the session binding with the owed mirror,
+    // the session noted as this binding's; then, in the background, the
+    // user message mirrored.
+    const admitted = {
+      assertSession: 1,
+      changed: 4,
+      createSession: 1,
+      stopRuns: 0,
+    };
     expect(await stub.hostCalls()).toEqual(admitted);
     for (let i = 0; i < 5; i += 1)
       expect(await stub.submit(message)).toEqual(first);
     await stub.settle();
     expect(await stub.hostCalls()).toEqual(admitted);
     // A second request is bound to the binding's session (its receipt
-    // and the binding row are written) and checked once.
+    // and the binding row are written; the session is already noted) and
+    // checked once.
     const second = await stub.submit({ ...message, requestId: 'wa:two' });
     if (!second.ok) throw new Error('Turn rejected');
     expect(second.result.sessionId).toBe(first.result.sessionId);
     await stub.settle();
-    const twice = { assertSession: 2, changed: 6, createSession: 1 };
+    const twice = { ...admitted, assertSession: 2, changed: 7 };
     expect(await stub.hostCalls()).toEqual(twice);
     await stub.submit({ ...message, requestId: 'wa:two' });
     await stub.settle();
@@ -821,7 +828,7 @@ describe('channel quotes and controls', () => {
     expect(
       JSON.parse((await stub.run(foreign.result.runId))!.request).channel
         .replyContext,
-    ).toEqual({ kind: 'unavailable' });
+    ).toEqual({ kind: 'unavailable', reason: 'unknown' });
     await stub.control({
       ...stop,
       requestId: 'wa:new',
@@ -837,6 +844,193 @@ describe('channel quotes and controls', () => {
     expect(
       JSON.parse((await stub.run(old.result.runId))!.request).channel
         .replyContext,
-    ).toEqual({ kind: 'unavailable' });
+    ).toEqual({ kind: 'unavailable', reason: 'other_conversation' });
+  });
+
+  it('still answers a finished reply after a stop that named it arrived late', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('stop-after-finish');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.finish(first.result.runId);
+    expect(await stub.control(stop)).toMatchObject({ ok: true });
+    expect(await stub.submit(message)).toMatchObject({
+      ok: true,
+      result: { status: 'finished', text: 'One answer' },
+    });
+    expect((await stub.run(first.result.runId))?.status).toBe('finished');
+    // A request the stop named that never ran stays cancelled.
+    expect(
+      await stub.control({
+        ...stop,
+        requestId: 'wa:stop-two',
+        cancelRequestIds: ['wa:two'],
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      await stub.submit({ ...message, requestId: 'wa:two' }),
+    ).toMatchObject({ ok: false, code: 'request_cancelled' });
+  });
+
+  it('stops every named run in one call and acknowledges the stop', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('stop-many');
+    const runs: string[] = [];
+    for (const requestId of ['wa:a', 'wa:b', 'wa:c']) {
+      const turn = await stub.submit({ ...message, requestId });
+      if (!turn.ok) throw new Error('Turn rejected');
+      runs.push(turn.result.runId);
+    }
+    expect(
+      await stub.control({
+        ...stop,
+        cancelRequestIds: ['wa:a', 'wa:b', 'wa:c', 'wa:never-sent'],
+      }),
+    ).toMatchObject({ ok: true, result: { command: 'stop' } });
+    expect((await stub.hostCalls()).stopRuns).toBe(1);
+    for (const runId of runs)
+      expect((await stub.run(runId))?.status).toBe('aborted');
+  });
+
+  it('resumes only a conversation this binding used at its current consent revision', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('resume-boundary');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    const other = await stub.submit({
+      ...message,
+      bindingId: 'chb_other',
+      requestId: 'wa:other',
+    });
+    if (!other.ok) throw new Error('Turn rejected');
+    const resume = (
+      requestId: string,
+      sessionId: string,
+      bindingRevision = 1,
+    ) =>
+      stub.control({
+        ...stop,
+        requestId,
+        bindingRevision,
+        cancelRequestIds: [],
+        command: { kind: 'resume', sessionId },
+      });
+    const refused = { ok: false, code: 'session_not_found' };
+    // Another binding's conversation, and a Portal one the user owns.
+    expect(await resume('wa:r1', other.result.sessionId)).toMatchObject(
+      refused,
+    );
+    expect(await resume('wa:r2', '$portal-session')).toMatchObject(refused);
+    // This binding's conversation, under a later consent revision.
+    expect(await resume('wa:r3', first.result.sessionId, 2)).toMatchObject(
+      refused,
+    );
+    expect(await stub.boundSession(message.bindingId)).toBe(
+      first.result.sessionId,
+    );
+    const fresh = await stub.control({
+      ...stop,
+      requestId: 'wa:new',
+      cancelRequestIds: [],
+      command: { kind: 'new' },
+    });
+    if (!fresh.ok) throw new Error('Control rejected');
+    expect(await resume('wa:r4', first.result.sessionId)).toMatchObject({
+      ok: true,
+      result: { sessionId: first.result.sessionId },
+    });
+    // A session bound before the binding table existed is recognised by
+    // the revision its latest request was sent under.
+    await stub.forgetSessionBindings();
+    expect(await resume('wa:r5', first.result.sessionId)).toMatchObject({
+      ok: true,
+    });
+    expect(await resume('wa:r6', fresh.result.sessionId!)).toMatchObject(
+      refused,
+    );
+    expect(await resume('wa:r7', first.result.sessionId, 2)).toMatchObject(
+      refused,
+    );
+  });
+
+  it('forgets a refused control, so a corrected body under its id is accepted', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('refused-control');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    const control = {
+      ...stop,
+      requestId: 'wa:resume',
+      cancelRequestIds: [],
+    };
+    expect(
+      await stub.control({
+        ...control,
+        command: { kind: 'resume', sessionId: '$victim' },
+      }),
+    ).toMatchObject({ ok: false, code: 'session_not_found' });
+    expect(
+      await stub.control({
+        ...control,
+        command: { kind: 'resume', sessionId: first.result.sessionId },
+      }),
+    ).toMatchObject({ ok: true, result: { command: 'resume' } });
+    await stub.revokeDelegation();
+    expect(
+      await stub.control({
+        ...control,
+        requestId: 'wa:new',
+        command: { kind: 'new' },
+      }),
+    ).toMatchObject({ ok: false, code: 'delegation_required' });
+    await stub.setDelegation({
+      raw: 'grant',
+      expiration: Math.floor(Date.now() / 1000) + 3600,
+    });
+    expect(
+      await stub.control({
+        ...control,
+        requestId: 'wa:new',
+        command: { kind: 'stop' },
+      }),
+    ).toMatchObject({ ok: true, result: { command: 'stop' } });
+  });
+
+  it('reuses the session a new-session control created when it is retried', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('new-retry');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    const command: ChannelControlInput = {
+      ...stop,
+      requestId: 'wa:new',
+      cancelRequestIds: [],
+      command: { kind: 'new' },
+    };
+    await stub.failAssertSessionOnce();
+    expect(await stub.control(command)).toMatchObject({
+      ok: false,
+      code: 'unavailable',
+    });
+    expect((await stub.hostCalls()).createSession).toBe(2);
+    const retried = await stub.control(command);
+    if (!retried.ok) throw new Error('Control rejected');
+    expect(retried.result.sessionId).not.toBe(first.result.sessionId);
+    expect((await stub.hostCalls()).createSession).toBe(2);
+    expect(await stub.boundSession(message.bindingId)).toBe(
+      retried.result.sessionId,
+    );
+  });
+
+  it('ignores an unreadable stored control result and completes the control again', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('unreadable-control');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    const status: ChannelControlInput = {
+      ...stop,
+      cancelRequestIds: [],
+      command: { kind: 'status' },
+    };
+    expect(await stub.control(status)).toMatchObject({ ok: true });
+    await stub.corruptStored('channel_controls', status.requestId);
+    expect(await stub.control(status)).toMatchObject({
+      ok: true,
+      result: { sessionId: first.result.sessionId, command: 'status' },
+    });
   });
 });

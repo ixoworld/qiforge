@@ -112,7 +112,9 @@ describe('channel-only semantic sessions', () => {
           message: 'Back to the application',
         }),
       ).text,
-    ).toBe('Returning to an earlier conversation.\n\nOne answer');
+    ).toBe(
+      'Back to our earlier conversation. Send /resume to go back.\n\nOne answer',
+    );
   });
 
   it('records shadow verdicts without changing the thread or waiting for the provider', async () => {
@@ -143,7 +145,6 @@ describe('channel-only semantic sessions', () => {
     ['ambiguous', 0.99, ambiguousThreadText],
     ['new_thread', 0.6, ambiguousThreadText],
     ['multiple_intents', 0.99, multipleIntentsText],
-    ['error', 0.99, 'I could not determine'],
   ])(
     'clarifies %s instead of creating a thread or executing the requested action',
     async (choice, probability, text) => {
@@ -163,6 +164,24 @@ describe('channel-only semantic sessions', () => {
       expect((await stub.hostCalls()).createSession).toBe(1);
     },
   );
+
+  it('keeps the message in the current conversation when the classifier fails', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('routing-provider-down');
+    await stub.configureRouting('on');
+    const first = accepted(await stub.submit(input));
+    await stub.routeAs('error');
+    const next = accepted(
+      await stub.submit({ ...input, requestId: 'wa:down', message: 'Yes' }),
+    );
+    expect(next.sessionId).toBe(first.sessionId);
+    expect(
+      (await runningRequest(stub, next.runId)).channel?.routingClarification,
+    ).toBeUndefined();
+    expect((await stub.receipt('wa:down'))?.routing_observation).toContain(
+      'provider-unavailable',
+    );
+    expect((await stub.hostCalls()).createSession).toBe(1);
+  });
 
   it('resumes an owned quoted thread before inference, including a split reply bubble', async () => {
     const stub = env.CHANNEL_TURNS_TEST.getByName('routing-quote');
@@ -325,10 +344,10 @@ describe('channel-only semantic sessions', () => {
     expect(await stub.count()).toBe(2);
   });
 
-  it('holds an older unstarted assignment when an explicit session switch completes during inference', async () => {
+  it('runs a message in the new session when an explicit session switch completes during its inference', async () => {
     const stub = env.CHANNEL_TURNS_TEST.getByName('routing-session-race');
     await stub.configureRouting('on');
-    accepted(await stub.submit(input));
+    const first = accepted(await stub.submit(input));
     await stub.blockRouting(true);
     const pending = stub.submit({ ...input, requestId: 'wa:before-new' });
     await waitForRouting(stub);
@@ -342,14 +361,15 @@ describe('channel-only semantic sessions', () => {
     });
     if (!control.ok) throw new Error('Control refused');
     await stub.blockRouting(false);
-    expect(await pending).toMatchObject({
-      ok: false,
-      code: 'request_cancelled',
-    });
+    const ran = accepted(await pending);
+    expect(ran.sessionId).toBe(control.result.sessionId);
     expect(await stub.boundSession(input.bindingId)).toBe(
       control.result.sessionId,
     );
-    expect(await stub.count()).toBe(1);
+    // Nothing was cancelled, and the stale assignment is gone.
+    expect((await stub.receipt('wa:before-new'))?.routing_json).toBeNull();
+    expect(await stub.count()).toBe(2);
+    expect((await stub.run(first.runId))?.status).toBe('running');
   });
 
   it('bounds candidate state, excludes other bindings, and can quote a thread outside the recency pool', async () => {
@@ -403,6 +423,25 @@ describe('channel-only semantic sessions', () => {
     expect((await stub.routingInputs()).at(-1)).toContain(
       'Updated application details while routing was off',
     );
+  });
+
+  it('treats an unreadable stored assignment as no routing', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('routing-unreadable');
+    await stub.configureRouting('on');
+    const first = accepted(await stub.submit(input));
+    await stub.routeAs('new_thread');
+    await stub.failBeginOnce();
+    const nextInput = { ...input, requestId: 'wa:unreadable' };
+    expect(await stub.submit(nextInput)).toMatchObject({ ok: false });
+    await stub.corruptStored('channel_requests', nextInput.requestId);
+    const recovered = accepted(await stub.submit(nextInput));
+    expect(recovered.sessionId).toBe(
+      (await stub.receipt(nextInput.requestId))?.session_id,
+    );
+    expect(recovered.sessionId).not.toBe(first.sessionId);
+    // A readable new-goal assignment would add the fresh-topic cue.
+    await stub.finish(recovered.runId);
+    expect(accepted(await stub.submit(nextInput)).text).toBe('One answer');
   });
 
   it('removes deleted sessions from the routing index even with routing disabled', async () => {

@@ -22,7 +22,16 @@ export const ChannelReplyReference = z.discriminatedUnion('kind', [
 ]);
 export type ChannelReplyReference = z.infer<typeof ChannelReplyReference>;
 export type ChannelReplyContext =
-  | { kind: 'unavailable' }
+  | {
+      kind: 'unavailable';
+      /**
+       * `other_conversation`: the quoted message is this binding's but
+       * belongs to a conversation other than the one the turn runs in.
+       * `unknown`: nothing quotable was found (no receipt, no run, the run
+       * did not finish, or the gateway could not resolve the quote).
+       */
+      reason?: 'other_conversation' | 'unknown';
+    }
   | {
       kind: 'resolved';
       requestId: string;

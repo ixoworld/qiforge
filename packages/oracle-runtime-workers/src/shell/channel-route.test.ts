@@ -899,4 +899,26 @@ describe('POST /channels/control authorization', () => {
     expect(e.authHubCalls).toEqual([]);
     expect(e.turns).toEqual([]);
   });
+  it('spends a control budget apart from turns and polls, so polling cannot block a stop', async () => {
+    const signed = await signedTurn(control);
+    const e = environment(signed, false);
+    const channelKey = `${signed.oracleDid}|channel|${USER_DID}`;
+    // The limiter refuses the turn/poll key only (a gateway polling hard).
+    e.env.RATE_LIMIT.limit = async ({ key }: { key: string }) => {
+      e.limiterKeys.push(key);
+      return { success: key !== channelKey };
+    };
+    const response = await createShell().fetch(
+      new Request('https://oracle.test/channels/control', {
+        method: 'POST',
+        headers: signed.headers,
+        body: signed.raw,
+      }),
+      e.env,
+    );
+    expect(response.status).toBe(200);
+    expect(e.limiterKeys).toEqual([
+      `${signed.oracleDid}|channel-control|${USER_DID}`,
+    ]);
+  });
 });

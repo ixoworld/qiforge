@@ -131,9 +131,9 @@ export interface ChannelRouteObservation {
 }
 
 export const ambiguousThreadText =
-  'Which conversation is this about? Please reply to a message in that conversation, or resend your request with the topic.';
+  'Is this about something we discussed earlier? Reply to my message about it, or add a few words on the topic.';
 export const multipleIntentsText =
-  'These requests may belong to different conversations. Please send them separately, with the topic for each.';
+  "You asked about a few different things. Please send them one at a time so I don't mix them up.";
 
 /** Thresholds are provisional experiment policy, not a claim of calibration. */
 export function decideChannelRoute(

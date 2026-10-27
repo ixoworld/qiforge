@@ -454,14 +454,30 @@ export class RunCoordinator {
   }
 
   /** Stop exactly the run a channel control names; never a later turn. */
-  async abortById(runId: string): Promise<void> {
-    const run = this.live.get(runId);
-    if (!run) return;
-    if (run.record.status === 'queued') await this.cancelQueued(run, 'aborted');
-    else {
-      this.abortRun(run, 'aborted');
-      await withinGrace(this.graceMs, run.done);
-    }
+  abortById(runId: string): Promise<void> {
+    return this.abortByIds([runId]);
+  }
+
+  /**
+   * Stop exactly the runs a channel control names, never a later turn.
+   * Every run is signalled before any is waited for, and the wait is one
+   * shared supersede grace: a control naming many runs must answer well
+   * inside the caller's timeout. A run may still be winding down when this
+   * resolves. Runs that are not live here (ended, never begun) are skipped.
+   */
+  async abortByIds(runIds: readonly string[]): Promise<void> {
+    const runs = [...new Set(runIds)].flatMap((runId) => {
+      const run = this.live.get(runId);
+      return run ? [run] : [];
+    });
+    if (runs.length === 0) return;
+    // Queued runs first, so an attempt that ends below dequeues none of them.
+    for (const run of runs)
+      if (run.record.status === 'queued')
+        void this.cancelQueued(run, 'aborted');
+    for (const run of runs)
+      if (run.record.status !== 'queued') this.abortRun(run, 'aborted');
+    await withinGrace(this.graceMs, Promise.all(runs.map((run) => run.done)));
   }
 
   /**

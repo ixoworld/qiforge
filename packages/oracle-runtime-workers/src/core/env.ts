@@ -17,6 +17,7 @@ import {
   USER_CONTEXT_BLOCKING_CAP_MS_DEFAULT,
   USER_CONTEXT_CACHE_TTL_MS_DEFAULT,
 } from '../memory/user-context-fetcher';
+import { CHANNEL_HISTORY_INDEX_DEBOUNCE_MS_DEFAULT } from '../memory/session-history-indexer';
 
 /**
  * Tier-0 (core) environment for the Workers runtime. Mirrors
@@ -395,6 +396,20 @@ export const baseEnvSchema = z.object({
     .min(1_000)
     .max(3_600_000)
     .default(USER_CONTEXT_CACHE_TTL_MS_DEFAULT),
+  /**
+   * How long a channel session must be quiet after its last finished run
+   * before its new history is indexed into the memory engine (ms): a burst
+   * of messages is one upload, and one prefetch-cache invalidation. `0`
+   * indexes after every finished run. At most 10 min: the wait is an
+   * in-memory timer that keeps the user object resident, and a Durable
+   * Object keeps pending work alive for 15 min at most.
+   */
+  CHANNEL_HISTORY_INDEX_DEBOUNCE_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(600_000)
+    .default(CHANNEL_HISTORY_INDEX_DEBOUNCE_MS_DEFAULT),
 
   // --- misc ---------------------------------------------------------------
   LOG_LEVEL: z.string().default('info'),

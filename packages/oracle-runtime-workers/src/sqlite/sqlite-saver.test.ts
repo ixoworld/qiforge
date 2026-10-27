@@ -24,6 +24,7 @@ import {
   TURN_TIME_NOTE_KWARG,
   withTurnTimeNote,
 } from '../core/turn-time-note';
+import { CHANNEL_REPLY_NOTE_KWARG } from '../channels/replies';
 import {
   type CarriedToolCall,
   SUMMARY_PREFIX,
@@ -679,6 +680,43 @@ describe('the turn time note kwarg', () => {
       await copy.close();
       await db.close();
     });
+  });
+
+  it('keeps the quoted-reply note and the channel provenance, dropping malformed ones', () => {
+    const base = { timestamp: '2026-01-01T00:00:00.000Z' };
+    const origin = { v: 1, transport: 'whatsapp' };
+    const reply = { kind: 'known', requestId: 'wa:prior', author: 'oracle' };
+    expect(
+      cleanAdditionalKwargs(
+        {
+          ...base,
+          [CHANNEL_REPLY_NOTE_KWARG]: '[WhatsApp reply: …]',
+          'org.ixo.qi.origin': origin,
+          'org.ixo.qi.reply': reply,
+        },
+        false,
+        'O',
+      ),
+    ).toEqual({
+      msgFromMatrixRoom: false,
+      oracleName: 'O',
+      ...base,
+      [CHANNEL_REPLY_NOTE_KWARG]: '[WhatsApp reply: …]',
+      'org.ixo.qi.origin': origin,
+      'org.ixo.qi.reply': reply,
+    });
+    expect(
+      cleanAdditionalKwargs(
+        {
+          ...base,
+          [CHANNEL_REPLY_NOTE_KWARG]: 7,
+          'org.ixo.qi.origin': 'whatsapp',
+          'org.ixo.qi.reply': null,
+        },
+        false,
+        'O',
+      ),
+    ).toEqual({ msgFromMatrixRoom: false, oracleName: 'O', ...base });
   });
 
   it('drops a non-string value under the key and leaves every other kwarg as before', () => {

@@ -519,9 +519,14 @@ it('retains a typed quote reference while hiding model-only quoted context from 
     'org.ixo.qi.origin': origin,
     'org.ixo.qi.reply': reply,
   });
+  expect(note).not.toContain('wa:prior');
+  expect(note).toContain('"yourMessage":"Should I draft it?"');
   expect(channelReplyNote({ kind: 'unavailable' })).toContain(
-    'Do not infer approval',
+    'cannot be shown to you',
   );
+  expect(
+    channelReplyNote({ kind: 'unavailable', reason: 'other_conversation' }),
+  ).toContain('/resume');
 });
 
 it('preserves only validated channel provenance on human messages in session history', async () => {
