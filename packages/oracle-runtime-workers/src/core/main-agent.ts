@@ -172,6 +172,7 @@ export async function createMainAgent(
     domainContext,
     domainResolver,
     domainPins,
+    domainReplay,
     onDomainProvenance,
   } = args;
   const surface: SessionSurface | undefined =
@@ -338,6 +339,7 @@ export async function createMainAgent(
           subjectDid: state.currentEntityDid,
           signal: abortSignal ?? new AbortController().signal,
           ...(domainPins ? { pins: domainPins } : {}),
+          replay: domainReplay,
           ...(onDomainProvenance ? { onProvenance: onDomainProvenance } : {}),
         })
       : undefined,

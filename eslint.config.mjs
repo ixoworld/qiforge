@@ -65,10 +65,7 @@ export default [
   // Type-checking still happens via vitest + tsc; ESLint only needs
   // syntactic + vitest-plugin rules here.
   {
-    files: [
-      '**/__tests__/**/*.[jt]s?(x)',
-      '**/?(*.)+(spec|test).[jt]s?(x)',
-    ],
+    files: ['**/__tests__/**/*.[jt]s?(x)', '**/?(*.)+(spec|test).[jt]s?(x)'],
     ...tseslint.configs.disableTypeChecked,
     plugins: { vitest },
     languageOptions: {

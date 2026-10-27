@@ -4,6 +4,7 @@
  */
 import type { DomainDocument } from '@ixo/domain.md/workers';
 import { z } from 'zod';
+import { professionalContext } from './professional-observations';
 
 const documentEntry = z.object({
   id: z.string(),
@@ -59,6 +60,7 @@ export function isPrivateEntry(entry: DomainDocumentEntry): boolean {
  */
 export function briefBody(document: DomainDocument): Record<string, unknown> {
   const front = document.frontmatter;
+  const professional = professionalContext(front);
   return {
     domain: front.domain,
     constitution: front.constitution,
@@ -68,6 +70,7 @@ export function briefBody(document: DomainDocument): Record<string, unknown> {
     rights: record(front.rights).agent_baseline,
     privacy: front.privacy,
     critical_do_not: front.critical_do_not,
+    ...(professional ? { 'x-professional-oracle': professional } : {}),
     documents: entries(document).map((entry) => ({
       id: entry.id,
       role: entry.role,

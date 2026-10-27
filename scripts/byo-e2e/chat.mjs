@@ -10,7 +10,9 @@ import { apiJson, createSession, sendMessage, summarize } from './lib.mjs';
 const args = process.argv.slice(2);
 const flag = (name) => {
   const i = args.indexOf(`--${name}`);
-  return i === -1 ? undefined : (args[i + 1]?.startsWith('--') ? true : args[i + 1]) ?? true;
+  return i === -1
+    ? undefined
+    : ((args[i + 1]?.startsWith('--') ? true : args[i + 1]) ?? true);
 };
 
 if (args.includes('--models')) {
@@ -19,7 +21,8 @@ if (args.includes('--models')) {
     apiJson('/byo-llm/status'),
   ]);
   console.log('platform models:');
-  for (const m of models.models ?? models) console.log(`  ${m.id}  (${m.badge ?? m.tier ?? ''})`);
+  for (const m of models.models ?? models)
+    console.log(`  ${m.id}  (${m.badge ?? m.tier ?? ''})`);
   console.log('byo models (connected providers):');
   for (const p of byo.providers ?? []) {
     if (!p.connected) continue;
@@ -48,7 +51,8 @@ const result = await sendMessage({
       process.stdout.write(`\x1b[2m${data.reasoning}\x1b[0m`);
     }
     if (name === 'message' && data?.content) process.stdout.write(data.content);
-    if (name === 'error') console.error('\n[error]', JSON.stringify(data).slice(0, 300));
+    if (name === 'error')
+      console.error('\n[error]', JSON.stringify(data).slice(0, 300));
   },
 });
 console.log(`\n(${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);

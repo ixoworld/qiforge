@@ -14,10 +14,7 @@ export const nest = [
     },
   },
   {
-    files: [
-      '**/__tests__/**/*.[jt]s?(x)',
-      '**/?(*.)+(spec|test).[jt]s?(x)',
-    ],
+    files: ['**/__tests__/**/*.[jt]s?(x)', '**/?(*.)+(spec|test).[jt]s?(x)'],
     plugins: { vitest },
     rules: {
       ...vitest.configs.recommended.rules,

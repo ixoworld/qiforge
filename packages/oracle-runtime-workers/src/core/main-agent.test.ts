@@ -43,6 +43,7 @@ import { tool as pluginTool } from '../plugin-api/tool-helper';
 import { resolveDeliveryProfile } from '../delivery/profile';
 import { harnessLimitOf, TurnBudget } from './turn-budget';
 import { z } from 'zod';
+import { DomainContextResolver } from './domain-context/resolver';
 
 // ── Open-Meteo / skills-registry fetch stub ─────────────────────────────────
 
@@ -272,6 +273,41 @@ describe('createRuntimeCore', () => {
 // ── createMainAgent end-to-end ──────────────────────────────────────────────
 
 describe('createMainAgent', () => {
+  it('retains domain provenance on resume without invoking the observation sink again', async () => {
+    const core = bootCore([]);
+    await core.warm();
+    const emit = vi.fn();
+    const resolver = new DomainContextResolver();
+    vi.spyOn(resolver, 'load').mockResolvedValue({
+      did: core.identity.entityDid,
+      status: 'unavailable',
+      stale: false,
+      findings: ['resolution-timeout'],
+    });
+    const args = {
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(core, scriptedLlm({ main: [[]] })),
+      requestCtx,
+      state: {},
+      domainContext: {
+        mode: 'observe' as const,
+        professionalObservations: { mode: 'advisory' as const, emit },
+      },
+      domainResolver: resolver,
+    };
+    const first = await createMainAgent(args);
+    await vi.waitFor(() => expect(emit).toHaveBeenCalledTimes(1));
+    const resumed = await createMainAgent({ ...args, domainReplay: true });
+    await Promise.resolve();
+    expect(emit).toHaveBeenCalledTimes(1);
+    expect(resumed.systemPrompt).toBe(first.systemPrompt);
+    expect(resumed.boundToolNames).toEqual(first.boundToolNames);
+    expect(resumed.domainContext).toEqual(first.domainContext);
+  });
+
   it('runs a tool-calling turn: load_capability → on-demand weather tool → final answer', async () => {
     const core = bootCore();
     await core.warm();

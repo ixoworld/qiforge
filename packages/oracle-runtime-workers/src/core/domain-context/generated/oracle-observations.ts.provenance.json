@@ -1,0 +1,7 @@
+{
+  "package": "@ixo/oracle-observations",
+  "version": "0.1.0",
+  "sourceRepository": "https://github.com/ixoworld/qi-runtimes",
+  "sourcePath": "runtimes/qi-domain-runtime/packages/observations/src/index.ts",
+  "sha256": "37f722e45a8a0a0202b511d8f4165379c21c51f8bcac54d95f2426104f2e2c70"
+}
