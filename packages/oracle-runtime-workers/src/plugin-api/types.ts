@@ -762,7 +762,26 @@ export interface RuntimeContext<TConfig = MergedConfig> {
       provider: string;
       bindingId: string;
       bindingRevision: number;
-    }): Promise<import('@ixo/action-protocol').HubActionOptionsV2>;
+    }): Promise<import('@ixo/action-protocol').HubActionOptionsV3>;
+    /**
+     * A bank send of a token from the owner's options list: `amount` is a
+     * decimal in the token's display units; the host converts it to base
+     * units from the listed decimals and builds the operation (no fee).
+     */
+    transfer(input: {
+      ownerDid: string;
+      sessionId: string;
+      runId: string;
+      requestId: string;
+      provider: string;
+      bindingId: string;
+      bindingRevision: number;
+      requestKey: string;
+      toAddress: string;
+      denom: string;
+      amount: string;
+      memo: string;
+    }): Promise<ActionReferenceV1>;
     request(input: {
       ownerDid: string;
       sessionId: string;
@@ -774,7 +793,11 @@ export interface RuntimeContext<TConfig = MergedConfig> {
       requestKey: string;
       operation: ActionOperationV1;
     }): Promise<ActionReferenceV1>;
-    status(ownerDid: string, actionId: string): Promise<ActionOutcomeV1 | null>;
+    /** The latest authenticated outcome and, for a transfer, its owner-facing line. */
+    status(
+      ownerDid: string,
+      actionId: string,
+    ): Promise<{ outcome: ActionOutcomeV1 | null; summary: string | null }>;
   };
 
   decisions: {

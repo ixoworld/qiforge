@@ -9,7 +9,9 @@ import {
   type ActionOutcomeV1,
   type ActionReferenceV1,
   type HubActionOptionsV2,
+  type HubActionOptionsV3,
 } from '@ixo/action-protocol';
+import { hubPrepareRefusal } from './transfer';
 
 export interface HubActionStatus {
   reference: ActionReferenceV1;
@@ -27,8 +29,17 @@ export interface HubActionTransport {
   fetcher?: { fetch(request: Request): Promise<Response> };
 }
 
-/** The envelope version this runtime parses (`ixo.auth-outcome/2`, `ixo.auth-capabilities/2`). */
-const HUB_PROTOCOL_QUERY = 'version=2';
+/**
+ * The protocol version this runtime declares on every operation call
+ * (capabilities, POST operations, GET status, options). Version 3 is the
+ * 0.5.0 contract: capabilities `transfer.limits`, any-denom bank sends, v2
+ * receipts with `denom` and `amountBaseUnits`, options with the owner's
+ * tokens. Version 2 callers (runtime 0.23.0) keep the 0.4.1 shapes; the
+ * envelopes are still tagged `ixo.auth-outcome/2` and
+ * `ixo.auth-capabilities/2`, which `@ixo/action-protocol` parses.
+ */
+const HUB_PROTOCOL_VERSION = '3';
+const HUB_PROTOCOL_QUERY = `version=${HUB_PROTOCOL_VERSION}`;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -73,6 +84,22 @@ export class HubActionClient {
     const response = await (this.transport.fetcher
       ? this.transport.fetcher.fetch(request)
       : fetch(request));
+    if (
+      body !== undefined &&
+      (response.status === 400 ||
+        response.status === 409 ||
+        response.status === 503)
+    ) {
+      // A prepare the Hub refused with a typed code (a transfer that would
+      // fail, a fee above the ceiling, not enough funds, a busy or
+      // unavailable transfer path, an operation the account may not use):
+      // the model relays it in words.
+      const refusal = hubPrepareRefusal(
+        response.status,
+        await response.json().catch(() => null),
+      );
+      if (refusal) throw refusal;
+    }
     if (!response.ok)
       throw new Error(`Hub action request returned ${response.status}`);
     return response.json();
@@ -85,9 +112,9 @@ export class HubActionClient {
     expiresAt: number;
     operation: ActionOperationV1;
   }): Promise<ActionReferenceV1> {
-    // `version=2` on the three operation calls: the Hub answers v1 (P1
-    // kinds only, v1-filtered outcomes, a P2 POST refused) without it, and
-    // stores the version per action for the outcomes it pushes.
+    // `version=3` on every operation call: the Hub answers older shapes
+    // (no any-denom sends, no receipt amounts) without it, and stores the
+    // version per action for the outcomes it pushes.
     const response = await this.send(
       `/api/internal/actions/operations?${HUB_PROTOCOL_QUERY}`,
       {
@@ -109,6 +136,32 @@ export class HubActionClient {
   }
 
   async options(input: {
+    bindingId: string;
+    bindingRevision: number;
+  }): Promise<HubActionOptionsV3> {
+    // Options version 3: version 2 plus the owner's bank tokens
+    // (`transfer.tokens`), which any-token transfers are chosen from.
+    const query = new URLSearchParams({
+      bindingId: input.bindingId,
+      bindingRevision: String(input.bindingRevision),
+      version: HUB_PROTOCOL_VERSION,
+    });
+    const options = parseActionOptions(
+      await this.send(
+        `/api/internal/actions/operations/options?${query.toString()}`,
+      ),
+    );
+    if (options.version !== 'ixo.auth-options/3')
+      throw new Error('Hub action options require version 3');
+    return options;
+  }
+
+  /**
+   * Options version 2 (connections, targets, resources; no token list),
+   * for the Gmail connection check: it does not make the Hub read the
+   * owner's balances.
+   */
+  async connectionOptions(input: {
     bindingId: string;
     bindingRevision: number;
   }): Promise<HubActionOptionsV2> {

@@ -76,12 +76,6 @@ export const ACTION_PROPOSAL_UNRESOLVED_RETENTION_MS = 180 * 24 * 60 * 60_000;
  * still possible, so the link stays used up.
  */
 export const ACTION_PROPOSAL_EXECUTION_WINDOW_MS = 60 * 60_000;
-/** Cards one agent run may prepare; more is a looping run, refused. */
-export const ACTION_PROPOSALS_PER_RUN = 8;
-/** Cards still awaiting the owner (live `prepared`, `claimed`, hash-less `unknown`) per owner. */
-export const ACTION_PROPOSALS_OPEN_PER_OWNER = 16;
-/** A `prepared` card counts as open this long after creation (its TTL plus clock skew). */
-export const OPEN_PREPARED_MS = 20 * 60_000;
 
 /**
  * A card's claim time from its lifecycle JSON, NULL when the JSON is not
@@ -256,11 +250,6 @@ export class ActionProposalStore {
       }
       if (Date.parse(subject.expiresAt) <= this.now())
         throw new ActionProposalConflict('Proposal expired');
-      await this.assertCapacity(
-        subject.ownerDid,
-        subject.origin.sessionId,
-        subject.origin.runId,
-      );
       await this.db.run(
         `INSERT INTO action_proposals (id,owner_did,invocation_id,session_id,run_id,subject,digest,lifecycle,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`,
         [
@@ -291,35 +280,6 @@ export class ActionProposalStore {
         lifecycle: { status: 'prepared' },
       });
     });
-  }
-
-  /**
-   * A looping or injected run must not mint cards without bound: at most
-   * `ACTION_PROPOSALS_PER_RUN` per run and `ACTION_PROPOSALS_OPEN_PER_OWNER`
-   * still awaiting the owner. A resumed tool call never reaches here (it
-   * returns its original card above).
-   */
-  private async assertCapacity(
-    ownerDid: string,
-    sessionId: string,
-    runId: string,
-  ): Promise<void> {
-    const run = await this.db.get<{ n: number }>(
-      `SELECT COUNT(*) AS n FROM action_proposals WHERE owner_did=? AND session_id=? AND run_id=?`,
-      [ownerDid, sessionId, runId],
-    );
-    if ((run?.n ?? 0) >= ACTION_PROPOSALS_PER_RUN)
-      throw new ActionProposalConflict(
-        'Too many action cards in this request; finish the open ones first',
-      );
-    const open = await this.db.get<{ n: number }>(
-      `SELECT COUNT(*) AS n FROM action_proposals WHERE owner_did=? AND ((status='prepared' AND created_at>?) OR status='claimed' OR (status='unknown' AND transaction_hash IS NULL))`,
-      [ownerDid, this.now() - OPEN_PREPARED_MS],
-    );
-    if ((open?.n ?? 0) >= ACTION_PROPOSALS_OPEN_PER_OWNER)
-      throw new ActionProposalConflict(
-        'Too many action cards are open; finish or decline them first',
-      );
   }
 
   async get(ownerDid: string, id: string): Promise<ActionProposal | null> {

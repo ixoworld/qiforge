@@ -163,7 +163,10 @@ export function draftReplyPlan(input: {
       else parts.push({ kind: 'spill', key: `step-${i}`, spill: shape.spill });
     }
     for (const call of step.toolCalls) {
-      if (call.name === 'request_hub_action') {
+      if (
+        call.name === 'request_hub_action' ||
+        call.name === 'request_hub_transfer'
+      ) {
         try {
           const result = JSON.parse(input.toolResults.get(call.id) ?? 'null');
           if (result?.status === 'prepared') {

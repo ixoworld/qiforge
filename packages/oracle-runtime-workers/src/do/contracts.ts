@@ -85,7 +85,6 @@ export interface OracleWorkerEnv {
   AUTH_HUB_URL?: string;
   AUTH_HUB_CHANNEL_SERVICE_KEY?: string;
   HUB_ACTIONS_ENABLED?: string;
-  AUTH_HUB_ACTION_OUTCOME_KEY?: string;
 
   // --- matrix -------------------------------------------------------------
   MATRIX_BASE_URL: string;

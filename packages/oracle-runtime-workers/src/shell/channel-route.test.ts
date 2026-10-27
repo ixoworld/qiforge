@@ -21,7 +21,12 @@ import {
   channelRequestHash,
   type ChannelTurnInput,
 } from '../channels/contract';
-import { createShell, rateLimitKey } from './app';
+import { signOutcomeRequest } from '@ixo/action-protocol';
+import {
+  HUB_DID_REFRESH_MIN_MS,
+  resetHubDidCache,
+} from '../hub-actions/outcome-signature';
+import { callbackAudience, createShell, rateLimitKey } from './app';
 
 const USER_DID = 'did:ixo:ixo1channeluser';
 
@@ -173,58 +178,129 @@ afterEach(() => {
 });
 
 describe('POST /api/internal/actions/outcomes', () => {
-  it('requires the separate Hub callback secret before routing by owner', async () => {
+  const ORACLE_ORIGIN = 'https://oracle.test';
+  const HUB_DID = 'did:web:hub.test';
+  const KEY_ID = `${HUB_DID}#key-0`;
+  const id = 'D'.repeat(32);
+  const outcome = {
+    version: 'ixo.auth-outcome/1',
+    eventId: 'event-shell',
+    ownerDid: USER_DID,
+    reference: {
+      version: 'ixo.auth-action/1',
+      id,
+      accountId: 'account-shell',
+      bindingId: 'chb_shell',
+      bindingRevision: 1,
+      revision: 1,
+      digest: 'a'.repeat(64),
+      url: `https://hub.test/a/${id}`,
+      expiresAt: 1999999999999,
+      title: 'Review form',
+    },
+    authorizedRevision: 1,
+    authorizedDigest: 'a'.repeat(64),
+    sequence: 1,
+    status: 'declined',
+    receipt: null,
+    occurredAt: 1770000000001,
+  };
+  const rawBody = JSON.stringify(outcome);
+
+  const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+  function multibase(raw: Uint8Array): string {
+    const bytes = Uint8Array.from([0xed, 0x01, ...raw]);
+    let value = 0n;
+    for (const byte of bytes) value = value * 256n + BigInt(byte);
+    let text = '';
+    while (value > 0n) {
+      text = BASE58[Number(value % 58n)] + text;
+      value /= 58n;
+    }
+    return `z${text}`;
+  }
+  async function hubKey() {
+    const pair = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, [
+      'sign',
+      'verify',
+    ]);
+    if (!('privateKey' in pair)) throw new Error('Ed25519 key pair expected');
+    const exported = await crypto.subtle.exportKey('raw', pair.publicKey);
+    if (!(exported instanceof ArrayBuffer)) throw new Error('raw key expected');
+    const raw = new Uint8Array(exported);
+    return { privateKey: pair.privateKey, publicKeyMultibase: multibase(raw) };
+  }
+  function didDocument(publicKeyMultibase: string, did = HUB_DID) {
+    return {
+      '@context': ['https://www.w3.org/ns/did/v1'],
+      id: did,
+      verificationMethod: [
+        {
+          id: `${did}#key-0`,
+          type: 'Multikey',
+          controller: did,
+          publicKeyMultibase,
+        },
+      ],
+    };
+  }
+
+  async function routeEnv(document: () => unknown) {
     const turn = await signedTurn();
     const base = environment(turn, false).env;
     const record = vi.fn(async () => undefined);
+    const hubCalls: string[] = [];
     const env = {
       ...base,
       HUB_ACTIONS_ENABLED: 'true',
-      AUTH_HUB_ACTION_OUTCOME_KEY: 'x'.repeat(40),
+      AUTH_HUB_URL: 'https://hub.test',
+      AUTH_HUB_CHANNEL_SERVICE_KEY: 'oracle-secret',
+      AUTH_HUB: {
+        fetch: async (request: Request) => {
+          hubCalls.push(new URL(request.url).pathname);
+          return Response.json(document());
+        },
+      },
       USER_ORACLE: {
         idFromName: (name: string) => name,
         get: () => ({ recordHubActionOutcome: record }),
       },
     };
-    const id = 'D'.repeat(32);
-    const outcome = {
-      version: 'ixo.auth-outcome/1',
-      eventId: 'event-shell',
-      ownerDid: USER_DID,
-      reference: {
-        version: 'ixo.auth-action/1',
-        id,
-        accountId: 'account-shell',
-        bindingId: 'chb_shell',
-        bindingRevision: 1,
-        revision: 1,
-        digest: 'a'.repeat(64),
-        url: `https://hub.test/a/${id}`,
-        expiresAt: 1999999999999,
-        title: 'Review form',
-      },
-      authorizedRevision: 1,
-      authorizedDigest: 'a'.repeat(64),
-      sequence: 1,
-      status: 'declined',
-      receipt: null,
-      occurredAt: 1770000000001,
-    };
-    const shell = createShell();
-    const send = (key?: string) =>
-      shell.request(
-        '/api/internal/actions/outcomes',
-        {
-          method: 'POST',
-          headers: key ? { 'x-auth-hub-outcome-key': key } : {},
-          body: JSON.stringify(outcome),
-        },
-        env,
-      );
-    expect((await send()).status).toBe(401);
-    expect((await send('wrong')).status).toBe(401);
-    expect(record).not.toHaveBeenCalled();
-    const accepted = await send('x'.repeat(40));
+    return { env, record, hubCalls };
+  }
+
+  const post = (
+    env: unknown,
+    headers: Record<string, string>,
+    body = rawBody,
+    url = `${ORACLE_ORIGIN}/api/internal/actions/outcomes`,
+  ) =>
+    createShell().request(
+      url,
+      { method: 'POST', headers, body },
+      // The shell's env type is the Worker's; the test env carries the
+      // bindings this route reads.
+      Object.assign({}, env),
+    );
+
+  afterEach(() => resetHubDidCache());
+
+  it('accepts a callback the configured Hub signed for this oracle origin', async () => {
+    const key = await hubKey();
+    const { env, record, hubCalls } = await routeEnv(() =>
+      didDocument(key.publicKeyMultibase),
+    );
+    const headers = await signOutcomeRequest({
+      privateKey: key.privateKey,
+      keyId: KEY_ID,
+      audience: ORACLE_ORIGIN,
+      rawBody,
+    });
+    // The transition header the Hub still sends is ignored, never required.
+    const accepted = await post(env, {
+      ...headers,
+      'x-auth-hub-outcome-key': 'legacy-key',
+    });
     expect(accepted.status).toBe(200);
     expect(await accepted.json()).toEqual({
       accepted: true,
@@ -236,6 +312,173 @@ describe('POST /api/internal/actions/outcomes', () => {
       sequence: outcome.sequence,
     });
     expect(record).toHaveBeenCalledWith(outcome);
+    expect(hubCalls).toEqual(['/.well-known/did.json']);
+    // The DID document is cached: a second callback reads it from memory.
+    expect((await post(env, headers)).status).toBe(200);
+    expect(hubCalls).toHaveLength(1);
+  });
+
+  it('refuses unsigned, re-targeted, tampered, stale and foreign-key callbacks', async () => {
+    const key = await hubKey();
+    const other = await hubKey();
+    const { env, record } = await routeEnv(() =>
+      didDocument(key.publicKeyMultibase),
+    );
+    const sign = (fields: {
+      privateKey?: CryptoKey;
+      keyId?: string;
+      audience?: string;
+      timestamp?: number;
+    }) =>
+      signOutcomeRequest({
+        privateKey: fields.privateKey ?? key.privateKey,
+        keyId: fields.keyId ?? KEY_ID,
+        audience: fields.audience ?? ORACLE_ORIGIN,
+        rawBody,
+        ...(fields.timestamp ? { timestamp: fields.timestamp } : {}),
+      });
+    // No signature; the old shared key alone is not enough.
+    expect((await post(env, {})).status).toBe(401);
+    expect(
+      (await post(env, { 'x-auth-hub-outcome-key': 'x'.repeat(40) })).status,
+    ).toBe(401);
+    // Signed for another oracle.
+    expect(
+      (await post(env, await sign({ audience: 'https://other-oracle.test' })))
+        .status,
+    ).toBe(401);
+    // Signed for this oracle but delivered to another origin it serves.
+    expect(
+      (
+        await post(
+          env,
+          await sign({}),
+          rawBody,
+          'https://alias.test/api/internal/actions/outcomes',
+        )
+      ).status,
+    ).toBe(401);
+    // A body changed after signing.
+    expect(
+      (
+        await post(
+          env,
+          await sign({}),
+          JSON.stringify({ ...outcome, status: 'authorized' }),
+        )
+      ).status,
+    ).toBe(401);
+    // A key the Hub DID document does not hold, or another DID's key id.
+    expect(
+      (await post(env, await sign({ privateKey: other.privateKey }))).status,
+    ).toBe(401);
+    expect(
+      (await post(env, await sign({ keyId: 'did:web:evil.test#key-0' })))
+        .status,
+    ).toBe(401);
+    // Outside the 300 s skew window.
+    expect(
+      (
+        await post(
+          env,
+          await sign({ timestamp: Math.floor(Date.now() / 1000) - 301 }),
+        )
+      ).status,
+    ).toBe(401);
+    expect(record).not.toHaveBeenCalled();
+  });
+
+  it('refuses a DID document for another DID and stays off without Hub configuration', async () => {
+    const key = await hubKey();
+    const { env, record } = await routeEnv(() =>
+      didDocument(key.publicKeyMultibase, 'did:web:evil.test'),
+    );
+    const headers = await signOutcomeRequest({
+      privateKey: key.privateKey,
+      keyId: KEY_ID,
+      audience: ORACLE_ORIGIN,
+      rawBody,
+    });
+    expect((await post(env, headers)).status).toBe(401);
+    resetHubDidCache();
+    for (const off of [
+      { HUB_ACTIONS_ENABLED: 'false' },
+      { AUTH_HUB_URL: '' },
+      { AUTH_HUB_CHANNEL_SERVICE_KEY: '' },
+    ])
+      expect((await post({ ...env, ...off }, headers)).status).toBe(401);
+    expect(record).not.toHaveBeenCalled();
+  });
+
+  it('verifies against ORACLE_PUBLIC_URL when it is set, whatever host the request used', async () => {
+    const key = await hubKey();
+    const { env, record } = await routeEnv(() =>
+      didDocument(key.publicKeyMultibase),
+    );
+    const configured = { ...env, ORACLE_PUBLIC_URL: `${ORACLE_ORIGIN}/base/` };
+    const sign = (audience: string) =>
+      signOutcomeRequest({
+        privateKey: key.privateKey,
+        keyId: KEY_ID,
+        audience,
+        rawBody,
+      });
+    const viaAlias = 'https://alias.workers.dev/api/internal/actions/outcomes';
+    expect(
+      (await post(configured, await sign(ORACLE_ORIGIN), rawBody, viaAlias))
+        .status,
+    ).toBe(200);
+    // Signed for the hostname the request used, not the configured one.
+    expect(
+      (
+        await post(
+          configured,
+          await sign('https://alias.workers.dev'),
+          rawBody,
+          viaAlias,
+        )
+      ).status,
+    ).toBe(401);
+    expect(record).toHaveBeenCalledTimes(1);
+    expect(callbackAudience(undefined, viaAlias)).toBe(
+      'https://alias.workers.dev',
+    );
+    expect(callbackAudience('not a url', viaAlias)).toBe('');
+  });
+
+  it('picks up a rotated Hub key with one fresh DID document read', async () => {
+    const before = await hubKey();
+    const after = await hubKey();
+    let current = before;
+    const { env, record, hubCalls } = await routeEnv(() =>
+      didDocument(current.publicKeyMultibase),
+    );
+    const signed = (key: { privateKey: CryptoKey }) =>
+      signOutcomeRequest({
+        privateKey: key.privateKey,
+        keyId: KEY_ID,
+        audience: ORACLE_ORIGIN,
+        rawBody,
+      });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      expect((await post(env, await signed(before))).status).toBe(200);
+      current = after;
+      // The cached document names the old key under the same id. Within
+      // a minute of the last read a failed signature reads nothing again.
+      expect((await post(env, await signed(after))).status).toBe(401);
+      expect(hubCalls).toHaveLength(1);
+      // Later, one fresh read picks up the rotated key.
+      vi.setSystemTime(Date.now() + HUB_DID_REFRESH_MIN_MS);
+      expect((await post(env, await signed(after))).status).toBe(200);
+      expect(hubCalls).toHaveLength(2);
+      // A forged signature right after reads nothing more.
+      expect((await post(env, await signed(before))).status).toBe(401);
+      expect(hubCalls).toHaveLength(2);
+      expect(record).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

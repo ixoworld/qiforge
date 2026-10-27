@@ -1,5 +1,6 @@
 import { AIMessage, HumanMessage, ToolMessage } from '@langchain/core/messages';
 import { describe, expect, it, vi } from 'vitest';
+import { HUB_ACTION_CARD_NOTE } from '../plugins/hub-actions/hub-actions.plugin';
 import { resolveDeliveryProfile } from './profile';
 import {
   draftReplyPlan,
@@ -119,6 +120,37 @@ describe('draftReplyPlan', () => {
     });
     expect(parseReplyPlan(JSON.stringify(plan))).toEqual(plan);
     expect(planText(plan)).toContain(actionReference.url);
+    // A transfer review is the same structured part, and the note a chat
+    // surface's prepared result carries does not change it.
+    expect(
+      draftReplyPlan({
+        steps: [
+          {
+            text: 'Review the transfer.',
+            toolCalls: [
+              { id: 'pay-call', name: 'request_hub_transfer', args: {} },
+            ],
+          },
+        ],
+        toolResults: new Map([
+          [
+            'pay-call',
+            JSON.stringify({
+              status: 'prepared',
+              actionReference,
+              summary: 'Review form',
+              note: HUB_ACTION_CARD_NOTE,
+            }),
+          ],
+        ]),
+        limits: limits(),
+        canSpill: false,
+      }),
+    ).toContainEqual({
+      kind: 'hub-action',
+      actionReference,
+      summary: 'Review form',
+    });
   });
   it('drops narration before a tool call but keeps substantive text written before one', () => {
     const plan = draftReplyPlan({
