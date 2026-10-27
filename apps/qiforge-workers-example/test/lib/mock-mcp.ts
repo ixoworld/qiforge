@@ -19,6 +19,11 @@
  * `state.historyUploads` is `'refuse'`, which answers 503 so the runtime
  * treats the upload as failed (recorded with `refused: true`).
  *
+ * The engine's document routes (`POST|GET|DELETE /knowledge/documents`) are
+ * an in-memory store that validates the contract the runtime's oracle
+ * document tools code against (UCAN headers, `x-oracle-entity-did`, the
+ * confirmation flag, the chunk caps) and records every request.
+ *
  * Also serves `/.well-known/did.json` (the oracle resolves the service DID
  * from the MCP URL's origin before minting), and `GET /__test/state` exposing
  * every recorded request + tool call for assertions. Each recorded request
@@ -31,6 +36,7 @@ import {
   createServer,
   type IncomingMessage,
   type Server as HttpServer,
+  type ServerResponse,
 } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -65,8 +71,45 @@ export interface RecordedToolCall {
   args: Record<string, unknown>;
 }
 
+export interface RecordedDocumentRequest {
+  method: string;
+  pathname: string;
+  search: string;
+  authorization?: string;
+  xAuthType?: string;
+  xRoomId?: string;
+  xOracleEntityDid?: string;
+  /** Parsed JSON body (POST only). */
+  body?: unknown;
+}
+
+export interface MockDocumentChunk {
+  label?: string;
+  content: string;
+}
+
+export interface MockDocument {
+  id: string;
+  space: string;
+  title: string;
+  source_description: string | null;
+  generation: number;
+  chunks: MockDocumentChunk[];
+  /** `ingesting` until `INGEST_MS` after the write, then `ready`; `deleting` after a DELETE. */
+  status: 'ingesting' | 'ready' | 'deleting';
+  createdAtMs: number;
+  /** When a `deleting` document disappears (the engine removes it in the background). */
+  removeAtMs?: number;
+}
+
 export interface MockMcpState {
   requests: RecordedRequest[];
+  /** Every `/knowledge/documents` request, in arrival order. */
+  documentRequests: RecordedDocumentRequest[];
+  /** Grouped documents currently stored. */
+  documents: MockDocument[];
+  /** Chunks stored without a document (`group_as_document: false`). */
+  looseChunks: Array<MockDocumentChunk & { id: string; space: string }>;
   toolCalls: RecordedToolCall[];
   memories: string[];
   /**
@@ -359,12 +402,282 @@ function recordedHeaders(
   };
 }
 
+const MAX_CHUNK_BYTES = 16_384;
+const MAX_CHUNKS = 64;
+/** The engine's cap on the chunks of one document, in total UTF-8 bytes. */
+const MAX_DOCUMENT_BYTES = 900_000;
+/** `ingesting` turns `ready` this long after a write. */
+const INGEST_MS = 400;
+/** A deleted document stays `deleting` this long, then is gone. */
+const DELETE_MS = 800;
+
+/** The oracle's domain entity DID: `did:ixo:entity:` and 32 lowercase hex digits. */
+const ENTITY_DID_PATTERN = /^did:ixo:entity:[0-9a-f]{32}$/;
+
+const documentBodySchema = z.object({
+  knowledge_space_type: z.enum(['public', 'private']),
+  confirmed_insertion_from_user: z.boolean(),
+  document: z
+    .object({
+      id: z
+        .string()
+        .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/)
+        .optional(),
+      title: z.string().min(1).max(200),
+      source_description: z.string().max(500).optional(),
+    })
+    .optional(),
+  if_exists: z.enum(['replace', 'fail']).optional(),
+  chunks: z
+    .array(
+      z.object({
+        label: z.string().max(120).optional(),
+        content: z.string().min(1),
+      }),
+    )
+    .min(1)
+    .max(MAX_CHUNKS),
+});
+
+function sendJson(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  headers: Record<string, string> = {},
+): void {
+  res.writeHead(status, { 'content-type': 'application/json', ...headers });
+  res.end(JSON.stringify(body));
+}
+
+/** Advance the background work: ingestion completes, deletions finish. */
+function settle(state: MockMcpState, now: number): void {
+  state.documents = state.documents.filter(
+    (d) => d.removeAtMs === undefined || d.removeAtMs > now,
+  );
+  for (const d of state.documents) {
+    if (d.status === 'ingesting' && now - d.createdAtMs >= INGEST_MS) {
+      d.status = 'ready';
+    }
+  }
+}
+
+function summaryOf(doc: MockDocument) {
+  return {
+    id: doc.id,
+    title: doc.title,
+    source_description: doc.source_description,
+    generation: doc.generation,
+    chunk_count: doc.chunks.length,
+    chunks_indexed: doc.status === 'ingesting' ? 0 : doc.chunks.length,
+    status: doc.status,
+    created_by: 'mock',
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  };
+}
+
+/** The Memory Engine's document routes, backed by `state`. */
+async function handleDocuments(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  state: MockMcpState,
+): Promise<void> {
+  const raw: Buffer[] = [];
+  for await (const chunk of req) raw.push(chunk as Buffer);
+  const text = Buffer.concat(raw).toString('utf8');
+  const method = req.method ?? 'GET';
+  let body: unknown;
+  try {
+    body = text ? JSON.parse(text) : undefined;
+  } catch {
+    body = undefined;
+    state.documentRequests.push({
+      method,
+      pathname: url.pathname,
+      search: url.search,
+      ...recordedHeaders(req),
+    });
+    sendJson(res, 400, { detail: 'body is not JSON', code: 'INVALID_JSON' });
+    return;
+  }
+  const entityDid = req.headers['x-oracle-entity-did'];
+  state.documentRequests.push({
+    method,
+    pathname: url.pathname,
+    search: url.search,
+    ...recordedHeaders(req),
+    ...(typeof entityDid === 'string' ? { xOracleEntityDid: entityDid } : {}),
+    ...(body === undefined ? {} : { body }),
+  });
+
+  if (req.headers['x-auth-type'] !== 'ucan' || !req.headers.authorization) {
+    sendJson(res, 401, { detail: 'UCAN required', code: 'UNAUTHORIZED' });
+    return;
+  }
+  if (typeof entityDid !== 'string' || entityDid.length === 0) {
+    sendJson(res, 400, {
+      detail: 'x-oracle-entity-did is required',
+      code: 'ENTITY_HEADER_MISSING',
+    });
+    return;
+  }
+  if (!ENTITY_DID_PATTERN.test(entityDid)) {
+    sendJson(res, 400, {
+      detail: 'x-oracle-entity-did is not a domain entity DID',
+      code: 'ENTITY_HEADER_INVALID',
+    });
+    return;
+  }
+  const roomId = req.headers['x-room-id'];
+  if (typeof roomId !== 'string' || roomId.length === 0) {
+    sendJson(res, 400, {
+      detail: 'x-room-id is required',
+      code: 'ROOM_ID_MISSING',
+    });
+    return;
+  }
+  settle(state, Date.now());
+
+  const space = url.searchParams.get('knowledge_space_type');
+  const id = decodeURIComponent(
+    url.pathname.slice('/knowledge/documents'.length).replace(/^\//, ''),
+  );
+
+  if (method === 'POST' && id === '') {
+    const parsed = documentBodySchema.safeParse(body);
+    if (!parsed.success) {
+      sendJson(res, 422, { detail: parsed.error.issues, code: 'VALIDATION' });
+      return;
+    }
+    const request = parsed.data;
+    if (request.confirmed_insertion_from_user !== true) {
+      sendJson(res, 403, {
+        detail: 'confirmation required',
+        code: 'CONFIRMATION_REQUIRED',
+      });
+      return;
+    }
+    if (
+      request.chunks.some(
+        (c) => Buffer.byteLength(c.content, 'utf8') > MAX_CHUNK_BYTES,
+      )
+    ) {
+      sendJson(res, 413, {
+        detail: 'chunk too large',
+        code: 'EPISODE_TOO_LARGE',
+      });
+      return;
+    }
+    const totalBytes = request.chunks.reduce(
+      (sum, c) => sum + Buffer.byteLength(c.content, 'utf8'),
+      0,
+    );
+    if (totalBytes > MAX_DOCUMENT_BYTES) {
+      sendJson(res, 413, {
+        detail: `chunks total ${totalBytes} bytes; the cap is ${MAX_DOCUMENT_BYTES}`,
+        code: 'DOCUMENT_TOO_LARGE',
+      });
+      return;
+    }
+    if (!request.document) {
+      const stored = request.chunks.map((c, i) => ({
+        ...c,
+        id: `loose-${state.looseChunks.length + i + 1}`,
+        space: request.knowledge_space_type,
+      }));
+      state.looseChunks.push(...stored);
+      sendJson(res, 202, {
+        success: true,
+        queued: stored.length,
+        chunk_ids: stored.map((c) => c.id),
+      });
+      return;
+    }
+    const docId = request.document.id ?? `doc-${state.documents.length + 1}`;
+    const existing = state.documents.find(
+      (d) => d.id === docId && d.space === request.knowledge_space_type,
+    );
+    if (existing && request.if_exists === 'fail') {
+      sendJson(res, 409, { detail: 'exists', code: 'DOCUMENT_EXISTS' });
+      return;
+    }
+    const doc: MockDocument = {
+      id: docId,
+      space: request.knowledge_space_type,
+      title: request.document.title,
+      source_description: request.document.source_description ?? null,
+      generation: (existing?.generation ?? 0) + 1,
+      chunks: request.chunks,
+      status: 'ingesting',
+      createdAtMs: Date.now(),
+    };
+    state.documents = [...state.documents.filter((d) => d !== existing), doc];
+    sendJson(res, 202, {
+      success: true,
+      document: {
+        id: doc.id,
+        generation: doc.generation,
+        chunk_count: doc.chunks.length,
+        status: 'ingesting',
+        replaced: existing !== undefined,
+      },
+      queued: doc.chunks.length,
+    });
+    return;
+  }
+
+  if (space !== 'public' && space !== 'private') {
+    sendJson(res, 422, { detail: 'knowledge_space_type', code: 'VALIDATION' });
+    return;
+  }
+  if (method === 'GET' && id === '') {
+    sendJson(res, 200, {
+      documents: state.documents
+        .filter((d) => d.space === space)
+        .map(summaryOf),
+    });
+    return;
+  }
+  const doc = state.documents.find((d) => d.id === id && d.space === space);
+  if (!doc) {
+    sendJson(res, 404, {
+      detail: 'no such document',
+      code: 'DOCUMENT_NOT_FOUND',
+    });
+    return;
+  }
+  if (method === 'GET') {
+    sendJson(res, 200, { ...summaryOf(doc), chunks: doc.chunks });
+    return;
+  }
+  if (method === 'DELETE') {
+    // The engine answers at once and removes the chunks in the background;
+    // a second delete while it runs is accepted and changes nothing.
+    if (doc.status !== 'deleting') {
+      doc.status = 'deleting';
+      doc.removeAtMs = Date.now() + DELETE_MS;
+      // The background removal needs no further request to finish.
+      setTimeout(() => settle(state, Date.now()), DELETE_MS + 20).unref();
+    }
+    sendJson(res, 202, {
+      success: true,
+      document: { id: doc.id, status: 'deleting', chunks: doc.chunks.length },
+    });
+    return;
+  }
+  sendJson(res, 405, { detail: 'method not allowed' });
+}
+
 export async function startMockMcpServer(port: number): Promise<MockMcpServer> {
   const origin = `http://localhost:${port}`;
   // did:web for a host with a port percent-encodes the colon.
   const did = `did:web:localhost%3A${port}`;
   const state: MockMcpState = {
     requests: [],
+    documentRequests: [],
+    documents: [],
+    looseChunks: [],
     toolCalls: [],
     memories: [],
     batchServesMemories: true,
@@ -388,6 +701,9 @@ export async function startMockMcpServer(port: number): Promise<MockMcpServer> {
       }
       if (url.pathname === '/__test/reset' && req.method === 'POST') {
         state.requests.length = 0;
+        state.documentRequests.length = 0;
+        state.documents.length = 0;
+        state.looseChunks.length = 0;
         state.toolCalls.length = 0;
         state.memories.length = 0;
         state.batchServesMemories = true;
@@ -395,6 +711,13 @@ export async function startMockMcpServer(port: number): Promise<MockMcpServer> {
         state.historyUploads = 'accept';
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+      if (
+        url.pathname === '/knowledge/documents' ||
+        url.pathname.startsWith('/knowledge/documents/')
+      ) {
+        await handleDocuments(req, res, url, state);
         return;
       }
       if (url.pathname === '/search-enhanced-batch') {

@@ -15,6 +15,7 @@ import {
   type MemoryMcpFactory,
 } from './memory-tools';
 import { oracleEntityDidSchema } from './memory-entity';
+import { createOracleDocumentTools } from './oracle-document-tools';
 
 const configSchema = z.object({
   MEMORY_MCP_URL: z.string().url('MEMORY_MCP_URL must be a valid HTTP(S) URL.'),
@@ -36,7 +37,8 @@ const manifest: PluginManifest = {
     'You create an artifact for the user (file, document, edit, generated content): record what it is, what it is for, and the structural choices you made.',
     'The user expresses satisfaction or dissatisfaction with something you produced: capture what worked or what did not — tone, length, structure, style — against that artifact entry.',
     'The user references something they told you before, or something you made before.',
-    'A controller or owner of this oracle asks you to store something every user of the oracle should know (a policy, a procedure, reference material): tell them it will be shared with every user of the oracle (or, for the private space, with its controllers and owners only), get their confirmation, then store it as oracle knowledge rather than as a memory about them.',
+    'A controller or owner of this oracle TYPES into the chat something every user of the oracle should know (a policy, a procedure, reference material): tell them it will be shared with every user of the oracle (or, for the private space, with the members of the domain only: its controllers, owner, admins and DAO members), get their confirmation, then store it as oracle knowledge rather than as a memory about them. This line is only for knowledge typed in the chat.',
+    'A controller or owner of this oracle hands you a file (an attachment or a Library file) and asks you to store it as oracle knowledge: a file the person attached or a Library file ALWAYS goes to add_oracle_document, never to add_oracle_knowledge, even when its text is visible in the conversation. If the file is one coherent record (a board resolution, a contract, a report) group it as a document (group_as_document true); if it is a file where someone dumped many unrelated company facts to upload them easily, store it as loose facts (group_as_document false). When it is not obvious which, ask the person first, and always confirm the public or private space with them before writing. list_oracle_documents and delete_oracle_document show and remove grouped documents.',
   ],
   whenNotToUse: [
     'Ephemeral conversation-only state (use the current message thread).',
@@ -44,6 +46,7 @@ const manifest: PluginManifest = {
     'Public web facts that are not specific to this user (use a web-search capability).',
     'Anything the user asked you to forget or framed as temporary.',
     'Oracle knowledge for something about one user: the shared knowledge is only for what every user of this oracle should know.',
+    'Storing a file the person did not ask you to store as oracle knowledge, or choosing between a grouped document and loose facts without asking when the file could be either.',
   ],
   tags: ['memory', 'recall', 'artifacts', 'personalization'],
   category: 'memory',
@@ -66,6 +69,15 @@ export interface MemoryPluginOptions {
    * explicit list to drop one of them or to expose `delete_edge`.
    */
   selectedTools?: readonly string[];
+  /**
+   * Surface `add_oracle_document`, `list_oracle_documents` and
+   * `delete_oracle_document` next to the upstream tools (default true). They
+   * talk to `MEMORY_ENGINE_URL` directly and are not part of
+   * {@link selectedTools}, and appear only when the upstream tools do (a user
+   * without a memory delegation gets neither). Pass `false` to keep documents
+   * out of the oracle.
+   */
+  documentTools?: boolean;
 }
 
 function resolveMemoryConfig(config: MergedConfig): {
@@ -109,10 +121,13 @@ export class MemoryPlugin extends OraclePlugin {
 
   private readonly selectedTools: readonly string[];
 
+  private readonly documentTools: boolean;
+
   constructor(options: MemoryPluginOptions = {}) {
     super();
     this.mcpFactory = options.mcpFactory ?? createDefaultMemoryMcpFactory;
     this.selectedTools = options.selectedTools ?? DEFAULT_MEMORY_TOOLS;
+    this.documentTools = options.documentTools ?? true;
   }
 
   override autoDetect(env: PluginEnv): boolean {
@@ -124,7 +139,15 @@ export class MemoryPlugin extends OraclePlugin {
   override async getRequestTools(rtCtx: RuntimeContext): Promise<PluginTool[]> {
     const { memoryMcpUrl, entityDid } = resolveMemoryConfig(rtCtx.config);
     const factory = this.mcpFactory(memoryMcpUrl, entityDid);
-    return fetchMemoryTools(rtCtx, factory, this.selectedTools);
+    const mcpTools = await fetchMemoryTools(rtCtx, factory, this.selectedTools);
+    // The document tools come first so a file never lands on the upstream
+    // add_oracle_knowledge by position.
+    // No upstream tools means memory is unavailable for this user (no
+    // delegation, unresolved service DID): the document tools would only
+    // answer "not reachable", so they are left out too.
+    return this.documentTools && mcpTools.length > 0
+      ? [...createOracleDocumentTools(), ...mcpTools]
+      : mcpTools;
   }
 
   override getSharedState(): Record<

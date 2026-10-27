@@ -370,6 +370,38 @@ without its origin and RPC, or with an unsafe URL.
 | `ACTION_PROPOSALS_RPC_DEVNET`, `_TESTNET`, `_MAINNET` | Chain RPC base URL per network for verification: `https`, no credentials, query or fragment (a `/rpc/` path is fine). Devnet or testnet required when enabled; mainnet cards are refused by policy.                    |
 | `ACTION_TOPIC_PROPOSALS_ENABLED`                      | `'true'` adds the topic cards ([topic-action-proposals](topic-action-proposals.md)): discussion drafts and claim-access grants, their claims and step permits. Default `'false'`; requires `ACTION_PROPOSALS_ENABLED`. |
 
+### Oracle documents
+
+Read by the memory plugin's `add_oracle_document` tool from the merged
+config (a `[vars]` entry, not a secret); all optional, and an invalid value
+falls back to the default with a warning. The document routes need
+`MEMORY_ENGINE_URL` like the prefetch, and send the header
+`x-oracle-entity-did` with the oracle's domain entity DID. Only a value
+shaped `did:ixo:entity:` plus 32 lowercase hex digits is sent: it is
+`ORACLE_ENTITY_DID` (empty counts as unset) or, when that is unset,
+`ORACLE_DID` if that has the entity shape; an account DID
+(`did:ixo:ixo1…`) is never sent in its place. Without such a value the
+document tools answer "This oracle is not configured for domain documents
+(ORACLE*ENTITY_DID missing)", make no request, and log one warning per
+isolate. The engine's `ENTITY_HEADER*\*`, `ENTITY_NOT_VOUCHED`and`ENTITY_UNVERIFIED`refusals are logged at warn and shown to the model as
+operator-facing sentences.`add_oracle_document`and`delete_oracle_document`
+first ask the engine for the private document list (the same domain access
+a write needs), so a person without access is refused before any file is
+downloaded, parsed or sent to a helper model. See
+[operations](operations.md#bundled-plugins-what-they-refuse).
+
+| Variable                      | Meaning                                                                                                                                                                                           |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MEMORY_DOCUMENT_CHUNK_BYTES` | Largest part of a document in UTF-8 bytes. Default `12000`, `1024` to `16384` (the engine's default cap is 16,384).                                                                               |
+| `MEMORY_DOCUMENT_MAX_CHUNKS`  | Most parts one call writes. Default `64`, `1` to `64` (the engine's per-request cap).                                                                                                             |
+| `MEMORY_DOCUMENT_MAX_CHARS`   | Most characters read from one file. Default: `MEMORY_DOCUMENT_CHUNK_BYTES` × `MEMORY_DOCUMENT_MAX_CHUNKS` (768,000 with the defaults); more is refused unless the call passes `allow_truncation`. |
+
+The engine also caps one document at 900,000 bytes of parts in total. The
+runtime keeps `MEMORY_DOCUMENT_CHUNK_BYTES` × `MEMORY_DOCUMENT_MAX_CHUNKS`
+within that: when the product is larger (for example 16384 × 64) the part
+count is lowered to fit (54 for 16384-byte parts) and one warning is logged
+per isolate. A refusal for size reports the file's size and the real limit.
+
 ### Ops and misc
 
 | Variable                     | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
@@ -850,7 +882,11 @@ This contract is Memory Engine 2.0.0's (devnet `1.0.0-develop.10` and later):
 an older engine keys spaces by the agent DID and answers the prefetch's
 `oracle_dids: [ORACLE_ENTITY_DID]` with 403, and a 2.0.0 engine answers a
 runtime older than this one (no header) with `400 ENTITY_HEADER_MISSING`, so
-runtime and engine move together. The engine refuses a request without the
+runtime and engine move together. The oracle document tools
+(`add_oracle_document`, `list_oracle_documents`, `delete_oracle_document`)
+also need the engine's `/knowledge/documents` routes, which arrive after
+2.2.0 (devnet first); an engine without them answers 404, which the tools
+report as a refusal (`The memory engine refused: …`) and nothing is written. The engine refuses a request without the
 header or with a malformed one, and
 refuses an entity whose on-chain document does not list the oracle's agent
 account as a `linkedEntity` with `service: 'matrix'` and

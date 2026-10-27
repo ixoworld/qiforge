@@ -16,6 +16,12 @@ import {
 } from './memory-tools';
 import { MemoryPlugin } from './memory.plugin';
 
+const DOCUMENT_TOOL_NAMES = [
+  'add_oracle_document',
+  'list_oracle_documents',
+  'delete_oracle_document',
+];
+
 interface FakeUpstreamTool {
   name: string;
   description: string;
@@ -141,7 +147,7 @@ describe('MemoryPlugin (Workers port)', () => {
     const tools = await plugin.getRequestTools(makeCtx());
 
     expect(tools.map((t) => t.name).sort()).toEqual(
-      [...DEFAULT_MEMORY_TOOLS].sort(),
+      [...DEFAULT_MEMORY_TOOLS, ...DOCUMENT_TOOL_NAMES].sort(),
     );
     // The default surface carries the oracle-knowledge write (the engine
     // gates it on chain) but not `delete_edge`.
@@ -212,6 +218,53 @@ describe('MemoryPlugin (Workers port)', () => {
     });
     // The lazy invocation opened its own authenticated client.
     expect(clientRecords.length).toBe(2);
+  });
+
+  it('lists the document tools next to the upstream tools, native and ungated', async () => {
+    const plugin = new MemoryPlugin();
+    const tools = await plugin.getRequestTools(makeCtx());
+    for (const name of DOCUMENT_TOOL_NAMES) {
+      expect(tools.map((t) => t.name)).toContain(name);
+    }
+    // The document tools come first, so a file never lands on the upstream
+    // add_oracle_knowledge by position; the upstream tools follow.
+    expect(
+      tools.slice(0, DOCUMENT_TOOL_NAMES.length).map((t) => t.name),
+    ).toEqual([...DOCUMENT_TOOL_NAMES]);
+    expect(
+      tools
+        .slice(DOCUMENT_TOOL_NAMES.length)
+        .map((t) => t.name)
+        .sort(),
+    ).toEqual([...DEFAULT_MEMORY_TOOLS].sort());
+  });
+
+  it('leaves the document tools out when documentTools is false', async () => {
+    const plugin = new MemoryPlugin({ documentTools: false });
+    const tools = await plugin.getRequestTools(makeCtx());
+    expect(tools.map((t) => t.name).sort()).toEqual(
+      [...DEFAULT_MEMORY_TOOLS].sort(),
+    );
+  });
+
+  it('teaches the grouped-or-loose rule in the manifest', () => {
+    const { whenToUse, whenNotToUse } = new MemoryPlugin().manifest;
+    const use = whenToUse.join('\n');
+    expect(use).toContain('add_oracle_document');
+    expect(use).toContain('group_as_document true');
+    expect(use).toContain('group_as_document false');
+    expect(use).toContain('ask the person first');
+    // Tool choice: typed text vs a file.
+    expect(use).toContain('TYPES into the chat');
+    expect(use).toContain('only for knowledge typed in the chat');
+    expect(use).toContain(
+      'a file the person attached or a Library file ALWAYS goes to add_oracle_document, never to add_oracle_knowledge, even when its text is visible in the conversation',
+    );
+    // "a policy" is the typed-in example, not a grouped-document example.
+    expect(use).not.toContain('(a board resolution, a contract, a policy');
+    expect((whenNotToUse ?? []).join('\n')).toContain(
+      'did not ask you to store',
+    );
   });
 
   it('contributes no tools when the service DID cannot be resolved', async () => {

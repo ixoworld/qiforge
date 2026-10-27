@@ -1477,6 +1477,72 @@ The constants named here are listed in
   with the user first: `public` knowledge is read by every user of the
   oracle, `private` by its domain members only. A fork that does not want
   the tool passes `selectedTools` without it.
+- **Oracle documents.** `add_oracle_document`, `list_oracle_documents`
+  and `delete_oracle_document` are native tools of the memory plugin (on
+  unless `new MemoryPlugin({ documentTools: false })`), listed only next to
+  the upstream memory tools, so a user without an `ixo:memory` delegation
+  sees none of them. They call the engine's `/knowledge/documents` routes
+  with the same UCAN invocation as the prefetch plus
+  `x-oracle-entity-did` (`ORACLE_ENTITY_DID`, as on every engine path; never the `ORACLE_DID` fallback); the engine
+  decides who may write (the same domain-member rule as
+  `add_oracle_knowledge`) and the tool turns its refusals into plain
+  sentences (`DOMAIN_ACCESS_DENIED`, `DOCUMENT_EXISTS`,
+  `EPISODE_TOO_LARGE`, `DOCUMENT_TOO_LARGE`, `DOCUMENT_LIMIT`, 429
+  queue/backlog/budget/rate with the retry hint). The source is a chat attachment (`source.kind` `attachment`, whose
+  `ref` is the `[source: …]` value of the attached file) or a Library file (kind `vfs`, `ref` the path); one field pair, because a
+  model asked to fill two optional source fields fills both. `group_as_document` is required with no default: `true` keeps the
+  file as one document under a document id (listable, replaced by adding the
+  same `document_id` again, removed whole; a replace or delete is accepted while the old text is still ingesting and finishes in the background), `false` stores each part as an
+  ordinary knowledge episode with no document (found by search, removed
+  one by one with `delete_episode`). The tool description tells the model to
+  group a coherent record (a board resolution, a contract, a report), to store a file of unrelated facts as loose facts, and to ask
+  the person when it cannot tell. It also refuses to write until
+  `confirmed_insertion_from_user` is `true`, and `delete_oracle_document`
+  until `confirmed_deletion_from_user` is. The text is read at most
+  `MEMORY_DOCUMENT_MAX_CHARS` (default parts × part size, 768,000
+  characters) and cut into parts of at
+  most `MEMORY_DOCUMENT_CHUNK_BYTES` (12,000 bytes) on paragraph, line, then
+  sentence boundaries, at most `MEMORY_DOCUMENT_MAX_CHUNKS` (64) parts; the
+  product never exceeds the engine's 900,000-byte document cap. A part that
+  would only name a page (`--- page 4 ---`) or hold only whitespace is
+  never sent. A
+  file needing more, or cut by the character cap, is refused with its size
+  and nothing is written, unless the call passes `allow_truncation: true`
+  (only the first parts are kept). A file without text is refused. A text-layer PDF or a text file may be up to 25 MB; a scanned PDF, an image or an Office file goes to the helper model only up to 10 MB, and a helper transcription the model cut off (`finish_reason: length`) counts as truncated. A PDF is read page by page and stops at the character cap. The extracted text is kept in memory for 10 minutes (4 files per user object), so the confirm-then-call round trip and a retry with `allow_truncation` do not download or parse the file again. A Library file needs the Files plugin on this oracle. After a
+  successful add or delete the room's prefetch cache is dropped, like any
+  memory write. The result string of a refused write is not an error
+  result, so a refused call also drops the cache; that only costs one
+  extra gather.
+  - **Tool choice.** The memory manifest says the oracle-knowledge line is
+    for knowledge typed in the chat, and that a file the person attached or
+    a Library file always goes to `add_oracle_document`, never to
+    `add_oracle_knowledge`, even when its text is visible in the
+    conversation; the tool description opens with the same rule and the
+    document tools are listed before the upstream ones.
+  - **Ids and retries.** A grouped write without `document_id` gets one
+    derived from the title (lowercase `[a-z0-9.-]`, at most 80 characters)
+    plus the first 8 hex digits of the SHA-256 of the part contents, and the
+    result reports it, so repeating the call after a timeout replaces
+    instead of duplicating. After a timeout a grouped write is told to call
+    again with the same id; a loose write is told not to retry and to search
+    for what landed. `PARTIAL_QUEUE` reports how many parts were stored
+    (grouped: call again with the same id; loose: do not retry). A 429
+    carries the engine's `Retry-After`. In loose mode `document_id`,
+    `if_exists` and `source_description` are ignored and the result lists
+    them under `ignored_in_loose_mode`. A `delete_failed` document shows the
+    engine's `delete_error` in `list_oracle_documents`, which also takes a
+    `status` filter and a `limit` (default 100, at most 500); calling
+    `delete_oracle_document` again retries it.
+  - **Trade-offs.** There is no two-turn confirmation gate: like `clear`
+    and `delete_episode`, a write or delete proceeds when the model passes
+    `confirmed_insertion_from_user` / `confirmed_deletion_from_user` true,
+    and the description tells it to ask the person first; a model that sets
+    the flag unasked defeats it, and the engine's domain-member check is the
+    real gate. A write holds the turn's write slot until the engine has
+    queued every part (up to the 30 s client timeout, longer when a large
+    file is read first), so another write tool of the same turn waits for
+    it. A refused call (the string is not an error result) still drops the
+    room's prefetch cache; that costs one extra gather.
 - **MCP call timeouts.** Sandbox, memory-engine and Firecrawl tools are
   MCP tools; each call carries its timeout as the MCP request's own
   (`metadata.timeoutMs`, which the MCP SDK clears when the response

@@ -111,16 +111,17 @@ import {
   applyAttachmentRetention,
   ATTACHMENT_PAYLOAD_TURNS,
   ATTACHMENT_PLACEHOLDER_PREFIX,
-  attachmentMetas,
-  attachmentRef,
+  createAttachmentViewSurface,
+  findPersistedAttachmentMeta,
+  IngestTextLru,
   INLINE_PAYLOAD_NEEDLE,
   isAttachmentViewMessage,
   offloadInlinePayloads,
   parseAttachmentInputs,
   prepareAttachments,
-  viewAttachment,
   type AttachmentViewSurface,
   type MatrixMediaSource,
+  type ViewAttachmentDeps,
   type SandboxUploadConfig,
   DOWNLOAD_TIMEOUT_MS,
   MAX_FILE_SIZE,
@@ -199,6 +200,7 @@ import {
 } from '../sqlite/cache-config';
 import { DoSqliteDatabase, type DoSqliteOpenOptions } from '../sqlite/database';
 import type { TierFlushResult } from '../sqlite/do-vfs';
+import type { AttachmentMeta } from '../sqlite/serialization';
 import {
   DEFAULT_TIER_HOT_BUDGET_BYTES,
   type PageTierOptions,
@@ -272,6 +274,7 @@ import { decideBootDirty } from './boot-dirty';
 import { decideFlush } from './flush-schedule';
 import { mirrorTxnId, mirrorEventContent, RoomMirror } from './room-mirror';
 import { prefixSpeaker } from './speaker-prefix';
+import { assembleTurnMessages } from './turn-messages';
 import {
   type ObservedMessage,
   summarizeObservedMessages,
@@ -1040,6 +1043,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private lastActionPruneAt: number | null = null;
     /** Text `view_attachment` extracted, per session (`attachments/view-cache.ts`). */
     private attachmentTextCache: AttachmentTextCacheStore | null = null;
+    /** Large texts of document ingestion, in memory (a few, minutes). */
+    private readonly ingestTextLru = new IngestTextLru();
     /**
      * Per-model context windows; learned limits persist in this object's KV
      * storage (`ctxwin:<model>`), so a provider's rejection is remembered
@@ -6877,54 +6882,34 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       ambientLlm: LlmAdapter;
       platform: OpenRouterLlmAdapter;
       signal: AbortSignal;
+      /** Attachments of the turn now running (not necessarily persisted yet). */
+      turnMetas: readonly AttachmentMeta[];
     }): Promise<AttachmentViewSurface> {
       const saver = this.saver!;
       const offloaded = await saver.hasThreadMessageMatching(input.sessionId, {
         messageType: 'human',
         contentContains: ATTACHMENT_PLACEHOLDER_PREFIX,
       });
-      const findMeta = async (ref: string) => {
-        // The placeholder quotes the ref, so a cheap pre-filter usually
-        // finds the message; a still-inline attachment needs the full scan.
-        const candidates = await saver.listThreadMessagesMatching(
-          input.sessionId,
-          { messageType: 'human', contentContains: ref },
-        );
-        const scan =
-          candidates.length > 0
-            ? candidates
-            : await saver.listThreadMessages(input.sessionId);
-        return scan
-          .filter((m) => m.type === 'human')
-          .flatMap((m) => attachmentMetas(m))
-          .find((meta) => attachmentRef(meta) === ref);
-      };
-      return {
+      const findMeta = (ref: string) =>
+        findPersistedAttachmentMeta(saver, input.sessionId, ref);
+      const viewDeps = (): ViewAttachmentDeps => ({
+        source: this.matrixMediaSource(),
+        extraction: this.extractionProvider(input.ambientLlm, input.platform),
+        caps: getModelCapabilities(input.model),
+        roomId: input.roomId,
+        signal: input.signal,
+        logger: console,
+        ...(this.attachmentTextCache
+          ? { cache: this.attachmentTextCache.forSession(input.sessionId) }
+          : {}),
+        ingestCache: this.ingestTextLru.forSession(input.sessionId),
+      });
+      return createAttachmentViewSurface({
         offloaded,
-        view: async (ref) => {
-          const meta = await findMeta(ref);
-          if (!meta) {
-            throw new Error(
-              `no attachment with ref "${ref}" in this conversation`,
-            );
-          }
-          const view = await viewAttachment(meta, {
-            source: this.matrixMediaSource(),
-            extraction: this.extractionProvider(
-              input.ambientLlm,
-              input.platform,
-            ),
-            caps: getModelCapabilities(input.model),
-            roomId: input.roomId,
-            signal: input.signal,
-            logger: console,
-            ...(this.attachmentTextCache
-              ? { cache: this.attachmentTextCache.forSession(input.sessionId) }
-              : {}),
-          });
-          return { meta, view };
-        },
-      };
+        turnMetas: input.turnMetas,
+        findPersisted: findMeta,
+        deps: viewDeps,
+      });
     }
 
     /**
@@ -7300,6 +7285,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             ambientLlm: baseAmbient.llm,
             platform: core.llm,
             signal: abortController.signal,
+            turnMetas: prepared?.metas ?? [],
           });
 
       // Request metadata (editor room, space, session run, entity) → state,
@@ -7697,36 +7683,30 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         ? undefined
         : renderTurnTimeNote(turnAt, req.identity.timezone);
       const content = timeNote ? withTurnTimeNote(spoken, timeNote) : spoken;
+      const human = new HumanMessage({
+        content,
+        additional_kwargs: {
+          timestamp: turnAt.toISOString(),
+          ...(timeNote ? { [TURN_TIME_NOTE_KWARG]: timeNote } : {}),
+          oracleName: core.identity.name,
+          msgFromMatrixRoom: req.client === 'matrix',
+          ...speakerKwargs,
+          ...(req.channel
+            ? { 'org.ixo.qi.origin': channelOrigin(req.channel) }
+            : {}),
+          ...attachmentKwargs,
+        },
+      });
       const stateInput = {
-        messages: [
-          new HumanMessage({
-            content,
-            additional_kwargs: {
-              timestamp: turnAt.toISOString(),
-              ...(timeNote ? { [TURN_TIME_NOTE_KWARG]: timeNote } : {}),
-              oracleName: core.identity.name,
-              msgFromMatrixRoom: req.client === 'matrix',
-              ...speakerKwargs,
-              ...(req.channel
-                ? { 'org.ixo.qi.origin': channelOrigin(req.channel) }
-                : {}),
-              ...attachmentKwargs,
-            },
-          }),
-          // Extraction-lane text rides as hidden context messages (the
-          // transcript hides AI messages that carry an `attachment`), as on Node.
-          ...(prepared?.extracted ?? []).map(
-            (item) =>
-              new AIMessage({
-                content: item.text,
-                additional_kwargs: {
-                  msgFromMatrixRoom: req.client === 'matrix',
-                  timestamp: new Date().toISOString(),
-                  attachment: item.meta,
-                },
-              }),
-          ),
-        ],
+        // Hidden attachment context (the transcript hides AI messages that
+        // carry an `attachment`): native-lane notes precede the person's
+        // message, extraction-lane text follows it, as on Node.
+        messages: assembleTurnMessages({
+          human,
+          extracted: prepared?.extracted ?? [],
+          nativeNotes: prepared?.nativeNotes ?? [],
+          matrixRoom: req.client === 'matrix',
+        }),
         config: { did: req.identity.userDid },
         client: req.client,
         // First contact's gathered context is checkpointed with the turn,
