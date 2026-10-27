@@ -20,6 +20,7 @@ export {
 export {
   aiProcess,
   aiProcessFromUrl,
+  capText,
   extractText,
   formatContent,
   getAudioFormat,
@@ -39,6 +40,7 @@ export {
   type FileCategory,
 } from './magic';
 export {
+  nativeAttachmentNote,
   prepareAttachments,
   SANDBOX_TRUNCATE_LIMIT,
   type AttachmentPipelineDeps,
@@ -46,6 +48,11 @@ export {
   type PrepareAttachmentsParams,
   type PreparedAttachments,
 } from './pipeline';
+export {
+  extractPdfText,
+  MIN_CHARS_PER_PAGE,
+  type PdfTextResult,
+} from './pdf-text';
 export { routeAttachment, type AttachmentStrategy } from './route';
 export {
   buildAnalysisMarkdown,
@@ -81,14 +88,22 @@ export {
   type AttachmentRetentionResult,
 } from './retention';
 export {
+  createAttachmentViewSurface,
+  extractAttachmentText,
+  findPersistedAttachmentMeta,
   viewAttachment,
+  type AttachmentMessageStore,
+  type AttachmentTextExtraction,
   type AttachmentView,
   type AttachmentViewSurface,
   type ViewAttachmentDeps,
 } from './view';
 export {
   AttachmentTextCacheStore,
+  IngestTextLru,
   LOCAL_TEXT_EXTRACTION,
   VIEW_CACHE_MAX_CHARS,
   type AttachmentTextCache,
+  type IngestedText,
+  type IngestTextScope,
 } from './view-cache';

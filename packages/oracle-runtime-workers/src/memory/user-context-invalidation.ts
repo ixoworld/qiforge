@@ -19,6 +19,10 @@ import {
   MEMORY_DELETE_EDGE_MCP_NAME,
   MEMORY_DELETE_EPISODE_MCP_NAME,
 } from '../plugins/memory/memory-tools';
+import {
+  ADD_ORACLE_DOCUMENT_TOOL_NAME,
+  DELETE_ORACLE_DOCUMENT_TOOL_NAME,
+} from '../plugins/memory/oracle-document-tools';
 
 /** The memory engine tools that write or delete what the prefetch reads. */
 export const MEMORY_WRITE_TOOL_NAMES: readonly string[] = [
@@ -27,6 +31,8 @@ export const MEMORY_WRITE_TOOL_NAMES: readonly string[] = [
   MEMORY_DELETE_EPISODE_MCP_NAME,
   MEMORY_DELETE_EDGE_MCP_NAME,
   MEMORY_CLEAR_MCP_NAME,
+  ADD_ORACLE_DOCUMENT_TOOL_NAME,
+  DELETE_ORACLE_DOCUMENT_TOOL_NAME,
 ];
 
 export interface UserContextInvalidationOptions {

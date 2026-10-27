@@ -21,6 +21,20 @@ export function sanitizeAttachmentFilename(filename: string): string {
   );
 }
 
+/** Longest mimetype / event id / mxc URI written into a hidden note. */
+export const NOTE_MIMETYPE_MAX = 100;
+export const NOTE_EVENT_ID_MAX = 255;
+export const NOTE_URI_MAX = 512;
+
+/**
+ * Clean a client-supplied value (mimetype, media event id, mxc URI) for the
+ * hidden notes the model reads: the filename cleaner plus quotes removed
+ * (the notes wrap refs in `"…"`), cut to `max` characters.
+ */
+export function sanitizeNoteField(value: string, max: number): string {
+  return sanitizeAttachmentFilename(value).replace(/"/g, '').slice(0, max);
+}
+
 /**
  * Sanitize a filename/path for the sandbox upload endpoint: only
  * alphanumerics, dots, dashes, underscores and slashes, and no `..` segments

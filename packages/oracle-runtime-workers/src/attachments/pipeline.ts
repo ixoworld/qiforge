@@ -58,7 +58,11 @@ import {
   type SandboxUploadConfig,
 } from './sandbox-archive';
 import {
+  NOTE_EVENT_ID_MAX,
+  NOTE_MIMETYPE_MAX,
+  NOTE_URI_MAX,
   sanitizeAttachmentFilename,
+  sanitizeNoteField,
   sanitizeSandboxPath,
   SANDBOX_OUTPUT_PREFIX,
 } from './sanitize';
@@ -91,6 +95,13 @@ export interface PreparedAttachments {
   metas: AttachmentMeta[];
   /** Extraction-lane results, to append as hidden context messages. */
   extracted: ExtractedAttachment[];
+  /**
+   * One line per file sent natively, to append as hidden context messages
+   * like `extracted`: the model reads the file itself but would otherwise
+   * never learn the reference that tools (`view_attachment`, document
+   * ingestion) take.
+   */
+  nativeNotes: ExtractedAttachment[];
   usage: { cost: number; promptTokens: number; completionTokens: number };
 }
 
@@ -115,10 +126,32 @@ function metaFor(attachment: AttachmentInput): AttachmentMeta {
   };
 }
 
+/**
+ * The line that names an attachment's reference to the model, for both lanes:
+ * `[source: eventId="…"]` (the media event id) or `[source: url="…"]` (the
+ * mxc / http URI), the same two values `attachmentRef` accepts.
+ */
 function sourceRef(attachment: AttachmentInput): string {
-  if (attachment.eventId) return `[source: eventId="${attachment.eventId}"]`;
-  if (attachment.mxcUri) return `[source: url="${attachment.mxcUri}"]`;
+  // A reference the cleaner would alter is not the reference tools match on,
+  // so such a value is left out rather than shown changed.
+  const clean = (value: string, max: number): string => {
+    const cleaned = sanitizeNoteField(value, max);
+    return cleaned === value ? cleaned : '';
+  };
+  const eventId = attachment.eventId
+    ? clean(attachment.eventId, NOTE_EVENT_ID_MAX)
+    : '';
+  if (eventId) return `[source: eventId="${eventId}"]`;
+  const url = attachment.mxcUri ? clean(attachment.mxcUri, NOTE_URI_MAX) : '';
+  if (url) return `[source: url="${url}"]`;
   return '';
+}
+
+/** The note for a file sent natively: its source line, name and type. */
+export function nativeAttachmentNote(attachment: AttachmentInput): string {
+  const ref = sourceRef(attachment);
+  if (!ref) return '';
+  return `${ref} "${sanitizeAttachmentFilename(attachment.filename)}" (${sanitizeNoteField(attachment.mimetype, NOTE_MIMETYPE_MAX)}) is attached to this message.`;
 }
 
 function errorMessage(error: unknown): string {
@@ -320,7 +353,13 @@ export async function prepareAttachments(
   const metas = params.attachments.map(metaFor);
   const usage = { cost: 0, promptTokens: 0, completionTokens: 0 };
   if (params.attachments.length === 0) {
-    return { content: params.text, metas, extracted: [], usage };
+    return {
+      content: params.text,
+      metas,
+      extracted: [],
+      nativeNotes: [],
+      usage,
+    };
   }
 
   const reportedTotal = params.attachments.reduce(
@@ -354,6 +393,7 @@ export async function prepareAttachments(
 
   const budget = new DownloadBudget();
   const natives: NativeAttachment[] = [];
+  const nativeNotes: ExtractedAttachment[] = [];
   for (const attachment of nativeCandidates) {
     try {
       const { bytes, mimetype, sniffed } = await budget.load(
@@ -382,6 +422,8 @@ export async function prepareAttachments(
         base64: bytesToBase64(bytes),
         filename: attachment.filename,
       });
+      const note = nativeAttachmentNote(attachment);
+      if (note) nativeNotes.push({ text: note, meta: metaFor(attachment) });
       deps.logger.log(
         `[attachments] NATIVE → "${attachment.filename}" sent directly to ${params.model} (${bytes.length} bytes, ${kind})`,
       );
@@ -449,7 +491,7 @@ export async function prepareAttachments(
         deps.logger.error(
           `[attachments] failed to process ${attachment.filename}: ${errorMessage(error)}`,
         );
-        text = `[File "${sanitizeAttachmentFilename(attachment.filename)}" (${attachment.mimetype}) failed to process: ${errorMessage(error)}]`;
+        text = `[File "${sanitizeAttachmentFilename(attachment.filename)}" (${sanitizeNoteField(attachment.mimetype, NOTE_MIMETYPE_MAX)}) failed to process: ${errorMessage(error)}]`;
       }
       const ref = sourceRef(attachment);
       extracted.push({ text: ref ? `${ref}\n${text}` : text, meta });
@@ -460,6 +502,7 @@ export async function prepareAttachments(
     content: buildUserMessageContent(params.text, natives),
     metas,
     extracted,
+    nativeNotes,
     usage,
   };
 }
