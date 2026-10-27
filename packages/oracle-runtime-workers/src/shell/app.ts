@@ -1,4 +1,16 @@
 import {
+  ActionProposalWireSchema,
+  TopicReceiptReferencesSchema,
+  BeginTopicStepSchema,
+  BeginTopicStepResultSchema,
+} from '@ixo/ixo-transaction/topic-proposals';
+import {
+  ActionProposalClaimSchema,
+  ActionProposalIdSchema,
+  ActionProposalReconcileSchema,
+} from '@ixo/ixo-transaction/action-proposals';
+import { ActionProposalConflict } from '../action-proposals/store';
+import {
   authenticateChannel,
   assertActiveChannelBindingCached,
   channelAuthConfig,
@@ -66,6 +78,8 @@ import {
   type FeedbackShellOptions,
 } from '../feedback/submit';
 import { z } from 'zod';
+import { parseOutcome } from '@ixo/action-protocol';
+import { verifyHubOutcomeCallback } from '../hub-actions/outcome-signature';
 
 const DebugEventBody = z.object({
   type: z
@@ -189,6 +203,22 @@ export const BYO_LLM_BODY_BYTES = 64 * 1024;
 export const DEBUG_BODY_BYTES = 64 * 1024;
 
 /** A body cap enforced before the body is buffered: over it, 413 and the handler never runs. */
+/**
+ * The audience a signed Hub outcome callback must be signed for: the origin
+ * of `ORACLE_PUBLIC_URL` when it is set, else the origin of the request URL.
+ * An unparsable public URL yields '' (which never verifies).
+ */
+export function callbackAudience(
+  publicUrl: string | undefined,
+  requestUrl: string,
+): string {
+  try {
+    return new URL(publicUrl || requestUrl).origin;
+  } catch {
+    return '';
+  }
+}
+
 function limitBody(maxSize: number) {
   return bodyLimit({
     maxSize,
@@ -218,6 +248,7 @@ export function rateLimitKey(
     | 'user'
     | 'poll'
     | 'channel'
+    | 'action'
     | 'artifact'
     | 'socket'
     | 'status'
@@ -427,7 +458,7 @@ export function createShell(
 
   app.post('/channels/control', async (c) => {
     try {
-      if (!c.env.CHANNEL_SERVICE_DID)
+      if (parseChannelServiceDids(c.env.CHANNEL_SERVICE_DID).length === 0)
         throw new ChannelError(
           503,
           'Channels are not configured',
@@ -493,6 +524,53 @@ export function createShell(
     }
   });
 
+  app.use('/api/internal/actions/outcomes', limitBody(64 * 1024));
+  // Auth Hub's signed outcome callbacks: on whenever Hub actions are
+  // configured. The signature is checked against the Hub's own did:web key
+  // (from AUTH_HUB_URL) for this oracle's origin, then the owner object
+  // confirms the outcome through Auth Hub's authenticated status API.
+  app.post('/api/internal/actions/outcomes', async (c) => {
+    if (
+      c.env.HUB_ACTIONS_ENABLED !== 'true' ||
+      !c.env.AUTH_HUB_URL ||
+      !c.env.AUTH_HUB_CHANNEL_SERVICE_KEY
+    )
+      return c.json({ code: 'unauthorized' }, 401);
+    const body = await c.req.raw.text();
+    if (body.length > 64_000) return c.json({ code: 'request_too_large' }, 413);
+    if (
+      !(await verifyHubOutcomeCallback({
+        hubUrl: c.env.AUTH_HUB_URL,
+        rawBody: body,
+        headers: c.req.raw.headers,
+        // The origin the Hub signs for: the configured public URL when
+        // set (a Worker reachable under several hostnames), else the
+        // origin this request came in on.
+        audience: callbackAudience(c.env.ORACLE_PUBLIC_URL, c.req.url),
+        ...(c.env.AUTH_HUB ? { fetcher: c.env.AUTH_HUB } : {}),
+      }))
+    )
+      return c.json({ code: 'unauthorized' }, 401);
+    try {
+      const outcome = parseOutcome(JSON.parse(body));
+      await userStub(c.env, outcome.ownerDid).recordHubActionOutcome(outcome);
+      return c.json({
+        accepted: true,
+        eventId: outcome.eventId,
+        accountId: outcome.reference.accountId,
+        actionId: outcome.reference.id,
+        revision: outcome.authorizedRevision,
+        digest: outcome.authorizedDigest,
+        sequence: outcome.sequence,
+      });
+    } catch (error) {
+      console.warn(
+        `[hub-actions] outcome refused: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return c.json({ code: 'outcome_refused' }, 409);
+    }
+  });
+
   app.post('/channels/turn', async (c) => {
     try {
       if (parseChannelServiceDids(c.env.CHANNEL_SERVICE_DID).length === 0)
@@ -547,6 +625,8 @@ export function createShell(
           outcome.status,
         );
       const result = outcome.result;
+      if (result.actionOutcomes?.length || result.hubActionOutcomes?.length)
+        await assertActiveChannelBindingCached(identity, c.env);
       return c.json(
         result,
         ['queued', 'running', 'recovering'].includes(result.status) ? 202 : 200,
@@ -607,8 +687,15 @@ export function createShell(
     if (!limiter) return next();
     const auth = c.get('auth') as AuthResult | undefined;
     if (!auth) return next();
+    // The chat lists' status poll and the card routes (Portal's review
+    // page) each have their own bucket: polling a card or the run list
+    // while chatting must not push turns into 429.
     const scope =
-      c.req.method === 'GET' && c.req.path === '/runs/active' ? 'poll' : 'user';
+      c.req.method === 'GET' && c.req.path === '/runs/active'
+        ? 'poll'
+        : c.req.path.startsWith('/action-proposals/')
+          ? 'action'
+          : 'user';
     const { success } = await limiter.limit({
       key: rateLimitKey(c.env, scope, auth.userDid),
     });
@@ -623,6 +710,129 @@ export function createShell(
       );
     return next();
   });
+
+  // What the owner object answers a proposal command with: the card; a
+  // conflict (the card or the authority it was sealed on changed: the Portal
+  // re-reads and retries, 409); or an authority read that failed and may
+  // succeed later (503, with a generic message).
+  const ProposalReply = z.discriminatedUnion('ok', [
+    z.object({ ok: z.literal(true), proposal: ActionProposalWireSchema }),
+    z.object({
+      ok: z.literal(false),
+      error: z.string(),
+      kind: z.enum(['conflict', 'unavailable']).default('conflict'),
+    }),
+  ]);
+  const refusalStatus = (kind: 'conflict' | 'unavailable') =>
+    kind === 'unavailable' ? 503 : 409;
+
+  app.get('/action-proposals/:proposalId', async (c) => {
+    c.header('Cache-Control', 'private, no-store');
+    c.header('Vary', 'Authorization');
+    const parsed = ActionProposalIdSchema.safeParse(c.req.param('proposalId'));
+    if (!parsed.success) return c.json({ error: 'Invalid proposal ID' }, 400);
+    const identity = identityOf(c.get('auth'), c.req.raw.headers);
+    const proposal = await userStub(c.env, identity.userDid).actionProposal(
+      identity,
+      parsed.data,
+    );
+    if (!proposal) return c.json({ error: 'Proposal not found' }, 404);
+    const result = ProposalReply.parse(JSON.parse(proposal));
+    return result.ok
+      ? c.json({ proposal: result.proposal })
+      : c.json({ error: result.error }, refusalStatus(result.kind));
+  });
+  for (const operation of ['claim', 'reject', 'revoke', 'reconcile'] as const) {
+    app.post(
+      `/action-proposals/:proposalId/${operation}`,
+      limitBody(4096),
+      async (c) => {
+        c.header('Cache-Control', 'private, no-store');
+        c.header('Vary', 'Authorization');
+        const id = ActionProposalIdSchema.safeParse(c.req.param('proposalId'));
+        const body = await c.req.json().catch(() => null);
+        const parsed = (
+          operation === 'reconcile'
+            ? z.union([
+                ActionProposalReconcileSchema,
+                TopicReceiptReferencesSchema,
+              ])
+            : ActionProposalClaimSchema
+        ).safeParse(body);
+        if (!id.success || !parsed.success)
+          return c.json({ error: 'Invalid proposal command' }, 400);
+        const identity = identityOf(c.get('auth'), c.req.raw.headers);
+        try {
+          const command =
+            operation === 'reconcile'
+              ? 'v' in parsed.data
+                ? {
+                    kind: 'topic-reconcile' as const,
+                    input: TopicReceiptReferencesSchema.parse(parsed.data),
+                  }
+                : {
+                    kind: operation,
+                    ...ActionProposalReconcileSchema.parse(parsed.data),
+                  }
+              : {
+                  kind: operation,
+                  ...ActionProposalClaimSchema.parse(parsed.data),
+                };
+          const proposal = await userStub(
+            c.env,
+            identity.userDid,
+          ).actionProposal(identity, id.data, command);
+          if (!proposal) return c.json({ error: 'Proposal not found' }, 404);
+          const result = ProposalReply.parse(JSON.parse(proposal));
+          return result.ok
+            ? c.json({ proposal: result.proposal })
+            : c.json({ error: result.error }, refusalStatus(result.kind));
+        } catch (error) {
+          if (
+            error instanceof ActionProposalConflict ||
+            (error instanceof Error && error.name === 'ActionProposalConflict')
+          )
+            return c.json({ error: error.message }, 409);
+          throw error;
+        }
+      },
+    );
+  }
+
+  app.post(
+    '/action-proposals/:proposalId/begin-step',
+    limitBody(4096),
+    async (c) => {
+      c.header('Cache-Control', 'private, no-store');
+      c.header('Vary', 'Authorization');
+      const id = ActionProposalIdSchema.safeParse(c.req.param('proposalId'));
+      const body = BeginTopicStepSchema.safeParse(
+        await c.req.json().catch(() => null),
+      );
+      if (!id.success || !body.success)
+        return c.json({ error: 'Invalid topic step command' }, 400);
+      const identity = identityOf(c.get('auth'), c.req.raw.headers);
+      const raw = await userStub(c.env, identity.userDid).beginTopicStep(
+        identity,
+        id.data,
+        body.data,
+      );
+      if (!raw) return c.json({ error: 'Proposal not found' }, 404);
+      const response = z
+        .discriminatedUnion('ok', [
+          z.object({ ok: z.literal(true), result: BeginTopicStepResultSchema }),
+          z.object({
+            ok: z.literal(false),
+            error: z.string(),
+            kind: z.enum(['conflict', 'unavailable']).default('conflict'),
+          }),
+        ])
+        .parse(JSON.parse(raw));
+      return response.ok
+        ? c.json(response.result)
+        : c.json({ error: response.error }, refusalStatus(response.kind));
+    },
+  );
 
   // --- sessions ----------------------------------------------------------------
   app.post('/sessions', async (c) => {

@@ -1,3 +1,5 @@
+import { ActionReferenceSchema } from '@ixo/ixo-transaction/action-proposals';
+import { parseReference } from '@ixo/action-protocol';
 /**
  * A finished run → its Reply Plan. Built once, when the run finishes, from
  * the turn's own messages (the model's checkpointed history is never
@@ -160,11 +162,45 @@ export function draftReplyPlan(input: {
         );
       else parts.push({ kind: 'spill', key: `step-${i}`, spill: shape.spill });
     }
-    for (const call of step.toolCalls)
+    for (const call of step.toolCalls) {
+      if (
+        call.name === 'request_hub_action' ||
+        call.name === 'request_hub_transfer'
+      ) {
+        try {
+          const result = JSON.parse(input.toolResults.get(call.id) ?? 'null');
+          if (result?.status === 'prepared') {
+            const actionReference = parseReference(result.actionReference);
+            if (
+              typeof result.summary === 'string' &&
+              result.summary === actionReference.title
+            )
+              parts.push({
+                kind: 'hub-action',
+                actionReference,
+                summary: result.summary,
+              });
+          }
+        } catch {
+          // Only a parsed tool result becomes a structured Hub reference.
+        }
+      }
+      if (call.name === 'prepare_action') {
+        try {
+          const result = JSON.parse(input.toolResults.get(call.id) ?? 'null');
+          if (result?.status === 'prepared') {
+            const ref = ActionReferenceSchema.safeParse(result.action);
+            if (ref.success) parts.push({ kind: 'action', action: ref.data });
+          }
+        } catch {
+          /* A malformed result is not an action reference. */
+        }
+      }
       if (call.name === CREATE_ARTIFACT_TOOL)
         parts.push(
           ...createArtifactParts(call.args, input.toolResults.get(call.id)),
         );
+    }
   });
   return parts;
 }
@@ -221,7 +257,15 @@ function capParts(parts: PlanPart[], limits: ChatLimits): ReplyContent[] {
     (part): ReplyContent =>
       part.kind === 'text'
         ? { kind: 'text', text: part.text }
-        : { kind: 'artifact', artifact: part.artifact },
+        : part.kind === 'artifact'
+          ? { kind: 'artifact', artifact: part.artifact }
+          : part.kind === 'action'
+            ? { kind: 'action', action: part.action }
+            : {
+                kind: 'hub-action',
+                actionReference: part.actionReference,
+                summary: part.summary,
+              },
   );
 }
 

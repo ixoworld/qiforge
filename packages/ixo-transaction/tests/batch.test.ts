@@ -130,12 +130,12 @@ describe('validateTransactionBatch', () => {
         validateTransactionBatch(
           batch([
             CREATE_ACCOUNT,
-            { typeUrl: '/cosmos.bank.v1beta1.MsgSend', value: {} },
+            { typeUrl: '/cosmos.bank.v1beta1.MsgMultiSend', value: {} },
           ]),
         ),
       ),
     ).toBe(
-      'Unsupported message typeUrl /cosmos.bank.v1beta1.MsgSend: not in the IXO transaction catalog',
+      'Unsupported message typeUrl /cosmos.bank.v1beta1.MsgMultiSend: not in the IXO transaction catalog',
     );
     expect(
       failure(() =>
@@ -358,7 +358,10 @@ describe('the Portal side of a batch', () => {
   it('refuses the whole batch when one message is outside the catalog', async () => {
     const args = buildBatchSignTransactionActionArgs(batch(podBatchMessages()));
     const transactSignX = vi.fn();
-    const smuggled = { typeUrl: '/cosmos.bank.v1beta1.MsgSend', value: {} };
+    const smuggled = {
+      typeUrl: '/cosmos.bank.v1beta1.MsgMultiSend',
+      value: {},
+    };
 
     await expect(
       signIxoTransactionWithWallet(
@@ -384,7 +387,7 @@ describe('the Portal side of a batch', () => {
     ).resolves.toEqual({
       success: false,
       error:
-        'Unsupported message typeUrl /cosmos.bank.v1beta1.MsgSend: not in the IXO transaction catalog',
+        'Unsupported message typeUrl /cosmos.bank.v1beta1.MsgMultiSend: not in the IXO transaction catalog',
     });
     expect(transactSignX).not.toHaveBeenCalled();
   });

@@ -222,3 +222,258 @@ The response contains `requestId`, `sessionId` (nullable before the first sessio
 Finished channel runs trigger incremental session-history indexing without waiting for an upload. A completion during an upload schedules another pass for the final tail. The existing watermark, scoped memory invocation, cache invalidation, failure backoff, and task exclusions apply. Channel turns adopt the room cache's current gathered context on subsequent turns, including empty slots; other clients retain their first-contact policy. A failed or timed-out gather leaves the prior checkpointed context usable. This provides bounded freshness rather than synchronous memory extraction.
 
 Deploy this runtime before the matching gateway. No additional Auth Hub grant or room topology is introduced. Control receipts and cancellation reservations use `CHANNEL_RECORD_RETENTION_MS`; they are pruned in bounded housekeeping batches.
+# Auth Hub action review (disabled by default)
+
+`HUB_ACTIONS_ENABLED=true` adds the on-demand `request_hub_action`,
+`request_hub_transfer` and `hub_action_status` tools plus read-only
+`hub_action_capabilities` and `hub_action_options`. Discover
+capabilities first: Auth Hub returns enabled kinds, exact registered form field
+descriptors, transfer limits and the configured network. The request tool
+accepts a strictly typed candidate operation from
+`@ixo/action-protocol`; the runtime adds the authenticated owner, current
+channel binding/revision, session, run, request and tool invocation. It checks
+the active binding again before calling Auth Hub. The model cannot supply those
+identity fields or approve an action. The existing `prepare_action` Portal card
+path remains available independently.
+
+The contract is `@ixo/action-protocol` 0.5.0 from npm. This runtime
+declares protocol version 3 on its Hub calls (see below). Outcomes still
+arrive as `ixo.auth-outcome/2`, so it needs a gateway that parses that
+envelope (gateway PR 20); the bank receipts it hands the gateway keep the
+0.4.1 shape (see [bank transfers](#bank-transfers-any-token)).
+
+The oracle uses `AUTH_HUB_URL` (an HTTPS origin) and
+`AUTH_HUB_CHANNEL_SERVICE_KEY` to create and read operations; both are
+required (the `AUTH_HUB` binding alone is not enough), and the plugin's tools
+are offered only when the flag, the URL and the key are all set.
+
+Only a run an inbound channel message started may prepare a review (its run
+record carries the channel's `remoteMessageRef`; a scheduled or background run
+is refused): that is provenance, not a usage cap, and there are no per-run or
+per-user prepare caps (every action still needs the owner's review in Auth
+Hub). A retry of the same tool call is the same prepare. A refusal reaches the model
+as `{ status: 'unavailable' | 'expired', reason }`. Auth Hub's capabilities
+are cached per owner object for 60 s. The Hub's idempotency key is the
+SHA-256 hex of `runId:toolCallId` (fixed length). A retry whose reserved
+expiry has passed returns the reference recorded for it, or `expired`, and
+never POSTs a past expiry. The owner object
+reserves the canonical request and stable expiry before the Hub POST, so an
+interrupted response can be retried with the same key and bytes. It stores each
+immutable initial reference with its original turn in SQLite. The
+finished run's Reply Plan contains a `hub-action` part with a typed
+`actionReference` and short summary (the plan takes it only from a
+`prepared` result whose `summary` equals the reference's title). On a chat
+surface (`ctx.session.surface.kind === 'chat'`, which every channel turn is)
+the `prepared` result of `request_hub_action` and `request_hub_transfer`
+also carries `note`: the user is shown the action automatically as a card
+with its title and a "Review action" button, so the model must not repeat
+the link or the title, must not say it has not executed or signed anything,
+and replies with one short line or nothing. The gateway renders the part as
+that card; gateways that predate plans and the Companion room mirror get the
+title linked to the review (`planText`). A result on the Portal stream has
+no plan and no card, so it carries no note (today both tools refuse anything
+but a channel turn). The model's text is delivered as written; the note is
+the only guard against a reply that repeats the card. Polling the original
+`/channels/turn` request retrieves `hubActionOutcomes` from SQLite first (callback-delivered
+outcomes included, so an Auth Hub outage hides nothing already known). A poll
+then refreshes at most ONE action that has no terminal outcome (`succeeded`,
+`failed`, `declined`) from Auth Hub's authenticated status, with a 3 s timeout
+and a per-action backoff of 15 s doubling to 10 min (the attempt is spent
+before the read), and stops refreshing an action 24 h after its review
+expired. The newer outcome by `sequence` wins; outcome sequences never move
+backwards on write (an older one is ignored), and the object is marked dirty
+only when an outcome is new or a refresh was scheduled (the backoff is
+owner-copy state); a poll that refreshes nothing marks nothing. This read also recovers a callback that was lost.
+The callback does not count as user access. Hub rows (requests, references,
+outcomes) are pruned from the alarm, at most hourly, 30 days after their
+review expired.
+
+Auth Hub can post the same typed event to `/api/internal/actions/outcomes`,
+signed with its service DID key: `x-auth-hub-timestamp` (unix seconds),
+`x-auth-hub-key-id` (`did:web:<hub host>#key-0`) and `x-auth-hub-signature`
+(base64url Ed25519 over `${timestamp}.${audience}.${sha256hex(rawBody)}`).
+The route is on when `HUB_ACTIONS_ENABLED=true`, `AUTH_HUB_URL` and
+`AUTH_HUB_CHANNEL_SERVICE_KEY` are set, and answers `401` otherwise. The Hub
+DID comes from `AUTH_HUB_URL` (never from the request); its document is read
+from `${AUTH_HUB_URL}/.well-known/did.json` (https only, at most 64 KB, no
+redirects, through `AUTH_HUB` when bound), must carry that exact DID and the
+`#key-0` key; only such a document's key is cached, for one hour per isolate.
+The checks that need no key run first: all three headers present, the Hub's
+key id, a well-formed timestamp within 300 s either way, a signature that
+decodes to 64 bytes; a callback failing them causes no Hub read. The document
+is read at most once a minute per isolate, whatever the read's outcome (a Hub
+`503`, a network error, a document for another DID), and concurrent callbacks
+share one read. A signature the cached key does not verify reads it once more
+under the same limit (a key rotation). The audience is the origin of
+`ORACLE_PUBLIC_URL` when it is set (a Worker reachable under several
+hostnames), else the origin of the incoming request URL, so a callback signed
+for another oracle, or for another hostname, fails. There is no shared callback secret
+any more (`AUTH_HUB_ACTION_OUTCOME_KEY` is removed); an
+`x-auth-hub-outcome-key` header the Hub still sends during its transition is
+ignored, never required. A valid signature is not trusted on its own: the
+receiver checks the event against its stored original reference and confirms
+it through Auth Hub's authenticated status API before storing it. A replay of
+an outcome already stored at that action id and sequence, with the same
+content, is acknowledged without a Hub read. Outcomes are compared in the
+0.4.1 receipt shape: an action prepared at protocol version 2 (runtime
+0.23.0) gets its callback without the bank `denom`/`amountBaseUnits`, while
+the confirming status read (version 3) carries them.
+Neither a callback nor a model turn executes a transfer. Hub-owned native
+transfer events remain status only. A resource open is not treated as
+acceptance or submission.
+
+The operation registry and owner review live in Auth Hub. Enabling this runtime
+flag requires compatible Hub routes, registered account and binding policy,
+separate inbound/outbound service credentials, and gateway support for typed
+`hub-action` parts and `hubActionOutcomes`. Local tests do not establish live
+channel, wallet, provider or form-owner acceptance.
+
+Other HTTP hosts can import the framework-independent
+`@ixo/oracle-runtime-workers/hub-actions/client` subpath. Pass a registered
+oracle key and HTTPS Hub origin to `HubActionClient`, call `capabilities()` to
+construct only supported operations, then `request()` with a stable request key
+and expiry in Unix **seconds**. Persist both before POST. The same key must
+reuse identical bytes on retry. `status(reference.id)` is an authenticated
+owner-scoped recovery read; an operation reference alone is never completion.
+The `@ixo/oracle-runtime-workers/hub-actions/request` subpath implements these
+checks for hosts with a durable `reserve`/`record` store. Envelope versions
+are `ixo.auth-action/1`, `ixo.auth-capabilities/2`, `ixo.auth-outcome/2` and
+`ixo.auth-options/3`; unsupported kinds and versions fail closed.
+
+The runtime declares protocol version 3 (`?version=3`) on the capabilities,
+prepare, status and options calls. Version 3 is the 0.5.0 contract:
+capabilities with per-denom `transfer.limits`, any-denom bank sends, receipts
+with `denom` and `amountBaseUnits`, options with the owner's tokens. Version 2
+callers (runtime 0.23.0) keep the 0.4.1 shapes; without a version Auth Hub
+answers v1 (the three P1 kinds only, v1-filtered outcomes) and refuses a P2
+prepare with `protocol_version_required`. The Hub stores the version per
+action for the outcomes it pushes. Pairing: this runtime must run with gateway PR 20 (it accepts the v2
+envelopes and the P2 receipt kinds); gateway PR 19 understands only
+`ixo.auth-outcome/1` and must never run against this runtime (a v2 outcome
+fails the whole turn). Outcomes arrive as `ixo.auth-outcome/2`; `expired` and
+`cancelled` (never executed, receipt null) are terminal like `succeeded`,
+`failed` and `declined`, so a poll stops refreshing them. Gateways that read
+`hubActionOutcomes` must accept the v2 envelope.
+
+Protocol package `0.5.0` supports bank sends of any listed token, exact signed
+statements, Gmail connection/removal and one reviewed plain-text email, Google
+Calendar connection/removal and one reviewed event, document read-access
+requests, and new private text files. `hub_action_options` requests
+`ixo.auth-options/3` and obtains confirmed connections, requestable document
+identifiers, existing action resources and the owner's bank tokens for the
+current owner and channel binding; an older options version is refused. Each connection carries its `gmail` or `calendar`
+service; do not use a profile-only Gmail connection for sending. Old Hub clients
+still receive Calendar-only options version 1 by default. The tool accepts no
+model-supplied identity. The shared
+`operationJsonSchema` is the tool schema source; there is no second runtime
+operation catalogue. Capability and options reads may be used by any registered
+oracle account with the compatible channel adapter.
+
+## Bank transfers (any token)
+
+`request_hub_transfer` prepares an `ixo.bank.send.v1` review; the generic
+`request_hub_action` refuses bank sends. The model supplies only the
+recipient, a token `denom` copied from `hub_action_options` `transfer.tokens`
+(at most 50: `denom`, `symbol`, `decimals`, `verified`, `balanceBaseUnits`),
+a decimal `amount` in that token's display units and an optional memo. The
+owner object then reads the options again (the balance must be current),
+refuses a denom that is not in the list (it never guesses an `ibc/…` hash),
+and converts the amount to base units with the listed `decimals` using
+integer arithmetic. It refuses more fraction digits than the token has, a
+zero amount, an amount above the balance, and, from the capabilities, an
+amount above the per-denom `transfer.limits` cap (`maxAmountBaseUnits`; a
+legacy `maxAmountUixo` caps only `uixo`). These are client-side pre-checks:
+Auth Hub enforces its own. The network is the account's capability, the
+chain id this Worker's `IXO_TRANSACTION_CHAIN_ID_*` for that network, the
+sender the owner's account. No fee is sent: Auth Hub simulates gas and sets
+the fee. A token that is not `verified` has `decimals` 0, so its amounts are
+base units; the model is told to name its full denom and say it is
+unverified (anyone controlling a factory or cw20 token can call it "USDC").
+
+Auth Hub can refuse a prepare with `{error, reason?}`; these reach the model
+as `{status: 'unavailable', reason}` in plain words (with the Hub's reason, at
+most 200 characters): `400` `simulation_failed`, `fee_above_ceiling` and
+`insufficient_funds` (the transfer as asked cannot go ahead); `409`
+`sequence_mismatch` and `503` `transfer_unavailable` (temporary: try again
+shortly); any other `409` (the operation is not available for this account,
+and a retry gets the same answer). Any other `400` or `503` is a transport
+error. Only the protocol refusing the operation the owner object built from
+the model's fields (an invalid recipient or memo) becomes "The transfer is
+incomplete (…)"; a `TypeError` from anywhere else stays an error.
+
+A transfer runs the turn-origin refusal first (no Hub read for a scheduled
+or background run), then validates the binding once for the whole call.
+
+The owner object stores the token (denom, symbol, decimals, verified) next to
+the prepared action. `hub_action_status` returns `{status: 'known', outcome,
+summary?}`, where `summary` is the owner-facing line for a bank receipt, for
+example `Transfer of 1.25 USDC (ibc/…) confirmed on chain. Transaction …,
+block …`, or `… was not included on chain (expired not included)`. A
+verified token shows its symbol (and its full denom unless it is `uixo`); an
+unverified token, or a receipt whose denom differs from the stored token,
+shows base units and the full denom with an "unverified token" marker. The
+`hubActionOutcomes` a channel poll returns to the gateway drop the receipt's
+`denom` and `amountBaseUnits` (the gateway parses the exact 0.4.1 bank
+receipt), so nothing new reaches the gateway. A transfer review is the same
+`hub-action` Reply Plan part as any other Hub review.
+
+The owner completes each review in Auth Hub. Gmail and Calendar setup return a fresh
+review with the account and scopes selected at Google; setup alone does not
+authorize a connection, email or event. The Gmail review freezes the verified
+sender, one recipient, subject and full message; edits create a new review before
+consent. Gmail permission includes managing drafts, although this action sends
+directly and does not read inbox messages. Connector and VFS services check fresh owner
+proofs and current Hub admission, own their durable effects and return typed
+receipts. An access-request receipt means `pending_owner`, never access granted.
+Private file content opens on its registered separate resource origin; it is
+not included in the Reply Plan or completion notice. Unknown effects are status
+reads on the same action, never a new model execution attempt. A
+`gmail.message.accepted.v1` receipt means Gmail accepted the email for sending;
+it does not prove delivery. A lost send response can remain unknown. The owner
+object enforces one Gmail send in flight per mailbox: while an earlier
+`gmail.message.send.v1` to the same connection id or the same account label
+(a reconnect gets a new id) has the latest outcome `authorized`, `submitted`
+or `unknown`, a new send is refused (`unavailable`, with the earlier action's
+id as `priorActionId`); for an `unknown` one the owner is asked to check
+Gmail's Sent folder. The refusal lifts when that action reaches a terminal
+outcome (or its rows are pruned, 30 days after its review expired). A Gmail send or disconnect must also name a
+connection (service `gmail`, id and label) from the owner's
+`hub_action_options` (the last read within 10 minutes, else a fresh one at
+options version 2, which does not make the Hub read the owner's balances);
+any other is refused. The tool's refusal names the field the protocol
+rejected (for example `Invalid fromAddress`). The Gmail service requires fresh independently verified scope
+attestations and confirmed proxy no-retry behavior; missing evidence disables
+the journey. Local conformance fixtures do not establish those activation gates.
+
+Both shared packages come from the npm registry: `@ixo/action-protocol` 0.5.0
+and `@ixo/topic-protocol` 1.0.0-rc.8 (the Worker-safe build with precompiled
+validators), pinned exactly in the runtime and in `@ixo/ixo-transaction`. No
+workspace override or vendored archive remains, and `prepublishOnly` refuses
+to publish if one comes back (`scripts/assert-no-vendored-overrides.mjs`).
+
+```ts
+import { HubActionClient } from '@ixo/oracle-runtime-workers/hub-actions/client';
+
+const hub = new HubActionClient({ origin: hubOrigin, key: oracleServiceKey });
+const capabilities = await hub.capabilities();
+// Choose a registered operation from capabilities; never invent form fields.
+const expiresAt = await durableRequests.reserve(
+  requestKey,
+  operation,
+  Math.floor(Date.now() / 1000) + 900,
+);
+const reference = await hub.request({
+  bindingId,
+  bindingRevision,
+  requestKey,
+  expiresAt,
+  operation,
+});
+await durableRequests.record(requestKey, reference);
+const latest = await hub.status(reference.id);
+```
+
+Here `durableRequests` is the host's persistent idempotency store; it returns
+the original expiry for every retry of the same key and rejects changed
+operation bytes. The Workers adapter supplies one in the owner's Durable
+Object.

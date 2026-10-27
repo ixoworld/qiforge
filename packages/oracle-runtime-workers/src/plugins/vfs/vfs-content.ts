@@ -1,12 +1,13 @@
 import { HumanMessage } from '@langchain/core/messages';
 import type { MessageContent } from '@langchain/core/messages';
+import { MAX_MODEL_LANE_BYTES, replyText } from '../../attachments/extract';
 import type { RuntimeContext } from '../../plugin-api/types';
 import { bytesToBase64 } from '../base64';
-import type { VfsClient, VfsFileStat } from './vfs-client';
+import type { VfsClient, VfsContentBytes, VfsFileStat } from './vfs-client';
 import { VfsContentTooLargeError, VfsHttpError } from './vfs-errors';
 
 /** Cap on the bytes we download and base64 into the vision model. */
-export const MAX_VISION_BYTES = 10 * 1024 * 1024;
+export const MAX_VISION_BYTES = MAX_MODEL_LANE_BYTES;
 
 /** MIME types that are text even though they don't start with `text/`. */
 const TEXT_MIME_EXACT = new Set<string>([
@@ -70,17 +71,37 @@ function isRenderableMime(mime: string): boolean {
 }
 
 /**
- * Read a non-text file for the agent. Returns a metadata stub without
- * downloading when the stored size or type already rules rendering out;
- * otherwise fetches at most {@link MAX_VISION_BYTES} and routes the bytes
- * through the vision model, returning its description/transcription. A vision
- * failure degrades to a metadata stub.
+ * What rendering a binary produced: the model's text (`truncated` when the
+ * provider stopped it at its output limit), or a metadata stub.
  */
-async function renderBinary(
+type BinaryRendering = { text: string; truncated: boolean } | { stub: string };
+
+/** True when the provider cut the reply at its output-token limit. */
+function stoppedAtLimit(metadata: unknown): boolean {
+  if (typeof metadata !== 'object' || metadata === null) return false;
+  const reason =
+    'finish_reason' in metadata
+      ? metadata.finish_reason
+      : 'stop_reason' in metadata
+        ? metadata.stop_reason
+        : undefined;
+  return reason === 'length' || reason === 'max_tokens';
+}
+
+/**
+ * Shared body of {@link renderBinary} and {@link renderBinaryForIngestion}.
+ * Returns a metadata stub without downloading when the stored size or type
+ * already rules rendering out; otherwise fetches at most
+ * {@link MAX_VISION_BYTES} and routes the bytes through the vision model. A
+ * vision failure is a stub too; the caller decides whether a stub is
+ * acceptable (`vfs_read`) or an error (ingestion).
+ */
+async function renderBinaryOrStub(
   client: VfsClient,
   rtCtx: RuntimeContext,
   stat: VfsFileStat,
-): Promise<string> {
+  preloaded?: VfsContentBytes,
+): Promise<BinaryRendering> {
   const name = basename(stat.path) || stat.id;
   const publicSuffix = stat.publicUrl
     ? ` — public link: ${stat.publicUrl}`
@@ -89,17 +110,23 @@ async function renderBinary(
     `[binary file "${name}" — ${mime}, ${size} bytes — too large to render (limit ${MAX_VISION_BYTES} bytes)${publicSuffix}]`;
   const storedMime = stat.mimeType || 'application/octet-stream';
 
-  if (stat.size > MAX_VISION_BYTES) return tooLarge(storedMime, stat.size);
+  if (stat.size > MAX_VISION_BYTES)
+    return { stub: tooLarge(storedMime, stat.size) };
   if (stat.mimeType && !isRenderableMime(stat.mimeType)) {
-    return `[binary file "${name}" — ${stat.mimeType}, ${stat.size} bytes — not rendered${publicSuffix}]`;
+    return {
+      stub: `[binary file "${name}" — ${stat.mimeType}, ${stat.size} bytes — not rendered${publicSuffix}]`,
+    };
   }
 
-  let downloaded: Awaited<ReturnType<VfsClient['contentBytes']>>;
+  let downloaded: VfsContentBytes;
   try {
-    downloaded = await client.contentBytes(stat.id, MAX_VISION_BYTES);
+    downloaded =
+      preloaded ?? (await client.contentBytes(stat.id, MAX_VISION_BYTES));
   } catch (err) {
     if (err instanceof VfsContentTooLargeError) {
-      return tooLarge(storedMime, `more than ${MAX_VISION_BYTES}`);
+      return {
+        stub: tooLarge(storedMime, `more than ${MAX_VISION_BYTES}`),
+      };
     }
     throw err;
   }
@@ -109,7 +136,9 @@ async function renderBinary(
   const isImage = mime.startsWith('image/');
   const isDoc = isDocMime(mime);
   if (!isImage && !isDoc) {
-    return `[binary file "${name}" — ${mime}, ${size} bytes — not rendered${publicSuffix}]`;
+    return {
+      stub: `[binary file "${name}" — ${mime}, ${size} bytes — not rendered${publicSuffix}]`,
+    };
   }
 
   const base64 = bytesToBase64(new Uint8Array(bytes));
@@ -138,18 +167,53 @@ async function renderBinary(
     const result = await model.invoke([new HumanMessage({ content })], {
       signal: rtCtx.abortSignal,
     });
-    const text =
-      typeof result.content === 'string'
-        ? result.content
-        : String(result.content);
-    if (text.trim().length > 0) return text;
-    return `[${isImage ? 'image' : 'document'} "${name}" — ${mime}, ${size} bytes — no description returned${publicSuffix}]`;
+    const text = replyText(result.content);
+    if (text.trim().length > 0) {
+      return { text, truncated: stoppedAtLimit(result.response_metadata) };
+    }
+    return {
+      stub: `[${isImage ? 'image' : 'document'} "${name}" — ${mime}, ${size} bytes — no description returned${publicSuffix}]`,
+    };
   } catch (err) {
     rtCtx.logger.warn(
       `[vfs] vision render failed for ${name}: ${err instanceof Error ? err.message : String(err)}`,
     );
-    return `[${isImage ? 'image' : 'document'} "${name}" — ${mime}, ${size} bytes — could not be rendered${publicSuffix}]`;
+    return {
+      stub: `[${isImage ? 'image' : 'document'} "${name}" — ${mime}, ${size} bytes — could not be rendered${publicSuffix}]`,
+    };
   }
+}
+
+/**
+ * Read a non-text file for the agent: the vision model's description or
+ * transcription, or a metadata stub when the file cannot be rendered.
+ */
+async function renderBinary(
+  client: VfsClient,
+  rtCtx: RuntimeContext,
+  stat: VfsFileStat,
+): Promise<string> {
+  const rendered = await renderBinaryOrStub(client, rtCtx, stat);
+  return 'text' in rendered ? rendered.text : rendered.stub;
+}
+
+/**
+ * Like {@link renderBinary} for callers that need the file's real text (the
+ * memory plugin's document ingestion): a file that is too large, not
+ * renderable or that the vision model fails on throws instead of returning a
+ * stub, so a stub is never mistaken for the document's content. Pass
+ * `preloaded` when the bytes are already in hand (no second download);
+ * `truncated` reports a reply the provider cut at its output limit.
+ */
+export async function renderBinaryForIngestion(
+  client: VfsClient,
+  rtCtx: RuntimeContext,
+  stat: VfsFileStat,
+  preloaded?: VfsContentBytes,
+): Promise<{ text: string; truncated: boolean }> {
+  const rendered = await renderBinaryOrStub(client, rtCtx, stat, preloaded);
+  if ('text' in rendered) return rendered;
+  throw new Error(rendered.stub);
 }
 
 /**

@@ -650,7 +650,12 @@ object fetches the six context slots (`identity`, `work`, `goals`,
 `interests`, `relationships`, `recent`) from the memory engine with one
 `POST /search-enhanced-batch` and the prompt composer renders them, so the
 agent does not have to call `search_memory_engine` to know who it is talking
-to. Settings and the measured latencies are in
+to. The request carries the user's UCAN invocation, the oracle room
+(`x-room-id`) and the oracle's domain entity (`x-oracle-entity-did:
+<ORACLE_ENTITY_DID>`, also every query's `oracle_dids`), which the engine
+keys the user's space and the shared knowledge by
+([memory engine contract](configuration.md#memory-engine-contract)).
+Settings and the measured latencies are in
 [configuration](configuration.md#first-turn-memory-prefetch).
 
 - **Waiting.** A thread with no checkpointed `userContext` (first contact)
@@ -690,7 +695,7 @@ memories…`. The client SDK does not render `router.update` frames yet, so
   A first contact that fetches nothing prints it too, with `waited=0ms` and
   the reason: `no-room`, `disabled` (`USER_CONTEXT_PREFETCH=off` or no
   `MEMORY_ENGINE_URL`), `not-booted`, `group-room`, `no-memory-grant`, or the
-  fetcher's `no-signing-key`, `no-invocation`, `recently-failed`; a `failed`
+  fetcher's `no-entity`, `no-signing-key`, `no-invocation`, `recently-failed`; a `failed`
   outcome carries its reason the same way. Task-run and supplied-context
   turns print nothing, and a thread that already holds a context prints
   nothing on its later turns),
@@ -707,7 +712,11 @@ recent=missing)` (per slot: rendered fact, entity, episode and community
   dropped. It should not happen and is worth a look),
   `failed for room=…: <reason> (not retried for 60s)` and the fetcher's own
   `skipped: …` (no engine URL, no signing key, no invocation, a recent
-  failure). A user with no `ixo:memory` delegation gets
+  failure; a missing or malformed `ORACLE_ENTITY_DID` is warned about once
+  per user object, `skipped: ORACLE_ENTITY_DID is not a domain entity DID …`,
+  and every first contact then reads `reason=no-entity`). The session-history
+  indexer logs the same condition once as `[history-indexer] ORACLE_ENTITY_DID
+  is not a domain entity DID …` and uploads nothing. A user with no `ixo:memory` delegation gets
   `first contact … outcome=skipped reason=no-memory-grant` on every first
   turn and is not slowed. If every one of the six slots fails the batch
   counts as `failed` (`every slot failed`), not as an empty answer.
@@ -1435,22 +1444,105 @@ The constants named here are listed in
   `sandbox_write_blob` reports `success: false` for a failed write. A
   sandbox connect reads the user's secrets with one room-state read
   (`ctx.secrets.getAll()`).
-- **Memory.** `memory-engine__add_oracle_knowledge` is in the default tool
-  surface, so every user's agent lists it, and the Memory Engine decides who
-  may use it: the call is refused (`Forbidden: …`) unless the calling user is
-  a domain member of an entity whose linked entities include the oracle DID.
-  From memory engine 1.5.0 a domain member is a `controller` or the `owner`
-  of that entity, the `id` of a `linkedEntity` with `service: matrix` and
-  `relationship: admin` (not `support`), or a member with positive voting
-  power of a DAO group (`did:ixo:wasm:…`) among those; legacy `did:x:zQ3…`
-  keys count as their `did:ixo:<address>` account. Engine 1.4.x admitted
-  controllers and the owner only. The engine caches the member set for
+- **Memory.** The Memory Engine keys everything by the oracle's domain
+  entity: every request names it in `x-oracle-entity-did`
+  (`ORACLE_ENTITY_DID`), the user's personal space is per (user, entity)
+  and the shared knowledge is the entity's. The engine refuses a request
+  without the header (`400 ENTITY_HEADER_MISSING` / `ENTITY_HEADER_INVALID`),
+  an entity whose on-chain document does not list the oracle's agent
+  account (`ORACLE_DID`) as a `linkedEntity` with `service: matrix` and
+  `relationship: admin` (`403 ENTITY_NOT_VOUCHED`), and, fail closed, an
+  entity it could not read from Blocksync with nothing usable cached
+  (`403 ENTITY_UNVERIFIED`); there is no fallback to the agent DID. The
+  runtime refuses to boot the memory plugin without a well-formed
+  `ORACLE_ENTITY_DID` (`did:ixo:entity:` followed by 32 lower-case hex
+  characters), and the prefetch and the
+  history upload send nothing without one
+  ([memory engine contract](configuration.md#memory-engine-contract)).
+  `memory-engine__add_oracle_knowledge` is in the default tool surface, so
+  every user's agent lists it, and the Memory Engine decides who may use
+  it: the call is refused (`Forbidden: …`) unless the calling user is a
+  domain member of the oracle's entity itself: a `controller` or the
+  `owner` of that entity, the `id` of one of its `linkedEntity` items with
+  `service: matrix` and `relationship: admin` (not `support`), or a member
+  with positive voting power of a DAO group (`did:ixo:wasm:…`) among those;
+  legacy `did:x:zQ3…` keys count as their `did:ixo:<address>` account. The
+  engine caches the entity's document (members and vouched agents) for
   5 min and refuses while Blocksync is unreachable and nothing cached is
-  usable. The call is also refused without
+  usable. Because of that cache, an agent removed from the entity's
+  `matrix` / `admin` links keeps access for up to 5 minutes, and for up to
+  15 minutes during a Blocksync outage (the stale entry is served while
+  Blocksync cannot be read). The call is also refused without
   `confirmed_insertion_from_user: true`. The agent has to confirm the scope
   with the user first: `public` knowledge is read by every user of the
   oracle, `private` by its domain members only. A fork that does not want
   the tool passes `selectedTools` without it.
+- **Oracle documents.** `add_oracle_document`, `list_oracle_documents`
+  and `delete_oracle_document` are native tools of the memory plugin (on
+  unless `new MemoryPlugin({ documentTools: false })`), listed only next to
+  the upstream memory tools, so a user without an `ixo:memory` delegation
+  sees none of them. They call the engine's `/knowledge/documents` routes
+  with the same UCAN invocation as the prefetch plus
+  `x-oracle-entity-did` (`ORACLE_ENTITY_DID`, as on every engine path; never the `ORACLE_DID` fallback); the engine
+  decides who may write (the same domain-member rule as
+  `add_oracle_knowledge`) and the tool turns its refusals into plain
+  sentences (`DOMAIN_ACCESS_DENIED`, `DOCUMENT_EXISTS`,
+  `EPISODE_TOO_LARGE`, `DOCUMENT_TOO_LARGE`, `DOCUMENT_LIMIT`, 429
+  queue/backlog/budget/rate with the retry hint). The source is a chat attachment (`source.kind` `attachment`, whose
+  `ref` is the `[source: …]` value of the attached file) or a Library file (kind `vfs`, `ref` the path); one field pair, because a
+  model asked to fill two optional source fields fills both. `group_as_document` is required with no default: `true` keeps the
+  file as one document under a document id (listable, replaced by adding the
+  same `document_id` again, removed whole; a replace or delete is accepted while the old text is still ingesting and finishes in the background), `false` stores each part as an
+  ordinary knowledge episode with no document (found by search, removed
+  one by one with `delete_episode`). The tool description tells the model to
+  group a coherent record (a board resolution, a contract, a report), to store a file of unrelated facts as loose facts, and to ask
+  the person when it cannot tell. It also refuses to write until
+  `confirmed_insertion_from_user` is `true`, and `delete_oracle_document`
+  until `confirmed_deletion_from_user` is. The text is read at most
+  `MEMORY_DOCUMENT_MAX_CHARS` (default parts × part size, 768,000
+  characters) and cut into parts of at
+  most `MEMORY_DOCUMENT_CHUNK_BYTES` (12,000 bytes) on paragraph, line, then
+  sentence boundaries, at most `MEMORY_DOCUMENT_MAX_CHUNKS` (64) parts; the
+  product never exceeds the engine's 900,000-byte document cap. A part that
+  would only name a page (`--- page 4 ---`) or hold only whitespace is
+  never sent. A
+  file needing more, or cut by the character cap, is refused with its size
+  and nothing is written, unless the call passes `allow_truncation: true`
+  (only the first parts are kept). A file without text is refused. A text-layer PDF or a text file may be up to 25 MB; a scanned PDF, an image or an Office file goes to the helper model only up to 10 MB, and a helper transcription the model cut off (`finish_reason: length`) counts as truncated. A PDF is read page by page and stops at the character cap. The extracted text is kept in memory for 10 minutes (4 files per user object), so the confirm-then-call round trip and a retry with `allow_truncation` do not download or parse the file again. A Library file needs the Files plugin on this oracle. After a
+  successful add or delete the room's prefetch cache is dropped, like any
+  memory write. The result string of a refused write is not an error
+  result, so a refused call also drops the cache; that only costs one
+  extra gather.
+  - **Tool choice.** The memory manifest says the oracle-knowledge line is
+    for knowledge typed in the chat, and that a file the person attached or
+    a Library file always goes to `add_oracle_document`, never to
+    `add_oracle_knowledge`, even when its text is visible in the
+    conversation; the tool description opens with the same rule and the
+    document tools are listed before the upstream ones.
+  - **Ids and retries.** A grouped write without `document_id` gets one
+    derived from the title (lowercase `[a-z0-9.-]`, at most 80 characters)
+    plus the first 8 hex digits of the SHA-256 of the part contents, and the
+    result reports it, so repeating the call after a timeout replaces
+    instead of duplicating. After a timeout a grouped write is told to call
+    again with the same id; a loose write is told not to retry and to search
+    for what landed. `PARTIAL_QUEUE` reports how many parts were stored
+    (grouped: call again with the same id; loose: do not retry). A 429
+    carries the engine's `Retry-After`. In loose mode `document_id`,
+    `if_exists` and `source_description` are ignored and the result lists
+    them under `ignored_in_loose_mode`. A `delete_failed` document shows the
+    engine's `delete_error` in `list_oracle_documents`, which also takes a
+    `status` filter and a `limit` (default 100, at most 500); calling
+    `delete_oracle_document` again retries it.
+  - **Trade-offs.** There is no two-turn confirmation gate: like `clear`
+    and `delete_episode`, a write or delete proceeds when the model passes
+    `confirmed_insertion_from_user` / `confirmed_deletion_from_user` true,
+    and the description tells it to ask the person first; a model that sets
+    the flag unasked defeats it, and the engine's domain-member check is the
+    real gate. A write holds the turn's write slot until the engine has
+    queued every part (up to the 30 s client timeout, longer when a large
+    file is read first), so another write tool of the same turn waits for
+    it. A refused call (the string is not an error result) still drops the
+    room's prefetch cache; that costs one extra gather.
 - **MCP call timeouts.** Sandbox, memory-engine and Firecrawl tools are
   MCP tools; each call carries its timeout as the MCP request's own
   (`metadata.timeoutMs`, which the MCP SDK clears when the response
@@ -1644,6 +1736,62 @@ that into a fallback instead of a failed turn:
   refusal on a model call made outside the streamed graph (attachment
   extraction while the turn is prepared) still falls back, but the notice has
   no stream to ride and is dropped.
+
+## Action cards
+
+What an operator sees of [action proposals](action-proposals.md) once
+`ACTION_PROPOSALS_ENABLED` is on:
+
+- **Boot** refuses the Worker when the feature is on without
+  `ACTION_PROPOSALS_PORTAL_ORIGIN` and a devnet or testnet RPC, or with an
+  `http`, credentialed or query-bearing URL (`validateEnv`, attributed to
+  `core`).
+- **Refusals** are one warn line each, `[action-proposals] preparation
+refused: <ErrorName>: <reason>`; the user gets a clarification. Policy
+  refusals (`Mainnet action proposals are disabled`, `Action cards are
+prepared in direct chats only`, chain id or signer mismatch) show the
+  reason to the user as well.
+- **Verification** of a signed card runs in the owner object's alarm with a
+  doubling cooldown (30 s → 10 min, ten attempts); each miss logs
+  `[action-proposals] verification of <id> pending: <reason>` (indexing lag,
+  `Chain verification unavailable`, `Transaction memo mismatch`, …). After
+  the tenth attempt the alarm stops; a Portal reconcile still verifies.
+  `[action-proposals] <id> execution blocked: Transaction subject mismatch`
+  means the recorded transaction carries the card's memo with other
+  messages: the card stays `unknown` with the hash listed and takes only a
+  revoke; the owner prepares another card.
+- **Receipts** into the originating Matrix thread or channel retry with the
+  same cooldown up to an hour apart and are `abandoned` after twelve
+  attempts; a row this build cannot read is `quarantined` with an error
+  line. Both states are visible in the owner copy's
+  `action_proposal_receipts` table and never wake the object again.
+- **Retention**: finished cards older than 90 days are deleted at the next
+  tick; a `/a/<id>` link then answers 404.
+- The alarm tick is guarded: an action-card failure logs
+  `[user-do] action proposal tick failed …` and re-arms in a minute; runs,
+  flush and tasks still run in the same tick. A row the build cannot read is
+  quarantined the first time it is met, so one bad row does not repeat the
+  failure every minute.
+- **Topic cards** (`ACTION_TOPIC_PROPOSALS_ENABLED`): a claim or step
+  request answers `409` when the card or the authority it was sealed on
+  changed, and `503 Topic authority is unavailable` when a room, DID or
+  chain read failed (reason in `[topic-actions] <id> authority
+unavailable: …`). Steps may start until an hour after the claim; a
+  started step with no reference is re-permitted to the same executor.
+  Other lines to know: `[topic-actions] authority content rejected …`
+  (room or chain content the contract refused, answered 409),
+  `[topic-actions] <id> <step> reference set aside …` (a hash proved to
+  be another card's transaction; the owner may record the right one),
+  `[topic-actions] <id> execution blocked: …` (a transaction with the
+  card's memo and other messages; the card stays `unknown` with the hash
+  listed and the owner should revoke it), `[topic-actions] verification of
+<id> quarantined: …` (a row this build cannot read; it leaves the
+  schedule), `[topic-actions] rebuilding pre-release … tables` (a
+  pre-release shape found at boot). A store that fails to open is logged
+  at boot and its routes answer `503` (`Action cards are unavailable` for
+  transfers, one `[action-proposals] <id> refused: card store unavailable`
+  line per request) while the other store keeps working.
+  See [topic-action-proposals](topic-action-proposals.md).
 
 ## Known limits
 

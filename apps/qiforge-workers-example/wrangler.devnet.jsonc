@@ -94,6 +94,9 @@
     // 32k window so pruning and summarization are reachable in a few turns
     // — only turns that pick this model as their main model are affected.
     // Drop for a production oracle.
+    "CHANNEL_SERVICE_DID": "did:web:channels.dev.ixo.earth",
+    "AUTH_HUB_URL": "https://dev.auth.ixo.earth",
+    "HUB_ACTIONS_ENABLED": "true",
     "MODEL_CONTEXT_OVERRIDES": "google/gemini-3.1-flash-lite=32000",
     // Optional: per-user-object clean-chunk cache (default 4 MiB; 8 MiB was
     // measured indistinguishable on devnet — see docs/operations.md).

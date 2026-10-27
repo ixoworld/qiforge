@@ -239,7 +239,12 @@ export function channelAuthConfig(
 const BindingVerdict = z.strictObject({ active: z.boolean() });
 
 export async function assertActiveChannelBinding(
-  identity: TurnIdentity,
+  identity: Pick<TurnIdentity, 'userDid'> & {
+    channel?: Pick<
+      NonNullable<TurnIdentity['channel']>,
+      'provider' | 'bindingId' | 'bindingRevision'
+    >;
+  },
   env: Pick<
     OracleWorkerEnv,
     'ORACLE_DID' | 'AUTH_HUB_CHANNEL_SERVICE_KEY' | 'AUTH_HUB' | 'AUTH_HUB_URL'

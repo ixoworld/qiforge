@@ -39,8 +39,14 @@ describe('proto fromJSON conversion (BE proto-JSON -> wallet EncodeObject)', () 
     });
   });
 
-  it('rejects a non-ixo namespace', () => {
-    expect(() => resolveProtoCodec('/cosmos.bank.v1beta1.MsgSend')).toThrow(
+  it('resolves a native bank transfer codec', () => {
+    expect(
+      typeof resolveProtoCodec('/cosmos.bank.v1beta1.MsgSend').fromJSON,
+    ).toBe('function');
+  });
+
+  it('rejects unsupported namespaces', () => {
+    expect(() => resolveProtoCodec('/ibc.fake.v1.MsgSend')).toThrow(
       /namespace/,
     );
   });

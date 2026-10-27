@@ -1245,6 +1245,7 @@ export class ChannelTurns {
       channel: {
         provider: input.provider,
         bindingId: input.bindingId,
+        bindingRevision: input.bindingRevision,
         remoteMessageRef: input.remoteMessageRef,
         ...(replyContext ? { replyContext } : {}),
         ...(input.replyTo ? { replyTo: input.replyTo } : {}),

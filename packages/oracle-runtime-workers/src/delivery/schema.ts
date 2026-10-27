@@ -1,3 +1,5 @@
+import { ActionReferenceSchema } from '@ixo/ixo-transaction/action-proposals';
+import { parseReference, type ActionReferenceV1 } from '@ixo/action-protocol';
 import { z } from 'zod';
 import type { ReplyContent, ReplyPlan } from './types';
 
@@ -18,6 +20,24 @@ export const ReplyPlanSchema = z.object({
         partId: z.string(),
         kind: z.literal('text'),
         text: z.string(),
+      }),
+      z.object({
+        partId: z.string(),
+        kind: z.literal('action'),
+        action: ActionReferenceSchema,
+      }),
+      z.object({
+        partId: z.string(),
+        kind: z.literal('hub-action'),
+        actionReference: z.custom<ActionReferenceV1>((value) => {
+          try {
+            parseReference(value);
+            return true;
+          } catch {
+            return false;
+          }
+        }),
+        summary: z.string().min(1).max(80),
       }),
       z.object({
         partId: z.string(),
@@ -55,7 +75,11 @@ export function planText(plan: { parts: readonly ReplyContent[] }): string {
     .map((part) =>
       part.kind === 'text'
         ? part.text
-        : `[${linkLabel(part.artifact.title)}](${part.artifact.url})`,
+        : part.kind === 'action'
+          ? `[${linkLabel(part.action.title)}](${part.action.url})`
+          : part.kind === 'hub-action'
+            ? `[${linkLabel(part.summary)}](${part.actionReference.url})`
+            : `[${linkLabel(part.artifact.title)}](${part.artifact.url})`,
     )
     .join('\n\n');
 }

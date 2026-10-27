@@ -267,6 +267,8 @@ export function createUcanAdapter(
 
 export interface CreateAmbientInput {
   /** Host task scheduler surface for this user, when tasks are enabled. */
+  actionProposals?: AmbientServices['actionProposals'];
+  hubActions?: AmbientServices['hubActions'];
   tasks?: import('../plugin-api/types').OracleTasksSurface;
   preferences?: import('../plugin-api/types').UserPreferencesSurface;
   /** `ctx.kv` over the user's working copy (`SqliteUserKv`). */
@@ -302,6 +304,10 @@ export function createAmbientServices(
 ): AmbientServices {
   return {
     ...(input.tasks ? { tasks: input.tasks } : {}),
+    ...(input.actionProposals
+      ? { actionProposals: input.actionProposals }
+      : {}),
+    ...(input.hubActions ? { hubActions: input.hubActions } : {}),
     ...(input.preferences ? { preferences: input.preferences } : {}),
     ...(input.kv ? { kv: input.kv } : {}),
     ...(input.frontend ? { frontend: input.frontend } : {}),

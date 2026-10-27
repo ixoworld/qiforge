@@ -13,7 +13,7 @@ import { z } from 'zod';
 import { createRuntimeCore } from '../core';
 import type { DecisionAdapter } from '@ixo/common/ai/decisions';
 import { CONTEXT_SECTION_LABELS } from '../core/prompt-composer';
-import { makeEnv } from '../core/test-fixtures';
+import { makeEnv, makePlugin } from '../core/test-fixtures';
 import {
   USER_CONTEXT_SLOTS,
   type UserContextSlot,
@@ -64,6 +64,8 @@ declare global {
 
 const USER_DID = 'did:ixo:user-context-user';
 const ORACLE_DID = 'did:ixo:entity:testoracle0000000000000001';
+/** The oracle's configured domain entity (`ORACLE_ENTITY_DID`). */
+const ENTITY_DID = 'did:ixo:entity:5e1fc0de5e1fc0de5e1fc0de5e1fc0de';
 // Deterministic BIP39 test vector — never a real account.
 const ORACLE_MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
@@ -105,8 +107,12 @@ interface EngineRequest {
   pathname: string;
   authorization: string | null;
   authType: string | null;
+  /** `x-oracle-entity-did`: the domain entity every memory space is keyed by. */
+  entityDid: string | null;
   roomId: string | null;
   queries: number;
+  /** The batch queries' `oracle_dids`, one list per query (batch only). */
+  oracleDids: unknown[];
 }
 
 type EngineMode =
@@ -164,6 +170,7 @@ class FakeEngine {
   async handle(request: Request): Promise<Response> {
     const url = new URL(request.url);
     let queries = 0;
+    let oracleDids: unknown[] = [];
     if (url.pathname === BATCH_PATH) {
       const body: unknown = await request.json();
       const list: unknown =
@@ -171,13 +178,22 @@ class FakeEngine {
           ? Reflect.get(body, 'queries')
           : undefined;
       queries = Array.isArray(list) ? list.length : -1;
+      if (Array.isArray(list)) {
+        oracleDids = list.map((q: unknown) =>
+          typeof q === 'object' && q !== null
+            ? Reflect.get(q, 'oracle_dids')
+            : undefined,
+        );
+      }
     }
     this.requests.push({
       pathname: url.pathname,
       authorization: request.headers.get('authorization'),
       authType: request.headers.get('x-auth-type'),
+      entityDid: request.headers.get('x-oracle-entity-did'),
       roomId: request.headers.get('x-room-id'),
       queries,
+      oracleDids,
     });
     if (url.pathname === '/.well-known/did.json')
       return Response.json({ id: ENGINE_DID });
@@ -349,6 +365,13 @@ interface ObjectOptions {
   env?: Record<string, unknown>;
   delegation?: string;
   decisionAdapter?: DecisionAdapter;
+  /**
+   * Boot without `ORACLE_ENTITY_DID`. The memory plugin refuses that at
+   * boot, so a stand-in plugin declares the engine URLs instead — the case
+   * the prefetch, the history indexer and the memory debug route guard
+   * themselves against.
+   */
+  withoutEntity?: boolean;
 }
 
 async function userObject(
@@ -358,33 +381,46 @@ async function userObject(
 ) {
   const objectEnv = {
     ORACLE_DID,
+    ORACLE_ENTITY_DID: ENTITY_DID,
     ORACLE_SIGNING_MNEMONIC: ORACLE_MNEMONIC,
     MEMORY_ENGINE_URL: ENGINE,
     MEMORY_MCP_URL: `${ENGINE}/mcp`,
     ...opts.env,
   };
+  const coreEnv = makeEnv(objectEnv);
+  if (opts.withoutEntity) delete coreEnv.ORACLE_ENTITY_DID;
   let memoryWrites = 0;
   const core = createRuntimeCore({
     config: { name: 'Test' },
-    env: makeEnv(objectEnv),
+    env: coreEnv,
     decisionAdapter: opts.decisionAdapter,
     // The memory plugin declares MEMORY_ENGINE_URL; its MCP surface is one
     // stub write tool under the upstream name.
-    plugins: [
-      new MemoryPlugin({
-        mcpFactory: () => async () => [
-          {
-            name: MEMORY_ADD_MCP_NAME,
-            description: 'Store a memory about the user.',
-            schema: z.object({ content: z.string() }),
-            invoke: async () => {
-              memoryWrites += 1;
-              return 'Memory stored.';
-            },
-          },
+    plugins: opts.withoutEntity
+      ? [
+          makePlugin({
+            name: 'memory-engine-client',
+            configSchema: z.object({
+              MEMORY_ENGINE_URL: z.string().url(),
+              MEMORY_MCP_URL: z.string().url(),
+            }),
+          }),
+        ]
+      : [
+          new MemoryPlugin({
+            mcpFactory: () => async () => [
+              {
+                name: MEMORY_ADD_MCP_NAME,
+                description: 'Store a memory about the user.',
+                schema: z.object({ content: z.string() }),
+                invoke: async () => {
+                  memoryWrites += 1;
+                  return 'Memory stored.';
+                },
+              },
+            ],
+          }),
         ],
-      }),
-    ],
   });
   const background: Promise<unknown>[] = [];
   const ctx = {
@@ -665,6 +701,8 @@ async function userObject(
     checkpointedContext,
     model,
     memoryWrites: () => memoryWrites,
+    /** `GET /debug/memory-schema` for the user. */
+    memorySchema: () => call('debugMemorySchema', USER_DID),
     /** Hand the session's transcript to the history indexer. */
     indexHistory: (sessionId: string) =>
       call('scheduleHistoryIndexing', sessionId),
@@ -724,6 +762,11 @@ describe('user-context prefetch in a user-object turn', () => {
       expect(batch?.authType).toBe('ucan');
       expect(batch?.roomId).toBe(ROOM);
       expect(batch?.authorization).toMatch(/^Bearer \S{100,}$/);
+      // Keyed by the configured entity, never the agent DID.
+      expect(batch?.entityDid).toBe(ENTITY_DID);
+      expect(batch?.oracleDids).toEqual(
+        USER_CONTEXT_SLOTS.map(() => [ENTITY_DID]),
+      );
 
       expect(first.system).toContain(CONTEXT_HEADING);
       expect(first.system).toContain(
@@ -1197,10 +1240,68 @@ describe('user-context prefetch in a user-object turn', () => {
 
       await o.indexHistory('s1');
       await o.drain();
-      expect(
-        o.engine.requests.filter((r) => r.pathname === '/messages'),
-      ).toHaveLength(1);
+      const uploads = o.engine.requests.filter(
+        (r) => r.pathname === '/messages',
+      );
+      expect(uploads).toHaveLength(1);
+      expect(uploads[0]?.entityDid).toBe(ENTITY_DID);
       expect(await o.status('s1')).toMatchObject({ cached: false });
     });
+  });
+
+  it('the memory debug route names the entity on its MCP request', async () => {
+    await withObject('user-context-debug-schema', {}, async (o) => {
+      // The fake engine serves no MCP endpoint: the route reports the
+      // failure, but the request it made is on record.
+      expect(await o.memorySchema()).toHaveProperty('error');
+      const mcp = o.engine.requests.filter((r) => r.pathname === '/mcp');
+      expect(mcp.length).toBeGreaterThan(0);
+      for (const request of mcp) {
+        expect(request.entityDid).toBe(ENTITY_DID);
+        expect(request.authType).toBe('ucan');
+      }
+    });
+  });
+
+  it('asks nothing and indexes nothing without ORACLE_ENTITY_DID, and warns once', async () => {
+    await withObject(
+      'user-context-no-entity',
+      { withoutEntity: true },
+      async (o) => {
+        const warn = vi.spyOn(console, 'warn');
+        const first = await o.turn('s1', 'r1');
+        expect(first.outcome.status).toBe('finished');
+        expect(firstContacts(warn.mock.calls, 's1')[0]).toMatch(
+          / outcome=skipped reason=no-entity waited=\d+ms$/,
+        );
+        const second = await o.turn('s2', 'r2');
+        expect(second.outcome.status).toBe('finished');
+        await o.indexHistory('s1');
+        await o.drain();
+        expect(await o.memorySchema()).toEqual({
+          error:
+            'ORACLE_ENTITY_DID is not a domain entity DID (did:ixo:entity:<32 hex>)',
+        });
+
+        // No batch, no history upload, no MCP call, not even the did.json
+        // look-up.
+        expect(o.engine.requests).toEqual([]);
+        expect(first.system).not.toContain(CONTEXT_HEADING);
+        const entityWarnings = warn.mock.calls
+          .map(([line]) => line)
+          .filter(
+            (line): line is string =>
+              typeof line === 'string' && line.includes('ORACLE_ENTITY_DID'),
+          );
+        // One from the prefetch, one from the indexer — not one per turn.
+        expect(entityWarnings).toHaveLength(2);
+        expect(
+          entityWarnings.filter((l) => l.startsWith('[user-context]')),
+        ).toHaveLength(1);
+        expect(
+          entityWarnings.filter((l) => l.startsWith('[history-indexer]')),
+        ).toHaveLength(1);
+      },
+    );
   });
 });

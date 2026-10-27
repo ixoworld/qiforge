@@ -74,14 +74,66 @@ const secureUrlSchema = z.string().refine((raw) => isSecureUrl(raw), {
   message: 'must be an https URL (http only on localhost)',
 });
 
+/**
+ * An https base URL for a chain RPC (a path such as `/rpc/` is fine): no
+ * credentials, query or fragment, which the verifier would refuse at the
+ * first lookup otherwise.
+ */
+const rpcOriginSchema = z.string().refine(
+  (raw) => {
+    try {
+      const url = new URL(raw);
+      return (
+        url.protocol === 'https:' &&
+        !url.username &&
+        !url.password &&
+        !url.search &&
+        !url.hash
+      );
+    } catch {
+      return false;
+    }
+  },
+  { message: 'must be an https URL without credentials, query or fragment' },
+);
+/** The Portal origin action links point at: https, host only. */
+const portalOriginSchema = z.string().refine(
+  (raw) => {
+    try {
+      const url = new URL(raw);
+      return (
+        url.protocol === 'https:' &&
+        url.pathname === '/' &&
+        !url.username &&
+        !url.password &&
+        !url.search &&
+        !url.hash
+      );
+    } catch {
+      return false;
+    }
+  },
+  { message: 'must be an https origin with no path, query or fragment' },
+);
+
 export const baseEnvSchema = z.object({
+  // --- action proposals (src/action-proposals, docs/action-proposals.md) ---
+  ACTION_PROPOSALS_RPC_TESTNET: rpcOriginSchema.optional(),
+  ACTION_PROPOSALS_RPC_DEVNET: rpcOriginSchema.optional(),
+  ACTION_PROPOSALS_RPC_MAINNET: rpcOriginSchema.optional(),
+  ACTION_PROPOSALS_ENABLED: z.enum(['true', 'false']).default('false'),
+  ACTION_TOPIC_PROPOSALS_ENABLED: z.enum(['true', 'false']).default('false'),
+  ACTION_PROPOSALS_PORTAL_ORIGIN: portalOriginSchema.optional(),
   // --- identity -----------------------------------------------------------
   ORACLE_NAME: z.string().min(1),
   /** UCAN audience — the DID users address invocations/delegations to. */
   ORACLE_DID: z.string().min(1),
   /**
    * On-chain entity DID surfaced to the agent as `identity.entityDid`. Falls
-   * back to `ORACLE_DID` when unset (see `createRuntimeCore`).
+   * back to `ORACLE_DID` when unset (see `createRuntimeCore`) for rooms and
+   * feedback. The memory plugin redeclares it as required
+   * (`did:ixo:entity:<32 hex>`): the Memory Engine keys every space by it and
+   * never receives the fallback.
    */
   ORACLE_ENTITY_DID: z.string().min(1).optional(),
   NETWORK: z.enum(['mainnet', 'testnet', 'devnet']).default('mainnet'),
@@ -456,11 +508,10 @@ export function validateEnv(
 ): ValidateEnvResult {
   const result = schema.safeParse(env);
   if (result.success) {
-    return {
-      valid: true,
-      config: result.data,
-      errors: [],
-    };
+    const errors = actionProposalEnvErrors(result.data);
+    return errors.length
+      ? { valid: false, config: {}, errors }
+      : { valid: true, config: result.data, errors: [] };
   }
 
   const errors: ValidateEnvError[] = result.error.issues.map((issue) => {
@@ -471,4 +522,40 @@ export function validateEnv(
   });
 
   return { valid: false, config: {}, errors };
+}
+
+/**
+ * Switching action proposals on without the settings they run on is a
+ * configuration error, not a runtime clarification: a card could be
+ * prepared with no link to review it at, or signed and never verified.
+ */
+function actionProposalEnvErrors(
+  config: Record<string, unknown>,
+): ValidateEnvError[] {
+  const errors: ValidateEnvError[] = [];
+  const enabled = config['ACTION_PROPOSALS_ENABLED'] === 'true';
+  if (enabled && !config['ACTION_PROPOSALS_PORTAL_ORIGIN'])
+    errors.push({
+      plugin: 'core',
+      field: 'ACTION_PROPOSALS_PORTAL_ORIGIN',
+      message: 'required when ACTION_PROPOSALS_ENABLED is true',
+    });
+  if (
+    enabled &&
+    !config['ACTION_PROPOSALS_RPC_DEVNET'] &&
+    !config['ACTION_PROPOSALS_RPC_TESTNET']
+  )
+    errors.push({
+      plugin: 'core',
+      field: 'ACTION_PROPOSALS_RPC_TESTNET',
+      message:
+        'ACTION_PROPOSALS_RPC_DEVNET or ACTION_PROPOSALS_RPC_TESTNET is required when ACTION_PROPOSALS_ENABLED is true',
+    });
+  if (config['ACTION_TOPIC_PROPOSALS_ENABLED'] === 'true' && !enabled)
+    errors.push({
+      plugin: 'core',
+      field: 'ACTION_TOPIC_PROPOSALS_ENABLED',
+      message: 'requires ACTION_PROPOSALS_ENABLED=true',
+    });
+  return errors;
 }

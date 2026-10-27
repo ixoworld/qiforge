@@ -22,7 +22,8 @@ import {
   type UserContextQuery,
 } from './user-context-fetcher';
 
-const ORACLE_DID = 'did:ixo:oracle';
+/** The oracle's configured domain entity (`ORACLE_ENTITY_DID`). */
+const ENTITY_DID = 'did:ixo:entity:0123456789abcdef0123456789abcdef';
 const PARAMS = { roomId: '!room:x', userDid: 'did:ixo:user', sessionId: 's1' };
 const NOW = new Date('2026-10-20T12:00:00.000Z');
 
@@ -150,7 +151,7 @@ function harness(
     };
   const deps: UserContextFetcherDeps = {
     memoryEngineUrl: 'https://memory.test/',
-    oracleDid: ORACLE_DID,
+    entityDid: ENTITY_DID,
     ucan: {
       hasSigningKey: () => true,
       resolveServiceDid: async () => 'did:web:memory.test',
@@ -185,7 +186,7 @@ function expectedQueries(recentSince: string): UserContextQuery[] {
   ];
   return [
     {
-      oracle_dids: [ORACLE_DID],
+      oracle_dids: [ENTITY_DID],
       query:
         'Who is the user — their name, age, background, personality traits, communication style, beliefs, values, and the core attributes that define how they see themselves and how they like to be addressed.',
       strategy: 'balanced',
@@ -209,7 +210,7 @@ function expectedQueries(recentSince: string): UserContextQuery[] {
       },
     },
     {
-      oracle_dids: [ORACLE_DID],
+      oracle_dids: [ENTITY_DID],
       query:
         'What the user works on — their job and role, current and past projects, the tools and technologies they use, code or systems they build, technical problems they solve (migrations, refactors, bug fixes, integrations), and the people they collaborate with at work.',
       strategy: 'balanced',
@@ -221,7 +222,7 @@ function expectedQueries(recentSince: string): UserContextQuery[] {
       search_filters: { invalid_at: current },
     },
     {
-      oracle_dids: [ORACLE_DID],
+      oracle_dids: [ENTITY_DID],
       query:
         'What the user is trying to achieve or improve — goals and aspirations they have stated, things they are learning, habits and routines they are building, milestones they are working toward, and causes they care about.',
       strategy: 'balanced',
@@ -233,7 +234,7 @@ function expectedQueries(recentSince: string): UserContextQuery[] {
       search_filters: { invalid_at: current },
     },
     {
-      oracle_dids: [ORACLE_DID],
+      oracle_dids: [ENTITY_DID],
       query:
         'What the user enjoys, cares about, or finds interesting — hobbies, favorite topics, preferences, products and content they engage with, things they like and dislike, and areas they have built expertise in outside of work.',
       strategy: 'balanced',
@@ -245,7 +246,7 @@ function expectedQueries(recentSince: string): UserContextQuery[] {
       search_filters: { invalid_at: current },
     },
     {
-      oracle_dids: [ORACLE_DID],
+      oracle_dids: [ENTITY_DID],
       query:
         'People the user interacts with or has mentioned — colleagues they work with, collaborators on projects, friends and family members, and any named individuals or groups they have brought up in conversation.',
       strategy: 'balanced',
@@ -257,7 +258,7 @@ function expectedQueries(recentSince: string): UserContextQuery[] {
       search_filters: { invalid_at: current },
     },
     {
-      oracle_dids: [ORACLE_DID],
+      oracle_dids: [ENTITY_DID],
       query:
         'What the user has been doing, focusing on, or talking about recently — current activities, decisions they have made, ongoing problems they are working through, and topics that have come up in recent conversations.',
       strategy: 'recent_memory',
@@ -279,7 +280,7 @@ function sentQueries(call: { init: RequestInit }): unknown {
 
 describe('buildUserContextQueries', () => {
   it('produces the six Node payloads field for field, with the recent slot bounded to the last 90 days', () => {
-    expect(buildUserContextQueries(ORACLE_DID, NOW)).toEqual(
+    expect(buildUserContextQueries(ENTITY_DID, NOW)).toEqual(
       expectedQueries('2026-07-22T12:00:00.000Z'),
     );
   });
@@ -291,8 +292,10 @@ describe('buildUserContextQueries', () => {
       return new Response(batchBody([]), { status: 200 });
     });
     try {
+      // Node's builder names its `oracle_dids` value `oracleDid`; the field
+      // now carries the domain entity, so both sides get the entity.
       await new MemoryEngineService('https://memory.test').gatherUserContext({
-        oracleDid: ORACLE_DID,
+        oracleDid: ENTITY_DID,
         roomId: '!room:x',
         oracleToken: '',
         userToken: '',
@@ -303,7 +306,7 @@ describe('buildUserContextQueries', () => {
     } finally {
       vi.unstubAllGlobals();
     }
-    const ours = buildUserContextQueries(ORACLE_DID, new Date());
+    const ours = buildUserContextQueries(ENTITY_DID, new Date());
     expect(bodies).toHaveLength(1);
     const node = JSON.parse(JSON.stringify(bodies[0])).queries;
     // The Node builder steps the date back in local time; the 90-day
@@ -474,7 +477,7 @@ describe('UserContextFetcher', () => {
     vi.useRealTimers();
   });
 
-  it('posts the six queries to <MEMORY_ENGINE_URL>/search-enhanced-batch with UCAN + room headers', async () => {
+  it('posts the six queries to <MEMORY_ENGINE_URL>/search-enhanced-batch with UCAN + entity + room headers', async () => {
     const h = harness();
     const outcome = await h.fetcher.fetch(PARAMS);
 
@@ -486,6 +489,7 @@ describe('UserContextFetcher', () => {
     expect(call!.init.headers).toEqual({
       Authorization: 'Bearer INVOCATION',
       'X-Auth-Type': 'ucan',
+      'x-oracle-entity-did': ENTITY_DID,
       'x-room-id': '!room:x',
       'Content-Type': 'application/json',
     });
@@ -820,6 +824,23 @@ describe('UserContextFetcher', () => {
     });
 
     for (const h of [noUrl, noRoom, noKey, noDid]) expect(h.calls).toEqual([]);
+  });
+
+  it('skips without ORACLE_ENTITY_DID — no mint, no request, nothing cached — and warns once', async () => {
+    const h = harness({ entityDid: undefined });
+    for (const roomId of ['!room:x', '!room:x', '!other:x']) {
+      await expect(h.fetcher.fetch({ ...PARAMS, roomId })).resolves.toEqual({
+        kind: 'skipped',
+        reason: 'no-entity',
+      });
+    }
+    await h.fetcher.refresh(PARAMS);
+    expect(h.calls).toEqual([]);
+    expect(h.minted).toEqual([]);
+    expect(h.fetcher.status(PARAMS.roomId).cached).toBe(false);
+    const warnings = h.logs.filter((l) => l.startsWith('warn '));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('ORACLE_ENTITY_DID');
   });
 
   it('does not negative-cache a missing delegation: the next turn mints again', async () => {

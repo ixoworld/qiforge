@@ -1,5 +1,63 @@
 # @ixo/oracle-runtime-workers
 
+## 0.25.0
+
+### Minor Changes
+
+- [#402](https://github.com/ixoworld/qiforge/pull/402) [`e24e59d`](https://github.com/ixoworld/qiforge/commit/e24e59d2551c05e4ac247a7fe02d8718963c9148) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Hub actions on `@ixo/action-protocol` 0.5.0:
+
+  - Any-token bank sends: the new `request_hub_transfer` tool prepares an `ixo.bank.send.v1` review from a token the owner's `hub_action_options` (`ixo.auth-options/3`, `transfer.tokens`) lists and a decimal display amount. The runtime converts to base units with the listed decimals (unverified tokens: base units), refuses a denom that is not listed, too many decimals, zero, an amount above the balance or above the per-denom capability cap, and sends no fee (Auth Hub simulates it). `request_hub_action` no longer takes bank sends. Auth Hub's `simulation_failed`, `fee_above_ceiling` and `insufficient_funds` refusals reach the model in plain words, and `hub_action_status` adds an owner-facing `summary` line for bank receipts (symbol for verified tokens, full denom and an "unverified token" marker otherwise). Channel polls keep handing the gateway the 0.4.1 bank receipt shape.
+  - On a chat surface a `prepared` result of `request_hub_action` and `request_hub_transfer` carries a `note`: the user already gets the review as a card with its title and a review button, so the model does not repeat the link or the title, does not say it has not executed or signed anything, and replies with one short line or nothing.
+  - Every Hub operation call (capabilities, prepare, status, options) declares protocol version 3.
+  - Signed outcome callbacks: `/api/internal/actions/outcomes` verifies the Hub's `#key-0` Ed25519 signature from `${AUTH_HUB_URL}/.well-known/did.json` (cached one hour) for this oracle's request origin, and is on whenever `HUB_ACTIONS_ENABLED`, `AUTH_HUB_URL` and `AUTH_HUB_CHANNEL_SERVICE_KEY` are set. **Breaking for operators:** `AUTH_HUB_ACTION_OUTCOME_KEY` is removed; an `x-auth-hub-outcome-key` header is ignored.
+  - No per-user usage caps: the Hub-action caps (2 per run, 5 per hour, 10 per day) and the action-proposal caps (8 per run, 16 open per owner) are removed. Hub actions still need a run started by an inbound channel message, and one Gmail send stays in flight per mailbox.
+  - Hardening: a signed callback's cheap checks (headers, key id, ±300 s timestamp, 64-byte signature) run before any Hub read; the Hub DID document is read at most once a minute per isolate whatever the outcome, concurrent callbacks share one read, and only a document that passes the id and key checks is cached. The callback audience is the origin of `ORACLE_PUBLIC_URL` when set. A replayed, already stored outcome is acknowledged without a Hub read, and callbacks for actions prepared at protocol version 2 are confirmed against version-3 status reads. Hub `409 sequence_mismatch` / `503 transfer_unavailable` read as temporary, any other `409` as not available for the account. The Gmail connection check reads options at version 2 (no balance read). A `uixo` receipt without a stored token still reads as IXO.
+
+## 0.24.0
+
+### Minor Changes
+
+- [#403](https://github.com/ixoworld/qiforge/pull/403) [`375c6ee`](https://github.com/ixoworld/qiforge/commit/375c6ee0ab17941febe1e8863daff83893020061) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Memory is keyed by the oracle's domain entity (Memory Engine 2.0.0, live on testnet and mainnet; devnet from `1.0.0-develop.10`). Every Memory Engine request (the memory plugin's MCP tools, the first-turn prefetch, the session-history upload and `GET /debug/memory-schema`) now carries `x-oracle-entity-did: <ORACLE_ENTITY_DID>`, and the prefetch batch sends `oracle_dids: [ORACLE_ENTITY_DID]` instead of the agent DID. The value is always the configured `ORACLE_ENTITY_DID`, never the core's fallback to `ORACLE_DID`, which stays for room aliases and feedback only. Without a well-formed entity the prefetch and the history indexer send nothing and each log one warning per user object (prefetch skip reason `no-entity`), and the debug route answers with an error.
+
+  **Breaking for oracles without `ORACLE_ENTITY_DID`.** The memory plugin's `configSchema` now requires `ORACLE_ENTITY_DID` shaped `did:ixo:entity:` followed by 32 lower-case hex characters: an oracle that sets `MEMORY_MCP_URL` but no entity (or an account DID such as `did:ixo:ixo1…` in its place) fails at boot with `Plugin 'memory' env validation failed for 'ORACLE_ENTITY_DID': …`. Set it to the oracle's domain entity, and make sure that entity's on-chain document lists the oracle's agent account (`ORACLE_DID`) as a `linkedEntity` with `service: 'matrix'` and `relationship: 'admin'`; the entity-keyed Memory Engine refuses requests from an agent its entity does not list. `qiforge-cli create-entity` already writes the oracle account as a `matrix` / `admin` linked entity on the entity it creates, so a new oracle is vouched for without a manual step; an entity created another way needs that link added by one of its controllers. Oracles that do not load the memory plugin are unaffected. API changes for forks: `buildMemoryHeaders(runCtx, memoryMcpUrl, entityDid)` and `createDefaultMemoryMcpFactory(memoryMcpUrl, entityDid)` take the entity as a new required argument, and a custom `MemoryPluginOptions.mcpFactory` receives it as its second argument. `MEMORY_ENTITY_HEADER` and `ORACLE_ENTITY_DID_PATTERN` are exported.
+
+## 0.23.0
+
+### Minor Changes
+
+- [#381](https://github.com/ixoworld/qiforge/pull/381) [`02f293c`](https://github.com/ixoworld/qiforge/commit/02f293cc55da175cbc50d9de9939bad007306ed2) Thanks [@ig-shaun](https://github.com/ig-shaun)! - Add `hub_action_options` (service-tagged v2 discovery of the owner's
+  connections and targets) and prepare Gmail connect, disconnect and one
+  plain-text email send, plus signed-statement, Calendar, document-access-request
+  and private-text operations, from verified channel turns. Derive the tool
+  schema from action-protocol 0.4.1 (declaring protocol version 2 to Auth Hub;
+  `ixo.auth-outcome/2` with terminal `expired` / `cancelled`) and retain the original-turn outcome and
+  owner review boundaries. Only one Gmail send per mailbox is in flight at a time
+  (authorized, submitted or unconfirmed), and a Gmail operation must name one of the
+  owner's listed connections.
+
+  Depend on the published `@ixo/action-protocol` 0.4.1 and
+  `@ixo/topic-protocol` 1.0.0-rc.8 (Worker-safe validators) from npm in both
+  consumers; no vendored archive or workspace override remains.
+
+- [#380](https://github.com/ixoworld/qiforge/pull/380) [`b964fdc`](https://github.com/ixoworld/qiforge/commit/b964fdc6a208da4933a52715c4cc0f46df933d7b) Thanks [@ig-shaun](https://github.com/ig-shaun)! - Add an opt-in Auth Hub action plugin for authenticated channel turns. It binds
+  requests to runtime-owned channel identity, projects typed review references into
+  Reply Plans, and recovers typed outcomes on the originating run.
+  Channel polls answer Hub outcomes from SQLite and refresh at most one
+  non-terminal action per poll with backoff; prepares are capped per run, hour
+  and day and only allowed in runs a user message started.
+
+- [#362](https://github.com/ixoworld/qiforge/pull/362) [`5bac08b`](https://github.com/ixoworld/qiforge/commit/5bac08bdf4707f36544a4b94cb02931ae9517610) Thanks [@ig-shaun](https://github.com/ig-shaun)! - Add an opt-in durable action proposal contract and owner lifecycle for conversational token transfers. Bind Portal consent to immutable values, deliver friendly channel action links and scoped verified outcomes, and reuse one canonical Decision-subject hashing implementation across browser and Workers consumers.
+
+  The card's id is the transaction memo (`inputs.memo`, required by the contract) and chain verification accepts no other memo, so one signed transaction confirms exactly one card; a hash is recorded for one card per owner. The owner object enforces the card policy itself (owner, signer, non-mainnet, configured chain id, 15-minute expiry) and refuses cards asked for in group rooms. Evidence checks match whole addresses, amounts with their unit and whole token ids, and ignore the turn-time note. Unconfirmed transactions are re-verified from the alarm with a doubling cooldown, receipts back off and are abandoned or quarantined instead of retrying for ever, finished cards are pruned after 90 days, and the action-card settings are validated at boot. A recorded hash the verifier proved is another transaction may be replaced; a transaction carrying the card's memo with other messages blocks the card (`lifecycle.executionBlockedAt` on the `unknown` card; revoke is the one command it still takes). The field is additive, but the lifecycle schema is strict: a consumer pinned to an earlier build rejects a blocked card, so the Portal must pin a build with this field (this branch or the published 0.2.0) before a runtime with this change serves its cards. `MsgSend` joins the shared message catalogue.
+
+  Topic cards (`ACTION_TOPIC_PROPOSALS_ENABLED`, v2 contract): discussion drafts and claim-access grants run as step journals with one-use permits. The switch gates claims and permits, not reads. The card expiry bounds the first step only and an hour-long execution window after the claim bounds the rest; a started step with no reference is re-permitted to the same executor; a second grant for the same account while one is in flight is refused; a grant is merged into an existing authorization only under its existing expiry; authority fingerprints cover the contract head, the pinned body and room policy, not thread activity; changed authority answers 409 and an unavailable read 503 (every authority read is typed on leaving its budget; 409 bodies carry the runtime's sentences, never schema dumps); a grant reference the verifier proved is another transaction is set aside so the right hash can replace it, while a transaction carrying the card's memo with other messages blocks the card; an object whose topic store failed to open still serves transfer cards, turns and the alarm; unreadable reference rows are quarantined, never retried every second; grant reads run in parallel. Step records and permits carry the identity-only executor (`TopicExecutorIdentitySchema`); the begin-step request adds `deviceId`. `@ixo/ixo-transaction` no longer bundles the chain SDK (peer dependency). The runtime requires a `@ixo/topic-protocol` build with precompiled validators (1.0.0-rc.8 or later); `src/core/topic-protocol-runtime.test.ts` fails the suite on a build that would generate code on Workers.
+
+### Patch Changes
+
+- Updated dependencies [[`02f293c`](https://github.com/ixoworld/qiforge/commit/02f293cc55da175cbc50d9de9939bad007306ed2), [`16fe4e6`](https://github.com/ixoworld/qiforge/commit/16fe4e65f97d57c064e6615e18dfe4ea7527bf25), [`5bac08b`](https://github.com/ixoworld/qiforge/commit/5bac08bdf4707f36544a4b94cb02931ae9517610)]:
+  - @ixo/ixo-transaction@0.2.0
+  - @ixo/common@1.7.1
+
 ## 0.22.0
 
 ### Minor Changes

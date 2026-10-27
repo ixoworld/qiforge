@@ -104,19 +104,21 @@ lifetime are in [operations](docs/operations.md).
 
 ## Documentation
 
-| Page                                       | What it covers                                                                                |
-| ------------------------------------------ | --------------------------------------------------------------------------------------------- |
-| [architecture](docs/architecture.md)       | The objects, the gateway split, self-sovereign storage, cost model, workerd rules, tasks      |
-| [node-parity](docs/node-parity.md)         | What is identical to the Node runtime, what differs, what is Workers-only, what is not ported |
-| [configuration](docs/configuration.md)     | Wrangler config, migrations, every env var and binding, `createOracleWorker` options, setup   |
-| [operations](docs/operations.md)           | Routes, status fields, gateway and user-object lifecycle, the ChatGPT proxy, the runbook      |
-| [chat-delivery](docs/chat-delivery.md)     | Chat replies on WhatsApp and Matrix: profiles, Reply Plans, artefacts and their links         |
-| [channels](docs/channels.md)               | The IXO Channels ingress: authorization, retries, Reply Plans, Matrix continuity              |
-| [frontend-bridge](docs/frontend-bridge.md) | Browser tools and AG-UI actions over the socket: one invocation, one socket, unknown outcomes |
-| [pod-creator](docs/pod-creator.md)         | The POD Creator plugin: roles, state in `ctx.kv`, the create path and its launch gate         |
-| [ixo-transaction](docs/ixo-transaction.md) | The opt-in wallet-signing plugin: chain ids, signing outcomes, the mainnet receipt rule       |
-| [testing](docs/testing.md)                 | Unit, harness e2e, the devnet feature matrix, stress                                          |
-| [load-tests](docs/load-tests.md)           | Measurements and the findings that shaped the gateway                                         |
+| Page                                                     | What it covers                                                                                     |
+| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| [architecture](docs/architecture.md)                     | The objects, the gateway split, self-sovereign storage, cost model, workerd rules, tasks           |
+| [node-parity](docs/node-parity.md)                       | What is identical to the Node runtime, what differs, what is Workers-only, what is not ported      |
+| [configuration](docs/configuration.md)                   | Wrangler config, migrations, every env var and binding, `createOracleWorker` options, setup        |
+| [operations](docs/operations.md)                         | Routes, status fields, gateway and user-object lifecycle, the ChatGPT proxy, the runbook           |
+| [chat-delivery](docs/chat-delivery.md)                   | Chat replies on WhatsApp and Matrix: profiles, Reply Plans, artefacts and their links              |
+| [channels](docs/channels.md)                             | The IXO Channels ingress: authorization, retries, Reply Plans, Matrix continuity                   |
+| [frontend-bridge](docs/frontend-bridge.md)               | Browser tools and AG-UI actions over the socket: one invocation, one socket, unknown outcomes      |
+| [pod-creator](docs/pod-creator.md)                       | The POD Creator plugin: roles, state in `ctx.kv`, the create path and its launch gate              |
+| [ixo-transaction](docs/ixo-transaction.md)               | The opt-in wallet-signing plugin: chain ids, signing outcomes, the mainnet receipt rule            |
+| [action-proposals](docs/action-proposals.md)             | Action cards: a transfer prepared from chat, signed in the Portal, verified on chain, receipted    |
+| [topic-action-proposals](docs/topic-action-proposals.md) | Topic cards: discussion drafts and claim-access grants as multi-step journals with one-use permits |
+| [testing](docs/testing.md)                               | Unit, harness e2e, the devnet feature matrix, stress                                               |
+| [load-tests](docs/load-tests.md)                         | Measurements and the findings that shaped the gateway                                              |
 
 ## Status (September 2026)
 

@@ -123,6 +123,18 @@ describe('WorkersAiJevDecisionAdapter', () => {
     });
   });
 
+  it('normalizes a completed inference result from the binding', async () => {
+    const adapter = new WorkersAiJevDecisionAdapter({
+      ai: binding(async () => ({ state: 'Completed', result: jevResult })),
+    });
+
+    expect(await adapter.evaluate(request)).toMatchObject({
+      modelVersion: 'jev-1.13.0',
+      answers: { work: { kind: 'boolean', probabilityTrue: 0.9 } },
+      provenance: { returnedModel: 'jev-1.13.0' },
+    });
+  });
+
   it('returns a fresh provenance object on every call', async () => {
     const adapter = new WorkersAiJevDecisionAdapter({
       ai: binding(async () => jevResult),

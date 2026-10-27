@@ -5,6 +5,12 @@ import type {
   ChannelReplyReference,
 } from '../channels/contract';
 import type {
+  BeginTopicStep,
+  TopicReceiptReferences,
+} from '@ixo/ixo-transaction/topic-proposals';
+import type { ProposalCommand } from '../action-proposals/store';
+import type { ActionOutcomeV1 } from '@ixo/action-protocol';
+import type {
   TopicDeliverableCommand,
   TopicDeliverableResult,
 } from '../tasks/topic-deliverables';
@@ -56,6 +62,12 @@ import type { DomainContextProvenance } from '../core/domain-context';
 /** Bindings every oracle Worker must declare (see the example `wrangler.jsonc`). */
 export interface OracleWorkerEnv {
   TOPIC_DELIVERABLES_ENABLED?: string;
+  ACTION_PROPOSALS_RPC_TESTNET?: string;
+  ACTION_PROPOSALS_RPC_DEVNET?: string;
+  ACTION_PROPOSALS_RPC_MAINNET?: string;
+  ACTION_PROPOSALS_ENABLED?: string;
+  ACTION_TOPIC_PROPOSALS_ENABLED?: string;
+  ACTION_PROPOSALS_PORTAL_ORIGIN?: string;
   USER_ORACLE: DurableObjectNamespace<UserOracleObject>;
   MATRIX_GATEWAY: DurableObjectNamespace<MatrixGatewayObject>;
 
@@ -78,6 +90,7 @@ export interface OracleWorkerEnv {
   AUTH_HUB?: Fetcher;
   AUTH_HUB_URL?: string;
   AUTH_HUB_CHANNEL_SERVICE_KEY?: string;
+  HUB_ACTIONS_ENABLED?: string;
 
   // --- matrix -------------------------------------------------------------
   MATRIX_BASE_URL: string;
@@ -381,6 +394,7 @@ export interface TurnRequest {
     /** A provider id (`/^[a-z][a-z0-9_-]{0,31}$/`), e.g. `whatsapp`. */
     provider: string;
     bindingId: string;
+    bindingRevision?: number;
     remoteMessageRef: string;
     replyContext?: ChannelReplyContext;
     replyTo?: ChannelReplyReference;
@@ -735,6 +749,7 @@ export interface StorageStatus {
  * piped straight to the client.
  */
 export interface UserOracleObject extends Rpc.DurableObjectBranded {
+  recordHubActionOutcome(outcome: ActionOutcomeV1): Promise<void>;
   topicDeliverable(
     identity: TurnIdentity,
     operationId: string,
@@ -778,6 +793,18 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
     opts?: { limit?: number; offset?: number },
   ): Promise<{ sessions: SessionSummary[]; total: number }>;
   deleteSession(identity: TurnIdentity, sessionId: string): Promise<boolean>;
+  actionProposal(
+    identity: TurnIdentity,
+    id: string,
+    command?:
+      | ProposalCommand
+      | { kind: 'topic-reconcile'; input: TopicReceiptReferences },
+  ): Promise<JsonString | null>;
+  beginTopicStep(
+    identity: TurnIdentity,
+    id: string,
+    input: BeginTopicStep,
+  ): Promise<JsonString | null>;
   /** `GET /artifacts/:id` — the owner's canonical copy, or null. */
   artifact(
     identity: TurnIdentity,
@@ -1085,6 +1112,17 @@ export interface MatrixGatewayObject extends Rpc.DurableObjectBranded {
   ): Promise<string>;
   /** Full room state as a JSON-encoded array of `{ type, state_key, content, sender, event_id }`. */
   getRoomState(roomId: string): Promise<JsonString>;
+  getTopicRoomState(roomId: string): Promise<JsonString>;
+  getTopicEvent(
+    roomId: string,
+    eventId: string,
+    opts?: { deadlineAt?: number },
+  ): Promise<JsonString | null>;
+  getTopicHistory(
+    roomId: string,
+    root: string,
+    opts?: { deadlineAt?: number; sender?: string },
+  ): Promise<JsonString>;
   /** One timeline event (decrypted when E2EE) as JSON `{ event_id, type, content, sender, origin_server_ts }`, or null. */
   getEvent(roomId: string, eventId: string): Promise<JsonString | null>;
   /**
