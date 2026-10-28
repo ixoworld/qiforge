@@ -116,7 +116,7 @@ describe('channel-only semantic sessions', () => {
         }),
       ).text,
     ).toBe(
-      'Back to *Grant application 2027*. Send /resume to go back.\n\nOne answer',
+      'Back to *Grant application 2027*. Send /resume to pick another topic.\n\nOne answer',
     );
   });
 
@@ -141,13 +141,13 @@ describe('channel-only semantic sessions', () => {
       message: 'Separate question: plan my trip',
     };
     expect(accepted(await stub.submit(again)).text).toBe(
-      'Starting a fresh topic for this. Send /resume to go back to the previous topic.\n\nOne answer',
+      'Starting a fresh topic for this. Send /resume to go back to an earlier topic.\n\nOne answer',
     );
     await stub.setSessionInfo(first.sessionId, {
       title: '  Grant *application*_\n`2027`\u200B ',
     });
     expect(accepted(await stub.submit(again)).text).toBe(
-      'Starting a fresh topic for this. Send /resume to go back to *Grant application 2027*.\n\nOne answer',
+      'Starting a fresh topic for this. Send /resume and pick *Grant application 2027* to go back.\n\nOne answer',
     );
   });
 

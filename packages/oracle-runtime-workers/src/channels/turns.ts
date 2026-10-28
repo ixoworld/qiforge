@@ -1108,14 +1108,16 @@ export class ChannelTurns {
     let notice: string | undefined;
     if (route?.mode === 'on' && route.destination.kind === 'new') {
       const before = await this.boldTitle(route.baseline);
-      notice = `Starting a fresh topic for this. Send /resume to go back to ${before ? `*${before}*` : 'the previous topic'}.`;
+      notice = before
+        ? `Starting a fresh topic for this. Send /resume and pick *${before}* to go back.`
+        : 'Starting a fresh topic for this. Send /resume to go back to an earlier topic.';
     } else if (
       route?.mode === 'on' &&
       route.destination.kind === 'session' &&
       route.destination.sessionId !== route.baseline
     ) {
       const to = await this.boldTitle(route.destination.sessionId);
-      notice = `Back to ${to ? `*${to}*` : 'an earlier topic'}. Send /resume to go back.`;
+      notice = `Back to ${to ? `*${to}*` : 'an earlier topic'}. Send /resume to pick another topic.`;
     }
     if (!notice) return { plan, rendered: plan ? planText(plan) : text };
     const decorated =
