@@ -11,6 +11,7 @@ import { FakeToolCallingModel } from 'langchain';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { createRuntimeCore } from '../core';
+import type { DecisionAdapter } from '@ixo/common/ai/decisions';
 import { CONTEXT_SECTION_LABELS } from '../core/prompt-composer';
 import { makeEnv, makePlugin } from '../core/test-fixtures';
 import {
@@ -35,6 +36,11 @@ import type { TurnRequest } from './contracts';
 import { RunCoordinator } from './run-coordinator';
 import type { RunFrame } from './run-buffer';
 import { storedRunRequest, type StoredRunRequest } from './run-request';
+import {
+  channelRequestHash,
+  type ChannelTurnInput,
+  type ChannelControlInput,
+} from '../channels/contract';
 import { createUserOracleDO } from './user-oracle-do';
 
 /**
@@ -145,6 +151,8 @@ function batchResults(facts: Partial<Record<UserContextSlot, string>>) {
 
 class FakeEngine {
   readonly requests: EngineRequest[] = [];
+  /** The message contents of each session-history upload (`POST /messages`). */
+  readonly uploads: string[][] = [];
   mode: EngineMode = { kind: 'answer' };
   facts: Partial<Record<UserContextSlot, string>> = {
     identity: FAVOURITE_SEA,
@@ -179,6 +187,24 @@ class FakeEngine {
             : undefined,
         );
       }
+    }
+    if (url.pathname === '/messages') {
+      const body: unknown = await request.json();
+      const list: unknown =
+        typeof body === 'object' && body !== null
+          ? Reflect.get(body, 'messages')
+          : undefined;
+      this.uploads.push(
+        Array.isArray(list)
+          ? list.map((m: unknown) =>
+              String(
+                typeof m === 'object' && m !== null
+                  ? Reflect.get(m, 'content')
+                  : m,
+              ),
+            )
+          : [],
+      );
     }
     this.requests.push({
       pathname: url.pathname,
@@ -301,8 +327,15 @@ function fakeGateway() {
     getOracleSigningMnemonic: async () => null,
     getOracleSecretsKey: async () => null,
     resolveUserRoom: async () => ({ roomId: ROOM }),
-    getRoomStateEvent: async () => null,
-    sendText: async () => '$event',
+    getRoomStateEvent: async (_roomId: string, type: string) =>
+      type === 'm.room.encryption'
+        ? JSON.stringify({ algorithm: 'm.megolm.v1.aes-sha2' })
+        : null,
+    sendText: async (
+      _roomId: string,
+      _text: string,
+      options?: { txnId?: string },
+    ) => `$${options?.txnId ?? 'event'}`,
     sendEvent: async () => '$event',
   };
 }
@@ -351,6 +384,7 @@ interface ObjectOptions {
   /** Extra env (the `USER_CONTEXT_*` knobs). */
   env?: Record<string, unknown>;
   delegation?: string;
+  decisionAdapter?: DecisionAdapter;
   /**
    * Boot without `ORACLE_ENTITY_DID`. The memory plugin refuses that at
    * boot, so a stand-in plugin declares the engine URLs instead — the case
@@ -371,6 +405,9 @@ async function userObject(
     ORACLE_SIGNING_MNEMONIC: ORACLE_MNEMONIC,
     MEMORY_ENGINE_URL: ENGINE,
     MEMORY_MCP_URL: `${ENGINE}/mcp`,
+    // A finished channel run indexes at once unless a test sets a quiet
+    // period: `drain` waits for every pending timer.
+    CHANNEL_HISTORY_INDEX_DEBOUNCE_MS: 0,
     ...opts.env,
   };
   const coreEnv = makeEnv(objectEnv);
@@ -379,6 +416,7 @@ async function userObject(
   const core = createRuntimeCore({
     config: { name: 'Test' },
     env: coreEnv,
+    decisionAdapter: opts.decisionAdapter,
     // The memory plugin declares MEMORY_ENGINE_URL; its MCP surface is one
     // stub write tool under the upstream name.
     plugins: opts.withoutEntity
@@ -488,6 +526,7 @@ async function userObject(
     options: {
       /** A Matrix turn in `roomKind`'s room (`ROOM`, or `GROUP_ROOM` for a group). */
       matrix?: 'direct' | 'group';
+      channel?: boolean;
       executionProfile?: TurnRequest['executionProfile'];
       /** Abort the run this long after it starts; the agent may never run. */
       abortAfterMs?: number;
@@ -504,7 +543,11 @@ async function userObject(
       });
     const runs = field('runs');
     if (!(runs instanceof RunCoordinator)) throw new Error('not booted');
-    const client = options.matrix ? 'matrix' : 'portal';
+    const client = options.channel
+      ? 'channel'
+      : options.matrix
+        ? 'matrix'
+        : 'portal';
     const request: TurnRequest = {
       identity: { ...identity, timezone: 'UTC' },
       sessionId,
@@ -512,6 +555,15 @@ async function userObject(
       client,
       requestId,
       ...(options.matrix ? { roomId, roomKind: options.matrix } : {}),
+      ...(options.channel
+        ? {
+            channel: {
+              provider: 'whatsapp',
+              bindingId: 'chb_context',
+              remoteMessageRef: `hmac:${'a'.repeat(64)}`,
+            },
+          }
+        : {}),
       ...(options.executionProfile
         ? { executionProfile: options.executionProfile }
         : {}),
@@ -544,7 +596,11 @@ async function userObject(
     const agentCall = options.executionProfile
       ? turnCalls[0]
       : turnCalls.find((c) => c.agent);
-    if (!agentCall && options.abortAfterMs === undefined)
+    if (
+      !agentCall &&
+      options.abortAfterMs === undefined &&
+      outcome.status !== 'aborted'
+    )
       throw new Error('the agent was never called');
     const steps = frames
       .filter((f) => f.event === 'router.update')
@@ -588,6 +644,81 @@ async function userObject(
   return {
     engine,
     turn,
+    async channelTurn(
+      message: string,
+      requestId: string,
+      extra: Partial<Pick<ChannelTurnInput, 'sessionId' | 'replyTo'>> = {},
+    ) {
+      const input: ChannelTurnInput = {
+        provider: 'whatsapp',
+        bindingId: 'chb_context',
+        bindingRevision: 1,
+        requestId,
+        remoteMessageRef: `hmac:${'a'.repeat(64)}`,
+        message,
+        context: { kind: 'companion' },
+        ...extra,
+      };
+      const identity = {
+        userDid: USER_DID,
+        channel: {
+          callerDid: 'did:web:channel.test',
+          provider: input.provider,
+          bindingId: input.bindingId,
+          bindingRevision: 1,
+        },
+      };
+      const hash = await channelRequestHash(JSON.stringify(input));
+      const parse = z.object({
+        ok: z.literal(true),
+        result: z.object({
+          sessionId: z.string(),
+          runId: z.string(),
+          status: z.string(),
+          text: z.string().optional(),
+        }),
+      });
+      parse.parse(await call('channelTurn', identity, input, hash));
+      await drain();
+      return parse.parse(await call('channelTurn', identity, input, hash))
+        .result;
+    },
+    async transcriptText(sessionId: string) {
+      const tuple = await saver().getTuple({
+        configurable: { thread_id: sessionId },
+      });
+      const messages: unknown = tuple?.checkpoint.channel_values.messages;
+      return Array.isArray(messages)
+        ? messages
+            .map((message) => textOf(Reflect.get(message, 'content')))
+            .join('\n')
+        : '';
+    },
+    async cancel(requestId: string): Promise<void> {
+      const control: ChannelControlInput = {
+        provider: 'whatsapp',
+        bindingId: 'chb_context',
+        bindingRevision: 1,
+        requestId: `stop:${requestId}`,
+        cancelRequestIds: [requestId],
+        command: { kind: 'stop' },
+      };
+      const outcome = await call(
+        'channelControl',
+        {
+          userDid: USER_DID,
+          channel: {
+            callerDid: 'did:web:channel.test',
+            provider: 'whatsapp',
+            bindingId: 'chb_context',
+            bindingRevision: 1,
+          },
+        },
+        control,
+        await channelRequestHash(JSON.stringify(control)),
+      );
+      expect(outcome).toMatchObject({ ok: true });
+    },
     drain,
     status,
     checkpointedContext,
@@ -987,6 +1118,150 @@ describe('user-context prefetch in a user-object turn', () => {
         expect(await o.checkpointedContext('s1')).toBeUndefined();
       },
       engine,
+    );
+  });
+
+  it('does not call the model for a channel request cancelled before execution', async () => {
+    await withObject('user-context-cancelled-channel', {}, async (o) => {
+      await o.cancel('cancelled-before-start');
+      const result = await o.turn('s-cancelled', 'cancelled-before-start', {
+        channel: true,
+      });
+      expect(result.outcome.status).toBe('aborted');
+      expect(o.model.calls).toEqual([]);
+      expect(o.engine.batches).toEqual([]);
+    });
+  });
+
+  it('routes authenticated channel turns while Portal stays explicit, and persists clarification without calling an agent or tools', async () => {
+    let decisions = 0;
+    const decisionAdapter: DecisionAdapter = {
+      provider: 'test',
+      model: 'channel-router',
+      evaluate: async (request) => {
+        decisions++;
+        const question = request.questions.destination;
+        if (question?.kind !== 'choice')
+          throw new Error('Expected routing choice');
+        const { message } = z
+          .object({ message: z.string() })
+          .parse(request.state);
+        const value = message === 'Yes' ? 'ambiguous' : 'new_thread';
+        const keys = Object.keys(question.options);
+        return {
+          answers: {
+            destination: {
+              kind: 'choice',
+              value,
+              confidence: 0.99,
+              probabilities: Object.fromEntries(
+                keys.map((key) => [
+                  key,
+                  key === value ? 0.99 : 0.01 / (keys.length - 1),
+                ]),
+              ),
+            },
+          },
+        };
+      },
+    };
+    await withObject(
+      'channel-router-versus-portal',
+      { env: { CHANNEL_SEMANTIC_ROUTING: 'on' }, decisionAdapter },
+      async (o) => {
+        await o.turn('portal-one', 'portal-r1');
+        await o.turn('portal-one', 'portal-r2');
+        expect(decisions).toBe(0);
+        const application = await o.channelTurn(
+          'Help with my application',
+          'wa:application',
+        );
+        expect(application.status).toBe('finished');
+        const trip = await o.channelTurn('A separate trip', 'wa:trip', {
+          sessionId: application.sessionId,
+        });
+        expect(trip.status).toBe('finished');
+        expect(trip.sessionId).not.toBe(application.sessionId);
+        expect(trip.text).toContain(
+          'Starting a fresh topic for this. Send /resume',
+        );
+        const calls = o.model.calls.length;
+        const clarification = await o.channelTurn('Yes', 'wa:yes', {
+          sessionId: trip.sessionId,
+        });
+        expect(clarification.status).toBe('finished');
+        expect(clarification.text).toContain(
+          'Is this about something we discussed earlier?',
+        );
+        expect(o.model.calls).toHaveLength(calls);
+        expect(o.memoryWrites()).toBe(0);
+        expect(await o.transcriptText(trip.sessionId)).toContain(
+          'Is this about something we discussed earlier?',
+        );
+        await o.turn('portal-one', 'portal-r3');
+        expect(decisions).toBe(2);
+      },
+    );
+  });
+
+  it('indexes a channel session once it goes quiet, and later channel turns adopt only a warm room cache', async () => {
+    await withObject(
+      'user-context-continuous-channel',
+      { env: { CHANNEL_HISTORY_INDEX_DEBOUNCE_MS: 1500 } },
+      async (o) => {
+        const turn = (requestId: string) =>
+          o.turn('s-channel', requestId, { channel: true });
+        // First contact waits for the gather, as on every client.
+        const first = await turn('channel-r1');
+        expect(first.system).toContain(factLine(FAVOURITE_SEA));
+        expect(o.engine.batches).toHaveLength(1);
+
+        // Two more finished turns inside the quiet period: they take the
+        // warm cache (no new request) and nothing is uploaded yet.
+        o.engine.facts = { goals: LEARNING };
+        const second = await turn('channel-r2');
+        expect(second.system).toContain(factLine(FAVOURITE_SEA));
+        await turn('channel-r3');
+        expect(o.engine.batches).toHaveLength(1);
+        expect(o.engine.uploads).toHaveLength(0);
+
+        // One upload for the three turns once the session is quiet; it
+        // invalidates the room's cache.
+        await o.drain();
+        expect(o.engine.uploads).toHaveLength(1);
+        expect(o.engine.uploads[0]).toHaveLength(6);
+        expect(await o.status('s-channel')).toMatchObject({ cached: false });
+
+        // A cold cache must not hold the next channel turn: it keeps the
+        // thread's context and refreshes in the background.
+        o.engine.mode = { kind: 'hang' };
+        const cold = await turn('channel-r4');
+        expect(cold.outcome.status).toBe('finished');
+        expect(cold.system).toContain(factLine(FAVOURITE_SEA));
+        expect(cold.system).not.toContain(LEARNING);
+        expect(cold.steps).not.toContain(PROGRESS_STEP);
+        expect(cold.elapsedMs).toBeLessThan(2500);
+        expect(o.engine.batches).toHaveLength(2);
+
+        // The refresh lands; the next turn (inside r4's quiet period, so no
+        // upload invalidates it first) takes the newer answer.
+        o.engine.release();
+        while (!(await o.status('s-channel'))['cached']) await sleep(10);
+        const warm = await turn('channel-r5');
+        expect(warm.system).toContain(factLine(LEARNING));
+        expect(warm.system).not.toContain(FAVOURITE_SEA);
+        expect(o.engine.batches).toHaveLength(2);
+        expect(await o.checkpointedContext('s-channel')).toMatchObject({
+          identity: {},
+          goals: { facts: [{ fact: LEARNING }] },
+        });
+
+        // r4 and r5 go up together, and only they: the tail after the
+        // first upload.
+        await o.drain();
+        expect(o.engine.uploads).toHaveLength(2);
+        expect(o.engine.uploads[1]).toHaveLength(4);
+      },
     );
   });
 

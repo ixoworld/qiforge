@@ -11,6 +11,104 @@ import type { ReplyPlan } from '../delivery/types';
  */
 export const ChannelProviderId = z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/);
 
+export const ChannelReplyReference = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('unavailable') }),
+  z.strictObject({
+    kind: z.literal('known'),
+    requestId: z.string().min(1).max(180),
+    author: z.enum(['user', 'oracle']),
+    partId: z.string().min(1).max(128).optional(),
+  }),
+]);
+export type ChannelReplyReference = z.infer<typeof ChannelReplyReference>;
+export type ChannelReplyContext =
+  | {
+      kind: 'unavailable';
+      /**
+       * `other_conversation`: the quoted message is this binding's but
+       * belongs to a conversation other than the one the turn runs in.
+       * `unknown`: nothing quotable was found (no receipt, no run, the run
+       * did not finish, or the gateway could not resolve the quote).
+       */
+      reason?: 'other_conversation' | 'unknown';
+    }
+  | {
+      kind: 'resolved';
+      requestId: string;
+      author: 'user' | 'oracle';
+      text: string;
+    };
+/**
+ * At most `max` code points. `.max()` counts UTF-16 units, which would refuse
+ * a line of emoji the code-point clip has already let through.
+ */
+const codePoints = (max: number) =>
+  z.string().refine((value) => Array.from(value).length <= max, {
+    message: `At most ${max} characters`,
+  });
+export const ChannelControlBody = z.strictObject({
+  provider: ChannelProviderId,
+  bindingId: z.string().regex(/^chb_[A-Za-z0-9_-]{1,120}$/),
+  bindingRevision: z.number().int().positive().safe(),
+  requestId: z.string().min(1).max(180),
+  cancelRequestIds: z.array(z.string().min(1).max(180)).max(64),
+  command: z.discriminatedUnion('kind', [
+    z.strictObject({ kind: z.literal('stop') }),
+    z.strictObject({ kind: z.literal('status') }),
+    z.strictObject({ kind: z.literal('new') }),
+    z.strictObject({
+      kind: z.literal('resume'),
+      sessionId: z.string().min(1).max(255),
+    }),
+    /** List this binding's sessions; read-only. */
+    z.strictObject({ kind: z.literal('topics') }),
+    /** Rename the bound session. */
+    z.strictObject({
+      kind: z.literal('rename'),
+      title: codePoints(80).min(1),
+    }),
+  ]),
+});
+export type ChannelControlInput = z.infer<typeof ChannelControlBody>;
+/** One of a binding's sessions, as `topics` lists it. */
+export const ChannelTopic = z.strictObject({
+  sessionId: z.string().min(1).max(255),
+  /** Null when the session has no title yet or is 'Untitled'. */
+  title: codePoints(200).min(1).nullable(),
+  /** Epoch ms. */
+  createdAt: z.number().int().nonnegative(),
+  /** Epoch ms of the session's last activity. */
+  updatedAt: z.number().int().nonnegative(),
+  /** The last message the person sent in it, clipped to 200 code points. */
+  lastUser: codePoints(200).nullable(),
+  /** The last finished reply in it, clipped to 200 code points. */
+  lastReply: codePoints(200).nullable(),
+});
+export type ChannelTopic = z.infer<typeof ChannelTopic>;
+export const ChannelControlResult = z.strictObject({
+  requestId: z.string(),
+  sessionId: z.string().nullable(),
+  command: z.enum(['stop', 'new', 'resume', 'status', 'topics', 'rename']),
+  /** Title of `sessionId` after the command; null: untitled, unknown or no session. */
+  title: codePoints(200).min(1).nullable(),
+  /**
+   * Only for `topics`: this binding's sessions at its current consent
+   * revision, most recent activity first, at most 20, the bound one included.
+   */
+  topics: z.array(ChannelTopic).max(20).optional(),
+});
+export type ChannelControlResult = z.infer<typeof ChannelControlResult>;
+/**
+ * A stored result as read back: receipts written before `title` existed
+ * have none and replay as untitled instead of re-running the control.
+ */
+export const StoredChannelControlResult = ChannelControlResult.extend({
+  title: codePoints(200).min(1).nullable().default(null),
+});
+export type ChannelControlOutcome =
+  | { ok: true; result: ChannelControlResult }
+  | Exclude<ChannelTurnOutcome, { ok: true }>;
+
 export const ChannelTurnBody = z.strictObject({
   provider: ChannelProviderId,
   bindingId: z.string().regex(/^chb_[A-Za-z0-9_-]{1,120}$/),
@@ -18,7 +116,10 @@ export const ChannelTurnBody = z.strictObject({
   requestId: z.string().min(1).max(180),
   remoteMessageRef: z.string().regex(/^hmac:[a-f0-9]{64}$/),
   sessionId: z.string().min(1).max(255).optional(),
+  /** An explicit correction stays in its current session, even with routing enabled. */
+  sessionPolicy: z.literal('continue').optional(),
   message: z.string().min(1).max(16_000),
+  replyTo: ChannelReplyReference.optional(),
   /**
    * Which kind of oracle the gateway believes it addresses. `companion` is
    * the legacy value; the gateway sends `oracle`. Both are accepted.
@@ -62,6 +163,8 @@ export interface ChannelTurnResponse {
   requestId: string;
   runId: string;
   sessionId: string;
+  /** Title of `sessionId` at response time; null when untitled. */
+  sessionTitle?: string | null;
   status:
     | 'queued'
     | 'running'
@@ -137,6 +240,7 @@ export type ChannelErrorCode =
   | 'storage_unauthorized'
   | 'session_not_found'
   | 'request_conflict'
+  | 'request_cancelled'
   | 'session_conflict'
   | 'room_not_encrypted'
   | 'room_unavailable'

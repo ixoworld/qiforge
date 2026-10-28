@@ -1,3 +1,8 @@
+import {
+  channelReplyNote,
+  CHANNEL_REPLY_NOTE_KWARG,
+} from '../channels/replies';
+import { channelRoutingConfig } from '../channels/routing';
 import { digestTopicProposalEffect } from '../action-proposals/topic-store';
 import {
   chainIdsFromConfig,
@@ -22,7 +27,11 @@ import {
   type BeginTopicStep,
   type TopicReceiptReferences,
 } from '@ixo/ixo-transaction/topic-proposals';
-import type { ChannelTurnResponse } from '../channels/contract';
+import type {
+  ChannelControlInput,
+  ChannelControlOutcome,
+  ChannelTurnResponse,
+} from '../channels/contract';
 import { refreshActionProposal } from '../action-proposals/reconcile';
 import { assertActionProposalPolicy } from '../action-proposals/policy';
 import { TopicReadUnavailable } from '../action-proposals/topic-errors';
@@ -294,8 +303,12 @@ import { createWorkStatusMiddleware } from '../core/middlewares/work-status';
 import { UserPreferencesStore } from '../plugins/user-preferences/user-preferences-store';
 import { SqliteUserKv } from '../sqlite/user-kv-store';
 import {
+  channelHistoryIndexDebounceMs,
+  pageOfMessages,
   SessionHistoryIndexer,
+  type HistoryEntry,
   type HistoryMessage,
+  type HistoryPage,
   type IndexableSession,
 } from '../memory/session-history-indexer';
 import {
@@ -2037,6 +2050,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         beforeCreate: () => this.markRunsMaybeActive(),
       });
 
+      const channelRouting = channelRoutingConfig.parse(this.core.validatedEnv);
       this.channelTurns = new ChannelTurns(liveDb, {
         createSession: async (identity, markerTxnId) => {
           const roomId = await this.resolveMainRoomId(identity.userDid);
@@ -2091,6 +2105,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             );
           }
         },
+        stopRuns: (runIds) => this.runs!.abortByIds(runIds),
+        describeSessions: async (sessionIds) => {
+          const found = await this.sessions!.summaries(sessionIds);
+          return new Map(
+            [...found].map(([sessionId, session]) => [
+              sessionId,
+              {
+                title: session.title,
+                createdAt: Date.parse(session.createdAt) || 0,
+                updatedAt: Date.parse(session.lastUpdatedAt) || 0,
+              },
+            ]),
+          );
+        },
+        renameSession: (sessionId, title) =>
+          this.sessions!.setTitle(sessionId, title),
         getRun: (runId) => this.runStore!.get(runId),
         getPlan: (runId) => this.runStore!.getPlan(runId),
         wasPruned: (runId) => this.runStore!.wasChannelRunPruned(runId),
@@ -2123,6 +2153,24 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         keepAlive: (work) => this.ctx.waitUntil(work),
         pruneTombstones: (before, limit) =>
           this.runStore!.pruneChannelTombstones(before, limit),
+        routing: {
+          mode: channelRouting.CHANNEL_SEMANTIC_ROUTING,
+          bindings: channelRouting.CHANNEL_SEMANTIC_ROUTING_BINDINGS.split(',')
+            .map((binding) => binding.trim())
+            .filter(Boolean),
+          minProbability:
+            channelRouting.CHANNEL_SEMANTIC_ROUTING_MIN_PROBABILITY,
+          evaluator: this.core.decisions,
+          ownsSession: async (sessionId) => {
+            const session = await this.sessions!.getSession(sessionId);
+            const roomId = await this.resolveMainRoomId(userDid);
+            return Boolean(
+              sessionId.startsWith('$') && roomId && session?.roomId === roomId,
+            );
+          },
+          observe: (observation) =>
+            console.log(`[channel-routing] ${JSON.stringify(observation)}`),
+        },
       });
 
       const core = this.core;
@@ -3073,54 +3121,87 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return toSummary(row);
     }
 
+    private async readyChannel(identity: TurnIdentity): Promise<void> {
+      if (identity.ucanDelegation)
+        throw new ChannelError(
+          403,
+          'Channel grants cannot become tool authority',
+          'channel_grant_not_tool_authority',
+        );
+      // The shell (the only caller) checked the binding just before.
+      // The 900 s margin is checked by admission, for a NEW request only
+      // (and again as its run starts): a poll of a run that exists
+      // answers its status whatever the delegation's state. Before a
+      // COLD object boots, though, a delegation must be live (present,
+      // unexpired): the boot may load the owner copy under it, and a user
+      // without one must get `delegation_required`, not a boot failure.
+      // Hydration reads the stored copy, then the deposited room state
+      // (re-read when the stored copy is inside the margin).
+      if (!this.db) {
+        const live = (): boolean => {
+          const held = this.delegations.get(identity.userDid);
+          return (
+            Boolean(held?.raw) &&
+            (typeof held?.expiration !== 'number' ||
+              held.expiration > Math.floor(Date.now() / 1000))
+          );
+        };
+        if (!live())
+          await this.hydrateDelegation(identity.userDid, {
+            minRemainingSeconds: CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
+          });
+        if (!live()) throw delegationRequiredError();
+      }
+      try {
+        await this.ready(identity);
+      } catch (error) {
+        // A delegation that lacks the file-storage grant over
+        // `/.oracles` cannot load the owner copy: the user must
+        // authorize again, exactly as without a delegation. (Boot throws
+        // the failure as its RPC envelope, so it is parsed, not matched
+        // by class.)
+        if (parseOwnerCopyFailure(error)?.code === 'NO_VFS_DELEGATION')
+          throw delegationRequiredError();
+        throw error;
+      }
+    }
+
+    async channelControl(
+      identity: TurnIdentity,
+      input: ChannelControlInput,
+      requestHash: string,
+    ): Promise<ChannelControlOutcome> {
+      try {
+        await this.readyChannel(identity);
+        return {
+          ok: true,
+          result: await this.channelTurns!.control(
+            identity,
+            input,
+            requestHash,
+          ),
+        };
+      } catch (error) {
+        const refusal =
+          error instanceof ChannelError ? error : classifyChannelFailure(error);
+        if (refusal)
+          return {
+            ok: false,
+            status: refusal.status,
+            code: refusal.code,
+            message: refusal.message,
+          };
+        throw error;
+      }
+    }
+
     async channelTurn(
       identity: TurnIdentity,
       input: ChannelTurnInput,
       requestHash: string,
     ): Promise<ChannelTurnOutcome> {
       try {
-        if (identity.ucanDelegation)
-          throw new ChannelError(
-            403,
-            'Channel grants cannot become tool authority',
-            'channel_grant_not_tool_authority',
-          );
-        // The shell (the only caller) checked the binding just before.
-        // The 900 s margin is checked by admission, for a NEW request only
-        // (and again as its run starts): a poll of a run that exists
-        // answers its status whatever the delegation's state. Before a
-        // COLD object boots, though, a delegation must be live (present,
-        // unexpired): the boot may load the owner copy under it, and a user
-        // without one must get `delegation_required`, not a boot failure.
-        // Hydration reads the stored copy, then the deposited room state
-        // (re-read when the stored copy is inside the margin).
-        if (!this.db) {
-          const live = (): boolean => {
-            const held = this.delegations.get(identity.userDid);
-            return (
-              Boolean(held?.raw) &&
-              (typeof held?.expiration !== 'number' ||
-                held.expiration > Math.floor(Date.now() / 1000))
-            );
-          };
-          if (!live())
-            await this.hydrateDelegation(identity.userDid, {
-              minRemainingSeconds: CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
-            });
-          if (!live()) throw delegationRequiredError();
-        }
-        try {
-          await this.ready(identity);
-        } catch (error) {
-          // A delegation that lacks the file-storage grant over
-          // `/.oracles` cannot load the owner copy: the user must
-          // authorize again, exactly as without a delegation. (Boot throws
-          // the failure as its RPC envelope, so it is parsed, not matched
-          // by class.)
-          if (parseOwnerCopyFailure(error)?.code === 'NO_VFS_DELEGATION')
-            throw delegationRequiredError();
-          throw error;
-        }
+        await this.readyChannel(identity);
         return {
           ok: true,
           result: await this.withActionOutcomes(
@@ -4513,18 +4594,63 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /**
+     * The indexer's tail read: transcript rows after the message `after`
+     * names (its id, re-resolved per read because rowids move when a
+     * checkpoint rewrites the thread), paged so only the unindexed tail is
+     * deserialized. The same messages as `historyMessages`, in its order;
+     * null when `after` is no longer in the thread.
+     */
+    private async historyPage(
+      sessionId: string,
+      after: string | null,
+      limit: number,
+    ): Promise<HistoryPage | null> {
+      const saver = this.saver!;
+      let anchor = null;
+      if (after !== null) {
+        anchor = await saver.findThreadMessageAnchor(sessionId, after);
+        if (!anchor) return null;
+      }
+      const pageRows = Math.max(1, limit);
+      const entries: HistoryEntry[] = [];
+      for (;;) {
+        const rows = await saver.listThreadMessageRows(sessionId, {
+          direction: 'newer',
+          anchor,
+          limit: pageRows,
+        });
+        for (const row of rows) {
+          anchor = row.anchor;
+          const m = row.message;
+          if (isSummarizationMessage(m) || isAttachmentViewMessage(m)) continue;
+          entries.push({
+            message: { type: m.type, content: visibleText(m) },
+            cursor: row.messageId,
+          });
+        }
+        if (rows.length < pageRows) return { entries, more: false };
+        if (entries.length >= limit) return { entries, more: true };
+      }
+    }
+
+    /**
      * Fire-and-forget session-history indexing (`SessionHistoryIndexer`).
-     * The watermark lives in this object's storage (`history:processed:<id>`),
-     * seeded from the row's `lastProcessedCount` for files migrated from Node;
-     * `touchSession` is not used because it bumps `last_updated_at` and
-     * would reorder the session list.
+     * The watermark is the session row's `last_processed_count` (the column
+     * the Node runtime keeps, so a migrated file continues where it left
+     * off); `touchSession` is not used because it bumps `last_updated_at`
+     * and would reorder the session list. `afterQuietMs` defers the pass
+     * until the session has been quiet that long (a finished channel run);
+     * every other trigger indexes at once.
      *
      * Task-run sessions (`task:<id>`) are never indexed: a run's transcript
      * is the task's instructions and its result, not something the user
      * said, and a supplied-context task's source text must not become
      * long-term memory that ordinary, tool-enabled turns can retrieve.
      */
-    private scheduleHistoryIndexing(sessionId: string): void {
+    private scheduleHistoryIndexing(
+      sessionId: string,
+      opts: { afterQuietMs?: number } = {},
+    ): void {
       if (sessionId.startsWith(TASK_SESSION_PREFIX)) return;
       const ambient = this.ambient;
       const userDid = this.userDid;
@@ -4552,9 +4678,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             lastProcessedCount: row.lastProcessedCount ?? 0,
           };
         },
-        listMessages: async (id) =>
-          this.historySnapshots.get(id)?.messages ??
-          (await this.historyMessages(id)),
+        readMessages: async (id, after, limit) => {
+          const snapshot = this.historySnapshots.get(id);
+          return snapshot
+            ? pageOfMessages(snapshot.messages, after, limit)
+            : this.historyPage(id, after, limit);
+        },
         setProcessedCount: async (id, count) => {
           if (this.historySnapshots.has(id)) return; // deleted: nothing to advance
           await this.sessions?.setLastProcessedCount(id, count);
@@ -4586,9 +4715,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         logger: console,
       });
       const indexer = this.historyIndexer;
+      // A deleted session's snapshot is its transcript's last chance: it is
+      // indexed even while the session backs off after a failure.
+      const work =
+        opts.afterQuietMs !== undefined
+          ? indexer.processAfterQuiet(sessionId, opts.afterQuietMs)
+          : this.historySnapshots.has(sessionId)
+            ? indexer.process(sessionId, { ignoreBackoff: true })
+            : indexer.process(sessionId);
       this.ctx.waitUntil(
-        indexer
-          .process(sessionId)
+        work
           .catch((err: unknown) => {
             console.error(
               `[user-do] session-history indexing failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
@@ -4662,11 +4798,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
     /**
      * Start a turn's user-context prefetch — stale-while-revalidate, as the
-     * Node AgentBuilder does it. A thread's context is fixed on first
-     * contact: a thread whose checkpoint already holds a gathered context
-     * never waits and never takes a newer answer; it only refreshes the
-     * room's cache in the background (a no-op while the cache is fresh), so
-     * the NEXT session in the room starts from it. First contact — including
+     * Node AgentBuilder does it. A thread whose checkpoint already holds a
+     * gathered context never waits; it refreshes the room's cache in the
+     * background (a no-op while the cache is fresh), so the NEXT session in
+     * the room starts from it. A channel thread also takes the cached answer
+     * when the cache is warm (indexed channel history invalidates it, so a
+     * later turn picks up the refresh); other clients never take a newer
+     * answer (first-contact policy). First contact — including
      * a thread whose earlier first turn got nothing (timeout, failure, skip)
      * — waits for the gather, at most the cap. Returns the step the build
      * awaits right before the agent is built, or null where this turn
@@ -4731,8 +4869,19 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           }),
         );
       if (hasUserContext(input.prior)) {
+        // A channel session is one long conversation, so it takes a newer
+        // room answer — but only one already in the cache: an upload that
+        // just invalidated the room must not make the next message wait for
+        // a gather. On a miss the thread keeps its context and the
+        // (single-flight) refresh warms the cache for a later turn.
+        const warm =
+          input.client === 'channel'
+            ? fetcher.readCached(input.roomId)
+            : undefined;
         keepGathering();
-        return null;
+        if (!warm) return null;
+        const context = withEverySlot(warm.context);
+        return async () => context;
       }
       const pending = fetcher
         .fetch(params)
@@ -6100,6 +6249,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * input whatever its disposition.
      */
     private runRequestJson(req: TurnRequest, stored: StoredRunRequest): string {
+      if (req.client === 'channel' && req.channel?.routingClarification)
+        return JSON.stringify({
+          ...stored,
+          disposition: {
+            kind: 'direct-read',
+            text: req.channel.routingClarification,
+            title: 'Conversation clarification',
+            messageId: `direct:${req.sessionId}:${req.requestId}:ai`,
+          },
+        });
       const admissible =
         admissionApplies(req) &&
         this.core.plugins.some((plugin) => plugin.getRequestAdmission);
@@ -6122,6 +6281,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const stored = JSON.parse(live.record.request) as StoredRunRequest;
       const req = stored.turn;
       if (req.client === 'channel') {
+        if (
+          req.channel &&
+          (await this.channelTurns!.isCancelled({
+            bindingId: req.channel.bindingId,
+            requestId: req.requestId,
+          }))
+        )
+          return { status: 'aborted', text: '' };
         await this.ctx.storage.sync();
         // The binding was checked as the request was admitted; a queued or
         // recovered attempt starts later and checks it again.
@@ -6448,6 +6615,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         timestamp: new Date().toISOString(),
         oracleName: this.core.identity.name,
         msgFromMatrixRoom: req.client === 'matrix',
+        ...(req.client === 'channel' && req.channel
+          ? {
+              'org.ixo.qi.origin': channelOrigin(req.channel),
+              ...(req.channel.replyTo
+                ? { 'org.ixo.qi.reply': req.channel.replyTo }
+                : {}),
+            }
+          : {}),
         ...(req.client === 'matrix'
           ? {
               senderDid: req.identity.userDid,
@@ -6570,7 +6745,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // into the user's oracle room in the background: never awaited here, so
       // the session's next queued run starts at once. Without the handle (a
       // reset dropped it mid-run) the next poll or alarm mirrors it.
-      if (record.client === 'channel') this.channelTurns?.deliverReply();
+      if (record.client === 'channel') {
+        this.channelTurns?.deliverReply();
+        // Indexed once the session has been quiet for a while, not per turn:
+        // each upload invalidates the room's prefetch cache.
+        if (outcome.status === 'finished')
+          this.scheduleHistoryIndexing(record.sessionId, {
+            afterQuietMs: channelHistoryIndexDebounceMs(this.core.validatedEnv),
+          });
+      }
       if (!record.taskRunId || !this.taskScheduler) return;
       if (this.taskScheduler.isRunActive(record.taskRunId)) return;
       if (outcome.status === 'finished')
@@ -7682,17 +7865,29 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const timeNote = suppliedContextOnly
         ? undefined
         : renderTurnTimeNote(turnAt, req.identity.timezone);
-      const content = timeNote ? withTurnTimeNote(spoken, timeNote) : spoken;
+      const replyNote = channelReplyNote(req.channel?.replyContext);
+      const referenced = replyNote
+        ? withTurnTimeNote(spoken, replyNote)
+        : spoken;
+      const content = timeNote
+        ? withTurnTimeNote(referenced, timeNote)
+        : referenced;
       const human = new HumanMessage({
         content,
         additional_kwargs: {
           timestamp: turnAt.toISOString(),
           ...(timeNote ? { [TURN_TIME_NOTE_KWARG]: timeNote } : {}),
+          ...(replyNote ? { [CHANNEL_REPLY_NOTE_KWARG]: replyNote } : {}),
           oracleName: core.identity.name,
           msgFromMatrixRoom: req.client === 'matrix',
           ...speakerKwargs,
           ...(req.channel
-            ? { 'org.ixo.qi.origin': channelOrigin(req.channel) }
+            ? {
+                'org.ixo.qi.origin': channelOrigin(req.channel),
+                ...(req.channel.replyTo
+                  ? { 'org.ixo.qi.reply': req.channel.replyTo }
+                  : {}),
+              }
             : {}),
           ...attachmentKwargs,
         },
@@ -7814,7 +8009,18 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             txnId: req.channel
               ? `channel-${await channelRequestHash(JSON.stringify([req.identity.userDid, req.channel.bindingId, req.requestId, who]))}`
               : mirrorTxnId(req.sessionId, req.requestId, who),
-            ...(req.channel ? { origin: req.channel } : {}),
+            ...(req.channel
+              ? {
+                  origin: {
+                    provider: req.channel.provider,
+                    bindingId: req.channel.bindingId,
+                    remoteMessageRef: req.channel.remoteMessageRef,
+                    ...(who === 'user' && req.channel.replyTo
+                      ? { replyTo: req.channel.replyTo }
+                      : {}),
+                  },
+                }
+              : {}),
           };
         },
         label,

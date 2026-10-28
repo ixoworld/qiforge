@@ -2,8 +2,8 @@
  * Drops a room's prefetched user context (`UserContextFetcher.invalidate`)
  * after a tool call that changed the user's memory succeeded, so the next
  * session in the room gathers again instead of reading the pre-write answer
- * for the rest of the cache TTL. It never changes the current thread: a
- * thread keeps the context it got on first contact.
+ * for the rest of the cache TTL. Channel turns adopt the refreshed context
+ * on a later turn; other clients keep their first-contact context.
  *
  * Applied as a tool middleware to the main agent and every sub-agent; a
  * failed call (thrown, or an error `ToolMessage`) leaves the cache alone.

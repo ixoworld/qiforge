@@ -20,6 +20,7 @@ import {
 import {
   channelRequestHash,
   type ChannelTurnInput,
+  type ChannelControlInput,
 } from '../channels/contract';
 import { signOutcomeRequest } from '@ixo/action-protocol';
 import {
@@ -41,17 +42,22 @@ const input: ChannelTurnInput = {
 };
 
 /** A channel turn signed by the channel service under the user's direct grant. */
-async function signedTurn() {
+async function signedTurn(
+  body:
+    | ChannelTurnInput
+    | ChannelControlInput
+    | Record<string, unknown> = input,
+) {
   const user = await generateKeypair();
   const service = await generateKeypair();
   const oracle = await generateKeypair();
   const signer = user.signer.withDID(USER_DID);
   const capability: Capability = {
     can: 'ixo:channel/invoke',
-    with: `ixo:channel:${input.bindingId}`,
+    with: `ixo:channel:${body.bindingId}`,
     nb: {
-      provider: input.provider,
-      bindingRevision: input.bindingRevision,
+      provider: body.provider,
+      bindingRevision: body.bindingRevision,
       oracleDid: oracle.did,
     },
   };
@@ -61,7 +67,7 @@ async function signedTurn() {
     capabilities: [capability],
     expiration: Math.floor(Date.now() / 1000) + 300,
   });
-  const raw = JSON.stringify(input);
+  const raw = JSON.stringify(body);
   // The did:ixo resolver and its key cache are shared per Blocksync URL per
   // isolate, so each turn's freshly generated user key gets its own URL.
   const blocksync = `https://blocksync-${crypto.randomUUID()}.test/graphql`;
@@ -74,7 +80,7 @@ async function signedTurn() {
       expiration: Math.floor(Date.now() / 1000) + 60,
       facts: [
         {
-          requestId: input.requestId,
+          requestId: body.requestId,
           requestHash: await channelRequestHash(raw),
         },
       ],
@@ -154,6 +160,20 @@ function environment(
     USER_ORACLE: {
       idFromName: (name: string) => name,
       get: () => ({
+        channelControl: async (
+          identity: { userDid: string },
+          command: ChannelControlInput,
+        ) => {
+          turns.push(identity.userDid);
+          return {
+            ok: true,
+            result: {
+              requestId: command.requestId,
+              sessionId: '$owned',
+              command: command.command.kind,
+            },
+          };
+        },
         channelPoll: async (identity: { userDid: string }) => {
           polls.push(identity.userDid);
           return options.channelPoll ? options.channelPoll() : null;
@@ -811,5 +831,122 @@ describe('POST /channels/turn service DID list', () => {
       message: 'Channels are not configured',
     });
     expect(turns).toEqual([]);
+  });
+});
+
+describe('POST /channels/control authorization', () => {
+  const control: ChannelControlInput = {
+    provider: 'whatsapp',
+    bindingId: input.bindingId,
+    bindingRevision: 1,
+    requestId: 'wa:stop',
+    cancelRequestIds: [input.requestId],
+    command: { kind: 'stop' },
+  };
+  it('authenticates the exact control body and checks the active binding before invoking the user object', async () => {
+    const signed = await signedTurn(control);
+    const e = environment(signed, false);
+    const response = await createShell().fetch(
+      new Request('https://oracle.test/channels/control', {
+        method: 'POST',
+        headers: signed.headers,
+        body: signed.raw,
+      }),
+      e.env,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      requestId: control.requestId,
+      command: 'stop',
+    });
+    expect(e.authHubCalls).toHaveLength(1);
+    expect(e.turns).toEqual([USER_DID]);
+  });
+  it.each([
+    [{ kind: 'topics' }, 200],
+    [{ kind: 'rename', title: 'Rent' }, 200],
+    [{ kind: 'rename', title: 'x'.repeat(81) }, 400],
+    [{ kind: 'rename', title: '' }, 400],
+    [{ kind: 'rename' }, 400],
+    [{ kind: 'topics', extra: true }, 400],
+  ])('validates the %j command (status %i)', async (command, status) => {
+    const signed = await signedTurn({
+      ...control,
+      cancelRequestIds: [],
+      command,
+    });
+    const e = environment(signed, false);
+    const response = await createShell().fetch(
+      new Request('https://oracle.test/channels/control', {
+        method: 'POST',
+        headers: signed.headers,
+        body: signed.raw,
+      }),
+      e.env,
+    );
+    expect(response.status).toBe(status);
+    expect(e.turns).toHaveLength(status === 200 ? 1 : 0);
+  });
+  it('rejects changed commands and inactive bindings without invoking controls', async () => {
+    const signed = await signedTurn(control);
+    const e = environment(signed, false, undefined, {
+      hub: () => Response.json({ active: false }),
+    });
+    const changed = await createShell().fetch(
+      new Request('https://oracle.test/channels/control', {
+        method: 'POST',
+        headers: signed.headers,
+        body: JSON.stringify({ ...control, command: { kind: 'new' } }),
+      }),
+      e.env,
+    );
+    expect(changed.status).toBe(403);
+    const revoked = await createShell().fetch(
+      new Request('https://oracle.test/channels/control', {
+        method: 'POST',
+        headers: signed.headers,
+        body: signed.raw,
+      }),
+      e.env,
+    );
+    expect(revoked.status).toBe(403);
+    expect(e.turns).toEqual([]);
+  });
+  it('rate limits controls before asking Auth Hub', async () => {
+    const signed = await signedTurn(control);
+    const e = environment(signed, true);
+    const response = await createShell().fetch(
+      new Request('https://oracle.test/channels/control', {
+        method: 'POST',
+        headers: signed.headers,
+        body: signed.raw,
+      }),
+      e.env,
+    );
+    expect(response.status).toBe(429);
+    expect(e.authHubCalls).toEqual([]);
+    expect(e.turns).toEqual([]);
+  });
+  it('spends a control budget apart from turns and polls, so polling cannot block a stop', async () => {
+    const signed = await signedTurn(control);
+    const e = environment(signed, false);
+    const channelKey = `${signed.oracleDid}|channel|${USER_DID}`;
+    // The limiter refuses the turn/poll key only (a gateway polling hard).
+    e.env.RATE_LIMIT.limit = async ({ key }: { key: string }) => {
+      e.limiterKeys.push(key);
+      return { success: key !== channelKey };
+    };
+    const response = await createShell().fetch(
+      new Request('https://oracle.test/channels/control', {
+        method: 'POST',
+        headers: signed.headers,
+        body: signed.raw,
+      }),
+      e.env,
+    );
+    expect(response.status).toBe(200);
+    expect(e.limiterKeys).toEqual([
+      `${signed.oracleDid}|channel-control|${USER_DID}`,
+    ]);
   });
 });
