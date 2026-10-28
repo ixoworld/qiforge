@@ -891,8 +891,8 @@ an older engine keys spaces by the agent DID and answers the prefetch's
 runtime older than this one (no header) with `400 ENTITY_HEADER_MISSING`, so
 runtime and engine move together. The oracle document tools
 (`add_oracle_document`, `list_oracle_documents`, `delete_oracle_document`)
-also need the engine's `/knowledge/documents` routes, which arrive after
-2.2.0 (devnet first); an engine without them answers 404, which the tools
+also need the engine's `/knowledge/documents` routes (Memory Engine 2.3.0 and
+later, devnet `1.0.0-develop.19` and later); an engine without them answers 404, which the tools
 report as a refusal (`The memory engine refused: …`) and nothing is written. The engine refuses a request without the
 header or with a malformed one, and
 refuses an entity whose on-chain document does not list the oracle's agent
