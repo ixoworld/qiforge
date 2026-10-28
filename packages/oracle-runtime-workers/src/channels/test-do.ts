@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { DoSqliteDatabase, type SqlRow } from '../sqlite/database';
 import { RunStore, type RunRecord } from '../do/run-store';
 import type { ReplyPlan } from '../delivery/types';
-import { ChannelTurns } from './turns';
+import { ChannelTurns, type ChannelSessionInfo } from './turns';
 import { DecisionRuntime } from '@ixo/common/ai/decisions';
 import type { ChannelRoutingMode } from './routing';
 import {
@@ -32,6 +32,8 @@ export class ChannelTurnsTestDO extends DurableObject {
     createSession: 0,
     stopRuns: 0,
   };
+  /** Batched session reads made since the object loaded. */
+  private describeCalls = 0;
   private mirrorMode: MirrorMode = 'ok';
   private holdSessionCreation = false;
   private pendingSessions: (() => void)[] = [];
@@ -47,6 +49,7 @@ export class ChannelTurnsTestDO extends DurableObject {
   private holdRouting = false;
   private failNextBegin = false;
   private failNextAssertSession = false;
+  private refuseNextRename = false;
 
   private async ready(): Promise<ChannelTurns> {
     if (this.turns) return this.turns;
@@ -62,7 +65,13 @@ export class ChannelTurnsTestDO extends DurableObject {
           await new Promise<void>((resolve) =>
             this.pendingSessions.push(resolve),
           );
-        return `$${marker}`;
+        const sessionId = `$${marker}`;
+        await this.putSessionInfo(sessionId, {
+          title: null,
+          createdAt: this.nowMs,
+          updatedAt: this.nowMs,
+        });
+        return sessionId;
       },
       assertSession: async (_identity, sessionId) => {
         this.calls.assertSession += 1;
@@ -98,6 +107,25 @@ export class ChannelTurnsTestDO extends DurableObject {
           )
             await runs.close(runId, { status: 'aborted' });
         }
+      },
+      describeSessions: async (sessionIds) => {
+        this.describeCalls += 1;
+        const found = new Map<string, ChannelSessionInfo>();
+        for (const sessionId of sessionIds) {
+          const info = await this.sessionInfo(sessionId);
+          if (info) found.set(sessionId, info);
+        }
+        return found;
+      },
+      renameSession: async (sessionId, title) => {
+        if (this.refuseNextRename) {
+          this.refuseNextRename = false;
+          return false;
+        }
+        const info = await this.sessionInfo(sessionId);
+        if (!info) return false;
+        await this.putSessionInfo(sessionId, { ...info, title });
+        return true;
       },
       getRun: (runId) => runs.get(runId),
       getPlan: (runId) => runs.getPlan(runId),
@@ -410,6 +438,50 @@ export class ChannelTurnsTestDO extends DurableObject {
     );
   }
 
+  /** As the sessions store: a session exists once created (or given details) and until deleted. */
+  private async sessionInfo(
+    sessionId: string,
+  ): Promise<ChannelSessionInfo | undefined> {
+    if ((await this.deletedSessions()).includes(sessionId)) return undefined;
+    return this.ctx.storage.get<ChannelSessionInfo>(`session:${sessionId}`);
+  }
+
+  private async putSessionInfo(
+    sessionId: string,
+    info: ChannelSessionInfo,
+  ): Promise<void> {
+    await this.ctx.storage.put(`session:${sessionId}`, info);
+  }
+
+  /** What the sessions store holds about a session (title, created, last activity). */
+  async setSessionInfo(
+    sessionId: string,
+    info: Partial<ChannelSessionInfo>,
+  ): Promise<void> {
+    const current = (await this.sessionInfo(sessionId)) ?? {
+      title: null,
+      createdAt: this.nowMs,
+      updatedAt: this.nowMs,
+    };
+    await this.putSessionInfo(sessionId, { ...current, ...info });
+  }
+
+  /** The title the sessions store holds for a session. */
+  async titleOf(sessionId: string): Promise<string | null> {
+    return (await this.sessionInfo(sessionId))?.title ?? null;
+  }
+
+  /** Ids of the binding rows `topics` keeps for a binding (any revision). */
+  async bindingRows(bindingId: string): Promise<string[]> {
+    await this.ready();
+    return (
+      await this.db!.exec<{ session_id: string }>(
+        'SELECT session_id FROM channel_session_bindings WHERE binding_id=? ORDER BY rowid',
+        [bindingId],
+      )
+    ).map((row) => row.session_id);
+  }
+
   private async deletedSessions(): Promise<string[]> {
     return (await this.ctx.storage.get<string[]>('deleted-sessions')) ?? [];
   }
@@ -467,6 +539,11 @@ export class ChannelTurnsTestDO extends DurableObject {
       for (const release of this.pendingSessions.splice(0)) release();
   }
 
+  /** How many times the sessions store was read for session details. */
+  async sessionReads(): Promise<number> {
+    return this.describeCalls;
+  }
+
   async hostCalls(): Promise<{
     assertSession: number;
     changed: number;
@@ -512,6 +589,35 @@ export class ChannelTurnsTestDO extends DurableObject {
     this.failNextAssertSession = true;
   }
 
+  /** The next rename finds no session, as when it is deleted after the checks passed. */
+  async refuseRenameOnce(): Promise<void> {
+    this.refuseNextRename = true;
+  }
+
+  /** Replace a control's stored result, as an older version might have written it. */
+  async storeControlResult(
+    bindingId: string,
+    requestId: string,
+    result: string,
+  ): Promise<void> {
+    await this.ready();
+    await this.db!.run(
+      'UPDATE channel_controls SET result=? WHERE binding_id=? AND request_id=?',
+      [result, bindingId, requestId],
+    );
+  }
+
+  /** The ids of the controls a binding has a receipt for. */
+  async controlReceipts(bindingId: string): Promise<string[]> {
+    await this.ready();
+    return (
+      await this.db!.exec<{ request_id: string }>(
+        'SELECT request_id FROM channel_controls WHERE binding_id=? ORDER BY rowid',
+        [bindingId],
+      )
+    ).map((row) => row.request_id);
+  }
+
   async indexedSessions(): Promise<string[]> {
     await this.ready();
     return (
@@ -539,6 +645,25 @@ export class ChannelTurnsTestDO extends DurableObject {
         : 'UPDATE channel_controls SET result=\'{"v":9}\' WHERE request_id=?',
       [requestId],
     );
+  }
+
+  /** A run's stored request as a broken write would leave it. */
+  async corruptRunRequest(runId: string): Promise<void> {
+    await this.ready();
+    await this.db!.run("UPDATE turn_runs SET request='{' WHERE run_id=?", [
+      runId,
+    ]);
+  }
+
+  /** Ids of the binding rows of a binding (any revision), most recently bound first. */
+  async bindingRowsNewestFirst(bindingId: string): Promise<string[]> {
+    await this.ready();
+    return (
+      await this.db!.exec<{ session_id: string }>(
+        'SELECT session_id FROM channel_session_bindings WHERE binding_id=? ORDER BY created_at DESC, rowid DESC',
+        [bindingId],
+      )
+    ).map((row) => row.session_id);
   }
 
   async reset(): Promise<void> {

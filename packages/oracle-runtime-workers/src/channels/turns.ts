@@ -1,18 +1,21 @@
 /* eslint-disable no-console -- console IS the logger on Workers (Logs/observability). */
 import type { z } from 'zod';
 import type { DoSqliteDatabase } from '../sqlite/database';
+import { UNTITLED_SESSION } from '../sqlite/sessions-store';
 import type { RunRecord } from '../do/run-store';
 import type { TurnIdentity, TurnRequest } from '../do/contracts';
 import { parseReplyPlan, planText } from '../delivery/schema';
 import type { ReplyPlan } from '../delivery/types';
 import {
   ChannelError,
-  ChannelControlResult,
+  type ChannelControlResult,
+  StoredChannelControlResult,
   type ChannelControlInput,
   type ChannelReplyContext,
   channelRequestHash,
   channelRunId,
   StaleSessionError,
+  type ChannelTopic,
   type ChannelTurnInput,
   type ChannelTurnResponse,
 } from './contract';
@@ -137,6 +140,75 @@ async function withDeadline<T>(work: Promise<T>, ms: number): Promise<T> {
   }
 }
 
+/** What the sessions store holds about one session. */
+export interface ChannelSessionInfo {
+  /** The stored title, if any: 'Untitled' and blank ones count as none. */
+  title: string | null;
+  /** Epoch ms. */
+  createdAt: number;
+  /** Epoch ms of the last activity. */
+  updatedAt: number;
+}
+
+/** The most sessions `topics` lists. */
+const CHANNEL_TOPICS_LIMIT = 20;
+/** The most binding rows `topics` reads, the most recently bound first: the rest are not listed. */
+const CHANNEL_TOPICS_SCAN = 200;
+/** Code points a title or a last line may have on the wire. */
+const CHANNEL_TOPIC_LINE_LIMIT = 200;
+const CHANNEL_TITLE_LIMIT = 80;
+/** Receipts looked through, newest first, for one that is not a routing question. */
+const CHANNEL_TOPIC_LOOKBACK = 5;
+/** Ids per statement: a Durable Object binds at most 100 parameters. */
+const CHANNEL_IDS_PER_STATEMENT = 50;
+
+function clipCodePoints(text: string, limit: number): string {
+  const points = Array.from(text);
+  return points.length > limit ? points.slice(0, limit).join('') : text;
+}
+
+/**
+ * Text as a single line of plain characters: whitespace runs become one
+ * space; control, format and line or paragraph separator characters (bidi
+ * overrides, zero-width marks) are removed.
+ */
+function plainLine(text: string): string {
+  return text
+    .replace(/\s+/gu, ' ')
+    .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+/** A line of a conversation as `topics` shows it, or null when nothing is left. */
+function topicLine(text: string | null | undefined): string | null {
+  const line = clipCodePoints(plainLine(text ?? ''), CHANNEL_TOPIC_LINE_LIMIT);
+  return line.length > 0 ? line : null;
+}
+
+function isPlaceholderTitle(title: string): boolean {
+  return title.toLowerCase() === UNTITLED_SESSION.toLowerCase();
+}
+
+/** A stored title as the wire carries it: null when untitled, at most 200 code points. */
+function wireTitle(title: string | null | undefined): string | null {
+  const line = plainLine(title ?? '');
+  return line.length > 0 && !isPlaceholderTitle(line)
+    ? clipCodePoints(line, CHANNEL_TOPIC_LINE_LIMIT)
+    : null;
+}
+
+/**
+ * A person's new title: one plain line of 1..80 code points that is not the
+ * placeholder, which the auto-titler would overwrite.
+ */
+function cleanTitle(title: string): string {
+  const cleaned = clipCodePoints(plainLine(title), CHANNEL_TITLE_LIMIT);
+  if (cleaned.length === 0 || isPlaceholderTitle(cleaned))
+    throw new ChannelError(400, 'Invalid title', 'invalid_request');
+  return cleaned;
+}
+
 export interface ChannelTurnsHost {
   routing?: ChannelRoutingOptions;
   createSession(identity: TurnIdentity, markerTxnId: string): Promise<string>;
@@ -157,6 +229,12 @@ export interface ChannelTurnsHost {
    * winding down when it resolves.
    */
   stopRuns(runIds: readonly string[]): Promise<void>;
+  /** The sessions store's rows for `sessionIds`; a session it holds none for (deleted) is absent. */
+  describeSessions(
+    sessionIds: readonly string[],
+  ): Promise<Map<string, ChannelSessionInfo>>;
+  /** Set a session's title, replacing any; false when it holds no such session. */
+  renameSession(sessionId: string, title: string): Promise<boolean>;
   getRun(runId: string): Promise<RunRecord | undefined>;
   /** The Reply Plan (JSON) a finished run was built into, if any. */
   getPlan(runId: string): Promise<string | null>;
@@ -305,6 +383,9 @@ export class ChannelTurns {
       await this.db.run(
         'CREATE INDEX IF NOT EXISTS idx_channel_requests_created ON channel_requests(created_at)',
       );
+      await this.db.run(
+        'CREATE INDEX IF NOT EXISTS idx_channel_requests_session ON channel_requests(binding_id, session_id)',
+      );
       await this.db.run(`CREATE TABLE IF NOT EXISTS channel_controls (
         binding_id TEXT NOT NULL, request_id TEXT NOT NULL, request_hash TEXT NOT NULL,
         result TEXT, replacement_session_id TEXT, created_at INTEGER NOT NULL,
@@ -393,12 +474,21 @@ export class ChannelTurns {
         'Channel identity does not match this request',
         'identity_mismatch',
       );
-    if (input.command.kind === 'status' && input.cancelRequestIds.length)
+    if (
+      (input.command.kind === 'status' ||
+        input.command.kind === 'topics' ||
+        input.command.kind === 'rename') &&
+      input.cancelRequestIds.length
+    )
       throw new ChannelError(
         400,
-        'A status request cannot cancel work',
+        `A ${input.command.kind} request cannot cancel work`,
         'invalid_request',
       );
+    const renamed =
+      input.command.kind === 'rename'
+        ? cleanTitle(input.command.title)
+        : undefined;
     const saved = await this.serialize(async () => {
       await this.setup();
       const row = await this.db.get<{
@@ -416,7 +506,7 @@ export class ChannelTurns {
           'request_conflict',
         );
       const result = row?.result
-        ? readStored(ChannelControlResult, row.result, 'control result')
+        ? readStored(StoredChannelControlResult, row.result, 'control result')
         : undefined;
       if (result) return { result };
       await this.assertNotCancelled(input);
@@ -445,6 +535,14 @@ export class ChannelTurns {
       }
       if (input.command.kind === 'new')
         await this.host.requireDelegation(identity);
+      if (input.command.kind === 'rename') {
+        if (!(await this.boundSession(input.bindingId)))
+          throw new ChannelError(
+            404,
+            'This conversation has no topic to rename',
+            'session_not_found',
+          );
+      }
     } catch (error) {
       await this.serialize(async () => {
         const dropped = await this.db.run(
@@ -500,6 +598,10 @@ export class ChannelTurns {
       await this.host.assertSession(identity, replacement);
     } else if (input.command.kind === 'resume')
       replacement = input.command.sessionId;
+    const listing =
+      input.command.kind === 'topics'
+        ? await this.listTopics(input)
+        : undefined;
     return this.serialize(async () => {
       // A later stop can cancel this control while its Matrix call is outstanding.
       await this.assertNotCancelled(input);
@@ -508,7 +610,11 @@ export class ChannelTurns {
         [input.bindingId, input.requestId],
       );
       const already = completed?.result
-        ? readStored(ChannelControlResult, completed.result, 'control result')
+        ? readStored(
+            StoredChannelControlResult,
+            completed.result,
+            'control result',
+          )
         : undefined;
       if (already) return already;
       if (replacement) {
@@ -518,10 +624,37 @@ export class ChannelTurns {
         );
         await this.recordSessionBinding(input, replacement);
       }
+      const sessionId = listing
+        ? listing.bound
+        : (replacement ?? (await this.boundSession(input.bindingId)));
+      if (renamed !== undefined) {
+        // Bound now, not as it was when the title was checked: a reset in
+        // between moves the name to the topic the person is in.
+        if (
+          !sessionId ||
+          !(await this.host.renameSession(sessionId, renamed))
+        ) {
+          // Refused after the checks passed: the receipt goes with it, so a
+          // corrected retry under the same id is not a conflict.
+          const dropped = await this.db.run(
+            'DELETE FROM channel_controls WHERE binding_id=? AND request_id=? AND result IS NULL',
+            [input.bindingId, input.requestId],
+          );
+          if (dropped.changes > 0) await this.host.changed();
+          throw new ChannelError(
+            404,
+            'This conversation has no topic to rename',
+            'session_not_found',
+          );
+        }
+        await this.host.changed();
+      }
       const result: ChannelControlResult = {
         requestId: input.requestId,
-        sessionId: replacement ?? (await this.boundSession(input.bindingId)),
+        sessionId,
         command: input.command.kind,
+        title: await this.titleOf(sessionId),
+        ...(listing ? { topics: listing.topics } : {}),
       };
       await this.db.run(
         'UPDATE channel_controls SET result=? WHERE binding_id=? AND request_id=?',
@@ -532,13 +665,176 @@ export class ChannelTurns {
     });
   }
 
-  /** Note that the binding, at its current consent revision, uses `sessionId`. */
+  /**
+   * A session's title for use inside `*…*`: one plain line without the
+   * characters that would end or restyle the markup, at most 80 code points;
+   * null when untitled or unknown.
+   */
+  private async boldTitle(sessionId: string | null): Promise<string | null> {
+    if (!sessionId) return null;
+    const title = wireTitle(
+      (await this.host.describeSessions([sessionId])).get(sessionId)?.title,
+    );
+    if (!title) return null;
+    const plain = clipCodePoints(
+      plainLine(title.replace(/[*_~`]/gu, '')),
+      CHANNEL_TITLE_LIMIT,
+    );
+    return plain.length > 0 ? plain : null;
+  }
+
+  /** The title of a session as the wire carries it: null when untitled or unknown. */
+  private async titleOf(sessionId: string | null): Promise<string | null> {
+    if (!sessionId) return null;
+    const found = await this.host.describeSessions([sessionId]);
+    return wireTitle(found.get(sessionId)?.title);
+  }
+
+  /**
+   * The sessions this binding used at its current consent revision (the
+   * bound one among them), most recent activity first, and the bound session
+   * the list was built from. Read-only apart from forgetting the binding
+   * rows of sessions the user deleted.
+   */
+  private async listTopics(
+    input: Pick<ChannelTurnInput, 'bindingId' | 'bindingRevision'>,
+  ): Promise<{ bound: string | null; topics: ChannelTopic[] }> {
+    const used = await this.db.exec<{ session_id: string }>(
+      'SELECT session_id FROM channel_session_bindings WHERE binding_id=? AND binding_revision=? ORDER BY created_at DESC, rowid DESC LIMIT ?',
+      [input.bindingId, input.bindingRevision, CHANNEL_TOPICS_SCAN],
+    );
+    const bound = await this.boundSession(input.bindingId);
+    const ids = new Set(used.map((row) => row.session_id));
+    if (bound) ids.add(bound);
+    const described = await this.host.describeSessions([...ids]);
+    const deleted = [...ids].filter((sessionId) => !described.has(sessionId));
+    if (deleted.length)
+      await this.serialize(async () => {
+        let removed = 0;
+        for (let at = 0; at < deleted.length; at += CHANNEL_IDS_PER_STATEMENT) {
+          const chunk = deleted.slice(at, at + CHANNEL_IDS_PER_STATEMENT);
+          removed += (
+            await this.db.run(
+              `DELETE FROM channel_session_bindings WHERE binding_id=? AND session_id IN (${chunk.map(() => '?').join(', ')})`,
+              [input.bindingId, ...chunk],
+            )
+          ).changes;
+        }
+        if (removed > 0) await this.host.changed();
+      });
+    const byActivity = [...described]
+      .map(([sessionId, info]) => ({ sessionId, info }))
+      .sort((a, b) => b.info.updatedAt - a.info.updatedAt);
+    let kept = byActivity.slice(0, CHANNEL_TOPICS_LIMIT);
+    const boundEntry = byActivity.find((entry) => entry.sessionId === bound);
+    if (boundEntry && !kept.includes(boundEntry))
+      kept = [...kept.slice(0, CHANNEL_TOPICS_LIMIT - 1), boundEntry].sort(
+        (a, b) => b.info.updatedAt - a.info.updatedAt,
+      );
+    const newest = await this.newestReceipts(
+      input.bindingId,
+      kept.map((entry) => entry.sessionId),
+    );
+    const topics: ChannelTopic[] = [];
+    for (const { sessionId, info } of kept) {
+      const line = await this.topicLines(
+        input,
+        sessionId,
+        newest.get(sessionId),
+      );
+      topics.push({
+        sessionId,
+        title: wireTitle(info.title),
+        createdAt: info.createdAt,
+        updatedAt: info.updatedAt,
+        ...line,
+      });
+    }
+    return { bound, topics };
+  }
+
+  /** The run of the newest request receipt of each session, in one statement. */
+  private async newestReceipts(
+    bindingId: string,
+    sessionIds: readonly string[],
+  ): Promise<Map<string, string>> {
+    const newest = new Map<string, string>();
+    if (sessionIds.length === 0) return newest;
+    const marks = sessionIds.map(() => '?').join(', ');
+    const rows = await this.db.exec<{ session_id: string; run_id: string }>(
+      `SELECT session_id, run_id FROM channel_requests WHERE binding_id=? AND rowid IN (SELECT MAX(rowid) FROM channel_requests WHERE binding_id=? AND session_id IN (${marks}) GROUP BY session_id)`,
+      [bindingId, bindingId, ...sessionIds],
+    );
+    for (const row of rows) newest.set(row.session_id, row.run_id);
+    return newest;
+  }
+
+  /**
+   * What the person last said in a session and the reply to it, from the
+   * newest receipt that is not a routing question (those are the oracle's
+   * words, not the topic's). Null lines when there is none, when it was sent
+   * under another consent revision, or when its stored request is unreadable.
+   */
+  private async topicLines(
+    input: Pick<ChannelTurnInput, 'bindingId' | 'bindingRevision'>,
+    sessionId: string,
+    newestRunId: string | undefined,
+  ): Promise<{ lastUser: string | null; lastReply: string | null }> {
+    const none = { lastUser: null, lastReply: null };
+    if (!newestRunId) return none;
+    let found = await this.topicReceipt(newestRunId);
+    if (found?.request.channel?.routingClarification) {
+      found = undefined;
+      const recent = await this.db.exec<{ run_id: string }>(
+        'SELECT run_id FROM channel_requests WHERE binding_id=? AND session_id=? ORDER BY rowid DESC LIMIT ?',
+        [input.bindingId, sessionId, CHANNEL_TOPIC_LOOKBACK],
+      );
+      for (const row of recent) {
+        const candidate = await this.topicReceipt(row.run_id);
+        if (candidate && !candidate.request.channel?.routingClarification) {
+          found = candidate;
+          break;
+        }
+      }
+    }
+    // Text from before the person's latest consent is not quoted.
+    if (
+      !found ||
+      found.request.identity.channel?.bindingRevision !== input.bindingRevision
+    )
+      return none;
+    return {
+      lastUser: topicLine(found.request.message),
+      lastReply: topicLine(
+        found.run.status === 'finished' ? found.run.partialText : null,
+      ),
+    };
+  }
+
+  /** A run and its stored request; undefined when either is missing or unreadable. */
+  private async topicReceipt(
+    runId: string,
+  ): Promise<{ run: RunRecord; request: TurnRequest } | undefined> {
+    const run = await this.host.getRun(runId);
+    if (!run) return undefined;
+    try {
+      return { run, request: this.host.requestOf(run) };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Note that the binding, at its current consent revision, uses `sessionId`,
+   * and when it last did: `created_at` is the time of the latest binding, so
+   * `topics` reads the most recently bound sessions.
+   */
   private async recordSessionBinding(
     input: Pick<ChannelTurnInput, 'bindingId' | 'bindingRevision'>,
     sessionId: string,
   ): Promise<void> {
     const recorded = await this.db.run(
-      'INSERT OR IGNORE INTO channel_session_bindings(binding_id,binding_revision,session_id,created_at) VALUES(?,?,?,?)',
+      'INSERT INTO channel_session_bindings(binding_id,binding_revision,session_id,created_at) VALUES(?,?,?,?) ON CONFLICT(binding_id,binding_revision,session_id) DO UPDATE SET created_at=excluded.created_at WHERE excluded.created_at > channel_session_bindings.created_at',
       [input.bindingId, input.bindingRevision, sessionId, this.now()],
     );
     if (recorded.changes > 0) await this.host.changed();
@@ -809,14 +1105,18 @@ export class ChannelTurns {
     const route = row?.routing_json
       ? readStored(routeAssignmentSchema, row.routing_json, 'route assignment')
       : undefined;
-    const notice =
-      route?.mode === 'on' && route.destination.kind === 'new'
-        ? 'Starting a fresh topic for this. Send /resume to go back to what we were doing.'
-        : route?.mode === 'on' &&
-            route.destination.kind === 'session' &&
-            route.destination.sessionId !== route.baseline
-          ? 'Back to our earlier conversation. Send /resume to go back.'
-          : undefined;
+    let notice: string | undefined;
+    if (route?.mode === 'on' && route.destination.kind === 'new') {
+      const before = await this.boldTitle(route.baseline);
+      notice = `Starting a fresh topic for this. Send /resume to go back to ${before ? `*${before}*` : 'the previous topic'}.`;
+    } else if (
+      route?.mode === 'on' &&
+      route.destination.kind === 'session' &&
+      route.destination.sessionId !== route.baseline
+    ) {
+      const to = await this.boldTitle(route.destination.sessionId);
+      notice = `Back to ${to ? `*${to}*` : 'an earlier topic'}. Send /resume to go back.`;
+    }
     if (!notice) return { plan, rendered: plan ? planText(plan) : text };
     const decorated =
       plan && plan.parts.length < 999
@@ -1600,6 +1900,7 @@ export class ChannelTurns {
       requestId: input.requestId,
       runId: record.runId,
       sessionId,
+      sessionTitle: await this.titleOf(sessionId),
       status: record.status,
       ...(record.messageId ? { messageId: record.messageId } : {}),
       // `text` is the whole reply as one message for gateways that predate

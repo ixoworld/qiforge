@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import type { ChannelTurnsTestDO } from './test-do';
 import {
   CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
+  ChannelControlBody,
+  ChannelControlResult,
   type ChannelTurnInput,
   type ChannelControlInput,
 } from './contract';
@@ -1031,6 +1033,566 @@ describe('channel quotes and controls', () => {
     expect(await stub.control(status)).toMatchObject({
       ok: true,
       result: { sessionId: first.result.sessionId, command: 'status' },
+    });
+  });
+});
+
+describe('channel topics, rename and titles', () => {
+  const control: ChannelControlInput = {
+    provider: 'whatsapp',
+    bindingId: message.bindingId,
+    bindingRevision: 1,
+    requestId: 'wa:control',
+    cancelRequestIds: [],
+    command: { kind: 'status' },
+  };
+  const topics = (id: string, bindingRevision = 1): ChannelControlInput => ({
+    ...control,
+    requestId: id,
+    bindingRevision,
+    command: { kind: 'topics' },
+  });
+  const rename = (id: string, title: string): ChannelControlInput => ({
+    ...control,
+    requestId: id,
+    command: { kind: 'rename', title },
+  });
+  const listed = async (
+    stub: ReturnType<typeof env.CHANNEL_TURNS_TEST.getByName>,
+    input: ChannelControlInput,
+  ) => {
+    const outcome = await stub.control(input);
+    if (!outcome.ok) throw new Error(`Control refused: ${outcome.code}`);
+    return outcome.result;
+  };
+  /** A fresh topic for the binding: `new`, then one message in it. */
+  const newTopic = async (
+    stub: ReturnType<typeof env.CHANNEL_TURNS_TEST.getByName>,
+    n: number,
+    text = `Question ${n}`,
+  ) => {
+    const result = await listed(stub, {
+      ...control,
+      requestId: `wa:new-${n}`,
+      command: { kind: 'new' },
+    });
+    const turn = await stub.submit({
+      ...message,
+      requestId: `wa:q-${n}`,
+      message: text,
+    });
+    if (!turn.ok || !result.sessionId) throw new Error('Turn rejected');
+    return { sessionId: result.sessionId, runId: turn.result.runId };
+  };
+
+  it('lists this binding and revision only, newest activity first, the bound one included', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('topics-list');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    const second = await newTopic(stub, 2);
+    const other = await stub.submit({
+      ...message,
+      bindingId: 'chb_other',
+      requestId: 'wa:other',
+    });
+    if (!other.ok) throw new Error('Turn rejected');
+    await stub.setSessionInfo(first.result.sessionId, {
+      title: 'Plan',
+      createdAt: 1_000,
+      updatedAt: 3_000,
+    });
+    await stub.setSessionInfo(second.sessionId, {
+      title: null,
+      createdAt: 2_000,
+      updatedAt: 2_000,
+    });
+    const result = await listed(stub, topics('wa:topics'));
+    expect(result).toMatchObject({
+      command: 'topics',
+      sessionId: second.sessionId,
+      title: null,
+    });
+    expect(result.topics?.map((topic) => topic.sessionId)).toEqual([
+      first.result.sessionId,
+      second.sessionId,
+    ]);
+    expect(result.topics?.[0]).toMatchObject({
+      title: 'Plan',
+      createdAt: 1_000,
+      updatedAt: 3_000,
+    });
+    // Another consent revision has used none of them; only the bound one is listed.
+    const later = await listed(stub, topics('wa:topics-r2', 2));
+    expect(later.topics?.map((topic) => topic.sessionId)).toEqual([
+      second.sessionId,
+    ]);
+  });
+
+  it('does not quote text sent under an earlier consent revision', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('topics-revision');
+    const first = await stub.submit({
+      ...message,
+      message: 'Old consent text',
+    });
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.finish(first.result.runId, undefined, 'Old consent reply');
+    const same = await listed(stub, topics('wa:topics'));
+    expect(same.topics?.[0]).toMatchObject({
+      lastUser: 'Old consent text',
+      lastReply: 'Old consent reply',
+    });
+    // The bound session is listed under the new revision, without its lines.
+    const later = await listed(stub, topics('wa:topics-r2', 2));
+    expect(later.sessionId).toBe(first.result.sessionId);
+    expect(later.topics).toHaveLength(1);
+    expect(later.topics?.[0]).toMatchObject({
+      sessionId: first.result.sessionId,
+      lastUser: null,
+      lastReply: null,
+    });
+  });
+
+  it('skips a routing clarification for the last lines', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('topics-clarification');
+    await stub.configureRouting('on');
+    const first = await stub.submit({ ...message, message: 'Real question' });
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.finish(first.result.runId, undefined, 'Real answer');
+    const clarified = await stub.submit({
+      ...message,
+      requestId: 'wa:clarify',
+      message: 'Which one?',
+      replyTo: { kind: 'known', author: 'user', requestId: 'wa:unknown' },
+    });
+    if (!clarified.ok) throw new Error('Turn rejected');
+    expect(
+      JSON.parse((await stub.run(clarified.result.runId))!.request).channel
+        .routingClarification,
+    ).toEqual(expect.any(String));
+    expect(clarified.result.sessionId).toBe(first.result.sessionId);
+    await stub.finish(clarified.result.runId, undefined, 'Please say which');
+    const result = await listed(stub, topics('wa:topics'));
+    expect(result.topics?.[0]).toMatchObject({
+      lastUser: 'Real question',
+      lastReply: 'Real answer',
+    });
+  });
+
+  it('keeps a topic whose stored request cannot be read, with null lines', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('topics-corrupt-request');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.corruptRunRequest(first.result.runId);
+    const result = await listed(stub, topics('wa:topics'));
+    expect(result.topics).toHaveLength(1);
+    expect(result.topics?.[0]).toMatchObject({
+      sessionId: first.result.sessionId,
+      lastUser: null,
+      lastReply: null,
+    });
+  });
+
+  it('reads the sessions in a bounded number of statements', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('topics-batched');
+    for (let n = 1; n <= 5; n += 1) await newTopic(stub, n);
+    const before = await stub.sessionReads();
+    await listed(stub, topics('wa:topics'));
+    // One batched read for the list, one for the title of the result.
+    expect((await stub.sessionReads()) - before).toBe(2);
+  });
+
+  it('lists a long-ago-bound session again once it is bound again', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('topics-rebound');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.advance(5_000);
+    const second = await newTopic(stub, 2);
+    await stub.advance(5_000);
+    const back = await listed(stub, {
+      ...control,
+      requestId: 'wa:back',
+      command: { kind: 'resume', sessionId: first.result.sessionId },
+    });
+    expect(back.sessionId).toBe(first.result.sessionId);
+    expect(await stub.bindingRowsNewestFirst(message.bindingId)).toEqual([
+      first.result.sessionId,
+      second.sessionId,
+    ]);
+  });
+
+  it('is read-only: it cancels nothing and leaves the bound session alone', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('topics-read-only');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    const before = await stub.boundSession(message.bindingId);
+    const result = await listed(stub, topics('wa:topics'));
+    expect(result.sessionId).toBe(first.result.sessionId);
+    expect(await stub.boundSession(message.bindingId)).toBe(before);
+    expect((await stub.hostCalls()).stopRuns).toBe(0);
+    expect((await stub.run(first.result.runId))?.status).toBe('running');
+  });
+
+  it('skips a deleted session and removes its binding row', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('topics-deleted');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    const second = await newTopic(stub, 2);
+    await stub.markSessionDeleted(first.result.sessionId);
+    expect(await stub.bindingRows(message.bindingId)).toContain(
+      first.result.sessionId,
+    );
+    const result = await listed(stub, topics('wa:topics'));
+    expect(result.topics?.map((topic) => topic.sessionId)).toEqual([
+      second.sessionId,
+    ]);
+    expect(await stub.bindingRows(message.bindingId)).toEqual([
+      second.sessionId,
+    ]);
+  });
+
+  it('lists at most 20 sessions, the most recently active', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('topics-cap');
+    const ids: string[] = [];
+    for (let n = 1; n <= 23; n += 1) {
+      const topic = await newTopic(stub, n);
+      await stub.setSessionInfo(topic.sessionId, { updatedAt: n * 1_000 });
+      ids.push(topic.sessionId);
+    }
+    const result = await listed(stub, topics('wa:topics'));
+    expect(result.topics).toHaveLength(20);
+    expect(result.topics?.map((topic) => topic.sessionId)).toEqual(
+      ids.slice(3).reverse(),
+    );
+  });
+
+  it('fills the last lines from the newest request, and nulls what is not there', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('topics-lines');
+    const done = await newTopic(stub, 1, 'What is the rent?');
+    await stub.finish(done.runId, undefined, 'R'.repeat(300));
+    const running = await newTopic(stub, 2, 'Still thinking');
+    const failed = await newTopic(stub, 3, 'Broken');
+    await stub.fail(failed.runId);
+    const idle = await listed(stub, {
+      ...control,
+      requestId: 'wa:new-4',
+      command: { kind: 'new' },
+    });
+    for (const [n, sessionId] of [
+      [1, done.sessionId],
+      [2, running.sessionId],
+      [3, failed.sessionId],
+      [4, idle.sessionId],
+    ] as const)
+      await stub.setSessionInfo(sessionId!, { updatedAt: n * 1_000 });
+    const result = await listed(stub, topics('wa:topics'));
+    const byId = new Map(
+      result.topics?.map((topic) => [topic.sessionId, topic]),
+    );
+    expect(byId.get(done.sessionId)).toMatchObject({
+      lastUser: 'What is the rent?',
+      lastReply: 'R'.repeat(200),
+    });
+    expect(byId.get(running.sessionId)).toMatchObject({
+      lastUser: 'Still thinking',
+      lastReply: null,
+    });
+    expect(byId.get(failed.sessionId)).toMatchObject({
+      lastUser: 'Broken',
+      lastReply: null,
+    });
+    expect(byId.get(idle.sessionId!)).toMatchObject({
+      lastUser: null,
+      lastReply: null,
+    });
+  });
+
+  it('clips the lines to 200 code points, never splitting one', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('topics-clip');
+    const topic = await newTopic(stub, 1, '\u{1F600}'.repeat(250));
+    await stub.finish(topic.runId, undefined, '\u{1F680}'.repeat(250));
+    const result = await listed(stub, topics('wa:topics'));
+    expect(result.topics?.[0]?.lastUser).toBe('\u{1F600}'.repeat(200));
+    expect(result.topics?.[0]?.lastReply).toBe('\u{1F680}'.repeat(200));
+    // 200 emoji are 400 UTF-16 units: the schema counts code points, and the
+    // receipt reads back, so a retry replays it.
+    expect(ChannelControlResult.safeParse(result).success).toBe(true);
+    expect(await listed(stub, topics('wa:topics'))).toEqual(result);
+  });
+
+  it('counts titles and lines in code points in the schemas', async () => {
+    const emoji = '\u{1F600}';
+    const rename41 = {
+      ...control,
+      command: { kind: 'rename', title: emoji.repeat(41) },
+    };
+    expect(ChannelControlBody.safeParse(rename41).success).toBe(true);
+    expect(
+      ChannelControlBody.safeParse({
+        ...control,
+        command: { kind: 'rename', title: emoji.repeat(80) },
+      }).success,
+    ).toBe(true);
+    expect(
+      ChannelControlBody.safeParse({
+        ...control,
+        command: { kind: 'rename', title: emoji.repeat(81) },
+      }).success,
+    ).toBe(false);
+    expect(
+      ChannelControlBody.safeParse({
+        ...control,
+        command: { kind: 'rename', title: '' },
+      }).success,
+    ).toBe(false);
+    const stub = env.CHANNEL_TURNS_TEST.getByName('topics-emoji-title');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.setSessionInfo(first.result.sessionId, {
+      title: emoji.repeat(150),
+    });
+    const result = await listed(stub, topics('wa:topics'));
+    expect(result.title).toBe(emoji.repeat(150));
+    expect(result.topics?.[0]?.title).toBe(emoji.repeat(150));
+    expect(ChannelControlResult.safeParse(result).success).toBe(true);
+    const renamed = await listed(stub, rename('wa:rename', emoji.repeat(41)));
+    expect(renamed.title).toBe(emoji.repeat(41));
+  });
+
+  it('normalises titles and lines: one plain line, no invisible characters', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('topics-normalise');
+    const topic = await newTopic(
+      stub,
+      1,
+      'Line one\n\n  line\ttwo\u202Eevil\u200Bzero\u2028end',
+    );
+    await stub.finish(topic.runId, undefined, 'A\r\nB   C\u0007D');
+    await stub.setSessionInfo(topic.sessionId, {
+      title: '  Rent\u200B \n plan\u202E  ',
+    });
+    const result = await listed(stub, topics('wa:topics'));
+    expect(result.title).toBe('Rent plan');
+    expect(result.topics?.[0]).toMatchObject({
+      title: 'Rent plan',
+      lastUser: 'Line one line twoevilzero end',
+      lastReply: 'A B CD',
+    });
+    const named = await listed(
+      stub,
+      rename('wa:rename', ' \u200B Big \t\n  plan\u202E '),
+    );
+    expect(named.title).toBe('Big plan');
+  });
+
+  it('shows what the person typed, without the reply or time notes', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('topics-notes');
+    const topic = await newTopic(stub, 1, 'Is it still on?');
+    await stub.finish(topic.runId, undefined, 'It is on.');
+    const quoted = await stub.submit({
+      ...message,
+      requestId: 'wa:quote',
+      message: 'Great, thanks',
+      replyTo: { kind: 'known', requestId: 'wa:q-1', author: 'user' },
+    });
+    if (!quoted.ok) throw new Error('Turn rejected');
+    // The quote reached the run as context (the note the model sees)...
+    expect(
+      JSON.parse((await stub.run(quoted.result.runId))!.request).channel
+        .replyContext,
+    ).toMatchObject({ kind: 'resolved', text: 'Is it still on?' });
+    // ...and the topic shows only what the person typed.
+    const result = await listed(stub, topics('wa:topics'));
+    expect(result.topics?.[0]?.sessionId).toBe(topic.sessionId);
+    expect(result.topics?.[0]?.lastUser).toBe('Great, thanks');
+    expect(JSON.stringify(result)).not.toContain('Is it still on?');
+  });
+
+  it('renames the bound session, replacing a generated title', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('rename');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.setSessionInfo(first.result.sessionId, {
+      title: 'Generated title',
+    });
+    const result = await listed(
+      stub,
+      rename('wa:rename', '  Rent \u0007plan\n2027  '),
+    );
+    expect(result).toEqual({
+      requestId: 'wa:rename',
+      sessionId: first.result.sessionId,
+      command: 'rename',
+      title: 'Rent plan 2027',
+    });
+    expect(await stub.titleOf(first.result.sessionId)).toBe('Rent plan 2027');
+    const listing = await listed(stub, topics('wa:topics'));
+    expect(listing.topics?.[0]?.title).toBe('Rent plan 2027');
+  });
+
+  it('refuses a rename without a bound session, and one that leaves no title', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('rename-unbound');
+    expect(await stub.control(rename('wa:rename', 'Rent'))).toMatchObject({
+      ok: false,
+      status: 404,
+      code: 'session_not_found',
+    });
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    expect(await stub.control(rename('wa:blank', ' \u0007 '))).toMatchObject({
+      ok: false,
+      status: 400,
+      code: 'invalid_request',
+    });
+    expect(await stub.titleOf(first.result.sessionId)).toBeNull();
+    // The refusal took its receipt with it: the same id works once bound.
+    expect(await stub.control(rename('wa:rename', 'Rent'))).toMatchObject({
+      ok: true,
+      result: { title: 'Rent' },
+    });
+  });
+
+  it('refuses the placeholder as a name, in any case', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('rename-placeholder');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    for (const title of ['Untitled', ' uNtItLeD ', 'UNTITLED'])
+      expect(await stub.control(rename('wa:rename', title))).toMatchObject({
+        ok: false,
+        status: 400,
+        code: 'invalid_request',
+      });
+    expect(await stub.titleOf(first.result.sessionId)).toBeNull();
+    expect(await stub.controlReceipts(message.bindingId)).toEqual([]);
+    expect(
+      await stub.control(rename('wa:rename', 'Untitled plan')),
+    ).toMatchObject({ ok: true, result: { title: 'Untitled plan' } });
+  });
+
+  it('drops the receipt of a rename the session store refuses after the checks', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('rename-refused-late');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.refuseRenameOnce();
+    expect(await stub.control(rename('wa:rename', 'Rent'))).toMatchObject({
+      ok: false,
+      status: 404,
+      code: 'session_not_found',
+    });
+    expect(await stub.controlReceipts(message.bindingId)).toEqual([]);
+    // A corrected retry under the same id is accepted, not a conflict.
+    expect(await stub.control(rename('wa:rename', 'Rent plan'))).toMatchObject({
+      ok: true,
+      result: { title: 'Rent plan' },
+    });
+    expect(await stub.titleOf(first.result.sessionId)).toBe('Rent plan');
+  });
+
+  it('replays a receipt stored before results carried a title', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('receipt-without-title');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    expect(
+      await listed(stub, { ...control, requestId: 'wa:old' }),
+    ).toMatchObject({ command: 'status' });
+    await stub.storeControlResult(
+      message.bindingId,
+      'wa:old',
+      JSON.stringify({
+        requestId: 'wa:old',
+        sessionId: first.result.sessionId,
+        command: 'status',
+      }),
+    );
+    await stub.setSessionInfo(first.result.sessionId, { title: 'Now titled' });
+    expect(await listed(stub, { ...control, requestId: 'wa:old' })).toEqual({
+      requestId: 'wa:old',
+      sessionId: first.result.sessionId,
+      command: 'status',
+      title: null,
+    });
+  });
+
+  it('refuses topics and rename that name requests to cancel', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('topics-cancel');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    for (const command of [
+      topics('wa:t'),
+      rename('wa:r', 'Rent'),
+    ] satisfies ChannelControlInput[])
+      expect(
+        await stub.control({
+          ...command,
+          cancelRequestIds: [message.requestId],
+        }),
+      ).toMatchObject({ ok: false, status: 400, code: 'invalid_request' });
+    expect((await stub.hostCalls()).stopRuns).toBe(0);
+    expect((await stub.run(first.result.runId))?.status).toBe('running');
+  });
+
+  it('answers a retried topics or rename from its receipt', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('topics-retry');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    const renamed = await listed(stub, rename('wa:rename', 'Rent'));
+    const listing = await listed(stub, topics('wa:topics'));
+    await stub.setSessionInfo(first.result.sessionId, { title: 'Changed' });
+    await newTopic(stub, 2);
+    expect(await listed(stub, rename('wa:rename', 'Rent'))).toEqual(renamed);
+    expect(await listed(stub, topics('wa:topics'))).toEqual(listing);
+    expect(await stub.titleOf(first.result.sessionId)).toBe('Changed');
+    expect(
+      await stub.control({ ...rename('wa:rename', 'Other') }),
+    ).toMatchObject({ ok: false, code: 'request_conflict' });
+  });
+
+  it('carries the session title on every control result', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('titles');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.setSessionInfo(first.result.sessionId, { title: 'Plan' });
+    expect(
+      await listed(stub, { ...control, requestId: 'wa:status' }),
+    ).toMatchObject({ command: 'status', title: 'Plan' });
+    const fresh = await listed(stub, {
+      ...control,
+      requestId: 'wa:new',
+      command: { kind: 'new' },
+    });
+    expect(fresh).toMatchObject({ command: 'new', title: null });
+    await stub.setSessionInfo(fresh.sessionId!, { title: 'Untitled' });
+    expect(
+      await listed(stub, { ...control, requestId: 'wa:status-2' }),
+    ).toMatchObject({ title: null });
+    expect(
+      await listed(stub, {
+        ...control,
+        requestId: 'wa:resume',
+        command: { kind: 'resume', sessionId: first.result.sessionId },
+      }),
+    ).toMatchObject({ command: 'resume', title: 'Plan' });
+    expect(
+      await listed(stub, {
+        ...control,
+        requestId: 'wa:stop',
+        command: { kind: 'stop' },
+      }),
+    ).toMatchObject({ command: 'stop', title: 'Plan' });
+  });
+
+  it('carries the session title on turn responses, null while untitled', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('session-title');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    expect(first.result.sessionTitle).toBeNull();
+    await stub.setSessionInfo(first.result.sessionId, { title: 'Plan' });
+    const polled = await stub.submit(message);
+    if (!polled.ok) throw new Error('Turn rejected');
+    expect(polled.result.sessionTitle).toBe('Plan');
+    await stub.finish(first.result.runId);
+    const finished = await stub.submit(message);
+    expect(finished).toMatchObject({
+      ok: true,
+      result: { status: 'finished', sessionTitle: 'Plan' },
     });
   });
 });

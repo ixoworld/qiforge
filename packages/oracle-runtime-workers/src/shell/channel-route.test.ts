@@ -43,7 +43,10 @@ const input: ChannelTurnInput = {
 
 /** A channel turn signed by the channel service under the user's direct grant. */
 async function signedTurn(
-  body: ChannelTurnInput | ChannelControlInput = input,
+  body:
+    | ChannelTurnInput
+    | ChannelControlInput
+    | Record<string, unknown> = input,
 ) {
   const user = await generateKeypair();
   const service = await generateKeypair();
@@ -858,6 +861,31 @@ describe('POST /channels/control authorization', () => {
     });
     expect(e.authHubCalls).toHaveLength(1);
     expect(e.turns).toEqual([USER_DID]);
+  });
+  it.each([
+    [{ kind: 'topics' }, 200],
+    [{ kind: 'rename', title: 'Rent' }, 200],
+    [{ kind: 'rename', title: 'x'.repeat(81) }, 400],
+    [{ kind: 'rename', title: '' }, 400],
+    [{ kind: 'rename' }, 400],
+    [{ kind: 'topics', extra: true }, 400],
+  ])('validates the %j command (status %i)', async (command, status) => {
+    const signed = await signedTurn({
+      ...control,
+      cancelRequestIds: [],
+      command,
+    });
+    const e = environment(signed, false);
+    const response = await createShell().fetch(
+      new Request('https://oracle.test/channels/control', {
+        method: 'POST',
+        headers: signed.headers,
+        body: signed.raw,
+      }),
+      e.env,
+    );
+    expect(response.status).toBe(status);
+    expect(e.turns).toHaveLength(status === 200 ? 1 : 0);
   });
   it('rejects changed commands and inactive bindings without invoking controls', async () => {
     const signed = await signedTurn(control);

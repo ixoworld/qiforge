@@ -71,6 +71,9 @@ describe('channel-only semantic sessions', () => {
     const stub = env.CHANNEL_TURNS_TEST.getByName('routing-goals');
     await stub.configureRouting('on');
     const first = accepted(await stub.submit(input));
+    await stub.setSessionInfo(first.sessionId, {
+      title: '  Grant *application*_\n`2027`\u200B ',
+    });
     await stub.routeAs('thread_0');
     const followup = accepted(
       await stub.submit({
@@ -113,7 +116,38 @@ describe('channel-only semantic sessions', () => {
         }),
       ).text,
     ).toBe(
-      'Back to our earlier conversation. Send /resume to go back.\n\nOne answer',
+      'Back to *Grant application 2027*. Send /resume to go back.\n\nOne answer',
+    );
+  });
+
+  it('names the topic being left in the fresh-topic notice, and says so when it is untitled', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('routing-fresh-notice');
+    await stub.configureRouting('on');
+    const first = accepted(await stub.submit(input));
+    await stub.routeAs('new_thread');
+    const trip = accepted(
+      await stub.submit({
+        ...input,
+        requestId: 'wa:trip',
+        sessionId: first.sessionId,
+        message: 'Separate question: plan my trip',
+      }),
+    );
+    await stub.finish(trip.runId);
+    const again = {
+      ...input,
+      requestId: 'wa:trip',
+      sessionId: first.sessionId,
+      message: 'Separate question: plan my trip',
+    };
+    expect(accepted(await stub.submit(again)).text).toBe(
+      'Starting a fresh topic for this. Send /resume to go back to the previous topic.\n\nOne answer',
+    );
+    await stub.setSessionInfo(first.sessionId, {
+      title: '  Grant *application*_\n`2027`\u200B ',
+    });
+    expect(accepted(await stub.submit(again)).text).toBe(
+      'Starting a fresh topic for this. Send /resume to go back to *Grant application 2027*.\n\nOne answer',
     );
   });
 

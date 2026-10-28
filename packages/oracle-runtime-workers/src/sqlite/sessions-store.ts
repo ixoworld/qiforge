@@ -65,6 +65,9 @@ type SessionRow = {
   slack_thread_ts: string | null;
 };
 
+/** Ids per statement in `summaries`. */
+const SUMMARY_CHUNK = 50;
+
 type SessionRowWithTotal = SessionRow & { total: number };
 
 const SESSION_COLUMNS = `session_id, title, last_updated_at, created_at, oracle_name,
@@ -240,6 +243,46 @@ export class SessionsStore {
     );
     for (const row of rows) rooms.set(row.session_id, row.room_id);
     return rooms;
+  }
+
+  /**
+   * Title and times of many sessions, without their heavier columns, in
+   * statements of at most `SUMMARY_CHUNK` ids (a Durable Object binds at most
+   * 100 parameters). Sessions without a row are absent from the map.
+   */
+  async summaries(
+    sessionIds: readonly string[],
+  ): Promise<
+    Map<
+      string,
+      { title: string | null; createdAt: string; lastUpdatedAt: string }
+    >
+  > {
+    const found = new Map<
+      string,
+      { title: string | null; createdAt: string; lastUpdatedAt: string }
+    >();
+    if (sessionIds.length === 0) return found;
+    await this.setup();
+    for (let at = 0; at < sessionIds.length; at += SUMMARY_CHUNK) {
+      const chunk = sessionIds.slice(at, at + SUMMARY_CHUNK);
+      const rows = await this.db.exec<{
+        session_id: string;
+        title: string | null;
+        created_at: string;
+        last_updated_at: string;
+      }>(
+        `SELECT session_id, title, created_at, last_updated_at FROM sessions WHERE session_id IN (${chunk.map(() => '?').join(', ')})`,
+        [...chunk],
+      );
+      for (const row of rows)
+        found.set(row.session_id, {
+          title: row.title,
+          createdAt: row.created_at,
+          lastUpdatedAt: row.last_updated_at,
+        });
+    }
+    return found;
   }
 
   async getSession(sessionId: string): Promise<SessionRecord | undefined> {

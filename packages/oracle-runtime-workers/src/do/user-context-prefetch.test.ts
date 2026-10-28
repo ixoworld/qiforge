@@ -1183,7 +1183,7 @@ describe('user-context prefetch in a user-object turn', () => {
         expect(trip.status).toBe('finished');
         expect(trip.sessionId).not.toBe(application.sessionId);
         expect(trip.text).toContain(
-          'Starting a fresh topic for this. Send /resume to go back to what we were doing.',
+          'Starting a fresh topic for this. Send /resume to go back to',
         );
         const calls = o.model.calls.length;
         const clarification = await o.channelTurn('Yes', 'wa:yes', {

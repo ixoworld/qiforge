@@ -2106,6 +2106,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           }
         },
         stopRuns: (runIds) => this.runs!.abortByIds(runIds),
+        describeSessions: async (sessionIds) => {
+          const found = await this.sessions!.summaries(sessionIds);
+          return new Map(
+            [...found].map(([sessionId, session]) => [
+              sessionId,
+              {
+                title: session.title,
+                createdAt: Date.parse(session.createdAt) || 0,
+                updatedAt: Date.parse(session.lastUpdatedAt) || 0,
+              },
+            ]),
+          );
+        },
+        renameSession: (sessionId, title) =>
+          this.sessions!.setTitle(sessionId, title),
         getRun: (runId) => this.runStore!.get(runId),
         getPlan: (runId) => this.runStore!.getPlan(runId),
         wasPruned: (runId) => this.runStore!.wasChannelRunPruned(runId),
