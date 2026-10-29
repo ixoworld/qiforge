@@ -1,13 +1,15 @@
 import { ActionProposalsPlugin } from './action-proposals/action-proposals.plugin';
 import { HubActionsPlugin } from './hub-actions/hub-actions.plugin';
+import { IxoChainPlugin } from './ixo-chain';
 export { ActionProposalsPlugin } from './action-proposals/action-proposals.plugin';
 export { HubActionsPlugin } from './hub-actions/hub-actions.plugin';
 /**
  * Bundled Workers-runtime plugins — ports of the Node runtime's MCP / fetch
  * plugins. Each is gated the same way as on Node: `autoDetect` on its env
  * key where one exists (memory / sandbox / firecrawl / composio), always-on
- * otherwise (domain-indexer; vfs self-gates on `ctx.ucan.hasSigningKey()`;
- * pod-creator is on-demand and stays hidden until `load_capability`).
+ * otherwise (domain-indexer; ixo-chain unless `IXO_CHAIN_TOOLS=off`; vfs
+ * self-gates on `ctx.ucan.hasSigningKey()`; pod-creator and ixo-chain are
+ * on-demand and stay hidden until `load_capability`).
  *
  * A host opts in by spreading `BUNDLED_WORKERS_PLUGINS` into
  * `createOracleWorker({ plugins })` — plugins whose env keys are absent are
@@ -46,6 +48,7 @@ export * from './user-preferences';
 export * from './portal';
 export * from './agui';
 export * from './ixo-transaction';
+export * from './ixo-chain';
 export * from './pod-creator';
 export * from './oracle-payments';
 
@@ -73,6 +76,7 @@ export const tasksPlugin = TasksPlugin;
 export const BUNDLED_WORKERS_PLUGINS = [
   new ActionProposalsPlugin(),
   new HubActionsPlugin(),
+  new IxoChainPlugin(),
   memoryPlugin,
   sandboxPlugin,
   firecrawlPlugin,

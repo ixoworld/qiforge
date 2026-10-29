@@ -2339,6 +2339,136 @@ describe('createMainAgent — per-turn isolation and a stable prompt', () => {
   });
 });
 
+/** A message's text, whether a string or text blocks. */
+function textOf(content: BaseMessage['content']): string {
+  if (typeof content === 'string') return content;
+  return content
+    .map((block) =>
+      block.type === 'text' && typeof block.text === 'string' ? block.text : '',
+    )
+    .join('');
+}
+
+/** A scripted model that records the system prompt of every call it answers. */
+class SystemRecordingModel extends FakeToolCallingModel {
+  constructor(
+    private readonly script: Script,
+    readonly systems: string[],
+    private readonly position: { current: number } = { current: 0 },
+  ) {
+    super({ toolCalls: script, indexRef: position });
+  }
+
+  override bindTools(): SystemRecordingModel {
+    return new SystemRecordingModel(this.script, this.systems, this.position);
+  }
+
+  override async _generate(
+    ...args: Parameters<FakeToolCallingModel['_generate']>
+  ): ReturnType<FakeToolCallingModel['_generate']> {
+    const system = args[0].find((m) => m.type === 'system');
+    this.systems.push(system ? textOf(system.content) : '');
+    return super._generate(...args);
+  }
+}
+
+describe('createMainAgent — who the user is', () => {
+  const ADDRESS = 'ixo1qypqxpq9qcrsszg2pvxq6rs0zqg3yyc5lzv7xu';
+  const ORACLE_LINE =
+    "- You are the oracle `did:ixo:oracle1` (entity `did:ixo:entity:oracle1`); the domain context describes you, never the user. Never give these as the user's.";
+
+  it("names the user's DID and IXO address on the configured network, and the oracle's own DIDs", async () => {
+    const core = bootCore();
+    await core.warm();
+    const { systemPrompt } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(core, scriptedLlm({})),
+      requestCtx: {
+        ...requestCtx,
+        user: { ...requestCtx.user, did: `did:ixo:${ADDRESS}` },
+      },
+      state: { currentEntityDid: 'did:ixo:entity:viewed' },
+    });
+    expect(systemPrompt).toContain(
+      [
+        '**Current entity:** did:ixo:entity:viewed',
+        '',
+        '## Who you are talking to',
+        '',
+        `- User DID: \`did:ixo:${ADDRESS}\``,
+        `- User's IXO account (wallet) address on devnet: \`${ADDRESS}\` — the DID's suffix. Use it for their balances, claims and transfers unless they name another; it overrides anything recalled about their address.`,
+        ORACLE_LINE,
+      ].join('\n'),
+    );
+  });
+
+  it('says a DID that is not an IXO account has no address', async () => {
+    const did = 'did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK';
+    const core = bootCore();
+    await core.warm();
+    const { systemPrompt } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(core, scriptedLlm({})),
+      requestCtx: { ...requestCtx, user: { ...requestCtx.user, did } },
+      state: {},
+    });
+    expect(systemPrompt).toContain(
+      `- User DID: \`${did}\`\n- User's IXO account address: none — their DID is not an IXO account; ask for one before reading balances or claims.\n${ORACLE_LINE}`,
+    );
+  });
+
+  it('gives a dispatched sub-agent the same identity section', async () => {
+    const helper = makePlugin({
+      name: 'helper',
+      manifest: makeManifest({ title: 'Helper', visibility: 'always' }),
+      getSubAgents: () => [makeSubAgent('Help Agent')],
+    });
+    const core = bootCore([helper]);
+    await core.warm();
+    const subSystems: string[] = [];
+    const scripted = scriptedLlm({
+      main: [
+        [{ name: 'call_help_agent', args: { task: 'Help.' }, id: 'h1' }],
+        [],
+      ],
+    });
+    const built = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(core, {
+        get: (role, params) =>
+          role === 'subagent'
+            ? new SystemRecordingModel([[]], subSystems)
+            : scripted.get(role, params),
+      }),
+      requestCtx: {
+        ...requestCtx,
+        user: { ...requestCtx.user, did: `did:ixo:${ADDRESS}` },
+      },
+      state: {},
+      checkpointer: new MemorySaver(),
+    });
+    await built.agent.invoke(
+      { messages: [new HumanMessage('Help me.')] },
+      { configurable: { thread_id: 'identity-subagent' } },
+    );
+    const [sub] = subSystems;
+    if (sub === undefined) throw new Error('the sub-agent was not dispatched');
+    expect(sub).toContain(
+      `you are a test sub-agent\n\n## Who you are talking to\n\n- User DID: \`did:ixo:${ADDRESS}\``,
+    );
+    expect(sub).toContain(ORACLE_LINE);
+  });
+});
+
 describe('createMainAgent — plugin operating guides', () => {
   const GUIDE = '### Probe mode\n\nAlways probe twice before reporting.';
   const guided = (

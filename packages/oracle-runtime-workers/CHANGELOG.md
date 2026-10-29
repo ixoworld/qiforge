@@ -1,5 +1,54 @@
 # @ixo/oracle-runtime-workers
 
+## 0.28.0
+
+### Minor Changes
+
+- [#410](https://github.com/ixoworld/qiforge/pull/410) [`bdb1dd8`](https://github.com/ixoworld/qiforge/commit/bdb1dd8c39cd1bc3808f067787843b73d4115314) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - User identity in the system prompt; new bundled `ixo-chain` read-only chain tools.
+
+  - Every system prompt, and every sub-agent prompt, now names the user's DID and their IXO account address (the suffix of a `did:ixo:ixo1…` DID, or none for a `did:key:` / `did:web:` user) and says that the oracle's own DIDs are never the user's.
+  - `hub_action_options` also returns `ownerAddress`, the user's IXO account address beside `ownerDid`.
+  - `IxoChainPlugin` (in `BUNDLED_WORKERS_PLUGINS`, on-demand, left out with `IXO_CHAIN_TOOLS=off`) adds `get_account_balances` (live bank balances from the chain REST gateway, each denom shown through the chain's own bank metadata: `uixo` as IXO, any other denom verified only when its metadata lists its display unit) and `chain_lookup` (up to 8 claim, collection, entity, DID document, 1155 token balance and transaction reads in one Blocksync request, each answering on its own). Account fields default to the user's own address; failures come back as results with a reason and whether to retry. New optional `CHAIN_REST_URL` (defaults per `NETWORK`).
+
+## 0.27.0
+
+### Minor Changes
+
+- [#394](https://github.com/ixoworld/qiforge/pull/394) [`a70f6e2`](https://github.com/ixoworld/qiforge/commit/a70f6e2e0c27e4938352d6e496fb648d804f91ce) Thanks [@ig-shaun](https://github.com/ig-shaun)! - Channel conversations: `POST /channels/control` (stop, status, new, resume, topics, rename) with durable control receipts and cancellation reservations keyed by binding; a stop signals every named run and waits one shared grace, and a request whose run already finished still answers from it. `/resume` is bounded to the sessions the binding used at its current consent revision. Quoted WhatsApp replies reach the model as a note next to the person's words, never as their words: the note is stripped from transcripts, memory indexing and the action-proposal evidence, and says when the quoted message is from another conversation.
+
+  Channel sessions are indexed into the memory engine once quiet (`CHANNEL_HISTORY_INDEX_DEBOUNCE_MS`, default 3 min), reading only the unindexed tail in bounded chunks with a per-session backoff; a channel turn adopts a refreshed context only when the room cache is warm and never waits for one.
+
+  Opt-in, channel-only semantic routing (`CHANNEL_SEMANTIC_ROUTING=off|shadow|on`, default off) with binding allowlists and durable assignments; a classifier outage keeps the message in the current conversation, and an explicit `/new` or `/resume` that lands while a message is classified wins without cancelling it. Controls have their own rate-limit scope (`channel-control`).
+
+  Controls also list and name topics: `topics` returns the binding's sessions (title, times, last user line and last reply) and is read-only for the conversation, dropping only the bookkeeping rows of deleted sessions; `rename` sets the bound session's title (the placeholder `Untitled` is refused). Titles and lines are normalised to one plain line and every length is in Unicode code points. Every control result carries `title`, and every turn response carries `sessionTitle`, so a gateway can name the session it picked or switched to.
+
+## 0.26.0
+
+### Minor Changes
+
+- [#406](https://github.com/ixoworld/qiforge/pull/406) [`d045644`](https://github.com/ixoworld/qiforge/commit/d04564404dcde57848ecba0a86f05c64768baf85) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Memory plugin: `add_oracle_document`, `list_oracle_documents` and `delete_oracle_document`. An oracle can turn a chat attachment or a Library file into domain knowledge through the Memory Engine's `/knowledge/documents` routes, either grouped under one document id (a board resolution, a contract, a policy, a report) or as loose knowledge (a file of unrelated facts); the model is told to ask the person when it cannot tell and to confirm the public or private space first. New `documentTools` plugin option (default true) and `MEMORY_DOCUMENT_CHUNK_BYTES`, `MEMORY_DOCUMENT_MAX_CHUNKS`, `MEMORY_DOCUMENT_MAX_CHARS` settings; requests send `x-oracle-entity-did` (`ORACLE_ENTITY_DID`) like every other engine path. Needs a Memory Engine with the `/knowledge/documents` routes (Memory Engine 2.3.0 or later).
+
+## 0.25.0
+
+### Minor Changes
+
+- [#402](https://github.com/ixoworld/qiforge/pull/402) [`e24e59d`](https://github.com/ixoworld/qiforge/commit/e24e59d2551c05e4ac247a7fe02d8718963c9148) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Hub actions on `@ixo/action-protocol` 0.5.0:
+
+  - Any-token bank sends: the new `request_hub_transfer` tool prepares an `ixo.bank.send.v1` review from a token the owner's `hub_action_options` (`ixo.auth-options/3`, `transfer.tokens`) lists and a decimal display amount. The runtime converts to base units with the listed decimals (unverified tokens: base units), refuses a denom that is not listed, too many decimals, zero, an amount above the balance or above the per-denom capability cap, and sends no fee (Auth Hub simulates it). `request_hub_action` no longer takes bank sends. Auth Hub's `simulation_failed`, `fee_above_ceiling` and `insufficient_funds` refusals reach the model in plain words, and `hub_action_status` adds an owner-facing `summary` line for bank receipts (symbol for verified tokens, full denom and an "unverified token" marker otherwise). Channel polls keep handing the gateway the 0.4.1 bank receipt shape.
+  - On a chat surface a `prepared` result of `request_hub_action` and `request_hub_transfer` carries a `note`: the user already gets the review as a card with its title and a review button, so the model does not repeat the link or the title, does not say it has not executed or signed anything, and replies with one short line or nothing.
+  - Every Hub operation call (capabilities, prepare, status, options) declares protocol version 3.
+  - Signed outcome callbacks: `/api/internal/actions/outcomes` verifies the Hub's `#key-0` Ed25519 signature from `${AUTH_HUB_URL}/.well-known/did.json` (cached one hour) for this oracle's request origin, and is on whenever `HUB_ACTIONS_ENABLED`, `AUTH_HUB_URL` and `AUTH_HUB_CHANNEL_SERVICE_KEY` are set. **Breaking for operators:** `AUTH_HUB_ACTION_OUTCOME_KEY` is removed; an `x-auth-hub-outcome-key` header is ignored.
+  - No per-user usage caps: the Hub-action caps (2 per run, 5 per hour, 10 per day) and the action-proposal caps (8 per run, 16 open per owner) are removed. Hub actions still need a run started by an inbound channel message, and one Gmail send stays in flight per mailbox.
+  - Hardening: a signed callback's cheap checks (headers, key id, ±300 s timestamp, 64-byte signature) run before any Hub read; the Hub DID document is read at most once a minute per isolate whatever the outcome, concurrent callbacks share one read, and only a document that passes the id and key checks is cached. The callback audience is the origin of `ORACLE_PUBLIC_URL` when set. A replayed, already stored outcome is acknowledged without a Hub read, and callbacks for actions prepared at protocol version 2 are confirmed against version-3 status reads. Hub `409 sequence_mismatch` / `503 transfer_unavailable` read as temporary, any other `409` as not available for the account. The Gmail connection check reads options at version 2 (no balance read). A `uixo` receipt without a stored token still reads as IXO.
+
+## 0.24.0
+
+### Minor Changes
+
+- [#403](https://github.com/ixoworld/qiforge/pull/403) [`375c6ee`](https://github.com/ixoworld/qiforge/commit/375c6ee0ab17941febe1e8863daff83893020061) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Memory is keyed by the oracle's domain entity (Memory Engine 2.0.0, live on testnet and mainnet; devnet from `1.0.0-develop.10`). Every Memory Engine request (the memory plugin's MCP tools, the first-turn prefetch, the session-history upload and `GET /debug/memory-schema`) now carries `x-oracle-entity-did: <ORACLE_ENTITY_DID>`, and the prefetch batch sends `oracle_dids: [ORACLE_ENTITY_DID]` instead of the agent DID. The value is always the configured `ORACLE_ENTITY_DID`, never the core's fallback to `ORACLE_DID`, which stays for room aliases and feedback only. Without a well-formed entity the prefetch and the history indexer send nothing and each log one warning per user object (prefetch skip reason `no-entity`), and the debug route answers with an error.
+
+  **Breaking for oracles without `ORACLE_ENTITY_DID`.** The memory plugin's `configSchema` now requires `ORACLE_ENTITY_DID` shaped `did:ixo:entity:` followed by 32 lower-case hex characters: an oracle that sets `MEMORY_MCP_URL` but no entity (or an account DID such as `did:ixo:ixo1…` in its place) fails at boot with `Plugin 'memory' env validation failed for 'ORACLE_ENTITY_DID': …`. Set it to the oracle's domain entity, and make sure that entity's on-chain document lists the oracle's agent account (`ORACLE_DID`) as a `linkedEntity` with `service: 'matrix'` and `relationship: 'admin'`; the entity-keyed Memory Engine refuses requests from an agent its entity does not list. `qiforge-cli create-entity` already writes the oracle account as a `matrix` / `admin` linked entity on the entity it creates, so a new oracle is vouched for without a manual step; an entity created another way needs that link added by one of its controllers. Oracles that do not load the memory plugin are unaffected. API changes for forks: `buildMemoryHeaders(runCtx, memoryMcpUrl, entityDid)` and `createDefaultMemoryMcpFactory(memoryMcpUrl, entityDid)` take the entity as a new required argument, and a custom `MemoryPluginOptions.mcpFactory` receives it as its second argument. `MEMORY_ENTITY_HEADER` and `ORACLE_ENTITY_DID_PATTERN` are exported.
+
 ## 0.23.0
 
 ### Minor Changes

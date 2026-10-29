@@ -1,3 +1,7 @@
+import {
+  channelReplyNote,
+  CHANNEL_REPLY_NOTE_KWARG,
+} from '../channels/replies';
 /**
  * Transcript rendering around attachment payload retention: an offloaded
  * message still lists its attachment metadata with its original text, and
@@ -477,6 +481,52 @@ describe('pageThreadTranscript', () => {
       pageThreadTranscript(source, 'thread', { limit: 5, after: 'nope' }),
     ).rejects.toBeInstanceOf(TranscriptCursorError);
   });
+});
+
+it('retains a typed quote reference while hiding model-only quoted context from the transcript', async () => {
+  const reply = {
+    kind: 'known',
+    requestId: 'wa:prior',
+    author: 'oracle',
+    partId: 'p2',
+  } as const;
+  const note = channelReplyNote({
+    kind: 'resolved',
+    requestId: 'wa:prior',
+    author: 'oracle',
+    text: 'Should I draft it?',
+  });
+  if (!note) throw new Error('No reply note');
+  const origin = {
+    v: 1,
+    transport: 'whatsapp',
+    binding_id: 'chb_one',
+    remote_ref: `hmac:${'a'.repeat(64)}`,
+  };
+  const result = await transformTranscript([
+    new HumanMessage({
+      id: 'quoted-human',
+      content: `${note}\n\nYes`,
+      additional_kwargs: {
+        [CHANNEL_REPLY_NOTE_KWARG]: note,
+        'org.ixo.qi.origin': origin,
+        'org.ixo.qi.reply': reply,
+      },
+    }),
+  ]);
+  expect(result.messages[0]?.content).toBe('Yes');
+  expect(result.messages[0]?.metadata).toEqual({
+    'org.ixo.qi.origin': origin,
+    'org.ixo.qi.reply': reply,
+  });
+  expect(note).not.toContain('wa:prior');
+  expect(note).toContain('"yourMessage":"Should I draft it?"');
+  expect(channelReplyNote({ kind: 'unavailable' })).toContain(
+    'cannot be shown to you',
+  );
+  expect(
+    channelReplyNote({ kind: 'unavailable', reason: 'other_conversation' }),
+  ).toContain('/resume');
 });
 
 it('preserves only validated channel provenance on human messages in session history', async () => {

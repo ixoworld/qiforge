@@ -129,7 +129,8 @@ Non-secret values go in `vars`; secrets through `wrangler secret put` (or
 identity, auth and Matrix groups plus `LOG_LEVEL`. Plugins read their own
 variables (e.g. `MEMORY_MCP_URL`, `FIRECRAWL_MCP_URL`, `SANDBOX_MCP_URL`,
 `DOMAIN_INDEXER_URL`, `SKILLS_CAPSULES_BASE_URL`, `COMPOSIO_*`,
-`IXO_TRANSACTION_*`) through the same object; each plugin's `configSchema` is
+`IXO_TRANSACTION_*`, `IXO_CHAIN_TOOLS`, `CHAIN_REST_URL`) through the same
+object; each plugin's `configSchema` is
 the reference. Two plugin keys gate money: `POD_CREATOR_ALLOW_MAINNET`
 (default `false`) must be `'true'` before the POD Creator plugin prepares a
 mainnet creation batch — with `NETWORK` at its `mainnet` default and the flag
@@ -211,14 +212,26 @@ user's oracle session; the authorization model, retries and replies are in
 [channels](channels.md). Set these on the script that serves HTTP (the
 oracle script in a gateway split).
 
-| Binding or variable            | Required         | Meaning                                                                                                                                                                                                            |
-| ------------------------------ | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `CHANNEL_SERVICE_DID`          | to enable        | The channel service DID allowed to invoke this deployment, or a comma-separated list of them (trimmed, empties dropped, duplicates removed). Unset or empty = the route answers `503 Channels are not configured`. |
-| `AUTH_HUB_CHANNEL_SERVICE_KEY` | with the route   | Dedicated credential (secret) sent as `x-channels-service-key` when the runtime asks Auth Hub whether a channel binding is active. Never an operator credential.                                                   |
-| `AUTH_HUB`                     | one of these two | **Binding**, not a var: a Cloudflare service binding to Auth Hub (`"services": [{ "binding": "AUTH_HUB", "service": "<auth hub worker>" }]`). Used in preference to `AUTH_HUB_URL` when both are set.              |
-| `AUTH_HUB_URL`                 | one of these two | Auth Hub's origin when there is no service binding. Must be `https`.                                                                                                                                               |
-| `HUB_ACTIONS_ENABLED`          | no               | Set to `true` on the oracle script to enable Auth Hub action preparation, status recovery, and the callback route. Unset is disabled.                                                                              |
-| `AUTH_HUB_ACTION_OUTCOME_KEY`  | with callbacks   | Separate secret provisioned for the Hub account's outbound outcome delivery. Auth Hub sends it as `x-auth-hub-outcome-key`; it is never the oracle-to-Hub channel service key.                                     |
+| Binding or variable            | Required         | Meaning                                                                                                                                                                                                                                                                                            |
+| ------------------------------ | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CHANNEL_SERVICE_DID`          | to enable        | The channel service DID allowed to invoke this deployment, or a comma-separated list of them (trimmed, empties dropped, duplicates removed). Unset or empty = the route answers `503 Channels are not configured`.                                                                                 |
+| `AUTH_HUB_CHANNEL_SERVICE_KEY` | with the route   | Dedicated credential (secret) sent as `x-channels-service-key` when the runtime asks Auth Hub whether a channel binding is active. Never an operator credential.                                                                                                                                   |
+| `AUTH_HUB`                     | one of these two | **Binding**, not a var: a Cloudflare service binding to Auth Hub (`"services": [{ "binding": "AUTH_HUB", "service": "<auth hub worker>" }]`). Used in preference to `AUTH_HUB_URL` when both are set.                                                                                              |
+| `AUTH_HUB_URL`                 | one of these two | Auth Hub's origin when there is no service binding. Must be `https`.                                                                                                                                                                                                                               |
+| `HUB_ACTIONS_ENABLED`          | no               | Set to `true` on the oracle script to enable Auth Hub action preparation (any-token bank sends included), status recovery, and the signed outcome callback route. Needs `AUTH_HUB_URL` and `AUTH_HUB_CHANNEL_SERVICE_KEY` as well (the `AUTH_HUB` binding alone is not enough). Unset is disabled. |
+
+Auth Hub signs its outcome callbacks (`POST /api/internal/actions/outcomes`)
+with the `#key-0` Ed25519 key of its did:web document; there is no shared
+callback secret (`AUTH_HUB_ACTION_OUTCOME_KEY` is gone, and an
+`x-auth-hub-outcome-key` header the Hub still sends during the transition is
+ignored). The Hub DID is derived from `AUTH_HUB_URL` (`did:web:<host>`), and
+its document is read from `${AUTH_HUB_URL}/.well-known/did.json` (through
+`AUTH_HUB` when bound), cached for an hour per isolate and read at most once
+a minute. The signature must be for this oracle's own origin, within 300 s:
+the origin of `ORACLE_PUBLIC_URL` when it is set, else the origin of the
+request URL. Either way it must be the origin of the https oracle URL
+registered on the Hub channel account; set `ORACLE_PUBLIC_URL` when the
+Worker is reachable under more than one hostname.
 
 Without the key, or without both `AUTH_HUB` and `AUTH_HUB_URL`, binding
 validation is "not configured": a new channel turn gets `503` and nothing is
@@ -304,6 +317,12 @@ tool, and the capability router's Decision is its own trace with the turn's
 | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` (secret) | Only for `cloudflare-jev` **without** the `AI` binding: the account and Workers AI token for the REST API. With `"ai": { "binding": "AI" }` declared in `wrangler.jsonc` the binding is used and neither is needed.                                                                                                                                                                        |
 | `CAPABILITY_ROUTER`                                      | Capability router, the runtime's own Decision (requires a `DECISION_PROVIDER`). `off` (default) never evaluates; `shadow` evaluates off the turn's path and logs `[capability-router-shadow]` verdicts for accuracy measurement; `on` awaits the verdict before the first model call and preloads the predicted on-demand plugin's tools for that turn only. Any failure preloads nothing. |
 
+### Channel conversation routing
+
+`CHANNEL_SEMANTIC_ROUTING=off|shadow|on` defaults to `off` and applies exclusively to authenticated channel turns. Companion's Portal and Matrix sessions keep explicit selection. `shadow` observes asynchronously without routing; `on` applies clear assignments and produces tool-free clarification when ambiguous or unavailable. `CHANNEL_SEMANTIC_ROUTING_BINDINGS` optionally limits the mode to comma-separated test binding IDs; empty means all channel bindings. `CHANNEL_SEMANTIC_ROUTING_MIN_PROBABILITY` defaults to `0.9` (range `0.5..1`), with an additional `0.2` winner margin. Thresholds are experimental.
+
+The router uses the existing Decision provider, with a 1.5-second evaluation budget. It never infers cancellation or approval. It is independent of `CAPABILITY_ROUTER`. See [channel routing](channel-routing.md) for the full pilot recipe, dedicated provider selection, rollback behavior, evidence, and limits.
+
 ### Anonymous response feedback
 
 Users can send anonymous free-text feedback about one completed Agent reply
@@ -343,11 +362,12 @@ example) per address; declare the dedicated binding to get the Node runtime's
 
 ### Memory prefetch
 
-| Variable                       | Meaning                                                                                                                                                                                                                                                                                                                                   |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `USER_CONTEXT_PREFETCH`        | `on` (default) or `off`. `off` makes no first-turn memory prefetch at all; the memory tools still work. Needs `MEMORY_ENGINE_URL` (the memory plugin's engine origin), `ORACLE_ENTITY_DID` and the user's `ixo:memory` delegation; without any of them no request is made. See [First-turn memory prefetch](#first-turn-memory-prefetch). |
-| `USER_CONTEXT_PREFETCH_CAP_MS` | How long a first turn waits for the prefetch. Default `3000`, `0` to `30000`. `0` never waits: the gather runs in the background and the turn uses the room's cached answer if there is one, otherwise none.                                                                                                                              |
-| `USER_CONTEXT_CACHE_TTL_MS`    | How long a room's result is reused by later sessions. Default `300000` (5 min), `1000` to `3600000`.                                                                                                                                                                                                                                      |
+| Variable                            | Meaning                                                                                                                                                                                                                                                                                                                                                                              |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `USER_CONTEXT_PREFETCH`             | `on` (default) or `off`. `off` makes no first-turn memory prefetch at all; the memory tools still work. Needs `MEMORY_ENGINE_URL` (the memory plugin's engine origin), `ORACLE_ENTITY_DID` and the user's `ixo:memory` delegation; without any of them no request is made. See [First-turn memory prefetch](#first-turn-memory-prefetch).                                            |
+| `USER_CONTEXT_PREFETCH_CAP_MS`      | How long a first turn waits for the prefetch. Default `3000`, `0` to `30000`. `0` never waits: the gather runs in the background and the turn uses the room's cached answer if there is one, otherwise none.                                                                                                                                                                         |
+| `USER_CONTEXT_CACHE_TTL_MS`         | How long a room's result is reused by later sessions. Default `300000` (5 min), `1000` to `3600000`.                                                                                                                                                                                                                                                                                 |
+| `CHANNEL_HISTORY_INDEX_DEBOUNCE_MS` | How long a channel session must be quiet after its last finished run before its new history is indexed (one upload per burst of messages). Default `180000` (3 min), `0` to `600000`; `0` indexes after every finished run. The wait is an in-memory timer that keeps the user object resident until it fires. See [channels](channels.md#quoted-replies-and-conversation-controls). |
 
 ### Action proposals
 
@@ -362,6 +382,49 @@ without its origin and RPC, or with an unsafe URL.
 | `ACTION_PROPOSALS_PORTAL_ORIGIN`                      | The trusted Portal origin for `/a/<id>` links: `https`, host only, no path. Required when enabled.                                                                                                                     |
 | `ACTION_PROPOSALS_RPC_DEVNET`, `_TESTNET`, `_MAINNET` | Chain RPC base URL per network for verification: `https`, no credentials, query or fragment (a `/rpc/` path is fine). Devnet or testnet required when enabled; mainnet cards are refused by policy.                    |
 | `ACTION_TOPIC_PROPOSALS_ENABLED`                      | `'true'` adds the topic cards ([topic-action-proposals](topic-action-proposals.md)): discussion drafts and claim-access grants, their claims and step permits. Default `'false'`; requires `ACTION_PROPOSALS_ENABLED`. |
+
+### Chain tools
+
+The bundled ixo-chain plugin ([chain-tools](chain-tools.md)): read-only
+`get_account_balances` and `chain_lookup`, on-demand. It reads Blocksync at
+`BLOCKSYNC_GRAPHQL_URL` and needs no delegation capability.
+
+| Variable          | Meaning                                                                                                                                                                                                                                                                               |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `IXO_CHAIN_TOOLS` | `on` (default) or `off`. `off` leaves the plugin out of the oracle.                                                                                                                                                                                                                   |
+| `CHAIN_REST_URL`  | Chain REST (LCD) base URL for balances and denom metadata: `https`, no credentials, query or fragment (a `/rest` path is fine). Defaults per `NETWORK`: mainnet `https://impacthub.ixo.world/rest`, testnet `https://testnet.ixo.earth/rest`, devnet `https://devnet.ixo.earth/rest`. |
+
+### Oracle documents
+
+Read by the memory plugin's `add_oracle_document` tool from the merged
+config (a `[vars]` entry, not a secret); all optional, and an invalid value
+falls back to the default with a warning. The document routes need
+`MEMORY_ENGINE_URL` like the prefetch, and send the header
+`x-oracle-entity-did` with the oracle's domain entity DID. Only a value
+shaped `did:ixo:entity:` plus 32 lowercase hex digits is sent: it is
+`ORACLE_ENTITY_DID` (empty counts as unset) or, when that is unset,
+`ORACLE_DID` if that has the entity shape; an account DID
+(`did:ixo:ixo1…`) is never sent in its place. Without such a value the
+document tools answer "This oracle is not configured for domain documents
+(ORACLE*ENTITY_DID missing)", make no request, and log one warning per
+isolate. The engine's `ENTITY_HEADER*\*`, `ENTITY_NOT_VOUCHED`and`ENTITY_UNVERIFIED`refusals are logged at warn and shown to the model as
+operator-facing sentences.`add_oracle_document`and`delete_oracle_document`
+first ask the engine for the private document list (the same domain access
+a write needs), so a person without access is refused before any file is
+downloaded, parsed or sent to a helper model. See
+[operations](operations.md#bundled-plugins-what-they-refuse).
+
+| Variable                      | Meaning                                                                                                                                                                                           |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MEMORY_DOCUMENT_CHUNK_BYTES` | Largest part of a document in UTF-8 bytes. Default `12000`, `1024` to `16384` (the engine's default cap is 16,384).                                                                               |
+| `MEMORY_DOCUMENT_MAX_CHUNKS`  | Most parts one call writes. Default `64`, `1` to `64` (the engine's per-request cap).                                                                                                             |
+| `MEMORY_DOCUMENT_MAX_CHARS`   | Most characters read from one file. Default: `MEMORY_DOCUMENT_CHUNK_BYTES` × `MEMORY_DOCUMENT_MAX_CHUNKS` (768,000 with the defaults); more is refused unless the call passes `allow_truncation`. |
+
+The engine also caps one document at 900,000 bytes of parts in total. The
+runtime keeps `MEMORY_DOCUMENT_CHUNK_BYTES` × `MEMORY_DOCUMENT_MAX_CHUNKS`
+within that: when the product is larger (for example 16384 × 64) the part
+count is lowered to fit (54 for 16384-byte parts) and one warning is logged
+per isolate. A refusal for size reports the file's size and the real limit.
 
 ### Ops and misc
 
@@ -843,7 +906,11 @@ This contract is Memory Engine 2.0.0's (devnet `1.0.0-develop.10` and later):
 an older engine keys spaces by the agent DID and answers the prefetch's
 `oracle_dids: [ORACLE_ENTITY_DID]` with 403, and a 2.0.0 engine answers a
 runtime older than this one (no header) with `400 ENTITY_HEADER_MISSING`, so
-runtime and engine move together. The engine refuses a request without the
+runtime and engine move together. The oracle document tools
+(`add_oracle_document`, `list_oracle_documents`, `delete_oracle_document`)
+also need the engine's `/knowledge/documents` routes (Memory Engine 2.3.0 and
+later, devnet `1.0.0-develop.19` and later); an engine without them answers 404, which the tools
+report as a refusal (`The memory engine refused: …`) and nothing is written. The engine refuses a request without the
 header or with a malformed one, and
 refuses an entity whose on-chain document does not list the oracle's agent
 account as a `linkedEntity` with `service: 'matrix'` and
@@ -890,7 +957,10 @@ overlaps the preferences read, attachment handling and the capability router
   waits and never changes: its later turns only refresh the room's cache in
   the background, so a gather that outlives the cap, or a refreshed answer,
   reaches the user's next session (within `USER_CONTEXT_CACHE_TTL_MS`), not
-  the running thread. A thread that got nothing on first contact (timeout,
+  the running thread. A channel thread is the exception: a later turn takes
+  the room's cached answer when the cache holds a live one (never waiting
+  for one; on a miss it keeps its context and the refresh serves a later
+  turn). A thread that got nothing on first contact (timeout,
   failure, skip) asks again on its next turn. A gather still unsettled 5 s
   past its request timeout (30 s) is abandoned: the next turn starts a new
   one instead of joining it, and the abandoned one's late answer is dropped.

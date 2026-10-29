@@ -180,9 +180,9 @@ describe('Hub action Durable Object store', () => {
     });
   });
 
-  it('caps prepares per run and refuses a lapsed reservation instead of posting it', async () => {
+  it('has no per-run or per-user prepare cap and refuses a lapsed reservation instead of posting it', async () => {
     const stub = env.HUB_ACTION_TEST.get(
-      env.HUB_ACTION_TEST.idFromName('caps-and-expiry'),
+      env.HUB_ACTION_TEST.idFromName('no-caps-and-expiry'),
     );
     const now = Math.floor(Date.now() / 1000);
     await stub.reserve(origin, operation, now + 900);
@@ -193,17 +193,16 @@ describe('Hub action Durable Object store', () => {
     );
     // A retry of a reserved key is not a new prepare.
     expect(await stub.reserve(origin, operation, now + 900)).toBe(now + 900);
-    // A native promise around the RPC one: `rejects` would otherwise probe
-    // the RPC promise's properties, each a pipelined call of its own.
-    await expect(
-      Promise.resolve(
-        stub.reserve(
-          { ...origin, requestKey: 'run-one:tool-three' },
+    // A third, fourth, … request in the same run is reserved like the
+    // first: no usage caps.
+    for (const key of ['run-one:tool-three', 'run-one:tool-four'])
+      expect(
+        await stub.reserve(
+          { ...origin, requestKey: key },
           operation,
           now + 900,
         ),
-      ),
-    ).rejects.toThrow('most reviews one turn may prepare');
+      ).toBe(now + 900);
     // A reservation that lapsed with no reference recorded: no POST.
     const posted: unknown[] = [];
     const client = {

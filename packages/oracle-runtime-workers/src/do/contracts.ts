@@ -1,4 +1,10 @@
 import type {
+  ChannelControlInput,
+  ChannelControlOutcome,
+  ChannelReplyContext,
+  ChannelReplyReference,
+} from '../channels/contract';
+import type {
   BeginTopicStep,
   TopicReceiptReferences,
 } from '@ixo/ixo-transaction/topic-proposals';
@@ -85,7 +91,6 @@ export interface OracleWorkerEnv {
   AUTH_HUB_URL?: string;
   AUTH_HUB_CHANNEL_SERVICE_KEY?: string;
   HUB_ACTIONS_ENABLED?: string;
-  AUTH_HUB_ACTION_OUTCOME_KEY?: string;
 
   // --- matrix -------------------------------------------------------------
   MATRIX_BASE_URL: string;
@@ -332,6 +337,10 @@ export interface OracleWorkerEnv {
    * `on` preloads the predicted on-demand plugin's tools for the turn.
    */
   CAPABILITY_ROUTER?: CapabilityRouterMode;
+  /** Applies exclusively to authenticated channel admission; Portal/Matrix turns never route. */
+  CHANNEL_SEMANTIC_ROUTING?: 'off' | 'shadow' | 'on';
+  CHANNEL_SEMANTIC_ROUTING_BINDINGS?: string;
+  CHANNEL_SEMANTIC_ROUTING_MIN_PROBABILITY?: string;
 
   // --- langsmith tracing ---------------------------------------------------
   /** `'true'` traces every turn (explicit tracer — Workers has no env auto-attach). */
@@ -404,6 +413,10 @@ export interface TurnRequest {
     bindingId: string;
     bindingRevision?: number;
     remoteMessageRef: string;
+    replyContext?: ChannelReplyContext;
+    replyTo?: ChannelReplyReference;
+    /** Host-generated direct reply: no agent or tools run for an ambiguous destination. */
+    routingClarification?: string;
   };
   executionProfile?: TaskExecutionProfile;
   identity: TurnIdentity;
@@ -759,6 +772,11 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
     operationId: string,
     command: TopicDeliverableCommand,
   ): Promise<TopicDeliverableResult>;
+  channelControl(
+    identity: TurnIdentity,
+    input: ChannelControlInput,
+    requestHash: string,
+  ): Promise<ChannelControlOutcome>;
   channelTurn(
     identity: TurnIdentity,
     input: ChannelTurnInput,

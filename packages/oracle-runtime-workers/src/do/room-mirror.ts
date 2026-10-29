@@ -1,4 +1,7 @@
-import { channelOrigin } from '../channels/contract';
+import {
+  channelOrigin,
+  type ChannelReplyReference,
+} from '../channels/contract';
 /**
  * The room mirror of HTTP chats: every Portal turn is replayed into the
  * user's oracle room as a thread under the session's marker event, the user
@@ -46,6 +49,7 @@ export interface MirrorSend {
     provider: string;
     bindingId: string;
     remoteMessageRef: string;
+    replyTo?: ChannelReplyReference;
   };
 }
 
@@ -75,6 +79,9 @@ export function mirrorEventContent(send: MirrorSend) {
     ...(send.origin
       ? {
           'org.ixo.qi.origin': channelOrigin(send.origin),
+          ...(send.origin.replyTo
+            ? { 'org.ixo.qi.reply': send.origin.replyTo }
+            : {}),
         }
       : {}),
   };

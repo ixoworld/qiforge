@@ -1,3 +1,4 @@
+import { userContent } from '../channels/replies';
 /**
  * Transcript → client DTO. Port of `@ixo/common`'s
  * `transformGraphStateMessageToListMessageResponse` so `GET /messages/:id`
@@ -13,11 +14,7 @@ import {
   isAttachmentViewMessage,
 } from '../attachments/retention';
 import { SUMMARY_PREFIX } from '../core/middlewares/summarization';
-import {
-  stripTurnTimeNote,
-  TURN_TIME_NOTE_KWARG,
-} from '../core/turn-time-note';
-import { ChannelOrigin } from '../channels/contract';
+import { ChannelOrigin, ChannelReplyReference } from '../channels/contract';
 import { CREATE_ARTIFACT_TOOL, createArtifactParts } from '../artifacts/tool';
 import { planText } from '../delivery/schema';
 import type {
@@ -59,7 +56,10 @@ export interface MessageDto {
   createdAt?: string;
   attachment?: AttachmentMeta;
   attachments?: AttachmentMeta[];
-  metadata?: { 'org.ixo.qi.origin': ChannelOrigin };
+  metadata?: {
+    'org.ixo.qi.origin': ChannelOrigin;
+    'org.ixo.qi.reply'?: ChannelReplyReference;
+  };
 }
 
 export interface ListMessagesResponse {
@@ -131,10 +131,7 @@ export function contentToText(content: BaseMessage['content']): string {
  */
 export function visibleContent(message: BaseMessage): BaseMessage['content'] {
   if (message.type !== 'human') return message.content;
-  return stripTurnTimeNote(
-    message.content,
-    message.additional_kwargs?.[TURN_TIME_NOTE_KWARG],
-  );
+  return userContent(message.content, message.additional_kwargs);
 }
 
 /** `visibleContent` as text (titles, mirrors, indexing). */
@@ -216,7 +213,13 @@ export async function transformTranscript(
       if (attachments?.length) dto.attachments = attachments;
       if (message.type === 'human') {
         const origin = ChannelOrigin.safeParse(kw['org.ixo.qi.origin']);
-        if (origin.success) dto.metadata = { 'org.ixo.qi.origin': origin.data };
+        if (origin.success) {
+          const reply = ChannelReplyReference.safeParse(kw['org.ixo.qi.reply']);
+          dto.metadata = {
+            'org.ixo.qi.origin': origin.data,
+            ...(reply.success ? { 'org.ixo.qi.reply': reply.data } : {}),
+          };
+        }
       }
       acc.push(dto);
       for (const call of dto.toolCalls ?? [])

@@ -725,6 +725,19 @@ export class UserContextFetcher {
     }
   }
 
+  /**
+   * The room's answer when the cache holds a live one, else undefined —
+   * synchronous: it never waits and never starts a gather (pair it with
+   * `refresh`). A hit is recorded as the room's last outcome, as `fetch`
+   * records one.
+   */
+  readCached(
+    roomId: string,
+  ): Extract<UserContextFetchOutcome, { kind: 'cached' }> | undefined {
+    const cached = this.readCache(roomId);
+    return cached ? this.record(roomId, cached) : undefined;
+  }
+
   /** Cache / in-flight state of one room, for `/debug/context` and tests. */
   status(roomId: string): UserContextStatus {
     const cached = this.readCache(roomId, false);

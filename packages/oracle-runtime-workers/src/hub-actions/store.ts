@@ -7,6 +7,23 @@ import {
   type ActionReferenceV1,
 } from '@ixo/action-protocol';
 import type { DoSqliteDatabase } from '../sqlite/database';
+import type { TransferToken } from './transfer';
+
+function isTransferToken(value: unknown): value is TransferToken {
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    'denom' in value &&
+    typeof value.denom === 'string' &&
+    'symbol' in value &&
+    typeof value.symbol === 'string' &&
+    'decimals' in value &&
+    typeof value.decimals === 'number' &&
+    Number.isSafeInteger(value.decimals) &&
+    'verified' in value &&
+    typeof value.verified === 'boolean'
+  );
+}
 
 /**
  * Outcomes after which the Hub never reports another for the action
@@ -19,10 +36,6 @@ export const HUB_CHECK_BASE_MS = 15_000;
 export const HUB_CHECK_MAX_MS = 10 * 60_000;
 /** A non-terminal action is no longer refreshed this long after its review expired. */
 export const HUB_CHECK_AFTER_EXPIRY_MS = 24 * 60 * 60_000;
-/** Prepares (Hub POSTs) per agent run, per user per hour and per user per day. */
-export const HUB_ACTIONS_PER_RUN = 2;
-export const HUB_ACTIONS_PER_HOUR = 5;
-export const HUB_ACTIONS_PER_DAY = 10;
 /** Rows are dropped this long after their review expired. */
 const HUB_RETENTION_SECONDS = 30 * 24 * 60 * 60;
 
@@ -108,6 +121,10 @@ export class HubActionStore {
       await this.db.run(
         `ALTER TABLE hub_actions ADD COLUMN check_attempts INTEGER NOT NULL DEFAULT 0`,
       );
+    // The token a transfer was prepared with (symbol, decimals, verified),
+    // for the owner-facing outcome line.
+    if (!actionColumns.some((c) => c.name === 'token'))
+      await this.db.run(`ALTER TABLE hub_actions ADD COLUMN token TEXT`);
     if (!actionColumns.some((c) => c.name === 'expires_at'))
       await this.db.run(
         `ALTER TABLE hub_actions ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0`,
@@ -185,6 +202,31 @@ export class HubActionStore {
     return row?.action_id ?? null;
   }
 
+  /** Keep the token a transfer was prepared with, for its outcome line. */
+  async setToken(actionId: string, token: TransferToken): Promise<void> {
+    await this.db.run('UPDATE hub_actions SET token = ? WHERE action_id = ?', [
+      JSON.stringify({
+        denom: token.denom,
+        symbol: token.symbol,
+        decimals: token.decimals,
+        verified: token.verified,
+      }),
+      actionId,
+    ]);
+  }
+  async token(
+    ownerDid: string,
+    actionId: string,
+  ): Promise<TransferToken | null> {
+    const row = await this.db.get<{ token: string | null }>(
+      'SELECT token FROM hub_actions WHERE owner_did = ? AND action_id = ?',
+      [ownerDid, actionId],
+    );
+    if (!row?.token) return null;
+    const value: unknown = JSON.parse(row.token);
+    return isTransferToken(value) ? value : null;
+  }
+
   /** The reference already recorded for a request key, if any. */
   async byRequestKey(requestKey: string): Promise<ActionReferenceV1 | null> {
     const row = await this.db.get<{ reference: string }>(
@@ -192,38 +234,6 @@ export class HubActionStore {
       [requestKey],
     );
     return row ? parseReference(JSON.parse(row.reference)) : null;
-  }
-
-  /**
-   * A new request (not a retry of a reserved key) within the caps:
-   * `HUB_ACTIONS_PER_RUN` per run, `HUB_ACTIONS_PER_HOUR` and
-   * `HUB_ACTIONS_PER_DAY` per owner.
-   */
-  private async assertCapacity(origin: HubActionOrigin): Promise<void> {
-    const run = await this.db.get<{ n: number }>(
-      'SELECT COUNT(*) AS n FROM hub_action_requests WHERE owner_did = ? AND session_id = ? AND run_id = ?',
-      [origin.ownerDid, origin.sessionId, origin.runId],
-    );
-    if ((run?.n ?? 0) >= HUB_ACTIONS_PER_RUN)
-      throw new HubActionRefused(
-        'limit',
-        'This request already prepared the most reviews one turn may prepare.',
-      );
-    const now = this.now();
-    const counts = await this.db.get<{ hour: number; day: number }>(
-      'SELECT SUM(created_at > ?) AS hour, COUNT(*) AS day FROM hub_action_requests WHERE owner_did = ? AND created_at > ?',
-      [now - 60 * 60_000, origin.ownerDid, now - 24 * 60 * 60_000],
-    );
-    if ((counts?.hour ?? 0) >= HUB_ACTIONS_PER_HOUR)
-      throw new HubActionRefused(
-        'limit',
-        'Too many reviews were prepared in the last hour; try again later.',
-      );
-    if ((counts?.day ?? 0) >= HUB_ACTIONS_PER_DAY)
-      throw new HubActionRefused(
-        'limit',
-        'Too many reviews were prepared today; try again tomorrow.',
-      );
   }
 
   async reserve(
@@ -253,7 +263,6 @@ export class HubActionStore {
           );
         return previous.expires_at;
       }
-      await this.assertCapacity(origin);
       await this.db.run(
         `INSERT INTO hub_action_requests(request_key,owner_did,session_id,run_id,request_id,binding_id,binding_revision,operation,expires_at,created_at)
          VALUES(?,?,?,?,?,?,?,?,?,?)`,
@@ -465,6 +474,21 @@ export class HubActionStore {
       );
       return true;
     });
+  }
+
+  /** The stored outcome of the owner's action at `sequence`, if any. */
+  async outcomeAt(
+    ownerDid: string,
+    actionId: string,
+    sequence: number,
+  ): Promise<ActionOutcomeV1 | null> {
+    const row = await this.db.get<{ outcome: string }>(
+      `SELECT o.outcome FROM hub_action_outcomes o
+         JOIN hub_actions a ON a.action_id = o.action_id
+        WHERE a.owner_did = ? AND o.action_id = ? AND o.sequence = ?`,
+      [ownerDid, actionId, sequence],
+    );
+    return row ? parseOutcome(JSON.parse(row.outcome)) : null;
   }
 
   async outcomesForRun(

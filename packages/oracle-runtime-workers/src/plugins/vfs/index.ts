@@ -1,4 +1,9 @@
-export { VfsPlugin, type VfsConfig, type VfsPluginOptions } from './vfs.plugin';
+export {
+  resolveVfsConfig,
+  VfsPlugin,
+  type VfsConfig,
+  type VfsPluginOptions,
+} from './vfs.plugin';
 export {
   buildClient,
   createVfsTools,
@@ -26,7 +31,11 @@ export {
   type VfsSearchResult,
   type VfsTreeEntry,
 } from './vfs-client';
-export { isTextMime, readForAgent } from './vfs-content';
+export {
+  isTextMime,
+  readForAgent,
+  renderBinaryForIngestion,
+} from './vfs-content';
 export {
   isAlreadyExistsConflict,
   isWriteConflict,

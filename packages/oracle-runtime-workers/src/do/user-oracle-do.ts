@@ -1,3 +1,8 @@
+import {
+  channelReplyNote,
+  CHANNEL_REPLY_NOTE_KWARG,
+} from '../channels/replies';
+import { channelRoutingConfig } from '../channels/routing';
 import { digestTopicProposalEffect } from '../action-proposals/topic-store';
 import {
   chainIdsFromConfig,
@@ -22,7 +27,11 @@ import {
   type BeginTopicStep,
   type TopicReceiptReferences,
 } from '@ixo/ixo-transaction/topic-proposals';
-import type { ChannelTurnResponse } from '../channels/contract';
+import type {
+  ChannelControlInput,
+  ChannelControlOutcome,
+  ChannelTurnResponse,
+} from '../channels/contract';
 import { refreshActionProposal } from '../action-proposals/reconcile';
 import { assertActionProposalPolicy } from '../action-proposals/policy';
 import { TopicReadUnavailable } from '../action-proposals/topic-errors';
@@ -40,6 +49,11 @@ import { ChannelTurns } from '../channels/turns';
 import { HubActionClient } from '../hub-actions/client';
 import { prepareHubAction } from '../hub-actions/request';
 import {
+  bankReceiptSummary,
+  describeAmount,
+  toBaseUnits,
+} from '../hub-actions/transfer';
+import {
   HUB_CHECK_AFTER_EXPIRY_MS,
   HubActionRefused,
   HubActionStore,
@@ -49,6 +63,9 @@ import {
   canonicalJson,
   type ActionCapabilitiesV1,
   type HubActionOptionsV2,
+  type HubActionOptionsV3,
+  parseOperation,
+  v1Receipt,
   type ActionOperationV1,
   type ActionOutcomeV1,
 } from '@ixo/action-protocol';
@@ -103,16 +120,17 @@ import {
   applyAttachmentRetention,
   ATTACHMENT_PAYLOAD_TURNS,
   ATTACHMENT_PLACEHOLDER_PREFIX,
-  attachmentMetas,
-  attachmentRef,
+  createAttachmentViewSurface,
+  findPersistedAttachmentMeta,
+  IngestTextLru,
   INLINE_PAYLOAD_NEEDLE,
   isAttachmentViewMessage,
   offloadInlinePayloads,
   parseAttachmentInputs,
   prepareAttachments,
-  viewAttachment,
   type AttachmentViewSurface,
   type MatrixMediaSource,
+  type ViewAttachmentDeps,
   type SandboxUploadConfig,
   DOWNLOAD_TIMEOUT_MS,
   MAX_FILE_SIZE,
@@ -191,6 +209,7 @@ import {
 } from '../sqlite/cache-config';
 import { DoSqliteDatabase, type DoSqliteOpenOptions } from '../sqlite/database';
 import type { TierFlushResult } from '../sqlite/do-vfs';
+import type { AttachmentMeta } from '../sqlite/serialization';
 import {
   DEFAULT_TIER_HOT_BUDGET_BYTES,
   type PageTierOptions,
@@ -264,6 +283,7 @@ import { decideBootDirty } from './boot-dirty';
 import { decideFlush } from './flush-schedule';
 import { mirrorTxnId, mirrorEventContent, RoomMirror } from './room-mirror';
 import { prefixSpeaker } from './speaker-prefix';
+import { assembleTurnMessages } from './turn-messages';
 import {
   type ObservedMessage,
   summarizeObservedMessages,
@@ -283,8 +303,12 @@ import { createWorkStatusMiddleware } from '../core/middlewares/work-status';
 import { UserPreferencesStore } from '../plugins/user-preferences/user-preferences-store';
 import { SqliteUserKv } from '../sqlite/user-kv-store';
 import {
+  channelHistoryIndexDebounceMs,
+  pageOfMessages,
   SessionHistoryIndexer,
+  type HistoryEntry,
   type HistoryMessage,
+  type HistoryPage,
   type IndexableSession,
 } from '../memory/session-history-indexer';
 import {
@@ -604,6 +628,25 @@ const ACTION_TICK_BUDGET_MS = 15_000;
 const ACTION_PRUNE_INTERVAL_MS = 60 * 60_000;
 /** How long the Hub's capabilities answer is reused per object. */
 const HUB_CAPABILITIES_CACHE_MS = 60_000;
+/** A Hub network name as the chain-id config key it is configured under. */
+/**
+ * Whether two Hub outcomes are the same event. Receipts are compared in the
+ * 0.4.1 shape: an action prepared at protocol version 2 (runtime 0.23.0) gets
+ * its callback without the 0.5.0 bank fields (`denom`, `amountBaseUnits`),
+ * while the confirming status read (version 3) carries them.
+ */
+function sameHubOutcome(a: ActionOutcomeV1, b: ActionOutcomeV1): boolean {
+  return (
+    canonicalJson({ ...a, receipt: v1Receipt(a.receipt) }) ===
+    canonicalJson({ ...b, receipt: v1Receipt(b.receipt) })
+  );
+}
+
+const HUB_NETWORK_CHAIN = {
+  'ixo mainnet': 'mainnet',
+  'ixo testnet': 'testnet',
+  'ixo devnet': 'devnet',
+} as const;
 /** How long a `hub_action_options` answer vouches for a Gmail connection. */
 const HUB_OPTIONS_REUSE_MS = 10 * 60_000;
 /** A channel poll waits this long for Auth Hub, once per poll at most. */
@@ -1007,8 +1050,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       at: number;
     } | null = null;
     /** The last `hub_action_options` answer for this owner (Gmail connection checks). */
-    private lastHubOptions: { value: HubActionOptionsV2; at: number } | null =
-      null;
+    private lastHubOptions: {
+      value: HubActionOptionsV2 | HubActionOptionsV3;
+      at: number;
+    } | null = null;
     private topicProposals: TopicProposalStore | null = null;
     /** `assertTopicDependenciesMemo`: card id and digest -> when it passed. */
     private topicAuthorityMemo: Map<string, number> | undefined;
@@ -1016,6 +1061,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private lastActionPruneAt: number | null = null;
     /** Text `view_attachment` extracted, per session (`attachments/view-cache.ts`). */
     private attachmentTextCache: AttachmentTextCacheStore | null = null;
+    /** Large texts of document ingestion, in memory (a few, minutes). */
+    private readonly ingestTextLru = new IngestTextLru();
     /**
      * Per-model context windows; learned limits persist in this object's KV
      * storage (`ctxwin:<model>`), so a provider's rejection is remembered
@@ -2008,6 +2055,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         beforeCreate: () => this.markRunsMaybeActive(),
       });
 
+      const channelRouting = channelRoutingConfig.parse(this.core.validatedEnv);
       this.channelTurns = new ChannelTurns(liveDb, {
         createSession: async (identity, markerTxnId) => {
           const roomId = await this.resolveMainRoomId(identity.userDid);
@@ -2062,6 +2110,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             );
           }
         },
+        stopRuns: (runIds) => this.runs!.abortByIds(runIds),
+        describeSessions: async (sessionIds) => {
+          const found = await this.sessions!.summaries(sessionIds);
+          return new Map(
+            [...found].map(([sessionId, session]) => [
+              sessionId,
+              {
+                title: session.title,
+                createdAt: Date.parse(session.createdAt) || 0,
+                updatedAt: Date.parse(session.lastUpdatedAt) || 0,
+              },
+            ]),
+          );
+        },
+        renameSession: (sessionId, title) =>
+          this.sessions!.setTitle(sessionId, title),
         getRun: (runId) => this.runStore!.get(runId),
         getPlan: (runId) => this.runStore!.getPlan(runId),
         wasPruned: (runId) => this.runStore!.wasChannelRunPruned(runId),
@@ -2094,6 +2158,24 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         keepAlive: (work) => this.ctx.waitUntil(work),
         pruneTombstones: (before, limit) =>
           this.runStore!.pruneChannelTombstones(before, limit),
+        routing: {
+          mode: channelRouting.CHANNEL_SEMANTIC_ROUTING,
+          bindings: channelRouting.CHANNEL_SEMANTIC_ROUTING_BINDINGS.split(',')
+            .map((binding) => binding.trim())
+            .filter(Boolean),
+          minProbability:
+            channelRouting.CHANNEL_SEMANTIC_ROUTING_MIN_PROBABILITY,
+          evaluator: this.core.decisions,
+          ownsSession: async (sessionId) => {
+            const session = await this.sessions!.getSession(sessionId);
+            const roomId = await this.resolveMainRoomId(userDid);
+            return Boolean(
+              sessionId.startsWith('$') && roomId && session?.roomId === roomId,
+            );
+          },
+          observe: (observation) =>
+            console.log(`[channel-routing] ${JSON.stringify(observation)}`),
+        },
       });
 
       const core = this.core;
@@ -2192,8 +2274,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                   requestKey: string;
                   operation: ActionOperationV1;
                 }) => this.requestHubAction(input),
+                transfer: (input) => this.transferHubAction(input),
                 status: (ownerDid: string, actionId: string) =>
-                  this.statusHubAction(ownerDid, actionId),
+                  this.hubActionStatusForTool(ownerDid, actionId),
               },
             }
           : {}),
@@ -3065,54 +3148,87 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return toSummary(row);
     }
 
+    private async readyChannel(identity: TurnIdentity): Promise<void> {
+      if (identity.ucanDelegation)
+        throw new ChannelError(
+          403,
+          'Channel grants cannot become tool authority',
+          'channel_grant_not_tool_authority',
+        );
+      // The shell (the only caller) checked the binding just before.
+      // The 900 s margin is checked by admission, for a NEW request only
+      // (and again as its run starts): a poll of a run that exists
+      // answers its status whatever the delegation's state. Before a
+      // COLD object boots, though, a delegation must be live (present,
+      // unexpired): the boot may load the owner copy under it, and a user
+      // without one must get `delegation_required`, not a boot failure.
+      // Hydration reads the stored copy, then the deposited room state
+      // (re-read when the stored copy is inside the margin).
+      if (!this.db) {
+        const live = (): boolean => {
+          const held = this.delegations.get(identity.userDid);
+          return (
+            Boolean(held?.raw) &&
+            (typeof held?.expiration !== 'number' ||
+              held.expiration > Math.floor(Date.now() / 1000))
+          );
+        };
+        if (!live())
+          await this.hydrateDelegation(identity.userDid, {
+            minRemainingSeconds: CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
+          });
+        if (!live()) throw delegationRequiredError();
+      }
+      try {
+        await this.ready(identity);
+      } catch (error) {
+        // A delegation that lacks the file-storage grant over
+        // `/.oracles` cannot load the owner copy: the user must
+        // authorize again, exactly as without a delegation. (Boot throws
+        // the failure as its RPC envelope, so it is parsed, not matched
+        // by class.)
+        if (parseOwnerCopyFailure(error)?.code === 'NO_VFS_DELEGATION')
+          throw delegationRequiredError();
+        throw error;
+      }
+    }
+
+    async channelControl(
+      identity: TurnIdentity,
+      input: ChannelControlInput,
+      requestHash: string,
+    ): Promise<ChannelControlOutcome> {
+      try {
+        await this.readyChannel(identity);
+        return {
+          ok: true,
+          result: await this.channelTurns!.control(
+            identity,
+            input,
+            requestHash,
+          ),
+        };
+      } catch (error) {
+        const refusal =
+          error instanceof ChannelError ? error : classifyChannelFailure(error);
+        if (refusal)
+          return {
+            ok: false,
+            status: refusal.status,
+            code: refusal.code,
+            message: refusal.message,
+          };
+        throw error;
+      }
+    }
+
     async channelTurn(
       identity: TurnIdentity,
       input: ChannelTurnInput,
       requestHash: string,
     ): Promise<ChannelTurnOutcome> {
       try {
-        if (identity.ucanDelegation)
-          throw new ChannelError(
-            403,
-            'Channel grants cannot become tool authority',
-            'channel_grant_not_tool_authority',
-          );
-        // The shell (the only caller) checked the binding just before.
-        // The 900 s margin is checked by admission, for a NEW request only
-        // (and again as its run starts): a poll of a run that exists
-        // answers its status whatever the delegation's state. Before a
-        // COLD object boots, though, a delegation must be live (present,
-        // unexpired): the boot may load the owner copy under it, and a user
-        // without one must get `delegation_required`, not a boot failure.
-        // Hydration reads the stored copy, then the deposited room state
-        // (re-read when the stored copy is inside the margin).
-        if (!this.db) {
-          const live = (): boolean => {
-            const held = this.delegations.get(identity.userDid);
-            return (
-              Boolean(held?.raw) &&
-              (typeof held?.expiration !== 'number' ||
-                held.expiration > Math.floor(Date.now() / 1000))
-            );
-          };
-          if (!live())
-            await this.hydrateDelegation(identity.userDid, {
-              minRemainingSeconds: CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
-            });
-          if (!live()) throw delegationRequiredError();
-        }
-        try {
-          await this.ready(identity);
-        } catch (error) {
-          // A delegation that lacks the file-storage grant over
-          // `/.oracles` cannot load the owner copy: the user must
-          // authorize again, exactly as without a delegation. (Boot throws
-          // the failure as its RPC envelope, so it is parsed, not matched
-          // by class.)
-          if (parseOwnerCopyFailure(error)?.code === 'NO_VFS_DELEGATION')
-            throw delegationRequiredError();
-          throw error;
-        }
+        await this.readyChannel(identity);
         return {
           ok: true,
           result: await this.withActionOutcomes(
@@ -3234,11 +3350,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         this.markDirty();
         await this.requestHousekeeping(Date.now() + 1000);
       }
-      const hubActionOutcomes = await this.hubOutcomesForRun(
-        ownerDid,
-        result.sessionId,
-        result.runId,
-      );
+      // The gateway parses with @ixo/action-protocol 0.4.1, whose bank
+      // receipt is exact: the 0.5.0 `denom`/`amountBaseUnits` fields are
+      // dropped here (the owner-facing amount line comes from
+      // hub_action_status instead), so the emitted shape stays 0.4.1.
+      const hubActionOutcomes = (
+        await this.hubOutcomesForRun(ownerDid, result.sessionId, result.runId)
+      ).map((outcome) => ({ ...outcome, receipt: v1Receipt(outcome.receipt) }));
       return {
         ...result,
         ...(actionOutcomes.length ? { actionOutcomes } : {}),
@@ -3246,14 +3364,64 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       };
     }
 
-    private async hubActionOptions(input: {
+    /** `hub_action_options` and the transfer path: version 3, with the owner's tokens. */
+    private async hubActionOptions(
+      input: {
+        ownerDid: string;
+        provider: string;
+        bindingId: string;
+        bindingRevision: number;
+      },
+      bindingChecked = false,
+    ): Promise<HubActionOptionsV3> {
+      const client = this.hubActionClient;
+      if (!client || input.ownerDid !== this.userDid)
+        throw new Error('Hub action options are unavailable for this owner');
+      return this.readHubOptions(input, bindingChecked, (binding) =>
+        client.options(binding),
+      );
+    }
+
+    /**
+     * Read the owner's options for the trusted binding (validated here
+     * unless the caller already validated it in this same call) and keep
+     * the read for the Gmail connection check.
+     */
+    private async readHubOptions<
+      T extends HubActionOptionsV2 | HubActionOptionsV3,
+    >(
+      input: {
+        ownerDid: string;
+        provider: string;
+        bindingId: string;
+        bindingRevision: number;
+      },
+      bindingChecked: boolean,
+      read: (binding: {
+        bindingId: string;
+        bindingRevision: number;
+      }) => Promise<T>,
+    ): Promise<T> {
+      if (!bindingChecked) await this.assertHubBinding(input);
+      const options = await read(input);
+      if (
+        options.ownerDid !== input.ownerDid ||
+        options.bindingId !== input.bindingId ||
+        options.bindingRevision !== input.bindingRevision
+      )
+        throw new Error(
+          'Hub action options do not match this owner and binding',
+        );
+      this.lastHubOptions = { value: options, at: Date.now() };
+      return options;
+    }
+
+    private async assertHubBinding(input: {
       ownerDid: string;
       provider: string;
       bindingId: string;
       bindingRevision: number;
-    }) {
-      if (!this.hubActionClient || input.ownerDid !== this.userDid)
-        throw new Error('Hub action options are unavailable for this owner');
+    }): Promise<void> {
       await assertActiveChannelBinding(
         {
           userDid: input.ownerDid,
@@ -3265,17 +3433,34 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         },
         this.env,
       );
-      const options = await this.hubActionClient.options(input);
+    }
+
+    /**
+     * Only a run an inbound channel message started may prepare a review:
+     * a scheduled or background run has no user asking for it. Checked
+     * before any Hub read.
+     */
+    private async assertHubTurnOrigin(input: {
+      ownerDid: string;
+      sessionId: string;
+      runId: string;
+    }): Promise<void> {
+      const record = await this.runStore?.get(input.runId);
+      const turn = record
+        ? (JSON.parse(record.request) as StoredRunRequest).turn
+        : null;
       if (
-        options.ownerDid !== input.ownerDid ||
-        options.bindingId !== input.bindingId ||
-        options.bindingRevision !== input.bindingRevision
+        !turn ||
+        turn.client !== 'channel' ||
+        !turn.channel?.remoteMessageRef ||
+        turn.identity.userDid !== input.ownerDid ||
+        turn.sessionId !== input.sessionId ||
+        turn.sessionId.startsWith(SYNTHETIC_SESSION_PREFIX)
       )
-        throw new Error(
-          'Hub action options do not match this owner and binding',
+        throw new HubActionRefused(
+          'limit',
+          'Reviews are prepared only in reply to a message from the user.',
         );
-      this.lastHubOptions = { value: options, at: Date.now() };
-      return options;
     }
 
     /**
@@ -3307,7 +3492,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         cached.value.bindingId === input.bindingId &&
         cached.value.bindingRevision === input.bindingRevision
           ? cached.value
-          : await this.hubActionOptions(input);
+          : await this.readHubOptions(input, true, (binding) =>
+              this.hubActionClient!.connectionOptions(binding),
+            );
       if (
         !options.connections.some(
           (c) =>
@@ -3347,50 +3534,32 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return value;
     }
 
-    private async requestHubAction(input: {
-      ownerDid: string;
-      sessionId: string;
-      runId: string;
-      requestId: string;
-      provider: string;
-      bindingId: string;
-      bindingRevision: number;
-      requestKey: string;
-      operation: ActionOperationV1;
-    }) {
+    /**
+     * `checked`: the transfer path already ran the turn-origin refusal and
+     * validated the binding in this same call.
+     */
+    private async requestHubAction(
+      input: {
+        ownerDid: string;
+        sessionId: string;
+        runId: string;
+        requestId: string;
+        provider: string;
+        bindingId: string;
+        bindingRevision: number;
+        requestKey: string;
+        operation: ActionOperationV1;
+      },
+      checked = false,
+    ) {
       const store = this.hubActionStore;
       const client = this.hubActionClient;
       if (!store || !client || input.ownerDid !== this.userDid)
         throw new Error('Hub actions are unavailable for this channel');
-      // Only a run an inbound channel message started may prepare a review:
-      // a scheduled or background run has no user asking for it.
-      const record = await this.runStore?.get(input.runId);
-      const turn = record
-        ? (JSON.parse(record.request) as StoredRunRequest).turn
-        : null;
-      if (
-        !turn ||
-        turn.client !== 'channel' ||
-        !turn.channel?.remoteMessageRef ||
-        turn.identity.userDid !== input.ownerDid ||
-        turn.sessionId !== input.sessionId ||
-        turn.sessionId.startsWith(SYNTHETIC_SESSION_PREFIX)
-      )
-        throw new HubActionRefused(
-          'limit',
-          'Reviews are prepared only in reply to a message from the user.',
-        );
-      await assertActiveChannelBinding(
-        {
-          userDid: input.ownerDid,
-          channel: {
-            provider: input.provider,
-            bindingId: input.bindingId,
-            bindingRevision: input.bindingRevision,
-          },
-        },
-        this.env,
-      );
+      if (!checked) {
+        await this.assertHubTurnOrigin(input);
+        await this.assertHubBinding(input);
+      }
       await this.assertGmailOperationAllowed(input);
       const reference = await prepareHubAction(
         {
@@ -3410,6 +3579,107 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       );
       this.markDirty();
       return reference;
+    }
+
+    /**
+     * A bank send of one of the owner's listed tokens. The token comes from
+     * a fresh options read (its balance must be current), the amount is
+     * converted to base units with the listed decimals (unverified tokens
+     * list 0: base units), refused when zero or above the balance; the
+     * network is the account's capability, the chain id this Worker's own
+     * for that network, the sender the owner's account. No fee is sent: the
+     * Hub simulates gas and sets it.
+     */
+    private async transferHubAction(input: {
+      ownerDid: string;
+      sessionId: string;
+      runId: string;
+      requestId: string;
+      provider: string;
+      bindingId: string;
+      bindingRevision: number;
+      requestKey: string;
+      toAddress: string;
+      denom: string;
+      amount: string;
+      memo: string;
+    }) {
+      if (!this.hubActionStore || input.ownerDid !== this.userDid)
+        throw new Error('Hub actions are unavailable for this channel');
+      await this.assertHubTurnOrigin(input);
+      await this.assertHubBinding(input);
+      const options = await this.hubActionOptions(input, true);
+      const tokens = options.transfer?.tokens;
+      if (!tokens?.length)
+        throw new HubActionRefused(
+          'refused',
+          'Bank sends are not available for this owner right now (no token list from Auth Hub).',
+        );
+      const token = tokens.find((item) => item.denom === input.denom);
+      if (!token)
+        throw new HubActionRefused(
+          'refused',
+          `That token is not in the owner's list; use a denom exactly as hub_action_options lists it (${tokens
+            .map((item) => item.denom)
+            .slice(0, 10)
+            .join(', ')}).`,
+        );
+      const amountBaseUnits = toBaseUnits(input.amount, token.decimals);
+      if (amountBaseUnits > BigInt(token.balanceBaseUnits))
+        throw new HubActionRefused(
+          'refused',
+          `The owner holds ${describeAmount(token.balanceBaseUnits, token)}, less than this transfer.`,
+        );
+      const capabilities = await this.cachedHubCapabilities();
+      if (!capabilities.network)
+        throw new HubActionRefused(
+          'refused',
+          'Bank sends are not enabled for this oracle account.',
+        );
+      const network = HUB_NETWORK_CHAIN[capabilities.network];
+      const chainId = chainIdsFromConfig(chainIdConfigSchema.parse(this.env))[
+        network
+      ];
+      let operation: ActionOperationV1;
+      try {
+        operation = parseOperation({
+          kind: 'ixo.bank.send.v1',
+          chainId,
+          network: capabilities.network,
+          fromAddress: input.ownerDid.replace(/^did:ixo:/, ''),
+          toAddress: input.toAddress,
+          amountBaseUnits: amountBaseUnits.toString(),
+          denom: token.denom,
+          memo: input.memo,
+        });
+      } catch (error) {
+        // Only the protocol refusing the operation built from the model's
+        // fields (an invalid recipient or memo) is the model's to fix.
+        throw new HubActionRefused(
+          'refused',
+          `The transfer is incomplete (${error instanceof Error ? error.message : String(error)}).`,
+        );
+      }
+      const reference = await this.requestHubAction(
+        { ...input, operation },
+        true,
+      );
+      await this.hubActionStore.setToken(reference.id, token);
+      return reference;
+    }
+
+    /**
+     * `hub_action_status`: the outcome plus, for a bank send, the
+     * owner-facing line (amount from the token stored at preparation).
+     */
+    private async hubActionStatusForTool(
+      ownerDid: string,
+      actionId: string,
+    ): Promise<{ outcome: ActionOutcomeV1 | null; summary: string | null }> {
+      const outcome = await this.statusHubAction(ownerDid, actionId);
+      if (!outcome) return { outcome, summary: null };
+      const token = await this.hubActionStore!.token(ownerDid, actionId);
+      return { outcome, summary: bankReceiptSummary(outcome.receipt, token) };
     }
 
     private async statusHubAction(
@@ -3502,15 +3772,24 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         input.reference.id,
       );
       if (!held || !this.hubActionClient) throw new Error('Unknown Hub action');
+      if (canonicalJson(input.reference) !== canonicalJson(held.reference))
+        throw new Error('Hub outcome does not match the prepared action');
+      // A replay of an outcome already confirmed and stored (a Hub retry,
+      // a callback delivered twice) is acknowledged without a Hub read.
+      const stored = await this.hubActionStore!.outcomeAt(
+        input.ownerDid,
+        input.reference.id,
+        input.sequence,
+      );
+      if (stored && sameHubOutcome(stored, input)) return;
       const remote = await this.hubActionClient.status(input.reference.id);
       if (
         !remote.outcome ||
         remote.ownerDid !== input.ownerDid ||
         canonicalJson(remote.reference) !== canonicalJson(held.reference) ||
-        canonicalJson(input.reference) !== canonicalJson(held.reference) ||
         remote.outcome.sequence < input.sequence ||
         (remote.outcome.sequence === input.sequence &&
-          canonicalJson(remote.outcome) !== canonicalJson(input))
+          !sameHubOutcome(remote.outcome, input))
       )
         throw new Error(
           'Hub outcome was not confirmed by authenticated status',
@@ -3759,13 +4038,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         input.evidenceRefs,
       );
       if (prior) return prior;
-      // The caps before the authority read it would waste (create checks
-      // them again, atomically).
-      await topics.assertCapacity(
-        this.userDid,
-        input.origin.sessionId,
-        input.origin.runId,
-      );
       const rpc = {
         devnet: this.env.ACTION_PROPOSALS_RPC_DEVNET,
         testnet: this.env.ACTION_PROPOSALS_RPC_TESTNET,
@@ -4349,18 +4621,63 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /**
+     * The indexer's tail read: transcript rows after the message `after`
+     * names (its id, re-resolved per read because rowids move when a
+     * checkpoint rewrites the thread), paged so only the unindexed tail is
+     * deserialized. The same messages as `historyMessages`, in its order;
+     * null when `after` is no longer in the thread.
+     */
+    private async historyPage(
+      sessionId: string,
+      after: string | null,
+      limit: number,
+    ): Promise<HistoryPage | null> {
+      const saver = this.saver!;
+      let anchor = null;
+      if (after !== null) {
+        anchor = await saver.findThreadMessageAnchor(sessionId, after);
+        if (!anchor) return null;
+      }
+      const pageRows = Math.max(1, limit);
+      const entries: HistoryEntry[] = [];
+      for (;;) {
+        const rows = await saver.listThreadMessageRows(sessionId, {
+          direction: 'newer',
+          anchor,
+          limit: pageRows,
+        });
+        for (const row of rows) {
+          anchor = row.anchor;
+          const m = row.message;
+          if (isSummarizationMessage(m) || isAttachmentViewMessage(m)) continue;
+          entries.push({
+            message: { type: m.type, content: visibleText(m) },
+            cursor: row.messageId,
+          });
+        }
+        if (rows.length < pageRows) return { entries, more: false };
+        if (entries.length >= limit) return { entries, more: true };
+      }
+    }
+
+    /**
      * Fire-and-forget session-history indexing (`SessionHistoryIndexer`).
-     * The watermark lives in this object's storage (`history:processed:<id>`),
-     * seeded from the row's `lastProcessedCount` for files migrated from Node;
-     * `touchSession` is not used because it bumps `last_updated_at` and
-     * would reorder the session list.
+     * The watermark is the session row's `last_processed_count` (the column
+     * the Node runtime keeps, so a migrated file continues where it left
+     * off); `touchSession` is not used because it bumps `last_updated_at`
+     * and would reorder the session list. `afterQuietMs` defers the pass
+     * until the session has been quiet that long (a finished channel run);
+     * every other trigger indexes at once.
      *
      * Task-run sessions (`task:<id>`) are never indexed: a run's transcript
      * is the task's instructions and its result, not something the user
      * said, and a supplied-context task's source text must not become
      * long-term memory that ordinary, tool-enabled turns can retrieve.
      */
-    private scheduleHistoryIndexing(sessionId: string): void {
+    private scheduleHistoryIndexing(
+      sessionId: string,
+      opts: { afterQuietMs?: number } = {},
+    ): void {
       if (sessionId.startsWith(TASK_SESSION_PREFIX)) return;
       const ambient = this.ambient;
       const userDid = this.userDid;
@@ -4388,9 +4705,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             lastProcessedCount: row.lastProcessedCount ?? 0,
           };
         },
-        listMessages: async (id) =>
-          this.historySnapshots.get(id)?.messages ??
-          (await this.historyMessages(id)),
+        readMessages: async (id, after, limit) => {
+          const snapshot = this.historySnapshots.get(id);
+          return snapshot
+            ? pageOfMessages(snapshot.messages, after, limit)
+            : this.historyPage(id, after, limit);
+        },
         setProcessedCount: async (id, count) => {
           if (this.historySnapshots.has(id)) return; // deleted: nothing to advance
           await this.sessions?.setLastProcessedCount(id, count);
@@ -4422,9 +4742,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         logger: console,
       });
       const indexer = this.historyIndexer;
+      // A deleted session's snapshot is its transcript's last chance: it is
+      // indexed even while the session backs off after a failure.
+      const work =
+        opts.afterQuietMs !== undefined
+          ? indexer.processAfterQuiet(sessionId, opts.afterQuietMs)
+          : this.historySnapshots.has(sessionId)
+            ? indexer.process(sessionId, { ignoreBackoff: true })
+            : indexer.process(sessionId);
       this.ctx.waitUntil(
-        indexer
-          .process(sessionId)
+        work
           .catch((err: unknown) => {
             console.error(
               `[user-do] session-history indexing failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
@@ -4498,11 +4825,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
     /**
      * Start a turn's user-context prefetch — stale-while-revalidate, as the
-     * Node AgentBuilder does it. A thread's context is fixed on first
-     * contact: a thread whose checkpoint already holds a gathered context
-     * never waits and never takes a newer answer; it only refreshes the
-     * room's cache in the background (a no-op while the cache is fresh), so
-     * the NEXT session in the room starts from it. First contact — including
+     * Node AgentBuilder does it. A thread whose checkpoint already holds a
+     * gathered context never waits; it refreshes the room's cache in the
+     * background (a no-op while the cache is fresh), so the NEXT session in
+     * the room starts from it. A channel thread also takes the cached answer
+     * when the cache is warm (indexed channel history invalidates it, so a
+     * later turn picks up the refresh); other clients never take a newer
+     * answer (first-contact policy). First contact — including
      * a thread whose earlier first turn got nothing (timeout, failure, skip)
      * — waits for the gather, at most the cap. Returns the step the build
      * awaits right before the agent is built, or null where this turn
@@ -4567,8 +4896,19 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           }),
         );
       if (hasUserContext(input.prior)) {
+        // A channel session is one long conversation, so it takes a newer
+        // room answer — but only one already in the cache: an upload that
+        // just invalidated the room must not make the next message wait for
+        // a gather. On a miss the thread keeps its context and the
+        // (single-flight) refresh warms the cache for a later turn.
+        const warm =
+          input.client === 'channel'
+            ? fetcher.readCached(input.roomId)
+            : undefined;
         keepGathering();
-        return null;
+        if (!warm) return null;
+        const context = withEverySlot(warm.context);
+        return async () => context;
       }
       const pending = fetcher
         .fetch(params)
@@ -5936,6 +6276,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * input whatever its disposition.
      */
     private runRequestJson(req: TurnRequest, stored: StoredRunRequest): string {
+      if (req.client === 'channel' && req.channel?.routingClarification)
+        return JSON.stringify({
+          ...stored,
+          disposition: {
+            kind: 'direct-read',
+            text: req.channel.routingClarification,
+            title: 'Conversation clarification',
+            messageId: `direct:${req.sessionId}:${req.requestId}:ai`,
+          },
+        });
       const admissible =
         admissionApplies(req) &&
         this.core.plugins.some((plugin) => plugin.getRequestAdmission);
@@ -5958,6 +6308,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const stored = JSON.parse(live.record.request) as StoredRunRequest;
       const req = stored.turn;
       if (req.client === 'channel') {
+        if (
+          req.channel &&
+          (await this.channelTurns!.isCancelled({
+            bindingId: req.channel.bindingId,
+            requestId: req.requestId,
+          }))
+        )
+          return { status: 'aborted', text: '' };
         await this.ctx.storage.sync();
         // The binding was checked as the request was admitted; a queued or
         // recovered attempt starts later and checks it again.
@@ -6284,6 +6642,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         timestamp: new Date().toISOString(),
         oracleName: this.core.identity.name,
         msgFromMatrixRoom: req.client === 'matrix',
+        ...(req.client === 'channel' && req.channel
+          ? {
+              'org.ixo.qi.origin': channelOrigin(req.channel),
+              ...(req.channel.replyTo
+                ? { 'org.ixo.qi.reply': req.channel.replyTo }
+                : {}),
+            }
+          : {}),
         ...(req.client === 'matrix'
           ? {
               senderDid: req.identity.userDid,
@@ -6406,7 +6772,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // into the user's oracle room in the background: never awaited here, so
       // the session's next queued run starts at once. Without the handle (a
       // reset dropped it mid-run) the next poll or alarm mirrors it.
-      if (record.client === 'channel') this.channelTurns?.deliverReply();
+      if (record.client === 'channel') {
+        this.channelTurns?.deliverReply();
+        // Indexed once the session has been quiet for a while, not per turn:
+        // each upload invalidates the room's prefetch cache.
+        if (outcome.status === 'finished')
+          this.scheduleHistoryIndexing(record.sessionId, {
+            afterQuietMs: channelHistoryIndexDebounceMs(this.core.validatedEnv),
+          });
+      }
       if (!record.taskRunId || !this.taskScheduler) return;
       if (this.taskScheduler.isRunActive(record.taskRunId)) return;
       if (outcome.status === 'finished')
@@ -6718,54 +7092,34 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       ambientLlm: LlmAdapter;
       platform: OpenRouterLlmAdapter;
       signal: AbortSignal;
+      /** Attachments of the turn now running (not necessarily persisted yet). */
+      turnMetas: readonly AttachmentMeta[];
     }): Promise<AttachmentViewSurface> {
       const saver = this.saver!;
       const offloaded = await saver.hasThreadMessageMatching(input.sessionId, {
         messageType: 'human',
         contentContains: ATTACHMENT_PLACEHOLDER_PREFIX,
       });
-      const findMeta = async (ref: string) => {
-        // The placeholder quotes the ref, so a cheap pre-filter usually
-        // finds the message; a still-inline attachment needs the full scan.
-        const candidates = await saver.listThreadMessagesMatching(
-          input.sessionId,
-          { messageType: 'human', contentContains: ref },
-        );
-        const scan =
-          candidates.length > 0
-            ? candidates
-            : await saver.listThreadMessages(input.sessionId);
-        return scan
-          .filter((m) => m.type === 'human')
-          .flatMap((m) => attachmentMetas(m))
-          .find((meta) => attachmentRef(meta) === ref);
-      };
-      return {
+      const findMeta = (ref: string) =>
+        findPersistedAttachmentMeta(saver, input.sessionId, ref);
+      const viewDeps = (): ViewAttachmentDeps => ({
+        source: this.matrixMediaSource(),
+        extraction: this.extractionProvider(input.ambientLlm, input.platform),
+        caps: getModelCapabilities(input.model),
+        roomId: input.roomId,
+        signal: input.signal,
+        logger: console,
+        ...(this.attachmentTextCache
+          ? { cache: this.attachmentTextCache.forSession(input.sessionId) }
+          : {}),
+        ingestCache: this.ingestTextLru.forSession(input.sessionId),
+      });
+      return createAttachmentViewSurface({
         offloaded,
-        view: async (ref) => {
-          const meta = await findMeta(ref);
-          if (!meta) {
-            throw new Error(
-              `no attachment with ref "${ref}" in this conversation`,
-            );
-          }
-          const view = await viewAttachment(meta, {
-            source: this.matrixMediaSource(),
-            extraction: this.extractionProvider(
-              input.ambientLlm,
-              input.platform,
-            ),
-            caps: getModelCapabilities(input.model),
-            roomId: input.roomId,
-            signal: input.signal,
-            logger: console,
-            ...(this.attachmentTextCache
-              ? { cache: this.attachmentTextCache.forSession(input.sessionId) }
-              : {}),
-          });
-          return { meta, view };
-        },
-      };
+        turnMetas: input.turnMetas,
+        findPersisted: findMeta,
+        deps: viewDeps,
+      });
     }
 
     /**
@@ -7141,6 +7495,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             ambientLlm: baseAmbient.llm,
             platform: core.llm,
             signal: abortController.signal,
+            turnMetas: prepared?.metas ?? [],
           });
 
       // Request metadata (editor room, space, session run, entity) → state,
@@ -7537,37 +7892,43 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const timeNote = suppliedContextOnly
         ? undefined
         : renderTurnTimeNote(turnAt, req.identity.timezone);
-      const content = timeNote ? withTurnTimeNote(spoken, timeNote) : spoken;
+      const replyNote = channelReplyNote(req.channel?.replyContext);
+      const referenced = replyNote
+        ? withTurnTimeNote(spoken, replyNote)
+        : spoken;
+      const content = timeNote
+        ? withTurnTimeNote(referenced, timeNote)
+        : referenced;
+      const human = new HumanMessage({
+        content,
+        additional_kwargs: {
+          timestamp: turnAt.toISOString(),
+          ...(timeNote ? { [TURN_TIME_NOTE_KWARG]: timeNote } : {}),
+          ...(replyNote ? { [CHANNEL_REPLY_NOTE_KWARG]: replyNote } : {}),
+          oracleName: core.identity.name,
+          msgFromMatrixRoom: req.client === 'matrix',
+          ...speakerKwargs,
+          ...(req.channel
+            ? {
+                'org.ixo.qi.origin': channelOrigin(req.channel),
+                ...(req.channel.replyTo
+                  ? { 'org.ixo.qi.reply': req.channel.replyTo }
+                  : {}),
+              }
+            : {}),
+          ...attachmentKwargs,
+        },
+      });
       const stateInput = {
-        messages: [
-          new HumanMessage({
-            content,
-            additional_kwargs: {
-              timestamp: turnAt.toISOString(),
-              ...(timeNote ? { [TURN_TIME_NOTE_KWARG]: timeNote } : {}),
-              oracleName: core.identity.name,
-              msgFromMatrixRoom: req.client === 'matrix',
-              ...speakerKwargs,
-              ...(req.channel
-                ? { 'org.ixo.qi.origin': channelOrigin(req.channel) }
-                : {}),
-              ...attachmentKwargs,
-            },
-          }),
-          // Extraction-lane text rides as hidden context messages (the
-          // transcript hides AI messages that carry an `attachment`), as on Node.
-          ...(prepared?.extracted ?? []).map(
-            (item) =>
-              new AIMessage({
-                content: item.text,
-                additional_kwargs: {
-                  msgFromMatrixRoom: req.client === 'matrix',
-                  timestamp: new Date().toISOString(),
-                  attachment: item.meta,
-                },
-              }),
-          ),
-        ],
+        // Hidden attachment context (the transcript hides AI messages that
+        // carry an `attachment`): native-lane notes precede the person's
+        // message, extraction-lane text follows it, as on Node.
+        messages: assembleTurnMessages({
+          human,
+          extracted: prepared?.extracted ?? [],
+          nativeNotes: prepared?.nativeNotes ?? [],
+          matrixRoom: req.client === 'matrix',
+        }),
         config: { did: req.identity.userDid },
         client: req.client,
         // First contact's gathered context is checkpointed with the turn,
@@ -7675,7 +8036,18 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             txnId: req.channel
               ? `channel-${await channelRequestHash(JSON.stringify([req.identity.userDid, req.channel.bindingId, req.requestId, who]))}`
               : mirrorTxnId(req.sessionId, req.requestId, who),
-            ...(req.channel ? { origin: req.channel } : {}),
+            ...(req.channel
+              ? {
+                  origin: {
+                    provider: req.channel.provider,
+                    bindingId: req.channel.bindingId,
+                    remoteMessageRef: req.channel.remoteMessageRef,
+                    ...(who === 'user' && req.channel.replyTo
+                      ? { replyTo: req.channel.replyTo }
+                      : {}),
+                  },
+                }
+              : {}),
           };
         },
         label,

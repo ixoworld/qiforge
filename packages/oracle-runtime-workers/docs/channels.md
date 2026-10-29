@@ -23,7 +23,7 @@ The service invokes the same capability for `ORACLE_DID`. Its expiration is at m
 
 The validator checks both signatures, the exact two-member chain, the resource, the caveats, both audiences, and both lifetimes. Wildcards and additional delegation hops are rejected. The channel proof is never deposited as generic downstream tool authority. Existing tool authorization remains responsible for each consequential action.
 
-The validator records no replay marks: a poll repeats its exact body and may reuse an invocation, also concurrently, and the durable receipt makes every repeat return the same run. Once the invocation proves the user, the request spends one unit of that user's channel budget in `RATE_LIMIT` (key `<ORACLE_DID>|channel|<userDid>`, separate from the Portal's `<ORACLE_DID>|user|<userDid>`, so channel polls never push the user's Portal requests into `429` or the other way round); over the limit it returns `429` before Auth Hub is called.
+The validator records no replay marks: a poll repeats its exact body and may reuse an invocation, also concurrently, and the durable receipt makes every repeat return the same run. Once the invocation proves the user, the request spends one unit of that user's channel budget in `RATE_LIMIT` (key `<ORACLE_DID>|channel|<userDid>`, separate from the Portal's `<ORACLE_DID>|user|<userDid>`, so channel polls never push the user's Portal requests into `429` or the other way round); over the limit it returns `429` before Auth Hub is called. `POST /channels/control` spends its own budget (`<ORACLE_DID>|channel-control|<userDid>`), so a gateway polling hard cannot turn a stop into `429`.
 
 Auth Hub receives `POST /api/internal/channels/validate-binding` with the dedicated `x-channels-service-key` header. The body contains `userDid`, `bindingId`, `bindingRevision`, `provider`, and `oracleDid`. Only `{active:true}` allows admission. An unavailable validator fails closed.
 
@@ -66,15 +66,17 @@ The object holds the delegation with its expiry (unix seconds), taken from where
 
 `provider` is a provider id matching `^[a-z][a-z0-9_-]{0,31}$` (`whatsapp` today). The runtime does not enumerate providers: it echoes the id into the grant check (`nb.provider`), the Auth Hub binding check and the `org.ixo.qi.origin` Matrix event, and an id without its own delivery profile is shaped with the generic chat profile (WhatsApp keeps its own). `context.kind` is `oracle` (the gateway's value) or `companion` (accepted for gateways that predate channel accounts); the object is strict, so any other kind or extra field is `400 invalid_request`. The kind does not change behaviour: the oracle is always this deployment's.
 
-`sessionId` is optional on the first request. An existing session must belong to this user and the canonical encrypted oracle room. The session is checked when a request is bound to it, before it starts a run; a poll of an admitted request checks nothing and writes nothing, so it does not mark the user's database dirty. Subsequent messages reuse the binding's session. Deleting that session releases the binding: its next message opens a new session.
+`sessionId` is optional on the first request. An existing session must belong to this user and the canonical encrypted oracle room. The session is checked when a request is bound to it, before it starts a run; a poll of an admitted request checks nothing and writes nothing, so it does not mark the user's database dirty. Subsequent messages reuse the binding's session by default. Deleting that session releases the binding: its next message opens a new session.
+
+An oracle can opt into [channel conversation routing](channel-routing.md) with `CHANNEL_SEMANTIC_ROUTING=shadow|on` (default `off`) and an optional binding allowlist. Only channel admission calls the router; Portal and Matrix remain explicit. In `on`, the runtime owns destination selection and treats the gateway's `sessionId` as a hint. `sessionPolicy: "continue"` bypasses semantic selection for an explicit correction. Explicit new/resume controls pin the next admitted turn. The router persists assignments before execution and can clarify without an agent or tools; automatic switching never cancels work. Off-mode session-conflict behavior below is unchanged.
 
 A new request that names a session the user's object no longer holds (deleted in Qi.Space, or never created there) is answered `409 session_conflict`, its receipt is removed and the binding forgets that session. The gateway clears its stored session and sends the **same request ID again without `sessionId`**; that resend is a new body under a free request ID and opens a new session. A request without `sessionId` whose binding still pointed at a deleted session opens a new session at once, with no round trip. A session that exists but is not this user's oracle session (another room, a local session) stays `404 session_not_found`.
 
-Topics, attachments, provider identifiers, and caller-supplied user identities are not accepted. The body limit is 64,000 bytes. Text is limited to 16,000 characters.
+Topic deliverables (Matrix topics), attachments, provider identifiers, and caller-supplied user identities are not accepted. The body limit is 64,000 bytes. Text is limited to 16,000 characters.
 
 ## Responses and retries
 
-An admitted turn returns `202` with `requestId`, `runId`, `sessionId`, and a `queued`, `running`, or `recovering` status. A terminal turn returns `200` with its terminal status. A `finished` turn also contains `text` and, when available, `messageId`.
+An admitted turn returns `202` with `requestId`, `runId`, `sessionId`, and a `queued`, `running`, or `recovering` status. Every turn response also carries `sessionTitle`, the title of `sessionId` at response time (null while untitled), so a gateway can tell the person when a turn ran in a different session than the one it sent. A terminal turn returns `200` with its terminal status. A `finished` turn also contains `text` and, when available, `messageId`.
 
 `finished` is the only successful terminal status. Its `text` may be empty after a tool-only completion; the gateway must complete delivery without sending an empty provider message. An absent `messageId` does not mean the turn should be retried.
 
@@ -204,11 +206,32 @@ The focused workerd tests exercise real UCAN signatures, negative authorization 
 
 Companion's `feat/workers-runtime` deployment must adopt the released runtime and configure these bindings. Live onboarding, revocation, encrypted Matrix event inspection, and provider delivery remain deployment acceptance checks. `pnpm test:e2e:channels` in the example app is the operator-run acceptance harness for them ([testing](testing.md#harness-end-to-end-minutes-local); its variables and checkpoints are in [`docs/testing/channels-acceptance.md`](../../../docs/testing/channels-acceptance.md)).
 
+## Quoted replies and conversation controls
+
+`ChannelTurnBody.replyTo` is optional. A known reference carries `kind: "known"`, the originating `requestId`, `author` (`user` or `oracle`), and optionally a reply `partId`; an unresolved reference carries `kind: "unavailable"`. The runtime reads canonical content from that binding's request receipt only when it belongs to the selected session. With routing off or in shadow, this is the current session. With routing on, a verified quote can first select an older owned session within the same binding and consent revision. A split-bubble suffix resolves to its parent reply part. Unavailable references prompt clarification. The turn's `replyContext` then says why: `reason: "other_conversation"` when the quoted message is this binding's but belongs to a conversation other than the one the turn runs in (its text is not copied across), `reason: "unknown"` when nothing quotable was found (no receipt, no run, a run that did not finish, an unknown reply part, or a reference the gateway sent as `unavailable`). Quoted text is untrusted context and never changes action authority. Canonical user messages and encrypted room mirrors retain the typed `org.ixo.qi.reply` reference; the model-only quotation note is hidden from the visible transcript and indexing.
+
+`POST /channels/control` uses the same exact-body UCAN validation, channel rate limit, and Auth Hub binding check as a new turn. The body contains `provider`, `bindingId`, `bindingRevision`, `requestId`, up to 64 `cancelRequestIds`, and `command`:
+
+- `{kind: "stop"}` cancels the named requests and returns the binding's current session.
+- `{kind: "status"}` returns the current session; its cancellation list must be empty.
+- `{kind: "new"}` cancels named work and creates an idempotent session marker under the user's existing encrypted oracle room.
+- `{kind: "resume", sessionId}` validates the destination before cancelling work, then binds the owned session. The destination must be a session this binding used at its current consent revision (`channel_session_bindings`, written whenever a turn, `new` or `resume` binds a session); a Portal conversation, another binding's, or one this binding used under an earlier consent revision is `404 session_not_found`. Sessions bound before that table existed are not copied into it: one is accepted when the binding's latest request receipt in it was sent under the current revision, so a session opened by `new` before the upgrade and never written to since cannot be resumed.
+- `{kind: "topics"}` lists the binding's sessions; it is read-only for the conversation (it cancels nothing, creates nothing and does not change the bound session) and its cancellation list must be empty. The only thing it writes is bookkeeping: the `channel_session_bindings` rows of sessions the user has deleted are dropped. It returns the sessions recorded there for the binding at its current consent revision plus the bound one (the result's `sessionId`, the same id the list was built from), most recent activity (`sessions.last_updated_at`) first, at most 20; the bound session is always among them. A deleted session is skipped. Each topic is `{sessionId, title, createdAt, updatedAt, lastUser, lastReply}`: `title` is null while untitled, the times are epoch ms, and the two last lines come from the newest request receipt of the session for this binding that is not a routing question (what the person typed, and the reply when its run finished). Titles and lines are normalised to one plain line (whitespace runs become one space; control, format and line-separator characters are removed), and every length is counted in Unicode code points, never UTF-16 units: lines are clipped to 200, titles to 200. Lines are null when nothing is available, when the receipt was sent under an earlier consent revision, or when its stored request cannot be read. `topics` lists at most the 20 most recently active of them and has no age cutoff: an old session is listed as long as it is among the binding's 200 most recently bound. Only those 200 sessions are read (a turn, `new` or `resume` that binds a session refreshes its time), so a session not bound for a long time while 200 others were may be absent even if it was recently active.
+- `{kind: "rename", title}` sets the bound session's title, replacing a generated one. The title is normalised as above and must be 1 to 80 code points; the placeholder `Untitled` (any case) is `400 invalid_request`, since the automatic titler would overwrite it. No bound session is `404 session_not_found`, and a refused rename leaves no receipt, so a corrected retry under the same id is accepted. Its cancellation list must be empty.
+
+The response contains `requestId`, `sessionId` (nullable before the first session), the command kind, and `title`: the title of `sessionId` after the command, null when it is untitled, unknown or there is no session (a session still named `Untitled` counts as untitled). A `topics` response adds `topics`. A receipt stored before `title` existed replays with `title: null`. Controls use durable receipts separate from turn receipts. An altered body under the same control ID returns `request_conflict`; identical retries return the original result. A control refused while its destination is checked (`resume` to a session it may not use, `new` without a usable delegation) removes its receipt, so a corrected body under the same ID is accepted. `new` stores the session it created on its receipt; a retry after a later failure reuses it instead of creating another. Cancellation tombstones reserve even not-yet-admitted turns. Admission, queued attempts, and recovery check that reservation, so once the tombstones are written nothing named can start. A request whose run already exists is still answered from that run: a stop that arrives after the run finished does not hide its reply. A stop signals every named run first and then waits once, at most the run supersede grace for all of them together; it answers success even when a run is still winding down (a tool call in flight cannot be interrupted, and retrying the stop would not end it sooner). Matrix I/O and stopping runs happen outside the SQLite admission lock. A later control can cancel an older session switch while its Matrix call is outstanding; the older switch cannot subsequently rebind the channel. Cancelling never undoes completed external effects.
+
+A channel session's history is indexed into the memory engine once the session has been quiet for `CHANNEL_HISTORY_INDEX_DEBOUNCE_MS` (default 3 min) after its last finished run; each finish restarts the wait, so a burst of messages is one upload and one invalidation of the room's prefetch cache. The wait is an in-memory timer: it keeps the user object resident until it fires, and an instance that ends before then (a deploy, a crash) drops it, leaving the tail to the session's next trigger (its next finished run, the next new session, a deletion). Only the tail after the session's `lastProcessedCount` is read, page by page from a cursor the object keeps (a fresh object scans the transcript once), and it is uploaded in chunks of at most 200 messages or 256 KiB of content, the count advancing after each accepted chunk. A run that finishes while the session is being indexed, at any stage, gets one more pass for its tail. After a failed pass the session is not tried again for 1 min, doubling to at most 1 h and reset by a success; a deletion is indexed regardless. The scoped memory invocation and the task exclusions apply as for other sessions.
+
+A later channel turn takes the room cache's gathered context (empty slots included) only when the cache holds a live answer; it never waits for one. On a miss — right after an upload invalidated the room, after the cache TTL, or after a failed gather — the turn keeps its checkpointed context and the room is refreshed in the background (one gather per room at a time), so the refreshed answer reaches a later turn. Only a channel thread's first contact waits, as on other clients; Portal and Matrix threads keep their first-contact context. This is bounded freshness, not synchronous extraction: a fact said in a channel reaches the prompt after the quiet period, the engine's own extraction, and a refresh that a later turn starts.
+
+Deploy this runtime before the matching gateway. No additional Auth Hub grant or room topology is introduced. Control receipts and cancellation reservations use `CHANNEL_RECORD_RETENTION_MS`; they are pruned in bounded housekeeping batches (both tables are indexed on `created_at`). A session's `channel_session_bindings` rows are removed with the session.
+
 # Auth Hub action review (disabled by default)
 
-`HUB_ACTIONS_ENABLED=true` adds the on-demand `request_hub_action` and
-`hub_action_status` tools plus read-only `hub_action_capabilities` and
-`hub_action_options`. Discover
+`HUB_ACTIONS_ENABLED=true` adds the on-demand `request_hub_action`,
+`request_hub_transfer` and `hub_action_status` tools plus read-only
+`hub_action_capabilities` and `hub_action_options`. Discover
 capabilities first: Auth Hub returns enabled kinds, exact registered form field
 descriptors, transfer limits and the configured network. The request tool
 accepts a strictly typed candidate operation from
@@ -218,9 +241,11 @@ the active binding again before calling Auth Hub. The model cannot supply those
 identity fields or approve an action. The existing `prepare_action` Portal card
 path remains available independently.
 
-The contract is `@ixo/action-protocol` 0.4.1 from npm. This runtime
-declares protocol version 2 on its Hub calls (see below), so it needs a
-gateway that parses `ixo.auth-outcome/2` (gateway PR 20).
+The contract is `@ixo/action-protocol` 0.5.0 from npm. This runtime
+declares protocol version 3 on its Hub calls (see below). Outcomes still
+arrive as `ixo.auth-outcome/2`, so it needs a gateway that parses that
+envelope (gateway PR 20); the bank receipts it hands the gateway keep the
+0.4.1 shape (see [bank transfers](#bank-transfers-any-token)).
 
 The oracle uses `AUTH_HUB_URL` (an HTTPS origin) and
 `AUTH_HUB_CHANNEL_SERVICE_KEY` to create and read operations; both are
@@ -229,9 +254,9 @@ are offered only when the flag, the URL and the key are all set.
 
 Only a run an inbound channel message started may prepare a review (its run
 record carries the channel's `remoteMessageRef`; a scheduled or background run
-is refused). Each prepare is capped: 2 per agent run, 5 per user per hour and
-10 per user per day (`HUB_ACTIONS_PER_*` in `src/hub-actions/store.ts`); a
-retry of the same tool call is not a new prepare. A refusal reaches the model
+is refused): that is provenance, not a usage cap, and there are no per-run or
+per-user prepare caps (every action still needs the owner's review in Auth
+Hub). A retry of the same tool call is the same prepare. A refusal reaches the model
 as `{ status: 'unavailable' | 'expired', reason }`. Auth Hub's capabilities
 are cached per owner object for 60 s. The Hub's idempotency key is the
 SHA-256 hex of `runId:toolCallId` (fixed length). A retry whose reserved
@@ -241,8 +266,20 @@ reserves the canonical request and stable expiry before the Hub POST, so an
 interrupted response can be retried with the same key and bytes. It stores each
 immutable initial reference with its original turn in SQLite. The
 finished run's Reply Plan contains a `hub-action` part with a typed
-`actionReference` and short summary. Polling the original `/channels/turn`
-request retrieves `hubActionOutcomes` from SQLite first (callback-delivered
+`actionReference` and short summary (the plan takes it only from a
+`prepared` result whose `summary` equals the reference's title). On a chat
+surface (`ctx.session.surface.kind === 'chat'`, which every channel turn is)
+the `prepared` result of `request_hub_action` and `request_hub_transfer`
+also carries `note`: the user is shown the action automatically as a card
+with its title and a "Review action" button, so the model must not repeat
+the link or the title, must not say it has not executed or signed anything,
+and replies with one short line or nothing. The gateway renders the part as
+that card; gateways that predate plans and the Companion room mirror get the
+title linked to the review (`planText`). A result on the Portal stream has
+no plan and no card, so it carries no note (today both tools refuse anything
+but a channel turn). The model's text is delivered as written; the note is
+the only guard against a reply that repeats the card. Polling the original
+`/channels/turn` request retrieves `hubActionOutcomes` from SQLite first (callback-delivered
 outcomes included, so an Auth Hub outage hides nothing already known). A poll
 then refreshes at most ONE action that has no terminal outcome (`succeeded`,
 `failed`, `declined`) from Auth Hub's authenticated status, with a 3 s timeout
@@ -256,11 +293,36 @@ The callback does not count as user access. Hub rows (requests, references,
 outcomes) are pruned from the alarm, at most hourly, 30 days after their
 review expired.
 
-Auth Hub can post the same typed event to `/api/internal/actions/outcomes` with
-the separate `x-auth-hub-outcome-key` credential, configured on the oracle as
-`AUTH_HUB_ACTION_OUTCOME_KEY`. The callback is disabled when that secret is
-absent. The receiver checks the event against its stored original reference
-and confirms it through Auth Hub's authenticated status API before storing it.
+Auth Hub can post the same typed event to `/api/internal/actions/outcomes`,
+signed with its service DID key: `x-auth-hub-timestamp` (unix seconds),
+`x-auth-hub-key-id` (`did:web:<hub host>#key-0`) and `x-auth-hub-signature`
+(base64url Ed25519 over `${timestamp}.${audience}.${sha256hex(rawBody)}`).
+The route is on when `HUB_ACTIONS_ENABLED=true`, `AUTH_HUB_URL` and
+`AUTH_HUB_CHANNEL_SERVICE_KEY` are set, and answers `401` otherwise. The Hub
+DID comes from `AUTH_HUB_URL` (never from the request); its document is read
+from `${AUTH_HUB_URL}/.well-known/did.json` (https only, at most 64 KB, no
+redirects, through `AUTH_HUB` when bound), must carry that exact DID and the
+`#key-0` key; only such a document's key is cached, for one hour per isolate.
+The checks that need no key run first: all three headers present, the Hub's
+key id, a well-formed timestamp within 300 s either way, a signature that
+decodes to 64 bytes; a callback failing them causes no Hub read. The document
+is read at most once a minute per isolate, whatever the read's outcome (a Hub
+`503`, a network error, a document for another DID), and concurrent callbacks
+share one read. A signature the cached key does not verify reads it once more
+under the same limit (a key rotation). The audience is the origin of
+`ORACLE_PUBLIC_URL` when it is set (a Worker reachable under several
+hostnames), else the origin of the incoming request URL, so a callback signed
+for another oracle, or for another hostname, fails. There is no shared callback secret
+any more (`AUTH_HUB_ACTION_OUTCOME_KEY` is removed); an
+`x-auth-hub-outcome-key` header the Hub still sends during its transition is
+ignored, never required. A valid signature is not trusted on its own: the
+receiver checks the event against its stored original reference and confirms
+it through Auth Hub's authenticated status API before storing it. A replay of
+an outcome already stored at that action id and sequence, with the same
+content, is acknowledged without a Hub read. Outcomes are compared in the
+0.4.1 receipt shape: an action prepared at protocol version 2 (runtime
+0.23.0) gets its callback without the bank `denom`/`amountBaseUnits`, while
+the confirming status read (version 3) carries them.
 Neither a callback nor a model turn executes a transfer. Hub-owned native
 transfer events remain status only. A resource open is not treated as
 acceptance or submission.
@@ -279,15 +341,18 @@ and expiry in Unix **seconds**. Persist both before POST. The same key must
 reuse identical bytes on retry. `status(reference.id)` is an authenticated
 owner-scoped recovery read; an operation reference alone is never completion.
 The `@ixo/oracle-runtime-workers/hub-actions/request` subpath implements these
-checks for hosts with a durable `reserve`/`record` store. Protocol versions are
-`ixo.auth-action/1`, `ixo.auth-capabilities/1` and `ixo.auth-outcome/1`;
-unsupported kinds and versions fail closed.
+checks for hosts with a durable `reserve`/`record` store. Envelope versions
+are `ixo.auth-action/1`, `ixo.auth-capabilities/2`, `ixo.auth-outcome/2` and
+`ixo.auth-options/3`; unsupported kinds and versions fail closed.
 
-The runtime declares protocol version 2 (`?version=2`) on the capabilities,
-prepare and status calls: without it Auth Hub answers v1 (the three P1 kinds
-only, v1-filtered outcomes) and refuses a P2 prepare with
-`protocol_version_required`, and it stores the version per action for the
-outcomes it pushes. Pairing: runtime #381 must run with gateway PR 20 (it accepts the v2
+The runtime declares protocol version 3 (`?version=3`) on the capabilities,
+prepare, status and options calls. Version 3 is the 0.5.0 contract:
+capabilities with per-denom `transfer.limits`, any-denom bank sends, receipts
+with `denom` and `amountBaseUnits`, options with the owner's tokens. Version 2
+callers (runtime 0.23.0) keep the 0.4.1 shapes; without a version Auth Hub
+answers v1 (the three P1 kinds only, v1-filtered outcomes) and refuses a P2
+prepare with `protocol_version_required`. The Hub stores the version per
+action for the outcomes it pushes. Pairing: this runtime must run with gateway PR 20 (it accepts the v2
 envelopes and the P2 receipt kinds); gateway PR 19 understands only
 `ixo.auth-outcome/1` and must never run against this runtime (a v2 outcome
 fails the whole turn). Outcomes arrive as `ixo.auth-outcome/2`; `expired` and
@@ -295,18 +360,69 @@ fails the whole turn). Outcomes arrive as `ixo.auth-outcome/2`; `expired` and
 `failed` and `declined`, so a poll stops refreshing them. Gateways that read
 `hubActionOutcomes` must accept the v2 envelope.
 
-Protocol package `0.4.1` supports exact signed statements, Gmail connection/removal
-and one reviewed plain-text email, Google Calendar connection/removal and one
-reviewed event, document read-access requests, and new private text files.
-`hub_action_options` requests `ixo.auth-options/2` and obtains confirmed connections,
-requestable document identifiers and existing action resources for the current
-owner and channel binding. Each connection carries its `gmail` or `calendar`
+Protocol package `0.5.0` supports bank sends of any listed token, exact signed
+statements, Gmail connection/removal and one reviewed plain-text email, Google
+Calendar connection/removal and one reviewed event, document read-access
+requests, and new private text files. `hub_action_options` requests
+`ixo.auth-options/3` and obtains confirmed connections, requestable document
+identifiers, existing action resources and the owner's bank tokens for the
+current owner and channel binding; an older options version is refused. The
+runtime adds `ownerAddress`, the IXO account address read off the owner's
+`did:ixo:ixo1…` DID (`null` for any other DID), beside the Hub's `ownerDid`. Each connection carries its `gmail` or `calendar`
 service; do not use a profile-only Gmail connection for sending. Old Hub clients
 still receive Calendar-only options version 1 by default. The tool accepts no
 model-supplied identity. The shared
 `operationJsonSchema` is the tool schema source; there is no second runtime
 operation catalogue. Capability and options reads may be used by any registered
 oracle account with the compatible channel adapter.
+
+## Bank transfers (any token)
+
+`request_hub_transfer` prepares an `ixo.bank.send.v1` review; the generic
+`request_hub_action` refuses bank sends. The model supplies only the
+recipient, a token `denom` copied from `hub_action_options` `transfer.tokens`
+(at most 50: `denom`, `symbol`, `decimals`, `verified`, `balanceBaseUnits`),
+a decimal `amount` in that token's display units and an optional memo. The
+owner object then reads the options again (the balance must be current),
+refuses a denom that is not in the list (it never guesses an `ibc/…` hash),
+and converts the amount to base units with the listed `decimals` using
+integer arithmetic. It refuses more fraction digits than the token has, a
+zero amount, an amount above the balance, and, from the capabilities, an
+amount above the per-denom `transfer.limits` cap (`maxAmountBaseUnits`; a
+legacy `maxAmountUixo` caps only `uixo`). These are client-side pre-checks:
+Auth Hub enforces its own. The network is the account's capability, the
+chain id this Worker's `IXO_TRANSACTION_CHAIN_ID_*` for that network, the
+sender the owner's account. No fee is sent: Auth Hub simulates gas and sets
+the fee. A token that is not `verified` has `decimals` 0, so its amounts are
+base units; the model is told to name its full denom and say it is
+unverified (anyone controlling a factory or cw20 token can call it "USDC").
+
+Auth Hub can refuse a prepare with `{error, reason?}`; these reach the model
+as `{status: 'unavailable', reason}` in plain words (with the Hub's reason, at
+most 200 characters): `400` `simulation_failed`, `fee_above_ceiling` and
+`insufficient_funds` (the transfer as asked cannot go ahead); `409`
+`sequence_mismatch` and `503` `transfer_unavailable` (temporary: try again
+shortly); any other `409` (the operation is not available for this account,
+and a retry gets the same answer). Any other `400` or `503` is a transport
+error. Only the protocol refusing the operation the owner object built from
+the model's fields (an invalid recipient or memo) becomes "The transfer is
+incomplete (…)"; a `TypeError` from anywhere else stays an error.
+
+A transfer runs the turn-origin refusal first (no Hub read for a scheduled
+or background run), then validates the binding once for the whole call.
+
+The owner object stores the token (denom, symbol, decimals, verified) next to
+the prepared action. `hub_action_status` returns `{status: 'known', outcome,
+summary?}`, where `summary` is the owner-facing line for a bank receipt, for
+example `Transfer of 1.25 USDC (ibc/…) confirmed on chain. Transaction …,
+block …`, or `… was not included on chain (expired not included)`. A
+verified token shows its symbol (and its full denom unless it is `uixo`); an
+unverified token, or a receipt whose denom differs from the stored token,
+shows base units and the full denom with an "unverified token" marker. The
+`hubActionOutcomes` a channel poll returns to the gateway drop the receipt's
+`denom` and `amountBaseUnits` (the gateway parses the exact 0.4.1 bank
+receipt), so nothing new reaches the gateway. A transfer review is the same
+`hub-action` Reply Plan part as any other Hub review.
 
 The owner completes each review in Auth Hub. Gmail and Calendar setup return a fresh
 review with the account and scopes selected at Google; setup alone does not
@@ -329,13 +445,14 @@ id as `priorActionId`); for an `unknown` one the owner is asked to check
 Gmail's Sent folder. The refusal lifts when that action reaches a terminal
 outcome (or its rows are pruned, 30 days after its review expired). A Gmail send or disconnect must also name a
 connection (service `gmail`, id and label) from the owner's
-`hub_action_options` (the last read within 10 minutes, else a fresh one);
+`hub_action_options` (the last read within 10 minutes, else a fresh one at
+options version 2, which does not make the Hub read the owner's balances);
 any other is refused. The tool's refusal names the field the protocol
 rejected (for example `Invalid fromAddress`). The Gmail service requires fresh independently verified scope
 attestations and confirmed proxy no-retry behavior; missing evidence disables
 the journey. Local conformance fixtures do not establish those activation gates.
 
-Both shared packages come from the npm registry: `@ixo/action-protocol` 0.4.1
+Both shared packages come from the npm registry: `@ixo/action-protocol` 0.5.0
 and `@ixo/topic-protocol` 1.0.0-rc.8 (the Worker-safe build with precompiled
 validators), pinned exactly in the runtime and in `@ixo/ixo-transaction`. No
 workspace override or vendored archive remains, and `prepublishOnly` refuses

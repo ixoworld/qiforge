@@ -17,6 +17,7 @@ import {
 import {
   ChannelError,
   type ChannelTurnInput,
+  type ChannelControlInput,
   channelRequestHash,
 } from './contract';
 
@@ -49,7 +50,7 @@ export interface ChannelAuthConfig {
 export async function authenticateChannel(
   headers: Headers,
   raw: string,
-  input: ChannelTurnInput,
+  input: ChannelTurnInput | ChannelControlInput,
   config: ChannelAuthConfig,
 ): Promise<TurnIdentity> {
   const authorization = headers.get('authorization');

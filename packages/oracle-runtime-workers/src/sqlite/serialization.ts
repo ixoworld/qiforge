@@ -13,6 +13,7 @@
  * circular-safe variant, typed.
  */
 import { TURN_TIME_NOTE_KWARG } from '../core/turn-time-note';
+import { CHANNEL_REPLY_NOTE_KWARG } from '../channels/replies';
 
 /**
  * `additional_kwargs` key of the tool calls a mid-turn summary carries for
@@ -259,6 +260,11 @@ export interface CleanAdditionalKwargs {
   lc_source?: string;
   /** The exact time note the turn's content starts with (see core/turn-time-note.ts). */
   turn_time_note?: string;
+  /** The exact quoted-reply note after it (see channels/replies.ts). */
+  channel_reply_note?: string;
+  /** Where a channel message came from, and what it replied to, as the turn recorded them. */
+  'org.ixo.qi.origin'?: unknown;
+  'org.ixo.qi.reply'?: unknown;
   /** Tool calls of the turn a mid-turn summary condensed (newest kept, capped). */
   turn_carry?: unknown[];
   reasoning?: string;
@@ -361,6 +367,20 @@ export function cleanAdditionalKwargs(
   const turnTimeNote = additionalKwargs[TURN_TIME_NOTE_KWARG];
   if (typeof turnTimeNote === 'string')
     cleaned[TURN_TIME_NOTE_KWARG] = turnTimeNote;
+  // Kept for the same reason: without it the quoted text would read as the
+  // person's own words in the transcript, in memory indexing and in the
+  // evidence a proposal is checked against.
+  const replyNote = additionalKwargs[CHANNEL_REPLY_NOTE_KWARG];
+  if (typeof replyNote === 'string')
+    cleaned[CHANNEL_REPLY_NOTE_KWARG] = replyNote;
+  // Channel provenance, read back typed by the transcript (ChannelOrigin,
+  // ChannelReplyReference); anything malformed is dropped there.
+  for (const key of ['org.ixo.qi.origin', 'org.ixo.qi.reply'] as const)
+    if (
+      typeof additionalKwargs[key] === 'object' &&
+      additionalKwargs[key] !== null
+    )
+      cleaned[key] = additionalKwargs[key];
   // Kept so a run resumed after the summary still knows what this turn ran.
   const carry = cappedTurnCarry(additionalKwargs[TURN_CARRY_KWARG]);
   if (carry !== undefined) cleaned[TURN_CARRY_KWARG] = carry;
