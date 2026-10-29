@@ -257,34 +257,70 @@ const memoSchema = z
   .describe('An optional note shown to the owner and kept on chain.');
 
 /**
- * The schema the model is given: constant in size whatever the catalogue
- * holds (a type adds one enum value). Each message's own fields are
- * checked by the handler against its catalogue schema.
+ * A catalogue field reduced to its basic type: no descriptions, patterns or
+ * limits (those stay in describe_chain_messages and the handler's check).
  */
-export function chainTransactionSchemaFor<
-  const T extends readonly [string, ...string[]],
->(types: T) {
+export function fieldsOnly(schema: z.core.$ZodType): z.ZodType {
+  if (schema instanceof z.ZodObject)
+    return z.strictObject(
+      Object.fromEntries(
+        Object.entries(schema.shape).map(([key, field]) => [
+          key,
+          fieldsOnly(field),
+        ]),
+      ),
+    );
+  if (schema instanceof z.ZodOptional)
+    return fieldsOnly(schema.unwrap()).optional();
+  if (schema instanceof z.ZodArray) return z.array(fieldsOnly(schema.element));
+  if (schema instanceof z.ZodString) return z.string();
+  if (schema instanceof z.ZodNumber) return z.number();
+  if (schema instanceof z.ZodBoolean) return z.boolean();
+  if (schema instanceof z.ZodLiteral) return z.literal([...schema.values]);
+  throw new Error(
+    `No model-facing form for a ${schema._zod.def.type} field in the chain transaction catalogue`,
+  );
+}
+
+/**
+ * One message type as the model is given it: its field names and basic
+ * types, so a provider that holds a tool call to its schema sends every
+ * field. Loose, so a field the type does not have reaches the handler,
+ * which names it.
+ */
+function messageFieldsOnly(schema: z.ZodObject) {
+  return z.looseObject(
+    Object.fromEntries(
+      Object.entries(schema.shape).map(([key, field]) => [
+        key,
+        fieldsOnly(field),
+      ]),
+    ),
+  );
+}
+
+/**
+ * The schema the model is given: per type, its fields (messageFieldsOnly),
+ * so a type adds its short field list and the rules are fetched with
+ * describe_chain_messages when needed. Each message is then checked by the
+ * handler against its full catalogue schema.
+ */
+export function chainTransactionSchemaFor(
+  catalog: Readonly<Record<string, { schema: z.ZodObject }>>,
+) {
+  const [first, ...rest] = Object.values(catalog).map((entry) =>
+    messageFieldsOnly(entry.schema),
+  );
+  if (!first) throw new Error('The chain transaction catalogue is empty');
   return z.strictObject({
     messages: z
-      .array(
-        z
-          .object({
-            type: z
-              .enum(types)
-              .describe(
-                'The message type; describe_chain_messages lists its fields.',
-              ),
-          })
-          .catchall(z.unknown()),
-      )
+      .array(z.discriminatedUnion('type', [first, ...rest]))
       .min(1)
       .max(CHAIN_TX_MAX_MESSAGES),
     memo: memoSchema,
   });
 }
-const chainTransactionSchema = chainTransactionSchemaFor(
-  CHAIN_TX_MESSAGE_TYPES,
-);
+const chainTransactionSchema = chainTransactionSchemaFor(CHAIN_TX_CATALOG);
 
 /**
  * The request tool's description: what it does, the discovery step, one
@@ -511,20 +547,33 @@ async function requestChainTransaction(
 /**
  * Each message against its type's catalogue schema (strict: a field the
  * type does not have, the owner's identity included, is refused). The
- * model-facing schema only checks the type, so this is where a message's
- * fields are checked, on a model turn as on a direct call.
+ * model-facing schema only names the fields and their basic types, so this
+ * is where a message's formats and limits are checked, on a model turn as on
+ * a direct call.
  */
 function strictChainTxMessages(
-  messages: readonly ({ type: ChainTxMessageType } & Record<string, unknown>)[],
+  messages: readonly unknown[],
 ): { messages: ChainTxMessageInput[] } | { issues: string[] } {
   const checked: ChainTxMessageInput[] = [];
   const issues: string[] = [];
   messages.forEach((message, index) => {
-    const result = CHAIN_TX_CATALOG[message.type].schema.safeParse(message);
+    const type = chainTxTypeOf(message);
+    if (!type) {
+      issues.push(`messages[${index}].type: not a known message type`);
+      return;
+    }
+    const result = CHAIN_TX_CATALOG[type].schema.safeParse(message);
     if (result.success) checked.push(result.data);
     else issues.push(...issuesOf(result.error, ['messages', index]));
   });
   return issues.length ? { issues } : { messages: checked };
+}
+
+function chainTxTypeOf(message: unknown): ChainTxMessageType | null {
+  if (typeof message !== 'object' || message === null || !('type' in message))
+    return null;
+  const { type } = message;
+  return CHAIN_TX_MESSAGE_TYPES.find((known) => known === type) ?? null;
 }
 
 function chainTxShapeRefusal(
