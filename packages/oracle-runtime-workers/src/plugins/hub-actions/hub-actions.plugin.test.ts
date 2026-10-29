@@ -1220,8 +1220,8 @@ describe('request_chain_transaction', () => {
     );
     // The model never names the owner's identity.
     expect(tool.description).not.toMatch(/`agentDid`|`agentAddress`/);
-    // The JSON Schema the model is given: the type enum, the batch bound,
-    // the memo, and no per-type field.
+    // The JSON Schema the model is given: one branch per type with its
+    // field names and basic types, the batch bound and the memo.
     const json = z.toJSONSchema(tool.schema);
     expect(json).toMatchObject({
       properties: {
@@ -1229,8 +1229,9 @@ describe('request_chain_transaction', () => {
           minItems: 1,
           maxItems: 8,
           items: {
-            properties: { type: { enum: [...CHAIN_TX_MESSAGE_TYPES] } },
-            required: ['type'],
+            oneOf: CHAIN_TX_MESSAGE_TYPES.map((type) => ({
+              properties: { type: { const: type } },
+            })),
           },
         },
         memo: { type: 'string' },
@@ -1238,10 +1239,11 @@ describe('request_chain_transaction', () => {
       additionalProperties: false,
     });
     const text = JSON.stringify(json);
+    // Each type's own fields are named, so the model can send them.
+    for (const field of ['"toAddress"', '"amount"', '"claimId"', '"tokens"'])
+      expect(text).toContain(field);
+    // What the runtime fills never is.
     for (const field of [
-      '"toAddress"',
-      '"claimId"',
-      '"tokens"',
       '"signer"',
       '"chainId"',
       '"network"',
@@ -1256,18 +1258,36 @@ describe('request_chain_transaction', () => {
     ).toBe(false);
   });
 
-  it('costs one summary line and one enum value per type: a fifth type grows the per-call cost by about a line', () => {
-    const size = (catalog: Record<string, { summary: string }>) => {
-      const types = Object.keys(catalog) as [string, ...string[]];
-      return (
-        chainTransactionDescription(catalog).length +
-        JSON.stringify(z.toJSONSchema(chainTransactionSchemaFor(types))).length
-      );
-    };
+  it('gives the model every field of every type, and a fifth type costs its summary line and its field list', () => {
+    const size = (
+      catalog: Parameters<typeof chainTransactionSchemaFor>[0] &
+        Record<string, { summary: string }>,
+    ) =>
+      chainTransactionDescription(catalog).length +
+      JSON.stringify(z.toJSONSchema(chainTransactionSchemaFor(catalog))).length;
+    // What the model is sent names each type's own fields (a provider holds
+    // a tool call to this schema, so a field missing here never arrives).
+    const sent = JSON.stringify(
+      z.toJSONSchema(chainTransactionSchemaFor(CHAIN_TX_CATALOG)).properties
+        ?.messages,
+    );
+    for (const [type, entry] of Object.entries(CHAIN_TX_CATALOG)) {
+      expect(sent).toContain(`"const":"${type}"`);
+      for (const field of Object.keys(entry.schema.shape))
+        expect(sent).toContain(`"${field}":`);
+    }
+    // Rules and formats stay out of it (describe_chain_messages has them).
+    expect(sent).not.toContain('"description"');
+    expect(sent).not.toContain('"pattern"');
     const fifth = {
       ...CHAIN_TX_CATALOG,
       'ixo.entity.update': {
         summary: "update one of the owner's entities.",
+        rules: '',
+        schema: z.strictObject({
+          type: z.literal('ixo.entity.update'),
+          entityId: z.string().describe('The entity id.'),
+        }),
       },
     };
     const line = "- `ixo.entity.update`: update one of the owner's entities.";
@@ -1277,10 +1297,18 @@ describe('request_chain_transaction', () => {
         `\n${line}\nUp to 8 messages`,
       )}`,
     );
-    // The line, its newline, and the enum value with its quotes and comma.
-    expect(size(fifth) - size(CHAIN_TX_CATALOG)).toBe(
-      line.length + 1 + '"ixo.entity.update",'.length,
+    expect(size(fifth) - size(CHAIN_TX_CATALOG)).toBeLessThan(
+      line.length + 200,
     );
+  });
+
+  it('keeps every message field through LangChain, as a model call does', async () => {
+    const tool = new HubActionsPlugin()
+      .getTools()
+      .find((item) => item.name === 'request_chain_transaction');
+    const json = JSON.stringify(z.toJSONSchema(tool!.schema));
+    expect(json).toContain('"toAddress":');
+    expect(json).toContain('"amount":');
   });
 
   it('leaves the runtime-built kinds out of the generic tool schema', () => {

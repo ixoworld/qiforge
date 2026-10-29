@@ -465,10 +465,15 @@ per-message enablement: the kind is on by default in Auth Hub, and an
 operator can still disable it for an account like any kind.
 
 The model uses two tools, discover then request, so the per-request token
-cost does not grow with the catalogue. `request_chain_transaction`'s
-description is a few sentences plus one summary line per message type, and
-its JSON Schema is constant in size: `messages` (1 to 8 objects, each a
-`type` from the catalogue and any other fields) and `memo`. Before a type's
+cost grows only slowly with the catalogue. `request_chain_transaction`'s
+description is a few sentences plus one summary line per message type. Its
+JSON Schema lists, per type, the field names and their basic types only (no
+descriptions, patterns or limits), plus the batch bound and `memo`. The
+fields must be in that schema: a model provider holds a tool call to its
+schema, so a field the schema does not declare is dropped before the
+runtime sees it (this broke the first 0.29.0 build, which declared only
+`type`). Each per-type object stays open, so a field a type does not have
+still reaches the handler, which names it in its refusal. Before a type's
 first use in a conversation the model calls `describe_chain_messages`
 (`{types: [...]}`, 1 to 8 distinct catalogue types), which returns, per
 type, its full rules (purpose, what the runtime fills, chain caveats) and
@@ -478,9 +483,10 @@ capabilities `chainTx.messageTypes` (none when chain transactions are off
 for the account; the whole catalogue when the capabilities cannot be read
 or the turn is not a channel turn). The catalogue is one structure in the
 plugin (`CHAIN_TX_CATALOG`: per type a `summary`, `rules` and a strict zod
-`schema`), so a new type is one entry: about one line on every request, and
+`schema`, from which the model-facing field list is derived), so a new type
+is one entry: its summary line and its field names on every request, and
 its rules only when asked for. At the time of writing the two tools cost
-about 2.4 KB of description and schema per model request, against about
+about 3.4 KB of description and schema per model request, against about
 7.6 KB for the earlier per-type schema and description plus the separate
 send tool.
 
