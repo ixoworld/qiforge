@@ -47,11 +47,10 @@ import type {
 } from '@ixo/ixo-transaction/action-proposals';
 import { ChannelTurns } from '../channels/turns';
 import { HubActionClient } from '../hub-actions/client';
-import { prepareHubAction } from '../hub-actions/request';
+import { chainTxOperation, prepareHubAction } from '../hub-actions/request';
 import {
   bankReceiptSummary,
-  describeAmount,
-  toBaseUnits,
+  bankStepsInBaseUnits,
 } from '../hub-actions/transfer';
 import {
   HUB_CHECK_AFTER_EXPIRY_MS,
@@ -64,7 +63,6 @@ import {
   type ActionCapabilitiesV1,
   type HubActionOptionsV2,
   type HubActionOptionsV3,
-  parseOperation,
   v1Receipt,
   type ActionOperationV1,
   type ActionOutcomeV1,
@@ -430,7 +428,11 @@ import {
   resolveTurnDelegation,
   WorkersUcanService,
 } from './ucan-service';
-import type { UcanDelegation, UserContextData } from '../plugin-api/types';
+import type {
+  ChainTxMessageInput,
+  UcanDelegation,
+  UserContextData,
+} from '../plugin-api/types';
 
 /**
  * The gateway's topic read errors that describe what the homeserver
@@ -2269,7 +2271,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                   requestKey: string;
                   operation: ActionOperationV1;
                 }) => this.requestHubAction(input),
-                transfer: (input) => this.transferHubAction(input),
+                chainTransaction: (input) =>
+                  this.chainTransactionHubAction(input),
                 status: (ownerDid: string, actionId: string) =>
                   this.hubActionStatusForTool(ownerDid, actionId),
               },
@@ -3337,7 +3340,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       };
     }
 
-    /** `hub_action_options` and the transfer path: version 3, with the owner's tokens. */
+    /** `hub_action_options` and a chain transaction's bank steps: version 3, with the owner's tokens. */
     private async hubActionOptions(
       input: {
         ownerDid: string;
@@ -3508,7 +3511,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /**
-     * `checked`: the transfer path already ran the turn-origin refusal and
+     * `checked`: the chain-transaction path already ran the turn-origin refusal and
      * validated the binding in this same call.
      */
     private async requestHubAction(
@@ -3555,15 +3558,17 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /**
-     * A bank send of one of the owner's listed tokens. The token comes from
-     * a fresh options read (its balance must be current), the amount is
-     * converted to base units with the listed decimals (unverified tokens
-     * list 0: base units), refused when zero or above the balance; the
-     * network is the account's capability, the chain id this Worker's own
-     * for that network, the sender the owner's account. No fee is sent: the
-     * Hub simulates gas and sets it.
+     * One chain transaction of the model's messages. The network is the
+     * account's capability, the chain id this Worker's own for that
+     * network; the signer and the owner's identity in claims messages come
+     * from the owner's DID (`chainTxOperation`). The model names none of
+     * them. Bank steps name a listed token and a display amount: with at
+     * least one, the owner's options are read once, fresh (the balances
+     * must be current), and each step is converted to base units and
+     * checked against the listed balance (`bankStepsInBaseUnits`). No fee
+     * is sent: the Hub simulates gas and sets it.
      */
-    private async transferHubAction(input: {
+    private async chainTransactionHubAction(input: {
       ownerDid: string;
       sessionId: string;
       runId: string;
@@ -3572,73 +3577,39 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       bindingId: string;
       bindingRevision: number;
       requestKey: string;
-      toAddress: string;
-      denom: string;
-      amount: string;
+      messages: ChainTxMessageInput[];
       memo: string;
     }) {
       if (!this.hubActionStore || input.ownerDid !== this.userDid)
         throw new Error('Hub actions are unavailable for this channel');
       await this.assertHubTurnOrigin(input);
       await this.assertHubBinding(input);
-      const options = await this.hubActionOptions(input, true);
-      const tokens = options.transfer?.tokens;
-      if (!tokens?.length)
-        throw new HubActionRefused(
-          'refused',
-          'Bank sends are not available for this owner right now (no token list from Auth Hub).',
-        );
-      const token = tokens.find((item) => item.denom === input.denom);
-      if (!token)
-        throw new HubActionRefused(
-          'refused',
-          `That token is not in the owner's list; use a denom exactly as hub_action_options lists it (${tokens
-            .map((item) => item.denom)
-            .slice(0, 10)
-            .join(', ')}).`,
-        );
-      const amountBaseUnits = toBaseUnits(input.amount, token.decimals);
-      if (amountBaseUnits > BigInt(token.balanceBaseUnits))
-        throw new HubActionRefused(
-          'refused',
-          `The owner holds ${describeAmount(token.balanceBaseUnits, token)}, less than this transfer.`,
-        );
       const capabilities = await this.cachedHubCapabilities();
-      if (!capabilities.network)
+      if (
+        !capabilities.network ||
+        !capabilities.chainTx ||
+        !capabilities.operations.includes('ixo.chain.tx.v1')
+      )
         throw new HubActionRefused(
           'refused',
-          'Bank sends are not enabled for this oracle account.',
+          'Chain transactions are not enabled for this oracle account; retrying or changing the fields will not help.',
         );
-      const network = HUB_NETWORK_CHAIN[capabilities.network];
       const chainId = chainIdsFromConfig(chainIdConfigSchema.parse(this.env))[
-        network
+        HUB_NETWORK_CHAIN[capabilities.network]
       ];
-      let operation: ActionOperationV1;
-      try {
-        operation = parseOperation({
-          kind: 'ixo.bank.send.v1',
-          chainId,
-          network: capabilities.network,
-          fromAddress: input.ownerDid.replace(/^did:ixo:/, ''),
-          toAddress: input.toAddress,
-          amountBaseUnits: amountBaseUnits.toString(),
-          denom: token.denom,
-          memo: input.memo,
-        });
-      } catch (error) {
-        // Only the protocol refusing the operation built from the model's
-        // fields (an invalid recipient or memo) is the model's to fix.
-        throw new HubActionRefused(
-          'refused',
-          `The transfer is incomplete (${error instanceof Error ? error.message : String(error)}).`,
-        );
-      }
-      const reference = await this.requestHubAction(
-        { ...input, operation },
-        true,
-      );
-      await this.hubActionStore.setToken(reference.id, token);
-      return reference;
+      const tokens = input.messages.some(
+        (message) => message.type === 'cosmos.bank.send',
+      )
+        ? ((await this.hubActionOptions(input, true)).transfer?.tokens ?? null)
+        : null;
+      const operation = chainTxOperation({
+        ownerDid: input.ownerDid,
+        chainId,
+        network: capabilities.network,
+        memo: input.memo,
+        messages: bankStepsInBaseUnits(input.messages, tokens),
+      });
+      return this.requestHubAction({ ...input, operation }, true);
     }
 
     /**

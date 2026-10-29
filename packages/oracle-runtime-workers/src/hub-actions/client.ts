@@ -11,7 +11,11 @@ import {
   type HubActionOptionsV2,
   type HubActionOptionsV3,
 } from '@ixo/action-protocol';
-import { hubPrepareRefusal } from './transfer';
+import {
+  hubPrepareRefusal,
+  prepareSubjectOf,
+  type HubPrepareSubject,
+} from './transfer';
 
 export interface HubActionStatus {
   reference: ActionReferenceV1;
@@ -31,15 +35,27 @@ export interface HubActionTransport {
 
 /**
  * The protocol version this runtime declares on every operation call
- * (capabilities, POST operations, GET status, options). Version 3 is the
- * 0.5.0 contract: capabilities `transfer.limits`, any-denom bank sends, v2
- * receipts with `denom` and `amountBaseUnits`, options with the owner's
- * tokens. Version 2 callers (runtime 0.23.0) keep the 0.4.1 shapes; the
- * envelopes are still tagged `ixo.auth-outcome/2` and
+ * (capabilities, POST operations, GET status, options). Version 4 is the
+ * 0.6.0 contract: version 3 plus chain transactions (`ixo.chain.tx.v1` in
+ * capabilities with its `chainTx` entry, prepared through POST, receipts
+ * with `steps`); options answer as at version 3 (`ixo.auth-options/3`).
+ * Version 3 is the 0.5.0 contract: capabilities `transfer.limits`,
+ * any-denom bank sends, v2 receipts with `denom` and `amountBaseUnits`,
+ * options with the owner's tokens. Version 2 callers (runtime 0.23.0) keep
+ * the 0.4.1 shapes. The envelopes stay tagged `ixo.auth-outcome/2` and
  * `ixo.auth-capabilities/2`, which `@ixo/action-protocol` parses.
  */
-const HUB_PROTOCOL_VERSION = '3';
+const HUB_PROTOCOL_VERSION = '4';
 const HUB_PROTOCOL_QUERY = `version=${HUB_PROTOCOL_VERSION}`;
+/** Every Hub call but a chain-transaction prepare. */
+const HUB_TIMEOUT_MS = 10_000;
+/**
+ * A chain-transaction prepare: Auth Hub bounds its own chain reads and
+ * simulation at about 8 s and then answers 503 `transfer_unavailable`
+ * (retryable); this leaves room for that answer to arrive instead of an
+ * abort here.
+ */
+export const HUB_CHAIN_TX_PREPARE_TIMEOUT_MS = 15_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -66,10 +82,12 @@ export class HubActionClient {
     this.origin = url.origin;
   }
 
+  /** `subject`: what a refused prepare is called in the model's words. */
   private async send(
     path: string,
     body?: unknown,
-    timeoutMs = 10_000,
+    timeoutMs = HUB_TIMEOUT_MS,
+    subject?: HubPrepareSubject,
   ): Promise<unknown> {
     const request = new Request(new URL(path, this.origin), {
       method: body === undefined ? 'GET' : 'POST',
@@ -87,16 +105,22 @@ export class HubActionClient {
     if (
       body !== undefined &&
       (response.status === 400 ||
+        response.status === 404 ||
         response.status === 409 ||
+        response.status === 429 ||
         response.status === 503)
     ) {
-      // A prepare the Hub refused with a typed code (a transfer that would
-      // fail, a fee above the ceiling, not enough funds, a busy or
-      // unavailable transfer path, an operation the account may not use):
-      // the model relays it in words.
+      // A prepare the Hub refused with a typed code (a transfer or
+      // transaction that would fail, a fee above the ceiling, not enough
+      // funds, a message the Hub did not accept, a missing chain
+      // authorization, a busy or unavailable transfer path, an operation
+      // the account may not use, a kind turned off, a protocol mismatch,
+      // no account for the owner, a rate limit): the model relays it in
+      // words.
       const refusal = hubPrepareRefusal(
         response.status,
         await response.json().catch(() => null),
+        subject,
       );
       if (refusal) throw refusal;
     }
@@ -112,15 +136,18 @@ export class HubActionClient {
     expiresAt: number;
     operation: ActionOperationV1;
   }): Promise<ActionReferenceV1> {
-    // `version=3` on every operation call: the Hub answers older shapes
-    // (no any-denom sends, no receipt amounts) without it, and stores the
-    // version per action for the outcomes it pushes.
+    // The protocol version on every operation call: the Hub answers older
+    // shapes (no chain transactions, no any-denom sends, no receipt
+    // amounts) without it, and stores the version per action for the
+    // outcomes it pushes.
+    const operation = parseOperation(input.operation);
     const response = await this.send(
       `/api/internal/actions/operations?${HUB_PROTOCOL_QUERY}`,
-      {
-        ...input,
-        operation: parseOperation(input.operation),
-      },
+      { ...input, operation },
+      operation.kind === 'ixo.chain.tx.v1'
+        ? HUB_CHAIN_TX_PREPARE_TIMEOUT_MS
+        : HUB_TIMEOUT_MS,
+      prepareSubjectOf(operation.kind),
     );
     if (!response || typeof response !== 'object' || !('reference' in response))
       throw new Error('Hub action response has no reference');
@@ -139,7 +166,8 @@ export class HubActionClient {
     bindingId: string;
     bindingRevision: number;
   }): Promise<HubActionOptionsV3> {
-    // Options version 3: version 2 plus the owner's bank tokens
+    // Options version 3 (asked at the protocol version; version 4 answers
+    // the same): version 2 plus the owner's bank tokens
     // (`transfer.tokens`), which any-token transfers are chosen from.
     const query = new URLSearchParams({
       bindingId: input.bindingId,
@@ -181,7 +209,10 @@ export class HubActionClient {
   }
 
   /** `timeoutMs`: the poll path passes a short one (a slow Hub must not hold a poll). */
-  async status(id: string, timeoutMs = 10_000): Promise<HubActionStatus> {
+  async status(
+    id: string,
+    timeoutMs = HUB_TIMEOUT_MS,
+  ): Promise<HubActionStatus> {
     if (!/^[A-Za-z0-9_-]{32}$/.test(id))
       throw new Error('Invalid Hub action id');
     const raw = await this.send(
