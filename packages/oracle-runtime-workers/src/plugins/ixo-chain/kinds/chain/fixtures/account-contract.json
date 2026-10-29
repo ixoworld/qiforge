@@ -1,0 +1,9 @@
+{
+  "account": {
+    "@type": "/cosmos.auth.v1beta1.BaseAccount",
+    "address": "ixo14hj2tavq8fpesdwxxcu44rty3hh90vhujrvcmstl4zr3txmfvw9sqa3vn7",
+    "pub_key": null,
+    "account_number": "7532",
+    "sequence": "0"
+  }
+}

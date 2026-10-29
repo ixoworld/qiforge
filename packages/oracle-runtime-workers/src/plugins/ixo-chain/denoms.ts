@@ -28,11 +28,17 @@
  *   as its symbol.
  *
  * A denom whose metadata could not be read (a transport failure, or no
- * budget left to ask) is shown the same way with `metadataUnavailable`:
- * it may still be verified. Its trace is not read then.
+ * budget left to ask) or was not asked (a `chain_lookup` request past its
+ * denom lookups) is shown the same way with `metadataUnavailable`: it may
+ * still be verified. Its trace is not read then.
  */
 import { z } from 'zod';
-import { MIN_ATTEMPT_MS, throwIfAborted, type ChainCall } from './http';
+import {
+  hasBudget,
+  throwIfAborted,
+  untilAborted,
+  type ChainCall,
+} from './http';
 import { restJson } from './rest';
 
 export type DenomMetadataView = { symbol: string; decimals: number } | null;
@@ -229,16 +235,26 @@ export const METADATA_NOT_FOUND_TTL_MS = 60_000;
 export const METADATA_FAILED_TTL_MS = 10_000;
 /** A denom trace or a channel's chain id never changes: found ones are reused for 1 h (misses and failures as for metadata). */
 export const IBC_TRACE_TTL_MS = 3_600_000;
-const CACHE_LIMIT = 256;
+/** Answers kept per cache; past it the oldest written is dropped. */
+export const DENOM_CACHE_LIMIT = 256;
 
-/** One read's answer: the value (null for a miss), or why there is none. */
-type Lookup<T> = { value: T | null } | 'failed' | 'aborted';
+/**
+ * One read's answer: the value (null for a miss), or why there is none:
+ * `failed` (the upstream failed), `timeout` (it did not answer in time, or
+ * the launching call's budget ran out), `aborted` (the launching turn was
+ * aborted).
+ */
+type Lookup<T> = { value: T | null } | 'failed' | 'timeout' | 'aborted';
 
 /**
  * Answers per `${restUrl}|${key}`, kept per isolate: a found value for
- * `foundTtlMs`, a miss for 60 s, a failure for 10 s, an abort never. A
+ * `foundTtlMs`, a miss for 60 s, a failure for 10 s, a timeout or an abort
+ * never; at most {@link DENOM_CACHE_LIMIT}, the oldest dropped first. A
  * read in flight is shared by every call of the isolate that needs the
- * same key; none is started with less than 1 s of the budget left.
+ * same key; none is started with less than 1 s of the budget left. A call
+ * that joined a read which then timed out or was aborted by its launching
+ * turn reads again itself while its own budget allows; it waits on its own
+ * turn's abort, never another's.
  */
 class ReadCache<T> {
   private readonly answers = new Map<
@@ -249,18 +265,22 @@ class ReadCache<T> {
 
   constructor(private readonly foundTtlMs: number) {}
 
-  get(
+  async get(
     call: ChainCall,
     key: string,
     read: () => Promise<Lookup<T>>,
   ): Promise<Lookup<T>> {
     const id = `${call.restUrl}|${key}`;
     const hit = this.answers.get(id);
-    if (hit && hit.expiresAt > Date.now()) return Promise.resolve(hit.lookup);
+    if (hit && hit.expiresAt > Date.now()) return hit.lookup;
     const running = this.inflight.get(id);
-    if (running) return running;
-    if (call.deadline - Date.now() < MIN_ATTEMPT_MS)
-      return Promise.resolve('failed');
+    if (running) {
+      const lookup = await untilAborted(running, call.signal);
+      return (lookup === 'timeout' || lookup === 'aborted') && hasBudget(call)
+        ? this.get(call, key, read)
+        : lookup;
+    }
+    if (!hasBudget(call)) return 'timeout';
     const pending = read()
       .then((lookup) => {
         this.remember(id, lookup);
@@ -277,14 +297,18 @@ class ReadCache<T> {
   }
 
   private remember(id: string, lookup: Lookup<T>): void {
-    if (lookup === 'aborted') return;
+    if (lookup === 'aborted' || lookup === 'timeout') return;
     const ttl =
       lookup === 'failed'
         ? METADATA_FAILED_TTL_MS
         : lookup.value
           ? this.foundTtlMs
           : METADATA_NOT_FOUND_TTL_MS;
-    if (this.answers.size > CACHE_LIMIT) this.answers.clear();
+    this.answers.delete(id);
+    if (this.answers.size >= DENOM_CACHE_LIMIT) {
+      const oldest = this.answers.keys().next();
+      if (!oldest.done) this.answers.delete(oldest.value);
+    }
     this.answers.set(id, { lookup, expiresAt: Date.now() + ttl });
   }
 }
@@ -306,8 +330,9 @@ export function resetDenomMetadataCache(): void {
 
 /**
  * One bounded REST read of a resource that may be absent: a 404 is a
- * miss, any other failure `failed`, the launching turn's abort `aborted`
- * (so a call sharing the read is not failed by another turn's abort).
+ * miss, a timeout `timeout`, any other failure `failed`, the launching
+ * turn's abort `aborted` (so a call sharing the read is not failed by
+ * another turn's abort).
  */
 async function readRest<S extends z.ZodType, T>(
   call: ChainCall,
@@ -328,7 +353,11 @@ async function readRest<S extends z.ZodType, T>(
     throw error;
   }
   if (!read.ok)
-    return read.failure.reason === 'not_found' ? { value: null } : 'failed';
+    return read.failure.reason === 'not_found'
+      ? { value: null }
+      : read.failure.reason === 'timeout'
+        ? 'timeout'
+        : 'failed';
   return { value: pick(read.value) };
 }
 
@@ -441,8 +470,7 @@ async function tracedDisplay(
   const hash = denom.slice('ibc/'.length);
   const trace = await traceCache.get(call, hash, () => readTrace(call, hash));
   throwIfAborted(call.signal);
-  if (trace === 'failed' || trace === 'aborted' || !trace.value)
-    return fallback;
+  if (typeof trace !== 'object' || !trace.value) return fallback;
   const { baseDenom, path, channel } = trace.value;
   const chainId = await chainIdCache.get(call, channel, () =>
     readChainId(call, channel),
@@ -452,11 +480,41 @@ async function tracedDisplay(
     ...fallback,
     trace: {
       baseDenom,
-      claimedChain:
-        chainId === 'failed' || chainId === 'aborted' ? null : chainId.value,
+      claimedChain: typeof chainId === 'object' ? chainId.value : null,
       path,
     },
   };
+}
+
+/**
+ * The display of `denom` when it takes no lookup: `uixo`, a denom that is
+ * not a bank denom (never looked up) and an `ibc/…` denom in `ibcDenoms`.
+ * Null for any other denom: its display needs its DenomMetadata.
+ */
+export function knownDisplay(
+  denom: string,
+  ibcDenoms: IbcDenomTable,
+): TokenDisplay | null {
+  if (denom === 'uixo' || !DENOM.test(denom))
+    return trustedDenomDisplay(denom, null);
+  const known = IBC_DENOM.test(denom) ? ibcDenoms.get(denom) : undefined;
+  return known
+    ? {
+        symbol: known.symbol,
+        decimals: known.decimals,
+        verified: true,
+        ...(known.origin ? { origin: known.origin } : {}),
+      }
+    : null;
+}
+
+/**
+ * A denom shown without its metadata (the read failed, or was not made):
+ * unverified, in base units, under its full denom, `metadataUnavailable`
+ * because it may still be verified.
+ */
+export function unreadDisplay(denom: string): TokenDisplay {
+  return { ...trustedDenomDisplay(denom, null), metadataUnavailable: true };
 }
 
 /**
@@ -469,25 +527,15 @@ export async function denomDisplay(
   denom: string,
   ibcDenoms: IbcDenomTable,
 ): Promise<TokenDisplay> {
-  if (denom === 'uixo' || !DENOM.test(denom))
-    return trustedDenomDisplay(denom, null);
-  const ibc = IBC_DENOM.test(denom);
-  const known = ibc ? ibcDenoms.get(denom) : undefined;
-  if (known)
-    return {
-      symbol: known.symbol,
-      decimals: known.decimals,
-      verified: true,
-      ...(known.origin ? { origin: known.origin } : {}),
-    };
+  const known = knownDisplay(denom, ibcDenoms);
+  if (known) return known;
   const lookup = await metadataCache.get(call, denom, () =>
     readMetadata(call, denom),
   );
   throwIfAborted(call.signal);
-  if (lookup === 'failed' || lookup === 'aborted')
-    return { ...trustedDenomDisplay(denom, null), metadataUnavailable: true };
+  if (typeof lookup !== 'object') return unreadDisplay(denom);
   const display = trustedDenomDisplay(denom, lookup.value);
-  return display.verified || !ibc
+  return display.verified || !IBC_DENOM.test(denom)
     ? display
     : tracedDisplay(call, denom, display);
 }

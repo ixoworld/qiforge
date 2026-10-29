@@ -1,0 +1,17 @@
+{
+  "allowances": [
+    {
+      "granter": "ixo1vafr2dqhgz8frc7gf22njz8y2u0fue4kuetey6",
+      "grantee": "ixo1cra6p0jefu8f907gqngkfzxur26k7f73an4v95",
+      "allowance": {
+        "@type": "/cosmos.feegrant.v1beta1.BasicAllowance",
+        "spend_limit": [],
+        "expiration": "2027-06-26T07:54:41.109Z"
+      }
+    }
+  ],
+  "pagination": {
+    "next_key": null,
+    "total": "1"
+  }
+}

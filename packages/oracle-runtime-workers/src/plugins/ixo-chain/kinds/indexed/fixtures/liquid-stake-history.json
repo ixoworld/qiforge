@@ -1,0 +1,75 @@
+{
+  "pageInfo": {
+    "hasNextPage": false
+  },
+  "nodes": [
+    {
+      "kind": "stake",
+      "poolId": "pay",
+      "payload": {
+        "pool_id": "pay",
+        "delegator": "ixo1axp72yt8qltre8pxgtt2g909s76794v2n7xw2h",
+        "msg_index": 0,
+        "liquid_amount": {
+          "denom": "uixo",
+          "amount": "10000000000"
+        },
+        "authz_msg_index": 0,
+        "stk_ixo_minted_amount": {
+          "denom": "upay",
+          "amount": "10000000000"
+        }
+      },
+      "transactionHash": "4FC61CE1BA49ED4A77311857F697B1C96C0FD049F6DC486715CBAD62513C7488",
+      "height": "18502876",
+      "timestamp": "2026-08-04T07:42:05.922"
+    },
+    {
+      "kind": "unstake",
+      "poolId": "pay",
+      "payload": {
+        "pool_id": "pay",
+        "delegator": "ixo1axp72yt8qltre8pxgtt2g909s76794v2n7xw2h",
+        "msg_index": 0,
+        "unstake_amount": {
+          "denom": "upay",
+          "amount": "1000000"
+        },
+        "authz_msg_index": 0,
+        "completion_time": "2026-08-25T05:43:03.888499954Z",
+        "unbonded_amount": {
+          "denom": "uixo",
+          "amount": "0"
+        },
+        "unbonding_amount": {
+          "denom": "uixo",
+          "amount": "899986"
+        }
+      },
+      "transactionHash": "951D847D0D380A07694BAC20C6CFA08184AA2352D2E2B2DB6818C0CD5726D134",
+      "height": "18501590",
+      "timestamp": "2026-08-04T05:43:03.888"
+    },
+    {
+      "kind": "stake",
+      "poolId": "pay",
+      "payload": {
+        "pool_id": "pay",
+        "delegator": "ixo1axp72yt8qltre8pxgtt2g909s76794v2n7xw2h",
+        "msg_index": 0,
+        "liquid_amount": {
+          "denom": "uixo",
+          "amount": "1000000"
+        },
+        "authz_msg_index": 0,
+        "stk_ixo_minted_amount": {
+          "denom": "upay",
+          "amount": "1000000"
+        }
+      },
+      "transactionHash": "3B95838A82084FB8CD7895CD29CCBAE3A1AEC288D659D2B998ADFAC880C90704",
+      "height": "18500970",
+      "timestamp": "2026-08-04T04:45:39.156"
+    }
+  ]
+}

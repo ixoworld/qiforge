@@ -1,0 +1,14 @@
+{
+  "account_authenticators": [
+    {
+      "id": "1155",
+      "type": "AllOf",
+      "config": "W3sidHlwZSI6IlNpZ25hdHVyZVZlcmlmaWNhdGlvbiIsImNvbmZpZyI6IkE4dWc2Tm0rcE1IM290R3c1MURFcDRBVkY2VEtPZlVGR3hWWTNXRTN1UE9MIn0seyJ0eXBlIjoiQW55T2YiLCJjb25maWciOiJXM3NpZEhsd1pTSTZJazFsYzNOaFoyVkdhV3gwWlhJaUxDSmpiMjVtYVdjaU9pSmxlVXBCWkVoc2QxcFRTVFpKYVRsd1pVYzRkV015TVdoamJsSm9XVEpPZG1SWE5UQk1ibGw0V1cxV01GbFVSWFZVV0U1dVVWZFNhMUZZVmpCaFIxWjFaRWRzYWxsWVVuWmphVW81SW4wc2V5SjBlWEJsSWpvaVRXVnpjMkZuWlVacGJIUmxjaUlzSW1OdmJtWnBaeUk2SW1WNVNrRmtTR3gzV2xOSk5rbHBPWEJsUnpoMVl6SXhhR051VW1oWk1rNTJaRmMxTUV4dVdYaFpiVll3V1ZSRmRWUllUbTVWYlZaMFlqTmFiRkZZVmpCaFIxWjFaRWRzYWxsWVVuWmphVW81SW4xZCJ9XQ=="
+    },
+    {
+      "id": "1156",
+      "type": "SignatureVerification",
+      "config": "Am7qryqDT+eIvUwuCnHyoEJWGyXJB+TE/iwnys3c+gVH"
+    }
+  ]
+}

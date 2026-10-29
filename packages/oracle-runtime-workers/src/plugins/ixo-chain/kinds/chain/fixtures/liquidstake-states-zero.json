@@ -1,0 +1,13 @@
+{
+  "net_amount_state": {
+    "stake_rate": "1.000000000000000000",
+    "unstake_rate": "0.000000000000000000",
+    "stkixo_total_supply": "0",
+    "net_amount": "0.000000000000000000",
+    "total_del_shares": "0.000000000000000000",
+    "total_liquid_tokens": "0",
+    "total_remaining_rewards": "0.000000000000000000",
+    "total_unbonding_balance": "0",
+    "proxy_acc_balance": "0"
+  }
+}
