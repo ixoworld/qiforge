@@ -1,4 +1,10 @@
-import type { ActionReceiptV1, OptionsToken } from '@ixo/action-protocol';
+import type {
+  ActionOperationV1,
+  ActionReceiptV1,
+  OptionsToken,
+} from '@ixo/action-protocol';
+import type { ChainTxMessageInput } from '../plugin-api/types';
+import type { ChainTxHostMessage } from './request';
 import { HubActionRefused } from './store';
 
 /**
@@ -84,6 +90,64 @@ const IXO_TOKEN: TransferToken = {
 };
 
 /**
+ * A chain transaction's bank steps in base units; the other messages pass
+ * unchanged. Each bank step names a display `amount` of a token from the
+ * owner's list (`denom`, absent = uixo): the token must be listed, the
+ * amount converts with its listed decimals (`toBaseUnits`: a plain decimal,
+ * no more digits after the point than the decimals, above zero; an
+ * unverified token lists 0: base units), and the bank steps of one token
+ * together stay within its listed balance. `tokens` is the owner's list
+ * (hub_action_options `transfer.tokens`), null when the Hub listed none;
+ * the caller reads it only when there is a bank step.
+ */
+export function bankStepsInBaseUnits(
+  messages: readonly ChainTxMessageInput[],
+  tokens: readonly OptionsToken[] | null,
+): ChainTxHostMessage[] {
+  const spent = new Map<string, bigint>();
+  return messages.map((message, index) => {
+    if (message.type !== 'cosmos.bank.send') return message;
+    const at = `messages[${index}]`;
+    if (!tokens?.length)
+      throw new HubActionRefused(
+        'refused',
+        'Coin sends are not available for this owner right now (no token list from Auth Hub).',
+      );
+    const denom = message.denom ?? IXO_TOKEN.denom;
+    const token = tokens.find((item) => item.denom === denom);
+    if (!token)
+      throw new HubActionRefused(
+        'refused',
+        `${at}.denom: ${denom} is not in the owner's token list; use a denom exactly as hub_action_options lists it (${tokens
+          .map((item) => item.denom)
+          .slice(0, 10)
+          .join(', ')}).`,
+      );
+    let amount: bigint;
+    try {
+      amount = toBaseUnits(message.amount, token.decimals);
+    } catch (error) {
+      if (error instanceof HubActionRefused)
+        throw new HubActionRefused('refused', `${at}.amount: ${error.message}`);
+      throw error;
+    }
+    const total = (spent.get(token.denom) ?? 0n) + amount;
+    spent.set(token.denom, total);
+    if (total > BigInt(token.balanceBaseUnits))
+      throw new HubActionRefused(
+        'refused',
+        `${at}.amount: the owner holds ${describeAmount(token.balanceBaseUnits, token)}, less than ${total === amount ? 'this send' : 'the bank steps of this token in this transaction'}.`,
+      );
+    return {
+      type: 'cosmos.bank.send',
+      toAddress: message.toAddress,
+      amountBaseUnits: amount.toString(),
+      denom: token.denom,
+    };
+  });
+}
+
+/**
  * The owner-facing line for a bank receipt (v2 receipts carry `denom` and
  * `amountBaseUnits`), or null for any other receipt. Without a stored token
  * for that denom (another runtime prepared it) `uixo` still reads as IXO;
@@ -116,15 +180,90 @@ export function bankReceiptSummary(
   return `${what} ${receipt.code === 0 ? 'confirmed' : 'failed'} on chain. Transaction ${receipt.txHash}, block ${receipt.height}.`;
 }
 
-/** What the model is told when Auth Hub refuses a transfer at preparation (400). */
-const HUB_TRANSFER_REFUSALS: Record<string, string> = {
-  simulation_failed:
-    'Auth Hub simulated this transfer and it would fail on chain',
-  fee_above_ceiling:
-    "The network fee for this transfer is above this oracle's fee limit",
-  insufficient_funds:
-    'The account does not hold enough to cover this transfer and its network fee',
+/**
+ * What a refused prepare is called in the words the model relays: a bank
+ * send (`ixo.bank.send.v1`) is a transfer, a chain transaction
+ * (`ixo.chain.tx.v1`, one or more messages) a transaction, anything else an
+ * operation.
+ */
+export type HubPrepareSubject = 'transfer' | 'transaction' | 'operation';
+
+export function prepareSubjectOf(
+  kind: ActionOperationV1['kind'],
+): HubPrepareSubject {
+  return kind === 'ixo.bank.send.v1'
+    ? 'transfer'
+    : kind === 'ixo.chain.tx.v1'
+      ? 'transaction'
+      : 'operation';
+}
+
+/** What the model is told when Auth Hub refuses a prepare (400). */
+const HUB_PREPARE_REFUSALS: Record<
+  string,
+  (subject: HubPrepareSubject) => string
+> = {
+  simulation_failed: (subject) =>
+    `Auth Hub simulated this ${subject} and it would fail on chain`,
+  fee_above_ceiling: (subject) =>
+    `The network fee for this ${subject} is above this oracle's fee limit`,
+  insufficient_funds: (subject) =>
+    `The account does not hold enough to cover this ${subject} and its network fee`,
+  // Chain transactions: the Hub names the field it refused in `reason`
+  // ("invalid_message: messages[1].toAddress"), so the model can correct
+  // it or tell the owner what was wrong.
+  operation_not_registered: (subject) =>
+    `Auth Hub did not accept this ${subject} as written`,
+  // The chain's authorization module refused the simulation: for claims,
+  // the collection admin has not authorized this account.
+  not_authorized: (subject) =>
+    `The account is not authorized on chain for this ${subject} (for claims, the collection admin has not granted the authorization)`,
 };
+/** Appended to every refusal no retry or change of arguments can lift. */
+const NOT_FIXABLE = 'retrying or changing the fields will not help';
+
+/** A kind the account's operator turned off, in the subject's words. */
+function kindOff(subject: HubPrepareSubject): string {
+  return subject === 'transfer'
+    ? 'Bank sends are'
+    : subject === 'transaction'
+      ? 'Chain transactions are'
+      : 'This kind of operation is';
+}
+
+/**
+ * Hub refusals the model cannot fix (fixed words, no retry): the kind
+ * turned off for the account, a field the runtime sets (signer, network,
+ * chain id), a protocol or request the Hub does not accept from this
+ * runtime, and no account or link for the owner (404). A 429 passes with
+ * time, but not within a turn.
+ */
+function unfixableRefusal(
+  status: number,
+  parsed: { error: string; reason?: string } | null,
+  subject: HubPrepareSubject,
+): string | null {
+  if (status === 404)
+    return `Auth Hub has no completed account or active channel link for this owner (${parsed?.error ?? 'not_found'}); ${NOT_FIXABLE}.`;
+  if (status === 429)
+    return `Auth Hub is limiting requests from this oracle right now (${parsed?.error ?? 'rate_limited'}); try again later.`;
+  if (status !== 400 || !parsed) return null;
+  if (parsed.error === 'operation_not_registered') {
+    if (parsed.reason === 'kind_disabled')
+      return `${kindOff(subject)} turned off for this oracle account in Auth Hub (kind_disabled); ${NOT_FIXABLE}.`;
+    const field = /^invalid_operation: (signer|network|chainId)$/.exec(
+      parsed.reason ?? '',
+    )?.[1];
+    if (field)
+      return `Auth Hub refused this ${subject}'s ${field}, which the runtime sets from the owner's account and this oracle's configuration (${parsed.reason}); ${NOT_FIXABLE}.`;
+  }
+  if (parsed.error === 'protocol_version_required')
+    return `Auth Hub does not accept this ${subject} at this runtime's protocol version (protocol_version_required); ${NOT_FIXABLE}.`;
+  if (parsed.error === 'invalid_request')
+    return `Auth Hub refused the request itself, not its fields (invalid_request); ${NOT_FIXABLE}.`;
+  return null;
+}
+
 /** Hub codes that pass with time (a sequence race, the transfer path down). */
 const HUB_TRANSIENT_CODES: Readonly<Record<number, readonly string[]>> = {
   409: ['sequence_mismatch'],
@@ -147,10 +286,16 @@ function hubErrorBody(
 
 /**
  * A Hub refusal of a prepare (`{error, reason?}` with status 400, 409 or
- * 503) as a refusal the model can relay, or null when the status and code
- * are not one of those it maps:
- * - 400 `simulation_failed`, `fee_above_ceiling`, `insufficient_funds`: the
- *   transfer as asked cannot go ahead (with the Hub's reason);
+ * 503, or any 404 or 429) as a refusal the model can relay, or null when
+ * the status and code are not one of those it maps:
+ * - fixed words that no retry or change of fields helps: 400
+ *   `operation_not_registered` with reason `kind_disabled` or
+ *   `invalid_operation: signer|network|chainId`, 400
+ *   `protocol_version_required` and `invalid_request`, and 404; 429 says to
+ *   try again later;
+ * - 400 `simulation_failed`, `fee_above_ceiling`, `insufficient_funds`,
+ *   `not_authorized`, `operation_not_registered`: the transfer or
+ *   transaction as asked cannot go ahead (with the Hub's reason);
  * - 409 `sequence_mismatch`, 503 `transfer_unavailable`: temporary, try
  *   again shortly;
  * - any other 409: the account may not use this operation (deterministic,
@@ -159,15 +304,19 @@ function hubErrorBody(
 export function hubPrepareRefusal(
   status: number,
   body: unknown,
+  subject: HubPrepareSubject = 'transfer',
 ): HubActionRefused | null {
   const parsed = hubErrorBody(body);
+  const unfixable = unfixableRefusal(status, parsed, subject);
+  if (unfixable) return new HubActionRefused('refused', unfixable);
   if (!parsed) return null;
   const detail = parsed.reason ? `: ${parsed.reason}` : '';
-  if (status === 400 && Object.hasOwn(HUB_TRANSFER_REFUSALS, parsed.error))
-    return new HubActionRefused(
-      'refused',
-      `${HUB_TRANSFER_REFUSALS[parsed.error]}${detail}.`,
-    );
+  const words =
+    status === 400 && Object.hasOwn(HUB_PREPARE_REFUSALS, parsed.error)
+      ? HUB_PREPARE_REFUSALS[parsed.error]
+      : undefined;
+  if (words)
+    return new HubActionRefused('refused', `${words(subject)}${detail}.`);
   if (HUB_TRANSIENT_CODES[status]?.includes(parsed.error))
     return new HubActionRefused(
       'refused',

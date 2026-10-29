@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 // prepublishOnly guard: a workspace `overrides` entry that resolves a
-// dependency from `file:vendor/...` exists only in this repository, so a
-// package published while one is in place names a version consumers cannot
-// install. Publish the vendored package to the registry, pin it, remove the
-// override, then publish.
+// dependency from `file:vendor/...`, or a `file:` dependency of the package
+// being published (a locally packed archive or a directory), exists only on
+// the machine that wrote it, so a package published while one is in place
+// names a version consumers cannot install. Publish the dependency to the
+// registry, pin it, remove the override or `file:` spec, then publish.
+// prepublishOnly runs in the package's own directory, so `process.cwd()` is
+// the package being published.
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +25,26 @@ for (const line of lines) {
 if (vendored.length) {
   console.error(
     `Refusing to publish: pnpm-workspace.yaml overrides resolve from vendored archives:\n  ${vendored.join('\n  ')}`,
+  );
+  process.exit(1);
+}
+
+const manifestPath = join(process.cwd(), 'package.json');
+const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+const local = [];
+for (const field of [
+  'dependencies',
+  'optionalDependencies',
+  'peerDependencies',
+  'devDependencies',
+]) {
+  for (const [name, spec] of Object.entries(manifest[field] ?? {}))
+    if (typeof spec === 'string' && spec.startsWith('file:'))
+      local.push(`${field}: ${name} ${spec}`);
+}
+if (local.length) {
+  console.error(
+    `Refusing to publish ${manifest.name ?? manifestPath}: file: dependencies resolve only on this machine:\n  ${local.join('\n  ')}`,
   );
   process.exit(1);
 }

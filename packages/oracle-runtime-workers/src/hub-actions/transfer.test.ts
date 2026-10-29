@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import type { ActionReceiptV1 } from '@ixo/action-protocol';
 import {
   bankReceiptSummary,
+  bankStepsInBaseUnits,
   describeAmount,
   fromBaseUnits,
   hubPrepareRefusal,
+  prepareSubjectOf,
   toBaseUnits,
   type TransferToken,
 } from './transfer';
@@ -92,6 +94,75 @@ describe('any-token transfer amounts', () => {
     expect(describeAmount('1250000', USDC)).toBe(`1.25 USDC (${USDC.denom})`);
     expect(describeAmount('1250000', FAKE)).toBe(
       '1250000 base units of factory/ixo1creator/usdc (unverified token)',
+    );
+  });
+});
+
+describe('chain transaction bank steps', () => {
+  const RECIPIENT = 'ixo1qgpqyqszqgpqyqszqgpqyqszqgpqyqszuzefze';
+  const listed = [
+    { ...IXO, balanceBaseUnits: '5000000' },
+    { ...USDC, balanceBaseUnits: '2500000' },
+  ];
+  const token = {
+    type: 'ixo.token.transfer' as const,
+    recipient: RECIPIENT,
+    tokens: [{ id: 'CARBON:bafytoken', amount: '3' }],
+  };
+
+  it('converts each bank step with its listed decimals and passes the other messages unchanged', () => {
+    expect(
+      bankStepsInBaseUnits(
+        [
+          { type: 'cosmos.bank.send', toAddress: RECIPIENT, amount: '1.25' },
+          token,
+          {
+            type: 'cosmos.bank.send',
+            toAddress: RECIPIENT,
+            amount: '2.5',
+            denom: USDC.denom,
+          },
+        ],
+        listed,
+      ),
+    ).toEqual([
+      {
+        type: 'cosmos.bank.send',
+        toAddress: RECIPIENT,
+        amountBaseUnits: '1250000',
+        denom: 'uixo',
+      },
+      token,
+      {
+        type: 'cosmos.bank.send',
+        toAddress: RECIPIENT,
+        amountBaseUnits: '2500000',
+        denom: USDC.denom,
+      },
+    ]);
+    // No bank step: no token list needed.
+    expect(bankStepsInBaseUnits([token], null)).toEqual([token]);
+  });
+
+  it('refuses without a token list, and checks the bank steps of one token against its balance together', () => {
+    const send = (amount: string) => ({
+      type: 'cosmos.bank.send' as const,
+      toAddress: RECIPIENT,
+      amount,
+    });
+    for (const tokens of [null, []])
+      expect(() => bankStepsInBaseUnits([send('1')], tokens)).toThrow(
+        'no token list from Auth Hub',
+      );
+    // Each within the 5 IXO balance, together above it.
+    expect(() =>
+      bankStepsInBaseUnits([send('3'), send('2.000001')], listed),
+    ).toThrow(
+      'messages[1].amount: the owner holds 5 IXO, less than the bank steps of this token in this transaction.',
+    );
+    // Exactly the balance is allowed (the Hub checks the fee).
+    expect(bankStepsInBaseUnits([send('3'), send('2')], listed)).toHaveLength(
+      2,
     );
   });
 });
@@ -192,6 +263,144 @@ describe('Hub prepare refusals', () => {
         ?.message,
     ).toBe(
       "The network fee for this transfer is above this oracle's fee limit.",
+    );
+  });
+
+  it('names a chain transaction and relays the field or authorization the Hub refused (400)', () => {
+    expect(
+      hubPrepareRefusal(
+        400,
+        {
+          error: 'operation_not_registered',
+          reason: 'invalid_message: messages[1].toAddress',
+        },
+        'transaction',
+      ),
+    ).toMatchObject({
+      name: 'HubActionRefused',
+      kind: 'refused',
+      message:
+        'Auth Hub did not accept this transaction as written: invalid_message: messages[1].toAddress.',
+    });
+    expect(
+      hubPrepareRefusal(400, { error: 'not_authorized' }, 'transaction')
+        ?.message,
+    ).toBe(
+      'The account is not authorized on chain for this transaction (for claims, the collection admin has not granted the authorization).',
+    );
+    expect(
+      hubPrepareRefusal(
+        400,
+        { error: 'insufficient_funds', reason: 'balance 5 < 7' },
+        'transaction',
+      )?.message,
+    ).toBe(
+      'The account does not hold enough to cover this transaction and its network fee: balance 5 < 7.',
+    );
+    expect(
+      hubPrepareRefusal(400, { error: 'simulation_failed' }, 'transaction')
+        ?.message,
+    ).toBe('Auth Hub simulated this transaction and it would fail on chain.');
+    expect(
+      hubPrepareRefusal(400, { error: 'operation_not_registered' }, 'operation')
+        ?.message,
+    ).toBe('Auth Hub did not accept this operation as written.');
+    expect(prepareSubjectOf('ixo.bank.send.v1')).toBe('transfer');
+    expect(prepareSubjectOf('ixo.chain.tx.v1')).toBe('transaction');
+    expect(prepareSubjectOf('form.submit.v1')).toBe('operation');
+  });
+
+  it('says that retrying or changing the fields will not help when the model cannot fix the refusal', () => {
+    const cases: [
+      number,
+      unknown,
+      'transfer' | 'transaction' | 'operation',
+      string,
+    ][] = [
+      [
+        400,
+        { error: 'operation_not_registered', reason: 'kind_disabled' },
+        'transaction',
+        'Chain transactions are turned off for this oracle account in Auth Hub (kind_disabled); retrying or changing the fields will not help.',
+      ],
+      [
+        400,
+        { error: 'operation_not_registered', reason: 'kind_disabled' },
+        'transfer',
+        'Bank sends are turned off for this oracle account in Auth Hub (kind_disabled); retrying or changing the fields will not help.',
+      ],
+      [
+        400,
+        { error: 'operation_not_registered', reason: 'kind_disabled' },
+        'operation',
+        'This kind of operation is turned off for this oracle account in Auth Hub (kind_disabled); retrying or changing the fields will not help.',
+      ],
+      ...(['signer', 'network', 'chainId'] as const).map(
+        (field): [number, unknown, 'transaction', string] => [
+          400,
+          {
+            error: 'operation_not_registered',
+            reason: `invalid_operation: ${field}`,
+          },
+          'transaction',
+          `Auth Hub refused this transaction's ${field}, which the runtime sets from the owner's account and this oracle's configuration (invalid_operation: ${field}); retrying or changing the fields will not help.`,
+        ],
+      ),
+      [
+        400,
+        { error: 'protocol_version_required' },
+        'transaction',
+        "Auth Hub does not accept this transaction at this runtime's protocol version (protocol_version_required); retrying or changing the fields will not help.",
+      ],
+      [
+        400,
+        { error: 'invalid_request' },
+        'transaction',
+        'Auth Hub refused the request itself, not its fields (invalid_request); retrying or changing the fields will not help.',
+      ],
+      [
+        404,
+        { error: 'not_found' },
+        'transaction',
+        'Auth Hub has no completed account or active channel link for this owner (not_found); retrying or changing the fields will not help.',
+      ],
+      [
+        404,
+        'missing',
+        'transfer',
+        'Auth Hub has no completed account or active channel link for this owner (not_found); retrying or changing the fields will not help.',
+      ],
+      [
+        429,
+        { error: 'channel_service_rate_limited' },
+        'transaction',
+        'Auth Hub is limiting requests from this oracle right now (channel_service_rate_limited); try again later.',
+      ],
+      [
+        429,
+        null,
+        'operation',
+        'Auth Hub is limiting requests from this oracle right now (rate_limited); try again later.',
+      ],
+    ];
+    for (const [status, body, subject, words] of cases)
+      expect(hubPrepareRefusal(status, body, subject)).toMatchObject({
+        name: 'HubActionRefused',
+        kind: 'refused',
+        message: words,
+      });
+    // A field from the model's messages stays fixable, with the Hub's reason.
+    expect(
+      hubPrepareRefusal(
+        400,
+        {
+          error: 'operation_not_registered',
+          reason: 'invalid_operation: memo',
+        },
+        'transaction',
+      )?.message,
+    ).toBe(
+      'Auth Hub did not accept this transaction as written: invalid_operation: memo.',
     );
   });
 
