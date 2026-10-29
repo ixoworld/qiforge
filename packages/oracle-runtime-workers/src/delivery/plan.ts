@@ -165,7 +165,7 @@ export function draftReplyPlan(input: {
     for (const call of step.toolCalls) {
       if (
         call.name === 'request_hub_action' ||
-        call.name === 'request_hub_transfer'
+        call.name === 'request_chain_transaction'
       ) {
         try {
           const result = JSON.parse(input.toolResults.get(call.id) ?? 'null');

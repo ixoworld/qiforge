@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { HubActionClient } from './client';
+import { describe, expect, it, vi } from 'vitest';
+import { HUB_CHAIN_TX_PREPARE_TIMEOUT_MS, HubActionClient } from './client';
 import type { ActionReferenceV1, ActionOutcomeV1 } from '@ixo/action-protocol';
 
 const id = 'B'.repeat(32);
@@ -29,7 +29,7 @@ const outcome: ActionOutcomeV1 = {
 };
 
 describe('Hub action HTTP client', () => {
-  it('requests version 3 options (with the owner tokens) for the trusted binding', async () => {
+  it('requests version 3 options (with the owner tokens) at protocol version 4 for the trusted binding', async () => {
     const requests: Request[] = [];
     const options = {
       version: 'ixo.auth-options/3',
@@ -75,7 +75,7 @@ describe('Hub action HTTP client', () => {
         bindingRevision: reference.bindingRevision,
       }),
     ).toEqual(options);
-    expect(new URL(requests[0]!.url).searchParams.get('version')).toBe('3');
+    expect(new URL(requests[0]!.url).searchParams.get('version')).toBe('4');
     expect(new URL(requests[0]!.url).searchParams.get('bindingId')).toBe(
       'chb_two',
     );
@@ -200,7 +200,7 @@ describe('Hub action HTTP client', () => {
     ).rejects.toThrow();
   });
 
-  it('declares protocol version 3 on capabilities, prepare and status, and reads v2 outcomes', async () => {
+  it('declares protocol version 4 on capabilities, prepare and status, and reads v2 outcomes', async () => {
     const urls: string[] = [];
     const v2 = {
       ...outcome,
@@ -256,9 +256,9 @@ describe('Hub action HTTP client', () => {
     });
     expect((await client.status(id)).outcome).toEqual(v2);
     expect(urls).toEqual([
-      'GET /api/internal/actions/operations/capabilities?version=3',
-      'POST /api/internal/actions/operations?version=3',
-      `GET /api/internal/actions/operations/${id}?version=3`,
+      'GET /api/internal/actions/operations/capabilities?version=4',
+      'POST /api/internal/actions/operations?version=4',
+      `GET /api/internal/actions/operations/${id}?version=4`,
     ]);
   });
 
@@ -330,6 +330,75 @@ describe('Hub action HTTP client', () => {
     status = 503;
     answer = { error: 'maintenance' };
     await expect(send()).rejects.toThrow('Hub action request returned 503');
+    // No account or link for the owner, a rate limit: fixed words.
+    status = 404;
+    answer = { error: 'not_found' };
+    await expect(send()).rejects.toMatchObject({
+      name: 'HubActionRefused',
+      message:
+        'Auth Hub has no completed account or active channel link for this owner (not_found); retrying or changing the fields will not help.',
+    });
+    status = 429;
+    answer = { error: 'channel_service_rate_limited' };
+    await expect(send()).rejects.toMatchObject({
+      name: 'HubActionRefused',
+      message:
+        'Auth Hub is limiting requests from this oracle right now (channel_service_rate_limited); try again later.',
+    });
+  });
+
+  it('gives a chain-transaction prepare 15 s (Auth Hub bounds its own at about 8 s) and every other call 10 s', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    try {
+      const client = new HubActionClient({
+        origin: 'https://hub.test',
+        key: 'oracle-secret',
+        fetcher: {
+          fetch: async () => Response.json({ reference }),
+        },
+      });
+      const common = {
+        bindingId: reference.bindingId,
+        bindingRevision: reference.bindingRevision,
+        requestKey: 'k'.repeat(64),
+        expiresAt: 1999999999,
+      };
+      await client.request({
+        ...common,
+        operation: {
+          kind: 'ixo.chain.tx.v1',
+          chainId: 'pandora-8',
+          network: 'ixo testnet',
+          signer: 'ixo1qyqszqgpqyqszqgpqyqszqgpqyqszqgpdxlvf0',
+          memo: '',
+          messages: [
+            {
+              type: 'cosmos.bank.send',
+              toAddress: 'ixo1qgpqyqszqgpqyqszqgpqyqszqgpqyqszuzefze',
+              amountBaseUnits: '1',
+            },
+          ],
+        },
+      });
+      expect(timeout).toHaveBeenLastCalledWith(HUB_CHAIN_TX_PREPARE_TIMEOUT_MS);
+      expect(HUB_CHAIN_TX_PREPARE_TIMEOUT_MS).toBe(15_000);
+      await client.request({
+        ...common,
+        operation: {
+          kind: 'ixo.bank.send.v1',
+          chainId: 'pandora-8',
+          network: 'ixo testnet',
+          fromAddress: 'ixo1qyqszqgpqyqszqgpqyqszqgpqyqszqgpdxlvf0',
+          toAddress: 'ixo1qgpqyqszqgpqyqszqgpqyqszqgpqyqszuzefze',
+          amountBaseUnits: '5',
+          denom: 'uixo',
+          memo: '',
+        },
+      });
+      expect(timeout).toHaveBeenLastCalledWith(10_000);
+    } finally {
+      timeout.mockRestore();
+    }
   });
 
   it('reads connection options at version 2 (no balances read) for the Gmail check', async () => {

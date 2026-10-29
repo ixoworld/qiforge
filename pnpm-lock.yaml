@@ -680,8 +680,8 @@ importers:
         specifier: 0.39.0
         version: 0.39.0
       '@ixo/action-protocol':
-        specifier: 0.5.0
-        version: 0.5.0
+        specifier: 0.6.0
+        version: 0.6.0
       '@ixo/common':
         specifier: workspace:*
         version: link:../common
@@ -3426,8 +3426,8 @@ packages:
     resolution: {integrity: sha512-XrZyu+jJs+qsWFdjEKkdKXHidxXDZJviW6zNwuNbzn7hf9apMRb3NGmv1XDkYgop+4cgWAuBnb7ZWuFxUJyZ1w==}
     engines: {node: '>=20'}
 
-  '@ixo/action-protocol@0.5.0':
-    resolution: {integrity: sha512-KnJfwfRGq6bMYQJxYLn/Ka0gmryDtrmDzFwuACoF/3UP+wPAbZubWA32BDDfdOE2l/YjGD6D8zgoWVXHh1Q7pg==}
+  '@ixo/action-protocol@0.6.0':
+    resolution: {integrity: sha512-2++rS+SJZWVj9xnUFyxWvolGk3bNKtqIjbi3MzzGy4AqhDUhHJ9cUd2/xIWByPk3Law2RmyQpJXZTMmSL/cH4g==}
     engines: {node: '>=20'}
 
   '@ixo/did-provider-x@0.1.1':
@@ -15582,7 +15582,7 @@ snapshots:
 
   '@ixo/action-protocol@0.4.1': {}
 
-  '@ixo/action-protocol@0.5.0': {}
+  '@ixo/action-protocol@0.6.0': {}
 
   '@ixo/did-provider-x@0.1.1':
     dependencies:

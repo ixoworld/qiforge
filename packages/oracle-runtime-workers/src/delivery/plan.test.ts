@@ -120,15 +120,16 @@ describe('draftReplyPlan', () => {
     });
     expect(parseReplyPlan(JSON.stringify(plan))).toEqual(plan);
     expect(planText(plan)).toContain(actionReference.url);
-    // A transfer review is the same structured part, and the note a chat
-    // surface's prepared result carries does not change it.
+    // A chain transaction review (a coin send included) is the same
+    // structured part, and the note a chat surface's prepared result
+    // carries does not change it.
     expect(
       draftReplyPlan({
         steps: [
           {
             text: 'Review the transfer.',
             toolCalls: [
-              { id: 'pay-call', name: 'request_hub_transfer', args: {} },
+              { id: 'pay-call', name: 'request_chain_transaction', args: {} },
             ],
           },
         ],

@@ -18,11 +18,21 @@ const DID = `did:ixo:${ADDRESS}`;
 const OTHER = 'ixo1x4p6j0h3mzv8e7mhd6q9wquh2vqd9yh5ttnzyg';
 const USDC =
   'ibc/6BBE9BD4246F8E04948D5A4EEE7164B2630263B9EBB5E7DC5F0A46C62A2FF97B';
+const INJECTIVE_USDC =
+  'ibc/77C12480BD8C29BF0ACEC2143736C15BAF8CD232CA27BAE09336677B828955E6';
 const BLOCKSYNC = 'https://blocksync.test/graphql';
 
-function ctxFor(did = DID, blocksyncUrl = BLOCKSYNC): RuntimeContext {
+function ctxFor(
+  did = DID,
+  blocksyncUrl = BLOCKSYNC,
+  config: Record<string, unknown> = {},
+): RuntimeContext {
   return makeRuntimeContext({
-    config: { NETWORK: 'mainnet', BLOCKSYNC_GRAPHQL_URL: blocksyncUrl },
+    config: {
+      NETWORK: 'mainnet',
+      BLOCKSYNC_GRAPHQL_URL: blocksyncUrl,
+      ...config,
+    },
     user: {
       did,
       matrixUserId: '@user:test',
@@ -106,6 +116,10 @@ describe('IxoChainPlugin', () => {
     expect(balances?.description).toContain(readOnly);
     expect(balances?.description).toContain('uixo ÷ 1,000,000');
     expect(balances?.description).toContain('metadataUnavailable');
+    const origin =
+      "`origin` (verified tokens only) names the chain an IBC token came from; say it when two tokens share a symbol (e.g. USDC from noble-1 and from injective-1). An unverified IBC token's `trace` (base denom, claimed chain) is self-reported by the sending chain: name the token by its full denom and present the trace only as unverified, never as what the token is.";
+    expect(balances?.description).toContain(origin);
+    expect(plugin.operatingGuide).toContain(origin);
     expect(lookup?.description).toContain(untrusted);
     expect(lookup?.description).toContain(
       'Coin amounts in claims, collections and messages are base units (uixo ÷ 1,000,000 = IXO)',
@@ -146,6 +160,41 @@ describe('IxoChainPlugin', () => {
       ]);
   });
 
+  it('validates IXO_CHAIN_IBC_DENOMS at boot', () => {
+    const { schema, pluginOwnership } = composeEnvSchema(
+      [new IxoChainPlugin()],
+      baseEnvSchema,
+    );
+    const entry = { symbol: 'OSMO', decimals: 6, origin: 'osmosis-1' };
+    const hash = `ibc/${'A'.repeat(64)}`;
+    for (const good of [JSON.stringify({ [hash]: entry }), { [hash]: entry }])
+      expect(
+        validateEnv(
+          schema,
+          makeEnv({ IXO_CHAIN_IBC_DENOMS: good }),
+          pluginOwnership,
+        ).valid,
+      ).toBe(true);
+    for (const bad of [
+      '{not json',
+      JSON.stringify({ 'ibc/abc': entry }),
+      JSON.stringify({ [hash]: { ...entry, decimals: 19 } }),
+      JSON.stringify({ [hash]: { ...entry, symbol: 'a b' } }),
+    ])
+      expect(
+        validateEnv(
+          schema,
+          makeEnv({ IXO_CHAIN_IBC_DENOMS: bad }),
+          pluginOwnership,
+        ).errors,
+      ).toEqual([
+        expect.objectContaining({
+          plugin: 'ixo-chain',
+          field: 'IXO_CHAIN_IBC_DENOMS',
+        }),
+      ]);
+  });
+
   it('picks the chain REST gateway per NETWORK unless CHAIN_REST_URL is set', () => {
     expect(chainRestUrl({ NETWORK: 'mainnet' })).toBe(
       'https://impacthub.ixo.world/rest',
@@ -162,11 +211,12 @@ describe('IxoChainPlugin', () => {
 });
 
 describe('get_account_balances', () => {
-  it("reads the user's balances, trusting the chain's denom metadata", async () => {
+  it("reads the user's balances: both mainnet USDCs from the IBC table, other denoms through the chain's metadata", async () => {
     const fetcher = stubFetch((url) => {
       if (url.includes('/cosmos/bank/v1beta1/balances/'))
         return json({
           balances: [
+            { denom: INJECTIVE_USDC, amount: '2199004' },
             { denom: USDC, amount: '25069999' },
             { denom: 'uixo', amount: '9000000' },
             { denom: 'upay', amount: '5740000' },
@@ -182,18 +232,6 @@ describe('get_account_balances', () => {
             ],
             display: 'pay',
             symbol: 'PAY',
-          },
-        });
-      if (
-        url.endsWith(
-          `denoms_metadata_by_query_string?denom=${encodeURIComponent(USDC)}`,
-        )
-      )
-        return json({
-          metadata: {
-            denom_units: [{ denom: 'uusdc', exponent: 0, aliases: [] }],
-            display: 'transfer/channel-26/uusdc',
-            symbol: 'UUSDC',
           },
         });
       throw new Error(`unexpected ${url}`);
@@ -216,6 +254,15 @@ describe('get_account_balances', () => {
           amount: '9',
         },
         {
+          denom: USDC,
+          symbol: 'USDC',
+          decimals: 6,
+          verified: true,
+          amountBaseUnits: '25069999',
+          amount: '25.069999',
+          origin: 'noble-1',
+        },
+        {
           denom: 'upay',
           symbol: 'PAY',
           decimals: 6,
@@ -224,12 +271,13 @@ describe('get_account_balances', () => {
           amount: '5.74',
         },
         {
-          denom: USDC,
-          symbol: USDC,
-          decimals: 0,
-          verified: false,
-          amountBaseUnits: '25069999',
-          amount: '25069999',
+          denom: INJECTIVE_USDC,
+          symbol: 'USDC',
+          decimals: 6,
+          verified: true,
+          amountBaseUnits: '2199004',
+          amount: '2.199004',
+          origin: 'injective-1',
         },
       ],
     });
@@ -237,8 +285,89 @@ describe('get_account_balances', () => {
       `https://impacthub.ixo.world/rest/cosmos/bank/v1beta1/balances/${ADDRESS}?pagination.limit=50`,
       expect.objectContaining({ method: 'GET' }),
     );
-    // uixo is never looked up; upay and the ibc denom once each.
-    expect(fetcher).toHaveBeenCalledTimes(3);
+    // uixo and the table's denoms are never looked up; upay once.
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps an IBC token the table does not know under its hash, its trace beside it as a claim', async () => {
+    const OSMO = `ibc/${'A'.repeat(64)}`;
+    const fetcher = stubFetch((url) => {
+      if (url.includes('/cosmos/bank/v1beta1/balances/'))
+        return json({ balances: [{ denom: OSMO, amount: '1500000' }] });
+      if (url.includes('denoms_metadata_by_query_string'))
+        return json({
+          metadata: {
+            denom_units: [{ denom: 'uosmo', exponent: 0, aliases: [] }],
+            display: 'transfer/channel-4/uosmo',
+            symbol: '',
+          },
+        });
+      if (url.endsWith(`/ibc/apps/transfer/v1/denom_traces/${'A'.repeat(64)}`))
+        return json({
+          denom_trace: { path: 'transfer/channel-4', base_denom: 'uosmo' },
+        });
+      if (
+        url.endsWith(
+          '/ibc/core/channel/v1/channels/channel-4/ports/transfer/client_state',
+        )
+      )
+        return json({
+          identified_client_state: {
+            client_id: '07-tendermint-4',
+            client_state: { chain_id: 'osmosis-1' },
+          },
+        });
+      throw new Error(`unexpected ${url}`);
+    });
+    expect(
+      await tool('get_account_balances').handler({}, ctxFor()),
+    ).toMatchObject({
+      ok: true,
+      tokens: [
+        {
+          denom: OSMO,
+          symbol: OSMO,
+          decimals: 0,
+          verified: false,
+          amountBaseUnits: '1500000',
+          amount: '1500000',
+          trace: {
+            baseDenom: 'uosmo',
+            claimedChain: 'osmosis-1',
+            path: 'transfer/channel-4',
+          },
+        },
+      ],
+    });
+    expect(fetcher).toHaveBeenCalledTimes(4);
+  });
+
+  it('lets IXO_CHAIN_IBC_DENOMS replace a built-in entry', async () => {
+    const fetcher = stubFetch(() =>
+      json({ balances: [{ denom: USDC, amount: '25069999' }] }),
+    );
+    const override = JSON.stringify({
+      [USDC]: { symbol: 'USDC.noble', decimals: 6, origin: 'noble-1' },
+    });
+    expect(
+      await tool('get_account_balances').handler(
+        {},
+        ctxFor(DID, BLOCKSYNC, { IXO_CHAIN_IBC_DENOMS: override }),
+      ),
+    ).toMatchObject({
+      ok: true,
+      tokens: [
+        {
+          denom: USDC,
+          symbol: 'USDC.noble',
+          decimals: 6,
+          verified: true,
+          amount: '25.069999',
+          origin: 'noble-1',
+        },
+      ],
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
   it('reads another account by address or DID and says whose it is', async () => {

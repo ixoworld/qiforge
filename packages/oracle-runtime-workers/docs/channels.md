@@ -230,10 +230,12 @@ Deploy this runtime before the matching gateway. No additional Auth Hub grant or
 # Auth Hub action review (disabled by default)
 
 `HUB_ACTIONS_ENABLED=true` adds the on-demand `request_hub_action`,
-`request_hub_transfer` and `hub_action_status` tools plus read-only
-`hub_action_capabilities` and `hub_action_options`. Discover
-capabilities first: Auth Hub returns enabled kinds, exact registered form field
-descriptors, transfer limits and the configured network. The request tool
+`request_chain_transaction` and `hub_action_status` tools plus read-only
+`hub_action_capabilities`, `hub_action_options` and
+`describe_chain_messages`.
+Discover capabilities first: Auth Hub returns enabled kinds, exact registered
+form field descriptors, transfer limits, the chain-transaction message types
+(`chainTx`) and the configured network. The request tool
 accepts a strictly typed candidate operation from
 `@ixo/action-protocol`; the runtime adds the authenticated owner, current
 channel binding/revision, session, run, request and tool invocation. It checks
@@ -241,11 +243,11 @@ the active binding again before calling Auth Hub. The model cannot supply those
 identity fields or approve an action. The existing `prepare_action` Portal card
 path remains available independently.
 
-The contract is `@ixo/action-protocol` 0.5.0 from npm. This runtime
-declares protocol version 3 on its Hub calls (see below). Outcomes still
+The contract is `@ixo/action-protocol` 0.6.0 from npm. This runtime
+declares protocol version 4 on its Hub calls (see below). Outcomes still
 arrive as `ixo.auth-outcome/2`, so it needs a gateway that parses that
 envelope (gateway PR 20); the bank receipts it hands the gateway keep the
-0.4.1 shape (see [bank transfers](#bank-transfers-any-token)).
+0.4.1 shape (see [coin sends](#coin-sends-any-token)).
 
 The oracle uses `AUTH_HUB_URL` (an HTTPS origin) and
 `AUTH_HUB_CHANNEL_SERVICE_KEY` to create and read operations; both are
@@ -269,8 +271,8 @@ finished run's Reply Plan contains a `hub-action` part with a typed
 `actionReference` and short summary (the plan takes it only from a
 `prepared` result whose `summary` equals the reference's title). On a chat
 surface (`ctx.session.surface.kind === 'chat'`, which every channel turn is)
-the `prepared` result of `request_hub_action` and `request_hub_transfer`
-also carries `note`: the user is shown the action automatically as a card
+the `prepared` result of `request_hub_action` and
+`request_chain_transaction` also carries `note`: the user is shown the action automatically as a card
 with its title and a "Review action" button, so the model must not repeat
 the link or the title, must not say it has not executed or signed anything,
 and replies with one short line or nothing. The gateway renders the part as
@@ -345,8 +347,19 @@ checks for hosts with a durable `reserve`/`record` store. Envelope versions
 are `ixo.auth-action/1`, `ixo.auth-capabilities/2`, `ixo.auth-outcome/2` and
 `ixo.auth-options/3`; unsupported kinds and versions fail closed.
 
-The runtime declares protocol version 3 (`?version=3`) on the capabilities,
-prepare, status and options calls. Version 3 is the 0.5.0 contract:
+The runtime declares protocol version 4 (`?version=4`) on the capabilities,
+prepare, status and options calls. Version 4 is the 0.6.0 contract: version 3
+plus chain transactions (capabilities list `ixo.chain.tx.v1` with `chainTx`,
+the Hub accepts its prepare, receipts carry `steps`); options still answer
+`ixo.auth-options/3`. Auth Hub lists the kind only to version 4 callers (a
+version 3 runtime parses capabilities with the 0.5.0 exact-key parser and
+would fail on it) and refuses an `ixo.chain.tx.v1` prepare from an older
+caller with `400 protocol_version_required`, so Auth Hub must accept version 4
+before this runtime is deployed.
+
+Deploy order: Auth Hub (accepts version 4) → channel gateways on @ixo/action-protocol 0.6.0 → runtimes.
+
+Version 3 is the 0.5.0 contract:
 capabilities with per-denom `transfer.limits`, any-denom bank sends, receipts
 with `denom` and `amountBaseUnits`, options with the owner's tokens. Version 2
 callers (runtime 0.23.0) keep the 0.4.1 shapes; without a version Auth Hub
@@ -376,53 +389,182 @@ model-supplied identity. The shared
 operation catalogue. Capability and options reads may be used by any registered
 oracle account with the compatible channel adapter.
 
-## Bank transfers (any token)
+## Coin sends (any token)
 
-`request_hub_transfer` prepares an `ixo.bank.send.v1` review; the generic
-`request_hub_action` refuses bank sends. The model supplies only the
-recipient, a token `denom` copied from `hub_action_options` `transfer.tokens`
-(at most 50: `denom`, `symbol`, `decimals`, `verified`, `balanceBaseUnits`),
-a decimal `amount` in that token's display units and an optional memo. The
-owner object then reads the options again (the balance must be current),
+A coin send is a `cosmos.bank.send` message of `request_chain_transaction`:
+one message for a single send, or a step of a batch. There is no separate
+send tool any more: this runtime never prepares the older `ixo.bank.send.v1`
+card, and the generic `request_hub_action` refuses that kind (and
+`ixo.chain.tx.v1`) with a pointer to `request_chain_transaction`. Auth Hub
+still serves `ixo.bank.send.v1` for older runtimes, and this runtime still
+reads and relays the outcome of such a card (below).
+
+The model supplies only the recipient, a decimal `amount` in the token's
+display units (`"1.5"` for 1.5 IXO) and an optional `denom` copied from
+`hub_action_options` `transfer.tokens` (at most 50: `denom`, `symbol`,
+`decimals`, `verified`, `balanceBaseUnits`; absent = `uixo`). When a
+transaction has at least one bank step, the owner object reads the options
+once for the call, fresh (the balances must be current, at the protocol
+version: version 4, answered as options version 3), and for each bank step
 refuses a denom that is not in the list (it never guesses an `ibc/…` hash),
-and converts the amount to base units with the listed `decimals` using
-integer arithmetic. It refuses more fraction digits than the token has, a
-zero amount, an amount above the balance, and, from the capabilities, an
-amount above the per-denom `transfer.limits` cap (`maxAmountBaseUnits`; a
-legacy `maxAmountUixo` caps only `uixo`). These are client-side pre-checks:
-Auth Hub enforces its own. The network is the account's capability, the
-chain id this Worker's `IXO_TRANSACTION_CHAIN_ID_*` for that network, the
-sender the owner's account. No fee is sent: Auth Hub simulates gas and sets
-the fee. A token that is not `verified` has `decimals` 0, so its amounts are
-base units; the model is told to name its full denom and say it is
-unverified (anyone controlling a factory or cw20 token can call it "USDC").
+converts the amount to base units with the listed `decimals` using integer
+arithmetic (`toBaseUnits`), refuses more fraction digits than the token has
+and a zero amount, and refuses when the bank steps of one token together
+exceed its listed balance. A transaction without a bank step reads no
+options. Refusals name the step: `messages[0].denom: …`,
+`messages[2].amount: the owner holds 5 IXO, less than the bank steps of this
+token in this transaction.` What reaches Auth Hub is the protocol's
+`cosmos.bank.send` (`toAddress`, `amountBaseUnits`, `denom` = the listed
+token's). These are client-side pre-checks: Auth Hub enforces its own. No
+fee is sent: Auth Hub simulates gas and sets the fee. A token that is not
+`verified` has `decimals` 0, so its amounts are base units; the model is told
+to name its full denom and say it is unverified (anyone controlling a factory
+or cw20 token can call it "USDC").
 
-Auth Hub can refuse a prepare with `{error, reason?}`; these reach the model
-as `{status: 'unavailable', reason}` in plain words (with the Hub's reason, at
-most 200 characters): `400` `simulation_failed`, `fee_above_ceiling` and
-`insufficient_funds` (the transfer as asked cannot go ahead); `409`
-`sequence_mismatch` and `503` `transfer_unavailable` (temporary: try again
-shortly); any other `409` (the operation is not available for this account,
-and a retry gets the same answer). Any other `400` or `503` is a transport
-error. Only the protocol refusing the operation the owner object built from
-the model's fields (an invalid recipient or memo) becomes "The transfer is
-incomplete (…)"; a `TypeError` from anywhere else stays an error.
+Auth Hub lists the owner's tokens while `ixo.bank.send.v1` or
+`ixo.chain.tx.v1` is enabled for the account (it answers `transfer: null`
+when both are off, and also when the owner has no address or the chain did
+not answer); without a token list a
+bank step is refused ("Coin sends are not available for this owner right
+now (no token list from Auth Hub)."). The chain-transaction capabilities
+carry no per-denom caps, so the older card's `transfer.limits` pre-check
+does not apply to a bank step.
 
-A transfer runs the turn-origin refusal first (no Hub read for a scheduled
-or background run), then validates the binding once for the whole call.
-
-The owner object stores the token (denom, symbol, decimals, verified) next to
-the prepared action. `hub_action_status` returns `{status: 'known', outcome,
-summary?}`, where `summary` is the owner-facing line for a bank receipt, for
+`hub_action_status` returns `{status: 'known', outcome, summary?}`, where
+`summary` is the owner-facing line for an `ixo.bank.send.v1` receipt (a
+card an older runtime prepared, with the token it stored next to it), for
 example `Transfer of 1.25 USDC (ibc/…) confirmed on chain. Transaction …,
 block …`, or `… was not included on chain (expired not included)`. A
 verified token shows its symbol (and its full denom unless it is `uixo`); an
 unverified token, or a receipt whose denom differs from the stored token,
 shows base units and the full denom with an "unverified token" marker. The
-`hubActionOutcomes` a channel poll returns to the gateway drop the receipt's
-`denom` and `amountBaseUnits` (the gateway parses the exact 0.4.1 bank
-receipt), so nothing new reaches the gateway. A transfer review is the same
-`hub-action` Reply Plan part as any other Hub review.
+`hubActionOutcomes` a channel poll returns to the gateway drop such a
+receipt's `denom` and `amountBaseUnits` (the gateway parses the exact 0.4.1
+bank receipt).
+
+## Chain transactions
+
+`request_chain_transaction` prepares one `ixo.chain.tx.v1` review: 1 to 8
+messages executed as one transaction (all succeed or none do), shown to the
+owner step by step in Auth Hub and signed once. The generic
+`request_hub_action` refuses this kind (and a bank send), and its schema
+leaves out both kinds' branches (about 3.7 KB of JSON Schema on every model
+request). The model supplies only `messages` and an optional `memo` (at most
+256 UTF-8 bytes); the owner object adds the chain id (this Worker's
+`IXO_TRANSACTION_CHAIN_ID_*` for the account's network), the network (the
+account's capability), the signer (the owner's address, from their DID
+`did:ixo:<address>`, as a transfer's sender) and the owner's identity in
+claims messages: `agentDid` is `did:ixo:<signer>` (the owner's DID, the form
+the runtime authenticates to Auth Hub with) on a submit and an evaluation,
+and an evaluation's `agentAddress` is the signer. The model never supplies
+either: they are not in the tool's schema, and a stray one is overwritten.
+An owner DID that is not `did:ixo:<address>` leaves no signer, refused in
+fixed words (below). No fee is sent:
+Auth Hub simulates gas and sets it. There are no per-message caps and no
+per-message enablement: the kind is on by default in Auth Hub, and an
+operator can still disable it for an account like any kind.
+
+The model uses two tools, discover then request, so the per-request token
+cost does not grow with the catalogue. `request_chain_transaction`'s
+description is a few sentences plus one summary line per message type, and
+its JSON Schema is constant in size: `messages` (1 to 8 objects, each a
+`type` from the catalogue and any other fields) and `memo`. Before a type's
+first use in a conversation the model calls `describe_chain_messages`
+(`{types: [...]}`, 1 to 8 distinct catalogue types), which returns, per
+type, its full rules (purpose, what the runtime fills, chain caveats) and
+its fields as JSON Schema (meaning, format, limits), the rules every type
+shares, and `availableTypes`: the catalogue filtered by the account's
+capabilities `chainTx.messageTypes` (none when chain transactions are off
+for the account; the whole catalogue when the capabilities cannot be read
+or the turn is not a channel turn). The catalogue is one structure in the
+plugin (`CHAIN_TX_CATALOG`: per type a `summary`, `rules` and a strict zod
+`schema`), so a new type is one entry: about one line on every request, and
+its rules only when asked for. At the time of writing the two tools cost
+about 2.4 KB of description and schema per model request, against about
+7.6 KB for the earlier per-type schema and description plus the separate
+send tool.
+
+The four message types (`describe_chain_messages` teaches them to the
+model):
+
+| `type`                | Fields                                                                                                                           | What it does                                                                                                                                                                                                                                                                                                                                                                                                |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cosmos.bank.send`    | `toAddress`, `amountBaseUnits`, `denom?` (default `uixo`)                                                                        | Sends coins from the owner's wallet. The model gives `amount` in display units instead; the owner object converts it ([coin sends](#coin-sends-any-token)).                                                                                                                                                                                                                                                 |
+| `ixo.claims.submit`   | `collectionId`, `claimId`, `agentDid`, `adminAddress`, `useIntent?`                                                              | Files a claim the owner already created. Runs under the collection admin's authorization (Auth Hub wraps it in `MsgExec`); the chain agent address is the signer.                                                                                                                                                                                                                                           |
+| `ixo.claims.evaluate` | `claimId`, `collectionId`, `oracle`, `agentDid`, `agentAddress`, `adminAddress`, `status` (1–4), `reason?`, `verificationProof?` | Records the owner's decision, as evaluator, on someone else's claim (1 approve, 2 reject, 3 dispute, 4 invalidate). `agentDid`/`agentAddress` are the owner's own (the evaluator, not the claimant: the chain keys the evaluator and its payout on them); `oracle` is the evaluator DID recorded on the evaluation. Needs evaluator authorization (wrapped in `MsgExec`); an approval can pay the claimant. |
+| `ixo.token.transfer`  | `recipient`, `tokens` (1–32 lines of `id` and whole `amount`)                                                                    | Moves IXO impact tokens (1155-style) from the owner's wallet; the chain owner is the signer. Not the IXO coin.                                                                                                                                                                                                                                                                                              |
+
+The Fields column is the wire (`@ixo/action-protocol`). The model writes
+neither `agentDid` nor `agentAddress`: the runtime fills them from the signer
+as above. A bank step's `amountBaseUnits` is the runtime's too: the model
+writes a display `amount`.
+
+Each message is checked strictly against its type's catalogue schema,
+which mirrors the protocol shapes with Auth Hub's stricter rules; before any
+Hub call the runtime refuses an unknown type, a batch of 0 or more than 8,
+an address that is not a 20-byte `ixo1…` account address (`ixo1` and 38
+characters; a 32-byte contract address is refused), a bank `amount` that is
+not a plain decimal, a token amount that is zero or not whole, a non-digit
+collection id (or one with leading zeros), a claim id, token id or
+verification proof outside `^[A-Za-z0-9:._/-]+$`, a verification proof
+over 300 characters, an `oracle` DID with a `%` not followed by two hex
+digits, a pending (0) or unknown evaluation status, 0 or more than 32 token
+lines, a memo over 256 bytes or with a control, invisible or text-direction
+character (U+0000–U+001F, U+007F–U+009F, U+061C, U+200B–U+200F,
+U+2028–U+2029, U+202A–U+202E, U+2066–U+2069, U+FEFF; one shared helper,
+`hasUnsafeText`), and any field a type does not have, the ones the runtime
+fills included (`signer`, `chainId`, `network`, `agentDid`, an evaluation's
+or submit's `agentAddress`, a token `owner`, a bank `amountBaseUnits`, a
+fee). On a model turn LangChain first validates the arguments against the
+model-facing schema (the batch size, each `type`, the memo, no other
+top-level argument), so the model reads zod's issues for those
+(`Received tool input did not match expected schema`, `→ at
+messages[1].type`); the handler then checks each message's fields and
+answers `{status: 'unavailable', reason}` naming every refused field, at
+most five: `The messages do not match a supported message shape (check
+messages[1].toAddress: A 20-byte ixo1… account address (42 characters);
+contract addresses are refused; messages[3].agentDid: not a field here
+(describe_chain_messages lists each type's fields)).` The owner object then
+runs the turn-origin refusal, validates the binding, reads the (cached)
+capabilities and refuses when the account does not list `ixo.chain.tx.v1`
+with `chainTx` or has no network, converts bank steps (above), fills the
+owner's identity, and `@ixo/action-protocol` parses the whole operation
+("The transaction is incomplete (…)" on a field from the messages). The
+request path pre-checks the capabilities' `chainTx.messageTypes` and
+`chainTx.maxMessages` and the network, then prepares it like any review
+(the same reservation, idempotency key, Reply Plan card and outcome
+handling). How the model finds claim ids, collection ids, DIDs and
+addresses is not this tool's job: it asks the owner or uses other tools.
+
+Auth Hub refusals reach the model in plain words as `{status:
+'unavailable', reason}`, with the Hub's `reason` appended (at most 200
+characters): `400 operation_not_registered` ("Auth Hub did not accept this
+transaction as written: invalid_message: messages[1].toAddress."),
+`not_authorized` (no authorization from the collection admin),
+`insufficient_funds`, `fee_above_ceiling` and `simulation_failed`; `409
+sequence_mismatch` and `503 transfer_unavailable` are temporary ("try again
+shortly"). Refusals the model cannot fix get fixed words ending "retrying or
+changing the fields will not help": `400 operation_not_registered` with
+reason `kind_disabled` or `invalid_operation: signer|network|chainId` (fields
+the runtime sets), `400 protocol_version_required` and `invalid_request`, any
+404 (no completed account or active link for the owner), and the runtime's
+own "Invalid signer" (an owner DID that is not `did:ixo:<address>`) or
+missing kind; a 429 says "try again later". A bank send says "transfer", a
+chain transaction "transaction", any other kind "operation". The
+chain-transaction prepare gets a 15 s timeout (every other Hub call 10 s):
+Auth Hub bounds its chain reads and simulation at about 8 s and answers
+`503 transfer_unavailable`, which then arrives instead of a client abort.
+
+The outcome is the ordinary Hub outcome; its receipt is the protocol's
+`ixo.chain.tx.v1` receipt (`txHash`, `height`, `code`, `reason?` of
+`check_tx_rejected`, `expired_not_included` or `tx_failed`, a plain
+`message?`, and `steps`: the message types in order). It is stored, returned
+by `hub_action_status` and relayed in `hubActionOutcomes` unchanged (only the
+bank-send receipt is reduced to its 0.4.1 shape), so a gateway that relays
+chain-transaction outcomes must parse them with `@ixo/action-protocol`
+0.6.0. Out of scope here: name resolution (collection and token names),
+per-message caps or enablement, claim creation, how an oracle finds ids, and
+mainnet enablement.
 
 The owner completes each review in Auth Hub. Gmail and Calendar setup return a fresh
 review with the account and scopes selected at Google; setup alone does not
@@ -452,11 +594,14 @@ rejected (for example `Invalid fromAddress`). The Gmail service requires fresh i
 attestations and confirmed proxy no-retry behavior; missing evidence disables
 the journey. Local conformance fixtures do not establish those activation gates.
 
-Both shared packages come from the npm registry: `@ixo/action-protocol` 0.5.0
+Both shared packages come from the npm registry: `@ixo/action-protocol` 0.6.0
 and `@ixo/topic-protocol` 1.0.0-rc.8 (the Worker-safe build with precompiled
 validators), pinned exactly in the runtime and in `@ixo/ixo-transaction`. No
-workspace override or vendored archive remains, and `prepublishOnly` refuses
-to publish if one comes back (`scripts/assert-no-vendored-overrides.mjs`).
+workspace override or vendored archive remains. `prepublishOnly`
+(`scripts/assert-no-vendored-overrides.mjs`) refuses to publish with a
+workspace override from `file:vendor/` or a `file:` dependency of the
+package being published (a locally packed archive resolves only on the
+machine that packed it).
 
 ```ts
 import { HubActionClient } from '@ixo/oracle-runtime-workers/hub-actions/client';

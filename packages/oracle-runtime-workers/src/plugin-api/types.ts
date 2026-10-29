@@ -24,7 +24,31 @@ import type {
   ActionReferenceV1,
   ActionOutcomeV1,
   ActionCapabilitiesV1,
+  ChainTxMessage,
 } from '@ixo/action-protocol';
+
+/**
+ * A chain-transaction message as the model writes it: the protocol's
+ * message without the owner's identity, which the host fills (a claim's
+ * `agentDid`, an evaluation's `agentDid` and `agentAddress`: the signer's).
+ * A bank step names a display `amount` of a token from the owner's list
+ * (`denom`, absent = uixo); the host converts it to the protocol's
+ * `amountBaseUnits` from the listed decimals.
+ */
+export type ChainTxMessageInput =
+  | {
+      type: 'cosmos.bank.send';
+      toAddress: string;
+      /** A plain decimal in the token's display units ("1.5"). */
+      amount: string;
+      denom?: string;
+    }
+  | Extract<ChainTxMessage, { type: 'ixo.token.transfer' }>
+  | Omit<Extract<ChainTxMessage, { type: 'ixo.claims.submit' }>, 'agentDid'>
+  | Omit<
+      Extract<ChainTxMessage, { type: 'ixo.claims.evaluate' }>,
+      'agentDid' | 'agentAddress'
+    >;
 
 /**
  * Route shape returned by `OraclePlugin.getAuthExcludedRoutes()`. Paths are
@@ -782,11 +806,17 @@ export interface RuntimeContext<TConfig = MergedConfig> {
       bindingRevision: number;
     }): Promise<import('@ixo/action-protocol').HubActionOptionsV3>;
     /**
-     * A bank send of a token from the owner's options list: `amount` is a
-     * decimal in the token's display units; the host converts it to base
-     * units from the listed decimals and builds the operation (no fee).
+     * One chain transaction (`ixo.chain.tx.v1`) of 1–8 messages: the host
+     * adds the chain id and network (the account's), the signer (the
+     * owner's address) and the owner's identity in claims messages
+     * (`agentDid` = `did:ixo:<signer>`, an evaluation's `agentAddress` = the
+     * signer) and prepares it like any operation (no fee: the Hub simulates
+     * gas and sets it). A bank step's display `amount` is converted to base
+     * units from the owner's token list (one options read per call, only
+     * when there is a bank step), refused for a token not listed, more
+     * digits than its decimals, zero or more than the listed balance.
      */
-    transfer(input: {
+    chainTransaction(input: {
       ownerDid: string;
       sessionId: string;
       runId: string;
@@ -795,9 +825,7 @@ export interface RuntimeContext<TConfig = MergedConfig> {
       bindingId: string;
       bindingRevision: number;
       requestKey: string;
-      toAddress: string;
-      denom: string;
-      amount: string;
+      messages: ChainTxMessageInput[];
       memo: string;
     }): Promise<ActionReferenceV1>;
     request(input: {

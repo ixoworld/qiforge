@@ -129,7 +129,7 @@ Non-secret values go in `vars`; secrets through `wrangler secret put` (or
 identity, auth and Matrix groups plus `LOG_LEVEL`. Plugins read their own
 variables (e.g. `MEMORY_MCP_URL`, `FIRECRAWL_MCP_URL`, `SANDBOX_MCP_URL`,
 `DOMAIN_INDEXER_URL`, `SKILLS_CAPSULES_BASE_URL`, `COMPOSIO_*`,
-`IXO_TRANSACTION_*`, `IXO_CHAIN_TOOLS`, `CHAIN_REST_URL`) through the same
+`IXO_TRANSACTION_*`, `IXO_CHAIN_TOOLS`, `CHAIN_REST_URL`, `IXO_CHAIN_IBC_DENOMS`) through the same
 object; each plugin's `configSchema` is
 the reference. Two plugin keys gate money: `POD_CREATOR_ALLOW_MAINNET`
 (default `false`) must be `'true'` before the POD Creator plugin prepares a
@@ -389,10 +389,11 @@ The bundled ixo-chain plugin ([chain-tools](chain-tools.md)): read-only
 `get_account_balances` and `chain_lookup`, on-demand. It reads Blocksync at
 `BLOCKSYNC_GRAPHQL_URL` and needs no delegation capability.
 
-| Variable          | Meaning                                                                                                                                                                                                                                                                               |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `IXO_CHAIN_TOOLS` | `on` (default) or `off`. `off` leaves the plugin out of the oracle.                                                                                                                                                                                                                   |
-| `CHAIN_REST_URL`  | Chain REST (LCD) base URL for balances and denom metadata: `https`, no credentials, query or fragment (a `/rest` path is fine). Defaults per `NETWORK`: mainnet `https://impacthub.ixo.world/rest`, testnet `https://testnet.ixo.earth/rest`, devnet `https://devnet.ixo.earth/rest`. |
+| Variable               | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `IXO_CHAIN_TOOLS`      | `on` (default) or `off`. `off` leaves the plugin out of the oracle.                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `CHAIN_REST_URL`       | Chain REST (LCD) base URL for balances and denom metadata: `https`, no credentials, query or fragment (a `/rest` path is fine). Defaults per `NETWORK`: mainnet `https://impacthub.ixo.world/rest`, testnet `https://testnet.ixo.earth/rest`, devnet `https://devnet.ixo.earth/rest`.                                                                                                                                                                                                             |
+| `IXO_CHAIN_IBC_DENOMS` | Optional. Verified IBC tokens for `get_account_balances`, merged over the built-in ones of the oracle's `NETWORK` (mainnet: USDC from `noble-1` and from `injective-1`): a JSON object (as a string, or an object `vars` entry) `{ "ibc/<64 upper-case hex>": { "symbol": "1–20 of A–Z a–z 0–9 . -", "decimals": 0–18, "origin"?: "chain id" } }`. An entry shows that denom verified with those decimals and `origin`, without a lookup. Invalid JSON or an invalid entry fails boot validation. |
 
 ### Oracle documents
 
