@@ -38,13 +38,16 @@ Blocksync from `BLOCKSYNC_GRAPHQL_URL`, chain REST from ixo-chain's
 some providers' tool schemas (`node-parity.md`). The handler checks the
 fields each action needs (`answer`: `field`, `reply`; `skip`: `field`;
 `section`: `section`, `addAnother`; `discard`: `confirmed`) and answers a
-missing one with `invalid_input` naming it.
+missing one with `invalid_input` naming it. `submit` sends only with
+`confirmed: true`, which the model passes only after the person clearly said
+yes to the review it read back; without it the answer is
+`needs_confirmation` with the answers, and no card is requested.
 
 Identity comes from the runtime: the person's address is
 `ixoAddressOf(ctx.user.did)`. No tool takes an account.
 
 **Prompt footprint** (`toJsonSchema` of both schemas, the two descriptions,
-the operating guide and the manifest): 4,631 characters, against ixo-chain's
+the operating guide and the manifest): 4,755 characters, against ixo-chain's
 7,403.
 
 ## Where the data comes from
@@ -135,7 +138,7 @@ book under `drafts` existed only on unreleased branches and is ignored.
    runtime release that carries WhatsApp files), each checked (https link,
    sha256, size), matched against the question's `acceptedTypes`; a file
    already in the draft (same sha256) answers `duplicate`.
-9. **Sending.** An application goes out as the application card
+9. **Sending**, only with `confirmed: true` (see above). An application goes out as the application card
    (`ixo.bid.submit.v1`), logged work as the claim card
    (`ixo.claim.submit.v1`) — `@ixo/action-protocol` 0.7.0, Hub protocol
    level 5. The plugin first reads `ctx.hubActions.capabilities()`: when the

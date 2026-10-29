@@ -795,11 +795,32 @@ describe('yoma_lookup', () => {
 });
 
 describe('yoma_form', () => {
+  it('sends nothing until the person said yes to the review', async () => {
+    const { form, requests } = setup();
+    const ref = await fillApplication(form);
+    const unconfirmed = await form({ action: 'submit', ...ref });
+    expect(unconfirmed).toMatchObject({
+      ok: true,
+      status: 'needs_confirmation',
+    });
+    expect(unconfirmed.answers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: 'Lebo Mokoena' }),
+      ]),
+    );
+    expect(
+      (await form({ action: 'submit', confirmed: false, ...ref })).status,
+    ).toBe('needs_confirmation');
+    expect(requests).toHaveLength(0);
+  });
+
   it('asks the application one question at a time and sends it as a card; locked while it waits', async () => {
     const { form, requests, outcomes } = setup();
     const ref = await fillApplication(form);
     expect((await form({ action: 'review', ...ref })).status).toBe('ready');
-    expect((await form({ action: 'submit', ...ref })).status).toBe('prepared');
+    expect(
+      (await form({ action: 'submit', confirmed: true, ...ref })).status,
+    ).toBe('prepared');
     const operation = answerSchema.parse(requests[0]!.operation);
     expect(operation).toMatchObject({
       kind: 'ixo.bid.submit.v1',
@@ -835,10 +856,14 @@ describe('yoma_form', () => {
   it('sends a new card after one was declined, with a new request key', async () => {
     const { form, requests, outcomes, newRun } = setup();
     const ref = await fillApplication(form);
-    expect((await form({ action: 'submit', ...ref })).status).toBe('prepared');
+    expect(
+      (await form({ action: 'submit', confirmed: true, ...ref })).status,
+    ).toBe('prepared');
     outcomes.set('action-1', 'declined');
     newRun('run-2');
-    expect((await form({ action: 'submit', ...ref })).status).toBe('prepared');
+    expect(
+      (await form({ action: 'submit', confirmed: true, ...ref })).status,
+    ).toBe('prepared');
     expect(requests).toHaveLength(2);
     expect(requests[1]!.requestKey).not.toBe(requests[0]!.requestKey);
   });
@@ -848,7 +873,7 @@ describe('yoma_form', () => {
       expiresAt: Math.floor(Date.now() / 1000) - 3600,
     });
     const ref = await fillApplication(form);
-    await form({ action: 'submit', ...ref });
+    await form({ action: 'submit', confirmed: true, ...ref });
     expect(
       (
         await form({
@@ -865,7 +890,9 @@ describe('yoma_form', () => {
   it("does not send when the Hub doesn't offer the application card to this account", async () => {
     const { form, requests } = setup({ operations: ['ixo.bank.send.v1'] });
     const ref = await fillApplication(form);
-    expect(await form({ action: 'submit', ...ref })).toMatchObject({
+    expect(
+      await form({ action: 'submit', confirmed: true, ...ref }),
+    ).toMatchObject({
       ok: false,
       reason: 'not_enabled',
       retryable: false,
@@ -897,7 +924,9 @@ describe('yoma_form', () => {
       const { grants, instantPermission } = hook();
       const { form, requests } = setup({ instantPermission });
       const ref = await fillApplication(form);
-      expect(await form({ action: 'submit', ...ref })).toMatchObject({
+      expect(
+        await form({ action: 'submit', confirmed: true, ...ref }),
+      ).toMatchObject({
         ok: true,
         status: 'can_log_work',
         say: 'They can start logging work now.',
@@ -921,9 +950,9 @@ describe('yoma_form', () => {
       };
       const { form } = setup({ instantPermission });
       const ref = await fillApplication(form);
-      expect((await form({ action: 'submit', ...ref })).say).toContain(
-        'a few seconds',
-      );
+      expect(
+        (await form({ action: 'submit', confirmed: true, ...ref })).say,
+      ).toContain('a few seconds');
     });
 
     it('answers unavailable, retryable, when the grant fails, and keeps the application', async () => {
@@ -931,7 +960,9 @@ describe('yoma_form', () => {
       const { instantPermission } = hook(true);
       const { form, requests } = setup({ instantPermission });
       const ref = await fillApplication(form);
-      expect(await form({ action: 'submit', ...ref })).toMatchObject({
+      expect(
+        await form({ action: 'submit', confirmed: true, ...ref }),
+      ).toMatchObject({
         ok: false,
         reason: 'unavailable',
         retryable: true,
@@ -963,9 +994,9 @@ describe('yoma_form', () => {
       };
       const { form, requests } = setup({ instantPermission });
       const ref = await fillApplication(form);
-      expect((await form({ action: 'submit', ...ref })).status).toBe(
-        'prepared',
-      );
+      expect(
+        (await form({ action: 'submit', confirmed: true, ...ref })).status,
+      ).toBe('prepared');
       expect(requests).toHaveLength(1);
       expect(grants).toHaveLength(0);
       expect(
@@ -1056,7 +1087,9 @@ describe('yoma_form', () => {
       label: expect.stringContaining('ertificate'),
       value: '📷 certificate.jpg',
     });
-    expect((await form({ action: 'submit', ...ref })).status).toBe('prepared');
+    expect(
+      (await form({ action: 'submit', confirmed: true, ...ref })).status,
+    ).toBe('prepared');
     expect(requests).toHaveLength(1);
     const operation = requests[0]!.operation;
     if (operation.kind !== 'ixo.claim.submit.v1')
@@ -1097,7 +1130,9 @@ describe('yoma_form', () => {
       stoppedAt: 'evidence',
       hubSaid: 'A photo did not match the file that was sent',
     });
-    expect((await form({ action: 'submit', ...ref })).status).toBe('prepared');
+    expect(
+      (await form({ action: 'submit', confirmed: true, ...ref })).status,
+    ).toBe('prepared');
     expect(requests[1]!.requestKey).not.toBe(requests[0]!.requestKey);
     expect(
       (await storedDraft(kv, 'claim', '9787')).cardFailure,
@@ -1162,7 +1197,9 @@ describe('yoma_form', () => {
       ...ref,
       field: 'dcterms:description_reflection',
     });
-    expect(await form({ action: 'submit', ...ref })).toMatchObject({
+    expect(
+      await form({ action: 'submit', confirmed: true, ...ref }),
+    ).toMatchObject({
       ok: false,
       reason: 'not_enabled',
       retryable: false,

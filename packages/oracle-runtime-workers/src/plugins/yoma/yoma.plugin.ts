@@ -141,7 +141,10 @@ const formSchema = z.strictObject({
   otherText: z.string().max(500).optional().describe('answer: own "Other"'),
   section: z.string().min(1).max(200).optional().describe('section'),
   addAnother: z.boolean().optional().describe('section'),
-  confirmed: z.boolean().optional().describe('discard'),
+  confirmed: z
+    .boolean()
+    .optional()
+    .describe('submit: clear yes to the review; discard'),
 });
 
 type LookupRequest = z.infer<typeof lookupRequestSchema>;
@@ -486,10 +489,10 @@ const STATUS_RULE =
 const OPERATING_GUIDE = [
   '### Yoma',
   '- Say programme, job, application, logging work, tap Confirm; never claim collection, protocol, bid, DID, token or chain.',
-  '- Like Jambo: `programmes` (3 a message: name, who, where), then `programme_jobs` for the one they pick (what, pay; no pay line when none).',
-  '- `yoma_form`: `next`, then `answer` per reply, one plain question a message, options numbered as given. Pass the reply as written, plus `value` for dates, numbers, phones, emails. On `unclear`/`invalid`, ask again using `say`.',
-  '- Files: ask them to send it here, then `answer` with their caption or "[photo]". Pins arrive as "📍 lat, long". `skip` optional questions; on `more_items` ask if there is another, then `section`.',
-  '- On `done`: `review`, read back briefly, `submit` when they confirm (a card to confirm; `can_log_work`: they can log work now). On `apply_first`, do the application first. Never say sent before `next`/`my_drafts` says submitted. On `lastCard`, say why it failed; offer to resend.',
+  '- Like Jambo: `programmes` (3 a message: name, who, where), then `programme_jobs` for their pick (what, pay if any).',
+  '- `yoma_form`: `next`, then `answer` each reply, one plain question a message, options numbered. Pass the reply as written, plus `value` for dates, numbers, phones, emails. On `unclear`/`invalid`, ask again using `say`.',
+  '- Files: ask them to send it, then `answer` with the caption or "[photo]". Pins arrive as "📍 lat, long". `skip` optional questions; on `more_items` ask if there is another, then `section`.',
+  '- On `done`: `review`, read back briefly, `submit` with `confirmed: true` only on a clear yes to that read-back, never from another answer (a card; `can_log_work`: they can log work). On `apply_first`, apply first. Say sent only once `next`/`my_drafts` says submitted. On `lastCard`, say why; offer to resend.',
   `- ${STATUS_RULE} \`my_work\`: approved? paid?`,
   `- ${DATA_RULE}`,
 ].join('\n');
@@ -528,7 +531,7 @@ export class YomaPlugin extends OraclePlugin {
       {
         name: 'yoma_form',
         description: [
-          "Apply or log work through the job's form, one question at a time. `action`: next | answer (a file or pin in their message counts) | skip | section | review | submit (a card to confirm) | discard (only when asked). Saved at once.",
+          "Apply or log work through the job's form, one question at a time. `action`: next | answer (a file/pin in their message counts) | skip | section | review | submit (`confirmed` only on a clear yes to the read-back; sends a card) | discard (only when asked). Saved at once.",
           DATA_RULE,
         ].join(' '),
         schema: formSchema,
@@ -1383,6 +1386,13 @@ export class YomaPlugin extends OraclePlugin {
         missing: problems.slice(0, 5).map((e) => e.path),
       };
     if (draft.card) return { ok: true, status: 'waiting_for_confirm' };
+    if (!input.confirmed)
+      return {
+        ok: true,
+        status: 'needs_confirmation',
+        say: 'Read these back and send only after they clearly say yes to them.',
+        answers: summaryRows(model),
+      };
     const instant = this.options.instantPermission;
     if (input.form === 'application' && instant?.allows(input.collectionId))
       return this.grantInstantly(input, ctx, kv, call, draft, instant);
