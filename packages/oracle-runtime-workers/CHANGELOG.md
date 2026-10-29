@@ -1,5 +1,11 @@
 # @ixo/oracle-runtime-workers
 
+## 0.29.1
+
+### Patch Changes
+
+- [#418](https://github.com/ixoworld/qiforge/pull/418) [`b9595f6`](https://github.com/ixoworld/qiforge/commit/b9595f6a3837d3491098cb4deac92dab490511f8) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - `request_chain_transaction`: the model-facing schema now declares each message type's field names and basic types (derived from the catalogue, without descriptions, patterns or limits). In 0.29.0 each message declared only `type` with no other properties allowed, so a model provider dropped the other fields (`toAddress`, `amount`, …) and every call was refused as incomplete. Each per-type object stays open, so a field a type does not have still reaches the handler, which names it; formats and limits are still checked by the handler against the full catalogue schema. Per-request cost of the two chain tools is about 3.4 KB.
+
 ## 0.29.0
 
 ### Minor Changes
