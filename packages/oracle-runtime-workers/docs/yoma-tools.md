@@ -158,6 +158,19 @@ book under `drafts` existed only on unreleased branches and is ignored.
    submitted claim keeps its `claimId` from `ixo.claim.submission.v1`.
    Answers are locked while a card waits.
 
+10. **Instant permission (optional).** A host may pass
+    `instantPermission: { allows(collectionId), grant({ collectionId, admin,
+address, signal }) }`. For a collection it `allows`, `submit` of a
+    finished application sends no card: it calls `grant` (a failure answers
+    `unavailable`, retryable, and the application stays open; the turn's abort
+    is rethrown), marks the application done, reads the permission on chain
+    again and answers `can_log_work` ("it can take a few seconds to show"
+    when the grant is not visible yet). A claim on such a collection without
+    permission answers `apply_first` instead of `not_accepted`. Without the
+    hook, or when `allows` is false, every job waits for the operator to
+    accept the application. The plugin holds no wallet: the host decides
+    which collections and grants with its own key.
+
 ## Known limits
 
 - **Lockfile.** `@ixo/action-protocol` is pinned to 0.7.0, which is not on

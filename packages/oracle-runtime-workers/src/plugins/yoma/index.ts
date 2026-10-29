@@ -1,4 +1,8 @@
-export { YomaPlugin, type YomaPluginOptions } from './yoma.plugin';
+export {
+  YomaPlugin,
+  type InstantPermission,
+  type YomaPluginOptions,
+} from './yoma.plugin';
 export {
   CLEF_MODEL,
   workersAiClefRunner,

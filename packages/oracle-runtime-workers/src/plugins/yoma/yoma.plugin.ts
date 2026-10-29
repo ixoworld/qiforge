@@ -426,9 +426,29 @@ function capFormResult(
 
 /* ── the plugin ───────────────────────────────────────────────────────── */
 
+/**
+ * A host's way to let people log work on chosen collections as soon as they
+ * finish the application, instead of waiting for the operator to accept it
+ * through the bids bot: the host grants the permission itself (for example
+ * with its own wallet, where the collection's admin allowed that).
+ */
+export interface InstantPermission {
+  /** Whether this collection takes the instant route. */
+  allows(collectionId: string): boolean;
+  /** Give the account permission to submit a claim to the collection; throws when it could not. */
+  grant(input: {
+    collectionId: string;
+    admin: string;
+    address: string;
+    signal?: AbortSignal;
+  }): Promise<void>;
+}
+
 export interface YomaPluginOptions {
   /** A Clef runner (`workersAiClefRunner(env.AI)`) to read choice replies in any words; without it, only option numbers and exact text count. */
   getClef?: () => ClefRunner | undefined;
+  /** Collections where a finished application gives permission at once, granted by the host. Absent: every job waits for acceptance. */
+  instantPermission?: InstantPermission;
 }
 
 const manifest: PluginManifest = {
@@ -469,7 +489,7 @@ const OPERATING_GUIDE = [
   '- Like Jambo: `programmes` (3 a message: name, who, where), then `programme_jobs` for the one they pick (what, pay; no pay line when none).',
   '- `yoma_form`: `next`, then `answer` per reply, one plain question a message, options numbered as given. Pass the reply as written, plus `value` for dates, numbers, phones, emails. On `unclear`/`invalid`, ask again using `say`.',
   '- Files: ask them to send it here, then `answer` with their caption or "[photo]". Pins arrive as "📍 lat, long". `skip` optional questions; on `more_items` ask if there is another, then `section`.',
-  '- On `done`: `review`, read back briefly, `submit` when they confirm (a card to confirm). Never say sent before `next`/`my_drafts` says submitted. On `lastCard`, say why it failed; offer to resend.',
+  '- On `done`: `review`, read back briefly, `submit` when they confirm (a card to confirm; `can_log_work`: they can log work now). On `apply_first`, do the application first. Never say sent before `next`/`my_drafts` says submitted. On `lastCard`, say why it failed; offer to resend.',
   `- ${STATUS_RULE} \`my_work\`: approved? paid?`,
   `- ${DATA_RULE}`,
 ].join('\n');
@@ -1236,11 +1256,17 @@ export class YomaPlugin extends OraclePlugin {
         : { ok: true as const, value: false };
       if (!allowed.ok) return failed(allowed.failure);
       if (!allowed.value)
-        return {
-          ok: true,
-          status: 'not_accepted',
-          say: 'They can log work on this job once they have applied and been accepted.',
-        };
+        return this.options.instantPermission?.allows(input.collectionId)
+          ? {
+              ok: true,
+              status: 'apply_first',
+              say: 'Finish the short application first; then they can log work straight away.',
+            }
+          : {
+              ok: true,
+              status: 'not_accepted',
+              say: 'They can log work on this job once they have applied and been accepted.',
+            };
     }
     if (!draft) {
       const at = new Date().toISOString();
@@ -1281,6 +1307,64 @@ export class YomaPlugin extends OraclePlugin {
     };
   }
 
+  /**
+   * A finished application on a collection the host grants at once: no card,
+   * the host gives the permission, the application is marked done, and the
+   * chain is asked again (a grant can take a block to show).
+   */
+  private async grantInstantly(
+    input: FormInput,
+    ctx: RuntimeContext,
+    kv: Kv,
+    call: ChainCall,
+    draft: Draft,
+    instant: InstantPermission,
+  ): Promise<Record<string, unknown>> {
+    const address = ixoAddressOf(ctx.user.did);
+    if (!address)
+      return failed({
+        reason: 'invalid_input',
+        detail: 'This account has no IXO address to give permission to.',
+        retryable: false,
+      });
+    try {
+      await instant.grant({
+        collectionId: input.collectionId,
+        admin: draft.admin,
+        address,
+        signal: ctx.abortSignal,
+      });
+    } catch (error) {
+      if (ctx.abortSignal.aborted) throw error;
+      return failed({
+        reason: 'unavailable',
+        detail:
+          "Permission to log work couldn't be given just now; everything is saved. Try again in a moment.",
+        retryable: true,
+      });
+    }
+    const written = await updateDraft(
+      kv,
+      input.form,
+      input.collectionId,
+      (c) => (c ? { ...c, submittedAt: new Date().toISOString() } : c),
+    );
+    if (!written.ok) return failed(written.failure);
+    const visible = await canLogWork(call, {
+      address,
+      admin: draft.admin,
+      collectionId: input.collectionId,
+    });
+    return {
+      ok: true,
+      status: 'can_log_work',
+      say:
+        visible.ok && visible.value
+          ? 'They can start logging work now.'
+          : 'They can start logging work; it can take a few seconds to show.',
+    };
+  }
+
   private async submit(
     input: FormInput,
     ctx: RuntimeContext,
@@ -1299,6 +1383,9 @@ export class YomaPlugin extends OraclePlugin {
         missing: problems.slice(0, 5).map((e) => e.path),
       };
     if (draft.card) return { ok: true, status: 'waiting_for_confirm' };
+    const instant = this.options.instantPermission;
+    if (input.form === 'application' && instant?.allows(input.collectionId))
+      return this.grantInstantly(input, ctx, kv, call, draft, instant);
     const kind = input.form === 'claim' ? CLAIM_KIND : APPLICATION_KIND;
     const channel = ctx.session.channel;
     if (

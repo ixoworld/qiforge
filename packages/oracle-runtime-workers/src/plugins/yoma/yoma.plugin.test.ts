@@ -11,7 +11,11 @@ import { allDrafts, draftKey, type Kv } from './drafts';
 import milestoneApplication from './fixtures/form-9787-bco.json';
 import milestoneClaim from './fixtures/form-9787-vct.json';
 import treePlanting from './fixtures/form-8724-vct.json';
-import { MAX_RESULT_CHARS, YomaPlugin } from './yoma.plugin';
+import {
+  MAX_RESULT_CHARS,
+  YomaPlugin,
+  type InstantPermission,
+} from './yoma.plugin';
 
 const ADDRESS = 'ixo1cra6p0jefu8f907gqngkfzxur26k7f73an4v95';
 const DID = `did:ixo:${ADDRESS}`;
@@ -308,9 +312,13 @@ function setup(
     kv?: Kv | false;
     operations?: Capabilities['operations'];
     expiresAt?: number;
+    instantPermission?: InstantPermission;
   } = {},
 ) {
   const plugin = new YomaPlugin({
+    ...(opts.instantPermission
+      ? { instantPermission: opts.instantPermission }
+      : {}),
     getClef: () =>
       opts.clef === null ? undefined : (opts.clef ?? firstOption),
   });
@@ -863,6 +871,108 @@ describe('yoma_form', () => {
       retryable: false,
     });
     expect(requests).toHaveLength(0);
+  });
+
+  describe('instant permission', () => {
+    /** A host hook that grants on 9787 only, recording each grant. */
+    const hook = (fail = false) => {
+      const grants: Array<{
+        collectionId: string;
+        admin: string;
+        address: string;
+      }> = [];
+      const instantPermission: InstantPermission = {
+        allows: (collectionId) => collectionId === '9787',
+        grant: async ({ collectionId, admin, address }) => {
+          if (fail) throw new Error('wallet out of gas');
+          grants.push({ collectionId, admin, address });
+          world.allowed = true;
+        },
+      };
+      return { grants, instantPermission };
+    };
+
+    it('grants on a finished application instead of sending the card', async () => {
+      world.allowed = false;
+      const { grants, instantPermission } = hook();
+      const { form, requests } = setup({ instantPermission });
+      const ref = await fillApplication(form);
+      expect(await form({ action: 'submit', ...ref })).toMatchObject({
+        ok: true,
+        status: 'can_log_work',
+        say: 'They can start logging work now.',
+      });
+      expect(requests).toHaveLength(0);
+      expect(grants).toEqual([
+        { collectionId: '9787', admin: expect.any(String), address: ADDRESS },
+      ]);
+      expect((await form({ action: 'next', ...ref })).status).toBe('submitted');
+      expect(
+        (await form({ action: 'next', form: 'claim', collectionId: '9787' }))
+          .status,
+      ).not.toBe('not_accepted');
+    });
+
+    it('says it can take a few seconds when the grant is not visible yet', async () => {
+      world.allowed = false;
+      const instantPermission: InstantPermission = {
+        allows: () => true,
+        grant: async () => {},
+      };
+      const { form } = setup({ instantPermission });
+      const ref = await fillApplication(form);
+      expect((await form({ action: 'submit', ...ref })).say).toContain(
+        'a few seconds',
+      );
+    });
+
+    it('answers unavailable, retryable, when the grant fails, and keeps the application', async () => {
+      world.allowed = false;
+      const { instantPermission } = hook(true);
+      const { form, requests } = setup({ instantPermission });
+      const ref = await fillApplication(form);
+      expect(await form({ action: 'submit', ...ref })).toMatchObject({
+        ok: false,
+        reason: 'unavailable',
+        retryable: true,
+      });
+      expect(requests).toHaveLength(0);
+      expect((await form({ action: 'next', ...ref })).status).not.toBe(
+        'submitted',
+      );
+    });
+
+    it('asks for the application first on a claim it allows', async () => {
+      world.allowed = false;
+      const { instantPermission } = hook();
+      const { form } = setup({ instantPermission });
+      expect(
+        (await form({ action: 'next', form: 'claim', collectionId: '9787' }))
+          .status,
+      ).toBe('apply_first');
+    });
+
+    it('leaves a job it does not allow exactly as before', async () => {
+      world.allowed = false;
+      const { grants } = hook();
+      const instantPermission: InstantPermission = {
+        allows: () => false,
+        grant: async () => {
+          throw new Error('must not be called');
+        },
+      };
+      const { form, requests } = setup({ instantPermission });
+      const ref = await fillApplication(form);
+      expect((await form({ action: 'submit', ...ref })).status).toBe(
+        'prepared',
+      );
+      expect(requests).toHaveLength(1);
+      expect(grants).toHaveLength(0);
+      expect(
+        (await form({ action: 'next', form: 'claim', collectionId: '9787' }))
+          .status,
+      ).toBe('not_accepted');
+    });
   });
 
   it('only lets them log work once accepted', async () => {
