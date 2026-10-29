@@ -129,7 +129,8 @@ Non-secret values go in `vars`; secrets through `wrangler secret put` (or
 identity, auth and Matrix groups plus `LOG_LEVEL`. Plugins read their own
 variables (e.g. `MEMORY_MCP_URL`, `FIRECRAWL_MCP_URL`, `SANDBOX_MCP_URL`,
 `DOMAIN_INDEXER_URL`, `SKILLS_CAPSULES_BASE_URL`, `COMPOSIO_*`,
-`IXO_TRANSACTION_*`) through the same object; each plugin's `configSchema` is
+`IXO_TRANSACTION_*`, `IXO_CHAIN_TOOLS`, `CHAIN_REST_URL`) through the same
+object; each plugin's `configSchema` is
 the reference. Two plugin keys gate money: `POD_CREATOR_ALLOW_MAINNET`
 (default `false`) must be `'true'` before the POD Creator plugin prepares a
 mainnet creation batch — with `NETWORK` at its `mainnet` default and the flag
@@ -376,6 +377,17 @@ without its origin and RPC, or with an unsafe URL.
 | `ACTION_PROPOSALS_PORTAL_ORIGIN`                      | The trusted Portal origin for `/a/<id>` links: `https`, host only, no path. Required when enabled.                                                                                                                     |
 | `ACTION_PROPOSALS_RPC_DEVNET`, `_TESTNET`, `_MAINNET` | Chain RPC base URL per network for verification: `https`, no credentials, query or fragment (a `/rpc/` path is fine). Devnet or testnet required when enabled; mainnet cards are refused by policy.                    |
 | `ACTION_TOPIC_PROPOSALS_ENABLED`                      | `'true'` adds the topic cards ([topic-action-proposals](topic-action-proposals.md)): discussion drafts and claim-access grants, their claims and step permits. Default `'false'`; requires `ACTION_PROPOSALS_ENABLED`. |
+
+### Chain tools
+
+The bundled ixo-chain plugin ([chain-tools](chain-tools.md)): read-only
+`get_account_balances` and `chain_lookup`, on-demand. It reads Blocksync at
+`BLOCKSYNC_GRAPHQL_URL` and needs no delegation capability.
+
+| Variable          | Meaning                                                                                                                                                                                                                                                                               |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `IXO_CHAIN_TOOLS` | `on` (default) or `off`. `off` leaves the plugin out of the oracle.                                                                                                                                                                                                                   |
+| `CHAIN_REST_URL`  | Chain REST (LCD) base URL for balances and denom metadata: `https`, no credentials, query or fragment (a `/rest` path is fine). Defaults per `NETWORK`: mainnet `https://impacthub.ixo.world/rest`, testnet `https://testnet.ixo.earth/rest`, devnet `https://devnet.ixo.earth/rest`. |
 
 ### Oracle documents
 

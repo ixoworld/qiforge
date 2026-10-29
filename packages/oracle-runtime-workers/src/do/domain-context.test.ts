@@ -564,6 +564,12 @@ describe('domain context in a user-object turn', () => {
         // The sub-agent the main agent dispatched sees the same block and tools.
         expect(sub.system).toContain('you are a test sub-agent');
         expect(sub.system).toContain(DOMAIN_CONTEXT_OPEN);
+        // ... after the section naming the user, as on the main prompt.
+        const identityAt = sub.system.indexOf('## Who you are talking to');
+        expect(identityAt).toBeGreaterThan(-1);
+        expect(identityAt).toBeLessThan(
+          sub.system.indexOf(DOMAIN_CONTEXT_OPEN),
+        );
         expect(sub.system).toContain('"role":"subject-domain"');
         expect(sub.tools).toEqual(expect.arrayContaining(DOMAIN_TOOLS));
 

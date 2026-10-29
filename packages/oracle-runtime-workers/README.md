@@ -117,6 +117,7 @@ lifetime are in [operations](docs/operations.md).
 | [ixo-transaction](docs/ixo-transaction.md)               | The opt-in wallet-signing plugin: chain ids, signing outcomes, the mainnet receipt rule            |
 | [action-proposals](docs/action-proposals.md)             | Action cards: a transfer prepared from chat, signed in the Portal, verified on chain, receipted    |
 | [topic-action-proposals](docs/topic-action-proposals.md) | Topic cards: discussion drafts and claim-access grants as multi-step journals with one-use permits |
+| [chain-tools](docs/chain-tools.md)                       | The bundled `ixo-chain` reader: live balances, batched Blocksync reads, retries and limits         |
 | [testing](docs/testing.md)                               | Unit, harness e2e, the devnet feature matrix, stress                                               |
 | [load-tests](docs/load-tests.md)                         | Measurements and the findings that shaped the gateway                                              |
 

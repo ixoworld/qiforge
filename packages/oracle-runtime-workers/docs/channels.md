@@ -366,7 +366,9 @@ Calendar connection/removal and one reviewed event, document read-access
 requests, and new private text files. `hub_action_options` requests
 `ixo.auth-options/3` and obtains confirmed connections, requestable document
 identifiers, existing action resources and the owner's bank tokens for the
-current owner and channel binding; an older options version is refused. Each connection carries its `gmail` or `calendar`
+current owner and channel binding; an older options version is refused. The
+runtime adds `ownerAddress`, the IXO account address read off the owner's
+`did:ixo:ixo1…` DID (`null` for any other DID), beside the Hub's `ownerDid`. Each connection carries its `gmail` or `calendar`
 service; do not use a profile-only Gmail connection for sending. Old Hub clients
 still receive Calendar-only options version 1 by default. The tool accepts no
 model-supplied identity. The shared

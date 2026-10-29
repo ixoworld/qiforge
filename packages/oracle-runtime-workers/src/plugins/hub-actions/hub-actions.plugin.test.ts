@@ -259,7 +259,11 @@ describe('Hub actions Workers plugin', () => {
       .getTools()
       .find((item) => item.name === 'hub_action_options');
     if (!tool) throw new Error('Options tool missing');
-    expect(await tool.handler({}, ctx)).toEqual(options);
+    // `did:ixo:owner` names no IXO account.
+    expect(await tool.handler({}, ctx)).toEqual({
+      ...options,
+      ownerAddress: null,
+    });
     expect(discover).toHaveBeenCalledWith({
       ownerDid: options.ownerDid,
       provider: 'whatsapp',
@@ -274,6 +278,55 @@ describe('Hub actions Workers plugin', () => {
       }),
     );
     expect(discover).toHaveBeenCalledTimes(1);
+  });
+
+  it("adds the owner's IXO account address, read off their DID, to the Hub's options", async () => {
+    const address = 'ixo1qypqxpq9qcrsszg2pvxq6rs0zqg3yyc5lzv7xu';
+    const owned: HubActionOptionsV3 = {
+      ...options,
+      ownerDid: `did:ixo:${address}`,
+    };
+    const ctx = makeRuntimeContext({
+      config: { HUB_ACTIONS_ENABLED: 'true' },
+      user: {
+        did: owned.ownerDid,
+        matrixUserId: '@owner:test',
+        ucanDelegation: { raw: 'delegation' },
+      },
+      session: {
+        id: 'session-three',
+        client: 'channel',
+        runId: 'run-three',
+        requestId: 'request-three',
+        channel: {
+          provider: 'whatsapp',
+          bindingId: owned.bindingId,
+          bindingRevision: owned.bindingRevision,
+        },
+      },
+      hubActions: {
+        capabilities: async () => {
+          throw new Error('not called');
+        },
+        options: async () => owned,
+        request: async () => reference,
+        transfer: async () => {
+          throw new Error('unused');
+        },
+        status: async () => ({ outcome: null, summary: null }),
+      },
+    });
+    const tool = new HubActionsPlugin()
+      .getTools()
+      .find((item) => item.name === 'hub_action_options');
+    if (!tool) throw new Error('Options tool missing');
+    expect(await tool.handler({}, ctx)).toEqual({
+      ...owned,
+      ownerAddress: address,
+    });
+    expect(tool.description).toContain(
+      "ownerDid is the authenticated user's DID and ownerAddress their IXO account address.",
+    );
   });
 
   it.each<P2Operation>([

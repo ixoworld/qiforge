@@ -6,6 +6,7 @@ import {
   type AgentMiddleware,
   type StructuredTool,
 } from 'langchain';
+import { NetworkSchema } from '@ixo/ixo-transaction';
 import { z } from 'zod';
 import type {
   PluginContext,
@@ -83,6 +84,7 @@ import type { SessionSurface } from '../plugin-api/types';
 
 import { taskExecutionProfile } from './execution-profile';
 import { prepareDomainContext } from './domain-context';
+import { ixoAddressOf, renderUserIdentity } from './user-identity';
 
 const PLUGIN_LOGGER_COMPONENT = 'main-agent';
 
@@ -93,6 +95,13 @@ const DEFAULT_OPERATIONAL_MODE = [
 ].join('\n');
 
 type CollectedTool = { pluginName: string; tool: PluginTool };
+
+/** The validated env values the user-identity section names. */
+const identityConfigSchema = z.object({
+  NETWORK: NetworkSchema,
+  ORACLE_DID: z.string().min(1),
+  ORACLE_ENTITY_DID: z.string().min(1).optional(),
+});
 
 /** Map plugin name → effective `manifest.visibility` (default `on-demand`). */
 function visibilityIndex(
@@ -528,6 +537,20 @@ export async function createMainAgent(
       ? [scopeToolCallIds(hooks.toolExecution, dispatch)]
       : []),
   ];
+  // Who the user is, from the DID their delegation proved: fixed for the
+  // user's object, so it sits in the cached part of the prompt.
+  const identityConfig = identityConfigSchema.parse(config);
+  const userIdentityBlock = renderUserIdentity({
+    user: {
+      did: requestCtx.user.did,
+      address: ixoAddressOf(requestCtx.user.did),
+    },
+    network: identityConfig.NETWORK,
+    oracleDid: identityConfig.ORACLE_DID,
+    ...(identityConfig.ORACLE_ENTITY_DID
+      ? { oracleEntityDid: identityConfig.ORACLE_ENTITY_DID }
+      : {}),
+  });
   const subAgentTools = await collectSubAgentsWithFallback({
     registry: registries.subAgents,
     buildCtx,
@@ -541,11 +564,13 @@ export async function createMainAgent(
     subAgents: subAgentEntries,
     dispatchMiddleware,
     ...(resultCap ? { resultCap } : {}),
-    // Sub-agents see the same domain context: its block on their prompt,
-    // its tools beside their own.
-    ...(domain
-      ? { passthroughTools: domainTools, contextPrompt: domain.prompt }
-      : {}),
+    // Sub-agents know who the user is and see the same domain context: the
+    // identity section and the domain block on their prompt, the domain
+    // tools beside their own.
+    contextPrompt: domain?.prompt
+      ? `${userIdentityBlock}\n\n${domain.prompt}`
+      : userIdentityBlock,
+    ...(domain ? { passthroughTools: domainTools } : {}),
   });
 
   // Effect of every tool the model can call (durable runs: what may run
@@ -896,6 +921,7 @@ export async function createMainAgent(
       requestCtx.user.currentTime,
     ),
     currentEntityDid: state.currentEntityDid ?? '',
+    userIdentityBlock,
     oracleNameOverride: state.userPreferences?.agentName,
     degradedServicesBlock: hooks?.degradedServicesBlock,
     surfaceBlock: renderSurfaceSection(

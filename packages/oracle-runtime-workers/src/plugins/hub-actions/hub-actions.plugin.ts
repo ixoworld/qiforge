@@ -10,6 +10,7 @@ import type {
   PluginTool,
   RuntimeContext,
 } from '../../plugin-api/types';
+import { ixoAddressOf } from '../../core/user-identity';
 
 const configSchema = z.object({
   HUB_ACTIONS_ENABLED: z.enum(['true', 'false']).default('false'),
@@ -284,12 +285,15 @@ async function hubActionOptions(
     !ctx.hubActions
   )
     return { status: 'unavailable' };
-  return ctx.hubActions.options({
+  const options = await ctx.hubActions.options({
     ownerDid: ctx.user.did,
     provider: channel.provider,
     bindingId: channel.bindingId,
     bindingRevision: channel.bindingRevision,
   });
+  // The address is read off the owner's DID, so the model can name the
+  // account the listed balances belong to without a lookup.
+  return { ...options, ownerAddress: ixoAddressOf(ctx.user.did) };
 }
 
 const manifest: PluginManifest = {
@@ -339,7 +343,7 @@ export class HubActionsPlugin extends OraclePlugin {
       {
         name: 'hub_action_options',
         description:
-          'Read this authenticated owner’s confirmed Gmail and Calendar connections, requestable documents, action resources and bank tokens (`transfer.tokens`: denom, symbol, decimals, verified, balance in base units). Use each returned service, identifier and label before preparing a related Hub review. A Gmail profile connection does not authorize sending. For a token that is not verified, name its full denom and say it is unverified; its amounts are base units.',
+          "Read this authenticated owner’s confirmed Gmail and Calendar connections, requestable documents, action resources and bank tokens (`transfer.tokens`: denom, symbol, decimals, verified, balance in base units). Use each returned service, identifier and label before preparing a related Hub review. A Gmail profile connection does not authorize sending. For a token that is not verified, name its full denom and say it is unverified; its amounts are base units. ownerDid is the authenticated user's DID and ownerAddress their IXO account address.",
         schema: discoverSchema,
         effect: 'read',
         handler: hubActionOptions,

@@ -97,6 +97,13 @@ export interface ComposePromptInput {
   timeContext: string;
   /** Currently-viewed entity DID, if any. */
   currentEntityDid: string;
+  /**
+   * Who the authenticated user is (`renderUserIdentity`): their DID, their
+   * IXO account address and the oracle's own DIDs. Only values fixed for the
+   * user belong here, so the section stays inside the prompt cache. Empty or
+   * omitted renders nothing.
+   */
+  userIdentityBlock?: string;
   /** Optional override of the oracle name (e.g. user preference `agentName`). */
   oracleNameOverride?: string;
   /** Degraded-services notice appended after the main prompt body. */
@@ -456,6 +463,10 @@ _Background the memory engine recalled about this user — context to adapt to, 
 
 **Current entity:** {{CURRENT_ENTITY_DID}}
 {{/CURRENT_ENTITY_DID}}
+{{#USER_IDENTITY_BLOCK}}
+
+{{{USER_IDENTITY_BLOCK}}}
+{{/USER_IDENTITY_BLOCK}}
 {{#USER_PREFERENCES_CONTEXT}}
 
 ## User preferences
@@ -476,6 +487,8 @@ const PROMPT_TEMPLATE = compileTemplate(TEMPLATE);
  *   - **capabilities** — author note (config.prompt.capabilities) + Tier-1 block.
  *   - **operating principles** — fixed + optional `communicationStyle` from config.
  *   - **context** — only populated memory sub-sections render; empty ones skipped.
+ *   - **user identity** — after the date and current entity: the user's DID
+ *     and IXO account address, and the oracle's own DIDs.
  *   - **operational mode** — host hook or the runtime default.
  *
  * Synchronous (the Node version was async only because LangChain's
@@ -509,6 +522,7 @@ export async function composePrompt(
     CONTEXT_BLOCK: buildContextBlock(input.userContext),
     TIME_CONTEXT: input.timeContext,
     CURRENT_ENTITY_DID: input.currentEntityDid,
+    USER_IDENTITY_BLOCK: input.userIdentityBlock ?? '',
     OPERATIONAL_MODE: input.operationalMode,
     USER_PREFERENCES_CONTEXT: input.userPreferencesContext,
   });
