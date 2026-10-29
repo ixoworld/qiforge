@@ -1,5 +1,6 @@
 /**
- * The `chain_lookup` requests and the one Blocksync document they become.
+ * The core `chain_lookup` kinds' arguments and the Blocksync root field
+ * each request becomes.
  *
  * Every field name, argument and enum below is checked against the
  * ixo-blocksync-api schema (`public/graphql/schema.graphql`; see
@@ -15,13 +16,11 @@
 import { IxoAddressSchema } from '@ixo/ixo-transaction';
 import { z } from 'zod';
 import { ixoAddressOf, type UserIdentity } from '../../core/user-identity';
-import type { AliasedField } from './blocksync';
 
-const MAX_REQUESTS = 8;
 const MAX_FIRST = 20;
 const DEFAULT_FIRST = 10;
 /**
- * Rows a document of several requests reads in all: each list request is
+ * Rows a call of several requests reads in all: each list request is
  * capped at `max(5, floor(40 / requests))`.
  */
 const SHARED_ROWS = 40;
@@ -40,99 +39,106 @@ const TX_HASH = /^[A-F0-9]{64}$/i;
 const CURSOR = /^[A-Za-z0-9+/=_-]{1,200}$/;
 const ENTITY_TYPE = /^[A-Za-z0-9/_.:-]{1,64}$/;
 
-// The account-field format and `first`'s meaning are stated once, in the
-// tool description; each field here only names its role. Lengths are not
-// capped here: every string is checked against its kind's bounded pattern
-// before it reaches the document.
-const first = z.number().int().min(1).max(MAX_FIRST).optional();
-const account = (role: string) => z.string().optional().describe(role);
+// These schemas are shown only through `describe_chain_kinds`, so each
+// field says its format in full. Lengths are not capped here: every string
+// is checked against its kind's bounded pattern before it reaches the
+// document.
+/** A list kind's `first` argument. */
+export const firstArg = z
+  .number()
+  .int()
+  .min(1)
+  .max(MAX_FIRST)
+  .optional()
+  .describe(
+    'Rows to read, 1–20 (default 10; fewer when a call has several requests).',
+  );
+/** An account argument (`role` names whose it is), the user's by default. */
+export const accountArg = (role: string) =>
+  z
+    .string()
+    .optional()
+    .describe(
+      `${role}: an ixo1… address or did:ixo:ixo1… DID. Default: the user.`,
+    );
 
-export const chainRequestSchema = z.discriminatedUnion('kind', [
-  z.strictObject({
-    kind: z.literal('claims'),
-    agent: account('Claim submitter.'),
-    collectionId: z.string().optional(),
-    first,
-    after: z.string().optional().describe('Previous page endCursor.'),
+/** Each core kind's arguments (strict: an unknown key refuses the request). */
+export const CORE_ARGS = {
+  claims: z.strictObject({
+    agent: accountArg('Claim submitter'),
+    collectionId: z
+      .string()
+      .optional()
+      .describe('Only claims in this collection, e.g. "8250".'),
+    first: firstArg,
+    after: z
+      .string()
+      .optional()
+      .describe("The previous page's `endCursor`, for the next page."),
   }),
-  z.strictObject({
-    kind: z.literal('claim'),
+  claim: z.strictObject({
     claimId: z.string().describe('The claim id (a CID, e.g. bafkrei…).'),
   }),
-  z.strictObject({
-    kind: z.literal('claim_collection'),
+  claim_collection: z.strictObject({
     id: z.string().describe('Collection id, e.g. "8250".'),
   }),
-  z.strictObject({
-    kind: z.literal('claim_collections'),
-    entity: z.string().optional().describe('Its did:ixo:entity:… DID.'),
-    admin: account('Collection admin.'),
-    first,
+  claim_collections: z.strictObject({
+    entity: z
+      .string()
+      .optional()
+      .describe(
+        "The collections' entity (did:ixo:entity:…); alone, every admin's.",
+      ),
+    admin: accountArg('Collection admin'),
+    first: firstArg,
   }),
-  z.strictObject({
-    kind: z.literal('entities'),
-    owner: account('Entity owner.'),
-    type: z.string().optional().describe('e.g. "dao".'),
-    first,
+  entities: z.strictObject({
+    owner: accountArg('Entity owner'),
+    type: z.string().optional().describe('Entity type, e.g. "dao".'),
+    first: firstArg,
   }),
-  z.strictObject({
-    kind: z.literal('entity'),
-    id: z.string().describe('did:ixo:entity:…'),
+  entity: z.strictObject({
+    id: z.string().describe('The entity DID: did:ixo:entity:<32 hex>.'),
   }),
-  z.strictObject({
-    kind: z.literal('did_document'),
+  did_document: z.strictObject({
     id: z
       .string()
       .optional()
-      .describe("Any did:ixo:… DID; default: the user's."),
+      .describe("Any did:ixo:… DID. Default: the user's."),
   }),
-  z.strictObject({
-    kind: z.literal('token_balances'),
-    address: account('Token holder.'),
-    first,
+  token_balances: z.strictObject({
+    address: accountArg('Token holder'),
+    first: firstArg,
   }),
-  z.strictObject({
-    kind: z.literal('transactions'),
-    address: account('Signer or recipient.'),
+  transactions: z.strictObject({
+    address: accountArg('Signer or recipient'),
     direction: z
       .enum(['signed', 'received'])
       .optional()
-      .describe('Default: signed.'),
-    first,
+      .describe('Signed by the address, or received by it. Default: signed.'),
+    first: firstArg,
   }),
-  z.strictObject({
-    kind: z.literal('transaction'),
-    hash: z.string().describe('64-hex transaction hash.'),
+  transaction: z.strictObject({
+    hash: z.string().describe('The 64-hex transaction hash.'),
   }),
-]);
+};
 
-export type ChainRequest = z.infer<typeof chainRequestSchema>;
-export type ChainRequestKind = ChainRequest['kind'];
+type CoreArgs = typeof CORE_ARGS;
+type ChainRequestKind = keyof CoreArgs;
+/** A core kind's request: its name beside its parsed arguments. */
+export type ChainRequest = {
+  [K in ChainRequestKind]: { kind: K } & z.output<CoreArgs[K]>;
+}[ChainRequestKind];
 export type Subject = 'user' | 'other';
 
-export const chainLookupSchema = z.strictObject({
-  requests: z.array(chainRequestSchema).min(1).max(MAX_REQUESTS),
-});
-
 /**
- * One request as a document field, or why it cannot be asked. `subject` is
- * known before the read for a request by account; `first` is the rows a
- * list request reads.
+ * One request as a root field of the lookup document (without its alias),
+ * or why it cannot be asked. `subject` is known before the read for a
+ * request by account; `first` is the rows a list request reads.
  */
 export type FieldPlan =
-  | ({
-      ok: true;
-      request: ChainRequest;
-      kind: ChainRequestKind;
-      subject?: Subject;
-      first?: number;
-    } & AliasedField)
-  | {
-      ok: false;
-      request: ChainRequest;
-      kind: ChainRequestKind;
-      detail: string;
-    };
+  | { ok: true; field: string; subject?: Subject; first?: number }
+  | { ok: false; detail: string };
 
 type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
 
@@ -151,8 +157,8 @@ export function literal(value: Json): string {
 }
 
 /**
- * The rows a list request reads: its `first` (1–20 by the schema, default
- * 10), capped at `max(5, floor(40 / count))` when the document holds
+ * The rows a list request reads: its `first` (1–20 by its kind's schema,
+ * default 10), capped at `max(5, floor(40 / count))` when the call holds
  * `count > 1` requests.
  */
 export function firstOf(requested: number | undefined, count: number): number {
@@ -163,10 +169,61 @@ export function firstOf(requested: number | undefined, count: number): number {
   return Math.min(requested ?? DEFAULT_FIRST, cap, MAX_FIRST);
 }
 
+const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+const BECH32_GENERATOR = [
+  0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3,
+];
+/** The checksum's length in characters. */
+const BECH32_CHECKSUM = 6;
+
+/** BIP-173 `bech32_polymod`. */
+function polymod(values: readonly number[]): number {
+  let checksum = 1;
+  for (const value of values) {
+    const top = checksum >>> 25;
+    checksum = ((checksum & 0x1ffffff) << 5) ^ value;
+    BECH32_GENERATOR.forEach((generator, bit) => {
+      if ((top >>> bit) & 1) checksum ^= generator;
+    });
+  }
+  return checksum;
+}
+
+/**
+ * Whether `address` is a valid lower-case bech32 string (BIP-173, as Cosmos
+ * SDK addresses are) with the prefix `prefix`: only bech32 characters after
+ * `<prefix>1`, the checksum matching, and data that converts to whole
+ * bytes (at most 4 padding bits, all zero). Its length is the caller's to
+ * bound.
+ */
+export function isBech32(address: string, prefix: string): boolean {
+  if (!address.startsWith(`${prefix}1`)) return false;
+  const data = address.slice(prefix.length + 1);
+  if (data.length <= BECH32_CHECKSUM) return false;
+  const values: number[] = [];
+  for (const char of data) {
+    const value = BECH32_CHARSET.indexOf(char);
+    if (value < 0) return false;
+    values.push(value);
+  }
+  const codes = [...prefix].map((char) => char.charCodeAt(0));
+  const expanded = [
+    ...codes.map((code) => code >> 5),
+    0,
+    ...codes.map((code) => code & 31),
+  ];
+  if (polymod([...expanded, ...values]) !== 1) return false;
+  const payload = values.length - BECH32_CHECKSUM;
+  const padding = (payload * 5) % 8;
+  const last = values[payload - 1] ?? 0;
+  return padding < 5 && (last & ((1 << padding) - 1)) === 0;
+}
+
 /**
  * The account an account field names: the user's own address when the
  * field is omitted, else an `ixo1…` address or the address a
- * `did:ixo:ixo1…` DID names.
+ * `did:ixo:ixo1…` DID names, its bech32 checksum verified (a mistyped
+ * address is refused, never read).
  */
 export function accountOf(
   input: string | undefined,
@@ -186,6 +243,11 @@ export function accountOf(
     return {
       ok: false,
       detail: `${role} must be an ixo1… address or a did:ixo:ixo1… DID.`,
+    };
+  if (!isBech32(address, 'ixo'))
+    return {
+      ok: false,
+      detail: `${role} is not a valid ixo1… address: its checksum does not match. Check it for a typo.`,
     };
   return {
     ok: true,
@@ -215,30 +277,17 @@ function equalities(pairs: [string, string | undefined][]): string {
   );
 }
 
+const invalid = (detail: string): FieldPlan => ({ ok: false, detail });
+
 /**
- * One request as an aliased field of the lookup document; `count` is the
- * number of requests the document holds.
+ * One request as a root field of the lookup document. `rows` is the rows a
+ * list request reads: its `first` as {@link firstOf} scales it for the call.
  */
 export function requestField(
-  alias: string,
   request: ChainRequest,
   identity: UserIdentity,
-  count = 1,
+  rows: number,
 ): FieldPlan {
-  const plan = fieldOf(alias, request, identity, count);
-  return 'detail' in plan
-    ? { ok: false, request, kind: request.kind, detail: plan.detail }
-    : { ok: true, request, kind: request.kind, alias, ...plan };
-}
-
-const invalid = (detail: string) => ({ detail });
-
-function fieldOf(
-  alias: string,
-  request: ChainRequest,
-  identity: UserIdentity,
-  count: number,
-): { field: string; subject?: Subject; first?: number } | { detail: string } {
   switch (request.kind) {
     case 'claims': {
       const agent = accountOf(request.agent, identity, 'agent');
@@ -257,11 +306,11 @@ function fieldOf(
         ['collectionId', request.collectionId],
       ]);
       const after = request.after ? `, after: ${literal(request.after)}` : '';
-      const n = firstOf(request.first, count);
       return {
+        ok: true,
         subject: agent.subject,
-        first: n,
-        field: `${alias}: claims(filter: ${filter}, first: ${n}${after}, orderBy: SUBMISSION_DATE_DESC) { totalCount pageInfo { hasNextPage endCursor } nodes { ${CLAIM_FIELDS} evaluation { status evaluationDate } } }`,
+        first: rows,
+        field: `claims(filter: ${filter}, first: ${rows}${after}, orderBy: SUBMISSION_DATE_DESC) { totalCount pageInfo { hasNextPage endCursor } nodes { ${CLAIM_FIELDS} evaluation { status evaluationDate } } }`,
       };
     }
     case 'claim':
@@ -270,13 +319,15 @@ function fieldOf(
           'claimId must be a claim id (a CID such as "bafkrei…").',
         );
       return {
-        field: `${alias}: claim(claimId: ${literal(request.claimId)}) { ${CLAIM_FIELDS} evaluation { status evaluationDate oracle agentDid agentAddress reason amount } }`,
+        ok: true,
+        field: `claim(claimId: ${literal(request.claimId)}) { ${CLAIM_FIELDS} evaluation { status evaluationDate oracle agentDid agentAddress reason amount } }`,
       };
     case 'claim_collection':
       if (!COLLECTION_ID.test(request.id))
         return invalid('id must be a collection number such as "8250".');
       return {
-        field: `${alias}: claimCollection(id: ${literal(request.id)}) { ${COLLECTION_FIELDS} payments }`,
+        ok: true,
+        field: `claimCollection(id: ${literal(request.id)}) { ${COLLECTION_FIELDS} payments }`,
       };
     case 'claim_collections': {
       if (request.entity !== undefined && !ENTITY_DID.test(request.entity))
@@ -292,15 +343,15 @@ function fieldOf(
         ['entity', request.entity],
         ['admin', admin?.address],
       ]);
-      const n = firstOf(request.first, count);
       // Newest start date first (the id is text: "9" sorts above "10"). A
       // collection without a start date sorts first, as PostgreSQL puts
       // NULLs first in a descending order; x/claims reads the start date on
       // every claim submission, so a collection that takes claims has one.
       return {
+        ok: true,
         ...(admin ? { subject: admin.subject } : {}),
-        first: n,
-        field: `${alias}: claimCollections(filter: ${filter}, first: ${n}, orderBy: START_DATE_DESC) { totalCount nodes { ${COLLECTION_FIELDS} } }`,
+        first: rows,
+        field: `claimCollections(filter: ${filter}, first: ${rows}, orderBy: START_DATE_DESC) { totalCount nodes { ${COLLECTION_FIELDS} } }`,
       };
     }
     case 'entities': {
@@ -312,18 +363,19 @@ function fieldOf(
         ['owner', owner.address],
         ['type', request.type],
       ]);
-      const n = firstOf(request.first, count);
       return {
+        ok: true,
         subject: owner.subject,
-        first: n,
-        field: `${alias}: entities(filter: ${filter}, first: ${n}, orderBy: ID_DESC) { totalCount nodes { id type status owner metadata } }`,
+        first: rows,
+        field: `entities(filter: ${filter}, first: ${rows}, orderBy: ID_DESC) { totalCount nodes { id type status owner metadata } }`,
       };
     }
     case 'entity':
       if (!ENTITY_DID.test(request.id))
         return invalid('id must be a did:ixo:entity:… DID.');
       return {
-        field: `${alias}: entity(id: ${literal(request.id)}) { id type status owner accounts settings linkedResource linkedEntity controller service }`,
+        ok: true,
+        field: `entity(id: ${literal(request.id)}) { id type status owner accounts settings linkedResource linkedEntity controller service }`,
       };
     case 'did_document': {
       const id = request.id ?? identity.did;
@@ -334,68 +386,48 @@ function fieldOf(
             : 'id must be a did:ixo:… DID.',
         );
       return {
+        ok: true,
         subject: id === identity.did ? 'user' : 'other',
-        field: `${alias}: iid(id: ${literal(id)}) { id controller verificationMethod linkedResource alsoKnownAs }`,
+        field: `iid(id: ${literal(id)}) { id controller verificationMethod linkedResource alsoKnownAs }`,
       };
     }
     case 'token_balances': {
       const holder = accountOf(request.address, identity, 'address');
       if (!holder.ok) return invalid(holder.detail);
-      const n = firstOf(request.first, count);
       return {
+        ok: true,
         subject: holder.subject,
-        first: n,
-        field: `${alias}: tokenBalances(filter: ${equalities([['address', holder.address]])}, first: ${n}, orderBy: AMOUNT_DESC) { totalCount nodes { tokenId amount retired token { name collection tokenClassByName { contractAddress class } } } }`,
+        first: rows,
+        field: `tokenBalances(filter: ${equalities([['address', holder.address]])}, first: ${rows}, orderBy: AMOUNT_DESC) { totalCount nodes { tokenId amount retired token { name collection tokenClassByName { contractAddress class } } } }`,
       };
     }
     case 'transactions': {
       const holder = accountOf(request.address, identity, 'address');
       if (!holder.ok) return invalid(holder.detail);
-      const n = firstOf(request.first, count);
       if (request.direction === 'received')
         // `Message.to` (indexed) is the recipient field of the message, or
         // of its first inner message for an authz MsgExec: toAddress,
         // receiver, recipient, recipientAddress or recipientDid. The same
         // filter the Portal's wallet history polls with.
         return {
+          ok: true,
           subject: holder.subject,
-          first: n,
-          field: `${alias}: messages(filter: ${equalities([['to', holder.address]])}, first: ${n}, orderBy: ID_DESC) { totalCount nodes { ${MESSAGE_FIELDS} transactionHash transactionByTransactionHash { ${TRANSACTION_FIELDS} } } }`,
+          first: rows,
+          field: `messages(filter: ${equalities([['to', holder.address]])}, first: ${rows}, orderBy: ID_DESC) { totalCount nodes { ${MESSAGE_FIELDS} transactionHash transactionByTransactionHash { ${TRANSACTION_FIELDS} } } }`,
         };
       return {
+        ok: true,
         subject: holder.subject,
-        first: n,
-        field: `${alias}: transactionSigners(filter: ${equalities([['signerAddress', holder.address]])}, first: ${n}, orderBy: TRANSACTION_ID_DESC) { totalCount nodes { transactionHash transaction { ${TRANSACTION_FIELDS} ${messagesOf(LIST_TX_MESSAGES)} } } }`,
+        first: rows,
+        field: `transactionSigners(filter: ${equalities([['signerAddress', holder.address]])}, first: ${rows}, orderBy: TRANSACTION_ID_DESC) { totalCount nodes { transactionHash transaction { ${TRANSACTION_FIELDS} ${messagesOf(LIST_TX_MESSAGES)} } } }`,
       };
     }
     case 'transaction':
       if (!TX_HASH.test(request.hash))
         return invalid('hash must be a 64-character hex transaction hash.');
       return {
-        field: `${alias}: transactions(filter: ${equalities([['hash', request.hash.toUpperCase()]])}, first: 1) { nodes { ${TRANSACTION_FIELDS} fee transactionSignersByTransactionId(first: ${TX_SIGNERS}) { nodes { signerAddress } } ${messagesOf(ONE_TX_MESSAGES)} } }`,
+        ok: true,
+        field: `transactions(filter: ${equalities([['hash', request.hash.toUpperCase()]])}, first: 1) { nodes { ${TRANSACTION_FIELDS} fee transactionSignersByTransactionId(first: ${TX_SIGNERS}) { nodes { signerAddress } } ${messagesOf(ONE_TX_MESSAGES)} } }`,
       };
   }
-}
-
-/** The alias of the request at `index`. */
-const aliasOf = (index: number) => `r${index}`;
-
-/**
- * Every askable request as an aliased document field (aliases `r0…r7`, by
- * position) and each request's plan. `fields` is empty when no request can
- * be asked.
- */
-export function buildDocument(
-  requests: readonly ChainRequest[],
-  identity: UserIdentity,
-): { fields: AliasedField[]; plans: FieldPlan[] } {
-  const plans = requests.map((request, index) =>
-    requestField(aliasOf(index), request, identity, requests.length),
-  );
-  return {
-    fields: plans.flatMap((plan) =>
-      plan.ok ? [{ alias: plan.alias, field: plan.field }] : [],
-    ),
-    plans,
-  };
 }

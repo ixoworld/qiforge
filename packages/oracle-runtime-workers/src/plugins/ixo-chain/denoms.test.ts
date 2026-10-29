@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  DENOM_CACHE_LIMIT,
   IBC_TRACE_TTL_MS,
   KNOWN_IBC_DENOMS,
   METADATA_FAILED_TTL_MS,
@@ -37,12 +38,25 @@ function callWith(
     network: 'mainnet',
     restUrl: 'https://rest.test/rest',
     blocksyncUrl: 'https://blocksync.test/graphql',
+    user: 'did:ixo:ixo1test',
     deadline: Date.now() + TOOL_BUDGET_MS,
     signal: new AbortController().signal,
     fetch: fetcher,
     ...overrides,
   };
 }
+
+/** USDC's metadata with a 6-decimal `usdc` display unit. */
+const usdcMetadata = () =>
+  metadata(
+    'usdc',
+    [
+      { denom: 'uusdc', exponent: 0 },
+      { denom: 'usdc', exponent: 6 },
+    ],
+    'USDC',
+  );
+const USDC_VERIFIED = { symbol: 'USDC', decimals: 6, verified: true };
 
 const UNVERIFIED_UNAVAILABLE = {
   symbol: USDC,
@@ -339,16 +353,19 @@ describe('denomDisplay', () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
-  it("does not fail a call sharing a read with another turn's abort", async () => {
+  it("reads again itself when the read it shared ends in another turn's abort", async () => {
     const launcher = new AbortController();
-    const fetcher = vi.fn(
-      (_input: RequestInfo | URL, init?: RequestInit) =>
-        new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener('abort', () =>
-            reject(new DOMException('aborted', 'AbortError')),
-          );
-        }),
-    );
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockImplementationOnce(
+        (_input, init) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError')),
+            );
+          }),
+      )
+      .mockImplementation(async () => usdcMetadata());
     const aborted = denomDisplay(
       callWith(fetcher, { signal: launcher.signal }),
       USDC,
@@ -358,13 +375,73 @@ describe('denomDisplay', () => {
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
     launcher.abort(new Error('turn cancelled'));
     await expect(aborted).rejects.toThrow('turn cancelled');
-    await expect(sharing).resolves.toEqual(UNVERIFIED_UNAVAILABLE);
-    // An aborted read is not remembered: the next call asks again.
-    const next = vi.fn(
-      async (_input: RequestInfo | URL) => new Response('', { status: 404 }),
+    await expect(sharing).resolves.toEqual(USDC_VERIFIED);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("reads again itself when the read it shared ran out of the launching call's budget, and keeps no timeout", async () => {
+    vi.useFakeTimers();
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockImplementationOnce(
+        (_input, init) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError')),
+            );
+          }),
+      )
+      .mockImplementation(async () => usdcMetadata());
+    const short = denomDisplay(
+      callWith(fetcher, { deadline: Date.now() + 2_000 }),
+      USDC,
+      NONE,
     );
-    await denomDisplay(callWith(next), USDC, NONE);
-    expect(readsOf(next, '/denoms_metadata')).toBe(1);
+    const sharing = denomDisplay(callWith(fetcher), USDC, NONE);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await expect(short).resolves.toEqual(UNVERIFIED_UNAVAILABLE);
+    await expect(sharing).resolves.toEqual(USDC_VERIFIED);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws its own turn's abort while it waits on a shared read, leaving the read to its launcher", async () => {
+    let answer: (response: Response) => void = () => undefined;
+    const fetcher = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          answer = resolve;
+        }),
+    );
+    const launching = denomDisplay(callWith(fetcher), USDC, NONE);
+    const joiner = new AbortController();
+    const joining = denomDisplay(
+      callWith(fetcher, { signal: joiner.signal }),
+      USDC,
+      NONE,
+    );
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+    const reason = new Error('joiner cancelled');
+    joiner.abort(reason);
+    await expect(joining).rejects.toBe(reason);
+    answer(usdcMetadata());
+    await expect(launching).resolves.toEqual(USDC_VERIFIED);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it(`keeps at most ${DENOM_CACHE_LIMIT} answers, dropping the oldest first`, async () => {
+    const fetcher = vi.fn(async () => new Response('', { status: 404 }));
+    const denoms = Array.from(
+      { length: DENOM_CACHE_LIMIT + 1 },
+      (_, n) => `utok${n}`,
+    );
+    for (const denom of denoms)
+      await denomDisplay(callWith(fetcher), denom, NONE);
+    expect(fetcher).toHaveBeenCalledTimes(DENOM_CACHE_LIMIT + 1);
+    // The second is still kept; the first, the oldest, was dropped.
+    await denomDisplay(callWith(fetcher), 'utok1', NONE);
+    expect(fetcher).toHaveBeenCalledTimes(DENOM_CACHE_LIMIT + 1);
+    await denomDisplay(callWith(fetcher), 'utok0', NONE);
+    expect(fetcher).toHaveBeenCalledTimes(DENOM_CACHE_LIMIT + 2);
   });
 
   it('starts no read once the budget is spent, and logs nothing for it', async () => {

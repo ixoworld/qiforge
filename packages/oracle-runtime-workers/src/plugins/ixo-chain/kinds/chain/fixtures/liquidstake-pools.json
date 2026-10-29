@@ -1,0 +1,46 @@
+{
+  "pools": [
+    {
+      "pool_id": "pay",
+      "liquid_bond_denom": "upay",
+      "proxy_account_address": "ixo1pyf300wuv4wnmjut9g30yea474mer2djm36xzuf8u9ek2966cstq8khlez",
+      "whitelisted_validators": [
+        {
+          "validator_address": "ixovaloper1kr8v9qt46ysltgmzcrtgyw5ckke83up673u2lu",
+          "target_weight": "1000"
+        },
+        {
+          "validator_address": "ixovaloper1099enmr6x2kj0gk5rd8r6vaupj9yr6k6ej6zj8",
+          "target_weight": "1000"
+        }
+      ],
+      "unstake_fee_rate": "0.100000000000000000",
+      "fee_account_address": "ixo1jsmd43wyn4wazs0pswyq2nh36dgxe8rd5h4ncq",
+      "autocompound_fee_rate": "0.050000000000000000",
+      "whitelist_admin_address": "ixo1axp72yt8qltre8pxgtt2g909s76794v2n7xw2h",
+      "paused": false,
+      "weighted_rewards_receivers": []
+    },
+    {
+      "pool_id": "zero",
+      "liquid_bond_denom": "uzero",
+      "proxy_account_address": "ixo19zwggtdgaspa9tje6mxdap9xjpc4rayf3nd6dt5g3lwkx4y7z6dqfrzwfs",
+      "whitelisted_validators": [
+        {
+          "validator_address": "ixovaloper1kr8v9qt46ysltgmzcrtgyw5ckke83up673u2lu",
+          "target_weight": "10000"
+        }
+      ],
+      "unstake_fee_rate": "0.000000000000000000",
+      "fee_account_address": "ixo1qzngrk3hnpytp9apt7442u3gyr0fyv9y4wvy6u",
+      "autocompound_fee_rate": "0.000000000000000000",
+      "whitelist_admin_address": "ixo1dwaypqeva5j5p8a0dux9n35lp0aspepnfy9zj45fc9s3wmpvcz4sk6duea",
+      "paused": false,
+      "weighted_rewards_receivers": []
+    }
+  ],
+  "pagination": {
+    "next_key": null,
+    "total": "2"
+  }
+}

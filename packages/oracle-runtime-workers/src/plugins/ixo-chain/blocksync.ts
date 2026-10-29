@@ -5,11 +5,11 @@
  *
  * PostGraphile answers field by field: one alias can be null with an error
  * naming it while the others are fine, so errors are returned beside the
- * data, never thrown. "current transaction is aborted" and "Connection
- * terminated unexpectedly" say nothing about the question: the aliases
- * they name are asked again once, in a document of only those aliases,
- * and the answers merged; a statement timeout is never asked again (it
- * would only time out again).
+ * data, never thrown. A transient database error ({@link TRANSIENT_ERROR}:
+ * an aborted transaction, a dropped connection, no free connection) says
+ * nothing about the question: the aliases it names are asked again once,
+ * in a document of only those aliases, and the answers merged; a
+ * statement timeout is never asked again (it would only time out again).
  */
 import { z } from 'zod';
 import {
@@ -28,8 +28,13 @@ export const BLOCKSYNC_MAX_BYTES = 1024 * 1024;
  */
 export const BLOCKSYNC_ATTEMPT_TIMEOUT_MS = 11_000;
 
+/**
+ * Database errors that say nothing about the question: an aborted
+ * transaction, a dropped connection, and the server's connection pool or
+ * PostgreSQL itself out of connections.
+ */
 export const TRANSIENT_ERROR =
-  /current transaction is aborted|Connection terminated unexpectedly/;
+  /current transaction is aborted|Connection terminated unexpectedly|timeout exceeded when trying to connect|too many clients|remaining connection slots are reserved/;
 export const STATEMENT_TIMEOUT = /statement timeout/i;
 
 export interface GraphqlError {

@@ -1,0 +1,31 @@
+{
+  "epochs": [
+    {
+      "identifier": "day",
+      "start_time": "2024-12-11T05:09:01.539486940Z",
+      "duration": "86400s",
+      "current_epoch": "688",
+      "current_epoch_start_time": "2026-10-29T05:09:01.539486940Z",
+      "epoch_counting_started": true,
+      "current_epoch_start_height": "19830619"
+    },
+    {
+      "identifier": "hour",
+      "start_time": "2024-12-11T05:09:01.539486940Z",
+      "duration": "3600s",
+      "current_epoch": "16498",
+      "current_epoch_start_time": "2026-10-29T14:09:01.539486940Z",
+      "epoch_counting_started": true,
+      "current_epoch_start_height": "19836357"
+    },
+    {
+      "identifier": "week",
+      "start_time": "2024-12-11T05:09:01.539486940Z",
+      "duration": "604800s",
+      "current_epoch": "99",
+      "current_epoch_start_time": "2026-10-28T05:09:01.539486940Z",
+      "epoch_counting_started": true,
+      "current_epoch_start_height": "19815320"
+    }
+  ]
+}

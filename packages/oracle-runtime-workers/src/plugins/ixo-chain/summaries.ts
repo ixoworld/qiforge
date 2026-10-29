@@ -60,7 +60,8 @@ export const ENTITY_STATUS_NOTE =
 /** `entities` reads `ID_DESC`, and an entity id is a hash: the order says nothing about age. */
 export const ENTITIES_ORDER = 'id (text)';
 
-function clip(text: string, max: number): string {
+/** `text` cut to `max` characters, the last one an ellipsis when cut. */
+export function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
@@ -69,7 +70,7 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** A non-empty string field, clipped; undefined otherwise. */
-function text(value: unknown, max = TEXT_CHARS): string | undefined {
+export function text(value: unknown, max = TEXT_CHARS): string | undefined {
   return typeof value === 'string' && value ? clip(value, max) : undefined;
 }
 

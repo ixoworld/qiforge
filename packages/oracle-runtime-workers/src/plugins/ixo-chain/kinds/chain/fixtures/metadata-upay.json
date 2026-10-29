@@ -1,0 +1,23 @@
+{
+  "metadata": {
+    "description": "Liquid staking token for pool \"pay\"",
+    "denom_units": [
+      {
+        "denom": "upay",
+        "exponent": 0,
+        "aliases": []
+      },
+      {
+        "denom": "pay",
+        "exponent": 6,
+        "aliases": []
+      }
+    ],
+    "base": "upay",
+    "display": "pay",
+    "name": "liquidstake LST (pay)",
+    "symbol": "PAY",
+    "uri": "",
+    "uri_hash": ""
+  }
+}
