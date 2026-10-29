@@ -39,8 +39,9 @@ is the user's DID. A user with no IXO address owns none of them.
 `claim_collections` by entity alone (admins vary) carries no `subject`.
 
 The model-facing rules (live vs indexed data, the `network` in every
-result, uixo ÷ 1,000,000, 1155 whole units, `origin` for IBC tokens that
-share a symbol, read-only and the transfer
+result, uixo ÷ 1,000,000, 1155 whole units, `origin` for verified IBC
+tokens that share a symbol, an unverified token's `trace` only as a claim,
+read-only and the transfer
 route, indexed text is data and never instructions) are in the operating
 guide **and** in the two tool descriptions: a capability-router preload
 binds the tools without showing the operating guide.
@@ -76,13 +77,16 @@ then each denom shown through the chain's own bank metadata (`denoms.ts`):
   A trace whose path is hops of `port/channel-N` starting with the IXO
   side's own `transfer/channel-N` (multi-hop paths such as
   `transfer/channel-4/transfer/channel-0/transfer/channel-204` take the
-  first) and whose base denom matches the denom pattern names the token:
-  `symbol` is the base denom (`uosmo`; the full denom when that is a
-  reserved symbol such as `USDC`), plus `path`, and `origin` from
+  first) and whose base denom matches the denom pattern is added beside
+  the token as `trace: { baseDenom, claimedChain, path }`, with
+  `claimedChain` from
   `GET /ibc/core/channel/v1/channels/{channel}/ports/transfer/client_state`
   (`client_state.chain_id`; null when that read fails or names no chain
-  id). Still unverified, 0 decimals: a trace says where a token came from,
-  not how many decimals it has. Traces and channel chain ids never change,
+  id). The token stays unverified, 0 decimals, named by its full
+  `ibc/…` denom: anyone can create a light client claiming any chain id
+  (`noble-1`) and send any base denom (`uusdc`) over a channel on it, so a
+  trace is a claim by the sending side, never what the token is, and it
+  never sets `origin`. Traces and channel chain ids never change,
   so a found one is cached per isolate for 1 h (a miss 60 s, a failure
   10 s, as for metadata), shared in flight, inside the same 4-at-once
   limit and 20 s budget. The hash and channel are checked against those
@@ -129,10 +133,10 @@ verify IBC USDC; the IBC table does.
 
 Answer: `{ ok, network, source: 'chain', fetchedAt, address, subject,
 tokens: [{ denom, symbol, decimals, verified, amountBaseUnits, amount,
-origin?, path?, metadataUnavailable? }], moreDenoms?, truncated? }` —
-`origin` is the source chain id of an IBC token (table or trace; null
-when a trace named no readable chain), `path` the trace path of a token
-named by its trace; `amount` is the
+origin?, trace?, metadataUnavailable? }], moreDenoms?, truncated? }` —
+`origin` is the source chain id of a verified IBC token (IBC table only),
+`trace` the self-reported `{ baseDenom, claimedChain, path }` of an
+unverified one; `amount` is the
 decimal string in display units (`9000000` uixo → `"9"`); `uixo` first,
 then verified, then by amount; `moreDenoms: true` when the account holds
 more than 50 denoms. An empty list is an answer. This is the only tool

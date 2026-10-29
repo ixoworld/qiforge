@@ -21,6 +21,7 @@ import {
   formatUnits,
   ibcDenomTable,
   parseIbcDenoms,
+  type IbcTrace,
 } from './denoms';
 import {
   TOOL_BUDGET_MS,
@@ -228,8 +229,8 @@ type BalanceToken = {
   verified: boolean;
   amountBaseUnits: string;
   amount: string;
-  origin?: string | null;
-  path?: string;
+  origin?: string;
+  trace?: IbcTrace;
   metadataUnavailable?: true;
 };
 
@@ -287,7 +288,7 @@ async function getAccountBalances(
         amountBaseUnits: coin.amount,
         amount: formatUnits(coin.amount, display.decimals),
         ...(display.origin !== undefined ? { origin: display.origin } : {}),
-        ...(display.path !== undefined ? { path: display.path } : {}),
+        ...(display.trace !== undefined ? { trace: display.trace } : {}),
         ...(display.metadataUnavailable ? { metadataUnavailable: true } : {}),
       };
     },
@@ -507,13 +508,13 @@ const UNTRUSTED_TEXT_RULE =
 const NETWORK_RULE = 'Every result names its `network`.';
 /** Also in the `get_account_balances` description. */
 const ORIGIN_RULE =
-  '`origin` names the chain an IBC token came from; say it when two tokens share a symbol (e.g. USDC from noble-1 and from injective-1).';
+  "`origin` (verified tokens only) names the chain an IBC token came from; say it when two tokens share a symbol (e.g. USDC from noble-1 and from injective-1). An unverified IBC token's `trace` (base denom, claimed chain) is self-reported by the sending chain: name the token by its full denom and present the trace only as unverified, never as what the token is.";
 
 const OPERATING_GUIDE = [
   '### IXO chain reader',
   '- Balances are live chain state; everything else comes from the Blocksync index, seconds behind the chain. Say which network an answer is from (`network` is in every result).',
   [
-    '- `get_account_balances` converts `amount` (IXO = uixo ÷ 1,000,000); an unverified token is in base units, named by its full denom or (IBC, with its trace `path`) its source denom, and one with `metadataUnavailable` may still be verified.',
+    '- `get_account_balances` converts `amount` (IXO = uixo ÷ 1,000,000); an unverified token is in base units and named by its full denom, and one with `metadataUnavailable` may still be verified.',
     ORIGIN_RULE,
     '`chain_lookup` coin amounts are base units (`amountBaseUnits`); 1155 token amounts are whole units.',
   ].join(' '),
@@ -544,7 +545,7 @@ export class IxoChainPlugin extends OraclePlugin {
         name: 'get_account_balances',
         description: [
           'Read the live bank balances of an IXO account from the chain.',
-          'Each token has `amount` in its display units (IXO = uixo ÷ 1,000,000) and `amountBaseUnits`; an unverified token is in base units, named by its full denom or (IBC, with its trace `path`) its source denom, and one with `metadataUnavailable` may still be verified.',
+          'Each token has `amount` in its display units (IXO = uixo ÷ 1,000,000) and `amountBaseUnits`; an unverified token is in base units and named by its full denom, and one with `metadataUnavailable` may still be verified.',
           ORIGIN_RULE,
           NETWORK_RULE,
           READ_ONLY_RULE,

@@ -514,17 +514,20 @@ describe('IBC denom traces', () => {
       throw new Error(`unexpected ${url}`);
     });
 
-  it('names an unknown ibc denom by its trace: base denom, path and origin chain', async () => {
+  it('keeps an unknown ibc denom named by its hash, with its trace beside it as a claim', async () => {
     const fetcher = router({
       trace: () => trace('transfer/channel-4', 'uosmo'),
       client: () => clientState('osmosis-1'),
     });
     expect(await denomDisplay(callWith(fetcher), OSMO, NONE)).toEqual({
-      symbol: 'uosmo',
+      symbol: OSMO,
       decimals: 0,
       verified: false,
-      origin: 'osmosis-1',
-      path: 'transfer/channel-4',
+      trace: {
+        baseDenom: 'uosmo',
+        claimedChain: 'osmosis-1',
+        path: 'transfer/channel-4',
+      },
     });
     expect(fetcher).toHaveBeenCalledWith(
       `https://rest.test/rest/ibc/apps/transfer/v1/denom_traces/${'A'.repeat(64)}`,
@@ -537,24 +540,23 @@ describe('IBC denom traces', () => {
     expect(fetcher).toHaveBeenCalledTimes(3);
   });
 
-  it('takes the origin from the first channel of a multi-hop path', async () => {
+  it('takes the claimed chain from the first channel of a multi-hop path', async () => {
     const path = 'transfer/channel-4/transfer/channel-0/transfer/channel-204';
     const fetcher = router({
       trace: () => trace(path, 'uatom'),
       client: () => clientState('osmosis-1'),
     });
     expect(await denomDisplay(callWith(fetcher), OSMO, NONE)).toEqual({
-      symbol: 'uatom',
+      symbol: OSMO,
       decimals: 0,
       verified: false,
-      origin: 'osmosis-1',
-      path,
+      trace: { baseDenom: 'uatom', claimedChain: 'osmosis-1', path },
     });
     expect(readsOf(fetcher, '/channels/channel-4/ports/transfer/')).toBe(1);
     expect(readsOf(fetcher, '/client_state')).toBe(1);
   });
 
-  it('still names the token with origin null when the client state cannot be read', async () => {
+  it('keeps the trace with claimedChain null when the client state cannot be read', async () => {
     for (const client of [
       () => new Response('', { status: 500 }),
       () => new Response('', { status: 404 }),
@@ -567,11 +569,14 @@ describe('IBC denom traces', () => {
         client,
       });
       expect(await denomDisplay(callWith(fetcher), OSMO, NONE)).toEqual({
-        symbol: 'uosmo',
+        symbol: OSMO,
         decimals: 0,
         verified: false,
-        origin: null,
-        path: 'transfer/channel-4',
+        trace: {
+          baseDenom: 'uosmo',
+          claimedChain: null,
+          path: 'transfer/channel-4',
+        },
       });
     }
   });
@@ -605,8 +610,8 @@ describe('IBC denom traces', () => {
     expect(readsOf(fetcher, '/client_state')).toBe(1);
     await vi.advanceTimersByTimeAsync(IBC_TRACE_TTL_MS - 1);
     expect(await denomDisplay(callWith(fetcher), OSMO, NONE)).toMatchObject({
-      symbol: 'uosmo',
-      origin: 'osmosis-1',
+      symbol: OSMO,
+      trace: { baseDenom: 'uosmo', claimedChain: 'osmosis-1' },
     });
     expect(readsOf(fetcher, '/denom_traces/')).toBe(2);
     expect(readsOf(fetcher, '/client_state')).toBe(1);
@@ -634,7 +639,10 @@ describe('IBC denom traces', () => {
     answer(trace('transfer/channel-4', 'uosmo'));
     const [first, second] = await both;
     expect(first).toEqual(second);
-    expect(first).toMatchObject({ symbol: 'uosmo', origin: 'osmosis-1' });
+    expect(first).toMatchObject({
+      symbol: OSMO,
+      trace: { baseDenom: 'uosmo', claimedChain: 'osmosis-1' },
+    });
     expect(readsOf(fetcher, '/denom_traces/')).toBe(1);
   });
 
@@ -670,18 +678,23 @@ describe('IBC denom traces', () => {
     }
   });
 
-  it('never names an unverified token by a reserved symbol', async () => {
+  it('never lets a trace name a token or give it an origin: a client may claim any chain id', async () => {
     const fetcher = router({
-      trace: () => trace('transfer/channel-4', 'USDC'),
-      client: () => clientState('fake-1'),
+      trace: () => trace('transfer/channel-4', 'uusdc'),
+      client: () => clientState('noble-1'),
     });
-    expect(await denomDisplay(callWith(fetcher), OSMO, NONE)).toEqual({
+    const display = await denomDisplay(callWith(fetcher), OSMO, NONE);
+    expect(display).toEqual({
       symbol: OSMO,
       decimals: 0,
       verified: false,
-      origin: 'fake-1',
-      path: 'transfer/channel-4',
+      trace: {
+        baseDenom: 'uusdc',
+        claimedChain: 'noble-1',
+        path: 'transfer/channel-4',
+      },
     });
+    expect(display).not.toHaveProperty('origin');
   });
 
   it('keeps a denom verified by its own metadata, without a trace read', async () => {
