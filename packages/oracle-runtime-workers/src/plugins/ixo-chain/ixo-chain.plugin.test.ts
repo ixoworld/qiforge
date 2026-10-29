@@ -117,7 +117,7 @@ describe('IxoChainPlugin', () => {
     expect(balances?.description).toContain('uixo ÷ 1,000,000');
     expect(balances?.description).toContain('metadataUnavailable');
     const origin =
-      '`origin` names the chain an IBC token came from; say it when two tokens share a symbol (e.g. USDC from noble-1 and from injective-1).';
+      "`origin` (verified tokens only) names the chain an IBC token came from; say it when two tokens share a symbol (e.g. USDC from noble-1 and from injective-1). An unverified IBC token's `trace` (base denom, claimed chain) is self-reported by the sending chain: name the token by its full denom and present the trace only as unverified, never as what the token is.";
     expect(balances?.description).toContain(origin);
     expect(plugin.operatingGuide).toContain(origin);
     expect(lookup?.description).toContain(untrusted);
@@ -289,7 +289,7 @@ describe('get_account_balances', () => {
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
-  it('names an IBC token the table does not know by its trace, unverified in base units', async () => {
+  it('keeps an IBC token the table does not know under its hash, its trace beside it as a claim', async () => {
     const OSMO = `ibc/${'A'.repeat(64)}`;
     const fetcher = stubFetch((url) => {
       if (url.includes('/cosmos/bank/v1beta1/balances/'))
@@ -326,13 +326,16 @@ describe('get_account_balances', () => {
       tokens: [
         {
           denom: OSMO,
-          symbol: 'uosmo',
+          symbol: OSMO,
           decimals: 0,
           verified: false,
           amountBaseUnits: '1500000',
           amount: '1500000',
-          origin: 'osmosis-1',
-          path: 'transfer/channel-4',
+          trace: {
+            baseDenom: 'uosmo',
+            claimedChain: 'osmosis-1',
+            path: 'transfer/channel-4',
+          },
         },
       ],
     });

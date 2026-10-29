@@ -18,9 +18,11 @@
  *   upper-cased: `uatom` → `ATOM`) if it is plain ASCII.
  * - an `ibc/…` denom whose metadata does not verify it (the shape IBC
  *   transfers register: a display unit not listed) but whose denom trace
- *   reads: unverified, base units, named by the source chain's base denom
- *   (`uosmo`), with the trace `path` and the `origin` chain id of the IXO
- *   side's first channel (null when that could not be read).
+ *   reads: unverified, base units, the full denom as its symbol, with a
+ *   `trace`: the base denom, the chain id the IXO side's first channel's
+ *   light client claims (null when that could not be read) and the path.
+ *   Anyone can open a client claiming any chain id and send any base
+ *   denom over it, so a trace describes, it never identifies.
  * - anything else (no metadata, no trace, or a malformed denom, which is
  *   never looked up): unverified, base units (0 decimals), the full denom
  *   as its symbol.
@@ -38,11 +40,19 @@ export type TokenDisplay = {
   symbol: string;
   decimals: number;
   verified: boolean;
-  /** The chain id an IBC token came from; null when its trace named no readable chain. */
-  origin?: string | null;
-  /** The IBC trace path of a token named by its trace (`transfer/channel-26`). */
-  path?: string;
+  /** The chain id a verified IBC token came from (from the IBC table only). */
+  origin?: string;
+  /** What an unverified IBC token's trace claims: self-reported by the sending chain, never proof. */
+  trace?: IbcTrace;
   metadataUnavailable?: true;
+};
+
+/** An unverified IBC token's denom trace, as the sending side reported it. */
+export type IbcTrace = {
+  baseDenom: string;
+  /** The chain id the IXO side's first channel's light client claims; null when unread. */
+  claimedChain: string | null;
+  path: string;
 };
 
 /** An IBC voucher denom: `ibc/` and the upper-case hex SHA-256 of its trace. */
@@ -417,10 +427,11 @@ function readChainId(
 }
 
 /**
- * `fallback` named by the denom trace of `denom` (an `ibc/…` denom the
- * metadata did not verify): its base denom unless that is a reserved
- * symbol, its path, and the chain id of its first channel (null when
- * that read failed). `fallback` itself when the trace cannot be read.
+ * `fallback` with the denom trace of `denom` (an `ibc/…` denom the
+ * metadata did not verify) beside it: the base denom, the path and the
+ * chain id its first channel's client claims (null when that read
+ * failed). The symbol stays the full denom: a trace is self-reported.
+ * `fallback` itself when the trace cannot be read.
  */
 async function tracedDisplay(
   call: ChainCall,
@@ -437,16 +448,14 @@ async function tracedDisplay(
     readChainId(call, channel),
   );
   throwIfAborted(call.signal);
-  const reserved = (RESERVED_SYMBOLS as readonly string[]).includes(
-    baseDenom.toUpperCase(),
-  );
   return {
-    symbol: reserved ? denom : baseDenom,
-    decimals: 0,
-    verified: false,
-    origin:
-      chainId === 'failed' || chainId === 'aborted' ? null : chainId.value,
-    path,
+    ...fallback,
+    trace: {
+      baseDenom,
+      claimedChain:
+        chainId === 'failed' || chainId === 'aborted' ? null : chainId.value,
+      path,
+    },
   };
 }
 
