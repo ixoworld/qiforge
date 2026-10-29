@@ -22,6 +22,10 @@ jobs:
           node-version-file: '.nvmrc'
           cache: 'pnpm'
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @ixo/agent-tools build
+      - run: pnpm --filter @ixo/agent-tools typecheck
+      - run: pnpm --filter @ixo/agent-tools test
+      - run: pnpm --filter @ixo/agent-tools test:package
       # The Workers runtime resolves @ixo/ucan, @ixo/common/ai/decisions and
       # @ixo/ixo-transaction through their built `dist`, so they (and their
       # workspace deps) are built before the typecheck and the test runs.

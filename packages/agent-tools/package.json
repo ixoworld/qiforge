@@ -1,0 +1,44 @@
+{
+  "name": "@ixo/agent-tools",
+  "version": "0.1.0",
+  "description": "Strict IXO read tool contracts and host-bound authority for Workers agents",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ixoworld/qiforge.git"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:package": "node scripts/verify-package.mjs"
+  },
+  "dependencies": {
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@ixo/typescript-config": "workspace:*",
+    "@types/node": "^22.10.5",
+    "esbuild": "0.28.1",
+    "miniflare": "5.20260820.0-alpha",
+    "typescript": "5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
