@@ -7773,6 +7773,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                     provider: req.channel.provider,
                     bindingId: req.channel.bindingId,
                     bindingRevision: req.channel.bindingRevision,
+                    ...(req.channel.attachments?.length
+                      ? { attachments: req.channel.attachments }
+                      : {}),
                   },
                 }
               : {}),

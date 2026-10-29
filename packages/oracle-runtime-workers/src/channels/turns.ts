@@ -12,6 +12,7 @@ import {
   StoredChannelControlResult,
   type ChannelControlInput,
   type ChannelReplyContext,
+  channelAttachmentInputs,
   channelRequestHash,
   channelRunId,
   StaleSessionError,
@@ -1856,11 +1857,17 @@ export class ChannelTurns {
       client: 'channel',
       requestId: input.requestId,
       multitask: 'enqueue',
+      ...(input.attachments?.length
+        ? { attachments: channelAttachmentInputs(input.attachments) }
+        : {}),
       channel: {
         provider: input.provider,
         bindingId: input.bindingId,
         bindingRevision: input.bindingRevision,
         remoteMessageRef: input.remoteMessageRef,
+        ...(input.attachments?.length
+          ? { attachments: input.attachments }
+          : {}),
         ...(replyContext ? { replyContext } : {}),
         ...(input.replyTo ? { replyTo: input.replyTo } : {}),
         ...(routing?.destination.kind === 'clarify'

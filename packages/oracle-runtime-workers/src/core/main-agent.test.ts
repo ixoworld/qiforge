@@ -1441,6 +1441,64 @@ describe('createMainAgent — chat delivery', () => {
     ]);
   });
 
+  it('gives tools the files the person sent with the channel message', async () => {
+    const core = bootCore();
+    const seen: unknown[] = [];
+    const keepFile = pluginTool(
+      async (_args, ctx) => {
+        seen.push(ctx.session.channel?.attachments);
+        return { ok: true };
+      },
+      {
+        name: 'keep_file',
+        description: 'Keep the file the person sent.',
+        schema: z.object({}),
+        effect: 'read',
+      },
+    );
+    const photo = {
+      url: 'https://channels.example/media/chb_x/1f0e?exp=1893456000&sig=abc',
+      filename: 'shop.jpg',
+      mimetype: 'image/jpeg',
+      size: 120_000,
+      sha256: 'c'.repeat(64),
+      kind: 'image' as const,
+    };
+    const { agent, context } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(
+        core,
+        scriptedLlm({
+          main: [[{ name: 'keep_file', args: {}, id: 'k1' }], []],
+        }),
+      ),
+      requestCtx: {
+        ...requestCtx,
+        session: {
+          ...requestCtx.session,
+          client: 'channel',
+          channel: {
+            provider: 'whatsapp',
+            bindingId: 'chb_x',
+            bindingRevision: 1,
+            attachments: [photo],
+          },
+        },
+      },
+      state: {},
+      delivery: whatsapp,
+      hooks: { turnTools: [{ tool: keepFile, returnDirect: true }] },
+    });
+    await agent.invoke(
+      { messages: [new HumanMessage('[photo]')] },
+      { configurable: { thread_id: 'sess-file' }, context },
+    );
+    expect(seen).toEqual([[photo]]);
+  });
+
   it('adds nothing to a Portal turn', async () => {
     const core = bootCore();
     const { systemPrompt, context } = await createMainAgent({

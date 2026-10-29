@@ -16,7 +16,10 @@ import {
   requestOperationJsonSchema,
 } from './hub-actions.plugin';
 import { HubActionClient } from '../../hub-actions/client';
-import { prepareHubAction } from '../../hub-actions/request';
+import {
+  assertOperationEnabled,
+  prepareHubAction,
+} from '../../hub-actions/request';
 import type {
   ActionCapabilitiesV1,
   ChainTxCapabilities,
@@ -155,6 +158,116 @@ describe('Hub actions Workers plugin', () => {
       status: 'unavailable',
     });
     expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks for an application or a claim card when the Hub enables that kind, and for nothing else', async () => {
+    const bid = {
+      kind: 'ixo.bid.submit.v1' as const,
+      network: 'ixo testnet' as const,
+      collectionId: '44000',
+      title: 'Mapping local shops',
+      role: 'SA' as const,
+      summary: [{ label: 'Age', value: '19' }],
+      data: JSON.stringify({ age: 19 }),
+    };
+    const claim = {
+      kind: 'ixo.claim.submit.v1' as const,
+      network: 'ixo testnet' as const,
+      collectionId: '44000',
+      title: 'Mapping local shops',
+      summary: [{ label: 'Shop', value: 'Spaza on 5th' }],
+      data: JSON.stringify({ shop: 'Spaza on 5th' }),
+      evidence: [
+        {
+          field: 'shops.0.photo',
+          url: 'https://channels.test/media/chb_three/abc?exp=1&sig=x',
+          filename: 'shop.jpg',
+          mimetype: 'image/jpeg',
+          size: 1024,
+          sha256: 'a'.repeat(64),
+        },
+      ],
+    };
+    const capabilities: ActionCapabilitiesV1 = {
+      version: 'ixo.auth-capabilities/1',
+      accountId: 'account-three',
+      oracleDid: 'did:ixo:oracle',
+      network: null,
+      resourceOrigin: null,
+      operations: ['ixo.bid.submit.v1', 'ixo.claim.submit.v1'],
+      transfer: null,
+      forms: [],
+    };
+    expect(() =>
+      assertOperationEnabled(capabilities, bid, 'did:ixo:owner'),
+    ).not.toThrow();
+    expect(() =>
+      assertOperationEnabled(capabilities, claim, 'did:ixo:owner'),
+    ).not.toThrow();
+    expect(() =>
+      assertOperationEnabled(
+        { ...capabilities, operations: ['ixo.bid.submit.v1'] },
+        claim,
+        'did:ixo:owner',
+      ),
+    ).toThrow('Hub operation is not enabled for this oracle');
+    expect(() =>
+      assertOperationEnabled(
+        { ...capabilities, operations: ['form.submit.v1'] },
+        bid,
+        'did:ixo:owner',
+      ),
+    ).toThrow('Hub operation is not enabled for this oracle');
+
+    const request = vi.fn(async () => reference);
+    const ctx = makeRuntimeContext({
+      config: { HUB_ACTIONS_ENABLED: 'true' },
+      user: {
+        did: 'did:ixo:owner',
+        matrixUserId: '@owner:test',
+        ucanDelegation: { raw: 'delegation' },
+      },
+      session: {
+        id: 'session-three',
+        client: 'channel',
+        requestId: 'request-three',
+        runId: 'run-three',
+        channel: {
+          provider: 'whatsapp',
+          bindingId: 'chb_three',
+          bindingRevision: 4,
+        },
+      },
+      toolCallId: 'tool-bid',
+      hubActions: {
+        options: async () => options,
+        capabilities: async () => capabilities,
+        request,
+        chainTransaction: async () => {
+          throw new Error('unused');
+        },
+        status: async () => ({ outcome: null, summary: null }),
+      },
+    });
+    const tool = new HubActionsPlugin()
+      .getTools()
+      .find((item) => item.name === 'request_hub_action');
+    if (!tool) throw new Error('request tool missing');
+    expect(await tool.handler({ operation: bid }, ctx)).toMatchObject({
+      status: 'prepared',
+    });
+    expect(request).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: bid }),
+    );
+    expect(
+      await tool.handler(
+        { operation: claim },
+        { ...ctx, toolCallId: 'tool-claim' },
+      ),
+    ).toMatchObject({ status: 'prepared' });
+    expect(request).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: claim }),
+    );
   });
 
   it('sends epoch-second expiry through the real tool and HTTP adapter', async () => {
@@ -1413,7 +1526,7 @@ describe('request_chain_transaction', () => {
     if (!tool) throw new Error('capabilities tool missing');
     expect(await tool.handler({}, withClient)).toEqual(capabilities);
     expect(urls).toEqual([
-      'https://hub.test/api/internal/actions/operations/capabilities?version=4',
+      'https://hub.test/api/internal/actions/operations/capabilities?version=5',
     ]);
   });
 });

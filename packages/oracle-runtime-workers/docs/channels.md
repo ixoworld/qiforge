@@ -72,7 +72,9 @@ An oracle can opt into [channel conversation routing](channel-routing.md) with `
 
 A new request that names a session the user's object no longer holds (deleted in Qi.Space, or never created there) is answered `409 session_conflict`, its receipt is removed and the binding forgets that session. The gateway clears its stored session and sends the **same request ID again without `sessionId`**; that resend is a new body under a free request ID and opens a new session. A request without `sessionId` whose binding still pointed at a deleted session opens a new session at once, with no round trip. A session that exists but is not this user's oracle session (another room, a local session) stays `404 session_not_found`.
 
-Topic deliverables (Matrix topics), attachments, provider identifiers, and caller-supplied user identities are not accepted. The body limit is 64,000 bytes. Text is limited to 16,000 characters.
+Files ride by reference in an optional `attachments` list (1 to 10 entries): each is `{ url, filename, mimetype, size, sha256, kind }`, where `url` is an https capability link the gateway serves (never the bytes), `sha256` the lowercase hex digest of what it serves and `kind` one of `image`, `video`, `document` or `audio`. `message` still carries the caption or the gateway's placeholder (`[photo]`, `[document: name.pdf]`). The run gets the files as ordinary attachments, so the model sees the image or the extracted text; a file the pipeline cannot fetch becomes a note in the message instead of failing the turn. Tools read the raw list as `ctx.session.channel.attachments` for this turn, for example to keep a photo as claim evidence. Runtimes before this field answer a body that carries it with `400 invalid_request`, so a gateway sends files only to oracles on a runtime that accepts them.
+
+Topic deliverables (Matrix topics), provider identifiers, and caller-supplied user identities are not accepted. The body limit is 64,000 bytes. Text is limited to 16,000 characters.
 
 ## Responses and retries
 
@@ -243,8 +245,8 @@ the active binding again before calling Auth Hub. The model cannot supply those
 identity fields or approve an action. The existing `prepare_action` Portal card
 path remains available independently.
 
-The contract is `@ixo/action-protocol` 0.6.0 from npm. This runtime
-declares protocol version 4 on its Hub calls (see below). Outcomes still
+The contract is `@ixo/action-protocol` 0.7.0 from npm. This runtime
+declares protocol version 5 on its Hub calls (see below). Outcomes still
 arrive as `ixo.auth-outcome/2`, so it needs a gateway that parses that
 envelope (gateway PR 20); the bank receipts it hands the gateway keep the
 0.4.1 shape (see [coin sends](#coin-sends-any-token)).
@@ -347,8 +349,14 @@ checks for hosts with a durable `reserve`/`record` store. Envelope versions
 are `ixo.auth-action/1`, `ixo.auth-capabilities/2`, `ixo.auth-outcome/2` and
 `ixo.auth-options/3`; unsupported kinds and versions fail closed.
 
-The runtime declares protocol version 4 (`?version=4`) on the capabilities,
-prepare, status and options calls. Version 4 is the 0.6.0 contract: version 3
+The runtime declares protocol version 5 (`?version=5`) on the capabilities,
+prepare, status and options calls. Version 5 is the 0.7.0 contract: version 4
+plus the application card (`ixo.bid.submit.v1`) and the claim card
+(`ixo.claim.submit.v1`), with their receipts `ixo.bid.submission.v1`,
+`ixo.claim.submission.v1` and `ixo.submission.failed.v1`; options still
+answer `ixo.auth-options/3`. Auth Hub lists and accepts those kinds only at
+version 5 (a 0.6.0 parser cannot read them), so Auth Hub must accept version
+5 before this runtime is deployed. Version 4 is the 0.6.0 contract: version 3
 plus chain transactions (capabilities list `ixo.chain.tx.v1` with `chainTx`,
 the Hub accepts its prepare, receipts carry `steps`); options still answer
 `ixo.auth-options/3`. Auth Hub lists the kind only to version 4 callers (a
@@ -357,7 +365,7 @@ would fail on it) and refuses an `ixo.chain.tx.v1` prepare from an older
 caller with `400 protocol_version_required`, so Auth Hub must accept version 4
 before this runtime is deployed.
 
-Deploy order: Auth Hub (accepts version 4) → channel gateways on @ixo/action-protocol 0.6.0 → runtimes.
+Deploy order: Auth Hub (accepts version 5) → channel gateways on @ixo/action-protocol 0.7.0 → runtimes.
 
 Version 3 is the 0.5.0 contract:
 capabilities with per-denom `transfer.limits`, any-denom bank sends, receipts
@@ -405,7 +413,7 @@ display units (`"1.5"` for 1.5 IXO) and an optional `denom` copied from
 `decimals`, `verified`, `balanceBaseUnits`; absent = `uixo`). When a
 transaction has at least one bank step, the owner object reads the options
 once for the call, fresh (the balances must be current, at the protocol
-version: version 4, answered as options version 3), and for each bank step
+version: version 5, answered as options version 3), and for each bank step
 refuses a denom that is not in the list (it never guesses an `ibc/…` hash),
 converts the amount to base units with the listed `decimals` using integer
 arithmetic (`toBaseUnits`), refuses more fraction digits than the token has
@@ -600,7 +608,7 @@ rejected (for example `Invalid fromAddress`). The Gmail service requires fresh i
 attestations and confirmed proxy no-retry behavior; missing evidence disables
 the journey. Local conformance fixtures do not establish those activation gates.
 
-Both shared packages come from the npm registry: `@ixo/action-protocol` 0.6.0
+Both shared packages come from the npm registry: `@ixo/action-protocol` 0.7.0
 and `@ixo/topic-protocol` 1.0.0-rc.8 (the Worker-safe build with precompiled
 validators), pinned exactly in the runtime and in `@ixo/ixo-transaction`. No
 workspace override or vendored archive remains. `prepublishOnly`

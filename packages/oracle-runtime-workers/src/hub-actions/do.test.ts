@@ -157,9 +157,9 @@ async function harness(state: DurableObjectState) {
         return Response.json({ active: hubState.bindingActive });
       if (path === '/api/internal/actions/operations/options') {
         // Version 3 adds the owner's tokens (the Hub reads balances for it);
-        // version 4 answers as version 3.
+        // versions 4 and 5 answer as version 3.
         const version = new URL(request.url).searchParams.get('version') ?? '';
-        const v3 = version === '3' || version === '4';
+        const v3 = version === '3' || version === '4' || version === '5';
         hubState.optionsVersions.push(version);
         return Response.json({
           version: v3 ? 'ixo.auth-options/3' : 'ixo.auth-options/2',
@@ -1108,9 +1108,9 @@ describe('Hub actions in the owner object', () => {
       });
       // No display amount and no fee reach the Hub.
       expect(JSON.stringify(operation)).not.toMatch(/"amount":"1\.5|fee/i);
-      // Options read at the protocol version (4, answered as options
+      // Options read at the protocol version (5, answered as options
       // version 3), with the owner's balances.
-      expect(new Set(h.hubState.optionsVersions)).toEqual(new Set(['4']));
+      expect(new Set(h.hubState.optionsVersions)).toEqual(new Set(['5']));
       // No bank step: no options read at all.
       const reads = optionReads();
       expect(await prepare('b', [submit, token])).toMatchObject({

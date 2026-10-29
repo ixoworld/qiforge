@@ -1,6 +1,7 @@
 import type { ActionOutcomeWire } from '@ixo/ixo-transaction/topic-proposals';
 import type { ActionOutcomeV1 } from '@ixo/action-protocol';
 import { z } from 'zod';
+import type { AttachmentInput } from '../attachments/types';
 import type { ReplyPlan } from '../delivery/types';
 
 /**
@@ -109,6 +110,44 @@ export type ChannelControlOutcome =
   | { ok: true; result: ChannelControlResult }
   | Exclude<ChannelTurnOutcome, { ok: true }>;
 
+/**
+ * A file the person sent on the channel (a WhatsApp photo, video, document
+ * or audio file). The gateway downloads it from the provider and serves it
+ * from a capability link of its own; the bytes never ride in the body.
+ */
+export const ChannelAttachment = z.strictObject({
+  url: z
+    .string()
+    .max(2000)
+    .url()
+    .refine((value) => value.startsWith('https://'), 'must be an https URL'),
+  filename: z.string().min(1).max(200),
+  mimetype: z.string().min(1).max(100),
+  size: z.number().int().nonnegative().safe(),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  kind: z.enum(['image', 'video', 'document', 'audio']),
+});
+export type ChannelAttachment = z.infer<typeof ChannelAttachment>;
+
+/**
+ * The run's attachment inputs for channel files: the capability link is a
+ * plain https URL, so the pipeline fetches it like any other (SSRF-guarded),
+ * and the model sees the image or the extracted text.
+ */
+export function channelAttachmentInputs(
+  attachments: readonly ChannelAttachment[],
+): AttachmentInput[] {
+  return attachments.map((attachment) => ({
+    mxcUri: attachment.url,
+    filename: attachment.filename,
+    mimetype: attachment.mimetype,
+    size: attachment.size,
+  }));
+}
+
+/** Same cap as the attachment pipeline (`MAX_ATTACHMENTS`). */
+export const MAX_CHANNEL_ATTACHMENTS = 10;
+
 export const ChannelTurnBody = z.strictObject({
   provider: ChannelProviderId,
   bindingId: z.string().regex(/^chb_[A-Za-z0-9_-]{1,120}$/),
@@ -119,6 +158,12 @@ export const ChannelTurnBody = z.strictObject({
   /** An explicit correction stays in its current session, even with routing enabled. */
   sessionPolicy: z.literal('continue').optional(),
   message: z.string().min(1).max(16_000),
+  /** Files sent with the message; `message` carries the caption or a placeholder. */
+  attachments: z
+    .array(ChannelAttachment)
+    .min(1)
+    .max(MAX_CHANNEL_ATTACHMENTS)
+    .optional(),
   replyTo: ChannelReplyReference.optional(),
   /**
    * Which kind of oracle the gateway believes it addresses. `companion` is

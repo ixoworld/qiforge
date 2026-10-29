@@ -408,6 +408,36 @@ describe('channel request boundary', () => {
     ).toBe(false);
   });
 
+  it('accepts files the gateway serves and refuses malformed ones', () => {
+    const photo = {
+      url: 'https://channels.example/media/chb_one/1f0e?exp=1893456000&sig=abc_-',
+      filename: 'photo.jpg',
+      mimetype: 'image/jpeg',
+      size: 120_000,
+      sha256: 'a'.repeat(64),
+      kind: 'image',
+    };
+    expect(
+      ChannelTurnBody.safeParse({ ...input, attachments: [photo] }).success,
+    ).toBe(true);
+    for (const attachments of [
+      [],
+      [{ ...photo, url: 'http://channels.example/media/x' }],
+      [{ ...photo, url: 'not a url' }],
+      [{ ...photo, sha256: 'A'.repeat(64) }],
+      [{ ...photo, sha256: 'a'.repeat(63) }],
+      [{ ...photo, size: -1 }],
+      [{ ...photo, size: 1.5 }],
+      [{ ...photo, kind: 'sticker' }],
+      [{ ...photo, filename: '' }],
+      [{ ...photo, bytes: 'inline' }],
+      Array.from({ length: 11 }, () => photo),
+    ])
+      expect(ChannelTurnBody.safeParse({ ...input, attachments }).success).toBe(
+        false,
+      );
+  });
+
   it('accepts both oracle context kinds and refuses any other', () => {
     for (const kind of ['oracle', 'companion'])
       expect(

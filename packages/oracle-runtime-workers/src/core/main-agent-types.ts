@@ -9,6 +9,7 @@ import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import type { ReactAgent } from 'langchain';
 import { z } from 'zod';
+import { ChannelAttachment } from '../channels/contract';
 import type {
   ChatOpenAIFields,
   MergedConfig,
@@ -48,6 +49,7 @@ export const mainAgentRequestContextSchema = z.object({
         provider: z.string(),
         bindingId: z.string(),
         bindingRevision: z.number().int().positive(),
+        attachments: z.array(ChannelAttachment).optional(),
       })
       .optional(),
     wsId: z.string().optional(),

@@ -35,8 +35,13 @@ export interface HubActionTransport {
 
 /**
  * The protocol version this runtime declares on every operation call
- * (capabilities, POST operations, GET status, options). Version 4 is the
- * 0.6.0 contract: version 3 plus chain transactions (`ixo.chain.tx.v1` in
+ * (capabilities, POST operations, GET status, options). Version 5 is the
+ * 0.7.0 contract: version 4 plus the application card (`ixo.bid.submit.v1`)
+ * and the claim card (`ixo.claim.submit.v1`) with their receipts
+ * (`ixo.bid.submission.v1`, `ixo.claim.submission.v1`,
+ * `ixo.submission.failed.v1`), which a 0.6.0 parser cannot read, so the Hub
+ * lists and accepts them only at level 5; options answer as at version 3.
+ * Version 4 is the 0.6.0 contract: version 3 plus chain transactions (`ixo.chain.tx.v1` in
  * capabilities with its `chainTx` entry, prepared through POST, receipts
  * with `steps`); options answer as at version 3 (`ixo.auth-options/3`).
  * Version 3 is the 0.5.0 contract: capabilities `transfer.limits`,
@@ -45,7 +50,7 @@ export interface HubActionTransport {
  * the 0.4.1 shapes. The envelopes stay tagged `ixo.auth-outcome/2` and
  * `ixo.auth-capabilities/2`, which `@ixo/action-protocol` parses.
  */
-const HUB_PROTOCOL_VERSION = '4';
+const HUB_PROTOCOL_VERSION = '5';
 const HUB_PROTOCOL_QUERY = `version=${HUB_PROTOCOL_VERSION}`;
 /** Every Hub call but a chain-transaction prepare. */
 const HUB_TIMEOUT_MS = 10_000;
