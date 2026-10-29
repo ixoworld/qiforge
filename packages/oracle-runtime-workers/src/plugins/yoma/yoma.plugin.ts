@@ -62,6 +62,9 @@ import { judgeChoice } from './judge';
 import { canLogWork } from './permission';
 import {
   buildApplicationOperation,
+  buildClaimOperation,
+  MAX_CARD_DATA,
+  MAX_CARD_EVIDENCE,
   cardRequestKey,
   describeReward,
   pendingFileValue,
@@ -79,6 +82,7 @@ export const MAX_RESULT_CHARS = 12_000;
 /** A card whose outcome never came is cleared this long after it expired. */
 const CARD_GRACE_S = 60;
 const APPLICATION_KIND = 'ixo.bid.submit.v1';
+const CLAIM_KIND = 'ixo.claim.submit.v1';
 
 /* ── input schemas ────────────────────────────────────────────────────── */
 
@@ -465,7 +469,7 @@ const OPERATING_GUIDE = [
   '- Like Jambo: `programmes` (3 a message: name, who, where), then `programme_jobs` for the one they pick (what, pay; no pay line when none).',
   '- `yoma_form`: `next`, then `answer` per reply, one plain question a message, options numbered as given. Pass the reply as written, plus `value` for dates, numbers, phones, emails. On `unclear`/`invalid`, ask again using `say`.',
   '- Files: ask them to send it here, then `answer` with their caption or "[photo]". Pins arrive as "📍 lat, long". `skip` optional questions; on `more_items` ask if there is another, then `section`.',
-  '- On `done`: `review`, read back briefly, `submit` when they confirm. Never say sent before `next`/`my_drafts` says submitted. Logging work cannot be sent yet (`not_yet`): it stays saved.',
+  '- On `done`: `review`, read back briefly, `submit` when they confirm (a card to confirm). Never say sent before `next`/`my_drafts` says submitted. On `lastCard`, say why it failed; offer to resend.',
   `- ${STATUS_RULE} \`my_work\`: approved? paid?`,
   `- ${DATA_RULE}`,
 ].join('\n');
@@ -504,7 +508,7 @@ export class YomaPlugin extends OraclePlugin {
       {
         name: 'yoma_form',
         description: [
-          "Apply or log work through the job's form, one question at a time. `action`: next | answer (a file or pin in their message counts) | skip | section | review | submit (application: a card to confirm; logged work: not_yet) | discard (only when asked). Saved at once.",
+          "Apply or log work through the job's form, one question at a time. `action`: next | answer (a file or pin in their message counts) | skip | section | review | submit (a card to confirm) | discard (only when asked). Saved at once.",
           DATA_RULE,
         ].join(' '),
         schema: formSchema,
@@ -743,6 +747,9 @@ export class YomaPlugin extends OraclePlugin {
               ? 'waiting_for_confirm'
               : 'in_progress',
           lastTouched: draft.updatedAt.slice(0, 10),
+          ...(draft.cardFailure && !draft.card && !draft.submittedAt
+            ? { lastCard: lastCardView(draft.cardFailure) }
+            : {}),
         };
         if (draft.submittedAt || !protocols.ok) return line;
         const form = await loadForm(
@@ -802,9 +809,13 @@ export class YomaPlugin extends OraclePlugin {
   ): Promise<Draft> {
     if (!draft.card || draft.submittedAt || !ctx.hubActions) return draft;
     let status: string | undefined;
+    let receipt: unknown;
     try {
-      status = (await ctx.hubActions.status(ctx.user.did, draft.card.actionId))
-        .outcome?.status;
+      const outcome = (
+        await ctx.hubActions.status(ctx.user.did, draft.card.actionId)
+      ).outcome;
+      status = outcome?.status;
+      receipt = outcome?.receipt;
     } catch (error) {
       if (ctx.abortSignal.aborted) throw error;
       return draft;
@@ -825,9 +836,37 @@ export class YomaPlugin extends OraclePlugin {
       draft.collectionId,
       (c) => {
         if (!c) return c;
-        if (done) return { ...c, submittedAt: new Date().toISOString() };
-        const { card: _card, ...rest } = c;
-        return { ...rest, cardAttempt: c.cardAttempt + 1 };
+        if (done) {
+          const claimId = receiptText(
+            receipt,
+            'ixo.claim.submission.v1',
+            'claimId',
+          );
+          return {
+            ...c,
+            submittedAt: new Date().toISOString(),
+            ...(claimId ? { claimId: clip(claimId, 200) } : {}),
+          };
+        }
+        const { card: _card, cardFailure: _failure, ...rest } = c;
+        const step = receiptText(receipt, 'ixo.submission.failed.v1', 'step');
+        const message = receiptText(
+          receipt,
+          'ixo.submission.failed.v1',
+          'message',
+        );
+        return {
+          ...rest,
+          cardAttempt: c.cardAttempt + 1,
+          ...(step && message
+            ? {
+                cardFailure: {
+                  step: clip(step, 40),
+                  message: clip(message, 200),
+                },
+              }
+            : {}),
+        };
       },
     );
     return written.ok && written.draft ? written.draft : draft;
@@ -876,7 +915,12 @@ export class YomaPlugin extends OraclePlugin {
     if (!lookup.draft)
       return { ok: true, status: 'not_started', say: 'Use action next first.' };
     const draft = await this.refreshCard(ctx, kv, lookup.draft);
-    if (draft.submittedAt) return { ok: true, status: 'submitted' };
+    if (draft.submittedAt)
+      return {
+        ok: true,
+        status: 'submitted',
+        ...(draft.claimId ? { claimId: draft.claimId } : {}),
+      };
     if (input.action === 'discard') {
       if (!input.confirmed) return { ok: true, status: 'needs_confirmation' };
       if (draft.card)
@@ -1154,6 +1198,7 @@ export class YomaPlugin extends OraclePlugin {
           ok: true,
           status: 'submitted',
           submittedAt: draft.submittedAt,
+          ...(draft.claimId ? { claimId: draft.claimId } : {}),
         };
       if (draft.card) return { ok: true, status: 'waiting_for_confirm' };
     }
@@ -1229,6 +1274,9 @@ export class YomaPlugin extends OraclePlugin {
     return {
       ok: true,
       job: draft.title,
+      ...(draft.cardFailure
+        ? { lastCard: lastCardView(draft.cardFailure) }
+        : {}),
       ...stepView(model, nextStep(model, draft), draft),
     };
   }
@@ -1250,9 +1298,8 @@ export class YomaPlugin extends OraclePlugin {
         status: 'incomplete',
         missing: problems.slice(0, 5).map((e) => e.path),
       };
-    // Logged work goes out through the Hub's generic transaction card, not built yet.
-    if (input.form === 'claim') return { ok: true, status: 'not_yet' };
     if (draft.card) return { ok: true, status: 'waiting_for_confirm' };
+    const kind = input.form === 'claim' ? CLAIM_KIND : APPLICATION_KIND;
     const channel = ctx.session.channel;
     if (
       !ctx.hubActions ||
@@ -1267,9 +1314,7 @@ export class YomaPlugin extends OraclePlugin {
       });
     let offered: boolean;
     try {
-      offered = (await ctx.hubActions.capabilities()).operations.includes(
-        APPLICATION_KIND,
-      );
+      offered = (await ctx.hubActions.capabilities()).operations.includes(kind);
     } catch (error) {
       if (ctx.abortSignal.aborted) throw error;
       return failed({
@@ -1281,16 +1326,26 @@ export class YomaPlugin extends OraclePlugin {
     if (!offered)
       return failed({
         reason: 'not_enabled',
-        detail:
-          "Sending applications from chat isn't switched on for this number yet; everything is saved.",
+        detail: `Sending ${input.form === 'claim' ? 'logged work' : 'applications'} from chat isn't switched on for this number yet; everything is saved.`,
         retryable: false,
       });
     const requestKey = await cardRequestKey(draft);
-    const operation = buildApplicationOperation({
-      network: call.network,
-      model,
-      draft,
-    });
+    const operation =
+      input.form === 'claim'
+        ? buildClaimOperation({ network: call.network, model, draft })
+        : buildApplicationOperation({ network: call.network, model, draft });
+    if (!operation)
+      return failed({
+        reason: 'too_large',
+        detail: `This has more files than one card takes (${MAX_CARD_EVIDENCE}), or a question name too long to attach a file to; everything is saved.`,
+        retryable: false,
+      });
+    if (operation.data.length > MAX_CARD_DATA)
+      return failed({
+        reason: 'too_large',
+        detail: 'The answers are too long for one card; everything is saved.',
+        retryable: false,
+      });
     let reference;
     try {
       reference = await ctx.hubActions.request({
@@ -1321,7 +1376,7 @@ export class YomaPlugin extends OraclePlugin {
       (c) =>
         c
           ? {
-              ...c,
+              ...withoutFailure(c),
               card: {
                 actionId: reference.id,
                 requestKey,
@@ -1335,6 +1390,28 @@ export class YomaPlugin extends OraclePlugin {
     if (!written.ok) return failed(written.failure);
     return { ok: true, status: 'prepared', summary: reference.title };
   }
+}
+
+/** Why the last card did not go through, for the model to pass on (the Hub's words are data). */
+function lastCardView(failure: { step: string; message: string }) {
+  return { stoppedAt: failure.step, hubSaid: failure.message };
+}
+
+function withoutFailure(draft: Draft): Draft {
+  const { cardFailure: _failure, ...rest } = draft;
+  return rest;
+}
+
+/** A string field of a receipt of one kind, if the outcome carried one. */
+function receiptText(
+  receipt: unknown,
+  kind: string,
+  key: string,
+): string | undefined {
+  if (typeof receipt !== 'object' || receipt === null) return undefined;
+  if (Reflect.get(receipt, 'kind') !== kind) return undefined;
+  const value: unknown = Reflect.get(receipt, key);
+  return typeof value === 'string' && value ? value : undefined;
 }
 
 /** One page of a list, with how far along it is. */

@@ -70,6 +70,12 @@ const draftSchema = z.object({
     .optional(),
   /** Set once the card's outcome came back as done. */
   submittedAt: z.string().optional(),
+  /** A claim's id (its CID) from the claim card's receipt. */
+  claimId: z.string().max(200).optional(),
+  /** Why the last card stopped before it finished, from its receipt: the step and the Hub's words. */
+  cardFailure: z
+    .object({ step: z.string().max(40), message: z.string().max(200) })
+    .optional(),
 });
 
 const indexSchema = z.object({

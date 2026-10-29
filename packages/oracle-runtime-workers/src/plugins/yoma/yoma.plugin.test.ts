@@ -254,9 +254,11 @@ type HubActions = NonNullable<RuntimeContext['hubActions']>;
 type HubRequest = Parameters<HubActions['request']>[0];
 type Reference = Awaited<ReturnType<HubActions['request']>>;
 type Capabilities = Awaited<ReturnType<HubActions['capabilities']>>;
-type OutcomeStatus = NonNullable<
+type Outcome = NonNullable<
   Awaited<ReturnType<HubActions['status']>>['outcome']
->['status'];
+>;
+type OutcomeStatus = Outcome['status'];
+type Receipt = NonNullable<Outcome['receipt']>;
 
 const reference = (n: number, expiresAt = 1999999999): Reference => ({
   version: 'ixo.auth-action/1',
@@ -317,6 +319,8 @@ function setup(
   );
   const requests: HubRequest[] = [];
   const outcomes = new Map<string, OutcomeStatus>();
+  /** A receipt to hand back with an outcome, by action id. */
+  const receipts = new Map<string, Receipt>();
   const kv = opts.kv === undefined ? memoryKv() : opts.kv;
   const attachments: unknown[] = [];
   let runId = 'run-1';
@@ -346,7 +350,7 @@ function setup(
               authorizedDigest: 'd'.repeat(64),
               sequence: 1,
               status,
-              receipt: null,
+              receipt: receipts.get(actionId) ?? null,
               occurredAt: 1,
             }
           : null,
@@ -390,7 +394,16 @@ function setup(
   const newRun = (id: string) => {
     runId = id;
   };
-  return { kv, attachments, requests, outcomes, lookup, form, newRun };
+  return {
+    kv,
+    attachments,
+    requests,
+    outcomes,
+    receipts,
+    lookup,
+    form,
+    newRun,
+  };
 }
 
 /** Fills the milestone application (three text questions) and returns its ref. */
@@ -865,8 +878,9 @@ describe('yoma_form', () => {
     ).toBe('not_accepted');
   });
 
-  it('takes a file from the message it came with and saves as it goes; sending waits for the transaction card', async () => {
-    const { form, kv, attachments, requests } = setup();
+  it('takes a file from the message it came with, saves as it goes, and sends the claim card with its evidence', async () => {
+    const { form, kv, attachments, requests, outcomes, receipts, newRun } =
+      setup({ operations: ['ixo.bid.submit.v1', 'ixo.claim.submit.v1'] });
     if (!kv) throw new Error('storage expected');
     const ref = { form: 'claim', collectionId: '9787' };
     const answer = (field: string, reply: string, value?: string) =>
@@ -932,11 +946,118 @@ describe('yoma_form', () => {
       label: expect.stringContaining('ertificate'),
       value: '📷 certificate.jpg',
     });
-    expect((await form({ action: 'submit', ...ref })).status).toBe('not_yet');
-    expect(requests).toHaveLength(0);
-    expect((await storedDraft(kv, 'claim', '9787')).evidence).toEqual([
-      expect.objectContaining({ sha256: photo.sha256, url: photo.url }),
+    expect((await form({ action: 'submit', ...ref })).status).toBe('prepared');
+    expect(requests).toHaveLength(1);
+    const operation = requests[0]!.operation;
+    if (operation.kind !== 'ixo.claim.submit.v1')
+      throw new Error(`claim card expected, got ${operation.kind}`);
+    expect(operation).toMatchObject({
+      network: 'ixo mainnet',
+      collectionId: '9787',
+    });
+    const data = JSON.parse(operation.data) as Record<string, unknown>;
+    expect(data).not.toHaveProperty('ixo:evidenceType_certificate');
+    expect(data).toMatchObject({ 'schema:givenName': 'Lebo' });
+    expect(operation.evidence).toEqual([
+      {
+        field: 'ixo:evidenceType_certificate',
+        url: photo.url,
+        filename: photo.filename,
+        mimetype: photo.mimetype,
+        size: photo.size,
+        sha256: photo.sha256,
+      },
     ]);
+
+    // The Hub stopped at the evidence step: the reason comes back once, and
+    // the claim can be sent again in a new run.
+    outcomes.set('action-1', 'failed');
+    receipts.set('action-1', {
+      kind: 'ixo.submission.failed.v1',
+      actionId: 'action-1',
+      revision: 1,
+      digest: 'd'.repeat(64),
+      step: 'evidence',
+      message: 'A photo did not match the file that was sent',
+      failedAt: 2,
+    });
+    newRun('run-2');
+    const back = await form({ action: 'next', ...ref });
+    expect(back.lastCard).toEqual({
+      stoppedAt: 'evidence',
+      hubSaid: 'A photo did not match the file that was sent',
+    });
+    expect((await form({ action: 'submit', ...ref })).status).toBe('prepared');
+    expect(requests[1]!.requestKey).not.toBe(requests[0]!.requestKey);
+    expect(
+      (await storedDraft(kv, 'claim', '9787')).cardFailure,
+    ).toBeUndefined();
+
+    // Approved: submitted, with the claim's id from the receipt.
+    outcomes.set('action-2', 'succeeded');
+    receipts.set('action-2', {
+      kind: 'ixo.claim.submission.v1',
+      actionId: 'action-2',
+      revision: 1,
+      digest: 'd'.repeat(64),
+      collectionId: '9787',
+      claimId: 'bafkreiclaim',
+      transactionHash: 'a'.repeat(64),
+      submittedAt: 3,
+    });
+    expect(await form({ action: 'next', ...ref })).toMatchObject({
+      status: 'submitted',
+      claimId: 'bafkreiclaim',
+    });
+  });
+
+  it('answers not_enabled when the Hub does not offer the claim card', async () => {
+    const { form, requests, attachments } = setup();
+    const ref = { form: 'claim', collectionId: '9787' };
+    await form({ action: 'next', ...ref });
+    for (const [field, reply, value] of [
+      ['schema:givenName', 'Lebo'],
+      ['schema:familyName', 'Mokoena'],
+      ['schema:email', 'lebo@gmail.com', 'lebo@gmail.com'],
+      ['schema:addressCountry', 'South Africa'],
+      ['schema:temporalCoverage', 'September'],
+      ['schema:name', 'Data analysis bootcamp'],
+      ['ixo:evidenceType_completionCode', 'UMZ-4411'],
+    ] as Array<[string, string, string?]>) {
+      await form({
+        action: 'answer',
+        ...ref,
+        field,
+        reply,
+        ...(value ? { value } : {}),
+      });
+    }
+    attachments.push({
+      url: 'https://channels.test/media/binding-1/abc?exp=1&sig=x',
+      filename: 'certificate.jpg',
+      mimetype: 'image/jpeg',
+      size: 123456,
+      sha256: 'a'.repeat(64),
+      kind: 'image',
+    });
+    await form({
+      action: 'answer',
+      ...ref,
+      field: 'ixo:evidenceType_certificate',
+      reply: '[photo]',
+    });
+    attachments.length = 0;
+    await form({
+      action: 'skip',
+      ...ref,
+      field: 'dcterms:description_reflection',
+    });
+    expect(await form({ action: 'submit', ...ref })).toMatchObject({
+      ok: false,
+      reason: 'not_enabled',
+      retryable: false,
+    });
+    expect(requests).toHaveLength(0);
   });
 
   it('turns a shared pin into the map cell the web form stores', async () => {

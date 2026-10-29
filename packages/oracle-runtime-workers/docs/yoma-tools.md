@@ -135,23 +135,32 @@ book under `drafts` existed only on unreleased branches and is ignored.
    runtime release that carries WhatsApp files), each checked (https link,
    sha256, size), matched against the question's `acceptedTypes`; a file
    already in the draft (same sha256) answers `duplicate`.
-9. **Sending an application.** The plugin first reads
-   `ctx.hubActions.capabilities()`: when the Hub does not offer
-   `ixo.bid.submit.v1` to the account it answers `not_enabled`, not
-   retryable ("Sending applications from chat isn't switched on for this
-   number yet; everything is saved."). Otherwise it requests the card
-   (`@ixo/action-protocol` 0.6.0, protocol level 4). The request key hashes
-   the draft's last change and its `cardAttempt`: the same answers never make
-   two cards, and a card that was declined, expired, cancelled or failed —
-   or got no outcome by its expiry (plus 60 s) — is cleared and
-   `cardAttempt` bumped, so it can be sent again in a new run. Answers are
-   locked while a card waits. Logged work answers `submit` with `not_yet`: it
-   waits for the Hub's generic transaction card and stays saved, files
-   included.
+9. **Sending.** An application goes out as the application card
+   (`ixo.bid.submit.v1`), logged work as the claim card
+   (`ixo.claim.submit.v1`) — `@ixo/action-protocol` 0.7.0, Hub protocol
+   level 5. The plugin first reads `ctx.hubActions.capabilities()`: when the
+   Hub does not offer that kind to the account it answers `not_enabled`, not
+   retryable ("Sending … from chat isn't switched on for this number yet;
+   everything is saved."). The claim card carries the answers without file
+   questions (`data`, at most 60,000 characters), the summary rows, and one
+   `evidence` entry per file still answering a visible question (`field` as
+   a dotted path, `shops[2].photo` → `shops.2.photo`; the gateway link,
+   filename, type, size and SHA-256; at most 30). A draft that does not fit
+   answers `too_large`, not retryable. On approval the Hub uploads the files
+   to the collection's claims lane as the person, signs the answers, saves the
+   claim to the claims bot and submits it on chain, in one approval.
+   The request key hashes the draft's last change and its `cardAttempt`: the
+   same answers never make two cards, and a card that was declined, expired,
+   cancelled or failed — or got no outcome by its expiry (plus 60 s) — is
+   cleared and `cardAttempt` bumped, so it can be sent again in a new run.
+   A failed card's receipt (`ixo.submission.failed.v1`) is kept on the draft
+   as `lastCard` (`stoppedAt`, `hubSaid`) until the next card is sent; a
+   submitted claim keeps its `claimId` from `ixo.claim.submission.v1`.
+   Answers are locked while a card waits.
 
 ## Known limits
 
-- **Lockfile.** `@ixo/action-protocol` is pinned to 0.6.0, which is not on
+- **Lockfile.** `@ixo/action-protocol` is pinned to 0.7.0, which is not on
   npm yet: `pnpm-lock.yaml` must be regenerated once it is published.
 - **Mainnet only for programmes**: the Jambo worker has no testnet or devnet
   list.

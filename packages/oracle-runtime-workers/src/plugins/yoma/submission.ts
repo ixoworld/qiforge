@@ -1,4 +1,7 @@
-import type { BidSubmitOperation } from '@ixo/action-protocol';
+import type {
+  BidSubmitOperation,
+  ClaimSubmitOperation,
+} from '@ixo/action-protocol';
 import type { Model } from 'survey-core';
 import type { ChainCall } from '../ixo-chain/http';
 import type { Draft, Evidence } from './drafts';
@@ -11,15 +14,14 @@ import {
 import { clip } from './text';
 
 /**
- * Turning a finished application into the Auth Hub card the person approves:
- * `ixo.bid.submit.v1` (`@ixo/action-protocol` 0.6.0). The card carries what
- * the person sees (title and one row per answer) and what the Hub sends to
- * the bids bot as them: the answers as JSON.
- *
- * Claims do not go out yet: they will use the Auth Hub's generic transaction
- * card once it exists. Until then a finished claim stays saved in its draft,
- * files included (`Draft.evidence`), and `summaryRows`/`submittableData`
- * already give what that card will need.
+ * Turning a finished draft into the Auth Hub card the person approves
+ * (`@ixo/action-protocol` 0.7.0, Hub level 5): `ixo.bid.submit.v1` for an
+ * application, `ixo.claim.submit.v1` for a claim. The card carries what the
+ * person sees (title and one row per answer) and what the Hub files as them:
+ * the answers as JSON, and for a claim each file's gateway link, size and
+ * SHA-256. File questions are left out of the answers; the Hub uploads the
+ * files to the claims lane when the person confirms and puts the references
+ * in, then signs the answers, saves the claim and submits it on chain.
  */
 
 /** What a file question holds in the draft until submit, so the form's rules count it as answered. */
@@ -171,6 +173,76 @@ export function buildApplicationOperation(input: {
     role: 'SA',
     summary,
     data: JSON.stringify(submittableData(input.model)),
+  };
+}
+
+/** The card's `data` limit (`string(2, 60000)` in the protocol). */
+export const MAX_CARD_DATA = 60_000;
+/** The card's evidence limits: 30 files, a field of at most 200 characters. */
+export const MAX_CARD_EVIDENCE = 30;
+const MAX_EVIDENCE_FIELD = 200;
+
+/** `shops[2].photo` as the card's evidence field: `shops.2.photo`. */
+export function evidenceField(path: string): string {
+  return path.replace(/\[(\d+)\]\./g, '.$1.');
+}
+
+/**
+ * The files still answering a visible question: a file replaced since, or one
+ * whose question is now hidden, is left out.
+ */
+export function liveEvidence(
+  model: Model,
+  draft: Pick<Draft, 'evidence'>,
+): Evidence[] {
+  const paths = new Set(
+    visibleQuestions(model)
+      .filter((view) => view.input === 'file')
+      .map((view) => view.path),
+  );
+  return draft.evidence.filter((item) => {
+    if (!paths.has(item.path)) return false;
+    const value: unknown = questionAt(model, item.path)?.value;
+    return (Array.isArray(value) ? value : []).some(
+      (file) =>
+        field(file, 'content') === `${PENDING_FILE_PREFIX}${item.sha256}`,
+    );
+  });
+}
+
+/**
+ * The claim card for a finished claim draft, from its open model: rows and
+ * files first, then the answers to send (which clears hidden and file
+ * questions on that model). Undefined when it cannot fit the card: more
+ * files than the card takes, or a question name too long to address one.
+ */
+export function buildClaimOperation(input: {
+  network: Network;
+  model: Model;
+  draft: Pick<Draft, 'collectionId' | 'title' | 'evidence'>;
+}): ClaimSubmitOperation | undefined {
+  const summary = summaryRows(input.model);
+  const evidence = liveEvidence(input.model, input.draft).map((item) => ({
+    field: evidenceField(item.path),
+    url: item.url,
+    filename: item.filename,
+    mimetype: item.mimetype,
+    size: item.size,
+    sha256: item.sha256,
+  }));
+  if (
+    evidence.length > MAX_CARD_EVIDENCE ||
+    evidence.some((item) => item.field.length > MAX_EVIDENCE_FIELD)
+  )
+    return undefined;
+  return {
+    kind: 'ixo.claim.submit.v1',
+    network: networkLabel(input.network),
+    collectionId: input.draft.collectionId,
+    title: clip(input.draft.title, 120),
+    summary,
+    data: JSON.stringify(submittableData(input.model)),
+    evidence,
   };
 }
 
