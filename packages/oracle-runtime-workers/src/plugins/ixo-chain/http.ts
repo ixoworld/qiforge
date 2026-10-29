@@ -10,7 +10,12 @@ import {
   fetchWithoutRedirects,
 } from '../../core/domain-context/transport';
 
-export type Source = 'chain' | 'blocksync';
+/**
+ * Where a read goes. `chain` and `blocksync` are ixo-chain's; the Yoma
+ * plugin (`../yoma`) adds the Jambo worker's job list and the documents
+ * entities link to (profiles, forms), under the same policy.
+ */
+export type Source = 'chain' | 'blocksync' | 'job-list' | 'document';
 
 export type FailureReason =
   | 'rate_limited'
@@ -61,6 +66,8 @@ export const ERROR_BODY_MAX_BYTES = 8 * 1024;
 const SOURCE_NAME: Record<Source, string> = {
   chain: 'The chain node',
   blocksync: 'Blocksync',
+  'job-list': 'The Yoma job list',
+  document: 'The document host',
 };
 
 function rateLimited(source: Source): Failure {
@@ -99,7 +106,7 @@ function timedOut(source: Source): Failure {
     detail:
       source === 'blocksync'
         ? 'Blocksync did not answer in time; narrow the question (fewer rows or requests).'
-        : 'The chain node did not answer in time; try again shortly.',
+        : `${SOURCE_NAME[source]} did not answer in time; try again shortly.`,
     retryable: true,
   };
 }
@@ -271,6 +278,8 @@ function recordHealth(upstream: string, attempt: Attempt<unknown>): void {
 export interface Read {
   label: string;
   upstream: string;
+  /** The log line's tag; `[ixo-chain]` unless the reading plugin names its own. */
+  tag?: string;
 }
 
 /**
@@ -286,10 +295,11 @@ export async function withRetry<T>(
   read: Read,
   attempt: () => Promise<Attempt<T>>,
 ): Promise<Outcome<T>> {
+  const tag = read.tag ?? '[ixo-chain]';
   const held = heldBack(read.upstream);
   if (held) {
     console.warn(
-      `[ixo-chain] ${read.label} not attempted: the upstream failed moments ago (${held.note})`,
+      `${tag} ${read.label} not attempted: the upstream failed moments ago (${held.note})`,
     );
     return { ok: false, failure: held.failure };
   }
@@ -297,7 +307,7 @@ export async function withRetry<T>(
   recordHealth(read.upstream, first);
   if (first.ok && !first.retry) return { ok: true, value: first.value };
   if (first.ok || !first.quiet)
-    console.warn(`[ixo-chain] ${read.label} attempt 1 failed: ${first.note}`);
+    console.warn(`${tag} ${read.label} attempt 1 failed: ${first.note}`);
   const wait =
     !first.ok && first.retryAfterMs !== undefined
       ? first.retryAfterMs
@@ -313,12 +323,10 @@ export async function withRetry<T>(
   recordHealth(read.upstream, second);
   if (second.ok) {
     if (second.retry)
-      console.warn(
-        `[ixo-chain] ${read.label} attempt 2 failed: ${second.note}`,
-      );
+      console.warn(`${tag} ${read.label} attempt 2 failed: ${second.note}`);
     return { ok: true, value: second.value };
   }
-  console.warn(`[ixo-chain] ${read.label} attempt 2 failed: ${second.note}`);
+  console.warn(`${tag} ${read.label} attempt 2 failed: ${second.note}`);
   return first.ok
     ? { ok: true, value: first.value }
     : { ok: false, failure: second.failure };

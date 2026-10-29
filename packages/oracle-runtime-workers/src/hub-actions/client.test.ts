@@ -75,7 +75,7 @@ describe('Hub action HTTP client', () => {
         bindingRevision: reference.bindingRevision,
       }),
     ).toEqual(options);
-    expect(new URL(requests[0]!.url).searchParams.get('version')).toBe('4');
+    expect(new URL(requests[0]!.url).searchParams.get('version')).toBe('5');
     expect(new URL(requests[0]!.url).searchParams.get('bindingId')).toBe(
       'chb_two',
     );
@@ -256,10 +256,125 @@ describe('Hub action HTTP client', () => {
     });
     expect((await client.status(id)).outcome).toEqual(v2);
     expect(urls).toEqual([
-      'GET /api/internal/actions/operations/capabilities?version=4',
-      'POST /api/internal/actions/operations?version=4',
-      `GET /api/internal/actions/operations/${id}?version=4`,
+      'GET /api/internal/actions/operations/capabilities?version=5',
+      'POST /api/internal/actions/operations?version=5',
+      `GET /api/internal/actions/operations/${id}?version=5`,
     ]);
+  });
+
+  it('reads the outcome of a claim card, submitted or failed at a named step', async () => {
+    const tuple = { actionId: id, revision: 1, digest: reference.digest };
+    const submitted = {
+      version: 'ixo.auth-outcome/2' as const,
+      eventId: 'claim-1',
+      reference: { ...reference, title: 'Send your work in' },
+      ownerDid: 'did:ixo:second',
+      authorizedRevision: 1,
+      authorizedDigest: reference.digest,
+      sequence: 6,
+      status: 'succeeded' as const,
+      receipt: {
+        kind: 'ixo.claim.submission.v1' as const,
+        ...tuple,
+        collectionId: '44000',
+        claimId: 'bafkreiexample',
+        transactionHash: 'a'.repeat(64),
+        submittedAt: 1,
+      },
+      occurredAt: 1,
+    };
+    const failed = {
+      ...submitted,
+      eventId: 'claim-2',
+      sequence: 7,
+      status: 'failed' as const,
+      receipt: {
+        kind: 'ixo.submission.failed.v1' as const,
+        ...tuple,
+        step: 'evidence',
+        message: 'A photo did not match the file that was sent',
+        failedAt: 2,
+      },
+      occurredAt: 2,
+    };
+    let answer: unknown = submitted;
+    const client = new HubActionClient({
+      origin: 'https://hub.test',
+      key: 'oracle-secret',
+      fetcher: {
+        fetch: async () =>
+          Response.json({
+            reference,
+            ownerDid: 'did:ixo:second',
+            revision: 1,
+            digest: reference.digest,
+            reviewStatus: 'approved',
+            operationStatus: 'done',
+            outcome: answer,
+          }),
+      },
+    });
+    expect((await client.status(id)).outcome?.receipt).toEqual(
+      submitted.receipt,
+    );
+    answer = failed;
+    expect((await client.status(id)).outcome?.receipt).toEqual(failed.receipt);
+  });
+
+  it('reads the outcome of an application card, sent or failed at a named step', async () => {
+    const tuple = { actionId: id, revision: 1, digest: reference.digest };
+    const sent = {
+      version: 'ixo.auth-outcome/2' as const,
+      eventId: 'bid-1',
+      reference: { ...reference, title: 'Send your application' },
+      ownerDid: 'did:ixo:second',
+      authorizedRevision: 1,
+      authorizedDigest: reference.digest,
+      sequence: 6,
+      status: 'succeeded' as const,
+      receipt: {
+        kind: 'ixo.bid.submission.v1' as const,
+        ...tuple,
+        collectionId: '44000',
+        bidId: 'bid-123',
+        submittedAt: 1,
+      },
+      occurredAt: 1,
+    };
+    const failed = {
+      ...sent,
+      eventId: 'bid-2',
+      sequence: 7,
+      status: 'failed' as const,
+      receipt: {
+        kind: 'ixo.submission.failed.v1' as const,
+        ...tuple,
+        step: 'bid_bot',
+        message: 'The bids bot refused the application (HTTP 403)',
+        failedAt: 2,
+      },
+      occurredAt: 2,
+    };
+    let answer: unknown = sent;
+    const client = new HubActionClient({
+      origin: 'https://hub.test',
+      key: 'oracle-secret',
+      fetcher: {
+        fetch: async () =>
+          Response.json({
+            reference,
+            ownerDid: 'did:ixo:second',
+            revision: 1,
+            digest: reference.digest,
+            reviewStatus: 'approved',
+            operationStatus: 'done',
+            outcome: answer,
+          }),
+      },
+    });
+    expect((await client.status(id)).outcome?.receipt).toEqual(sent.receipt);
+    answer = failed;
+    expect((await client.status(id)).outcome?.receipt).toEqual(failed.receipt);
   });
 
   it('turns a Hub transfer refusal (400) into a refusal the model can relay', async () => {

@@ -20,6 +20,8 @@ export const REST_ATTEMPT_TIMEOUT_MS = 8_000;
 export interface RestOptions {
   /** Names the read in log lines (never the path: it carries an address). */
   label: string;
+  /** The log line's tag (`[ixo-chain]` by default). */
+  tag?: string;
   timeoutMs?: number;
   maxBytes?: number;
   /** A 404 is a quiet `not_found` failure instead of `unavailable`. */
@@ -99,7 +101,11 @@ export async function restJson<S extends z.ZodType>(
   const url = `${base}${path}`;
   const read = await withRetry<Found<z.infer<S>>>(
     call,
-    { label: opts.label, upstream: base },
+    {
+      label: opts.label,
+      upstream: base,
+      ...(opts.tag ? { tag: opts.tag } : {}),
+    },
     async () => {
       const answer = await exchange(
         call,

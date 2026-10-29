@@ -1,0 +1,177 @@
+{
+  "@context": {
+    "ixo": "https://w3id.org/ixo/ns/protocol/",
+    "@id": "@type",
+    "type": "@type",
+    "@protected": true
+  },
+  "type": "ixo:entity#surveyTemplate",
+  "question": {
+    "_namespaces": {
+      "schema": "https://schema.org/",
+      "ixo": "https://w3id.org/ixo/vocab/",
+      "dcterms": "http://purl.org/dc/terms/"
+    },
+    "title": "Tell us about the milestone you finished",
+    "description": "Well done for finishing your milestone! Use this form to tell Umuzi about it. You need two things: 1. The completion code Umuzi sent you. 2. Your milestone certificate (a PDF or a photo of it). Umuzi will check your answers and let you know. A red star * means you must answer.",
+    "showProgressBar": "top",
+    "progressBarType": "pages",
+    "showQuestionNumbers": "off",
+    "questionErrorLocation": "bottom",
+    "requiredText": "*",
+    "completeText": "Finish",
+    "pageNextText": "Next",
+    "pagePrevText": "Back",
+    "pages": [
+      {
+        "name": "page_person",
+        "title": "About you",
+        "elements": [
+          {
+            "type": "panel",
+            "name": "schema:Person",
+            "title": "Who you are",
+            "elements": [
+              {
+                "type": "text",
+                "name": "schema:givenName",
+                "title": "Your first name",
+                "isRequired": true,
+                "requiredErrorText": "Please write your first name."
+              },
+              {
+                "type": "text",
+                "name": "schema:familyName",
+                "title": "Your last name",
+                "isRequired": true,
+                "requiredErrorText": "Please write your last name."
+              },
+              {
+                "type": "text",
+                "name": "schema:email",
+                "title": "Your Umuzi email address",
+                "description": "The email address Umuzi gave you for the programme, not your personal email. We use it to find you. Check your spelling before you go on.",
+                "inputType": "email",
+                "isRequired": true,
+                "requiredErrorText": "Please write your Umuzi email address.",
+                "validators": [
+                  {
+                    "type": "email",
+                    "text": "Please check your email address. It should look like yourname@example.com"
+                  }
+                ]
+              },
+              {
+                "type": "radiogroup",
+                "name": "schema:addressCountry",
+                "title": "Which country do you live in?",
+                "description": "Phase 2 is for people who live in South Africa. Tap South Africa to confirm.",
+                "isRequired": true,
+                "requiredErrorText": "Please tap South Africa to confirm where you live.",
+                "choices": [
+                  {
+                    "value": "ZA",
+                    "text": "South Africa"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "page_milestone",
+        "title": "Your milestone",
+        "elements": [
+          {
+            "type": "panel",
+            "name": "schema:Project",
+            "title": "The milestone you finished",
+            "elements": [
+              {
+                "type": "dropdown",
+                "name": "schema:temporalCoverage",
+                "title": "Which month's stipend are you making a claim for?",
+                "description": "Tap the box and choose the month this claim is for.",
+                "isRequired": true,
+                "requiredErrorText": "Please choose the month you are claiming for.",
+                "placeholder": "Choose a month",
+                "choices": [
+                  {
+                    "value": "2026-09",
+                    "text": "September 2026"
+                  },
+                  {
+                    "value": "2026-10",
+                    "text": "October 2026"
+                  },
+                  {
+                    "value": "2026-11",
+                    "text": "November 2026"
+                  },
+                  {
+                    "value": "2026-12",
+                    "text": "December 2026"
+                  },
+                  {
+                    "value": "2027-01",
+                    "text": "January 2027"
+                  },
+                  {
+                    "value": "2027-02",
+                    "text": "February 2027"
+                  },
+                  {
+                    "value": "2027-03",
+                    "text": "March 2027"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "name": "schema:name",
+                "title": "What is the name of the milestone you finished?",
+                "description": "Write the name as it shows on your milestone certificate. For example: Block 3 - Social Gig. Do not worry about dashes or capital letters.",
+                "isRequired": true,
+                "requiredErrorText": "Please write the name of your milestone."
+              },
+              {
+                "type": "text",
+                "name": "ixo:evidenceType_completionCode",
+                "title": "Your completion code",
+                "description": "The code Umuzi sent you when you finished your milestone. Find that message, press and hold the code to copy it, then paste it here. Or type it carefully.",
+                "isRequired": true,
+                "requiredErrorText": "Please type your completion code."
+              },
+              {
+                "type": "file",
+                "name": "ixo:evidenceType_certificate",
+                "title": "Your milestone certificate",
+                "description": "Add the certificate you got for this milestone. If it is a PDF, open it and save it to your phone first, then tap here and choose it. A clear photo or a screenshot of the certificate also works.",
+                "acceptedTypes": "image/*,.pdf",
+                "storeDataAsText": false,
+                "waitForUpload": true,
+                "maxSize": 10485760,
+                "isRequired": true,
+                "requiredErrorText": "Please add your milestone certificate."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "page_experience",
+        "title": "Your experience",
+        "elements": [
+          {
+            "type": "comment",
+            "name": "dcterms:description_reflection",
+            "title": "What was it like to do this milestone? (optional)",
+            "description": "Tell us what went well and what was hard. You can write in any language. You can skip this. Your answer does not change whether your milestone is approved. It only helps Umuzi improve the programme.",
+            "rows": 4
+          }
+        ]
+      }
+    ]
+  }
+}
