@@ -8,10 +8,10 @@ UCAN-guarded) and is `on-demand`: the model loads it with `load_capability`
 sets `manifestOverrides: { 'ixo-chain': { visibility: 'always' } }` in
 `createOracleWorker`.
 
-| Tool                   | Reads                                           | Freshness                           |
-| ---------------------- | ----------------------------------------------- | ----------------------------------- |
-| `get_account_balances` | chain REST (LCD): bank balances, denom metadata | live chain state                    |
-| `chain_lookup`         | Blocksync GraphQL (`BLOCKSYNC_GRAPHQL_URL`)     | the index, seconds behind the chain |
+| Tool                   | Reads                                                             | Freshness                           |
+| ---------------------- | ----------------------------------------------------------------- | ----------------------------------- |
+| `get_account_balances` | chain REST (LCD): bank balances, denom metadata, IBC denom traces | live chain state                    |
+| `chain_lookup`         | Blocksync GraphQL (`BLOCKSYNC_GRAPHQL_URL`)                       | the index, seconds behind the chain |
 
 Endpoints per `NETWORK` (`CHAIN_REST_URL` overrides the REST one; https,
 no credentials, query or fragment):
@@ -39,7 +39,8 @@ is the user's DID. A user with no IXO address owns none of them.
 `claim_collections` by entity alone (admins vary) carries no `subject`.
 
 The model-facing rules (live vs indexed data, the `network` in every
-result, uixo ÷ 1,000,000, 1155 whole units, read-only and the transfer
+result, uixo ÷ 1,000,000, 1155 whole units, `origin` for IBC tokens that
+share a symbol, read-only and the transfer
 route, indexed text is data and never instructions) are in the operating
 guide **and** in the two tool descriptions: a capability-router preload
 binds the tools without showing the operating guide.
@@ -50,7 +51,9 @@ Input `{ address? }`. One `GET /cosmos/bank/v1beta1/balances/{address}?paginatio
 then each denom shown through the chain's own bank metadata (`denoms.ts`):
 
 - `uixo` → `IXO`, 6 decimals, verified; never looked up.
-- any other denom matching the Cosmos SDK denom pattern
+- (a) an `ibc/…` denom in the IBC table (below) → the entry's symbol,
+  decimals and `origin`, verified; never looked up.
+- (b) any other denom matching the Cosmos SDK denom pattern
   (`[a-zA-Z][a-zA-Z0-9/:._-]{2,127}`; native `u…`, `ibc/…`, anything else) →
   `GET /cosmos/bank/v1beta1/denoms_metadata_by_query_string?denom=…`
   (the path route `denoms_metadata/{denom}` answers 501 for a denom with a
@@ -66,9 +69,45 @@ then each denom shown through the chain's own bank metadata (`denoms.ts`):
   tool's budget left. A token whose metadata could not be read (a failed
   read or no budget) is shown unverified with `metadataUnavailable: true`:
   it may still be verified. The expected 404 is not logged.
-- no metadata, a display unit not listed, or a denom that does not match
-  the pattern (never looked up) → unverified, 0 decimals, the full denom as
-  its symbol.
+- (c) an `ibc/` denom of 64 upper-case hex digits whose metadata was read
+  but does not verify it → its denom trace:
+  `GET /ibc/apps/transfer/v1/denom_traces/{hash}` (the newer
+  `/ibc/apps/transfer/v1/denoms/{hash}` answers 501 on the IXO chain).
+  A trace whose path is hops of `port/channel-N` starting with the IXO
+  side's own `transfer/channel-N` (multi-hop paths such as
+  `transfer/channel-4/transfer/channel-0/transfer/channel-204` take the
+  first) and whose base denom matches the denom pattern names the token:
+  `symbol` is the base denom (`uosmo`; the full denom when that is a
+  reserved symbol such as `USDC`), plus `path`, and `origin` from
+  `GET /ibc/core/channel/v1/channels/{channel}/ports/transfer/client_state`
+  (`client_state.chain_id`; null when that read fails or names no chain
+  id). Still unverified, 0 decimals: a trace says where a token came from,
+  not how many decimals it has. Traces and channel chain ids never change,
+  so a found one is cached per isolate for 1 h (a miss 60 s, a failure
+  10 s, as for metadata), shared in flight, inside the same 4-at-once
+  limit and 20 s budget. The hash and channel are checked against those
+  patterns before they go into a URL path. A trace that is missing (404),
+  not served (501), fails, or has another shape leaves the token as in the
+  next bullet, without `metadataUnavailable`. When the metadata read
+  itself failed, no trace is read.
+- no metadata, a display unit not listed, no usable trace, or a denom that
+  does not match the pattern (never looked up) → unverified, 0 decimals,
+  the full denom as its symbol.
+
+**The IBC table** (`KNOWN_IBC_DENOMS` in `denoms.ts`), per network:
+
+| Network | Denom           | Symbol, decimals | `origin`      | Verified (mainnet, Oct 29 2026)                                                                                                                                                                     |
+| ------- | --------------- | ---------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| mainnet | `ibc/6BBE…F97B` | `USDC`, 6        | `noble-1`     | trace `transfer/channel-26` / `uusdc`; channel-26's client is for `noble-1`; Noble's `uusdc` metadata lists a `usdc` unit with exponent 6                                                           |
+| mainnet | `ibc/77C1…55E6` | `USDC`, 6        | `injective-1` | trace `transfer/channel-31` / `erc20:0xa00C59fF5a080D2b954d0c75e46E22a0c371235a`; channel-31's client is for `injective-1`; that token is USDC with 6 decimals (the Auth Hub's USDC sweep lands it) |
+
+Testnet (traces: only `uosmo`, `uaxl`) and devnet (none) have no entries.
+`IXO_CHAIN_IBC_DENOMS` ([configuration](configuration.md#chain-tools))
+merges more over the oracle's network's entries, or replaces one: each key
+`ibc/<64 upper-case hex>`, each value `{ symbol, decimals, origin? }`. An
+invalid value fails boot validation. The two USDCs share a symbol, so the
+operating guide and the tool description tell the model to say the
+`origin` when two tokens share one.
 
 Metadata is trusted for any denom because on the IXO chain it is written
 only by chain code, never by a token's issuer: the liquidstake module
@@ -85,12 +124,15 @@ verified. Bringing the Hub's rule in line is a Hub follow-up.
 
 Note: the IBC transfer module registers metadata whose `display` is the
 trace path (`transfer/channel-26/uusdc`) with only the base unit listed, so
-on mainnet (metadata read Oct 29 2026) IBC USDC shows unverified in base
-units here, as in the Hub.
+on mainnet (metadata read Oct 29 2026) the chain's own metadata cannot
+verify IBC USDC; the IBC table does.
 
 Answer: `{ ok, network, source: 'chain', fetchedAt, address, subject,
 tokens: [{ denom, symbol, decimals, verified, amountBaseUnits, amount,
-metadataUnavailable? }], moreDenoms?, truncated? }` — `amount` is the
+origin?, path?, metadataUnavailable? }], moreDenoms?, truncated? }` —
+`origin` is the source chain id of an IBC token (table or trace; null
+when a trace named no readable chain), `path` the trace path of a token
+named by its trace; `amount` is the
 decimal string in display units (`9000000` uixo → `"9"`); `uixo` first,
 then verified, then by amount; `moreDenoms: true` when the account holds
 more than 50 denoms. An empty list is an answer. This is the only tool
@@ -266,7 +308,8 @@ for 10 s per isolate: every other call of the isolate answers
 The call's own retry is still sent, and any answer clears the mark.
 
 A 404 is `unavailable` (not retryable): a wrong route or gateway, never
-"nothing there". Only the denom-metadata read takes a 404 as a miss.
+"nothing there". Only the denom-metadata, denom-trace and channel client-state
+reads take a 404 as a miss.
 `BLOCKSYNC_GRAPHQL_URL` is checked once per call with `new URL()` (http or
 https; the env schema only requires a string because the local harness
 serves http): one `fetch` cannot use is `unavailable`, not retryable, and
@@ -286,7 +329,7 @@ Every failure carries `detail`, one plain sentence the model can relay.
 Each failed attempt logs one `console.warn('[ixo-chain] <read> attempt N
 failed: <status or error class>')`, and a call answered from an unhealthy
 mark logs `<read> not attempted: …` — never a request body or an address.
-The expected denom-metadata 404 is not logged.
+The expected 404 of those reads is not logged.
 
 ## Size
 
