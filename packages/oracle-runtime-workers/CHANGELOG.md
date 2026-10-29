@@ -1,5 +1,11 @@
 # @ixo/oracle-runtime-workers
 
+## 0.28.1
+
+### Patch Changes
+
+- [#412](https://github.com/ixoworld/qiforge/pull/412) [`911e637`](https://github.com/ixoworld/qiforge/commit/911e637ee855199c42439842f85ccb74d424f732) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - IBC balances show their source token and chain (`origin`); USDC from Noble and Injective show as USDC with 6 decimals on mainnet; `IXO_CHAIN_IBC_DENOMS` adds more.
+
 ## 0.28.0
 
 ### Minor Changes
