@@ -1,5 +1,11 @@
 # @ixo/oracle-runtime-workers
 
+## 0.28.2
+
+### Patch Changes
+
+- [#414](https://github.com/ixoworld/qiforge/pull/414) [`15d7641`](https://github.com/ixoworld/qiforge/commit/15d76414bae6b699f0163ac80b538c1ba77ad1dc) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - An unverified IBC balance stays named by its full `ibc/…` denom: its denom trace is returned beside it as `trace: { baseDenom, claimedChain, path }`, which the tool tells the model is self-reported by the sending chain, and `origin` is set only for tokens verified by the IBC table. A light client can claim any chain id, so a trace must never make an arbitrary token read as, say, USDC from Noble.
+
 ## 0.28.1
 
 ### Patch Changes
