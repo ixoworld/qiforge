@@ -76,11 +76,12 @@ const secureUrlSchema = z.string().refine((raw) => isSecureUrl(raw), {
 });
 
 /**
- * An https base URL for a chain RPC (a path such as `/rpc/` is fine): no
- * credentials, query or fragment, which the verifier would refuse at the
- * first lookup otherwise.
+ * An https base URL for a chain RPC or REST gateway (a path such as `/rpc/`
+ * or `/rest` is fine): no credentials, query or fragment, which the
+ * verifier would refuse at the first lookup otherwise. The ixo-chain
+ * plugin's `CHAIN_REST_URL` uses the same rule.
  */
-const rpcOriginSchema = z.string().refine(
+export const rpcOriginSchema = z.string().refine(
   (raw) => {
     try {
       const url = new URL(raw);

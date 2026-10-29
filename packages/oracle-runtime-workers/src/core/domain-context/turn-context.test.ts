@@ -176,6 +176,10 @@ describe('prepareDomainContext: prompt block', () => {
     const lines = prompt.split('\n');
     expect(lines[0]).toBe(DOMAIN_CONTEXT_OPEN);
     expect(lines[1]).toBe(DOMAIN_CONTEXT_PRECEDENCE);
+    // The guidance opens by saying whose the domain DIDs are.
+    expect(lines[2]).toMatch(
+      /^The oracle domain and its DIDs are this oracle's, never the user's \(the user is named under "Who you are talking to"\)\. /,
+    );
     expect(lines.at(-1)).toBe(DOMAIN_CONTEXT_CLOSE);
     expect(prompt.split(DOMAIN_CONTEXT_OPEN)).toHaveLength(2);
     expect(prompt.split(DOMAIN_CONTEXT_CLOSE)).toHaveLength(2);
