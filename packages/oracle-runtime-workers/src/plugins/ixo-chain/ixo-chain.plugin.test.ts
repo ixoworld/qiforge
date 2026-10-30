@@ -99,7 +99,7 @@ describe('IxoChainPlugin', () => {
     expect(plugin.operatingGuide.startsWith('### ')).toBe(true);
     expect(plugin.operatingGuide.split('\n').length).toBeLessThanOrEqual(7);
     expect(plugin.operatingGuide).toContain(
-      '- Start with `get_account_overview` for broad account questions; for one fact use `get_account_balances` or `chain_lookup`.',
+      '- Broad account questions: `get_account_overview`; one fact: `get_account_balances` or `chain_lookup`.',
     );
   });
 
