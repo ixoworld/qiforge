@@ -153,6 +153,64 @@ describe('draftReplyPlan', () => {
       summary: 'Review form',
     });
   });
+  it('turns a prepared Yoma application or claim card into the same review card', () => {
+    const id = 'Y'.repeat(32);
+    const actionReference = {
+      version: 'ixo.auth-action/1',
+      id,
+      accountId: 'account-one',
+      bindingId: 'chb_one',
+      bindingRevision: 1,
+      revision: 1,
+      digest: 'b'.repeat(64),
+      url: `https://hub.test/a/${id}`,
+      expiresAt: 1999999999999,
+      title: 'Send your work in',
+    };
+    const plan = draftReplyPlan({
+      steps: [
+        {
+          text: '',
+          toolCalls: [{ id: 'yoma-call', name: 'yoma_form', args: {} }],
+        },
+      ],
+      toolResults: new Map([
+        [
+          'yoma-call',
+          JSON.stringify({
+            ok: true,
+            status: 'prepared',
+            summary: actionReference.title,
+            actionReference,
+            note: HUB_ACTION_CARD_NOTE,
+          }),
+        ],
+      ]),
+      limits: limits(),
+      canSpill: false,
+    });
+    expect(plan).toContainEqual({
+      kind: 'hub-action',
+      actionReference,
+      summary: actionReference.title,
+    });
+    // Another answer from the same tool (a question, a draft) is no card.
+    expect(
+      draftReplyPlan({
+        steps: [
+          {
+            text: 'Next question.',
+            toolCalls: [{ id: 'yoma-q', name: 'yoma_form', args: {} }],
+          },
+        ],
+        toolResults: new Map([
+          ['yoma-q', JSON.stringify({ ok: true, status: 'question' })],
+        ]),
+        limits: limits(),
+        canSpill: false,
+      }).some((part) => part.kind === 'hub-action'),
+    ).toBe(false);
+  });
   it('drops narration before a tool call but keeps substantive text written before one', () => {
     const plan = draftReplyPlan({
       steps: [
