@@ -11,6 +11,7 @@ import {
   CHAIN_TX_RESERVATION_MODES,
   CHAIN_TX_VOTE_OPTIONS,
   DENOM,
+  sanitizeSubmissionText,
   type ChainTxMessageType,
 } from '@ixo/action-protocol';
 import { z } from 'zod';
@@ -242,6 +243,15 @@ const plainText = (max: number, what: string) =>
         'Plain text: not blank, no control, invisible or text-direction characters.',
     })
     .describe(what);
+/**
+ * Free text published on chain is exactly what the review page shows:
+ * `sanitizeSubmissionText` (the protocol's own check) leaves it unchanged,
+ * so nothing link-like (a web or email address, a dotted name such as
+ * report.pdf), no hidden characters, single spaces, none at either end.
+ */
+const SHOWN_AS_IS =
+  'Shown exactly as written: no web or email addresses or dotted names such as report.pdf, no hidden characters, single spaces and none at either end.';
+const shownAsIs = (value: string) => sanitizeSubmissionText(value) === value;
 const link = (ipfs: boolean, what: string) =>
   z
     .string()
@@ -303,19 +313,18 @@ const linkDescription = (what: string) =>
   z
     .string()
     .max(300)
-    .refine((value) => !hasUnsafeText(value), {
-      message: 'No control, invisible or text-direction characters.',
+    .refine((value) => !hasUnsafeText(value) && shownAsIs(value), {
+      message: SHOWN_AS_IS,
     })
     .describe(what);
 const linkRight = z
   .string()
   .max(300)
   .refine(
-    (value) => value === '' || (!hasUnsafeText(value) && /\S/.test(value)),
-    {
-      message:
-        'Plain text: not blank, no control, invisible or text-direction characters.',
-    },
+    (value) =>
+      value === '' ||
+      (!hasUnsafeText(value) && /\S/.test(value) && shownAsIs(value)),
+    { message: SHOWN_AS_IS },
   )
   .optional()
   .describe('Optional: the rights that apply to it.');
@@ -331,11 +340,12 @@ const iidType = (what: string) =>
 /** A display amount: a plain decimal in the token's units, as the user said it. */
 const DISPLAY_AMOUNT = /^(0|[1-9][0-9]*)(\.[0-9]+)?$/;
 /**
- * A stake's IXO amount: at most 72 whole digits and 6 decimals, so the
- * converted amount stays within the protocol's base units (78 digits) and an
- * over-long amount is refused here, as `amount`.
+ * A stake's IXO amount: at most 72 whole digits and 6 significant decimals
+ * (trailing zeros beyond them carry no value), so the converted amount stays
+ * within the protocol's base units (78 digits) and an over-long amount is
+ * refused here, as `amount`.
  */
-const IXO_AMOUNT = /^(0|[1-9][0-9]{0,71})(\.[0-9]{1,6})?$/;
+const IXO_AMOUNT = /^(0|[1-9][0-9]{0,71})(\.(?=[0-9])[0-9]{0,6}0*)?$/;
 const ixoAmount = z
   .string()
   .max(80)
@@ -393,14 +403,16 @@ const payments = z
           .boolean()
           .optional()
           .describe(
-            'true: the payment is shared with the network and the oracle.',
+            'true: the payment is shared with the network and the oracle (left out on a change: kept).',
           ),
       })
       .optional()
       .describe('Paid to the filer when a claim is approved.'),
     rejection: paymentLeg('Paid to the filer when a claim is rejected.'),
   })
-  .describe('What the collection pays; a leg left out pays nothing.');
+  .describe(
+    'What the collection pays. A new collection: a leg left out pays nothing. A change: a leg left out keeps what it pays now, and `amount: []` stops it.',
+  );
 
 /** Refuses an end at or before a given start, on `endDate` (the protocol's rule). */
 function endAfterStart(
@@ -589,7 +601,7 @@ export const CHAIN_TX_CATALOG = {
   'ixo.token.retire': {
     summary:
       'use up (retire) impact tokens the owner holds, for good, for example to offset emissions.',
-    rules: `Uses up impact tokens the owner holds, for good: retired tokens can never be sold, moved or used again, and nothing undoes it. Never retire without the owner clearly asking for it. Ask which tokens and how many, where it counts (\`jurisdiction\`: a two-letter country code such as \`KE\`, optionally with a region and postal code such as \`KE-30\` or \`ZA-WC 7700\`, or \`Global\` for everywhere) and why, in their words (\`reason\`, up to 200 characters, for example \`offset\`). Find the token ids with chain_lookup token_balances: each line is a token \`id\` and a whole \`amount\` (impact tokens have no decimals), 1 to ${CHAIN_TX_MAX_TOKEN_LINES} lines, all of one kind of token. Say it like: “Retire 10 of your carbon credits for good, to offset your 2026 travel. This can’t be undone.”`,
+    rules: `Uses up impact tokens the owner holds, for good: retired tokens can never be sold, moved or used again, and nothing undoes it. Never retire without the owner clearly asking for it. Ask which tokens and how many, where it counts (\`jurisdiction\`: a two-letter country code such as \`KE\`, optionally with a region and postal code such as \`KE-30\` or \`ZA-WC 7700\`, or \`Global\` for everywhere) and why, in their words (\`reason\`, up to 200 characters, for example \`offset\`; written on chain exactly as given, so no web addresses or file names and no hidden characters). Find the token ids with chain_lookup token_balances: each line is a token \`id\` and a whole \`amount\` (impact tokens have no decimals), 1 to ${CHAIN_TX_MAX_TOKEN_LINES} lines, all of one kind of token. Say it like: “Retire 10 of your carbon credits for good, to offset your 2026 travel. This can’t be undone.”`,
     schema: z.strictObject({
       type: z.literal('ixo.token.retire'),
       tokens: z
@@ -609,7 +621,10 @@ export const CHAIN_TX_CATALOG = {
           'Global, or a two-letter country code with an optional region and postal code (KE, KE-30, ZA-WC 7700).',
         )
         .describe('Where the retirement counts: a country code or Global.'),
-      reason: plainText(200, 'Why, in the owner’s words (e.g. offset).'),
+      reason: plainText(200, 'Why, in the owner’s words (e.g. offset).').refine(
+        shownAsIs,
+        { message: SHOWN_AS_IS },
+      ),
     }),
   },
   'cosmos.staking.delegate': {
@@ -801,7 +816,7 @@ export const CHAIN_TX_CATALOG = {
   'ixo.claims.update-collection-payments': {
     summary:
       'change what a collection pays when claims are filed, checked, approved or rejected.',
-    rules: `Replaces what a claim collection pays, with the same kind of permission and \`adminAddress\` as \`ixo.claims.update-collection-state\` (permission \`change-collection-payments\`). Read the current payments first with chain_lookup claim_collection and send the whole new set: a leg left out pays nothing. Legs: \`submission\` (to the filer when a claim is filed), \`evaluation\` (to the checker for each check), \`approval\` (to the filer when approved; \`networkSplit: true\` shares it with the network and the oracle) and \`rejection\` (to the filer when rejected). Each leg has \`amount\`, up to ${CHAIN_TX_MAX_PAYMENT_COINS} coins of different tokens, each \`{denom, amountBaseUnits}\` in base units (IXO: denom \`uixo\`, 1 IXO = 1000000; another token’s denom copied exactly from a lookup, never a guessed \`ibc/…\` denom), and optional \`payAfterSeconds\` (up to ${CHAIN_TX_MAX_SECONDS}: it can be collected only that much later). Collections that pay in contract tokens can’t be changed here. Say it like: “Pay 50 IXO for each approved claim in the Clean Water collection, and nothing for filing or rejected claims.”`,
+    rules: `Changes what a claim collection pays, with the same kind of permission and \`adminAddress\` as \`ixo.claims.update-collection-state\` (permission \`change-collection-payments\`). Read the current payments first with chain_lookup claim_collection, and send only the legs that change: a leg left out keeps exactly what it pays now, and a leg with \`amount: []\` stops paying. Legs: \`submission\` (to the filer when a claim is filed), \`evaluation\` (to the checker for each check), \`approval\` (to the filer when approved; \`networkSplit: true\` shares it with the network and the oracle) and \`rejection\` (to the filer when rejected). Each leg has \`amount\`, up to ${CHAIN_TX_MAX_PAYMENT_COINS} coins of different tokens, each \`{denom, amountBaseUnits}\` in base units (IXO: denom \`uixo\`, 1 IXO = 1000000; another token’s denom copied exactly from a lookup, never a guessed \`ibc/…\` denom), and optional \`payAfterSeconds\` (up to ${CHAIN_TX_MAX_SECONDS}: it can be collected only that much later). A leg that pays in contract tokens can’t be replaced here: leave it out and it stays as it is. Say it like: “Pay 50 IXO for each approved claim in the Clean Water collection from now on; the other payments stay as they are.”`,
     schema: z.strictObject({
       type: z.literal('ixo.claims.update-collection-payments'),
       collectionId,
@@ -812,7 +827,7 @@ export const CHAIN_TX_CATALOG = {
   'ixo.claims.create-collection': {
     summary: 'create a claim collection for an entity the owner owns.',
     rules:
-      'Creates a claim collection: a place where people file claims of one kind for an entity the owner owns. Ask for the entity (`entityId`: chain_lookup entities or entity), the kind of claim (`protocolId`, the claim template’s did:ixo DID), when it opens (`startDate`) and closes (`endDate`, or null for no end date; always give the key), how many claims in total (`maxClaims`, "0" = no limit), how it starts (`state`: open, paused or closed), whether claims are reserved first (`reservations`: `allow`, `deny` or `required`) and what it pays (`payments`, as for `ixo.claims.update-collection-payments`, in base units). Offer to also let the owner manage the collection from chat later: with their yes, and only then, add `ixo.entity.grant-account-authz` steps to the same card that give the owner’s own address `change-collection-state`, `change-collection-dates`, `change-collection-quota` and `change-collection-payments` (as Portal does). Never add a step the owner did not ask for. A collection can’t be deleted, only closed. The result does not include the new collection’s number: once the owner has approved it and it went through (hub_action_status), find it with chain_lookup claim_collections. Say it like: “Create a claim collection for Clean Water Project, open from 1 November with no end date, paying 50 IXO for each approved claim.”',
+      'Creates a claim collection: a place where people file claims of one kind for an entity the owner owns. Ask for the entity (`entityId`: chain_lookup entities or entity), the kind of claim (`protocolId`, the claim template’s did:ixo DID), when it opens (`startDate`) and closes (`endDate`, or null for no end date; always give the key), how many claims in total (`maxClaims`, "0" = no limit), how it starts (`state`: open, paused or closed), whether claims are reserved first (`reservations`: `allow`, `deny` or `required`) and what it pays (`payments`, legs as for `ixo.claims.update-collection-payments`, in base units; on a new collection a leg left out pays nothing). Offer to also let the owner manage the collection from chat later: with their yes, and only then, add `ixo.entity.grant-account-authz` steps to the same card that give the owner’s own address `change-collection-state`, `change-collection-dates`, `change-collection-quota` and `change-collection-payments` (as Portal does). Never add a step the owner did not ask for. A collection can’t be deleted, only closed. The result does not include the new collection’s number: once the owner has approved it and it went through (hub_action_status), find it with chain_lookup claim_collections. Say it like: “Create a claim collection for Clean Water Project, open from 1 November with no end date, paying 50 IXO for each approved claim.”',
     schema: z
       .strictObject({
         type: z.literal('ixo.claims.create-collection'),
@@ -989,7 +1004,7 @@ export const CHAIN_TX_CATALOG = {
   },
   'ixo.iid.add-linked-resource': {
     summary: 'link a document (a profile, page or file) to such an identity.',
-    rules: `${IID_RULES} ${IID_ADD_RULE} The document must already be stored. \`resource\`: \`id\`, \`type\` (for example \`Settings\`), \`description\` (plain words, up to 300), \`mediaType\` (for example \`application/json\`), \`serviceEndpoint\` (where it is stored), \`proof\` (its content id, or "" when it has none), \`encrypted\` (true or false) and optional \`right\`. Say it like: “Link the annual report to Clean Water Project.”`,
+    rules: `${IID_RULES} ${IID_ADD_RULE} The document must already be stored. \`resource\`: \`id\`, \`type\` (for example \`Settings\`), \`description\` (plain words, up to 300; written on chain exactly as given, so no web addresses or file names, which belong in \`serviceEndpoint\`), \`mediaType\` (for example \`application/json\`), \`serviceEndpoint\` (where it is stored), \`proof\` (its content id, or "" when it has none), \`encrypted\` (true or false) and optional \`right\`. Say it like: “Link the annual report to Clean Water Project.”`,
     schema: z.strictObject({
       type: z.literal('ixo.iid.add-linked-resource'),
       did: ixoDid('The identity record changed.'),
@@ -1022,7 +1037,7 @@ export const CHAIN_TX_CATALOG = {
   },
   'ixo.iid.add-linked-claim': {
     summary: 'link a claim (a credential or record) to such an identity.',
-    rules: `${IID_RULES} \`claim\`: \`id\` (the claim’s id), \`type\`, \`description\` (plain words, up to 300), \`serviceEndpoint\` (where it is stored), \`proof\` (its content id, or "" when it has none), \`encrypted\` (true or false) and optional \`right\`. Say it like: “Link the water-quality certificate to Clean Water Project.”`,
+    rules: `${IID_RULES} \`claim\`: \`id\` (the claim’s id), \`type\`, \`description\` (plain words, up to 300; written on chain exactly as given, so no web addresses or file names, which belong in \`serviceEndpoint\`), \`serviceEndpoint\` (where it is stored), \`proof\` (its content id, or "" when it has none), \`encrypted\` (true or false) and optional \`right\`. Say it like: “Link the water-quality certificate to Clean Water Project.”`,
     schema: z.strictObject({
       type: z.literal('ixo.iid.add-linked-claim'),
       did: ixoDid('The identity record changed.'),

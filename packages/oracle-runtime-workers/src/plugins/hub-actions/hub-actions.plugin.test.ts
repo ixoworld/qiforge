@@ -2008,6 +2008,48 @@ describe('request_chain_transaction', () => {
       { ...level6['ixo.token.retire'], reason: 'off‮set' },
     ],
     [
+      'a retirement reason with a web address',
+      { ...level6['ixo.token.retire'], reason: 'see https://offset.example' },
+    ],
+    [
+      'a retirement reason with a soft hyphen',
+      { ...level6['ixo.token.retire'], reason: 'off\u00adset' },
+    ],
+    [
+      'a retirement reason with two spaces',
+      { ...level6['ixo.token.retire'], reason: 'travel  offset' },
+    ],
+    [
+      'a document described with a file name',
+      {
+        ...level6['ixo.iid.add-linked-resource'],
+        resource: {
+          ...(level6['ixo.iid.add-linked-resource'].resource as object),
+          description: 'report.pdf',
+        },
+      },
+    ],
+    [
+      'a right with a space at the start',
+      {
+        ...level6['ixo.iid.add-linked-resource'],
+        resource: {
+          ...(level6['ixo.iid.add-linked-resource'].resource as object),
+          right: ' CC-BY',
+        },
+      },
+    ],
+    [
+      'a linked claim described with an email address',
+      {
+        ...level6['ixo.iid.add-linked-claim'],
+        claim: {
+          ...(level6['ixo.iid.add-linked-claim'].claim as object),
+          description: 'ask lab@example.org',
+        },
+      },
+    ],
+    [
       'a retirement without token lines',
       { ...level6['ixo.token.retire'], tokens: [] },
     ],
