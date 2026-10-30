@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   HUB_CHAIN_TX_PREPARE_TIMEOUT_MS,
+  HUB_PROTOCOL_RECHECK_MS,
   HUB_UPDATE_REQUIRED,
   HubActionClient,
 } from './client';
@@ -437,11 +438,11 @@ describe('Hub action HTTP client', () => {
     expect((await client.status(id)).outcome?.receipt).toEqual(failed.receipt);
   });
 
-  it('refuses in plain words when Auth Hub predates protocol version 6, and keeps reading at version 2', async () => {
-    // An Auth Hub before version 6 (before @ixo/action-protocol 0.8.0) reads
-    // `?version=` with `z.enum(['1', '2', '3', '4', '5'])` on capabilities,
+  it('refuses in plain words when Auth Hub predates protocol version 5, and keeps reading at version 2', async () => {
+    // An Auth Hub before version 5 (before @ixo/action-protocol 0.7.0) reads
+    // `?version=` with `z.enum(['1', '2', '3', '4'])` on capabilities,
     // prepare, options and status; the ZodError becomes its router's
-    // 400 `{"error":"invalid_request"}`.
+    // 400 `{"error":"invalid_request"}`. Each read tries 6, then 5.
     const seen: string[] = [];
     const client = new HubActionClient({
       origin: 'https://hub.test',
@@ -451,7 +452,7 @@ describe('Hub action HTTP client', () => {
           const url = new URL(request.url);
           const version = url.searchParams.get('version') ?? '1';
           seen.push(`${request.method} ${url.pathname}?version=${version}`);
-          if (!['1', '2', '3', '4', '5'].includes(version))
+          if (!['1', '2', '3', '4'].includes(version))
             return Response.json({ error: 'invalid_request' }, { status: 400 });
           return Response.json({
             version: 'ixo.auth-options/2',
@@ -480,7 +481,7 @@ describe('Hub action HTTP client', () => {
     };
     await expect(client.options(binding)).rejects.toMatchObject(refused);
     expect(HUB_UPDATE_REQUIRED).toBe(
-      'Auth Hub must be updated before this oracle can use Hub actions: it does not accept protocol version 6, which this runtime needs (invalid_request). Tell the person this is not available right now; retrying or changing the fields will not help.',
+      'Auth Hub must be updated before this oracle can use Hub actions: it does not accept protocol version 5, the lowest this runtime works with (invalid_request). Tell the person this is not available right now; retrying or changing the fields will not help.',
     );
     // The Gmail connection check asks for options version 2, which such a
     // Hub still answers.
@@ -514,11 +515,123 @@ describe('Hub action HTTP client', () => {
     ).rejects.toMatchObject({ name: 'HubActionRefused', kind: 'refused' });
     expect(seen).toEqual([
       'GET /api/internal/actions/operations/capabilities?version=6',
+      'GET /api/internal/actions/operations/capabilities?version=5',
       `GET /api/internal/actions/operations/${id}?version=6`,
+      `GET /api/internal/actions/operations/${id}?version=5`,
       'GET /api/internal/actions/operations/options?version=6',
+      'GET /api/internal/actions/operations/options?version=5',
       'GET /api/internal/actions/operations/options?version=2',
+      // A prepare is never retried at another version: its 400 may be a
+      // real refusal of the operation.
       'POST /api/internal/actions/operations?version=6',
     ]);
+  });
+
+  it('speaks version 5 to a level-5 Auth Hub during the rollout, and asks for 6 again later', async () => {
+    // A Hub on @ixo/action-protocol 0.7.0: every Hub action still works at
+    // version 5; only the level-6 chain types are missing from what it lists.
+    const seen: string[] = [];
+    const level5 = ['1', '2', '3', '4', '5'];
+    let accepted = level5;
+    const client = new HubActionClient({
+      origin: 'https://hub.test',
+      key: 'oracle-secret',
+      fetcher: {
+        fetch: async (request: Request) => {
+          const url = new URL(request.url);
+          const version = url.searchParams.get('version') ?? '1';
+          seen.push(`${request.method} ${url.pathname}?version=${version}`);
+          if (!accepted.includes(version))
+            return Response.json({ error: 'invalid_request' }, { status: 400 });
+          if (url.pathname.endsWith('/capabilities'))
+            return Response.json({
+              version: 'ixo.auth-capabilities/2',
+              accountId: reference.accountId,
+              oracleDid: 'did:ixo:oracle',
+              network: 'ixo testnet',
+              resourceOrigin: null,
+              operations: ['form.submit.v1', 'ixo.chain.tx.v1'],
+              transfer: null,
+              chainTx: {
+                messageTypes: [
+                  'cosmos.bank.send',
+                  'ixo.claims.submit',
+                  'ixo.claims.evaluate',
+                  'ixo.token.transfer',
+                ],
+                maxMessages: 8,
+              },
+              forms: [],
+            });
+          if (url.pathname.endsWith('/options'))
+            return Response.json({
+              version: 'ixo.auth-options/3',
+              accountId: reference.accountId,
+              ownerDid: 'did:ixo:second',
+              bindingId: reference.bindingId,
+              bindingRevision: reference.bindingRevision,
+              connections: [],
+              targets: [],
+              resources: [],
+              transfer: null,
+            });
+          return Response.json({ reference });
+        },
+      },
+    });
+    const now = vi.spyOn(Date, 'now');
+    const start = 1_800_000_000_000;
+    now.mockReturnValue(start);
+    try {
+      expect((await client.capabilities()).chainTx?.messageTypes).toHaveLength(
+        4,
+      );
+      expect(client.protocolVersion).toBe('5');
+      const binding = {
+        bindingId: reference.bindingId,
+        bindingRevision: reference.bindingRevision,
+      };
+      expect((await client.options(binding)).version).toBe(
+        'ixo.auth-options/3',
+      );
+      await client.request({
+        ...binding,
+        requestKey: 'key-level-5',
+        expiresAt: 1999999999,
+        operation: {
+          kind: 'form.submit.v1',
+          formId: 'form-one',
+          destination: 'registered-form',
+          fields: [
+            {
+              id: 'answer',
+              label: 'Answer',
+              type: 'text',
+              required: true,
+              value: 'Yes',
+              source: 'user',
+            },
+          ],
+          declaration: null,
+        },
+      });
+      expect(seen).toEqual([
+        'GET /api/internal/actions/operations/capabilities?version=6',
+        'GET /api/internal/actions/operations/capabilities?version=5',
+        'GET /api/internal/actions/operations/options?version=5',
+        'POST /api/internal/actions/operations?version=5',
+      ]);
+      // Once Auth Hub is updated, the next read after the recheck asks for 6.
+      accepted = [...level5, '6'];
+      now.mockReturnValue(start + HUB_PROTOCOL_RECHECK_MS);
+      expect(client.protocolVersion).toBe('6');
+      await client.capabilities();
+      expect(seen.at(-1)).toBe(
+        'GET /api/internal/actions/operations/capabilities?version=6',
+      );
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it('turns a Hub transfer refusal (400) into a refusal the model can relay', async () => {

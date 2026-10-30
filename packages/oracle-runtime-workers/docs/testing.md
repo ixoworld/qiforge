@@ -240,7 +240,7 @@ checks that every field of every type (nested ones included) survives into
 the schema a provider is sent (`convertToOpenAITool`), that the request tool
 offers only the account's types per turn, and bounds its size; the
 `src/hub-actions` tests cover stake conversion and the owner identity of the
-new types through the owner object.
+new types through the owner object, a level-5 Auth Hub spoken to at version 5 (and one that predates 5 refused in plain words), and the turn's capabilities read (its short timeout, no re-read within 30 s of a failure, the last good answer).
 `src/delivery/plan.test.ts` checks direct structured Reply Plan projection.
 These tests use local fixtures; full signed transfer, registered form submission,
 and private resource return need the coordinated Hub and gateway acceptance run.

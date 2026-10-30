@@ -108,10 +108,20 @@ export interface HubActionTransport {
  *
  * An Auth Hub older than version 6 checks `?version=` against its closed
  * list (1 to 5) and answers every call that declares 6 with 400
- * `invalid_request`, before anything else: see `HUB_UPDATE_REQUIRED`.
+ * `invalid_request`, before anything else. This runtime then speaks
+ * version 5 to it (every Hub action but the level-6 chain types keeps
+ * working while Auth Hub is rolled out) and asks for 6 again after
+ * `HUB_PROTOCOL_RECHECK_MS`; a Hub that refuses 5 too is told apart with
+ * `HUB_UPDATE_REQUIRED`.
  */
 const HUB_PROTOCOL_VERSION = '6';
-const HUB_PROTOCOL_QUERY = `version=${HUB_PROTOCOL_VERSION}`;
+/** The lowest version this runtime works at: 6 without the level-6 chain types. */
+const HUB_PROTOCOL_FALLBACK_VERSION = '5';
+type HubProtocolVersion =
+  | typeof HUB_PROTOCOL_VERSION
+  | typeof HUB_PROTOCOL_FALLBACK_VERSION;
+/** How long a Hub that refused version 6 is spoken to at version 5 before 6 is tried again. */
+export const HUB_PROTOCOL_RECHECK_MS = 10 * 60_000;
 
 /**
  * What the model is told when Auth Hub refuses a read (capabilities,
@@ -121,7 +131,7 @@ const HUB_PROTOCOL_QUERY = `version=${HUB_PROTOCOL_VERSION}`;
  * The owner object keeps every action it holds: polls and callbacks pick
  * the outcomes up once the Hub is updated.
  */
-export const HUB_UPDATE_REQUIRED = `Auth Hub must be updated before this oracle can use Hub actions: it does not accept protocol version ${HUB_PROTOCOL_VERSION}, which this runtime needs (invalid_request). Tell the person this is not available right now; retrying or changing the fields will not help.`;
+export const HUB_UPDATE_REQUIRED = `Auth Hub must be updated before this oracle can use Hub actions: it does not accept protocol version ${HUB_PROTOCOL_FALLBACK_VERSION}, the lowest this runtime works with (invalid_request). Tell the person this is not available right now; retrying or changing the fields will not help.`;
 /** Every Hub call but a chain-transaction prepare. */
 const HUB_TIMEOUT_MS = 10_000;
 /**
@@ -136,8 +146,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+/** A read Auth Hub refused because it does not know the declared version. */
+function isUpdateRequired(error: unknown): boolean {
+  return (
+    error instanceof HubActionRefused && error.message === HUB_UPDATE_REQUIRED
+  );
+}
+
 export class HubActionClient {
   private readonly origin: string;
+  /** Until when this Hub is spoken to at version 5 (it refused 6). */
+  private fallbackUntil = 0;
 
   constructor(private readonly transport: HubActionTransport) {
     const url = new URL(transport.origin);
@@ -155,6 +174,34 @@ export class HubActionClient {
     )
       throw new Error('Hub action transport requires a secure origin and key');
     this.origin = url.origin;
+  }
+
+  /** The protocol version the next call declares. */
+  get protocolVersion(): HubProtocolVersion {
+    return Date.now() < this.fallbackUntil
+      ? HUB_PROTOCOL_FALLBACK_VERSION
+      : HUB_PROTOCOL_VERSION;
+  }
+
+  /**
+   * A read at the current version; when Auth Hub refuses version 6 as
+   * unknown, the same read at version 5, remembered for
+   * `HUB_PROTOCOL_RECHECK_MS`. Only reads do this: a refused read changed
+   * nothing, while a prepare's 400 can be a real refusal of its operation.
+   */
+  private async negotiated<T>(
+    read: (version: HubProtocolVersion) => Promise<T>,
+  ): Promise<T> {
+    const version = this.protocolVersion;
+    try {
+      return await read(version);
+    } catch (error) {
+      if (version !== HUB_PROTOCOL_VERSION || !isUpdateRequired(error))
+        throw error;
+      const answer = await read(HUB_PROTOCOL_FALLBACK_VERSION);
+      this.fallbackUntil = Date.now() + HUB_PROTOCOL_RECHECK_MS;
+      return answer;
+    }
   }
 
   /** `subject`: what a refused prepare is called in the model's words. */
@@ -226,8 +273,9 @@ export class HubActionClient {
     // amounts) without it, and stores the version per action for the
     // outcomes it pushes.
     const operation = parseOperation(input.operation);
+    // The version the capabilities read before every prepare settled on.
     const response = await this.send(
-      `/api/internal/actions/operations?${HUB_PROTOCOL_QUERY}`,
+      `/api/internal/actions/operations?version=${this.protocolVersion}`,
       { ...input, operation },
       operation.kind === 'ixo.chain.tx.v1'
         ? HUB_CHAIN_TX_PREPARE_TIMEOUT_MS
@@ -239,10 +287,17 @@ export class HubActionClient {
     return assertHubReferenceUrl(response.reference, this.origin);
   }
 
-  async capabilities(): Promise<ActionCapabilitiesV1> {
-    return parseCapabilities(
-      await this.send(
-        `/api/internal/actions/operations/capabilities?${HUB_PROTOCOL_QUERY}`,
+  /** `timeoutMs`: a turn's tool list passes a short one (a slow Hub must not hold a turn). */
+  async capabilities(
+    timeoutMs = HUB_TIMEOUT_MS,
+  ): Promise<ActionCapabilitiesV1> {
+    return this.negotiated(async (version) =>
+      parseCapabilities(
+        await this.send(
+          `/api/internal/actions/operations/capabilities?version=${version}`,
+          undefined,
+          timeoutMs,
+        ),
       ),
     );
   }
@@ -254,16 +309,18 @@ export class HubActionClient {
     // Options version 3 (asked at the protocol version; version 4 answers
     // the same): version 2 plus the owner's bank tokens
     // (`transfer.tokens`), which any-token transfers are chosen from.
-    const query = new URLSearchParams({
-      bindingId: input.bindingId,
-      bindingRevision: String(input.bindingRevision),
-      version: HUB_PROTOCOL_VERSION,
+    const options = await this.negotiated(async (version) => {
+      const query = new URLSearchParams({
+        bindingId: input.bindingId,
+        bindingRevision: String(input.bindingRevision),
+        version,
+      });
+      return parseActionOptions(
+        await this.send(
+          `/api/internal/actions/operations/options?${query.toString()}`,
+        ),
+      );
     });
-    const options = parseActionOptions(
-      await this.send(
-        `/api/internal/actions/operations/options?${query.toString()}`,
-      ),
-    );
     if (options.version !== 'ixo.auth-options/3')
       throw new Error('Hub action options require version 3');
     return options;
@@ -300,10 +357,12 @@ export class HubActionClient {
   ): Promise<HubActionStatus> {
     if (!/^[A-Za-z0-9_-]{32}$/.test(id))
       throw new Error('Invalid Hub action id');
-    const raw = await this.send(
-      `/api/internal/actions/operations/${id}?${HUB_PROTOCOL_QUERY}`,
-      undefined,
-      timeoutMs,
+    const raw = await this.negotiated((version) =>
+      this.send(
+        `/api/internal/actions/operations/${id}?version=${version}`,
+        undefined,
+        timeoutMs,
+      ),
     );
     if (!isRecord(raw)) throw new Error('Invalid Hub action status');
     const value = raw;

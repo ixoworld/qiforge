@@ -844,7 +844,13 @@ export interface RuntimeContext<TConfig = MergedConfig> {
 
   /** Host-owned action coordinator. It accepts only runtime-derived channel context. */
   hubActions?: {
-    capabilities(): Promise<ActionCapabilitiesV1>;
+    /**
+     * The Hub's capabilities for this oracle account (cached 60 s).
+     * `turn`: a read on a turn's critical path (a tool list): a short
+     * timeout, no new read within 30 s of a failed one, and the last
+     * capabilities read while reads fail.
+     */
+    capabilities(opts?: { turn?: boolean }): Promise<ActionCapabilitiesV1>;
     options(input: {
       ownerDid: string;
       provider: string;

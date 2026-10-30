@@ -507,9 +507,12 @@ function issuesOf(
 
 /**
  * The catalogue types this account may use: the Hub capabilities'
- * `chainTx.messageTypes` (none when chain transactions are off for the
- * account), or the whole catalogue when the capabilities cannot be read
- * (not a channel turn, or the Hub did not answer).
+ * `chainTx.messageTypes`. None when chain transactions cannot be used
+ * here: not a channel turn, Hub actions off, chain transactions off for the
+ * account, a Hub at protocol level 5 (the 0.6.0 types only, as it lists
+ * them), or capabilities that cannot be read (the owner object answers its
+ * last good capabilities while a read fails, and does not retry a failed
+ * read for 30 s, so this never holds a turn for long).
  */
 async function availableChainTxTypes(
   ctx: RuntimeContext,
@@ -520,15 +523,15 @@ async function availableChainTxTypes(
     !ctx.session.channel ||
     !ctx.hubActions
   )
-    return CHAIN_TX_MESSAGE_TYPES;
+    return [];
   let chainTx;
   try {
-    chainTx = (await ctx.hubActions.capabilities()).chainTx;
+    chainTx = (await ctx.hubActions.capabilities({ turn: true })).chainTx;
   } catch (error) {
     ctx.logger.warn(
-      `[hub-actions] capabilities unavailable, offering the whole chain transaction catalogue: ${error instanceof Error ? error.message : String(error)}`,
+      `[hub-actions] capabilities unavailable, no chain transaction types this turn: ${error instanceof Error ? error.message : String(error)}`,
     );
-    return CHAIN_TX_MESSAGE_TYPES;
+    return [];
   }
   return CHAIN_TX_MESSAGE_TYPES.filter((type) =>
     chainTx?.messageTypes.includes(type),

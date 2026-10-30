@@ -90,8 +90,12 @@ function outcome(
   };
 }
 
-/** `old`: an Auth Hub before protocol version 6 (see the `old` branch below). */
-type HubMode = 'up' | 'down' | 'hang' | 'old';
+/**
+ * `old`: an Auth Hub before protocol version 5, which this runtime cannot
+ * use; `level5`: one on version 5 (the rollout of version 6), which it can
+ * (see the branches below).
+ */
+type HubMode = 'up' | 'down' | 'hang' | 'old' | 'level5';
 const GMAIL = { id: 'gmail-one', label: 'alex@example.test' };
 
 async function harness(state: DurableObjectState) {
@@ -126,6 +130,8 @@ async function harness(state: DurableObjectState) {
       | 'operation_not_registered';
     posted: unknown[];
     optionsVersions: string[];
+    /** The protocol version of every operations call the Hub accepted. */
+    versions: string[];
   } = {
     bindingActive: true,
     optionsOwner: OWNER,
@@ -149,6 +155,7 @@ async function harness(state: DurableObjectState) {
     prepare: 'unexpected',
     posted: [],
     optionsVersions: [],
+    versions: [],
   };
   const hub = {
     fetch: async (request: Request): Promise<Response> => {
@@ -157,16 +164,16 @@ async function harness(state: DurableObjectState) {
       if (mode === 'down') return new Response('down', { status: 503 });
       if (path === '/api/internal/channels/validate-binding')
         return Response.json({ active: hubState.bindingActive });
-      // An Auth Hub before version 6 checks `?version=` against 1 to 5 on
+      // An older Auth Hub checks `?version=` against its closed list on
       // every operations call and answers anything else with 400
-      // invalid_request.
+      // invalid_request: 1 to 4 before version 5, 1 to 5 before version 6.
+      const declared = new URL(request.url).searchParams.get('version') ?? '1';
       if (
-        mode === 'old' &&
-        !['1', '2', '3', '4', '5'].includes(
-          new URL(request.url).searchParams.get('version') ?? '1',
-        )
+        (mode === 'old' && !['1', '2', '3', '4'].includes(declared)) ||
+        (mode === 'level5' && declared === '6')
       )
         return Response.json({ error: 'invalid_request' }, { status: 400 });
+      hubState.versions.push(declared);
       if (path === '/api/internal/actions/operations/options') {
         // Version 3 adds the owner's tokens (the Hub reads balances for it);
         // versions 4 to 6 answer as version 3.
@@ -197,6 +204,15 @@ async function harness(state: DurableObjectState) {
           resources: [],
         });
       }
+      if (
+        mode === 'hang' &&
+        path === '/api/internal/actions/operations/capabilities'
+      )
+        return new Promise<Response>((_resolve, reject) =>
+          request.signal.addEventListener('abort', () =>
+            reject(new Error('aborted')),
+          ),
+        );
       if (path === '/api/internal/actions/operations/capabilities')
         return Response.json({
           version: 'ixo.auth-capabilities/2',
@@ -462,7 +478,7 @@ describe('Hub actions in the owner object', () => {
     });
   });
 
-  it('keeps every held action and outcome while Auth Hub predates version 6, and records the outcome once it is updated', async () => {
+  it('keeps every held action and outcome while Auth Hub predates version 5, and records the outcome once it is updated', async () => {
     await withHub('hub-old-version', async (h) => {
       const done = await h.prepared(1);
       await h.store.recordOutcome(outcome(done, 2, 'declined'));
@@ -471,12 +487,14 @@ describe('Hub actions in the owner object', () => {
       h.outcomes.set(pending.id, outcome(pending, 3, 'succeeded'));
       h.setMode('old');
       // A poll still answers with what the object holds; the one status
-      // read it tries is refused and the action stays scheduled.
+      // read it tries (at version 6, then 5) is refused and the action
+      // stays scheduled.
       expect(await h.poll()).toEqual([
         outcome(done, 2, 'declined'),
         outcome(pending, 1, 'authorized'),
       ]);
       expect(h.calls).toEqual([
+        `GET /api/internal/actions/operations/${pending.id}`,
         `GET /api/internal/actions/operations/${pending.id}`,
       ]);
       // A callback cannot be confirmed (the route answers 409 and Auth Hub
@@ -550,6 +568,128 @@ describe('Hub actions in the owner object', () => {
       expect(await h.store.outcomeAt(OWNER, pending.id, 3)).toEqual(
         outcome(pending, 3, 'succeeded'),
       );
+    });
+  });
+
+  it('works at version 5 with a level-5 Auth Hub: the 0.6.0 chain types and every other action, nothing of level 6', async () => {
+    await withHub('hub-level-5', async (h) => {
+      await h.channelRun('run-chain');
+      h.hubState.prepare = 'ok';
+      h.hubState.tokens = [IXO_LISTED];
+      h.setMode('level5');
+      expect(
+        await call(
+          h.host,
+          'chainTransactionHubAction',
+          chainInput('f'.repeat(64), [
+            { type: 'cosmos.bank.send', toAddress: RECIPIENT, amount: '1' },
+          ]),
+        ),
+      ).toMatchObject({ id: expect.any(String) });
+      // Refused at 6 once, then everything at 5, the prepare included.
+      expect(new Set(h.hubState.versions)).toEqual(new Set(['5']));
+      // A level-6 type is refused before any POST: the Hub lists the four.
+      const posted = h.hubState.posted.length;
+      await expect(
+        call(
+          h.host,
+          'chainTransactionHubAction',
+          chainInput('g'.repeat(64), [
+            {
+              type: 'cosmos.staking.undelegate',
+              validatorAddress:
+                'ixovaloper1qeex565vg4uu7zwudh9ff2dauxptqf72nf2l44',
+              amount: '1',
+            },
+          ]),
+        ),
+      ).rejects.toThrow('This account cannot use cosmos.staking.undelegate');
+      expect(h.hubState.posted).toHaveLength(posted);
+      // The turn's tool offers the four.
+      const [tool] = await new HubActionsPlugin().getRequestTools(
+        makeRuntimeContext({
+          config: { HUB_ACTIONS_ENABLED: 'true' },
+          session: {
+            id: SESSION,
+            client: 'channel',
+            requestId: 'request-run-chain',
+            runId: 'run-chain',
+            channel: {
+              provider: 'whatsapp',
+              bindingId: 'chb_one',
+              bindingRevision: 2,
+            },
+          },
+          hubActions: {
+            capabilities: (opts) =>
+              call(
+                h.host,
+                opts?.turn ? 'turnHubCapabilities' : 'cachedHubCapabilities',
+              ),
+            options: async () => {
+              throw new Error('unused');
+            },
+            request: async () => {
+              throw new Error('unused');
+            },
+            chainTransaction: async () => {
+              throw new Error('unused');
+            },
+            status: async () => {
+              throw new Error('unused');
+            },
+          },
+        }),
+      );
+      expect(tool?.description).toContain('`ixo.token.transfer`');
+      expect(tool?.description).not.toContain('`cosmos.staking');
+    });
+  });
+
+  it('reads capabilities for a turn with a short timeout, at most once per 30 s while reads fail, keeping the last good answer', async () => {
+    await withHub('hub-turn-capabilities', async (h) => {
+      const reads = () =>
+        h.calls.filter((c) => c.endsWith('/operations/capabilities')).length;
+      const now = vi.spyOn(Date, 'now');
+      const start = 1_800_000_000_000;
+      try {
+        now.mockReturnValue(start);
+        h.setMode('down');
+        // No answer yet: the failure, then the same failure without a read.
+        await expect(call(h.host, 'turnHubCapabilities')).rejects.toThrow(
+          '503',
+        );
+        await expect(call(h.host, 'turnHubCapabilities')).rejects.toThrow(
+          '503',
+        );
+        expect(reads()).toBe(1);
+        // A prepare is not held back by a turn's failure window.
+        await expect(call(h.host, 'cachedHubCapabilities')).rejects.toThrow(
+          '503',
+        );
+        expect(reads()).toBe(2);
+        // After the window, one more read; it succeeds.
+        h.setMode('up');
+        now.mockReturnValue(start + 30_001);
+        const good = await call(h.host, 'turnHubCapabilities');
+        expect(reads()).toBe(3);
+        // The cache has expired and the Hub fails again: the last good
+        // answer, read once per window.
+        h.setMode('down');
+        now.mockReturnValue(start + 30_001 + 60_001);
+        expect(await call(h.host, 'turnHubCapabilities')).toEqual(good);
+        expect(await call(h.host, 'turnHubCapabilities')).toEqual(good);
+        expect(reads()).toBe(4);
+      } finally {
+        now.mockRestore();
+      }
+    });
+    await withHub('hub-turn-capabilities-hang', async (h) => {
+      h.setMode('hang');
+      const started = Date.now();
+      await expect(call(h.host, 'turnHubCapabilities')).rejects.toThrow();
+      // The turn's own timeout (3 s), not the Hub calls' 10 s.
+      expect(Date.now() - started).toBeLessThan(5_000);
     });
   });
 

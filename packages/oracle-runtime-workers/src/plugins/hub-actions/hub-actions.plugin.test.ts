@@ -2529,10 +2529,39 @@ describe('request_chain_transaction', () => {
     );
     // Chain transactions off for the account: no tool at all.
     expect(await offered(withChainTx(null))).toEqual([]);
-    // Capabilities unreadable, or not a channel turn: the whole catalogue.
-    expect(await offered(ctx)).toEqual([
-      ['request_chain_transaction', [...CHAIN_TX_MESSAGE_TYPES]],
-    ]);
+    // Capabilities unreadable (a Hub down, or one that predates level 5):
+    // no tool, never a guess at the catalogue.
+    expect(await offered(ctx)).toEqual([]);
+    // Not a channel turn, or Hub actions off: no tool and no Hub read.
+    const read = vi.fn(async (): Promise<ActionCapabilitiesV1> => {
+      throw new Error('unread');
+    });
+    for (const turn of [
+      makeRuntimeContext({
+        ...four,
+        session: { ...four.session, client: 'portal', channel: undefined },
+        hubActions: { ...four.hubActions!, capabilities: read },
+      }),
+      makeRuntimeContext({
+        ...four,
+        config: { HUB_ACTIONS_ENABLED: 'false' },
+        hubActions: { ...four.hubActions!, capabilities: read },
+      }),
+    ])
+      expect(await offered(turn)).toEqual([]);
+    expect(read).not.toHaveBeenCalled();
+    // The tool list is read on the turn's path: the owner object's turn read.
+    const turnRead = vi.fn(
+      async (_opts?: { turn?: boolean }): Promise<ActionCapabilitiesV1> =>
+        four.hubActions!.capabilities(),
+    );
+    await plugin.getRequestTools(
+      makeRuntimeContext({
+        ...four,
+        hubActions: { ...four.hubActions!, capabilities: turnRead },
+      }),
+    );
+    expect(turnRead).toHaveBeenCalledWith({ turn: true });
     // A type the account was not offered is refused before any Hub call,
     // on a model turn (the schema) and on a direct handler call.
     const [fourTool] = await plugin.getRequestTools(four);
@@ -2977,7 +3006,7 @@ describe('describe_chain_messages', () => {
     expect(capabilities).not.toHaveBeenCalled();
   });
 
-  it('filters availableTypes by the account capabilities, and falls back to the catalogue when they cannot be read', async () => {
+  it('filters availableTypes by the account capabilities, and lists none when they cannot be read or the turn is not a channel turn', async () => {
     const tool = describeTool();
     const args = { types: ['ixo.claims.submit'] };
     const available = async (ctx: RuntimeContext) =>
@@ -2995,19 +3024,17 @@ describe('describe_chain_messages', () => {
     ).toEqual(['ixo.claims.evaluate']);
     // Chain transactions off for the account: none.
     expect(await available(context(accountCapabilities(null)))).toEqual([]);
-    // The Hub not answering: the static catalogue.
+    // The Hub not answering: none (the request tool is not offered either).
     expect(
       await available(
         context(async () => {
           throw new Error('Hub action capabilities returned 503');
         }),
       ),
-    ).toEqual([...CHAIN_TX_MESSAGE_TYPES]);
-    // Not a channel turn: the catalogue, without a Hub read.
+    ).toEqual([]);
+    // Not a channel turn: none, without a Hub read.
     const capabilities = accountCapabilities(chainTx);
-    expect(await available(context(capabilities, 'portal'))).toEqual([
-      ...CHAIN_TX_MESSAGE_TYPES,
-    ]);
+    expect(await available(context(capabilities, 'portal'))).toEqual([]);
     expect(capabilities).not.toHaveBeenCalled();
   });
 });

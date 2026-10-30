@@ -363,20 +363,27 @@ and accepts the new types only at version 6
 four 0.6.0 types, and a prepare with a new type from such a caller is
 refused with `400 protocol_version_required`. An Auth Hub without version 6
 reads `?version=` against its closed list (1 to 5) and answers each call
-that declares 6 with `400 invalid_request`, handled as below
-(`HUB_UPDATE_REQUIRED`), so Auth Hub (with its website) on 0.8.0 must be
-deployed on every network first, then the channel gateways on 0.8.0 (a
-0.7.0 gateway cannot parse a receipt with a new step type and drops the
-outcome), then this runtime. Version 5 is the 0.7.0 contract: version 4
+that declares 6 with `400 invalid_request`. The client then negotiates: a
+read (capabilities, options, status) refused that way is asked again at
+version 5, and the Hub is spoken to at version 5 for
+`HUB_PROTOCOL_RECHECK_MS` (10 min, per client, so per owner object) before
+6 is tried again; a prepare uses the version the capabilities read before
+it settled on and is never retried at another version (its 400 can be a
+real refusal of the operation). So while Auth Hub is still on 0.7.0 every
+Hub action keeps working and only the 0.6.0 chain types are offered (the
+Hub lists only those at version 5); a Hub that refuses version 5 too gets
+`HUB_UPDATE_REQUIRED` (below). The order stays: Auth Hub (with its website)
+on 0.8.0, then the channel gateways on 0.8.0 (a 0.7.0 gateway cannot parse
+a receipt with a new step type and drops the outcome), then this runtime. Version 5 is the 0.7.0 contract: version 4
 plus the application card (`ixo.bid.submit.v1`) and the claim card
 (`ixo.claim.submit.v1`), with their receipts `ixo.bid.submission.v1`,
 `ixo.claim.submission.v1` and `ixo.submission.failed.v1`; options still
 answer `ixo.auth-options/3`. Auth Hub lists and accepts those kinds only at
 version 5 (a 0.6.0 parser cannot read them), so Auth Hub must accept version
 5 before a version 5 runtime is deployed (Auth Hub PR 86). An Auth Hub
-without the runtime's version reads `?version=` against its closed list and
-answers each capabilities, prepare, options and status call that declares it
-with `400 invalid_request`: the runtime then tells the model, in fixed
+that refuses version 5 as well (its closed list is 1 to 4) answers each
+capabilities, prepare, options and status call with `400 invalid_request`:
+the runtime then tells the model, in fixed
 words, that Auth Hub must be updated (`HUB_UPDATE_REQUIRED`), and keeps
 every action and outcome it holds; polls keep answering from SQLite and a
 Hub callback that cannot be confirmed is refused (`409`), so Auth Hub
@@ -532,10 +539,18 @@ cost grows only slowly with the catalogue. `request_chain_transaction` is a
 request-time tool (`getRequestTools`): each turn it is built from
 `availableTypes` (below), so its description and schema name only the
 types this account may use, a message of another type is refused before
-any Hub call, and an account without chain transactions gets no such tool
-(`describe_chain_messages` then answers `availableTypes: []`). The tool is
-built once per type list and cached (at most 8 lists per isolate); the
-capabilities read behind it is the owner object's 60 s cache. Its
+any Hub call, and a turn that cannot use chain transactions gets no such
+tool (`describe_chain_messages` then answers `availableTypes: []`): not a
+channel turn, Hub actions off, chain transactions off for the account, or
+capabilities that cannot be read; never a guess at the whole catalogue. The
+tool is built once per type list and cached (at most 8 lists per isolate).
+The capabilities behind it are a turn read of the owner object
+(`capabilities({ turn: true })`): the 60 s cache while fresh, else one read
+with a 3 s timeout (not the Hub calls' 10 s) shared by concurrent turns;
+after a failed read no turn reads again for 30 s, and while reads fail the
+last capabilities read are used (with none, no tool). A slow or failing Hub
+therefore costs a turn at most 3 s once per 30 s; a prepare still reads
+with the full timeout. Its
 description is a few sentences plus one summary line per message type. Its
 JSON Schema lists, per type, the field names and their basic types only (no
 descriptions, patterns or limits), plus the batch bound and `memo`. The
@@ -549,9 +564,8 @@ first use in a conversation the model calls `describe_chain_messages`
 type, its full rules (purpose, what the runtime fills, chain caveats) and
 its fields as JSON Schema (meaning, format, limits), the rules every type
 shares, and `availableTypes`: the catalogue filtered by the account's
-capabilities `chainTx.messageTypes` (none when chain transactions are off
-for the account; the whole catalogue when the capabilities cannot be read
-or the turn is not a channel turn). The catalogue is one structure in the
+capabilities `chainTx.messageTypes`, read the same way (none in the cases
+above). The catalogue is one structure in the
 plugin (`CHAIN_TX_CATALOG`: per type a `summary`, `rules` and a strict zod
 `schema`, from which the model-facing field list is derived), so a new type
 is one entry: its summary line and its field names on every request it is
