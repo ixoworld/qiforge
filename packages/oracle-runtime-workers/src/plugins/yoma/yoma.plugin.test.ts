@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { validateManifest } from '../../core/manifest';
+import type { ChannelAttachment } from '../../channels/contract';
 import { makeRuntimeContext } from '../../core/test-fixtures';
 import { UserKvLimitError } from '../../core/user-kv';
 import type {
@@ -374,7 +375,7 @@ function setup(
   /** A receipt to hand back with an outcome, by action id. */
   const receipts = new Map<string, Receipt>();
   const kv = opts.kv === undefined ? memoryKv() : opts.kv;
-  const attachments: unknown[] = [];
+  const attachments: ChannelAttachment[] = [];
   let runId = 'run-1';
   let requestId = 'request-1';
   let toolCalls = 0;
@@ -1161,7 +1162,7 @@ describe('yoma_form', () => {
     expect(
       (await answer('ixo:evidenceType_certificate', '[photo]')).status,
     ).toBe('no_file');
-    const photo = {
+    const photo: ChannelAttachment = {
       url:
         'https://channels.test/media/binding-1/abc?exp=' +
         (Math.floor(Date.now() / 1000) + 86_400) +
@@ -1525,7 +1526,7 @@ describe('yoma_form', () => {
 /** Fills the milestone claim (9787) up to its certificate photo, with that photo sent. */
 async function fillClaim(
   form: (a: Record<string, unknown>) => Promise<Record<string, unknown>>,
-  attachments: unknown[],
+  attachments: ChannelAttachment[],
   photoUrl = mediaLink('cert'),
 ) {
   const ref = { form: 'claim', collectionId: '9787' };
