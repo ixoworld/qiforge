@@ -20,6 +20,9 @@ import { z } from 'zod';
 import {
   ATTACHMENT_VIEW_SOURCE,
   buildUserMessageContent,
+  NOTE_FILENAME_MAX,
+  NOTE_MIMETYPE_MAX,
+  sanitizeNoteField,
   VIEW_ATTACHMENT_TOOL_NAME,
 } from '../../attachments';
 import { tool } from '../../plugin-api/tool-helper';
@@ -30,7 +33,7 @@ export const viewAttachmentSchema = z.object({
     .string()
     .min(1)
     .describe(
-      'The attachment reference exactly as listed in the "[attachment offloaded]" note of the message it belongs to (a Matrix event id such as "$abc…" or an mxc:// URI).',
+      'The attachment reference exactly as listed in the "[attachment offloaded]" note of the message it belongs to (a Matrix event id such as "$abc…", a channel file reference such as "channel:0123456789abcdef", or an mxc:// URI).',
     ),
 });
 
@@ -52,12 +55,13 @@ export function createViewAttachmentTool(): PluginTool {
       }
       const { meta, view } = await ctx.attachments.view(ref);
       if (view.kind === 'text') return view.text;
+      const name = sanitizeNoteField(meta.filename, NOTE_FILENAME_MAX);
       if (!ctx.toolCallId) {
         throw new Error(
-          `"${meta.filename}" was fetched but cannot be re-attached outside a tool call`,
+          `"${name}" was fetched but cannot be re-attached outside a tool call`,
         );
       }
-      const label = `Re-attached "${meta.filename}" (${meta.mimetype}) from earlier in this conversation.`;
+      const label = `Re-attached "${name}" (${sanitizeNoteField(meta.mimetype, NOTE_MIMETYPE_MAX)}) from earlier in this conversation.`;
       const timestamp = new Date().toISOString();
       const msgFromMatrixRoom = ctx.session.client === 'matrix';
       return new Command({

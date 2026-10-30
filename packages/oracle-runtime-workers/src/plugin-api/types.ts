@@ -18,6 +18,7 @@ import type { BaseMessage } from '@langchain/core/messages';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { UserPreferences } from '../core/state';
 import type { AttachmentViewSurface } from '../attachments/view';
+import type { ChannelAttachment } from '../channels/contract';
 import type { DeliveryConfig } from '../delivery/profile';
 import type {
   HubOperationStatus,
@@ -598,6 +599,14 @@ export interface RuntimeContext<TConfig = MergedConfig> {
       provider: string;
       bindingId: string;
       bindingRevision: number;
+      /**
+       * Files the person sent with this turn's message (a WhatsApp photo,
+       * video, document or audio file), as the channel gateway serves them:
+       * a capability `url` plus the `sha256` of its bytes. Absent when the
+       * message carried none. The model also sees them through the
+       * attachment pipeline; this is the raw list for tools that keep them.
+       */
+      attachments?: readonly ChannelAttachment[];
     };
     roomId?: string;
     /**

@@ -16,6 +16,11 @@
  */
 import { HumanMessage, type BaseMessage } from '@langchain/core/messages';
 import type { AttachmentMeta } from '../sqlite/serialization';
+import {
+  NOTE_FILENAME_MAX,
+  NOTE_MIMETYPE_MAX,
+  sanitizeNoteField,
+} from './sanitize';
 
 /** Newest user turns whose inline attachment payloads stay in the messages. */
 export const ATTACHMENT_PAYLOAD_TURNS = 2;
@@ -90,9 +95,12 @@ export function isAttachmentViewMessage(message: BaseMessage): boolean {
   );
 }
 
-/** The reference `view_attachment` takes: the media event id, else the URI. */
+/**
+ * The reference `view_attachment` takes: the media event id, else a channel
+ * file's opaque reference, else the URI.
+ */
 export function attachmentRef(meta: AttachmentMeta): string | undefined {
-  return meta.eventId ?? meta.mxcUri;
+  return meta.eventId ?? meta.channelRef ?? meta.mxcUri;
 }
 
 /** The attachment metadata a message carries (`attachments`, else `attachment`). */
@@ -115,7 +123,7 @@ function formatSize(size: number | undefined): string {
 export function buildPlaceholderText(metas: AttachmentMeta[]): string {
   const lines = metas.map((meta, i) => {
     const ref = attachmentRef(meta);
-    return `${i + 1}. "${meta.filename}" (${meta.mimetype}${formatSize(meta.size)})${
+    return `${i + 1}. "${sanitizeNoteField(meta.filename, NOTE_FILENAME_MAX)}" (${sanitizeNoteField(meta.mimetype, NOTE_MIMETYPE_MAX)}${formatSize(meta.size)})${
       ref ? ` — ref: ${ref}` : ' — no reference; it cannot be fetched again'
     }`;
   });

@@ -199,6 +199,58 @@ describe('channel-only semantic sessions', () => {
     },
   );
 
+  it('keeps a file in the current conversation: a placeholder is not classified, and a file is never answered with a question', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('routing-files');
+    await stub.configureRouting('on');
+    const first = accepted(await stub.submit(input));
+    const photo = {
+      url: 'https://channels.example/media/chb_one/1f0e?exp=1893456000&sig=abc',
+      filename: 'shop.jpg',
+      mimetype: 'image/jpeg',
+      size: 120_000,
+      sha256: 'b'.repeat(64),
+      kind: 'image' as const,
+    };
+    // Would clarify a text message (see above).
+    await stub.routeAs('ambiguous', 0.99);
+    const before = (await stub.routingInputs()).length;
+    for (const message of ['[photo]', '[document: report.pdf]']) {
+      const turn = accepted(
+        await stub.submit({
+          ...input,
+          requestId: `wa:${message}`,
+          message,
+          attachments: [photo],
+        }),
+      );
+      expect(turn.sessionId).toBe(first.sessionId);
+      const request = await runningRequest(stub, turn.runId);
+      expect(request.channel?.routingClarification).toBeUndefined();
+      expect(request.channel?.attachments).toEqual([photo]);
+      expect((await stub.receipt(`wa:${message}`))?.routing_json).toContain(
+        'attachment-placeholder',
+      );
+    }
+    expect((await stub.routingInputs()).length).toBe(before);
+    // With a caption the classifier runs; its question would drop the file,
+    // so the file stays where it is.
+    const captioned = accepted(
+      await stub.submit({
+        ...input,
+        requestId: 'wa:caption',
+        message: 'Is this the right shop?',
+        attachments: [photo],
+      }),
+    );
+    expect((await stub.routingInputs()).length).toBe(before + 1);
+    expect(captioned.sessionId).toBe(first.sessionId);
+    expect(
+      (await runningRequest(stub, captioned.runId)).channel
+        ?.routingClarification,
+    ).toBeUndefined();
+    expect((await stub.hostCalls()).createSession).toBe(1);
+  });
+
   it('keeps the message in the current conversation when the classifier fails', async () => {
     const stub = env.CHANNEL_TURNS_TEST.getByName('routing-provider-down');
     await stub.configureRouting('on');
