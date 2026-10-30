@@ -451,7 +451,8 @@ does not apply to a bank step.
 `hub_action_status` returns `{status: 'known', reviewStatus,
 operationStatus, outcome, summary?}`, with Auth Hub's own review and
 operation status (so an action still waiting reads apart from one whose
-review expired), or `{status: 'unavailable', reason}` for an id this owner
+review expired; each is a status `@ixo/action-protocol` lists, anything else
+Auth Hub answers reads `unknown`), or `{status: 'unavailable', reason}` for an id this owner
 never prepared or when Auth Hub must be updated. Plugins read the same
 through `ctx.hubActions.status(ownerDid, actionId, { timeoutMs? })`
 (`HubActionStatusRead`: `held: false` for an action the owner object does
