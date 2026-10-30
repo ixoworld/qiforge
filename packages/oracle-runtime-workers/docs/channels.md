@@ -699,9 +699,20 @@ request path pre-checks the capabilities' `chainTx.messageTypes` and
 handling). How the model finds claim ids, collection ids, DIDs and
 addresses is not this tool's job: it asks the owner or uses other tools.
 
-Auth Hub refusals reach the model in plain words as `{status:
-'unavailable', reason}`, with the Hub's `reason` appended (at most 200
-characters): `400 operation_not_registered` ("Auth Hub did not accept this
+Since protocol 0.8.0 a chain transaction the Hub would not make from what
+it read on chain, or whose simulation named one message, is refused (400
+`operation_not_registered` or `simulation_failed`) with a coded reason,
+`invalid_message: messages[<i>].<field>: <code>`. The runtime parses it with
+`parseChainTxRefusal` and gives the model, instead of the reason, its own
+words for the code (`CHAIN_TX_REFUSAL_WORDS` in
+`src/hub-actions/chain-tx-refusals.ts`, which must cover every
+`CHAIN_TX_REFUSAL_CODES` entry): the step, what it means for the person and
+what to do next, for example "in step 1, there are no rewards to collect
+from this validator yet. Leave this validator out of the card.", with the
+field and code marked as not for the person. A reason without a code, or
+with one this runtime does not know, is handled as before. Otherwise Auth
+Hub refusals reach the model in plain words as `{status: 'unavailable',
+reason}`, with the Hub's `reason` appended (at most 200 characters): `400 operation_not_registered` ("Auth Hub did not accept this
 transaction as written: invalid_message: messages[1].toAddress."),
 `not_authorized` (no authorization from the collection admin),
 `insufficient_funds`, `fee_above_ceiling` and `simulation_failed`; `409

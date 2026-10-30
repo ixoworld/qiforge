@@ -1,8 +1,10 @@
-import type {
-  ActionOperationV1,
-  ActionReceiptV1,
-  OptionsToken,
+import {
+  parseChainTxRefusal,
+  type ActionOperationV1,
+  type ActionReceiptV1,
+  type OptionsToken,
 } from '@ixo/action-protocol';
+import { chainTxRefusalWords } from './chain-tx-refusals';
 import type { ChainTxMessageInput } from '../plugin-api/types';
 import { quoteHubText } from './hub-text';
 import type { ChainTxHostMessage } from './request';
@@ -346,6 +348,24 @@ export function hubPrepareRefusal(
   if (unfixable)
     return new HubActionRefused('refused', unfixable, undefined, status);
   if (!parsed) return null;
+  // A chain transaction Auth Hub would not make from what it read on chain,
+  // or whose simulation named one message: a fixed code, in the runtime's
+  // own words (the reason text is not passed on). Without a code, the
+  // reason is passed on quoted, as below.
+  const coded =
+    status === 400 &&
+    subject === 'transaction' &&
+    (parsed.error === 'operation_not_registered' ||
+      parsed.error === 'simulation_failed')
+      ? parseChainTxRefusal(parsed.reason)
+      : null;
+  if (coded?.code)
+    return new HubActionRefused(
+      'refused',
+      chainTxRefusalWords({ ...coded, code: coded.code }),
+      undefined,
+      status,
+    );
   const reason = parsed.reason
     ? quoteHubText('reason', parsed.reason, HUB_REASON_MAX)
     : '';
