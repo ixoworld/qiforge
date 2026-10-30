@@ -11,7 +11,6 @@ import type {
 } from '../../plugin-api/types';
 import {
   TOOL_BUDGET_MS,
-  untilAborted,
   type ChainCall,
   type Failure,
   type Outcome,
@@ -70,7 +69,6 @@ import {
 import { judgeChoice } from './judge';
 import { canLogWork } from './permission';
 import {
-  answerRows,
   buildApplicationOperation,
   buildClaimOperation,
   cardRequestKey,
@@ -80,10 +78,13 @@ import {
   MAX_CARD_DATA,
   MAX_CARD_EVIDENCE,
   MAX_CARD_ROWS,
+  MAX_CARD_VALUE,
   networkLabel,
   PENDING_FILE_PREFIX,
   pendingFileValue,
+  readBack,
   reviewPages,
+  type RowProblem,
 } from './submission';
 import { clip } from './text';
 import { loadWork } from './work';
@@ -295,19 +296,30 @@ function caught(ctx: RuntimeContext, where: string, error: unknown) {
 /**
  * A Hub call that threw, in plain words, as the hub-actions plugin relays
  * them: a refusal the runtime typed (`HubActionRefused`) in its own words,
- * not retryable (a 429 among them: it passes with time, not within a turn);
- * an HTTP status the client did not type, by code; a timeout. Only 429, 503,
- * 504 and timeouts are worth asking again. The turn's own abort is rethrown.
+ * retryable only when Auth Hub answered 429, 503 or 504 (`httpStatus`); an
+ * HTTP status the client did not type, by code; a timeout, retryable. The
+ * turn's own abort is rethrown.
  */
 function hubFailure(ctx: RuntimeContext, what: string, error: unknown) {
   if (ctx.abortSignal.aborted) throw error;
   if (!(error instanceof Error)) return caught(ctx, what, error);
-  if (error.name === 'HubActionRefused' && 'kind' in error)
+  if (error.name === 'HubActionRefused' && 'kind' in error) {
+    // Auth Hub's own status says whether it passes with time.
+    const status = 'httpStatus' in error ? error.httpStatus : undefined;
+    const busy = status === 429 || status === 503 || status === 504;
     return failed({
-      reason: error.kind === 'expired' ? 'expired' : 'refused',
+      reason:
+        status === 429
+          ? 'rate_limited'
+          : busy
+            ? 'unavailable'
+            : error.kind === 'expired'
+              ? 'expired'
+              : 'refused',
       detail: `${clip(error.message, 400)} ${SAVED}`,
-      retryable: false,
+      retryable: busy,
     });
+  }
   if (error.name === 'TimeoutError' || error.name === 'AbortError')
     return failed({
       reason: 'timeout',
@@ -517,12 +529,37 @@ function capFormResult(
   return out;
 }
 
-/** One page of a draft's read-back: hidden answers cleared, every value in full. */
-function reviewOf(model: Model, page: number) {
-  clearHiddenAnswers(model);
-  const pages = reviewPages(answerRows(model));
+const CANNOT_SEND: Record<RowProblem, string> = {
+  rows: `It has more answers than one confirm card shows (${MAX_CARD_ROWS})`,
+  value: `An answer is longer than one confirm card shows (${MAX_CARD_VALUE} characters)`,
+  key: 'Its answers are named in a way a confirm card cannot show',
+  shape: 'Its answers are shaped in a way a confirm card cannot show',
+};
+
+/**
+ * One page of a draft's read-back, exactly the card's rows (hidden answers
+ * cleared, every value in full, a choice's meaning beside its value), with
+ * the files; `cannotSend` when the card could not show it all.
+ */
+function reviewOf(
+  model: Model,
+  page: number,
+  job: { entityDid: string; collectionId: string },
+) {
+  const { rows, files, problem } = readBack(model);
+  const pages = reviewPages(rows);
   const at = Math.min(page, pages.length);
-  return { answers: pages[at - 1]!, page: at, pages: pages.length };
+  return {
+    answers: pages[at - 1]!,
+    page: at,
+    pages: pages.length,
+    ...(files.length ? { files } : {}),
+    ...(problem
+      ? {
+          cannotSend: `${CANNOT_SEND[problem]}; it can be sent on jambo.yoma.world: ${jamboLink(job)}.`,
+        }
+      : {}),
+  };
 }
 
 /** Whether the person was shown every page of the read-back of these answers, in an earlier request than this one. */
@@ -647,12 +684,11 @@ const CLEARING_OUTCOMES = new Set([
   'failed',
 ]);
 
-const reviewStatusSchema = z.object({ reviewStatus: z.string().max(40) });
-
 /**
- * One Hub status read for a card, bounded by {@link HUB_STATUS_TIMEOUT_MS}:
- * its latest outcome, and the Hub's review state when the host passes it.
- * Undefined when the read failed or was late (the draft stays as it is).
+ * One Hub status read for a card, within {@link HUB_STATUS_TIMEOUT_MS} (the
+ * host bounds it): its latest outcome and Auth Hub's review status.
+ * Undefined when the read failed, or the owner object holds no such action
+ * (the draft stays as it is).
  */
 async function hubStatus(
   ctx: RuntimeContext,
@@ -662,33 +698,20 @@ async function hubStatus(
 > {
   const hub = ctx.hubActions;
   if (!hub) return undefined;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const pending = hub.status(ctx.user.did, actionId);
-  // A read that fails after the wait gave up is nobody's error.
-  pending.catch(() => undefined);
   try {
-    const answer = await untilAborted(
-      Promise.race([
-        pending,
-        new Promise<'late'>((resolve) => {
-          timer = setTimeout(() => resolve('late'), HUB_STATUS_TIMEOUT_MS);
-        }),
-      ]),
-      ctx.abortSignal,
-    );
-    if (answer === 'late') return undefined;
-    const review = reviewStatusSchema.safeParse(answer);
+    const read = await hub.status(ctx.user.did, actionId, {
+      timeoutMs: HUB_STATUS_TIMEOUT_MS,
+    });
+    if (!read.held) return undefined;
     return {
-      ...(answer.outcome
-        ? { status: answer.outcome.status, receipt: answer.outcome.receipt }
+      ...(read.outcome
+        ? { status: read.outcome.status, receipt: read.outcome.receipt }
         : {}),
-      ...(review.success ? { reviewStatus: review.data.reviewStatus } : {}),
+      ...(read.reviewStatus ? { reviewStatus: read.reviewStatus } : {}),
     };
   } catch (error) {
     if (ctx.abortSignal.aborted) throw error;
     return undefined;
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -1072,10 +1095,10 @@ export class YomaPlugin extends OraclePlugin {
    * card is cleared and `cardAttempt` bumped, so it can be sent again.
    * `authorized`, `submitted`, `unknown`: on its way, or possibly gone
    * through — never cleared, whatever the time (an `unknown` claim may
-   * settle later). No outcome yet: cleared only when the Hub's own review
-   * state says `expired` (Auth Hub records the `expired` outcome itself
-   * within a minute of expiry). A Hub read that fails or is late leaves the
-   * draft as it is.
+   * settle later). No outcome yet: cleared only when Auth Hub's review
+   * status says `expired` (it also records the `expired` outcome itself
+   * within a minute of expiry). A Hub read that fails, is late or finds no
+   * such action here leaves the draft as it is.
    */
   private async refreshCard(
     ctx: RuntimeContext,
@@ -1420,8 +1443,8 @@ export class YomaPlugin extends OraclePlugin {
     model: Model,
   ): Promise<Record<string, unknown>> {
     const problems = formErrors(model);
-    const shown = reviewOf(model, input.page ?? 1);
-    if (!problems.length && !draft.card) {
+    const shown = reviewOf(model, input.page ?? 1, draft);
+    if (!problems.length && !draft.card && !shown.cannotSend) {
       const written = await updateDraft(
         kv,
         input.form,
@@ -1440,7 +1463,11 @@ export class YomaPlugin extends OraclePlugin {
     }
     return {
       ok: true,
-      status: problems.length ? 'incomplete' : 'ready',
+      status: problems.length
+        ? 'incomplete'
+        : shown.cannotSend
+          ? 'web_only'
+          : 'ready',
       job: draft.title,
       ...shown,
       ...(shown.page < shown.pages
@@ -1448,7 +1475,6 @@ export class YomaPlugin extends OraclePlugin {
             say: `Page ${shown.page} of ${shown.pages}: read it back, then review page ${shown.page + 1}.`,
           }
         : {}),
-      ...(draft.evidence.length ? { files: draft.evidence.length } : {}),
       ...(problems.length
         ? {
             missing: problems
@@ -1983,11 +2009,11 @@ export class YomaPlugin extends OraclePlugin {
       return failed({
         reason: 'too_large',
         detail: `${
-          built.why === 'rows'
-            ? `This has more answers than one confirm card shows (${MAX_CARD_ROWS} rows)`
-            : built.why === 'files'
-              ? `This has more files than one card takes (${MAX_CARD_EVIDENCE}), or a question name too long to attach a file to`
-              : `The answers are longer than one card takes (${MAX_CARD_DATA} characters)`
+          built.why === 'files'
+            ? `It has more files than one card takes (${MAX_CARD_EVIDENCE}), or a question name too long to attach a file to`
+            : built.why === 'data'
+              ? `Its answers are longer than one card takes (${MAX_CARD_DATA} characters)`
+              : CANNOT_SEND[built.why]
         }; it can be sent on jambo.yoma.world: ${jamboLink(draft)}. ${SAVED}`,
         retryable: false,
       });

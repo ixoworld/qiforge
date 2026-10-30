@@ -22,7 +22,7 @@ import {
   visibleQuestions,
   type FormQuestion,
 } from './engine';
-import { answerRows, buildClaimOperation } from './submission';
+import { buildClaimOperation, readBack } from './submission';
 
 const progress = { skipped: [], closedSections: [] };
 
@@ -247,9 +247,12 @@ describe('what is read back is what is sent', () => {
     expect(data).not.toHaveProperty('schema:name_localLeader');
     expect(data).not.toHaveProperty('schema:telephone_localLeader');
     expect(data).toMatchObject({ 'ixo:localLeaderContacted': 'no' });
-    const labels = built.rows.map((row) => row.label);
-    expect(labels.some((l) => l.includes("Local leader's name"))).toBe(false);
-    expect(built.operation.summary).toEqual(built.rows);
+    expect(
+      built.rows.some((row) => row.field === 'schema:name_localLeader'),
+    ).toBe(false);
+    expect(built.operation.summary).toEqual(
+      built.rows.map(({ field, label, value }) => ({ field, label, value })),
+    );
   });
 
   it('keeps the leader when they were contacted, in the rows and the data', () => {
@@ -258,7 +261,8 @@ describe('what is read back is what is sent', () => {
     expect(dataOf(model)).toMatchObject({
       'schema:name_localLeader': 'Chief Dlamini',
     });
-    expect(answerRows(model)).toContainEqual({
+    expect(readBack(model).rows).toContainEqual({
+      field: 'schema:name_localLeader',
       label: "Local leader's name",
       value: 'Chief Dlamini',
     });
@@ -481,11 +485,21 @@ describe('choices', () => {
       ok: true,
       data: { country: 'Malawi' },
     });
-    expect(answerRows(inValue)).toEqual([
-      { label: 'country', value: 'Malawi' },
+    expect(readBack(inValue).rows).toEqual([
+      { field: 'country', label: 'country', value: 'Malawi' },
     ]);
-    expect(answerRows(asComment)).toEqual([
-      { label: 'country', value: 'Malawi' },
+    expect(readBack(asComment).rows).toEqual([
+      {
+        field: 'country',
+        label: 'country',
+        value: 'other',
+        means: 'Other (describe)',
+      },
+      {
+        field: 'country-Comment',
+        label: 'country (own answer)',
+        value: 'Malawi',
+      },
     ]);
   });
 

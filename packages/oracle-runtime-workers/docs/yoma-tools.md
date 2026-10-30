@@ -246,17 +246,30 @@ is ignored.
    the oracle's answers `unavailable`, not retryable. An invalid `NETWORK`
    reads nothing (no mainnet fallback).
 
-   The card's rows are every answer in full: a value longer than the card's
-   500 characters is split over rows ("Describe it (2/3)"); a draft that
-   needs more than the card's 60 rows, more than 30 files or more than
-   60,000 characters of data answers `too_large` with the Jambo link, so
-   nothing is sent that the person was not shown. The claim card carries the
-   answers without file questions (`data`) and one `evidence` entry per file
-   still answering a visible question (`field` as a dotted path,
-   `shops[2].photo` → `shops.2.photo`). On approval the Hub uploads the files
-   to the collection's claims lane as the person, signs the answers, saves
-   the claim to the claims bot and submits it on chain; the person must tick
-   consent on the Hub page.
+   **The card's rows** are exactly the answers of the `data` it sends,
+   as Auth Hub checks them (`submissionSummaryIssue`, `@ixo/action-protocol`
+   0.7.0; a mismatch is a 400): objects and arrays of objects are walked
+   into, every other value is an answer, and each answer gets one row,
+   `field` its dot path (`name`, `shops.1.name`, `where.latitude`), `value`
+   its `submissionDisplayValue` (the stored value: `ZA`, `true`, `2026-09`),
+   and a label from the form: the question's title, a repeating section's
+   item as "Participants 2 · Email", a map pin's parts as "Where · latitude",
+   "Where · grid cell", "Where · place" (with several pins, "Where 2 ·
+   place"), an own "Other" answer as "Country (own answer)". The read-back
+   in chat is the same rows, page by page, with what a choice means in the
+   form's words beside its stored value (`means: "South Africa"`) and the
+   files listed apart (the card shows files as files: an evidence `field`
+   never holds an answer). A claim of files only sends `data: "{}"` and no
+   rows. More than 100 answers, an answer longer than 2,000 characters, a
+   key the protocol refuses (empty, or with a `.`) or a value with no
+   display form is never cut or split: the read-back says `cannotSend` and
+   `submit` answers `too_large` with the Jambo link. Every card is checked
+   with `submissionSummaryIssue` before it is sent. The claim card also
+   carries one `evidence` entry per file still answering a visible question
+   (`shops[2].photo` → `shops.2.photo`). On approval (the person ticks
+   consent on the Hub page) the Hub uploads the files to the collection's
+   claims lane as the person, signs the answers, saves the claim to the
+   claims bot and submits it on chain.
 
    **Request keys.** Each send has its own key: SHA-256 of the owner's DID,
    the run, the tool call and the draft's `cardAttempt` (Auth Hub keys are
@@ -268,13 +281,13 @@ is ignored.
 
    **Hub refusals** come back in plain words, as the hub-actions plugin
    relays them: a typed refusal (`HubActionRefused`) in the runtime's words,
-   `refused` (`expired` for a lapsed request), not retryable; an HTTP status
-   the client did not type by code (429 `rate_limited` and 503/504
-   `unavailable` retryable; 401/403, 413 and other codes not); a timeout,
-   retryable.
+   retryable only when Auth Hub answered 429 (`rate_limited`), 503 or 504
+   (its `httpStatus`), else `refused` (`expired` for a lapsed request); an
+   HTTP status the client did not type, by code (429/503/504 retryable;
+   401/403, 413 and others not); a timeout, retryable.
 
    **The card's outcome** is read when the draft is next touched (each read
-   at most 3 s; `my_drafts` asks about at most three cards). `succeeded`:
+   bounded to 3 s through `status`'s `timeoutMs`; `my_drafts` asks about at most three cards). `succeeded`:
    sent, with the claim id from `ixo.claim.submission.v1`. `declined`,
    `expired`, `cancelled`, `failed`: the card is cleared, `cardAttempt`
    bumped, and a failed card's step and plain `message` kept as `lastCard`
@@ -284,9 +297,10 @@ is ignored.
    `unknown` until the chain settles — so they are never cleared and never
    sent again, whatever the time; answers, skips and sections stay locked
    and `discard` is refused until a final outcome, or a day after the card's
-   expiry with none. No outcome yet: cleared only when the host's status
-   read carries the Hub's `reviewStatus: 'expired'` (Auth Hub records the
-   `expired` outcome itself within a minute of expiry).
+   expiry with none. No outcome yet: cleared only when Auth Hub's
+   `reviewStatus` is `expired` (it also records the `expired` outcome
+   itself within a minute of expiry); a read that finds no such action in
+   the owner's store (`held: false`) leaves the card as it is.
 
    **Known gap:** if the Hub made a card but its answer never arrived (a
    timeout), the next send makes a second card: the first is not known
@@ -317,10 +331,6 @@ address, answers, signal }) }`. For a collection it `allows`, `submit` of a
 
 - **Lockfile.** `@ixo/action-protocol` is pinned to 0.7.0, which is not on
   npm yet: `pnpm-lock.yaml` must be regenerated once it is published.
-- **Hub status surface.** `ctx.hubActions.status` takes no timeout (the
-  plugin races it against 3 s; the read itself runs on to the client's
-  10 s) and carries no review state today, so a card with no outcome is
-  cleared only once the Hub records `expired`.
 - **Mainnet only for programmes**: the Jambo worker has no testnet or devnet
   list.
 - **Pay** reads as an amount only for USDC (`ibc/6BBE…F97B`, "$1.27") and

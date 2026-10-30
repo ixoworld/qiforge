@@ -178,7 +178,13 @@ describe('yoma under workerd', () => {
           capabilities: () => client.capabilities(),
           options: () => Promise.reject(new Error('unused')),
           chainTransaction: () => Promise.reject(new Error('unused')),
-          status: async () => ({ outcome: null, summary: null }),
+          status: async () => ({
+            held: false,
+            reviewStatus: null,
+            operationStatus: null,
+            outcome: null,
+            summary: null,
+          }),
           request: (input) => {
             keys.push(input.requestKey);
             return prepareHubAction(

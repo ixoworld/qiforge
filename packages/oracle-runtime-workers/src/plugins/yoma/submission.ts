@@ -1,8 +1,15 @@
-import type {
-  BidSubmitOperation,
-  ClaimSubmitOperation,
+import {
+  submissionDisplayValue,
+  submissionSummaryIssue,
+  type BidSubmitOperation,
+  type ClaimSubmitOperation,
+  type SubmissionSummaryRow,
 } from '@ixo/action-protocol';
-import { QuestionSelectBase, type Model, type Question } from 'survey-core';
+import {
+  QuestionPanelDynamicModel,
+  type Model,
+  type Question,
+} from 'survey-core';
 import type { ChainCall } from '../ixo-chain/http';
 import type { Draft, Evidence } from './drafts';
 import {
@@ -18,7 +25,8 @@ import { clip } from './text';
  * Turning a finished draft into the Auth Hub card the person approves
  * (`@ixo/action-protocol` 0.7.0, Hub level 5): `ixo.bid.submit.v1` for an
  * application, `ixo.claim.submit.v1` for a claim. The card carries what the
- * person sees (title and one row per answer) and what the Hub files as them:
+ * person sees (title, and exactly one row per answer of `data`, which the
+ * Hub checks) and what the Hub files as them:
  * the answers as JSON, and for a claim each file's gateway link, size and
  * SHA-256. File questions are left out of the answers; the Hub uploads the
  * files to the claims lane when the person confirms and puts the references
@@ -38,10 +46,13 @@ export function pendingFileValue(
   };
 }
 
-/** The card's summary limits (`@ixo/action-protocol` 0.7.0): 1–60 rows, a label of 1–200 characters, a value of at most 500. */
-export const MAX_CARD_ROWS = 60;
+/**
+ * The card's summary limits (`@ixo/action-protocol` 0.7.0): 0–100 rows, one
+ * per answer of `data`; a label of 1–200 characters; a value of at most 2,000.
+ */
+export const MAX_CARD_ROWS = 100;
+export const MAX_CARD_VALUE = 2_000;
 const MAX_LABEL = 200;
-const MAX_VALUE = 500;
 
 /** A string field of a stored answer object, if it has one. */
 function field(value: unknown, key: string): string | undefined {
@@ -49,12 +60,6 @@ function field(value: unknown, key: string): string | undefined {
     return undefined;
   const found: unknown = Reflect.get(value, key);
   return typeof found === 'string' ? found : undefined;
-}
-
-function coordinate(value: unknown, key: 'latitude' | 'longitude'): string {
-  if (typeof value !== 'object' || value === null) return '?';
-  const found: unknown = Reflect.get(value, key);
-  return typeof found === 'number' ? found.toFixed(5) : '?';
 }
 
 /** A stored choice value as its option's text; a value the list does not hold (an own answer) as itself. */
@@ -66,134 +71,236 @@ function choiceText(view: FormQuestion, value: unknown): string {
   );
 }
 
-/** The person's own "Other" answer, wherever the form keeps it. */
-function ownAnswer(question: Question): string | undefined {
-  if (!(question instanceof QuestionSelectBase) || !question.isOtherSelected)
+/** What a choice answer means in the form's words ("South Africa" for `ZA`). */
+function choiceMeaning(view: FormQuestion, value: unknown): string {
+  return (Array.isArray(value) ? value : [value])
+    .map((item) => choiceText(view, item))
+    .join(', ');
+}
+
+/** A file answer as the person reads it back: icon and name, never the link. */
+function fileText(value: unknown): string {
+  return (Array.isArray(value) ? value : [value])
+    .map((file) => {
+      const type = field(file, 'type') ?? '';
+      const icon = type.startsWith('image/')
+        ? '📷'
+        : type.startsWith('video/')
+          ? '🎬'
+          : '📄';
+      return `${icon} ${field(file, 'name') ?? 'file'}`;
+    })
+    .join(', ');
+}
+
+/** One row of the card: an answer's path in `data`, its label, and its display form. */
+export type CardRow = SubmissionSummaryRow;
+
+/** A read-back row: the card's row, and what a choice means when its stored value reads differently. */
+export interface ReviewRow extends CardRow {
+  means?: string;
+}
+
+const plainObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** Why the answers cannot go on one card. */
+export type RowProblem = 'rows' | 'value' | 'key' | 'shape';
+
+/**
+ * The answers of `data` as the protocol reads them
+ * (`submissionSummaryIssue`): objects walked key by key, arrays of objects
+ * index by index, every other value an answer at its dot path, shown as
+ * `submissionDisplayValue` gives it.
+ */
+function answersOf(
+  data: Record<string, unknown>,
+):
+  | { ok: true; answers: Array<{ path: string[]; value: string }> }
+  | { ok: false; problem: RowProblem } {
+  const answers: Array<{ path: string[]; value: string }> = [];
+  const walk = (
+    node: Record<string, unknown>,
+    prefix: string[],
+  ): RowProblem | undefined => {
+    for (const [key, value] of Object.entries(node)) {
+      if (key === '' || key.includes('.')) return 'key';
+      const path = [...prefix, key];
+      if (plainObject(value)) {
+        const problem = walk(value, path);
+        if (problem) return problem;
+      } else if (
+        Array.isArray(value) &&
+        value.length &&
+        value.every(plainObject)
+      ) {
+        for (const [index, item] of value.entries()) {
+          const problem = walk(item, [...path, String(index)]);
+          if (problem) return problem;
+        }
+      } else {
+        const shown = submissionDisplayValue(value);
+        if (shown === undefined) return 'shape';
+        answers.push({ path, value: shown });
+      }
+    }
     return undefined;
-  const text = question.otherValue;
-  return typeof text === 'string' && text ? text : undefined;
+  };
+  const problem = walk(data, []);
+  return problem ? { ok: false, problem } : { ok: true, answers };
 }
 
-/** One answer as the person reads it back: in full (never cut). */
-export function answerText(view: FormQuestion, question: Question): string {
-  const value: unknown = question.value;
-  if (value === undefined || value === null || value === '') return '';
-  switch (view.input) {
-    case 'pick-one':
-    case 'yes-no': {
-      const own = ownAnswer(question);
-      return own ?? choiceText(view, value);
-    }
-    case 'pick-many': {
-      const own = ownAnswer(question);
-      const items = Array.isArray(value) ? value : [value];
-      const shown = items
-        .filter(
-          (item) => !(own && (item === view.other?.value || item === own)),
-        )
-        .map((item) => choiceText(view, item));
-      return [...shown, ...(own ? [own] : [])].join(', ');
-    }
-    case 'file': {
-      const files = Array.isArray(value) ? value : [value];
-      return files
-        .map((file) => {
-          const type = field(file, 'type') ?? '';
-          const icon = type.startsWith('image/')
-            ? '📷'
-            : type.startsWith('video/')
-              ? '🎬'
-              : '📄';
-          return `${icon} ${field(file, 'name') ?? 'file'}`;
-        })
-        .join(', ');
-    }
-    case 'location': {
-      const cells = Array.isArray(value) ? value : [value];
-      return cells
-        .map((cell) => {
-          const place = field(cell, 'placeName');
-          return `📍 ${coordinate(cell, 'latitude')}, ${coordinate(cell, 'longitude')}${place ? ` (${place})` : ''}`;
-        })
-        .join('; ');
-    }
-    default:
-      return typeof value === 'object' ? JSON.stringify(value) : String(value);
-  }
-}
+/** Readable names for the parts of Jambo's map cell. */
+const CELL_PARTS: Record<string, string> = {
+  geoId: 'grid cell',
+  gridPrecision: 'grid size',
+  placeName: 'place',
+};
 
-function labelOf(view: FormQuestion): string {
-  return view.item
-    ? `${view.item.title} ${view.item.number} · ${view.title}`
-    : view.title;
-}
+const titleOf = (question: Question) =>
+  question.processedTitle || question.title || question.name;
 
-export interface AnswerRow {
-  label: string;
-  value: string;
+interface Container {
+  getQuestionByValueName(valueName: string): Question | null | undefined;
 }
 
 /**
- * Every answered question in form order, each value in full, from a model
- * whose hidden answers were cleared (`clearHiddenAnswers`): what the person
- * reads back is what is sent. Labels are the form's titles (already clipped).
+ * A row's label from the form: the question's title; a repeating section's
+ * item as the section's title and item number, then the question inside
+ * ("Participants 2 · Email"); a part of an object answer after its question
+ * ("Where · latitude", "Where 2 · place"); an own "Other" answer as
+ * "(own answer)".
  */
-export function answerRows(model: Model): AnswerRow[] {
-  const rows: AnswerRow[] = [];
-  for (const view of visibleQuestions(model)) {
+function labelFor(
+  container: Container,
+  parts: string[],
+  suffix: string,
+): string {
+  const [head, ...rest] = parts;
+  if (head === undefined) return '';
+  const own = head.endsWith(suffix) ? head.slice(0, -suffix.length) : undefined;
+  const question =
+    container.getQuestionByValueName(head) ??
+    (own ? container.getQuestionByValueName(own) : undefined) ??
+    undefined;
+  const base = question
+    ? `${titleOf(question)}${own && question.getValueName() === own ? ' (own answer)' : ''}`
+    : head;
+  if (
+    question instanceof QuestionPanelDynamicModel &&
+    rest.length > 1 &&
+    /^\d+$/.test(rest[0]!)
+  ) {
+    const index = Number(rest[0]);
+    const panel = question.panels[index];
+    const inner = panel
+      ? labelFor(panel, rest.slice(1), suffix)
+      : rest.slice(1).join(' · ');
+    return `${base} ${index + 1} · ${inner}`;
+  }
+  const segments = [base];
+  for (const part of rest) {
+    if (/^\d+$/.test(part))
+      segments[segments.length - 1] += ` ${Number(part) + 1}`;
+    else segments.push(CELL_PARTS[part] ?? part);
+  }
+  return segments.join(' · ');
+}
+
+/** `shops.0.name` (a data path) as the question path `shops[0].name`, when it names one. */
+function questionPath(parts: string[]): string | undefined {
+  if (parts.length === 1) return parts[0];
+  if (parts.length === 3 && /^\d+$/.test(parts[1]!))
+    return `${parts[0]}[${parts[1]}].${parts[2]}`;
+  return undefined;
+}
+
+/**
+ * Exactly one row per answer of `data`, in its order: the row the card
+ * shows (`field` its path, `value` its display form, the label from the
+ * form), and for a choice what it means in the form's words. `problem`
+ * when they cannot go on one card: more than {@link MAX_CARD_ROWS}, a value
+ * past {@link MAX_CARD_VALUE}, a key the protocol refuses, a value with no
+ * display form.
+ */
+export function rowsOf(
+  model: Model,
+  data: Record<string, unknown>,
+): { rows: ReviewRow[]; problem?: RowProblem } {
+  const read = answersOf(data);
+  if (!read.ok) return { rows: [], problem: read.problem };
+  const views = new Map(
+    visibleQuestions(model).map((view) => [view.path, view]),
+  );
+  const container: Container = {
+    getQuestionByValueName: (name) => model.getQuestionByValueName(name),
+  };
+  const rows = read.answers.map(({ path, value }): ReviewRow => {
+    const view = views.get(questionPath(path) ?? '');
+    const stored: unknown = view
+      ? questionAt(model, view.path)?.value
+      : undefined;
+    const means =
+      view &&
+      (view.input === 'pick-one' ||
+        view.input === 'pick-many' ||
+        view.input === 'yes-no')
+        ? choiceMeaning(view, stored)
+        : undefined;
+    return {
+      field: path.join('.'),
+      label:
+        clip(labelFor(container, path, model.commentSuffix), MAX_LABEL) ||
+        clip(path.join('.'), MAX_LABEL),
+      value,
+      ...(means !== undefined && means !== value ? { means } : {}),
+    };
+  });
+  const problem =
+    rows.length > MAX_CARD_ROWS
+      ? 'rows'
+      : rows.some((row) => row.value.length > MAX_CARD_VALUE)
+        ? 'value'
+        : undefined;
+  return { rows, ...(problem ? { problem } : {}) };
+}
+
+/** The file answers still on the form, as the person reads them back (the card shows the files themselves). */
+function fileRows(model: Model): Array<{ label: string; value: string }> {
+  return visibleQuestions(model).flatMap((view) => {
+    if (view.input !== 'file') return [];
     const question = questionAt(model, view.path);
-    if (!question || question.isEmpty()) continue;
-    rows.push({ label: labelOf(view), value: answerText(view, question) });
-  }
-  return rows;
+    if (!question || question.isEmpty()) return [];
+    return [
+      {
+        label: view.item
+          ? `${view.item.title} ${view.item.number} · ${view.title}`
+          : view.title,
+        value: fileText(question.value),
+      },
+    ];
+  });
 }
 
 /**
- * The card's rows, with nothing left out or cut: a value longer than the
- * card takes is split over rows ("Describe it (2/3)"). Undefined when that
- * is more rows than one card takes: such a form is not sent from chat.
+ * What a finished draft sends, from its open model, in one pass: hidden
+ * answers cleared, the files listed, then the answers the Hub files (file
+ * questions left out) and their rows. The read-back, the card and the data
+ * all come from here. Changes the model.
  */
-export function cardSummary(rows: AnswerRow[]): AnswerRow[] | undefined {
-  const out: AnswerRow[] = [];
-  for (const row of rows) {
-    const parts = pieces(row.value);
-    parts.forEach((part, index) =>
-      out.push({
-        label: clip(
-          parts.length > 1
-            ? `${row.label} (${index + 1}/${parts.length})`
-            : row.label,
-          MAX_LABEL,
-        ),
-        value: part,
-      }),
-    );
-  }
-  if (out.length > MAX_CARD_ROWS) return undefined;
-  return out.length ? out : [{ label: 'Answers', value: 'No answers' }];
-}
-
-/** A value in pieces of at most {@link MAX_VALUE} characters, never splitting a surrogate pair. */
-function pieces(value: string): string[] {
-  if (!value) return [''];
-  const out: string[] = [];
-  let at = 0;
-  while (at < value.length) {
-    let end = Math.min(at + MAX_VALUE, value.length);
-    const last = value.charCodeAt(end - 1);
-    if (end < value.length && last >= 0xd800 && last <= 0xdbff) end -= 1;
-    out.push(value.slice(at, end));
-    at = end;
-  }
-  return out;
+export function readBack(model: Model) {
+  clearHiddenAnswers(model);
+  const files = fileRows(model);
+  const data = submittableData(model);
+  return { files, data, ...rowsOf(model, data) };
 }
 
 /** Rows for one review answer: pages of at most this many JSON characters each. */
 export const REVIEW_PAGE_CHARS = 8_000;
 
 /** The rows in pages that each fit {@link REVIEW_PAGE_CHARS}, nothing cut; at least one (maybe empty) page. */
-export function reviewPages(rows: AnswerRow[]): AnswerRow[][] {
-  const pages: AnswerRow[][] = [[]];
+export function reviewPages<T>(rows: T[]): T[][] {
+  const pages: T[][] = [[]];
   let size = 0;
   for (const row of rows) {
     const rowSize = JSON.stringify(row).length + 1;
@@ -278,18 +385,26 @@ export function lapsedEvidence(
 }
 
 export type Built<T> =
-  | { ok: true; operation: T; rows: AnswerRow[] }
-  | { ok: false; why: 'rows' | 'files' | 'data' };
+  | { ok: true; operation: T; rows: ReviewRow[] }
+  | { ok: false; why: RowProblem | 'files' | 'data' };
+
+const cardRows = (rows: ReviewRow[]): CardRow[] =>
+  rows.map(({ field: path, label, value }) => ({ field: path, label, value }));
 
 /**
- * What a finished draft sends, from its open model: hidden answers cleared
- * first, then the rows read back and shown on the card, then the answers
- * the Hub files (file questions left out), all from that same model.
+ * The card, checked as the Hub checks it (`submissionSummaryIssue`): a
+ * mismatch is a bug here, refused rather than sent.
  */
-function sendable(model: Model) {
-  clearHiddenAnswers(model);
-  const rows = answerRows(model);
-  return { rows, summary: cardSummary(rows) };
+function checked<T extends BidSubmitOperation | ClaimSubmitOperation>(
+  operation: T,
+  rows: ReviewRow[],
+): Built<T> {
+  const issue = submissionSummaryIssue(operation);
+  if (issue) {
+    console.warn(`[yoma] card rows refused: ${issue.slice(0, 120)}`);
+    return { ok: false, why: 'shape' };
+  }
+  return { ok: true, operation, rows };
 }
 
 /** The application card for a finished application draft. */
@@ -298,23 +413,22 @@ export function buildApplicationOperation(input: {
   model: Model;
   draft: Pick<Draft, 'collectionId' | 'title'>;
 }): Built<BidSubmitOperation> {
-  const { rows, summary } = sendable(input.model);
-  if (!summary) return { ok: false, why: 'rows' };
-  const data = JSON.stringify(submittableData(input.model));
-  if (data.length > MAX_CARD_DATA) return { ok: false, why: 'data' };
-  return {
-    ok: true,
-    rows,
-    operation: {
+  const { data, rows, problem } = readBack(input.model);
+  if (problem) return { ok: false, why: problem };
+  const json = JSON.stringify(data);
+  if (json.length > MAX_CARD_DATA) return { ok: false, why: 'data' };
+  return checked(
+    {
       kind: 'ixo.bid.submit.v1',
       network: input.network,
       collectionId: input.draft.collectionId,
       title: clip(input.draft.title, 120),
       role: 'SA',
-      summary,
-      data,
+      summary: cardRows(rows),
+      data: json,
     },
-  };
+    rows,
+  );
 }
 
 /** The claim card for a finished claim draft, with one evidence entry per file still answering a visible question. */
@@ -323,8 +437,7 @@ export function buildClaimOperation(input: {
   model: Model;
   draft: Pick<Draft, 'collectionId' | 'title' | 'evidence'>;
 }): Built<ClaimSubmitOperation> {
-  const { rows, summary } = sendable(input.model);
-  if (!summary) return { ok: false, why: 'rows' };
+  clearHiddenAnswers(input.model);
   const evidence = liveEvidence(input.model, input.draft).map((item) => ({
     field: evidenceField(item.path),
     url: item.url,
@@ -338,21 +451,22 @@ export function buildClaimOperation(input: {
     evidence.some((item) => item.field.length > MAX_EVIDENCE_FIELD)
   )
     return { ok: false, why: 'files' };
-  const data = JSON.stringify(submittableData(input.model));
-  if (data.length > MAX_CARD_DATA) return { ok: false, why: 'data' };
-  return {
-    ok: true,
-    rows,
-    operation: {
+  const { data, rows, problem } = readBack(input.model);
+  if (problem) return { ok: false, why: problem };
+  const json = JSON.stringify(data);
+  if (json.length > MAX_CARD_DATA) return { ok: false, why: 'data' };
+  return checked(
+    {
       kind: 'ixo.claim.submit.v1',
       network: input.network,
       collectionId: input.draft.collectionId,
       title: clip(input.draft.title, 120),
-      summary,
-      data,
+      summary: cardRows(rows),
+      data: json,
       evidence,
     },
-  };
+    rows,
+  );
 }
 
 /**

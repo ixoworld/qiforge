@@ -3,7 +3,11 @@ import { z } from 'zod';
 import { validateManifest } from '../../core/manifest';
 import { makeRuntimeContext } from '../../core/test-fixtures';
 import { UserKvLimitError } from '../../core/user-kv';
-import type { PluginTool, RuntimeContext } from '../../plugin-api/types';
+import type {
+  HubActionStatusRead,
+  PluginTool,
+  RuntimeContext,
+} from '../../plugin-api/types';
 import type { ActionReferenceV1 as ActionReference } from '@ixo/action-protocol';
 import { HubActionClient } from '../../hub-actions/client';
 import { prepareHubAction } from '../../hub-actions/request';
@@ -348,8 +352,8 @@ function setup(
     operations?: Capabilities['operations'];
     expiresAt?: number;
     instantPermission?: InstantPermission;
-    /** The Hub's review state on a status read with no outcome, as a host may pass it. */
-    reviewStatus?: string;
+    /** Auth Hub's review status on a status read (default `prepared`). */
+    reviewStatus?: HubActionStatusRead['reviewStatus'];
     hubActions?: (base: HubActions) => HubActions;
     capabilities?: Partial<Capabilities>;
     config?: Record<string, unknown>;
@@ -392,7 +396,9 @@ function setup(
     status: async (_owner, actionId) => {
       const status = outcomes.get(actionId);
       return {
-        ...(opts.reviewStatus ? { reviewStatus: opts.reviewStatus } : {}),
+        held: true,
+        reviewStatus: opts.reviewStatus ?? 'prepared',
+        operationStatus: null,
         outcome: status
           ? {
               version: 'ixo.auth-outcome/2',
@@ -1188,9 +1194,16 @@ describe('yoma_form', () => {
     });
     const review = await form({ action: 'review', ...ref });
     expect(review.status).toBe('ready');
-    expect(review.answers).toContainEqual({
+    expect(review.files).toContainEqual({
       label: expect.stringContaining('ertificate'),
       value: '📷 certificate.jpg',
+    });
+    // The card's rows are the answers of `data`, one each, as the Hub checks.
+    expect(review.answers).toContainEqual({
+      field: 'schema:addressCountry',
+      label: 'Which country do you live in?',
+      value: 'ZA',
+      means: 'South Africa',
     });
     expect((await confirm(ref)).status).toBe('prepared');
     expect(requests).toHaveLength(1);
@@ -1631,6 +1644,28 @@ describe('cards in flight', () => {
     expect((await form({ action: 'next', ...ref })).status).toBe('submitted');
   });
 
+  it('leaves a card alone when this owner object holds no such action (Auth Hub was not asked)', async () => {
+    const { confirm, form } = setup({
+      expiresAt: Math.floor(Date.now() / 1000) - 3600,
+      reviewStatus: 'expired',
+      hubActions: (base) => ({
+        ...base,
+        status: async () => ({
+          held: false,
+          reviewStatus: null,
+          operationStatus: null,
+          outcome: null,
+          summary: null,
+        }),
+      }),
+    });
+    const ref = await fillApplication(form);
+    await confirm(ref);
+    expect((await form({ action: 'next', ...ref })).status).toBe(
+      'waiting_for_confirm',
+    );
+  });
+
   it('lets a card with no final outcome a day after its expiry be deleted when they ask', async () => {
     const { confirm, form, outcomes } = setup({
       expiresAt: Math.floor(Date.now() / 1000) - 2 * 86_400,
@@ -1738,6 +1773,24 @@ describe('sending, when Auth Hub says no', () => {
         'This review request expired before it reached Auth Hub; ask the user to confirm again.',
       ),
       { reason: 'expired', retryable: false },
+    ],
+    [
+      new HubActionRefused(
+        'refused',
+        'Auth Hub is limiting requests from this oracle right now (rate_limited); try again later.',
+        undefined,
+        429,
+      ),
+      { reason: 'rate_limited', retryable: true },
+    ],
+    [
+      new HubActionRefused(
+        'refused',
+        'Auth Hub did not accept this operation as written.',
+        undefined,
+        400,
+      ),
+      { reason: 'refused', retryable: false },
     ],
     [
       new Error('Hub action request returned 503'),
@@ -1974,13 +2027,13 @@ describe('instant permission, at most once', () => {
 
 describe('my_drafts under load', () => {
   it('asks Auth Hub about at most three cards, each for at most 3 s', async () => {
-    let asked = 0;
+    const timeouts: Array<number | undefined> = [];
     const { lookup, kv } = setup({
       hubActions: (base) => ({
         ...base,
-        status: () => {
-          asked += 1;
-          return new Promise(() => undefined);
+        status: async (_owner, _id, opts) => {
+          timeouts.push(opts?.timeoutMs);
+          throw new DOMException('The operation timed out.', 'TimeoutError');
         },
       }),
     });
@@ -2008,12 +2061,11 @@ describe('my_drafts under load', () => {
           answersAt: '2026-10-30T00:00:00.000Z',
         },
       }));
-    vi.useFakeTimers();
-    const pending = lookup({ kind: 'my_drafts' });
-    await vi.advanceTimersByTimeAsync(HUB_STATUS_TIMEOUT_MS + 50);
-    const [drafts] = (await pending).results;
+    const [drafts] = (await lookup({ kind: 'my_drafts' })).results;
     expect(drafts.drafts).toHaveLength(4);
-    expect(asked).toBe(MAX_CARD_REFRESHES);
+    expect(timeouts).toEqual(
+      Array(MAX_CARD_REFRESHES).fill(HUB_STATUS_TIMEOUT_MS),
+    );
   });
 });
 
