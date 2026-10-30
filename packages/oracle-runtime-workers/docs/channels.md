@@ -548,7 +548,8 @@ any Hub call, and a turn that cannot use chain transactions gets no such
 tool (`describe_chain_messages` then answers `availableTypes: []`): not a
 channel turn, Hub actions off, chain transactions off for the account, or
 capabilities that cannot be read; never a guess at the whole catalogue. The
-tool is built once per type list and cached (at most 8 lists per isolate).
+tool is built once per (types, described types) pair and cached (at most
+32 pairs per isolate, least recently used dropped).
 The capabilities behind it are a turn read of the owner object
 (`capabilities({ turn: true })`): the 60 s cache while fresh, else one read
 with a 3 s timeout (not the Hub calls' 10 s) shared by concurrent turns;
@@ -556,14 +557,43 @@ after a failed read no turn reads again for 30 s, and while reads fail the
 last capabilities read are used (with none, no tool). A slow or failing Hub
 therefore costs a turn at most 3 s once per 30 s; a prepare still reads
 with the full timeout. Its
-description is a few sentences plus one summary line per message type. Its
-JSON Schema lists, per type, the field names and their basic types only (no
-descriptions, patterns or limits), plus the batch bound and `memo`. The
-fields must be in that schema: a model provider holds a tool call to its
-schema, so a field the schema does not declare is dropped before the
-runtime sees it (this broke the first 0.29.0 build, which declared only
-`type`). Each per-type object stays open, so a field a type does not have
-still reaches the handler, which names it in its refusal. Before a type's
+description is a few sentences plus one summary line per available message
+type. Its JSON Schema declares field lists only for the types described in
+this conversation: per described type, the field names and their basic
+types (no descriptions, patterns or limits); every other available type is
+named in one open branch (`type` one of them, any other field allowed);
+plus the batch bound and `memo`. A described type's fields must be in that
+schema: a model provider holds a tool call to its schema, so a field the
+schema does not declare is dropped before the runtime sees it (this broke
+the first 0.29.0 build, which declared only `type`, as an open object, for
+every type). So the handler refuses a message of a type not described in
+this session, before any Hub call, with "Nothing was sent. Read the rules of
+`<type>` first: call describe_chain_messages with types [...], then send
+exactly the fields it lists.", and a described type is declared in full.
+Each per-type object stays open, so a field a type does not have still
+reaches the handler, which names it in its refusal. When the account's
+types cannot be remembered per session (no `ctx.kv`), every type carries
+its fields as before.
+
+The described types are kept per session id in the owner's key-value rows
+(`ctx.kv`, namespace `hub-actions/chain-tx-described`): durable across
+restarts of the owner object, forgotten after 7 days without use, at most
+200 sessions per owner; a new session starts with none. Request tools are
+built once per turn (`createMainAgent` runs once per run), not per model
+call, so a type described during a turn would otherwise reach the turn's
+next model call without its fields. A request middleware
+(`chainTxFieldsMiddleware`, inside the capability gate) therefore gives
+every model call the request tool for the session's current described set.
+LangChain refuses a new instance of a registered tool in `wrapModelCall`
+("Replaced tools are always rejected to preserve ToolNode execution
+identity"), so the model is given the tool as a plain function definition
+(same name and description); the registered tool, whose schema accepts the
+fields of every available type, still runs the call. A test drives
+describe then request in one turn through `createAgent`. No model binding
+in the runtime uses strict function calling (`strict`,
+`supportsStrictToolCalling` and native structured output are unset on the
+platform and BYO models); a strict mode would refuse every open object and
+optional field the runtime's tools use, not only this one. Before a type's
 first use in a conversation the model calls `describe_chain_messages`
 (`{types: [...]}`, 1 to 8 distinct catalogue types), which returns, per
 type, its full rules (purpose, what the runtime fills, chain caveats) and
@@ -580,14 +610,20 @@ offered on, and its rules only when asked for. The catalogue lives in
 Measured with protocol 0.8.0, as a provider is sent it (LangChain's
 `convertToOpenAITool` over the wrapped tool, JSON characters):
 
-| Types offered                      | Whole tool | Parameters | Description |
-| ---------------------------------- | ---------- | ---------- | ----------- |
-| the four 0.6.0 types (level 4 / 5) | 2 962      | 1 639      | 1 218       |
-| all 33 (level 6)                   | 18 739     | 14 290     | 4 315       |
+| Types offered                      | Described in the session                              | Whole tool | Parameters | Description |
+| ---------------------------------- | ----------------------------------------------------- | ---------- | ---------- | ----------- |
+| all 33                             | none                                                  | 5 803      | 1 358      | 4 311       |
+| all 33                             | 1 (bank send)                                         | 6 019      | 1 574      | 4 311       |
+| all 33                             | 2 (bank send, stake)                                  | 6 223      | 1 778      | 4 311       |
+| all 33                             | 4 (bank send, stake, claim submit, create collection) | 8 432      | 3 987      | 4 311       |
+| all 33                             | all 33 (or no session store)                          | 18 735     | 14 290     | 4 311       |
+| the four 0.6.0 types (level 4 / 5) | none                                                  | 1 846      | 523        | 1 218       |
+| the four 0.6.0 types (level 4 / 5) | all four                                              | 2 962      | 1 639      | 1 218       |
 
 `describe_chain_messages`, a boot-time tool whose `types` enum names all 33
 types whatever the account may use, is 1 586 characters. A test keeps the
-request tool under 3 500 (four types) and 20 000 (33). For comparison, the protocol's own JSON schema for the
+request tool under 3 500 (four types), 6 500 (33, none described), 9 000
+(33, four described) and 20 000 (33, all described). For comparison, the protocol's own JSON schema for the
 `ixo.chain.tx.v1` operation (patterns and limits included) is 29 711
 characters with 33 types; the runtime never sends it to a model
 (`request_hub_action` leaves the runtime-built kinds out).

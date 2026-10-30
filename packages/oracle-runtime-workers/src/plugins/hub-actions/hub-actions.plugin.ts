@@ -8,6 +8,9 @@ import {
   type ActionReferenceV1,
   type ChainTxMessageType,
 } from '@ixo/action-protocol';
+import { tool } from '@langchain/core/tools';
+import { convertToOpenAITool } from '@langchain/core/utils/function_calling';
+import { createMiddleware, type AgentMiddleware } from 'langchain';
 import { z } from 'zod';
 import { quoteHubText } from '../../hub-actions/hub-text';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin';
@@ -134,17 +137,34 @@ function messageFieldsOnly(schema: z.ZodObject) {
 }
 
 /**
- * The schema the model is given: per type, its fields (messageFieldsOnly),
- * so a type adds its short field list and the rules are fetched with
- * describe_chain_messages when needed. Each message is then checked by the
- * handler against its full catalogue schema.
+ * The schema the model is given: per type its fields (messageFieldsOnly)
+ * when the type was described in this session (`described`; absent: every
+ * type), and one open branch naming every other type (`type` one of them,
+ * any other field allowed). A type the model has not read about costs its
+ * name only; the request handler refuses it until it is described, and
+ * the next model call is given its fields (`chainTxFieldsMiddleware`).
+ * Each message is checked by the handler against its full catalogue
+ * schema.
  */
 export function chainTransactionSchemaFor(
   catalog: Readonly<Record<string, { schema: z.ZodObject }>>,
+  described?: ReadonlySet<string>,
 ) {
-  const [first, ...rest] = Object.values(catalog).map((entry) =>
-    messageFieldsOnly(entry.schema),
-  );
+  const entries = Object.entries(catalog);
+  const withFields = entries
+    .filter(([type]) => !described || described.has(type))
+    .map(([, entry]) => messageFieldsOnly(entry.schema));
+  const [firstUnread, ...unread] = entries
+    .filter(([type]) => described && !described.has(type))
+    .map(([type]) => type);
+  const branches =
+    firstUnread === undefined
+      ? withFields
+      : [
+          ...withFields,
+          z.looseObject({ type: z.literal([firstUnread, ...unread]) }),
+        ];
+  const [first, ...rest] = branches;
   if (!first) throw new Error('The chain transaction catalogue is empty');
   return z.strictObject({
     messages: z
@@ -183,22 +203,36 @@ function catalogOf(types: readonly ChainTxMessageType[]) {
 
 /**
  * request_chain_transaction for the message types this account may use
- * (`availableChainTxTypes`): the model is given only their summaries and
- * fields, so it neither sees nor pays for a type Auth Hub would refuse,
- * and its arguments are checked against the same schema (a message of
- * another type is refused before any Hub call). Null when the account may
- * use none (describe_chain_messages then answers `availableTypes: []`).
- * Built once per list.
+ * (`availableChainTxTypes`): the model is given their summaries, and the
+ * fields of those `described` in this session (null: of every one), so it
+ * neither sees nor pays for a type Auth Hub would refuse or one it has not
+ * read about, and its arguments are checked against the same schema (a
+ * message of another type is refused before any Hub call). Null when the
+ * account may use none (describe_chain_messages then answers
+ * `availableTypes: []`). Built once per (types, described) pair.
  */
 export function chainTransactionTool(
   types: readonly ChainTxMessageType[],
+  described: readonly ChainTxMessageType[] | null = null,
 ): PluginTool | null {
   const catalog = catalogOf(types);
   if (!Object.keys(catalog).length) return null;
-  const key = Object.keys(catalog).join(',');
+  const fields = described
+    ? new Set(
+        Object.keys(catalog).filter((type) =>
+          described.some((d) => d === type),
+        ),
+      )
+    : undefined;
+  const key = `${Object.keys(catalog).join(',')}|${fields ? [...fields].join(',') : '*'}`;
   const cached = chainTransactionTools.get(key);
-  if (cached) return cached;
-  const schema = chainTransactionSchemaFor(catalog);
+  if (cached) {
+    // Most recently used last, so the bound below drops the oldest.
+    chainTransactionTools.delete(key);
+    chainTransactionTools.set(key, cached);
+    return cached;
+  }
+  const schema = chainTransactionSchemaFor(catalog, fields);
   const tool: PluginTool = {
     name: 'request_chain_transaction',
     description: chainTransactionDescription(catalog),
@@ -206,14 +240,101 @@ export function chainTransactionTool(
     effect: 'write',
     handler: (input, ctx) => requestChainTransaction(schema, input, ctx),
   };
-  // Lists come from Auth Hub capabilities: one or two per deployment. The
-  // bound only keeps an unexpected stream of lists from growing the map.
+  // Type lists come from Auth Hub capabilities (one or two per deployment)
+  // and described sets from sessions; the bound keeps the map small, the
+  // least recently used pair is built again when needed.
   if (chainTransactionTools.size >= CHAIN_TRANSACTION_TOOL_CACHE)
     chainTransactionTools.delete(chainTransactionTools.keys().next().value!);
   chainTransactionTools.set(key, tool);
   return tool;
 }
-const CHAIN_TRANSACTION_TOOL_CACHE = 8;
+const CHAIN_TRANSACTION_TOOL_CACHE = 32;
+
+/**
+ * The message types described in a conversation (`describe_chain_messages`),
+ * per session id in the owner's own key-value rows: durable across restarts
+ * of the owner object, kept while used (`DESCRIBED_IDLE_TTL_MS`), and at
+ * most `DESCRIBED_MAX_SESSIONS` sessions per owner. A new session starts
+ * with none.
+ */
+const DESCRIBED_NAMESPACE = 'hub-actions/chain-tx-described';
+const DESCRIBED_IDLE_TTL_MS = 7 * 24 * 60 * 60_000;
+const DESCRIBED_MAX_SESSIONS = 200;
+
+/** The catalogue types in `value` (a stored list), in catalogue order. */
+function catalogueTypesIn(value: unknown): ChainTxMessageType[] {
+  return Array.isArray(value)
+    ? CHAIN_TX_MESSAGE_TYPES.filter((type) => value.includes(type))
+    : [];
+}
+
+/**
+ * The types described in this session; null when the turn has no
+ * key-value store or session to remember them in (every type then carries
+ * its fields, as before this was remembered).
+ */
+async function describedChainTxTypes(
+  ctx: RuntimeContext,
+): Promise<ChainTxMessageType[] | null> {
+  if (!ctx.kv || !ctx.session.id) return null;
+  return catalogueTypesIn(
+    await ctx.kv.get(DESCRIBED_NAMESPACE, ctx.session.id),
+  );
+}
+
+async function rememberDescribed(
+  ctx: RuntimeContext,
+  types: readonly ChainTxMessageType[],
+): Promise<void> {
+  if (!ctx.kv || !ctx.session.id) return;
+  await ctx.kv.update(
+    DESCRIBED_NAMESPACE,
+    ctx.session.id,
+    (current) => [...new Set([...catalogueTypesIn(current), ...types])],
+    { idleTtlMs: DESCRIBED_IDLE_TTL_MS, maxEntries: DESCRIBED_MAX_SESSIONS },
+  );
+}
+
+/**
+ * The per-turn tool is built before the turn's first model call, so a type
+ * described during the turn would reach the next model call without its
+ * fields, and a provider drops fields its schema does not declare (the
+ * 0.29.0 failure). Before each model call this gives the model the request
+ * tool for the session's current described set. LangChain refuses a new
+ * instance of a registered tool here, so the model gets the tool as its
+ * function definition (same name and description), while the registered
+ * tool, whose schema accepts the fields of every type, still runs the call.
+ */
+function chainTxFieldsMiddleware(ctx: RuntimeContext) {
+  let available: Promise<readonly ChainTxMessageType[]> | null = null;
+  return createMiddleware({
+    name: 'HubActionsChainTxFieldsMiddleware',
+    wrapModelCall: async (request, handler) => {
+      const index = request.tools.findIndex(
+        (entry) => entry.name === 'request_chain_transaction',
+      );
+      const registered = request.tools[index];
+      if (!registered || typeof registered.description !== 'string')
+        return handler(request);
+      const described = await describedChainTxTypes(ctx);
+      if (!described) return handler(request);
+      available ??= availableChainTxTypes(ctx);
+      const current = chainTransactionTool(await available, described);
+      if (!current) return handler(request);
+      // A plain object (a server-tool definition to LangChain), not a tool instance.
+      const { type, function: fn } = convertToOpenAITool(
+        tool(async () => '', {
+          name: 'request_chain_transaction',
+          description: registered.description,
+          schema: current.schema,
+        }),
+      );
+      const tools = [...request.tools];
+      tools[index] = { type, function: fn };
+      return handler({ ...request, tools });
+    },
+  });
+}
 const chainTransactionTools = new Map<string, PluginTool>();
 
 /** The request tool as the whole catalogue gives it (no account capabilities). */
@@ -232,7 +353,7 @@ const describeChainMessagesSchema = z.strictObject({
 });
 
 export const DESCRIBE_CHAIN_MESSAGES_TOOL_DESCRIPTION =
-  'Read the full rules of chain-transaction message types before using them in request_chain_transaction: every field with its meaning, format and limits, what the runtime fills, and chain caveats. Ask only for the types you need. Also returns `availableTypes`: the types this account may use.';
+  'Read the full rules of chain-transaction message types before using them in request_chain_transaction: every field with its meaning, format and limits, what the runtime fills, and chain caveats. Ask only for the types you need: request_chain_transaction takes only types described in this conversation, and gives their fields from the next call on. Also returns `availableTypes`: the types this account may use.';
 
 export type HubActionRequestResult =
   | {
@@ -388,6 +509,24 @@ async function requestChainTransaction(
 ): Promise<HubActionRequestResult> {
   const parsed = schema.safeParse(input);
   if (!parsed.success) return chainTxShapeRefusal(issuesOf(parsed.error));
+  const described = await describedChainTxTypes(ctx);
+  if (described) {
+    const unread = [
+      ...new Set(
+        parsed.data.messages
+          .map(chainTxTypeOf)
+          .filter(
+            (type): type is ChainTxMessageType =>
+              type !== null && !described.includes(type),
+          ),
+      ),
+    ];
+    if (unread.length)
+      return {
+        status: 'unavailable',
+        reason: `Nothing was sent. Read the rules of ${unread.map((type) => `\`${type}\``).join(', ')} first: call describe_chain_messages with types ${JSON.stringify(unread)}, then send exactly the fields it lists.`,
+      };
+  }
   const checked = strictChainTxMessages(parsed.data.messages);
   if ('issues' in checked) return chainTxShapeRefusal(checked.issues);
   if (ctx.config.HUB_ACTIONS_ENABLED !== 'true' || !ctx.hubActions)
@@ -562,6 +701,7 @@ async function describeChainMessages(
       status: 'unavailable',
       reason: `Name 1 to ${CHAIN_TX_MAX_MESSAGES} different message types, each one of: ${CHAIN_TX_MESSAGE_TYPES.join(', ')}.`,
     };
+  await rememberDescribed(ctx, parsed.data.types);
   return {
     status: 'known',
     general: CHAIN_TX_GENERAL_RULES,
@@ -768,8 +908,16 @@ export class HubActionsPlugin extends OraclePlugin {
    * the owner object), so 33 types do not reach a model that may use 4.
    */
   override async getRequestTools(ctx: RuntimeContext): Promise<PluginTool[]> {
-    const tool = chainTransactionTool(await availableChainTxTypes(ctx));
+    const [available, described] = await Promise.all([
+      availableChainTxTypes(ctx),
+      describedChainTxTypes(ctx),
+    ]);
+    const tool = chainTransactionTool(available, described);
     return tool ? [tool] : [];
+  }
+  /** Gives each model call the request tool with the fields described so far in the turn. */
+  override getRequestMiddlewares(ctx: RuntimeContext): AgentMiddleware[] {
+    return [chainTxFieldsMiddleware(ctx)];
   }
   override getTools(): PluginTool[] {
     return [

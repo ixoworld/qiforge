@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { ToolInputParsingException } from '@langchain/core/tools';
+import { HumanMessage } from '@langchain/core/messages';
+import { FakeToolCallingModel, createAgent } from 'langchain';
+import { createMemoryUserKv } from '../../core/user-kv';
 import {
   CHAIN_TX_LEVEL4_MESSAGE_TYPES,
   CHAIN_TX_MESSAGE_TYPES,
@@ -3142,5 +3145,313 @@ describe('describe_chain_messages', () => {
     const capabilities = accountCapabilities(chainTx);
     expect(await available(context(capabilities, 'portal'))).toEqual([]);
     expect(capabilities).not.toHaveBeenCalled();
+  });
+});
+
+describe('chain transaction field discovery', () => {
+  const VALIDATOR = 'ixovaloper1qeex565vg4uu7zwudh9ff2dauxptqf72nf2l44';
+  const stake = {
+    type: 'cosmos.staking.delegate',
+    validatorAddress: VALIDATOR,
+    amount: '100',
+  };
+  const allTypes: ActionCapabilitiesV1 = {
+    version: 'ixo.auth-capabilities/2',
+    accountId: 'account-three',
+    oracleDid: 'did:ixo:oracle',
+    network: 'ixo testnet',
+    resourceOrigin: null,
+    operations: ['ixo.chain.tx.v1'],
+    forms: [],
+    transfer: null,
+    chainTx: { messageTypes: [...CHAIN_TX_MESSAGE_TYPES], maxMessages: 8 },
+  };
+  type HubActions = NonNullable<RuntimeContext['hubActions']>;
+  function hubActions(
+    chainTransaction: HubActions['chainTransaction'],
+  ): HubActions {
+    const unused = async () => {
+      throw new Error('unused');
+    };
+    return {
+      capabilities: async () => allTypes,
+      options: unused,
+      request: unused,
+      chainTransaction,
+      status: unused,
+    };
+  }
+  const session = (id: string) => ({
+    id,
+    client: 'channel' as const,
+    requestId: `request-${id}`,
+    runId: `run-${id}`,
+    channel: {
+      provider: 'whatsapp',
+      bindingId: 'chb_three',
+      bindingRevision: 4,
+    },
+  });
+  function turn(
+    kv: ReturnType<typeof createMemoryUserKv>,
+    id: string,
+    chainTransaction: HubActions['chainTransaction'] = async () => reference,
+  ) {
+    return makeRuntimeContext({
+      config: { HUB_ACTIONS_ENABLED: 'true' },
+      user: {
+        did: 'did:ixo:owner',
+        matrixUserId: '@owner:test',
+        ucanDelegation: { raw: 'delegation' },
+      },
+      session: session(id),
+      toolCallId: 'tool-call',
+      kv,
+      hubActions: hubActions(chainTransaction),
+    });
+  }
+  const describeTool = () => {
+    const found = new HubActionsPlugin()
+      .getTools()
+      .find((item) => item.name === 'describe_chain_messages');
+    if (!found) throw new Error('describe tool missing');
+    return found;
+  };
+  /** The tool's parameters as a provider receives them. */
+  const parameters = (tool: PluginTool) =>
+    convertToOpenAITool(
+      wrapPluginTool(tool, {
+        ambient: createNoopAmbient(),
+        state: { messages: [] },
+      }),
+    ).function.parameters as {
+      properties: { messages: { items: { oneOf: Record<string, unknown>[] } } };
+    };
+  /** The branch that takes `type`: its own (`const`) or the open one (`enum`). */
+  const branch = (tool: PluginTool, type: string) =>
+    parameters(tool).properties.messages.items.oneOf.find((item) => {
+      const named = (
+        item.properties as {
+          type: { const?: string; enum?: string[] };
+        }
+      ).type;
+      return named.const === type || named.enum?.includes(type) === true;
+    });
+
+  it('declares fields only for the types described in this session, and names every other type in one open branch', async () => {
+    const kv = createMemoryUserKv();
+    const ctx = turn(kv, 'session-a');
+    const plugin = new HubActionsPlugin();
+    const [before] = await plugin.getRequestTools(ctx);
+    // Every available type is named in one open branch, none with fields.
+    expect(parameters(before!).properties.messages.items.oneOf).toEqual([
+      {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: [...CHAIN_TX_MESSAGE_TYPES] },
+        },
+        required: ['type'],
+        additionalProperties: {},
+      },
+    ]);
+    // The summaries stay in the description.
+    expect(before!.description).toContain('`cosmos.staking.delegate`');
+    await describeTool().handler(
+      { types: ['cosmos.staking.delegate', 'cosmos.gov.vote'] },
+      ctx,
+    );
+    const [after] = await plugin.getRequestTools(ctx);
+    expect(
+      Object.keys(
+        branch(after!, 'cosmos.staking.delegate')!.properties as object,
+      ),
+    ).toEqual(['type', 'validatorAddress', 'amount']);
+    expect(
+      Object.keys(branch(after!, 'cosmos.gov.vote')!.properties as object),
+    ).toEqual(['type', 'proposalId', 'option']);
+    expect(branch(after!, 'ixo.token.retire')!.properties).toEqual({
+      type: {
+        type: 'string',
+        enum: CHAIN_TX_MESSAGE_TYPES.filter(
+          (type) =>
+            type !== 'cosmos.staking.delegate' && type !== 'cosmos.gov.vote',
+        ),
+      },
+    });
+    // Another session of the same owner starts with none described.
+    const [other] = await plugin.getRequestTools(turn(kv, 'session-b'));
+    expect(
+      Object.keys(
+        branch(other!, 'cosmos.staking.delegate')!.properties as object,
+      ),
+    ).toEqual(['type']);
+    // The same pair is built once.
+    expect((await plugin.getRequestTools(ctx))[0]).toBe(after);
+  });
+
+  it('costs about 5 800 characters with 33 types and none described (most of it the summaries), and a type’s fields once described', () => {
+    const size = (described: readonly ChainTxMessageType[]) =>
+      JSON.stringify(
+        convertToOpenAITool(
+          wrapPluginTool(
+            chainTransactionTool(CHAIN_TX_MESSAGE_TYPES, described)!,
+            {
+              ambient: createNoopAmbient(),
+              state: { messages: [] },
+            },
+          ),
+        ),
+      ).length;
+    const none = size([]);
+    const one = size(['cosmos.bank.send']);
+    const two = size(['cosmos.bank.send', 'cosmos.staking.delegate']);
+    const four = size([
+      'cosmos.bank.send',
+      'cosmos.staking.delegate',
+      'ixo.claims.submit',
+      'ixo.claims.create-collection',
+    ]);
+    const all = size(CHAIN_TX_MESSAGE_TYPES);
+    // Recorded in docs/channels.md (5 803, 6 019, 6 223, 8 432 and 18 735
+    // when measured).
+    expect(none).toBeLessThan(6_500);
+    expect(none).toBeLessThan(one);
+    expect(one).toBeLessThan(two);
+    expect(two).toBeLessThan(four);
+    expect(four).toBeLessThan(9_000);
+    expect(all).toBeLessThan(20_000);
+  });
+
+  it('refuses a type not described in this session before any Hub call, saying what to call', async () => {
+    const chainTransaction = vi.fn(async () => reference);
+    const ctx = turn(createMemoryUserKv(), 'session-c', chainTransaction);
+    const [tool] = await new HubActionsPlugin().getRequestTools(ctx);
+    expect(
+      await tool!.handler(
+        {
+          messages: [
+            stake,
+            { type: 'cosmos.gov.vote', proposalId: '5', option: 'yes' },
+          ],
+        },
+        ctx,
+      ),
+    ).toEqual({
+      status: 'unavailable',
+      reason:
+        'Nothing was sent. Read the rules of `cosmos.staking.delegate`, `cosmos.gov.vote` first: call describe_chain_messages with types ["cosmos.staking.delegate","cosmos.gov.vote"], then send exactly the fields it lists.',
+    });
+    expect(chainTransaction).not.toHaveBeenCalled();
+    // Described: the same tool (built before) prepares it.
+    await describeTool().handler({ types: ['cosmos.staking.delegate'] }, ctx);
+    expect(await tool!.handler({ messages: [stake] }, ctx)).toMatchObject({
+      status: 'prepared',
+    });
+    expect(chainTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the described types of a session in the owner store, bounded and with an idle lifetime', async () => {
+    let now = 1_800_000_000_000;
+    const kv = createMemoryUserKv({ now: () => now });
+    const ctx = turn(kv, 'session-d');
+    await describeTool().handler({ types: ['cosmos.staking.delegate'] }, ctx);
+    await describeTool().handler({ types: ['cosmos.gov.vote'] }, ctx);
+    expect(await kv.get('hub-actions/chain-tx-described', 'session-d')).toEqual(
+      ['cosmos.staking.delegate', 'cosmos.gov.vote'],
+    );
+    // A week without use forgets them: describe again.
+    now += 7 * 24 * 60 * 60_000 + 1;
+    expect(
+      await kv.get('hub-actions/chain-tx-described', 'session-d'),
+    ).toBeUndefined();
+    // At most 200 sessions are kept per owner.
+    for (let i = 0; i < 201; i++)
+      await describeTool().handler(
+        { types: ['cosmos.gov.vote'] },
+        turn(kv, `many-${i}`),
+      );
+    expect(
+      await kv.get('hub-actions/chain-tx-described', 'many-0'),
+    ).toBeUndefined();
+    expect(await kv.get('hub-actions/chain-tx-described', 'many-200')).toEqual([
+      'cosmos.gov.vote',
+    ]);
+  });
+
+  it('gives the next model call of the same turn the fields just described, while the registered tool runs the call', async () => {
+    const chainTransaction = vi.fn(async () => reference);
+    const kv = createMemoryUserKv();
+    const ctx = turn(kv, 'session-e', chainTransaction);
+    const plugin = new HubActionsPlugin();
+    const [request] = await plugin.getRequestTools(ctx);
+    const ambient = {
+      ...createNoopAmbient({ config: { HUB_ACTIONS_ENABLED: 'true' }, kv }),
+      hubActions: hubActions(chainTransaction),
+    };
+    const wrap = (item: PluginTool) =>
+      wrapPluginTool(item, {
+        ambient,
+        state: { messages: [] },
+        fallbackContext: { user: ctx.user, session: ctx.session } as never,
+      });
+    // What each model call was bound with.
+    const bound: unknown[][] = [];
+    class RecordingModel extends FakeToolCallingModel {
+      override bindTools(
+        tools: Parameters<FakeToolCallingModel['bindTools']>[0],
+      ) {
+        bound.push([...tools]);
+        return super.bindTools(tools);
+      }
+    }
+    const model = new RecordingModel({
+      toolCalls: [
+        [
+          {
+            name: 'describe_chain_messages',
+            args: { types: ['cosmos.staking.delegate'] },
+            id: 'call-1',
+          },
+        ],
+        [
+          {
+            name: 'request_chain_transaction',
+            args: { messages: [stake] },
+            id: 'call-2',
+          },
+        ],
+        [],
+      ],
+    });
+    const agent = createAgent({
+      model,
+      tools: [wrap(describeTool()), wrap(request!)],
+      middleware: plugin.getRequestMiddlewares(ctx),
+    });
+    await agent.invoke({
+      messages: [new HumanMessage('Stake 100 IXO with Alex')],
+    });
+    const requestDefinition = (call: number) =>
+      bound[call]!.find(
+        (item) =>
+          typeof item === 'object' &&
+          item !== null &&
+          'function' in item &&
+          (item as { function: { name: string } }).function.name ===
+            'request_chain_transaction',
+      ) as
+        | { function: { parameters: Parameters<typeof JSON.stringify>[0] } }
+        | undefined;
+    // First call: the type is named only; second call (same turn, after
+    // describe): its fields are declared.
+    const first = JSON.stringify(requestDefinition(0)?.function.parameters);
+    const second = JSON.stringify(requestDefinition(1)?.function.parameters);
+    expect(first).not.toContain('"validatorAddress"');
+    expect(second).toContain('"validatorAddress":{"type":"string"}');
+    expect(second).toContain('"amount":{"type":"string"}');
+    // The registered tool ran the call with every field.
+    expect(chainTransaction).toHaveBeenCalledWith(
+      expect.objectContaining({ messages: [stake] }),
+    );
   });
 });
