@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import climatePlan from './fixtures/form-846-vct.json';
 import surveyRegistration from './fixtures/form-13472-bco.json';
 import treePlanting from './fixtures/form-8724-vct.json';
@@ -11,6 +11,7 @@ import {
   fileAccepted,
   formErrors,
   gridCell,
+  loadSurveyCore,
   nextStep,
   openModel,
   parseNumber,
@@ -23,6 +24,8 @@ import {
   type FormQuestion,
 } from './engine';
 import { buildClaimOperation, readBack } from './submission';
+
+beforeAll(loadSurveyCore);
 
 const progress = { skipped: [], closedSections: [] };
 

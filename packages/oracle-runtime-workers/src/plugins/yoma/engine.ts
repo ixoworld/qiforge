@@ -1,16 +1,11 @@
-import {
-  ElementFactory,
+import type * as SurveyCore from 'survey-core';
+import type {
+  ItemValue,
   Model,
   Question,
-  QuestionBooleanModel,
-  QuestionCheckboxModel,
-  QuestionFileModel,
   QuestionPanelDynamicModel,
   QuestionRatingModel,
   QuestionSelectBase,
-  QuestionTextModel,
-  Serializer,
-  type ItemValue,
 } from 'survey-core';
 import { MAX_SECTION_ITEMS } from './drafts';
 import type { ChoiceQuestion } from './judge';
@@ -37,45 +32,93 @@ const DEFAULT_GRID_PRECISION = 7;
 /** Choices shown per question; a longer list is cut (Yoma forms have at most a few dozen). */
 const MAX_OPTIONS = 60;
 
-class QuestionMapGridSelectorModel extends Question {
-  override getType() {
-    return MAP_GRID_TYPE;
+/**
+ * Jambo's map question as a survey-core question type, registered with the
+ * loaded module's `Serializer` and `ElementFactory` so forms that use it
+ * open. Defined here rather than at module scope: a class needs its base
+ * class when it is defined.
+ */
+function defineMapGridQuestion(core: typeof SurveyCore) {
+  class QuestionMapGridSelectorModel extends core.Question {
+    override getType() {
+      return MAP_GRID_TYPE;
+    }
+    override isEmpty(): boolean {
+      const value: unknown = this.value;
+      if (value === null || value === undefined) return true;
+      return Array.isArray(value) ? value.length === 0 : false;
+    }
+    get gridPrecision(): number {
+      return (
+        Number(this.getPropertyValue('gridPrecision')) || DEFAULT_GRID_PRECISION
+      );
+    }
+    set gridPrecision(value: number) {
+      this.setPropertyValue('gridPrecision', value);
+    }
+    get allowMultiple(): boolean {
+      return this.getPropertyValue('allowMultiple') === true;
+    }
+    set allowMultiple(value: boolean) {
+      this.setPropertyValue('allowMultiple', value);
+    }
   }
-  override isEmpty(): boolean {
-    const value: unknown = this.value;
-    if (value === null || value === undefined) return true;
-    return Array.isArray(value) ? value.length === 0 : false;
-  }
-  get gridPrecision(): number {
-    return (
-      Number(this.getPropertyValue('gridPrecision')) || DEFAULT_GRID_PRECISION
+
+  if (!core.Serializer.findClass(MAP_GRID_TYPE)) {
+    core.Serializer.addClass(
+      MAP_GRID_TYPE,
+      [
+        { name: 'gridPrecision:number', default: DEFAULT_GRID_PRECISION },
+        { name: 'allowMultiple:boolean', default: false },
+      ],
+      () => new QuestionMapGridSelectorModel(''),
+      'question',
+    );
+    core.ElementFactory.Instance.registerElement(
+      MAP_GRID_TYPE,
+      (name) => new QuestionMapGridSelectorModel(name),
     );
   }
-  set gridPrecision(value: number) {
-    this.setPropertyValue('gridPrecision', value);
-  }
-  get allowMultiple(): boolean {
-    return this.getPropertyValue('allowMultiple') === true;
-  }
-  set allowMultiple(value: boolean) {
-    this.setPropertyValue('allowMultiple', value);
-  }
+  return QuestionMapGridSelectorModel;
 }
 
-if (!Serializer.findClass(MAP_GRID_TYPE)) {
-  Serializer.addClass(
-    MAP_GRID_TYPE,
-    [
-      { name: 'gridPrecision:number', default: DEFAULT_GRID_PRECISION },
-      { name: 'allowMultiple:boolean', default: false },
-    ],
-    () => new QuestionMapGridSelectorModel(''),
-    'question',
+/** survey-core once loaded, with the map question registered on it. */
+export interface LoadedSurveyCore {
+  core: typeof SurveyCore;
+  MapGridQuestion: ReturnType<typeof defineMapGridQuestion>;
+}
+
+let loaded: LoadedSurveyCore | undefined;
+let loading: Promise<void> | undefined;
+
+/**
+ * Loads `survey-core` on first use rather than when the Worker starts:
+ * evaluating it (2.5 MB, every question class registered as its module
+ * runs) at startup pushed an oracle with this plugin to the Workers
+ * startup-time limit. Every function of this module that opens or reads a
+ * form model needs it, so callers await this first; it loads once per
+ * isolate, and a failed load is tried again on the next call.
+ */
+export function loadSurveyCore(): Promise<void> {
+  loading ??= import('survey-core').then(
+    (core) => {
+      loaded = { core, MapGridQuestion: defineMapGridQuestion(core) };
+    },
+    (error: unknown) => {
+      loading = undefined;
+      throw error;
+    },
   );
-  ElementFactory.Instance.registerElement(
-    MAP_GRID_TYPE,
-    (name) => new QuestionMapGridSelectorModel(name),
-  );
+  return loading;
+}
+
+/** The loaded survey-core; throws when {@link loadSurveyCore} has not finished. */
+export function surveyCore(): LoadedSurveyCore {
+  if (!loaded)
+    throw new Error(
+      'survey-core is not loaded: await loadSurveyCore() before using the form engine',
+    );
+  return loaded;
 }
 
 /** How a question is answered in chat. */
@@ -188,7 +231,8 @@ export function openModel(
   template: unknown,
   data?: Record<string, unknown>,
 ): Model {
-  const model = new Model(surveyJson(template));
+  const { core } = surveyCore();
+  const model = new core.Model(surveyJson(template));
   if (data) model.data = structuredClone(data);
   return model;
 }
@@ -225,10 +269,11 @@ function numericRating(question: QuestionRatingModel): number[] | undefined {
 }
 
 function inputFor(question: Question): ChatInput | undefined {
-  if (question instanceof QuestionTextModel)
+  const { core, MapGridQuestion } = surveyCore();
+  if (question instanceof core.QuestionTextModel)
     return INPUT_BY_TEXT_TYPE[question.inputType] ?? 'text';
-  if (question instanceof QuestionMapGridSelectorModel) return 'location';
-  if (question instanceof QuestionRatingModel)
+  if (question instanceof MapGridQuestion) return 'location';
+  if (question instanceof core.QuestionRatingModel)
     return numericRating(question) ? 'rating' : 'pick-one';
   switch (question.getType()) {
     case 'comment':
@@ -270,7 +315,7 @@ function specialItems(question: QuestionSelectBase): {
     question.dontKnowItem,
   ];
   const skipped = new Set<ItemValue>([...extras, question.otherItem]);
-  if (question instanceof QuestionCheckboxModel)
+  if (question instanceof surveyCore().core.QuestionCheckboxModel)
     skipped.add(question.selectAllItem);
   return { extras, other: question.otherItem, skipped };
 }
@@ -287,6 +332,7 @@ function describe(
 ): FormQuestion | undefined {
   const input = inputFor(question);
   if (!input) return undefined;
+  const { core, MapGridQuestion } = surveyCore();
   const view: FormQuestion = {
     path,
     name: question.name,
@@ -303,7 +349,7 @@ function describe(
     required: question.isRequired,
     ...(item ? { item } : {}),
   };
-  if (question instanceof QuestionSelectBase) {
+  if (question instanceof core.QuestionSelectBase) {
     const { extras, other, skipped } = specialItems(question);
     const shown = new Set<ItemValue>(question.visibleChoices);
     const regular = question.visibleChoices.filter((c) => !skipped.has(c));
@@ -323,7 +369,7 @@ function describe(
         value: other.value,
       };
   }
-  if (question instanceof QuestionBooleanModel)
+  if (question instanceof core.QuestionBooleanModel)
     view.options = [
       {
         value: question.getValueTrue(),
@@ -334,7 +380,7 @@ function describe(
         text: clip(question.labelFalse || 'No', 200),
       },
     ];
-  if (question instanceof QuestionRatingModel) {
+  if (question instanceof core.QuestionRatingModel) {
     const values = numericRating(question);
     if (values) {
       view.rateValues = values;
@@ -342,11 +388,11 @@ function describe(
       view.rateMax = values[values.length - 1];
     } else view.options = question.visibleRateValues.map(optionOf);
   }
-  if (question instanceof QuestionFileModel) {
+  if (question instanceof core.QuestionFileModel) {
     if (question.acceptedTypes) view.acceptedTypes = question.acceptedTypes;
     view.allowMultiple = question.allowMultiple;
   }
-  if (question instanceof QuestionMapGridSelectorModel)
+  if (question instanceof MapGridQuestion)
     view.allowMultiple = question.allowMultiple;
   return view;
 }
@@ -372,9 +418,10 @@ type Walked =
  * where "add another?" is asked), never a question the form hides.
  */
 function* walk(model: Model): Generator<Walked> {
+  const { core } = surveyCore();
   for (const question of model.getAllQuestions(false)) {
     if (!shown(question)) continue;
-    if (question instanceof QuestionPanelDynamicModel) {
+    if (question instanceof core.QuestionPanelDynamicModel) {
       const title = sectionTitle(question);
       for (const [index, panel] of question.panels.entries()) {
         if (!panel.isVisible) continue;
@@ -433,7 +480,9 @@ function dynamicSection(
   name: string,
 ): QuestionPanelDynamicModel | undefined {
   const question = model.getQuestionByName(name);
-  return question instanceof QuestionPanelDynamicModel ? question : undefined;
+  return question instanceof surveyCore().core.QuestionPanelDynamicModel
+    ? question
+    : undefined;
 }
 
 /** The live survey-core question at a path, or undefined when the form has none. */
@@ -572,7 +621,10 @@ export function setAnswer(
     };
   const before = structuredClone(dataOf(model));
   question.value = value;
-  if (otherText !== undefined && question instanceof QuestionSelectBase)
+  if (
+    otherText !== undefined &&
+    question instanceof surveyCore().core.QuestionSelectBase
+  )
     question.otherValue = otherText;
   const errors = errorsFor(question);
   if (errors.length) {
@@ -887,7 +939,7 @@ export function gridCell(
 ): Record<string, unknown> {
   const question = questionAt(model, path);
   const asked =
-    question instanceof QuestionMapGridSelectorModel
+    question instanceof surveyCore().MapGridQuestion
       ? question.gridPrecision
       : DEFAULT_GRID_PRECISION;
   const precision = Math.min(
