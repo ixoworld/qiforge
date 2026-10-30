@@ -185,7 +185,7 @@ describe('Hub actions Workers plugin', () => {
       collectionId: '44000',
       title: 'Mapping local shops',
       role: 'SA' as const,
-      summary: [{ label: 'Age', value: '19' }],
+      summary: [{ field: 'age', label: 'Age', value: '19' }],
       data: JSON.stringify({ age: 19 }),
     };
     const claim = {
@@ -193,7 +193,7 @@ describe('Hub actions Workers plugin', () => {
       network: 'ixo testnet' as const,
       collectionId: '44000',
       title: 'Mapping local shops',
-      summary: [{ label: 'Shop', value: 'Spaza on 5th' }],
+      summary: [{ field: 'shop', label: 'Shop', value: 'Spaza on 5th' }],
       data: JSON.stringify({ shop: 'Spaza on 5th' }),
       evidence: [
         {
