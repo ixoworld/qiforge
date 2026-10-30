@@ -20,6 +20,10 @@ import type { UserPreferences } from '../core/state';
 import type { AttachmentViewSurface } from '../attachments/view';
 import type { DeliveryConfig } from '../delivery/profile';
 import type {
+  HubOperationStatus,
+  HubReviewStatus,
+} from '../hub-actions/client';
+import type {
   ActionOperationV1,
   ActionReferenceV1,
   ActionOutcomeV1,
@@ -557,12 +561,13 @@ export interface HubActionStatusRead {
   held: boolean;
   /**
    * Auth Hub's review status (`prepared`, `authorized`, `declined`,
-   * `expired`, …) and operation status, as it answered; null when not held.
+   * `expired`, …) and operation status, each one the protocol lists or
+   * `unknown` for anything else Auth Hub answered; null when not held.
    * With no outcome yet they tell an action still waiting from one whose
    * review lapsed.
    */
-  reviewStatus: string | null;
-  operationStatus: string | null;
+  reviewStatus: HubReviewStatus | null;
+  operationStatus: HubOperationStatus | null;
   /** The latest authenticated outcome; null when there is none (yet). */
   outcome: ActionOutcomeV1 | null;
   /** For a bank-send receipt, the owner-facing line. */

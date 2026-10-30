@@ -925,14 +925,14 @@ describe('Hub actions Workers plugin', () => {
         status: async () => ({
           ...heldStatus(),
           reviewStatus: 'expired',
-          operationStatus: 'expired',
+          operationStatus: 'not_started',
         }),
       },
     });
     expect(await tool.handler({ actionId: id }, lapsed)).toEqual({
       status: 'known',
       reviewStatus: 'expired',
-      operationStatus: 'expired',
+      operationStatus: 'not_started',
       outcome: null,
     });
     // An id this owner never prepared is not a status.
