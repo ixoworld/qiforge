@@ -33,7 +33,7 @@ const outcome: ActionOutcomeV1 = {
 };
 
 describe('Hub action HTTP client', () => {
-  it('requests version 3 options (with the owner tokens) at protocol version 5 for the trusted binding', async () => {
+  it('requests version 3 options (with the owner tokens) at protocol version 6 for the trusted binding', async () => {
     const requests: Request[] = [];
     const options = {
       version: 'ixo.auth-options/3',
@@ -79,7 +79,7 @@ describe('Hub action HTTP client', () => {
         bindingRevision: reference.bindingRevision,
       }),
     ).toEqual(options);
-    expect(new URL(requests[0]!.url).searchParams.get('version')).toBe('5');
+    expect(new URL(requests[0]!.url).searchParams.get('version')).toBe('6');
     expect(new URL(requests[0]!.url).searchParams.get('bindingId')).toBe(
       'chb_two',
     );
@@ -260,9 +260,9 @@ describe('Hub action HTTP client', () => {
     });
     expect((await client.status(id)).outcome).toEqual(v2);
     expect(urls).toEqual([
-      'GET /api/internal/actions/operations/capabilities?version=5',
-      'POST /api/internal/actions/operations?version=5',
-      `GET /api/internal/actions/operations/${id}?version=5`,
+      'GET /api/internal/actions/operations/capabilities?version=6',
+      'POST /api/internal/actions/operations?version=6',
+      `GET /api/internal/actions/operations/${id}?version=6`,
     ]);
   });
 
@@ -437,9 +437,9 @@ describe('Hub action HTTP client', () => {
     expect((await client.status(id)).outcome?.receipt).toEqual(failed.receipt);
   });
 
-  it('refuses in plain words when Auth Hub predates protocol version 5, and keeps reading at version 2', async () => {
-    // An Auth Hub before version 5 (ixo-auth main before PR 86) reads
-    // `?version=` with `z.enum(['1', '2', '3', '4'])` on capabilities,
+  it('refuses in plain words when Auth Hub predates protocol version 6, and keeps reading at version 2', async () => {
+    // An Auth Hub before version 6 (before @ixo/action-protocol 0.8.0) reads
+    // `?version=` with `z.enum(['1', '2', '3', '4', '5'])` on capabilities,
     // prepare, options and status; the ZodError becomes its router's
     // 400 `{"error":"invalid_request"}`.
     const seen: string[] = [];
@@ -451,7 +451,7 @@ describe('Hub action HTTP client', () => {
           const url = new URL(request.url);
           const version = url.searchParams.get('version') ?? '1';
           seen.push(`${request.method} ${url.pathname}?version=${version}`);
-          if (!['1', '2', '3', '4'].includes(version))
+          if (!['1', '2', '3', '4', '5'].includes(version))
             return Response.json({ error: 'invalid_request' }, { status: 400 });
           return Response.json({
             version: 'ixo.auth-options/2',
@@ -480,7 +480,7 @@ describe('Hub action HTTP client', () => {
     };
     await expect(client.options(binding)).rejects.toMatchObject(refused);
     expect(HUB_UPDATE_REQUIRED).toBe(
-      'Auth Hub must be updated before this oracle can use Hub actions: it does not accept protocol version 5, which this runtime needs (invalid_request). Tell the person this is not available right now; retrying or changing the fields will not help.',
+      'Auth Hub must be updated before this oracle can use Hub actions: it does not accept protocol version 6, which this runtime needs (invalid_request). Tell the person this is not available right now; retrying or changing the fields will not help.',
     );
     // The Gmail connection check asks for options version 2, which such a
     // Hub still answers.
@@ -513,11 +513,11 @@ describe('Hub action HTTP client', () => {
       }),
     ).rejects.toMatchObject({ name: 'HubActionRefused', kind: 'refused' });
     expect(seen).toEqual([
-      'GET /api/internal/actions/operations/capabilities?version=5',
-      `GET /api/internal/actions/operations/${id}?version=5`,
-      'GET /api/internal/actions/operations/options?version=5',
+      'GET /api/internal/actions/operations/capabilities?version=6',
+      `GET /api/internal/actions/operations/${id}?version=6`,
+      'GET /api/internal/actions/operations/options?version=6',
       'GET /api/internal/actions/operations/options?version=2',
-      'POST /api/internal/actions/operations?version=5',
+      'POST /api/internal/actions/operations?version=6',
     ]);
   });
 

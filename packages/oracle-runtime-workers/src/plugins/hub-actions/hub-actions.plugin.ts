@@ -1,8 +1,6 @@
 import {
   CHAIN_TX_MAX_MESSAGES,
-  CHAIN_TX_MAX_TOKEN_LINES,
   CHAIN_TX_MESSAGE_TYPES,
-  DENOM,
   operationJsonSchema,
   parseOperation,
   type ActionOutcomeV1,
@@ -20,6 +18,18 @@ import type {
   RuntimeContext,
 } from '../../plugin-api/types';
 import { ixoAddressOf } from '../../core/user-identity';
+import {
+  CHAIN_TX_CATALOG,
+  CHAIN_TX_GENERAL_RULES,
+  chainTxMessageInput,
+  hasUnsafeText,
+} from './chain-tx-catalog';
+
+export {
+  CHAIN_TX_CATALOG,
+  CHAIN_TX_GENERAL_RULES,
+  hasUnsafeText,
+} from './chain-tx-catalog';
 
 const configSchema = z.object({
   HUB_ACTIONS_ENABLED: z.enum(['true', 'false']).default('false'),
@@ -65,192 +75,7 @@ const statusSchema = z.strictObject({
 });
 const discoverSchema = z.strictObject({});
 
-/**
- * The messages of one chain transaction (`ixo.chain.tx.v1`), as the model
- * writes them. The shapes are the protocol's minus the owner's identity
- * (a claim's `agentDid`, an evaluation's `agentAddress`), which the runtime
- * fills, as it fills the chain id, network and signer; a bank step names a
- * display amount, which the owner object converts to base units from the
- * owner's token list. The protocol parses the whole operation again before
- * it reaches the Hub. The rules match Auth Hub's (ids, address length, DID
- * escapes, memo characters), so a message the Hub would refuse is refused
- * here, before any Hub call.
- */
-/** A 20-byte bech32 account address: `ixo1` and 38 characters (a 32-byte contract address is longer). */
-const IXO_ADDRESS = /^ixo1[023456789acdefghjklmnpqrstuvwxyz]{38}$/;
-const BASE_UNITS = /^[1-9][0-9]{0,77}$/;
-/** A DID; `%` only as a `%xx` escape. */
-const ANY_DID = /^did:[a-z0-9]+:(?:[A-Za-z0-9._:-]|%[0-9A-Fa-f]{2})+$/;
-/** Claim, collection, token and proof ids: no spaces, quotes or markup. */
-const ID_CHARS = /^[A-Za-z0-9:._/-]+$/;
-const ID_RULE = 'Only letters, digits and : . _ / - (copied exactly).';
-/**
- * Characters that would let text render as something else: C0 and C1
- * controls, zero-width and direction marks (U+200B–U+200F), line and
- * paragraph separators (U+2028–U+2029), bidi embeddings, overrides and
- * isolates (U+202A–U+202E, U+2066–U+2069), the Arabic letter mark (U+061C)
- * and the byte order mark (U+FEFF). Auth Hub refuses the same set.
- */
-export function hasUnsafeText(value: string): boolean {
-  for (const char of value) {
-    const code = char.codePointAt(0) ?? 0;
-    if (
-      code <= 0x1f ||
-      (code >= 0x7f && code <= 0x9f) ||
-      code === 0x061c ||
-      (code >= 0x200b && code <= 0x200f) ||
-      (code >= 0x2028 && code <= 0x202e) ||
-      (code >= 0x2066 && code <= 0x2069) ||
-      code === 0xfeff
-    )
-      return true;
-  }
-  return false;
-}
 const MEMO_BYTES = 256;
-const address = (what: string) =>
-  z
-    .string()
-    .regex(
-      IXO_ADDRESS,
-      'A 20-byte ixo1… account address (42 characters); contract addresses are refused.',
-    )
-    .describe(`${what} (an ixo1… account address).`);
-const id = (max: number) => z.string().min(1).max(max).regex(ID_CHARS, ID_RULE);
-const baseUnits = (what: string) =>
-  z
-    .string()
-    .regex(BASE_UNITS, 'A whole number of base units above zero.')
-    .describe(what);
-const claimId = id(256).describe('The claim id, exactly as stored.');
-const collectionId = z
-  .string()
-  .regex(/^(0|[1-9][0-9]{0,19})$/, 'Digits only, no leading zeros.')
-  .describe('The claim collection id (digits).');
-
-/** A display amount: a plain decimal in the token's units, as the user said it. */
-const DISPLAY_AMOUNT = /^(0|[1-9][0-9]*)(\.[0-9]+)?$/;
-
-/**
- * One chain-transaction message type: the one-line `summary` the request
- * tool's description lists, the full `rules` describe_chain_messages
- * returns (with the fields of `schema`), and the strict `schema` the
- * request handler checks each message against. Adding a message type is
- * one entry here (once `@ixo/action-protocol` and Auth Hub support it).
- */
-interface ChainTxCatalogEntry {
-  summary: string;
-  rules: string;
-  schema: z.ZodObject;
-}
-
-export const CHAIN_TX_CATALOG = {
-  'cosmos.bank.send': {
-    summary:
-      "send coins (IXO or another token the owner holds) from the owner's wallet.",
-    rules: [
-      "Sends coins from the owner's wallet to `toAddress`, alone (a single coin send) or as a step of a batch.",
-      '`amount` is the amount as the user said it, in the token’s display units ("1.5" for 1.5 IXO): a plain decimal, never base units. The runtime looks the token up in the owner’s token list (hub_action_options `transfer.tokens`), converts the amount with the listed `decimals`, and refuses a token not in the list, more digits after the point than the token has, zero, and more than the listed balance (the bank steps of one token together).',
-      '`denom` is optional and defaults to uixo (IXO, 6 decimals). For another token copy its `denom` exactly from `transfer.tokens` (never guess an `ibc/…` hash); name the full denom to the owner for anything but IXO, and say when the token is unverified (it lists 0 decimals: its amount is a whole number of base units).',
-    ].join(' '),
-    schema: z.strictObject({
-      type: z.literal('cosmos.bank.send'),
-      toAddress: address('The recipient'),
-      amount: z
-        .string()
-        .max(80)
-        .regex(
-          DISPLAY_AMOUNT,
-          'A plain decimal amount in the token’s display units, such as 1.5 (never base units).',
-        )
-        .describe(
-          'The amount as the user said it, in the token’s display units (1.5 = 1.5 IXO).',
-        ),
-      denom: z
-        .string()
-        .regex(DENOM, 'A denom exactly as hub_action_options lists it.')
-        .optional()
-        .describe(
-          'The token’s denom, copied exactly from hub_action_options `transfer.tokens`; leave out for uixo (IXO).',
-        ),
-    }),
-  },
-  'ixo.claims.submit': {
-    summary:
-      'file a claim the owner has already created with a claim collection.',
-    rules:
-      'Files a claim the owner has already created with a claim collection. `claimId` is the stored claim’s id, `collectionId` the collection, `adminAddress` the collection admin’s address. The runtime adds the owner’s DID as the filer. The collection admin must have authorized the owner to submit claims. Collections with member budgets cannot be filed into here (no member address is sent). Set `useIntent` only when the collection works with intents.',
-    schema: z.strictObject({
-      type: z.literal('ixo.claims.submit'),
-      collectionId,
-      claimId,
-      adminAddress: address("The collection admin's address"),
-      useIntent: z
-        .boolean()
-        .optional()
-        .describe('true only when the collection pays claims through intents.'),
-    }),
-  },
-  'ixo.claims.evaluate': {
-    summary:
-      'record the owner’s decision, as evaluator, on someone else’s claim (approve, reject, dispute, invalidate).',
-    rules:
-      'Records the owner’s decision, as evaluator, on someone else’s claim (`claimId` in `collectionId`). `status` 1 approve, 2 reject, 3 dispute (the chain may refuse it as deprecated), 4 invalidate. It is recorded as the owner’s (the runtime adds their DID and address, never the claimant’s); `oracle` is the evaluator DID recorded on the evaluation (normally the owner’s DID, or the oracle entity DID the collection admin authorized); `adminAddress` is the collection admin’s address; `reason` (a number) and `verificationProof` are optional. The collection admin must have authorized the owner as an evaluator. An approval can pay the claimant.',
-    schema: z.strictObject({
-      type: z.literal('ixo.claims.evaluate'),
-      claimId,
-      collectionId,
-      oracle: z
-        .string()
-        .max(200)
-        .regex(ANY_DID, 'A DID (did:<method>:…; % only as %xx).')
-        .describe('The evaluator DID recorded on the evaluation (a did:…).'),
-      adminAddress: address("The collection admin's address"),
-      status: z
-        .literal([1, 2, 3, 4])
-        .describe(
-          '1 approve, 2 reject, 3 dispute (the chain may refuse it as deprecated), 4 invalidate.',
-        ),
-      reason: z
-        .number()
-        .int()
-        .min(0)
-        .max(4_294_967_295)
-        .optional()
-        .describe("The evaluator's reason code, when there is one."),
-      verificationProof: id(300)
-        .optional()
-        .describe(
-          'The evaluation proof (a credential CID), when there is one.',
-        ),
-    }),
-  },
-  'ixo.token.transfer': {
-    summary:
-      "move IXO impact tokens (1155-style token ids, whole amounts) from the owner's wallet.",
-    rules: `Moves IXO impact tokens (1155-style: each line a token \`id\` of 32 hex characters and a whole \`amount\`, 1 to ${CHAIN_TX_MAX_TOKEN_LINES} lines) from the owner’s wallet to \`recipient\`. Impact tokens have no decimals: an amount is a whole number of tokens. All tokens in one message must come from one token contract. These are not the IXO coin: coins go through \`cosmos.bank.send\`.`,
-    schema: z.strictObject({
-      type: z.literal('ixo.token.transfer'),
-      recipient: address('The recipient'),
-      tokens: z
-        .array(
-          z.strictObject({
-            id: id(128).describe(
-              'The impact token id (32 hex characters), exactly as listed.',
-            ),
-            amount: baseUnits('A whole number of tokens above zero.'),
-          }),
-        )
-        .min(1)
-        .max(CHAIN_TX_MAX_TOKEN_LINES),
-    }),
-  },
-} as const satisfies Record<ChainTxMessageType, ChainTxCatalogEntry>;
-
-/** What every message type shares, returned once by describe_chain_messages. */
-export const CHAIN_TX_GENERAL_RULES =
-  'Addresses are 20-byte `ixo1…` account addresses (contract addresses are refused). Ids (`claimId`, `collectionId`, token `id`, `verificationProof`) use only letters, digits and `: . _ / -`; copy them exactly and never invent them. Give only the fields listed for a type: the runtime adds the chain, the network, the signer and the owner’s own DID and address where a message needs them, and Auth Hub sets the fee. Up to 8 messages per transaction, run in order; all succeed or none do.';
-
 const memoSchema = z
   .string()
   .max(MEMO_BYTES)
@@ -279,6 +104,8 @@ export function fieldsOnly(schema: z.core.$ZodType): z.ZodType {
     );
   if (schema instanceof z.ZodOptional)
     return fieldsOnly(schema.unwrap()).optional();
+  if (schema instanceof z.ZodNullable)
+    return fieldsOnly(schema.unwrap()).nullable();
   if (schema instanceof z.ZodArray) return z.array(fieldsOnly(schema.element));
   if (schema instanceof z.ZodString) return z.string();
   if (schema instanceof z.ZodNumber) return z.number();
@@ -327,7 +154,6 @@ export function chainTransactionSchemaFor(
     memo: memoSchema,
   });
 }
-const chainTransactionSchema = chainTransactionSchemaFor(CHAIN_TX_CATALOG);
 
 /**
  * The request tool's description: what it does, the discovery step, one
@@ -342,9 +168,55 @@ export function chainTransactionDescription(
     ...Object.entries(catalog).map(
       ([type, entry]) => `- \`${type}\`: ${entry.summary}`,
     ),
-    'Up to 8 messages run in order as one transaction: all succeed or none do. Never invent ids or addresses (ask the owner or use other tools); coin amounts are display units ("1.5"), never base units. When the result is unavailable, tell the owner its reason in plain words; when it says retrying or changing the fields will not help, do not retry.',
+    'Up to 8 messages run in order as one transaction: all succeed or none do. Never invent ids or addresses (ask the owner or use other tools); coin and stake amounts are display units ("1.5"), never base units. Tell the owner what will happen in plain everyday words, never message type names or chain terms. When the result is unavailable, tell the owner its reason in plain words; when it says retrying or changing the fields will not help, do not retry.',
   ].join('\n');
 }
+
+/** The catalogue entries of `types`, in catalogue order. */
+function catalogOf(types: readonly ChainTxMessageType[]) {
+  return Object.fromEntries(
+    CHAIN_TX_MESSAGE_TYPES.filter((type) => types.includes(type)).map(
+      (type) => [type, CHAIN_TX_CATALOG[type]],
+    ),
+  );
+}
+
+/**
+ * request_chain_transaction for the message types this account may use
+ * (`availableChainTxTypes`): the model is given only their summaries and
+ * fields, so it neither sees nor pays for a type Auth Hub would refuse,
+ * and its arguments are checked against the same schema (a message of
+ * another type is refused before any Hub call). Null when the account may
+ * use none (describe_chain_messages then answers `availableTypes: []`).
+ * Built once per list.
+ */
+export function chainTransactionTool(
+  types: readonly ChainTxMessageType[],
+): PluginTool | null {
+  const catalog = catalogOf(types);
+  if (!Object.keys(catalog).length) return null;
+  const key = Object.keys(catalog).join(',');
+  const cached = chainTransactionTools.get(key);
+  if (cached) return cached;
+  const schema = chainTransactionSchemaFor(catalog);
+  const tool: PluginTool = {
+    name: 'request_chain_transaction',
+    description: chainTransactionDescription(catalog),
+    schema,
+    effect: 'write',
+    handler: (input, ctx) => requestChainTransaction(schema, input, ctx),
+  };
+  // Lists come from Auth Hub capabilities: one or two per deployment. The
+  // bound only keeps an unexpected stream of lists from growing the map.
+  if (chainTransactionTools.size >= CHAIN_TRANSACTION_TOOL_CACHE)
+    chainTransactionTools.delete(chainTransactionTools.keys().next().value!);
+  chainTransactionTools.set(key, tool);
+  return tool;
+}
+const CHAIN_TRANSACTION_TOOL_CACHE = 8;
+const chainTransactionTools = new Map<string, PluginTool>();
+
+/** The request tool as the whole catalogue gives it (no account capabilities). */
 export const CHAIN_TRANSACTION_TOOL_DESCRIPTION =
   chainTransactionDescription(CHAIN_TX_CATALOG);
 
@@ -510,10 +382,11 @@ async function requestHubAction(
 }
 
 async function requestChainTransaction(
+  schema: ReturnType<typeof chainTransactionSchemaFor>,
   input: unknown,
   ctx: RuntimeContext,
 ): Promise<HubActionRequestResult> {
-  const parsed = chainTransactionSchema.safeParse(input);
+  const parsed = schema.safeParse(input);
   if (!parsed.success) return chainTxShapeRefusal(issuesOf(parsed.error));
   const checked = strictChainTxMessages(parsed.data.messages);
   if ('issues' in checked) return chainTxShapeRefusal(checked.issues);
@@ -576,7 +449,7 @@ function strictChainTxMessages(
       return;
     }
     const result = CHAIN_TX_CATALOG[type].schema.safeParse(message);
-    if (result.success) checked.push(result.data);
+    if (result.success) checked.push(chainTxMessageInput(result.data));
     else issues.push(...issuesOf(result.error, ['messages', index]));
   });
   return issues.length ? { issues } : { messages: checked };
@@ -653,7 +526,7 @@ async function availableChainTxTypes(
     chainTx = (await ctx.hubActions.capabilities()).chainTx;
   } catch (error) {
     ctx.logger.warn(
-      `[hub-actions] capabilities unavailable for describe_chain_messages: ${error instanceof Error ? error.message : String(error)}`,
+      `[hub-actions] capabilities unavailable, offering the whole chain transaction catalogue: ${error instanceof Error ? error.message : String(error)}`,
     );
     return CHAIN_TX_MESSAGE_TYPES;
   }
@@ -843,6 +716,8 @@ const manifest: PluginManifest = {
   whenToUse: [
     'The user requests a registered form submission or a coin send.',
     'The user asks to file or evaluate a claim, or to send coins or impact tokens on chain.',
+    'The user asks to stake, unstake or move IXO, claim staking rewards, vote on a network proposal or retire impact tokens.',
+    'The user asks to reserve or dispute a claim, create or change a claim collection, give or remove a permission, create or update an entity, or change the links of an identity.',
     'The user asks to review an exact private resource or to sign a statement.',
     'The user asks to connect Gmail or Calendar, send a reviewed email or add an event.',
     'The user asks for document access or to save a private note.',
@@ -870,6 +745,15 @@ export class HubActionsPlugin extends OraclePlugin {
       typeof env.AUTH_HUB_CHANNEL_SERVICE_KEY === 'string' &&
       env.AUTH_HUB_CHANNEL_SERVICE_KEY.length > 0
     );
+  }
+  /**
+   * request_chain_transaction is built per turn: its schema names only the
+   * message types this account may use (Auth Hub capabilities, cached by
+   * the owner object), so 33 types do not reach a model that may use 4.
+   */
+  override async getRequestTools(ctx: RuntimeContext): Promise<PluginTool[]> {
+    const tool = chainTransactionTool(await availableChainTxTypes(ctx));
+    return tool ? [tool] : [];
   }
   override getTools(): PluginTool[] {
     return [
@@ -903,13 +787,6 @@ export class HubActionsPlugin extends OraclePlugin {
         schema: describeChainMessagesSchema,
         effect: 'read',
         handler: describeChainMessages,
-      },
-      {
-        name: 'request_chain_transaction',
-        description: CHAIN_TRANSACTION_TOOL_DESCRIPTION,
-        schema: chainTransactionSchema,
-        effect: 'write',
-        handler: requestChainTransaction,
       },
       {
         name: 'hub_action_status',

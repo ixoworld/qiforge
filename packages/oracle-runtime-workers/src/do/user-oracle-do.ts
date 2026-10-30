@@ -54,7 +54,7 @@ import {
 import { chainTxOperation, prepareHubAction } from '../hub-actions/request';
 import {
   bankReceiptSummary,
-  bankStepsInBaseUnits,
+  chainTxAmountsInBaseUnits,
 } from '../hub-actions/transfer';
 import {
   HUB_CHECK_AFTER_EXPIRY_MS,
@@ -3586,13 +3586,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     /**
      * One chain transaction of the model's messages. The network is the
      * account's capability, the chain id this Worker's own for that
-     * network; the signer and the owner's identity in claims messages come
+     * network; the signer and the owner's identity in the messages come
      * from the owner's DID (`chainTxOperation`). The model names none of
-     * them. Bank steps name a listed token and a display amount: with at
-     * least one, the owner's options are read once, fresh (the balances
-     * must be current), and each step is converted to base units and
-     * checked against the listed balance (`bankStepsInBaseUnits`). No fee
-     * is sent: the Hub simulates gas and sets it.
+     * them. Bank steps name a listed token and a display amount, stake
+     * steps an amount of IXO: with at least one of either, the owner's
+     * options are read once, fresh (the balances must be current), and each
+     * amount is converted to base units and checked against the listed
+     * balance (`chainTxAmountsInBaseUnits`). No fee is sent: the Hub
+     * simulates gas and sets it.
      */
     private async chainTransactionHubAction(input: {
       ownerDid: string;
@@ -3624,7 +3625,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         HUB_NETWORK_CHAIN[capabilities.network]
       ];
       const tokens = input.messages.some(
-        (message) => message.type === 'cosmos.bank.send',
+        (message) =>
+          message.type === 'cosmos.bank.send' ||
+          message.type === 'cosmos.staking.delegate',
       )
         ? ((await this.hubActionOptions(input, true)).transfer?.tokens ?? null)
         : null;
@@ -3633,7 +3636,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         chainId,
         network: capabilities.network,
         memo: input.memo,
-        messages: bankStepsInBaseUnits(input.messages, tokens),
+        messages: chainTxAmountsInBaseUnits(input.messages, tokens),
       });
       return this.requestHubAction({ ...input, operation }, true);
     }

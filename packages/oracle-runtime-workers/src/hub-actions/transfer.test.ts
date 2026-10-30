@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ActionReceiptV1 } from '@ixo/action-protocol';
 import {
   bankReceiptSummary,
-  bankStepsInBaseUnits,
+  chainTxAmountsInBaseUnits,
   describeAmount,
   fromBaseUnits,
   hubPrepareRefusal,
@@ -98,7 +98,7 @@ describe('any-token transfer amounts', () => {
   });
 });
 
-describe('chain transaction bank steps', () => {
+describe('chain transaction amounts', () => {
   const RECIPIENT = 'ixo1qgpqyqszqgpqyqszqgpqyqszqgpqyqszuzefze';
   const listed = [
     { ...IXO, balanceBaseUnits: '5000000' },
@@ -112,7 +112,7 @@ describe('chain transaction bank steps', () => {
 
   it('converts each bank step with its listed decimals and passes the other messages unchanged', () => {
     expect(
-      bankStepsInBaseUnits(
+      chainTxAmountsInBaseUnits(
         [
           { type: 'cosmos.bank.send', toAddress: RECIPIENT, amount: '1.25' },
           token,
@@ -141,7 +141,7 @@ describe('chain transaction bank steps', () => {
       },
     ]);
     // No bank step: no token list needed.
-    expect(bankStepsInBaseUnits([token], null)).toEqual([token]);
+    expect(chainTxAmountsInBaseUnits([token], null)).toEqual([token]);
   });
 
   it('refuses without a token list, and checks the bank steps of one token against its balance together', () => {
@@ -151,19 +151,136 @@ describe('chain transaction bank steps', () => {
       amount,
     });
     for (const tokens of [null, []])
-      expect(() => bankStepsInBaseUnits([send('1')], tokens)).toThrow(
+      expect(() => chainTxAmountsInBaseUnits([send('1')], tokens)).toThrow(
         'no token list from Auth Hub',
       );
     // Each within the 5 IXO balance, together above it.
     expect(() =>
-      bankStepsInBaseUnits([send('3'), send('2.000001')], listed),
+      chainTxAmountsInBaseUnits([send('3'), send('2.000001')], listed),
     ).toThrow(
-      'messages[1].amount: the owner holds 5 IXO, less than the bank steps of this token in this transaction.',
+      'messages[1].amount: the owner holds 5 IXO, less than what the steps of this transaction take of it together.',
     );
     // Exactly the balance is allowed (the Hub checks the fee).
-    expect(bankStepsInBaseUnits([send('3'), send('2')], listed)).toHaveLength(
-      2,
+    expect(
+      chainTxAmountsInBaseUnits([send('3'), send('2')], listed),
+    ).toHaveLength(2);
+  });
+
+  const VALIDATOR = 'ixovaloper1qeex565vg4uu7zwudh9ff2dauxptqf72nf2l44';
+  const OTHER_VALIDATOR = 'ixovaloper1qgpqyqszqgpqyqszqgpqyqszqgpqyqszrh8mx2';
+
+  it('converts stake amounts from IXO with 6 decimals, whatever the token list says', () => {
+    expect(
+      chainTxAmountsInBaseUnits(
+        [
+          {
+            type: 'cosmos.staking.delegate',
+            validatorAddress: VALIDATOR,
+            amount: '100',
+          },
+          {
+            type: 'cosmos.staking.undelegate',
+            validatorAddress: VALIDATOR,
+            amount: '0.000001',
+          },
+          {
+            type: 'cosmos.staking.redelegate',
+            fromValidatorAddress: VALIDATOR,
+            toValidatorAddress: OTHER_VALIDATOR,
+            amount: '2.5',
+          },
+        ],
+        // No token list: unstaking and moving stake never need one, and a
+        // stake is then left to Auth Hub's balance check.
+        null,
+      ),
+    ).toEqual([
+      {
+        type: 'cosmos.staking.delegate',
+        validatorAddress: VALIDATOR,
+        amountBaseUnits: '100000000',
+      },
+      {
+        type: 'cosmos.staking.undelegate',
+        validatorAddress: VALIDATOR,
+        amountBaseUnits: '1',
+      },
+      {
+        type: 'cosmos.staking.redelegate',
+        fromValidatorAddress: VALIDATOR,
+        toValidatorAddress: OTHER_VALIDATOR,
+        amountBaseUnits: '2500000',
+      },
+    ]);
+    for (const [amount, words] of [
+      ['0', 'messages[0].amount: The amount must be above zero.'],
+      ['0.0000001', 'messages[0].amount: This token has 6 decimals'],
+      ['1e3', 'messages[0].amount: The amount must be a plain decimal'],
+    ] as const)
+      expect(() =>
+        chainTxAmountsInBaseUnits(
+          [
+            {
+              type: 'cosmos.staking.undelegate',
+              validatorAddress: VALIDATOR,
+              amount,
+            },
+          ],
+          null,
+        ),
+      ).toThrow(words);
+  });
+
+  it('counts a stake against the listed IXO balance with the IXO sends, but never an unstake or a stake move', () => {
+    const stake = (amount: string) => ({
+      type: 'cosmos.staking.delegate' as const,
+      validatorAddress: VALIDATOR,
+      amount,
+    });
+    expect(() =>
+      chainTxAmountsInBaseUnits([stake('5.000001')], listed),
+    ).toThrow(
+      'messages[0].amount: the owner holds 5 IXO, less than this stake.',
     );
+    expect(() =>
+      chainTxAmountsInBaseUnits(
+        [
+          { type: 'cosmos.bank.send', toAddress: RECIPIENT, amount: '3' },
+          stake('2.5'),
+        ],
+        listed,
+      ),
+    ).toThrow(
+      'messages[1].amount: the owner holds 5 IXO, less than what the steps of this transaction take of it together.',
+    );
+    // Unstaking and moving stake take nothing from the wallet.
+    expect(
+      chainTxAmountsInBaseUnits(
+        [
+          stake('5'),
+          {
+            type: 'cosmos.staking.undelegate',
+            validatorAddress: VALIDATOR,
+            amount: '1000',
+          },
+          {
+            type: 'cosmos.staking.redelegate',
+            fromValidatorAddress: VALIDATOR,
+            toValidatorAddress: OTHER_VALIDATOR,
+            amount: '1000',
+          },
+        ],
+        listed,
+      ),
+    ).toHaveLength(3);
+    // A list without IXO: the stake is left to Auth Hub's balance check.
+    expect(chainTxAmountsInBaseUnits([stake('1000')], [listed[1]!])).toEqual([
+      {
+        type: 'cosmos.staking.delegate',
+        validatorAddress: VALIDATOR,
+        amountBaseUnits: '1000000000',
+      },
+    ]);
   });
 });
 

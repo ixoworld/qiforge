@@ -243,7 +243,8 @@ is ignored.
 9. **Sending**, only on the recorded consent (see above). An application
    goes out as the application card (`ixo.bid.submit.v1`, role `SA`, as
    Jambo's bids), logged work as the claim card (`ixo.claim.submit.v1`) —
-   `@ixo/action-protocol` 0.7.0, Hub protocol level 5. The plugin reads
+   introduced in `@ixo/action-protocol` 0.7.0 at Hub protocol level 5 (this
+   runtime declares level 6, which keeps them). The plugin reads
    `ctx.hubActions.capabilities()`: when the Hub does not offer that kind it
    answers `not_enabled`, not retryable ("…isn't switched on for this
    oracle's Auth Hub account yet"). The network is the account's
@@ -335,7 +336,7 @@ address, answers, signal }) }`. For a collection it `allows`, `submit` of a
 
 ## Known limits
 
-- **Lockfile.** `@ixo/action-protocol` is pinned to 0.7.0, which is not on
+- **Lockfile.** `@ixo/action-protocol` is pinned to 0.8.0, which is not on
   npm yet: `pnpm-lock.yaml` must be regenerated once it is published.
 - **Mainnet only for programmes**: the Jambo worker has no testnet or devnet
   list.

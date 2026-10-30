@@ -86,8 +86,13 @@ export interface HubActionTransport {
 
 /**
  * The protocol version this runtime declares on every operation call
- * (capabilities, POST operations, GET status, options). Version 5 is the
- * 0.7.0 contract: version 4 plus the application card (`ixo.bid.submit.v1`)
+ * (capabilities, POST operations, GET status, options). Version 6 is the
+ * 0.8.0 contract: version 5 plus 29 more `ixo.chain.tx.v1` message types
+ * (staking, voting, retiring impact tokens, claim collections, entities and
+ * identity-record links), which a 0.7.0 parser cannot read in capabilities,
+ * review steps or receipts, so the Hub lists and accepts them only at level
+ * 6 (`chainTxMessageTypesForLevel`); options answer as at version 3.
+ * Version 5 is the 0.7.0 contract: version 4 plus the application card (`ixo.bid.submit.v1`)
  * and the claim card (`ixo.claim.submit.v1`) with their receipts
  * (`ixo.bid.submission.v1`, `ixo.claim.submission.v1`,
  * `ixo.submission.failed.v1`), which a 0.6.0 parser cannot read, so the Hub
@@ -101,18 +106,18 @@ export interface HubActionTransport {
  * the 0.4.1 shapes. The envelopes stay tagged `ixo.auth-outcome/2` and
  * `ixo.auth-capabilities/2`, which `@ixo/action-protocol` parses.
  *
- * An Auth Hub older than version 5 checks `?version=` against its closed
- * list (1 to 4) and answers every call that declares 5 with 400
+ * An Auth Hub older than version 6 checks `?version=` against its closed
+ * list (1 to 5) and answers every call that declares 6 with 400
  * `invalid_request`, before anything else: see `HUB_UPDATE_REQUIRED`.
  */
-const HUB_PROTOCOL_VERSION = '5';
+const HUB_PROTOCOL_VERSION = '6';
 const HUB_PROTOCOL_QUERY = `version=${HUB_PROTOCOL_VERSION}`;
 
 /**
  * What the model is told when Auth Hub refuses a read (capabilities,
  * options, status) with 400 `invalid_request`. A read carries nothing but
  * the protocol version (and, for options, the binding the runtime itself
- * checked), so that answer comes from a Hub that does not know version 5.
+ * checked), so that answer comes from a Hub that does not know version 6.
  * The owner object keeps every action it holds: polls and callbacks pick
  * the outcomes up once the Hub is updated.
  */

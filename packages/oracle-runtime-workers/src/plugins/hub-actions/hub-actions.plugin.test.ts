@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { ToolInputParsingException } from '@langchain/core/tools';
-import { CHAIN_TX_MESSAGE_TYPES, operationKinds } from '@ixo/action-protocol';
+import {
+  CHAIN_TX_LEVEL4_MESSAGE_TYPES,
+  CHAIN_TX_MESSAGE_TYPES,
+  chainTxIssue,
+  operationKinds,
+  type ChainTxMessageType,
+} from '@ixo/action-protocol';
+import { convertToOpenAITool } from '@langchain/core/utils/function_calling';
 import { makeRuntimeContext } from '../../core/test-fixtures';
 import { createNoopAmbient } from '../../core/runtime-context';
 import { wrapPluginTool } from '../../core/wrap-plugin-tool';
@@ -12,10 +19,11 @@ import {
   HUB_ACTION_CARD_NOTE,
   HubActionsPlugin,
   RUNTIME_BUILT_KINDS,
-  chainTransactionDescription,
-  chainTransactionSchemaFor,
+  chainTransactionTool,
   requestOperationJsonSchema,
 } from './hub-actions.plugin';
+import { chainTxOperation } from '../../hub-actions/request';
+import { chainTxAmountsInBaseUnits } from '../../hub-actions/transfer';
 import { HubActionClient } from '../../hub-actions/client';
 import {
   assertOperationEnabled,
@@ -30,6 +38,7 @@ import type {
 import { HubActionRefused } from '../../hub-actions/store';
 import type {
   HubActionStatusRead,
+  PluginTool,
   RuntimeContext,
 } from '../../plugin-api/types';
 
@@ -851,11 +860,11 @@ describe('Hub actions Workers plugin', () => {
         status: async () => heldStatus(),
       },
     });
-    const tools = new HubActionsPlugin().getTools();
-    const action = tools.find((item) => item.name === 'request_hub_action');
-    const chain = tools.find(
-      (item) => item.name === 'request_chain_transaction',
-    );
+    const action = new HubActionsPlugin()
+      .getTools()
+      .find((item) => item.name === 'request_hub_action');
+    // Offered per turn from the account's types (here: every type).
+    const chain = chainTransactionTool(CHAIN_TX_MESSAGE_TYPES);
     if (!action || !chain) throw new Error('request tools missing');
     const input = {
       messages: [
@@ -988,10 +997,9 @@ describe('request_chain_transaction', () => {
   // A 32-byte (contract) address: `ixo1` and 59 characters.
   const CONTRACT = `ixo1${'q'.repeat(59)}`;
 
+  /** The request tool as an account offered every type is given it. */
   function chainTool() {
-    const tool = new HubActionsPlugin()
-      .getTools()
-      .find((item) => item.name === 'request_chain_transaction');
+    const tool = chainTransactionTool(CHAIN_TX_MESSAGE_TYPES);
     if (!tool) throw new Error('chain transaction tool missing');
     return tool;
   }
@@ -1091,7 +1099,7 @@ describe('request_chain_transaction', () => {
     ['nine messages', { messages: Array.from({ length: 9 }, () => bank) }],
     [
       'an unknown type',
-      { messages: [{ ...bank, type: 'cosmos.staking.delegate' }] },
+      { messages: [{ ...bank, type: 'cosmos.bank.multi-send' }] },
     ],
     [
       'a recipient on another chain',
@@ -1323,7 +1331,7 @@ describe('request_chain_transaction', () => {
     const ctx = channelContext(chainTransaction);
     const error: unknown = await wrapForModel(ctx)
       .invoke({
-        messages: [bank, { ...bank, type: 'cosmos.staking.delegate' }],
+        messages: [bank, { ...bank, type: 'cosmos.bank.multi-send' }],
         memo: 'Lunch\u202e',
       })
       .catch((caught: unknown) => caught);
@@ -1446,11 +1454,13 @@ describe('request_chain_transaction', () => {
         ...CHAIN_TX_MESSAGE_TYPES.map(
           (type) => `- \`${type}\`: ${CHAIN_TX_CATALOG[type].summary}`,
         ),
-        'Up to 8 messages run in order as one transaction: all succeed or none do. Never invent ids or addresses (ask the owner or use other tools); coin amounts are display units ("1.5"), never base units. When the result is unavailable, tell the owner its reason in plain words; when it says retrying or changing the fields will not help, do not retry.',
+        'Up to 8 messages run in order as one transaction: all succeed or none do. Never invent ids or addresses (ask the owner or use other tools); coin and stake amounts are display units ("1.5"), never base units. Tell the owner what will happen in plain everyday words, never message type names or chain terms. When the result is unavailable, tell the owner its reason in plain words; when it says retrying or changing the fields will not help, do not retry.',
       ].join('\n'),
     );
     // The model never names the owner's identity.
-    expect(tool.description).not.toMatch(/`agentDid`|`agentAddress`/);
+    expect(tool.description).not.toMatch(
+      /`(agentDid|agentAddress|creatorDid|controllerDid|ownerDid)`/,
+    );
     // The JSON Schema the model is given: one branch per type with its
     // field names and basic types, the batch bound and the memo.
     const json = z.toJSONSchema(tool.schema);
@@ -1480,66 +1490,1096 @@ describe('request_chain_transaction', () => {
       '"network"',
       '"agentDid"',
       '"agentAddress"',
+      '"creatorDid"',
+      '"controllerDid"',
+      '"ownerDid"',
     ])
       expect(text).not.toContain(field);
     expect(
       new HubActionsPlugin()
         .getTools()
-        .some((item) => item.name === 'request_hub_transfer'),
+        .some((item) => item.name === 'request_chain_transaction'),
     ).toBe(false);
   });
 
-  it('gives the model every field of every type, and a fifth type costs its summary line and its field list', () => {
-    const size = (
-      catalog: Parameters<typeof chainTransactionSchemaFor>[0] &
-        Record<string, { summary: string }>,
-    ) =>
-      chainTransactionDescription(catalog).length +
-      JSON.stringify(z.toJSONSchema(chainTransactionSchemaFor(catalog))).length;
-    // What the model is sent names each type's own fields (a provider holds
-    // a tool call to this schema, so a field missing here never arrives).
-    const sent = JSON.stringify(
-      z.toJSONSchema(chainTransactionSchemaFor(CHAIN_TX_CATALOG)).properties
-        ?.messages,
+  /** The tool's parameters as a provider is sent them (LangChain → OpenAI tool format). */
+  function providerParameters(tool: PluginTool) {
+    const ctx = channelContext(async () => reference);
+    return convertToOpenAITool(
+      wrapPluginTool(tool, {
+        ambient: createNoopAmbient(),
+        state: { messages: [] },
+        fallbackContext: { user: ctx.user, session: ctx.session } as never,
+      }),
+    ).function.parameters as JsonSchema;
+  }
+  type JsonSchema = {
+    properties?: Record<string, JsonSchema>;
+    items?: JsonSchema & { oneOf?: JsonSchema[] };
+    anyOf?: JsonSchema[];
+    type?: string;
+    const?: unknown;
+    additionalProperties?: unknown;
+  };
+  /** The message branches of the provider-facing parameters, by type. */
+  function providerBranches(parameters: JsonSchema) {
+    const branches = parameters.properties?.messages?.items?.oneOf ?? [];
+    return new Map(
+      branches.map((branch) => [
+        String(branch.properties?.type?.const),
+        branch,
+      ]),
     );
-    for (const [type, entry] of Object.entries(CHAIN_TX_CATALOG)) {
-      expect(sent).toContain(`"const":"${type}"`);
-      for (const field of Object.keys(entry.schema.shape))
-        expect(sent).toContain(`"${field}":`);
+  }
+  /** The paths of a catalogue schema's fields (nested objects and arrays too) that `json` does not declare. */
+  function missingFields(
+    schema: z.core.$ZodType,
+    json: JsonSchema | undefined,
+    at: string,
+  ): string[] {
+    if (!json) return [at];
+    if (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable)
+      return missingFields(
+        schema.unwrap(),
+        json.anyOf?.find((branch) => branch.type !== 'null') ?? json,
+        at,
+      );
+    if (schema instanceof z.ZodObject)
+      return Object.entries(schema.shape).flatMap(([key, field]) =>
+        missingFields(field, json.properties?.[key], `${at}.${key}`),
+      );
+    if (schema instanceof z.ZodArray)
+      return missingFields(schema.element, json.items, `${at}[]`);
+    return [];
+  }
+
+  it('keeps every field of every type, nested ones included, in the schema a provider is sent', () => {
+    const branches = providerBranches(providerParameters(chainTool()));
+    expect([...branches.keys()]).toEqual([...CHAIN_TX_MESSAGE_TYPES]);
+    expect(
+      CHAIN_TX_MESSAGE_TYPES.flatMap((type) =>
+        missingFields(CHAIN_TX_CATALOG[type].schema, branches.get(type), type),
+      ),
+    ).toEqual([]);
+    // A message branch that closes itself without naming its fields is what
+    // made providers drop them: each names them and stays open (the handler
+    // names a stray field).
+    expect(
+      CHAIN_TX_MESSAGE_TYPES.filter(
+        (type) => branches.get(type)?.additionalProperties === false,
+      ),
+    ).toEqual([]);
+    // Stake amounts are IXO as the owner says it: never base units.
+    for (const type of [
+      'cosmos.staking.delegate',
+      'cosmos.staking.undelegate',
+      'cosmos.staking.redelegate',
+    ]) {
+      expect(branches.get(type)?.properties).toHaveProperty('amount');
+      expect(branches.get(type)?.properties).not.toHaveProperty(
+        'amountBaseUnits',
+      );
     }
     // Rules and formats stay out of it (describe_chain_messages has them).
+    const sent = JSON.stringify(branches.get('ixo.claims.create-collection'));
     expect(sent).not.toContain('"description"');
     expect(sent).not.toContain('"pattern"');
-    const fifth = {
-      ...CHAIN_TX_CATALOG,
-      'ixo.entity.update': {
-        summary: "update one of the owner's entities.",
-        rules: '',
-        schema: z.strictObject({
-          type: z.literal('ixo.entity.update'),
-          entityId: z.string().describe('The entity id.'),
-        }),
-      },
-    };
-    const line = "- `ixo.entity.update`: update one of the owner's entities.";
-    expect(chainTransactionDescription(fifth)).toBe(
-      `${chainTransactionDescription(CHAIN_TX_CATALOG).replace(
-        '\nUp to 8 messages',
-        `\n${line}\nUp to 8 messages`,
-      )}`,
-    );
-    expect(size(fifth) - size(CHAIN_TX_CATALOG)).toBeLessThan(
-      line.length + 200,
-    );
+    // Enums keep their values; "no end date" stays sendable.
+    expect(sent).toContain('"enum":["open","paused","closed"]');
+    expect(
+      JSON.stringify(
+        branches.get('ixo.claims.create-collection')?.properties?.endDate,
+      ),
+    ).toContain('"null"');
   });
 
-  it('keeps every message field through LangChain, as a model call does', async () => {
-    const tool = new HubActionsPlugin()
-      .getTools()
-      .find((item) => item.name === 'request_chain_transaction');
-    const json = JSON.stringify(z.toJSONSchema(tool!.schema));
-    expect(json).toContain('"toAddress":');
-    expect(json).toContain('"amount":');
+  it('sends a provider only the offered types: 4 cost about 3 000 characters, 33 about 19 000', () => {
+    const size = (types: readonly ChainTxMessageType[]) => {
+      const tool = chainTransactionTool(types);
+      if (!tool) throw new Error('no tool');
+      return JSON.stringify(
+        convertToOpenAITool(
+          wrapPluginTool(tool, {
+            ambient: createNoopAmbient(),
+            state: { messages: [] },
+          }),
+        ),
+      ).length;
+    };
+    const four = size(CHAIN_TX_LEVEL4_MESSAGE_TYPES);
+    const all = size(CHAIN_TX_MESSAGE_TYPES);
+    // Recorded in docs/channels.md (2 962 and 18 739 when measured).
+    expect(four).toBeLessThan(3_500);
+    expect(all).toBeLessThan(20_000);
+    const fourTool = JSON.stringify(
+      providerParameters(chainTransactionTool(CHAIN_TX_LEVEL4_MESSAGE_TYPES)!),
+    );
+    expect(
+      CHAIN_TX_MESSAGE_TYPES.filter((type) => fourTool.includes(type)),
+    ).toEqual([...CHAIN_TX_LEVEL4_MESSAGE_TYPES]);
+  });
+
+  const VALIDATOR = 'ixovaloper1qeex565vg4uu7zwudh9ff2dauxptqf72nf2l44';
+  const VALIDATOR_TWO = 'ixovaloper1qgpqyqszqgpqyqszqgpqyqszqgpqyqszrh8mx2';
+  const ENTITY = 'did:ixo:entity:eb98bb2c92a62557b6c88c6f80e8d258';
+  const OTHER_ENTITY = 'did:ixo:entity:2f22535f8b179a51d77a0e302e68d35d';
+  const OWNER_DID = `did:ixo:${ADMIN}`;
+  const STORED =
+    'https://mx.ixo.earth/_matrix/media/v3/download/ixo.earth/statement';
+  type Level6Type = Exclude<
+    ChainTxMessageType,
+    (typeof CHAIN_TX_LEVEL4_MESSAGE_TYPES)[number]
+  >;
+  /** One message of each 0.8.0 type as the model writes it, optional fields included. */
+  const level6: Record<
+    Level6Type,
+    { type: Level6Type } & Record<string, unknown>
+  > = {
+    'ixo.token.retire': {
+      type: 'ixo.token.retire',
+      tokens: [{ id: 'CARBON:bafytoken', amount: '10' }],
+      jurisdiction: 'ZA-WC 7700',
+      reason: 'offset',
+    },
+    'cosmos.staking.delegate': {
+      type: 'cosmos.staking.delegate',
+      validatorAddress: VALIDATOR,
+      amount: '100',
+    },
+    'cosmos.staking.undelegate': {
+      type: 'cosmos.staking.undelegate',
+      validatorAddress: VALIDATOR,
+      amount: '0.5',
+    },
+    'cosmos.staking.redelegate': {
+      type: 'cosmos.staking.redelegate',
+      fromValidatorAddress: VALIDATOR,
+      toValidatorAddress: VALIDATOR_TWO,
+      amount: '50',
+    },
+    'cosmos.distribution.withdraw-rewards': {
+      type: 'cosmos.distribution.withdraw-rewards',
+      validatorAddress: VALIDATOR,
+    },
+    'cosmos.gov.vote': {
+      type: 'cosmos.gov.vote',
+      proposalId: '506',
+      option: 'no_with_veto',
+    },
+    'ixo.claims.claim-intent': {
+      type: 'ixo.claims.claim-intent',
+      collectionId: '42',
+    },
+    'ixo.claims.dispute': {
+      type: 'ixo.claims.dispute',
+      claimId: 'bafyclaimone',
+      collectionId: '42',
+      reason: 'check_wrong',
+      evidence: {
+        uri: STORED,
+        type: 'eval-engine/v1',
+        proof: 'bafystatement',
+        encrypted: true,
+      },
+    },
+    'ixo.claims.update-collection-state': {
+      type: 'ixo.claims.update-collection-state',
+      collectionId: '42',
+      adminAddress: ADMIN,
+      state: 'paused',
+    },
+    'ixo.claims.update-collection-dates': {
+      type: 'ixo.claims.update-collection-dates',
+      collectionId: '42',
+      adminAddress: ADMIN,
+      startDate: '2026-11-01T00:00:00+03:00',
+      endDate: null,
+    },
+    'ixo.claims.update-collection-quota': {
+      type: 'ixo.claims.update-collection-quota',
+      collectionId: '42',
+      adminAddress: ADMIN,
+      maxClaims: '0',
+    },
+    'ixo.claims.create-claim-authorization': {
+      type: 'ixo.claims.create-claim-authorization',
+      collectionId: '42',
+      adminAddress: ADMIN,
+      granteeAddress: RECIPIENT,
+      role: 'check-claims',
+      maxClaims: '1000000000',
+      expiresAt: '2027-01-01T00:00:00Z',
+      decideBefore: '2026-12-31T23:59:59.999Z',
+    },
+    'ixo.claims.update-collection-payments': {
+      type: 'ixo.claims.update-collection-payments',
+      collectionId: '42',
+      adminAddress: ADMIN,
+      payments: {
+        approval: {
+          amount: [
+            { denom: 'uixo', amountBaseUnits: '50000000' },
+            { denom: `ibc/${'A'.repeat(64)}`, amountBaseUnits: '1' },
+          ],
+          payAfterSeconds: 604800,
+          networkSplit: true,
+        },
+        rejection: { amount: [] },
+      },
+    },
+    'ixo.claims.create-collection': {
+      type: 'ixo.claims.create-collection',
+      entityId: ENTITY,
+      protocolId: OTHER_ENTITY,
+      startDate: '2026-11-01T00:00:00Z',
+      endDate: '2026-12-31T00:00:00Z',
+      maxClaims: '500',
+      state: 'open',
+      reservations: 'required',
+      payments: {
+        submission: { amount: [{ denom: 'uixo', amountBaseUnits: '1' }] },
+      },
+    },
+    'ixo.entity.create-account': {
+      type: 'ixo.entity.create-account',
+      entityId: ENTITY,
+      name: 'oracle revenue',
+    },
+    'ixo.entity.update': {
+      type: 'ixo.entity.update',
+      entityId: ENTITY,
+      startDate: '2027-01-01T00:00:00Z',
+      endDate: '2030-12-31T00:00:00Z',
+    },
+    'ixo.entity.revoke-account-authz': {
+      type: 'ixo.entity.revoke-account-authz',
+      entityId: ENTITY,
+      granteeAddress: RECIPIENT,
+      permission: 'authorize-claim-agents',
+    },
+    'ixo.entity.grant-account-authz': {
+      type: 'ixo.entity.grant-account-authz',
+      entityId: ENTITY,
+      granteeAddress: RECIPIENT,
+      permission: 'file-claims',
+      collectionId: '42',
+      maxClaims: '50',
+      reservationSeconds: 3600,
+      expiresAt: '2027-01-01T00:00:00Z',
+    },
+    'ixo.entity.create': {
+      type: 'ixo.entity.create',
+      entityType: 'protocol/claim',
+      profile: { serviceEndpoint: STORED, proof: 'bafyprofile' },
+      protocolId: OTHER_ENTITY,
+      startDate: '2026-11-01T00:00:00Z',
+      endDate: '2027-11-01T00:00:00Z',
+    },
+    'ixo.iid.add-service': {
+      type: 'ixo.iid.add-service',
+      did: ENTITY,
+      service: {
+        id: '{id}#api',
+        type: 'linkedDomains',
+        serviceEndpoint: 'https://cleanwater.org',
+      },
+    },
+    'ixo.iid.delete-service': {
+      type: 'ixo.iid.delete-service',
+      did: ENTITY,
+      serviceId: `${ENTITY}#api`,
+    },
+    'ixo.iid.add-linked-resource': {
+      type: 'ixo.iid.add-linked-resource',
+      did: ENTITY,
+      resource: {
+        id: '{id}#report',
+        type: 'Settings',
+        description: 'Annual report',
+        mediaType: 'application/pdf',
+        serviceEndpoint: 'ipfs://bafyreport',
+        proof: 'bafyreport',
+        encrypted: false,
+        right: 'CC-BY 4.0',
+      },
+    },
+    'ixo.iid.delete-linked-resource': {
+      type: 'ixo.iid.delete-linked-resource',
+      did: ENTITY,
+      resourceId: '{id}#report',
+    },
+    'ixo.iid.add-linked-claim': {
+      type: 'ixo.iid.add-linked-claim',
+      did: OWNER_DID,
+      claim: {
+        id: 'bafyclaimone',
+        type: 'Certificate',
+        description: 'Water quality',
+        serviceEndpoint: STORED,
+        proof: 'bafyclaimone',
+        encrypted: true,
+      },
+    },
+    'ixo.iid.delete-linked-claim': {
+      type: 'ixo.iid.delete-linked-claim',
+      did: OWNER_DID,
+      claimId: 'bafyclaimone',
+    },
+    'ixo.iid.add-linked-entity': {
+      type: 'ixo.iid.add-linked-entity',
+      did: ENTITY,
+      entity: {
+        id: OTHER_ENTITY,
+        type: 'dao',
+        relationship: 'member',
+        service: 'svc1',
+      },
+    },
+    'ixo.iid.delete-linked-entity': {
+      type: 'ixo.iid.delete-linked-entity',
+      did: ENTITY,
+      entityId: OTHER_ENTITY,
+    },
+    'ixo.iid.add-context': {
+      type: 'ixo.iid.add-context',
+      did: ENTITY,
+      context: { key: 'ixo', val: 'https://w3id.org/ixo/context/v1' },
+    },
+    'ixo.iid.delete-context': {
+      type: 'ixo.iid.delete-context',
+      did: ENTITY,
+      key: 'ixo',
+    },
+  };
+  /** What the owner object adds before the protocol sees a message. */
+  const OWNER_IDENTITY: Partial<Record<Level6Type, Record<string, string>>> = {
+    'ixo.claims.claim-intent': { agentDid: OWNER_DID },
+    'ixo.claims.dispute': { agentDid: OWNER_DID },
+    'ixo.claims.create-claim-authorization': { creatorDid: OWNER_DID },
+    'ixo.entity.update': { controllerDid: OWNER_DID },
+    'ixo.entity.create': { ownerDid: OWNER_DID },
+  };
+  const STAKE_TYPES: readonly string[] = [
+    'cosmos.staking.delegate',
+    'cosmos.staking.undelegate',
+    'cosmos.staking.redelegate',
+  ];
+  /** The protocol's reason for a message as the owner object would send it (1 IXO for a stake), or null. */
+  function protocolIssue(
+    message: { type: Level6Type } & Record<string, unknown>,
+  ) {
+    const { amount: _amount, ...rest } = message;
+    return chainTxIssue({
+      kind: 'ixo.chain.tx.v1',
+      chainId: 'ixo-5',
+      network: 'ixo mainnet',
+      signer: ADMIN,
+      memo: '',
+      messages: [
+        {
+          ...(STAKE_TYPES.includes(message.type)
+            ? { ...rest, amountBaseUnits: '1000000' }
+            : message),
+          ...OWNER_IDENTITY[message.type],
+        },
+      ],
+    });
+  }
+
+  it('accepts each of the 29 level-6 types, hands it to the host as written, and the protocol accepts what the owner object makes of it', async () => {
+    const chainTransaction = vi.fn(
+      async (
+        _input: Parameters<
+          NonNullable<RuntimeContext['hubActions']>['chainTransaction']
+        >[0],
+      ) => reference,
+    );
+    const ctx = channelContext(chainTransaction);
+    for (const message of Object.values(level6)) {
+      // What LangChain checks on a model turn (the model-facing schema),
+      // then the handler, which checks the message against its type.
+      expect([
+        message.type,
+        chainTool().schema.safeParse({ messages: [message] }).success,
+        await chainTool().handler({ messages: [message] }, ctx),
+      ]).toMatchObject([message.type, true, { status: 'prepared' }]);
+      expect(chainTransaction).toHaveBeenLastCalledWith(
+        expect.objectContaining({ messages: [message] }),
+      );
+      const handed = chainTransaction.mock.lastCall?.[0].messages ?? [];
+      // The owner object: amounts in base units, then the owner identity,
+      // then the protocol's own parse.
+      const operation = chainTxOperation({
+        ownerDid: OWNER_DID,
+        chainId: 'ixo-5',
+        network: 'ixo mainnet',
+        memo: '',
+        messages: chainTxAmountsInBaseUnits(handed, null),
+      });
+      expect([message.type, protocolIssue(message)]).toEqual([
+        message.type,
+        null,
+      ]);
+      expect(operation).toMatchObject({
+        messages: [OWNER_IDENTITY[message.type] ?? {}],
+      });
+    }
+    expect(chainTransaction).toHaveBeenCalledTimes(29);
+  });
+
+  it('accepts the identity links Portal already stored (ids as the record holds them, Portal’s link shapes)', async () => {
+    const chainTransaction = vi.fn(async () => reference);
+    const ctx = channelContext(chainTransaction);
+    for (const message of [
+      // Removes name the item exactly as the record holds it.
+      { type: 'ixo.iid.delete-service', did: ENTITY, serviceId: '#api' },
+      {
+        type: 'ixo.iid.delete-linked-entity',
+        did: ENTITY,
+        entityId: `{id}#${RECIPIENT}`,
+      },
+      {
+        type: 'ixo.iid.delete-linked-resource',
+        did: ENTITY,
+        resourceId: 'pro',
+      },
+      {
+        type: 'ixo.iid.delete-linked-claim',
+        did: ENTITY,
+        claimId: '{id}#claim:1',
+      },
+      { type: 'ixo.iid.delete-context', did: ENTITY, key: 'class' },
+      // Adds in Portal's shapes.
+      {
+        type: 'ixo.iid.add-linked-entity',
+        did: ENTITY,
+        entity: {
+          id: `{id}#ixo1${'q'.repeat(58)}`,
+          type: 'group',
+          relationship: 'Governs',
+          service: '',
+        },
+      },
+      {
+        type: 'ixo.iid.add-linked-entity',
+        did: ENTITY,
+        entity: {
+          id: RECIPIENT,
+          type: 'agent',
+          relationship: 'member',
+          service: 'did:cosmos:ixo',
+        },
+      },
+      {
+        type: 'ixo.iid.add-linked-resource',
+        did: ENTITY,
+        resource: {
+          id: '{id}#app:bafyapp',
+          type: 'application/vnd.ixo.design-pod+json',
+          description: '',
+          mediaType: 'application/json',
+          serviceEndpoint: STORED,
+          proof: '',
+          encrypted: false,
+          right: '',
+        },
+      },
+    ] as const) {
+      expect([
+        message,
+        protocolIssue(message),
+        chainTool().schema.safeParse({ messages: [message] }).success,
+        await chainTool().handler({ messages: [message] }, ctx),
+      ]).toMatchObject([message, null, true, { status: 'prepared' }]);
+    }
+  });
+
+  it.each<[string, { type: Level6Type } & Record<string, unknown>]>([
+    [
+      'a retirement for a lower-case country',
+      { ...level6['ixo.token.retire'], jurisdiction: 'ke' },
+    ],
+    [
+      'a blank retirement reason',
+      { ...level6['ixo.token.retire'], reason: '   ' },
+    ],
+    [
+      'a retirement reason with a bidi override',
+      { ...level6['ixo.token.retire'], reason: 'off‮set' },
+    ],
+    [
+      'a retirement without token lines',
+      { ...level6['ixo.token.retire'], tokens: [] },
+    ],
+    [
+      'a stake with an account address',
+      { ...level6['cosmos.staking.delegate'], validatorAddress: RECIPIENT },
+    ],
+    [
+      'a stake move to the same validator',
+      { ...level6['cosmos.staking.redelegate'], toValidatorAddress: VALIDATOR },
+    ],
+    [
+      'an upper-case validator',
+      {
+        ...level6['cosmos.distribution.withdraw-rewards'],
+        validatorAddress: VALIDATOR.toUpperCase(),
+      },
+    ],
+    ['proposal 0', { ...level6['cosmos.gov.vote'], proposalId: '0' }],
+    [
+      'a proposal number with a leading zero',
+      { ...level6['cosmos.gov.vote'], proposalId: '0506' },
+    ],
+    ['an unknown vote', { ...level6['cosmos.gov.vote'], option: 'veto' }],
+    [
+      'a collection id above uint64',
+      {
+        ...level6['ixo.claims.claim-intent'],
+        collectionId: '18446744073709551616',
+      },
+    ],
+    [
+      'an unknown dispute reason',
+      { ...level6['ixo.claims.dispute'], reason: 'fraud' },
+    ],
+    [
+      'an http evidence link',
+      {
+        ...level6['ixo.claims.dispute'],
+        evidence: {
+          ...(level6['ixo.claims.dispute'].evidence as object),
+          uri: 'http://example.com/s',
+        },
+      },
+    ],
+    [
+      'an evidence link with user info',
+      {
+        ...level6['ixo.claims.dispute'],
+        evidence: {
+          ...(level6['ixo.claims.dispute'].evidence as object),
+          uri: 'https://user@example.com/s',
+        },
+      },
+    ],
+    [
+      'an evidence proof with a space',
+      {
+        ...level6['ixo.claims.dispute'],
+        evidence: {
+          ...(level6['ixo.claims.dispute'].evidence as object),
+          proof: 'bafy one',
+        },
+      },
+    ],
+    [
+      'an upper-case collection state',
+      { ...level6['ixo.claims.update-collection-state'], state: 'OPEN' },
+    ],
+    [
+      'a date change without a date',
+      {
+        type: 'ixo.claims.update-collection-dates',
+        collectionId: '42',
+        adminAddress: ADMIN,
+      },
+    ],
+    [
+      'an end before the start',
+      {
+        ...level6['ixo.claims.update-collection-dates'],
+        startDate: '2026-11-02T00:00:00Z',
+        endDate: '2026-11-01T00:00:00Z',
+      },
+    ],
+    [
+      '30 February',
+      {
+        ...level6['ixo.claims.update-collection-dates'],
+        startDate: '2026-02-30T00:00:00Z',
+      },
+    ],
+    [
+      'a date before 1970',
+      {
+        ...level6['ixo.claims.update-collection-dates'],
+        startDate: '1969-12-31T23:59:59Z',
+      },
+    ],
+    [
+      'a date without a time',
+      {
+        ...level6['ixo.claims.update-collection-dates'],
+        startDate: '2026-11-01',
+      },
+    ],
+    [
+      'a negative quota',
+      { ...level6['ixo.claims.update-collection-quota'], maxClaims: '-1' },
+    ],
+    [
+      'a permission for an unknown role',
+      { ...level6['ixo.claims.create-claim-authorization'], role: 'admin' },
+    ],
+    [
+      'a permission for 0 claims',
+      { ...level6['ixo.claims.create-claim-authorization'], maxClaims: '0' },
+    ],
+    [
+      'a permission for more than 10^9 claims',
+      {
+        ...level6['ixo.claims.create-claim-authorization'],
+        maxClaims: '1000000001',
+      },
+    ],
+    [
+      'a decide-before date for filers',
+      {
+        ...level6['ixo.claims.create-claim-authorization'],
+        role: 'file-claims',
+      },
+    ],
+    [
+      'a reservation time for checkers',
+      {
+        ...level6['ixo.claims.create-claim-authorization'],
+        reservationSeconds: 60,
+      },
+    ],
+    [
+      'a reservation time over a year',
+      {
+        ...level6['ixo.entity.grant-account-authz'],
+        reservationSeconds: 31536001,
+      },
+    ],
+    [
+      'a payment with one token twice',
+      {
+        ...level6['ixo.claims.update-collection-payments'],
+        payments: {
+          submission: {
+            amount: [
+              { denom: 'uixo', amountBaseUnits: '1' },
+              { denom: 'uixo', amountBaseUnits: '2' },
+            ],
+          },
+        },
+      },
+    ],
+    [
+      'a payment of five coins',
+      {
+        ...level6['ixo.claims.update-collection-payments'],
+        payments: {
+          submission: {
+            amount: ['a', 'b', 'c', 'd', 'e'].map((x) => ({
+              denom: `u${x}xx`,
+              amountBaseUnits: '1',
+            })),
+          },
+        },
+      },
+    ],
+    [
+      'a network split on a filing payment',
+      {
+        ...level6['ixo.claims.update-collection-payments'],
+        payments: { submission: { amount: [], networkSplit: true } },
+      },
+    ],
+    [
+      'an unknown payment leg',
+      {
+        ...level6['ixo.claims.update-collection-payments'],
+        payments: { bonus: { amount: [] } },
+      },
+    ],
+    [
+      'a payment collectable after a negative time',
+      {
+        ...level6['ixo.claims.update-collection-payments'],
+        payments: { rejection: { amount: [], payAfterSeconds: -1 } },
+      },
+    ],
+    [
+      'a new collection without its end date key',
+      (({ endDate: _end, ...rest }) => rest)(
+        level6['ixo.claims.create-collection'],
+      ) as { type: Level6Type },
+    ],
+    [
+      'an upper-case entity id',
+      {
+        ...level6['ixo.claims.create-collection'],
+        entityId: ENTITY.toUpperCase().replace(
+          'DID:IXO:ENTITY:',
+          'did:ixo:entity:',
+        ),
+      },
+    ],
+    [
+      'a claim template outside ixo',
+      {
+        ...level6['ixo.claims.create-collection'],
+        protocolId: 'did:web:example.com',
+      },
+    ],
+    [
+      'an account named Admin',
+      { ...level6['ixo.entity.create-account'], name: 'Admin' },
+    ],
+    [
+      'an account name starting with a space',
+      { ...level6['ixo.entity.create-account'], name: ' lead' },
+    ],
+    [
+      'an entity update without a date',
+      { type: 'ixo.entity.update', entityId: ENTITY },
+    ],
+    [
+      'an unknown permission',
+      { ...level6['ixo.entity.revoke-account-authz'], permission: 'send' },
+    ],
+    [
+      'a file permission without its collection',
+      (({ collectionId: _c, ...rest }) => rest)(
+        level6['ixo.entity.grant-account-authz'],
+      ) as { type: Level6Type },
+    ],
+    [
+      'a collection on a collection-wide permission',
+      {
+        ...level6['ixo.entity.grant-account-authz'],
+        permission: 'change-collection-state',
+        maxClaims: undefined,
+        reservationSeconds: undefined,
+      },
+    ],
+    [
+      'an upper-case entity type',
+      { ...level6['ixo.entity.create'], entityType: 'DAO' },
+    ],
+    [
+      'an ipfs profile',
+      {
+        ...level6['ixo.entity.create'],
+        profile: {
+          serviceEndpoint: 'ipfs://bafyprofile',
+          proof: 'bafyprofile',
+        },
+      },
+    ],
+    [
+      'a new entity ending before it starts',
+      { ...level6['ixo.entity.create'], endDate: '2026-10-01T00:00:00Z' },
+    ],
+    [
+      'a service id without #',
+      {
+        ...level6['ixo.iid.add-service'],
+        service: {
+          id: 'api',
+          type: 'linkedDomains',
+          serviceEndpoint: 'https://cleanwater.org',
+        },
+      },
+    ],
+    [
+      'a javascript service link',
+      {
+        ...level6['ixo.iid.add-service'],
+        service: {
+          id: '{id}#api',
+          type: 'linkedDomains',
+          serviceEndpoint: 'javascript:alert(1)',
+        },
+      },
+    ],
+    [
+      'an upper-case media type',
+      {
+        ...level6['ixo.iid.add-linked-resource'],
+        resource: {
+          ...(level6['ixo.iid.add-linked-resource'].resource as object),
+          mediaType: 'JSON',
+        },
+      },
+    ],
+    [
+      'a document without encrypted',
+      {
+        ...level6['ixo.iid.add-linked-resource'],
+        resource: (({ encrypted: _e, ...rest }) => rest)(
+          level6['ixo.iid.add-linked-resource'].resource as {
+            encrypted: boolean;
+          },
+        ),
+      },
+    ],
+    [
+      'a linked claim id with a space',
+      {
+        ...level6['ixo.iid.add-linked-claim'],
+        claim: {
+          ...(level6['ixo.iid.add-linked-claim'].claim as object),
+          id: 'a b',
+        },
+      },
+    ],
+    [
+      'a relationship starting with a digit',
+      {
+        ...level6['ixo.iid.add-linked-entity'],
+        entity: {
+          ...(level6['ixo.iid.add-linked-entity'].entity as object),
+          relationship: '1member',
+        },
+      },
+    ],
+    [
+      'a removal id with a space',
+      { ...level6['ixo.iid.delete-linked-entity'], entityId: '{id}#a b' },
+    ],
+    [
+      'a removal id over 300 characters',
+      { ...level6['ixo.iid.delete-service'], serviceId: `#${'a'.repeat(300)}` },
+    ],
+    [
+      'a linked entity that is a validator',
+      {
+        ...level6['ixo.iid.add-linked-entity'],
+        entity: {
+          ...(level6['ixo.iid.add-linked-entity'].entity as object),
+          id: VALIDATOR,
+        },
+      },
+    ],
+    [
+      'a linked resource described with a bidi override',
+      {
+        ...level6['ixo.iid.add-linked-resource'],
+        resource: {
+          ...(level6['ixo.iid.add-linked-resource'].resource as object),
+          description: 'Report\u202e',
+        },
+      },
+    ],
+    [
+      'a blank right',
+      {
+        ...level6['ixo.iid.add-linked-claim'],
+        claim: {
+          ...(level6['ixo.iid.add-linked-claim'].claim as object),
+          right: '   ',
+        },
+      },
+    ],
+    [
+      'a context key starting with a digit',
+      {
+        ...level6['ixo.iid.add-context'],
+        context: { key: '1ixo', val: 'https://w3id.org/ixo' },
+      },
+    ],
+    [
+      'an http context',
+      {
+        ...level6['ixo.iid.add-context'],
+        context: { key: 'ixo', val: 'http://w3id.org/ixo' },
+      },
+    ],
+    [
+      'a record outside ixo',
+      { ...level6['ixo.iid.delete-context'], did: 'did:web:example.com' },
+    ],
+  ])(
+    'refuses %s, as the protocol does, before any Hub call',
+    async (_name, message) => {
+      const chainTransaction = vi.fn(async () => reference);
+      const ctx = channelContext(chainTransaction);
+      // Values set to undefined are absent on the wire.
+      const sent = JSON.parse(JSON.stringify(message)) as typeof message;
+      expect(protocolIssue(sent)).toMatch(/^invalid_message: messages\[0\]\./);
+      expect(
+        await chainTool().handler({ messages: [sent] }, ctx),
+      ).toMatchObject({
+        status: 'unavailable',
+        reason: expect.stringMatching(
+          /^The messages do not match a supported message shape \(check messages\[0\]\..+\)\.$/,
+        ),
+      });
+      expect(chainTransaction).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each<[string, Record<string, unknown>]>([
+    [
+      'a reservation agentDid',
+      { ...level6['ixo.claims.claim-intent'], agentDid: OWNER_DID },
+    ],
+    [
+      'a dispute agentDid',
+      { ...level6['ixo.claims.dispute'], agentDid: OWNER_DID },
+    ],
+    [
+      'a permission creatorDid',
+      {
+        ...level6['ixo.claims.create-claim-authorization'],
+        creatorDid: OWNER_DID,
+      },
+    ],
+    [
+      'an entity controllerDid',
+      { ...level6['ixo.entity.update'], controllerDid: OWNER_DID },
+    ],
+    [
+      'an entity ownerDid',
+      { ...level6['ixo.entity.create'], ownerDid: OWNER_DID },
+    ],
+    [
+      'a stake in base units',
+      { ...level6['cosmos.staking.delegate'], amountBaseUnits: '1000000' },
+    ],
+    [
+      'a stake amount in base units only',
+      (({ amount: _a, ...rest }) => ({ ...rest, amountBaseUnits: '1000000' }))(
+        level6['cosmos.staking.undelegate'],
+      ),
+    ],
+    [
+      'a stake in scientific notation',
+      { ...level6['cosmos.staking.redelegate'], amount: '1e6' },
+    ],
+    [
+      'a stake signer',
+      { ...level6['cosmos.staking.delegate'], delegatorAddress: ADMIN },
+    ],
+  ])(
+    'refuses %s (the runtime fills it or converts it)',
+    async (_name, message) => {
+      const chainTransaction = vi.fn(async () => reference);
+      expect(
+        await chainTool().handler(
+          { messages: [message] },
+          channelContext(chainTransaction),
+        ),
+      ).toMatchObject({ status: 'unavailable' });
+      expect(chainTransaction).not.toHaveBeenCalled();
+    },
+  );
+
+  it('offers the tool per turn with only the types the account may use', async () => {
+    const plugin = new HubActionsPlugin();
+    const chainTransaction = vi.fn(async () => reference);
+    const ctx = channelContext(chainTransaction);
+    const withChainTx = (chainTx: ChainTxCapabilities | null) =>
+      makeRuntimeContext({
+        ...ctx,
+        hubActions: {
+          ...ctx.hubActions!,
+          capabilities: async (): Promise<ActionCapabilitiesV1> => ({
+            version: 'ixo.auth-capabilities/2',
+            accountId: 'account-three',
+            oracleDid: 'did:ixo:oracle',
+            network: 'ixo testnet',
+            resourceOrigin: null,
+            operations: chainTx ? ['ixo.chain.tx.v1'] : [],
+            forms: [],
+            transfer: null,
+            chainTx,
+          }),
+        },
+      });
+    const offered = async (turn: RuntimeContext) => {
+      const tools = await plugin.getRequestTools(turn);
+      return tools.map((tool) => [
+        tool.name,
+        [...providerBranches(providerParameters(tool)).keys()],
+      ]);
+    };
+    // A level-5 Hub (or an account limited to them): the four.
+    const four = withChainTx({
+      messageTypes: [...CHAIN_TX_LEVEL4_MESSAGE_TYPES],
+      maxMessages: 8,
+    });
+    expect(await offered(four)).toEqual([
+      ['request_chain_transaction', [...CHAIN_TX_LEVEL4_MESSAGE_TYPES]],
+    ]);
+    // A level-6 Hub: all 33, in catalogue order whatever the Hub's order.
+    expect(
+      await offered(
+        withChainTx({
+          messageTypes: [...CHAIN_TX_MESSAGE_TYPES].reverse(),
+          maxMessages: 8,
+        }),
+      ),
+    ).toEqual([['request_chain_transaction', [...CHAIN_TX_MESSAGE_TYPES]]]);
+    // An account whose Hub held a type back: the rest.
+    const withoutCreate = CHAIN_TX_MESSAGE_TYPES.filter(
+      (type) => type !== 'ixo.entity.create',
+    );
+    const [held] = await plugin.getRequestTools(
+      withChainTx({ messageTypes: withoutCreate, maxMessages: 8 }),
+    );
+    expect(held?.description).not.toContain('`ixo.entity.create`');
+    expect([...providerBranches(providerParameters(held!)).keys()]).toEqual(
+      withoutCreate,
+    );
+    // Chain transactions off for the account: no tool at all.
+    expect(await offered(withChainTx(null))).toEqual([]);
+    // Capabilities unreadable, or not a channel turn: the whole catalogue.
+    expect(await offered(ctx)).toEqual([
+      ['request_chain_transaction', [...CHAIN_TX_MESSAGE_TYPES]],
+    ]);
+    // A type the account was not offered is refused before any Hub call,
+    // on a model turn (the schema) and on a direct handler call.
+    const [fourTool] = await plugin.getRequestTools(four);
+    const stake = level6['cosmos.staking.delegate'];
+    const error: unknown = await wrapPluginTool(fourTool!, {
+      ambient: createNoopAmbient(),
+      state: { messages: [] },
+      fallbackContext: { user: four.user, session: four.session } as never,
+    })
+      .invoke({ messages: [stake] })
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ToolInputParsingException);
+    expect(await fourTool!.handler({ messages: [stake] }, four)).toMatchObject({
+      status: 'unavailable',
+    });
+    expect(chainTransaction).not.toHaveBeenCalled();
+  });
+
+  it('tells the model to speak plainly, and every type how to say it', () => {
+    for (const words of [
+      'plain, everyday sentences',
+      'Never say message type names or chain words such as authz',
+      'uixo',
+      'The review card in Auth Hub shows every exact value',
+    ])
+      expect(CHAIN_TX_GENERAL_RULES).toContain(words);
+    const example = (type: ChainTxMessageType) =>
+      /Say it like: “([^”]+)”/.exec(CHAIN_TX_CATALOG[type].rules)?.[1];
+    expect(CHAIN_TX_MESSAGE_TYPES.filter((type) => !example(type))).toEqual([]);
+    // The example the model copies is in everyday words.
+    expect(
+      CHAIN_TX_MESSAGE_TYPES.filter((type) =>
+        /authz|bech32|uixo|valoper|MsgExec|delegat|base units|DID|IID|did:ixo|\.v1|cosmos\.|ixo\./i.test(
+          example(type) ?? '',
+        ),
+      ),
+    ).toEqual([]);
+    // The cards that need something stored first say so, and the new ids
+    // are looked up after the card went through.
+    for (const type of ['ixo.claims.dispute', 'ixo.entity.create'] as const)
+      expect(CHAIN_TX_CATALOG[type].rules).toContain('must ALREADY be stored');
+    expect(CHAIN_TX_CATALOG['ixo.claims.create-collection'].rules).toContain(
+      'chain_lookup claim_collections',
+    );
+    expect(CHAIN_TX_CATALOG['ixo.entity.create'].rules).toContain(
+      'chain_lookup entities',
+    );
   });
 
   it('leaves the runtime-built kinds out of the generic tool schema', () => {
@@ -1649,7 +2689,7 @@ describe('request_chain_transaction', () => {
     if (!tool) throw new Error('capabilities tool missing');
     expect(await tool.handler({}, withClient)).toEqual(capabilities);
     expect(urls).toEqual([
-      'https://hub.test/api/internal/actions/operations/capabilities?version=5',
+      'https://hub.test/api/internal/actions/operations/capabilities?version=6',
     ]);
   });
 });
@@ -1739,7 +2779,7 @@ describe('describe_chain_messages', () => {
     for (const words of [
       '20-byte `ixo1…` account addresses (contract addresses are refused)',
       'only letters, digits and `: . _ / -`',
-      'never invent them',
+      'never invent or guess one',
       'Auth Hub sets the fee',
       'all succeed or none do',
     ])
@@ -1837,7 +2877,7 @@ describe('describe_chain_messages', () => {
   });
 
   it.each<[string, unknown]>([
-    ['an unknown type', { types: ['cosmos.staking.delegate'] }],
+    ['an unknown type', { types: ['cosmos.bank.multi-send'] }],
     ['no types', { types: [] }],
     ['a type twice', { types: ['cosmos.bank.send', 'cosmos.bank.send'] }],
     ['no arguments', {}],
@@ -1848,8 +2888,7 @@ describe('describe_chain_messages', () => {
     const capabilities = accountCapabilities(chainTx);
     expect(await tool.handler(args, context(capabilities))).toEqual({
       status: 'unavailable',
-      reason:
-        'Name 1 to 8 different message types, each one of: cosmos.bank.send, ixo.claims.submit, ixo.claims.evaluate, ixo.token.transfer.',
+      reason: `Name 1 to 8 different message types, each one of: ${CHAIN_TX_MESSAGE_TYPES.join(', ')}.`,
     });
     expect(capabilities).not.toHaveBeenCalled();
   });
