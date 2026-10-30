@@ -165,7 +165,9 @@ export function draftReplyPlan(input: {
     for (const call of step.toolCalls) {
       if (
         call.name === 'request_hub_action' ||
-        call.name === 'request_chain_transaction'
+        call.name === 'request_chain_transaction' ||
+        // The Yoma plugin's application and claim cards.
+        call.name === 'yoma_form'
       ) {
         try {
           const result = JSON.parse(input.toolResults.get(call.id) ?? 'null');

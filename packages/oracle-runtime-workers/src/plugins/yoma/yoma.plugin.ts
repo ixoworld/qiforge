@@ -15,6 +15,7 @@ import {
   type Failure,
   type Outcome,
 } from '../ixo-chain/http';
+import { HUB_ACTION_CARD_NOTE } from '../hub-actions/hub-actions.plugin';
 import { chainRestUrl } from '../ixo-chain/ixo-chain.plugin';
 import {
   COLLECTION_ID,
@@ -2064,7 +2065,18 @@ export class YomaPlugin extends OraclePlugin {
           : c,
     );
     if (!written.ok) return failed(written.failure);
-    return { ok: true, status: 'prepared', summary: reference.title };
+    // `actionReference` (with `summary` equal to its title) is what turns
+    // this result into the Reply Plan's review card on a chat surface
+    // (delivery/plan.ts); the note tells the model the card is shown.
+    return {
+      ok: true,
+      status: 'prepared',
+      summary: reference.title,
+      actionReference: reference,
+      ...(ctx.session.surface?.kind === 'chat'
+        ? { note: HUB_ACTION_CARD_NOTE }
+        : {}),
+    };
   }
 
   /** A claim whose file links lapse before the Hub could fetch them: those files leave the draft, to be sent again. */
