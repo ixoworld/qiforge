@@ -626,6 +626,16 @@ export function modelOutcome(
   return { ...outcome, receipt: modelReceipt(outcome.receipt) };
 }
 
+/**
+ * What a `cancelled` outcome means. Auth Hub withdraws a card when the
+ * person cancels it, and also on its own: a chain transaction whose details
+ * changed on chain after the review (`409 review_changed`, reason
+ * `chain_changed`, shown on the review page only). The oracle gets
+ * `cancelled` either way, so the model must not say who withdrew it.
+ */
+export const CANCELLED_MEANING =
+  'Withdrawn before anything was sent: nothing happened on chain. The person may have cancelled it, or Auth Hub withdrew it because something it depended on changed after the review; do not say the person cancelled it. If they still want it, offer to prepare a fresh one.';
+
 async function hubActionStatus(
   input: unknown,
   ctx: RuntimeContext,
@@ -653,6 +663,9 @@ async function hubActionStatus(
       operationStatus: read.operationStatus,
       outcome: modelOutcome(read.outcome),
       ...(read.summary ? { summary: read.summary } : {}),
+      ...(read.outcome?.status === 'cancelled'
+        ? { meaning: CANCELLED_MEANING }
+        : {}),
     };
   } catch (error) {
     // An Auth Hub that must be updated first: plain words, not a tool error.
@@ -794,7 +807,7 @@ export class HubActionsPlugin extends OraclePlugin {
       {
         name: 'hub_action_status',
         description:
-          'Read the verified status of a Hub action already prepared for this owner. Never executes.',
+          'Read the verified status of a Hub action already prepared for this owner. Never executes. A `cancelled` outcome was withdrawn before anything was sent, by the person or by Auth Hub (`meaning` says so): never say the person cancelled it.',
         schema: statusSchema,
         effect: 'read',
         handler: hubActionStatus,

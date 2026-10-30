@@ -13,6 +13,7 @@ import { makeRuntimeContext } from '../../core/test-fixtures';
 import { createNoopAmbient } from '../../core/runtime-context';
 import { wrapPluginTool } from '../../core/wrap-plugin-tool';
 import {
+  CANCELLED_MEANING,
   CHAIN_TRANSACTION_TOOL_DESCRIPTION,
   CHAIN_TX_CATALOG,
   CHAIN_TX_GENERAL_RULES,
@@ -31,6 +32,7 @@ import {
 } from '../../hub-actions/request';
 import type {
   ActionCapabilitiesV1,
+  ActionOutcomeV1,
   ChainTxCapabilities,
   HubActionOptionsV3,
   P2Operation,
@@ -962,6 +964,57 @@ describe('Hub actions Workers plugin', () => {
       status: 'unavailable',
       reason: 'No Hub action with this id was prepared for this owner.',
     });
+  });
+
+  it('never lets the model say the person cancelled a withdrawn card', async () => {
+    // Auth Hub withdraws a chain card itself when its details changed on
+    // chain after the review; the oracle gets `cancelled` either way.
+    const cancelled: ActionOutcomeV1 = {
+      version: 'ixo.auth-outcome/2',
+      eventId: 'event-cancelled',
+      reference,
+      ownerDid: 'did:ixo:owner',
+      authorizedRevision: 1,
+      authorizedDigest: reference.digest,
+      sequence: 2,
+      status: 'cancelled',
+      receipt: null,
+      occurredAt: 1770000000002,
+    };
+    const ctx = (outcome: ActionOutcomeV1 | null) =>
+      makeRuntimeContext({
+        config: { HUB_ACTIONS_ENABLED: 'true' },
+        hubActions: {
+          capabilities: async () => {
+            throw new Error('unused');
+          },
+          options: async () => options,
+          request: async () => reference,
+          chainTransaction: async () => {
+            throw new Error('unused');
+          },
+          status: async () => heldStatus(outcome),
+        },
+      });
+    const tool = new HubActionsPlugin()
+      .getTools()
+      .find((item) => item.name === 'hub_action_status');
+    if (!tool) throw new Error('status tool missing');
+    expect(tool.description).toContain('never say the person cancelled it');
+    expect(await tool.handler({ actionId: id }, ctx(cancelled))).toMatchObject({
+      status: 'known',
+      outcome: { status: 'cancelled' },
+      meaning: CANCELLED_MEANING,
+    });
+    expect(CANCELLED_MEANING).toContain('do not say the person cancelled it');
+    expect(CANCELLED_MEANING).toContain('nothing happened on chain');
+    // Any other outcome carries no such note.
+    expect(
+      await tool.handler(
+        { actionId: id },
+        ctx({ ...cancelled, status: 'declined' }),
+      ),
+    ).not.toHaveProperty('meaning');
   });
 });
 

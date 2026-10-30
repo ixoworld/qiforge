@@ -475,7 +475,12 @@ operationStatus, outcome, summary?}`, with Auth Hub's own review and
 operation status (so an action still waiting reads apart from one whose
 review expired; each is a status `@ixo/action-protocol` lists, anything else
 Auth Hub answers reads `unknown`), or `{status: 'unavailable', reason}` for an id this owner
-never prepared or when Auth Hub must be updated. Plugins read the same
+never prepared or when Auth Hub must be updated. A `cancelled` outcome also
+carries `meaning` (`CANCELLED_MEANING`): nothing was sent, and the person
+may have cancelled the card or Auth Hub withdrew it because something it
+depended on changed after the review (a chain card's `409 review_changed`
+with reason `chain_changed`, which only the review page sees); the model
+must not say the person cancelled it. Plugins read the same
 through `ctx.hubActions.status(ownerDid, actionId, { timeoutMs? })`
 (`HubActionStatusRead`: `held: false` for an action the owner object does
 not hold, with no Hub read). A refusal Auth Hub answered is a
