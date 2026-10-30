@@ -156,6 +156,14 @@ export const CHAIN_TX_REFUSAL_WORDS = {
     means: 'an item with that id is already there',
     next: 'Choose another id, or remove the old item first.',
   },
+  not_available: {
+    means: 'that isn’t available on this service yet',
+    next: 'Do not retry; tell the person it cannot be done here for now.',
+  },
+  chain_data_too_large: {
+    means: 'this is too large to change in one go here',
+    next: 'Do not retry; tell the person it cannot be done through chat.',
+  },
   invalid_did: {
     means: 'one of the identifiers is not a valid ID on the network',
     next: 'Copy it again exactly from a lookup.',

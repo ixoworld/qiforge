@@ -422,6 +422,29 @@ describe('Hub prepare refusals', () => {
     ).toContain(
       'in step 1, there are no rewards to collect from this validator yet. Leave this validator out of the card.',
     );
+    // The two card-wide codes: nothing to retry.
+    for (const [code, field, words] of [
+      [
+        'not_available',
+        'type',
+        'in step 1, that isn’t available on this service yet. Do not retry; tell the person it cannot be done here for now.',
+      ],
+      [
+        'chain_data_too_large',
+        'payments',
+        'in step 1, this is too large to change in one go here. Do not retry; tell the person it cannot be done through chat.',
+      ],
+    ] as const)
+      expect(
+        hubPrepareRefusal(
+          400,
+          {
+            error: 'operation_not_registered',
+            reason: `invalid_message: messages[0].${field}: ${code}`,
+          },
+          'transaction',
+        )?.message,
+      ).toContain(words);
     // Without a code (a shape the parser refused), with a code this runtime
     // does not know, or for another subject: as before, the reason quoted.
     for (const [reason, subject] of [

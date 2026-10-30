@@ -2023,6 +2023,13 @@ describe('request_chain_transaction', () => {
           service: 'did:cosmos:ixo',
         },
       },
+      // A file name, a version and a bare domain are not links.
+      {
+        type: 'ixo.token.retire',
+        tokens: [{ id: 'CARBON:bafytoken', amount: '1' }],
+        jurisdiction: 'Global',
+        reason: 'Offset for Annual Report.pdf v2.0.1 by cleanwater.org',
+      },
       {
         type: 'ixo.iid.add-linked-resource',
         did: ENTITY,
@@ -2069,16 +2076,20 @@ describe('request_chain_transaction', () => {
       { ...level6['ixo.token.retire'], reason: 'off\u00adset' },
     ],
     [
+      'a retirement reason with a hidden tag character',
+      { ...level6['ixo.token.retire'], reason: 'offset\u{E0041}' },
+    ],
+    [
       'a retirement reason with two spaces',
       { ...level6['ixo.token.retire'], reason: 'travel  offset' },
     ],
     [
-      'a document described with a file name',
+      'a document described with a site name and a path',
       {
         ...level6['ixo.iid.add-linked-resource'],
         resource: {
           ...(level6['ixo.iid.add-linked-resource'].resource as object),
-          description: 'report.pdf',
+          description: 'see pay.example/now',
         },
       },
     ],

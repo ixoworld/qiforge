@@ -11,7 +11,7 @@ import {
   CHAIN_TX_RESERVATION_MODES,
   CHAIN_TX_VOTE_OPTIONS,
   DENOM,
-  sanitizeSubmissionText,
+  sanitizePublishedText,
   type ChainTxMessageType,
 } from '@ixo/action-protocol';
 import { z } from 'zod';
@@ -245,13 +245,15 @@ const plainText = (max: number, what: string) =>
     .describe(what);
 /**
  * Free text published on chain is exactly what the review page shows:
- * `sanitizeSubmissionText` (the protocol's own check) leaves it unchanged,
- * so nothing link-like (a web or email address, a dotted name such as
- * report.pdf), no hidden characters, single spaces, none at either end.
+ * `sanitizePublishedText` (the protocol's own check) leaves it unchanged:
+ * no link (a URL with a scheme, `www.`, an email address, or a host
+ * followed by a path such as pay.example/now; a file name or a bare domain
+ * is fine), no hidden characters (tag characters included), single spaces,
+ * none at either end.
  */
 const SHOWN_AS_IS =
-  'Shown exactly as written: no web or email addresses or dotted names such as report.pdf, no hidden characters, single spaces and none at either end.';
-const shownAsIs = (value: string) => sanitizeSubmissionText(value) === value;
+  'Shown exactly as written: no links (web addresses, www., email addresses, or a site name followed by a path), no hidden characters, single spaces and none at either end. File names such as Annual Report.pdf are fine.';
+const shownAsIs = (value: string) => sanitizePublishedText(value) === value;
 const link = (ipfs: boolean, what: string) =>
   z
     .string()
@@ -601,7 +603,7 @@ export const CHAIN_TX_CATALOG = {
   'ixo.token.retire': {
     summary:
       'use up (retire) impact tokens the owner holds, for good, for example to offset emissions.',
-    rules: `Uses up impact tokens the owner holds, for good: retired tokens can never be sold, moved or used again, and nothing undoes it. Never retire without the owner clearly asking for it. Ask which tokens and how many, where it counts (\`jurisdiction\`: a two-letter country code such as \`KE\`, optionally with a region and postal code such as \`KE-30\` or \`ZA-WC 7700\`, or \`Global\` for everywhere) and why, in their words (\`reason\`, up to 200 characters, for example \`offset\`; written on chain exactly as given, so no web addresses or file names and no hidden characters). Find the token ids with chain_lookup token_balances: each line is a token \`id\` and a whole \`amount\` (impact tokens have no decimals), 1 to ${CHAIN_TX_MAX_TOKEN_LINES} lines, all of one kind of token. Say it like: “Retire 10 of your carbon credits for good, to offset your 2026 travel. This can’t be undone.”`,
+    rules: `Uses up impact tokens the owner holds, for good: retired tokens can never be sold, moved or used again, and nothing undoes it. Never retire without the owner clearly asking for it. Ask which tokens and how many, where it counts (\`jurisdiction\`: a two-letter country code such as \`KE\`, optionally with a region and postal code such as \`KE-30\` or \`ZA-WC 7700\`, or \`Global\` for everywhere) and why, in their words (\`reason\`, up to 200 characters, for example \`offset\`; written on chain exactly as given, so no links (web or email addresses) and no hidden characters). Find the token ids with chain_lookup token_balances: each line is a token \`id\` and a whole \`amount\` (impact tokens have no decimals), 1 to ${CHAIN_TX_MAX_TOKEN_LINES} lines, all of one kind of token. Say it like: “Retire 10 of your carbon credits for good, to offset your 2026 travel. This can’t be undone.”`,
     schema: z.strictObject({
       type: z.literal('ixo.token.retire'),
       tokens: z
@@ -1004,7 +1006,7 @@ export const CHAIN_TX_CATALOG = {
   },
   'ixo.iid.add-linked-resource': {
     summary: 'link a document (a profile, page or file) to such an identity.',
-    rules: `${IID_RULES} ${IID_ADD_RULE} The document must already be stored. \`resource\`: \`id\`, \`type\` (for example \`Settings\`), \`description\` (plain words, up to 300; written on chain exactly as given, so no web addresses or file names, which belong in \`serviceEndpoint\`), \`mediaType\` (for example \`application/json\`), \`serviceEndpoint\` (where it is stored), \`proof\` (its content id, or "" when it has none), \`encrypted\` (true or false) and optional \`right\`. Say it like: “Link the annual report to Clean Water Project.”`,
+    rules: `${IID_RULES} ${IID_ADD_RULE} The document must already be stored. \`resource\`: \`id\`, \`type\` (for example \`Settings\`), \`description\` (plain words, up to 300; written on chain exactly as given, so no links (web or email addresses), which belong in \`serviceEndpoint\`; a file name is fine), \`mediaType\` (for example \`application/json\`), \`serviceEndpoint\` (where it is stored), \`proof\` (its content id, or "" when it has none), \`encrypted\` (true or false) and optional \`right\`. Say it like: “Link the annual report to Clean Water Project.”`,
     schema: z.strictObject({
       type: z.literal('ixo.iid.add-linked-resource'),
       did: ixoDid('The identity record changed.'),
@@ -1037,7 +1039,7 @@ export const CHAIN_TX_CATALOG = {
   },
   'ixo.iid.add-linked-claim': {
     summary: 'link a claim (a credential or record) to such an identity.',
-    rules: `${IID_RULES} \`claim\`: \`id\` (the claim’s id), \`type\`, \`description\` (plain words, up to 300; written on chain exactly as given, so no web addresses or file names, which belong in \`serviceEndpoint\`), \`serviceEndpoint\` (where it is stored), \`proof\` (its content id, or "" when it has none), \`encrypted\` (true or false) and optional \`right\`. Say it like: “Link the water-quality certificate to Clean Water Project.”`,
+    rules: `${IID_RULES} \`claim\`: \`id\` (the claim’s id), \`type\`, \`description\` (plain words, up to 300; written on chain exactly as given, so no links (web or email addresses), which belong in \`serviceEndpoint\`; a file name is fine), \`serviceEndpoint\` (where it is stored), \`proof\` (its content id, or "" when it has none), \`encrypted\` (true or false) and optional \`right\`. Say it like: “Link the water-quality certificate to Clean Water Project.”`,
     schema: z.strictObject({
       type: z.literal('ixo.iid.add-linked-claim'),
       did: ixoDid('The identity record changed.'),
