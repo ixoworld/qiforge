@@ -1,4 +1,9 @@
-import type { ChainTxRefusal, ChainTxRefusalCode } from '@ixo/action-protocol';
+import {
+  CHAIN_TX_MAX_MESSAGES,
+  CHAIN_TX_REFUSAL_CODES,
+  type ChainTxRefusal,
+  type ChainTxRefusalCode,
+} from '@ixo/action-protocol';
 
 /**
  * What each chain transaction refusal code means, for the person (`means`,
@@ -159,6 +164,37 @@ export const CHAIN_TX_REFUSAL_WORDS = {
   ChainTxRefusalCode,
   { means: string; next: string }
 >;
+
+/**
+ * A message field path as the protocol names one (`validatorAddress`,
+ * `payments.approval.amount[1].denom`): checked here as well, because the
+ * path is repeated in text the model reads.
+ */
+const REFUSAL_FIELD =
+  /^[A-Za-z][A-Za-z0-9_]*(?:\[\d{1,3}\])?(?:\.[A-Za-z][A-Za-z0-9_]*(?:\[\d{1,3}\])?){0,5}$/;
+
+/**
+ * A parsed refusal the runtime puts into words: a message index 0..7, a
+ * plain field path of at most 100 characters and a code of the protocol's
+ * list. Anything else is passed on as the Hub's quoted reason instead.
+ */
+export function wordableRefusal(
+  refusal: ChainTxRefusal | null,
+): (ChainTxRefusal & { code: ChainTxRefusalCode }) | null {
+  if (!refusal) return null;
+  const { index, field, code } = refusal;
+  if (
+    !Number.isInteger(index) ||
+    index < 0 ||
+    index >= CHAIN_TX_MAX_MESSAGES ||
+    field.length > 100 ||
+    !REFUSAL_FIELD.test(field) ||
+    code === null ||
+    !CHAIN_TX_REFUSAL_CODES.includes(code)
+  )
+    return null;
+  return { index, field, code };
+}
 
 /**
  * A coded chain transaction refusal in the model's words: which step, what

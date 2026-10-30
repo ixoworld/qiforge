@@ -4,7 +4,7 @@ import {
   type ActionReceiptV1,
   type OptionsToken,
 } from '@ixo/action-protocol';
-import { chainTxRefusalWords } from './chain-tx-refusals';
+import { chainTxRefusalWords, wordableRefusal } from './chain-tx-refusals';
 import type { ChainTxMessageInput } from '../plugin-api/types';
 import { quoteHubText } from './hub-text';
 import type { ChainTxHostMessage } from './request';
@@ -357,12 +357,12 @@ export function hubPrepareRefusal(
     subject === 'transaction' &&
     (parsed.error === 'operation_not_registered' ||
       parsed.error === 'simulation_failed')
-      ? parseChainTxRefusal(parsed.reason)
+      ? wordableRefusal(parseChainTxRefusal(parsed.reason))
       : null;
-  if (coded?.code)
+  if (coded)
     return new HubActionRefused(
       'refused',
-      chainTxRefusalWords({ ...coded, code: coded.code }),
+      chainTxRefusalWords(coded),
       undefined,
       status,
     );
