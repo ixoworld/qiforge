@@ -240,6 +240,8 @@ export interface AttachmentMeta {
   size?: number;
   mxcUri?: string;
   eventId?: string;
+  /** A channel file's opaque reference (`channel:<16 hex>`); its link is never stored here. */
+  channelRef?: string;
   category: string;
 }
 

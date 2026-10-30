@@ -45,6 +45,7 @@ export * from './plugin-api';
 export * from './plugins';
 export * from './do/contracts';
 export type { OwnerStore } from './owner-store/types';
+export type { ChannelAttachment } from './channels/contract';
 export { MigratingOwnerStore } from './owner-store/migrating-store';
 export {
   IxoVfsOwnerStore,

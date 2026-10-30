@@ -8,22 +8,73 @@ import {
   type ActionCapabilitiesV1,
   type ActionOutcomeV1,
   type ActionReferenceV1,
+  type ActionReviewView,
   type HubActionOptionsV2,
   type HubActionOptionsV3,
 } from '@ixo/action-protocol';
+import { HubActionRefused } from './store';
 import {
   hubPrepareRefusal,
   prepareSubjectOf,
   type HubPrepareSubject,
 } from './transfer';
 
+/**
+ * Auth Hub's review and operation status of an action, as
+ * `@ixo/action-protocol` 0.7.0 lists them (`ActionReviewView`), or `unknown`
+ * for any other value: these reach the model, so nothing but a listed
+ * word is passed on.
+ */
+export type HubReviewStatus = ActionReviewView['reviewStatus'] | 'unknown';
+export type HubOperationStatus = ActionReviewView['operationStatus'];
+
+const REVIEW_STATUSES = [
+  'prepared',
+  'superseded',
+  'declined',
+  'expired',
+  'revoked',
+  'signing',
+  'authorized',
+] as const satisfies readonly ActionReviewView['reviewStatus'][];
+const OPERATION_STATUSES = [
+  'awaiting_authorization',
+  'admitted',
+  'submitted',
+  'succeeded',
+  'failed',
+  'requires_review',
+  'unknown',
+  'not_started',
+] as const satisfies readonly HubOperationStatus[];
+// Every status the protocol lists is in the lists above.
+type Missing<All, Listed> = Exclude<All, Listed> extends never ? true : never;
+const reviewListed: Missing<
+  ActionReviewView['reviewStatus'],
+  (typeof REVIEW_STATUSES)[number]
+> = true;
+const operationListed: Missing<
+  HubOperationStatus,
+  (typeof OPERATION_STATUSES)[number]
+> = true;
+void reviewListed;
+void operationListed;
+
+/** `value` when it is a status the protocol lists, else `unknown`. */
+export function hubReviewStatus(value: unknown): HubReviewStatus {
+  return REVIEW_STATUSES.find((status) => status === value) ?? 'unknown';
+}
+export function hubOperationStatus(value: unknown): HubOperationStatus {
+  return OPERATION_STATUSES.find((status) => status === value) ?? 'unknown';
+}
+
 export interface HubActionStatus {
   reference: ActionReferenceV1;
   ownerDid: string;
   revision: number;
   digest: string;
-  reviewStatus: string;
-  operationStatus: string;
+  reviewStatus: HubReviewStatus;
+  operationStatus: HubOperationStatus;
   outcome: ActionOutcomeV1 | null;
 }
 
@@ -35,8 +86,13 @@ export interface HubActionTransport {
 
 /**
  * The protocol version this runtime declares on every operation call
- * (capabilities, POST operations, GET status, options). Version 4 is the
- * 0.6.0 contract: version 3 plus chain transactions (`ixo.chain.tx.v1` in
+ * (capabilities, POST operations, GET status, options). Version 5 is the
+ * 0.7.0 contract: version 4 plus the application card (`ixo.bid.submit.v1`)
+ * and the claim card (`ixo.claim.submit.v1`) with their receipts
+ * (`ixo.bid.submission.v1`, `ixo.claim.submission.v1`,
+ * `ixo.submission.failed.v1`), which a 0.6.0 parser cannot read, so the Hub
+ * lists and accepts them only at level 5; options answer as at version 3.
+ * Version 4 is the 0.6.0 contract: version 3 plus chain transactions (`ixo.chain.tx.v1` in
  * capabilities with its `chainTx` entry, prepared through POST, receipts
  * with `steps`); options answer as at version 3 (`ixo.auth-options/3`).
  * Version 3 is the 0.5.0 contract: capabilities `transfer.limits`,
@@ -44,9 +100,23 @@ export interface HubActionTransport {
  * options with the owner's tokens. Version 2 callers (runtime 0.23.0) keep
  * the 0.4.1 shapes. The envelopes stay tagged `ixo.auth-outcome/2` and
  * `ixo.auth-capabilities/2`, which `@ixo/action-protocol` parses.
+ *
+ * An Auth Hub older than version 5 checks `?version=` against its closed
+ * list (1 to 4) and answers every call that declares 5 with 400
+ * `invalid_request`, before anything else: see `HUB_UPDATE_REQUIRED`.
  */
-const HUB_PROTOCOL_VERSION = '4';
+const HUB_PROTOCOL_VERSION = '5';
 const HUB_PROTOCOL_QUERY = `version=${HUB_PROTOCOL_VERSION}`;
+
+/**
+ * What the model is told when Auth Hub refuses a read (capabilities,
+ * options, status) with 400 `invalid_request`. A read carries nothing but
+ * the protocol version (and, for options, the binding the runtime itself
+ * checked), so that answer comes from a Hub that does not know version 5.
+ * The owner object keeps every action it holds: polls and callbacks pick
+ * the outcomes up once the Hub is updated.
+ */
+export const HUB_UPDATE_REQUIRED = `Auth Hub must be updated before this oracle can use Hub actions: it does not accept protocol version ${HUB_PROTOCOL_VERSION}, which this runtime needs (invalid_request). Tell the person this is not available right now; retrying or changing the fields will not help.`;
 /** Every Hub call but a chain-transaction prepare. */
 const HUB_TIMEOUT_MS = 10_000;
 /**
@@ -123,6 +193,16 @@ export class HubActionClient {
         subject,
       );
       if (refusal) throw refusal;
+    }
+    if (body === undefined && response.status === 400) {
+      const answer: unknown = await response.json().catch(() => null);
+      if (isRecord(answer) && answer.error === 'invalid_request')
+        throw new HubActionRefused(
+          'refused',
+          HUB_UPDATE_REQUIRED,
+          undefined,
+          400,
+        );
     }
     if (!response.ok)
       throw new Error(`Hub action request returned ${response.status}`);
@@ -239,8 +319,8 @@ export class HubActionClient {
       ownerDid: value.ownerDid,
       revision: Number(value.revision),
       digest: value.digest,
-      reviewStatus: value.reviewStatus,
-      operationStatus: value.operationStatus,
+      reviewStatus: hubReviewStatus(value.reviewStatus),
+      operationStatus: hubOperationStatus(value.operationStatus),
       outcome: value.outcome == null ? null : parseOutcome(value.outcome),
     };
   }

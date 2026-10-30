@@ -42,6 +42,7 @@ export type { UserKvLimitKind } from '../core/user-kv';
 export type {
   ActionCallEventPayload,
   AgentMiddleware,
+  HubActionStatusRead,
   AuthExcludedRoute,
   BrowserToolCallEventPayload,
   ChatOpenAIFields,

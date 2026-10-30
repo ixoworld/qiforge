@@ -22,7 +22,15 @@
  *
  * Both lanes share one `MAX_TOTAL_SIZE` download budget (`DownloadBudget`):
  * declared sizes are checked against what is left before a download, and
- * each download is cut off at what is left.
+ * each download is cut off at what is left. A file the budget cannot take
+ * is noted; the turn always runs.
+ *
+ * A channel file (`channelRef`, see `channel.ts`) is private: it is read
+ * through the owner object's channel source and always goes to a model as
+ * the bytes already loaded, never by URL; the model, the notes and the
+ * stored metadata know it only by its `channel:` reference. It may be up to
+ * the gateway's 50 MiB: one above `MAX_FILE_SIZE` is archived to the
+ * sandbox and noted, never handed to a model.
  */
 import type { MessageContent } from '@langchain/core/messages';
 import type { ModelInputCapabilities } from '../core/llm';
@@ -34,6 +42,12 @@ import {
   buildUserMessageContent,
   type NativeAttachment,
 } from './content-blocks';
+import {
+  CHANNEL_MAX_FILE_BYTES,
+  channelArchiveName,
+  ChannelFileUnavailableError,
+  type ChannelMediaSource,
+} from './channel';
 import {
   ALLOWED_URI_SCHEMES,
   AttachmentRejectedError,
@@ -59,6 +73,7 @@ import {
 } from './sandbox-archive';
 import {
   NOTE_EVENT_ID_MAX,
+  NOTE_FILENAME_MAX,
   NOTE_MIMETYPE_MAX,
   NOTE_URI_MAX,
   sanitizeAttachmentFilename,
@@ -73,6 +88,8 @@ export const SANDBOX_TRUNCATE_LIMIT = 500;
 
 export interface AttachmentPipelineDeps {
   source: MatrixMediaSource;
+  /** Where `channelRef` files are read; absent = none can be read (noted). */
+  channel?: ChannelMediaSource;
   /** Helper-model provider for the extract lane; null → media cannot be extracted here. */
   extraction: ExtractionProvider | null;
   /** Sandbox archive target; null → originals are not archived (logged once per turn). */
@@ -115,21 +132,34 @@ export interface PrepareAttachmentsParams {
   caps: ModelInputCapabilities;
 }
 
-function metaFor(attachment: AttachmentInput): AttachmentMeta {
+/** The metadata stored on the turn's messages (a channel file: its reference, never a link). */
+export function attachmentMetaFor(attachment: AttachmentInput): AttachmentMeta {
   return {
     filename: attachment.filename,
     mimetype: attachment.mimetype,
     ...(attachment.size !== undefined ? { size: attachment.size } : {}),
     ...(attachment.mxcUri ? { mxcUri: attachment.mxcUri } : {}),
     ...(attachment.eventId ? { eventId: attachment.eventId } : {}),
+    ...(attachment.channelRef ? { channelRef: attachment.channelRef } : {}),
     category: classifyAttachment(attachment),
   };
 }
 
+/** A filename as the hidden notes quote it (no controls, brackets or quotes). */
+function noteName(attachment: AttachmentInput): string {
+  return sanitizeNoteField(attachment.filename, NOTE_FILENAME_MAX);
+}
+
+/** A mimetype as the hidden notes show it. */
+function noteType(attachment: AttachmentInput): string {
+  return sanitizeNoteField(attachment.mimetype, NOTE_MIMETYPE_MAX);
+}
+
 /**
  * The line that names an attachment's reference to the model, for both lanes:
- * `[source: eventId="…"]` (the media event id) or `[source: url="…"]` (the
- * mxc / http URI), the same two values `attachmentRef` accepts.
+ * `[source: eventId="…"]` (the media event id), `[source: ref="channel:…"]`
+ * (a channel file) or `[source: url="…"]` (the mxc / http URI), the values
+ * `attachmentRef` accepts.
  */
 function sourceRef(attachment: AttachmentInput): string {
   // A reference the cleaner would alter is not the reference tools match on,
@@ -142,6 +172,10 @@ function sourceRef(attachment: AttachmentInput): string {
     ? clean(attachment.eventId, NOTE_EVENT_ID_MAX)
     : '';
   if (eventId) return `[source: eventId="${eventId}"]`;
+  const channelRef = attachment.channelRef
+    ? clean(attachment.channelRef, NOTE_EVENT_ID_MAX)
+    : '';
+  if (channelRef) return `[source: ref="${channelRef}"]`;
   const url = attachment.mxcUri ? clean(attachment.mxcUri, NOTE_URI_MAX) : '';
   if (url) return `[source: url="${url}"]`;
   return '';
@@ -151,7 +185,24 @@ function sourceRef(attachment: AttachmentInput): string {
 export function nativeAttachmentNote(attachment: AttachmentInput): string {
   const ref = sourceRef(attachment);
   if (!ref) return '';
-  return `${ref} "${sanitizeAttachmentFilename(attachment.filename)}" (${sanitizeNoteField(attachment.mimetype, NOTE_MIMETYPE_MAX)}) is attached to this message.`;
+  return `${ref} "${noteName(attachment)}" (${noteType(attachment)}) is attached to this message.`;
+}
+
+/** The sandbox archive name: a channel file's carries its digest (`photo-<12 hex>.jpg`). */
+function archiveName(attachment: AttachmentInput): string {
+  const safeName = sanitizeAttachmentFilename(attachment.filename);
+  return attachment.channelRef
+    ? channelArchiveName(safeName, attachment.channelRef)
+    : safeName;
+}
+
+/** The largest file of this source the turn downloads. */
+function fileCap(attachment: AttachmentInput): number {
+  return attachment.channelRef ? CHANNEL_MAX_FILE_BYTES : MAX_FILE_SIZE;
+}
+
+function megabytes(bytes: number): string {
+  return `${Math.round(bytes / 1024 / 1024)} MB`;
 }
 
 function errorMessage(error: unknown): string {
@@ -179,24 +230,30 @@ class DownloadBudget {
     params: PrepareAttachmentsParams,
     deps: AttachmentPipelineDeps,
   ): Promise<{ bytes: Uint8Array; mimetype: string; sniffed: boolean }> {
-    if (attachment.size && attachment.size > MAX_FILE_SIZE)
+    const perFile = fileCap(attachment);
+    if (attachment.size && attachment.size > perFile)
       throw new AttachmentTooLargeError('File exceeds maximum size');
     const remaining = this.remaining;
     if (remaining === 0 || (attachment.size && attachment.size > remaining))
       throw new AttachmentRejectedError(BUDGET_EXCEEDED);
-    const cap = Math.min(MAX_FILE_SIZE, remaining);
+    const cap = Math.min(perFile, remaining);
     try {
       const loaded = await loadAttachmentBytes(
         attachment,
         params.roomId,
         deps.source,
-        { fetchImpl: deps.fetchImpl, signal: deps.signal, maxBytes: cap },
+        {
+          fetchImpl: deps.fetchImpl,
+          signal: deps.signal,
+          maxBytes: cap,
+          ...(deps.channel ? { channel: deps.channel } : {}),
+        },
       );
       this.used += loaded.bytes.length;
       return loaded;
     } catch (error) {
       // Cut off by the budget rather than by the per-file cap.
-      if (error instanceof AttachmentTooLargeError && cap < MAX_FILE_SIZE)
+      if (error instanceof AttachmentTooLargeError && cap < perFile)
         throw new AttachmentRejectedError(BUDGET_EXCEEDED);
       throw error;
     }
@@ -215,7 +272,7 @@ async function extractOne(
   preloaded?: Uint8Array,
 ): Promise<{ text: string; usage?: ExtractionUsage }> {
   const safeName = sanitizeAttachmentFilename(attachment.filename);
-  if (!attachment.eventId && !attachment.mxcUri)
+  if (!attachment.eventId && !attachment.mxcUri && !attachment.channelRef)
     throw new Error('Either mxcUri or eventId must be provided');
   if (attachment.mxcUri && !ALLOWED_URI_SCHEMES.test(attachment.mxcUri))
     throw new Error('Invalid URI scheme');
@@ -226,7 +283,7 @@ async function extractOne(
       `[attachments] unsupported file type ${attachment.mimetype} for ${attachment.filename}`,
     );
     return {
-      text: `[File "${safeName}" (${attachment.mimetype}) is not a supported file type and could not be processed]`,
+      text: `[File "${noteName(attachment)}" (${noteType(attachment)}) is not a supported file type and could not be processed]`,
     };
   }
 
@@ -236,14 +293,19 @@ async function extractOne(
     deps.logger.warn(`[attachments] ${m}`),
   );
 
-  // Public http(s) images/videos: let the provider fetch the URL itself.
+  // Public http(s) images/videos: let the provider fetch the URL itself. A
+  // channel file has no URL here (only its reference): it goes as bytes.
   const isHttpUrl =
     Boolean(attachment.mxcUri) &&
     !attachment.eventId &&
+    !attachment.channelRef &&
     /^https?:\/\//i.test(attachment.mxcUri ?? '');
   let text: string | undefined;
   let usage: ExtractionUsage | undefined;
-  if (
+  if (bytes.length > MAX_FILE_SIZE) {
+    // A channel file larger than any model is handed here: kept, not read.
+    text = `[File "${noteName(attachment)}" (${noteType(attachment)}, ${megabytes(bytes.length)}) is larger than the ${megabytes(MAX_FILE_SIZE)} a model reads here, so its content was not read]`;
+  } else if (
     isHttpUrl &&
     deps.extraction &&
     (category === 'image' || category === 'video')
@@ -280,23 +342,28 @@ async function extractOne(
   if (!deps.sandbox) {
     return { text, ...(usage ? { usage } : {}) };
   }
-  const destPath = `${SANDBOX_OUTPUT_PREFIX}/${safeName}`;
+  const storedName = archiveName(attachment);
+  const destPath = `${SANDBOX_OUTPUT_PREFIX}/${storedName}`;
   try {
-    await uploadToSandbox(
+    // The path the sandbox reports is where the file is (it may differ).
+    const archived = await uploadToSandbox(
       bytes,
-      safeName,
+      storedName,
       destPath,
       deps.sandbox,
       attachment.mimetype,
       deps.fetchImpl,
     );
-    const actualPath = sanitizeSandboxPath(destPath);
+    const actualPath = sanitizeSandboxPath(archived.path);
     let analysisPath: string | undefined;
-    if (category === 'image' || category === 'video' || category === 'audio') {
-      const analysisFilename = `${safeName.replace(/\.[^.]+$/, '')}-analysis.md`;
+    if (
+      bytes.length <= MAX_FILE_SIZE &&
+      (category === 'image' || category === 'video' || category === 'audio')
+    ) {
+      const analysisFilename = `${storedName.replace(/\.[^.]+$/, '')}-analysis.md`;
       const analysisDest = `${SANDBOX_OUTPUT_PREFIX}/${analysisFilename}`;
       try {
-        await uploadToSandbox(
+        const analysis = await uploadToSandbox(
           new TextEncoder().encode(
             buildAnalysisMarkdown(
               safeName,
@@ -312,7 +379,7 @@ async function extractOne(
           'text/markdown',
           deps.fetchImpl,
         );
-        analysisPath = sanitizeSandboxPath(analysisDest);
+        analysisPath = sanitizeSandboxPath(analysis.path);
       } catch (error) {
         deps.logger.warn(
           `[attachments] analysis .md upload failed for "${attachment.filename}": ${errorMessage(error)}`,
@@ -350,7 +417,7 @@ export async function prepareAttachments(
   params: PrepareAttachmentsParams,
   deps: AttachmentPipelineDeps,
 ): Promise<PreparedAttachments> {
-  const metas = params.attachments.map(metaFor);
+  const metas = params.attachments.map((a) => attachmentMetaFor(a));
   const usage = { cost: 0, promptTokens: 0, completionTokens: 0 };
   if (params.attachments.length === 0) {
     return {
@@ -362,16 +429,9 @@ export async function prepareAttachments(
     };
   }
 
-  const reportedTotal = params.attachments.reduce(
-    (sum, a) => sum + (a.size ?? 0),
-    0,
-  );
-  if (reportedTotal > MAX_TOTAL_SIZE) {
-    throw new Error(
-      `Total attachment size (${Math.round(reportedTotal / 1024 / 1024)} MB) exceeds budget (${Math.round(MAX_TOTAL_SIZE / 1024 / 1024)} MB)`,
-    );
-  }
-
+  // Declared sizes over the budget are not refused here as a whole: each
+  // file is checked against what is left (`DownloadBudget`) and one that
+  // does not fit is noted, so the turn always runs.
   const nativeCandidates: AttachmentInput[] = [];
   // A file the native lane already refused (empty, over budget) carries the
   // reason and is noted; one it downloaded but will not send carries its
@@ -387,7 +447,12 @@ export async function prepareAttachments(
     deps.logger.log(
       `[attachments] "${attachment.filename}" (${attachment.mimetype}) kind=${kind} model=${params.model} → ${strategy}`,
     );
-    if (strategy === 'send-native') nativeCandidates.push(attachment);
+    // A file larger than a model is handed is never sent as a block.
+    if (
+      strategy === 'send-native' &&
+      !(attachment.size && attachment.size > MAX_FILE_SIZE)
+    )
+      nativeCandidates.push(attachment);
     else extractQueue.push({ attachment });
   }
 
@@ -409,6 +474,10 @@ export async function prepareAttachments(
         mimetype,
         filename: sniffed ? '' : attachment.filename,
       });
+      if (bytes.length > MAX_FILE_SIZE) {
+        extractQueue.push({ attachment, preloaded: bytes });
+        continue;
+      }
       if (kind !== classifyAttachment(attachment)) {
         deps.logger.warn(
           `[attachments] "${attachment.filename}" claims ${attachment.mimetype} but is ${mimetype} — not sent natively`,
@@ -420,20 +489,22 @@ export async function prepareAttachments(
         kind: kind === 'image' ? 'image' : 'file',
         mimeType: mimetype,
         base64: bytesToBase64(bytes),
-        filename: attachment.filename,
+        filename: sanitizeAttachmentFilename(attachment.filename),
       });
       const note = nativeAttachmentNote(attachment);
-      if (note) nativeNotes.push({ text: note, meta: metaFor(attachment) });
+      if (note)
+        nativeNotes.push({ text: note, meta: attachmentMetaFor(attachment) });
       deps.logger.log(
         `[attachments] NATIVE → "${attachment.filename}" sent directly to ${params.model} (${bytes.length} bytes, ${kind})`,
       );
       if (deps.sandbox) {
-        const safeName = sanitizeAttachmentFilename(attachment.filename);
-        // Off the hot path — the agent's file tools can reach the original later.
+        const storedName = archiveName(attachment);
+        // Off the hot path — the agent's file tools can reach the original
+        // later. The upload holds the bytes until it ends; nothing else does.
         void uploadToSandbox(
           bytes,
-          safeName,
-          `${SANDBOX_OUTPUT_PREFIX}/${safeName}`,
+          storedName,
+          `${SANDBOX_OUTPUT_PREFIX}/${storedName}`,
           deps.sandbox,
           mimetype,
           deps.fetchImpl,
@@ -468,8 +539,11 @@ export async function prepareAttachments(
         '[attachments] sandbox archive unavailable for this turn — originals are not archived',
       );
     }
-    for (const { attachment, refused, preloaded } of extractQueue) {
-      const meta = metaFor(attachment);
+    for (const entry of extractQueue) {
+      const { attachment, refused, preloaded } = entry;
+      // The queue lets go of a file's bytes as soon as its turn comes.
+      delete entry.preloaded;
+      const meta = attachmentMetaFor(attachment);
       let text: string;
       try {
         if (refused) throw refused;
@@ -491,7 +565,11 @@ export async function prepareAttachments(
         deps.logger.error(
           `[attachments] failed to process ${attachment.filename}: ${errorMessage(error)}`,
         );
-        text = `[File "${sanitizeAttachmentFilename(attachment.filename)}" (${sanitizeNoteField(attachment.mimetype, NOTE_MIMETYPE_MAX)}) failed to process: ${errorMessage(error)}]`;
+        // A channel file's error never names its link (`channel.ts`).
+        text =
+          error instanceof ChannelFileUnavailableError
+            ? `[File "${noteName(attachment)}" (${noteType(attachment)}) could not be downloaded: ${errorMessage(error)}]`
+            : `[File "${noteName(attachment)}" (${noteType(attachment)}) failed to process: ${errorMessage(error)}]`;
       }
       const ref = sourceRef(attachment);
       extracted.push({ text: ref ? `${ref}\n${text}` : text, meta });

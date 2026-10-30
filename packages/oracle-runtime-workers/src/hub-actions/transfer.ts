@@ -4,6 +4,7 @@ import type {
   OptionsToken,
 } from '@ixo/action-protocol';
 import type { ChainTxMessageInput } from '../plugin-api/types';
+import { quoteHubText } from './hub-text';
 import type { ChainTxHostMessage } from './request';
 import { HubActionRefused } from './store';
 
@@ -279,10 +280,13 @@ function hubErrorBody(
     return null;
   const reason =
     'reason' in body && typeof body.reason === 'string' && body.reason.trim()
-      ? body.reason.trim().slice(0, 200)
+      ? body.reason.trim()
       : undefined;
   return reason ? { error, reason } : { error };
 }
+
+/** The longest part of a Hub refusal's `reason` the model is given. */
+const HUB_REASON_MAX = 200;
 
 /**
  * A Hub refusal of a prepare (`{error, reason?}` with status 400, 409 or
@@ -295,7 +299,8 @@ function hubErrorBody(
  *   try again later;
  * - 400 `simulation_failed`, `fee_above_ceiling`, `insufficient_funds`,
  *   `not_authorized`, `operation_not_registered`: the transfer or
- *   transaction as asked cannot go ahead (with the Hub's reason);
+ *   transaction as asked cannot go ahead (with the Hub's reason, quoted and
+ *   labelled as data, see `quoteHubText`);
  * - 409 `sequence_mismatch`, 503 `transfer_unavailable`: temporary, try
  *   again shortly;
  * - any other 409: the account may not use this operation (deterministic,
@@ -308,24 +313,36 @@ export function hubPrepareRefusal(
 ): HubActionRefused | null {
   const parsed = hubErrorBody(body);
   const unfixable = unfixableRefusal(status, parsed, subject);
-  if (unfixable) return new HubActionRefused('refused', unfixable);
+  if (unfixable)
+    return new HubActionRefused('refused', unfixable, undefined, status);
   if (!parsed) return null;
-  const detail = parsed.reason ? `: ${parsed.reason}` : '';
+  const reason = parsed.reason
+    ? quoteHubText('reason', parsed.reason, HUB_REASON_MAX)
+    : '';
   const words =
     status === 400 && Object.hasOwn(HUB_PREPARE_REFUSALS, parsed.error)
       ? HUB_PREPARE_REFUSALS[parsed.error]
       : undefined;
   if (words)
-    return new HubActionRefused('refused', `${words(subject)}${detail}.`);
+    return new HubActionRefused(
+      'refused',
+      `${words(subject)}.${reason ? ` ${reason}.` : ''}`,
+      undefined,
+      status,
+    );
   if (HUB_TRANSIENT_CODES[status]?.includes(parsed.error))
     return new HubActionRefused(
       'refused',
       `Auth Hub is temporarily unavailable for this (${parsed.error}); try again shortly.`,
+      undefined,
+      status,
     );
   if (status === 409)
     return new HubActionRefused(
       'refused',
-      `This operation is not available for this account (${parsed.error}${detail}).`,
+      `This operation is not available for this account (${parsed.error}).${reason ? ` ${reason}.` : ''}`,
+      undefined,
+      status,
     );
   return null;
 }

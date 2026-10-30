@@ -1,9 +1,11 @@
 /**
  * Fetching attachment bytes — Matrix media (through the gateway, which holds
- * the authenticated client and the room keys) and plain `http(s)` URLs with
- * the Node runtime's SSRF guard, manual redirect validation and streaming
- * size cap.
+ * the authenticated client and the room keys), channel files (through the
+ * owner object's `ChannelMediaSource`, see `channel.ts`) and plain `http(s)`
+ * URLs with the Node runtime's SSRF guard, manual redirect validation and
+ * streaming size cap.
  */
+import type { ChannelMediaSource } from './channel';
 import { containerMatchesClaim, detectMimeFromMagicBytes } from './magic';
 import type { AttachmentInput } from './types';
 
@@ -142,6 +144,10 @@ export interface DownloadOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
   maxBytes?: number;
+  /** Redirects followed (each hop SSRF-checked); default `MAX_REDIRECT_COUNT`. */
+  maxRedirects?: number;
+  /** Where a `channelRef` attachment's bytes come from; absent = none can be read. */
+  channel?: ChannelMediaSource;
 }
 
 /**
@@ -248,7 +254,7 @@ export async function downloadFromUrl(
   try {
     let currentUrl = url;
     let response: Response | undefined;
-    for (let i = 0; i <= MAX_REDIRECT_COUNT; i += 1) {
+    for (let i = 0; i <= (opts.maxRedirects ?? MAX_REDIRECT_COUNT); i += 1) {
       response = await fetchImpl(currentUrl, {
         signal: bound.signal,
         redirect: 'manual',
@@ -307,7 +313,7 @@ export async function loadAttachmentBytes(
   source: MatrixMediaSource,
   opts: DownloadOptions = {},
 ): Promise<{ bytes: Uint8Array; mimetype: string; sniffed: boolean }> {
-  if (!attachment.eventId && !attachment.mxcUri) {
+  if (!attachment.eventId && !attachment.mxcUri && !attachment.channelRef) {
     throw new Error('Either mxcUri or eventId must be provided');
   }
   if (attachment.mxcUri && !ALLOWED_URI_SCHEMES.test(attachment.mxcUri)) {
@@ -320,7 +326,18 @@ export async function loadAttachmentBytes(
 
   let bytes: Uint8Array;
   let httpType: string | undefined;
-  if (attachment.eventId || attachment.mxcUri!.startsWith('mxc://')) {
+  if (attachment.channelRef) {
+    if (!opts.channel)
+      throw new Error('Channel files cannot be read on this host');
+    const loaded = await opts.channel.load(attachment.channelRef, {
+      maxBytes,
+      ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
+      ...(opts.signal ? { signal: opts.signal } : {}),
+      ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    });
+    bytes = loaded.bytes;
+    httpType = loaded.contentType;
+  } else if (attachment.eventId || attachment.mxcUri!.startsWith('mxc://')) {
     const bound = boundedSignal(
       opts.signal,
       opts.timeoutMs ?? DOWNLOAD_TIMEOUT_MS,

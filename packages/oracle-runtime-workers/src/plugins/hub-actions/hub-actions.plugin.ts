@@ -5,10 +5,13 @@ import {
   DENOM,
   operationJsonSchema,
   parseOperation,
+  type ActionOutcomeV1,
+  type ActionReceiptV1,
   type ActionReferenceV1,
   type ChainTxMessageType,
 } from '@ixo/action-protocol';
 import { z } from 'zod';
+import { quoteHubText } from '../../hub-actions/hub-text';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin';
 import type {
   ChainTxMessageInput,
@@ -27,14 +30,18 @@ const configSchema = z.object({
  * (`ixo.chain.tx.v1`, coin sends included) is built by the runtime from
  * `request_chain_transaction`'s messages, and the older bank send
  * (`ixo.bank.send.v1`) is no longer prepared by this runtime (Auth Hub
- * still serves it for older runtimes). They are left out of the generic
- * tool's schema (its handler refuses them anyway), which also keeps their
- * branches (about 3.7 KB of the JSON Schema the model is sent) out of every
- * model request.
+ * still serves it for older runtimes). An application (`ixo.bid.submit.v1`)
+ * or a claim (`ixo.claim.submit.v1`) is built by the plugin that runs the
+ * claim collection, from the person's answers and the files of the turn
+ * (`ctx.session.channel.attachments`): the model never names an evidence
+ * link. They are left out of the generic tool's schema (its handler refuses
+ * them anyway), which also keeps their branches out of every model request.
  */
-const RUNTIME_BUILT_KINDS: readonly string[] = [
+export const RUNTIME_BUILT_KINDS: readonly string[] = [
   'ixo.bank.send.v1',
   'ixo.chain.tx.v1',
+  'ixo.bid.submit.v1',
+  'ixo.claim.submit.v1',
 ];
 function branchKind(branch: Record<string, unknown>): unknown {
   const properties = branch.properties;
@@ -442,6 +449,12 @@ async function requestHubAction(
       reason:
         'Use request_chain_transaction with only the messages for a chain transaction.',
     };
+  if (kind === 'ixo.bid.submit.v1' || kind === 'ixo.claim.submit.v1')
+    return {
+      status: 'unavailable',
+      reason:
+        'Applications and claims are prepared by the tools of the plugin that runs the claim collection, never with request_hub_action.',
+    };
   const parsed = requestSchema.safeParse(input);
   if (!parsed.success)
     return { status: 'unavailable', reason: 'An operation is required.' };
@@ -702,6 +715,41 @@ function refusalOf(error: unknown): HubActionRequestResult | null {
   return null;
 }
 
+/**
+ * A receipt as the model reads it. A failure receipt keeps only its plain
+ * fields: the Hub's `message` (its words for the person) is quoted and
+ * labelled as data, and anything else the Hub adds, its technical `detail`
+ * included (for the review page only), is left out. A chain transaction's
+ * `message` is quoted the same way. Every other receipt passes as
+ * `@ixo/action-protocol` parsed it (exact keys, no free Hub text).
+ */
+export function modelReceipt(
+  receipt: ActionReceiptV1 | null,
+): Record<string, unknown> | null {
+  if (!receipt) return null;
+  if (receipt.kind === 'ixo.submission.failed.v1')
+    return {
+      kind: receipt.kind,
+      actionId: receipt.actionId,
+      revision: receipt.revision,
+      digest: receipt.digest,
+      step: receipt.step,
+      message: quoteHubText('message', receipt.message),
+      failedAt: receipt.failedAt,
+    };
+  if (receipt.kind === 'ixo.chain.tx.v1' && receipt.message !== undefined)
+    return { ...receipt, message: quoteHubText('message', receipt.message) };
+  return { ...receipt };
+}
+
+/** An outcome as the model reads it: its receipt through `modelReceipt`. */
+export function modelOutcome(
+  outcome: ActionOutcomeV1 | null,
+): Record<string, unknown> | null {
+  if (!outcome) return null;
+  return { ...outcome, receipt: modelReceipt(outcome.receipt) };
+}
+
 async function hubActionStatus(
   input: unknown,
   ctx: RuntimeContext,
@@ -713,11 +761,29 @@ async function hubActionStatus(
     ctx.config.HUB_ACTIONS_ENABLED !== 'true'
   )
     return { status: 'unavailable' };
-  const { outcome, summary } = await ctx.hubActions.status(
-    ctx.user.did,
-    parsed.data.actionId,
-  );
-  return { status: 'known', outcome, ...(summary ? { summary } : {}) };
+  try {
+    const read = await ctx.hubActions.status(
+      ctx.user.did,
+      parsed.data.actionId,
+    );
+    if (!read.held)
+      return {
+        status: 'unavailable',
+        reason: 'No Hub action with this id was prepared for this owner.',
+      };
+    return {
+      status: 'known',
+      reviewStatus: read.reviewStatus,
+      operationStatus: read.operationStatus,
+      outcome: modelOutcome(read.outcome),
+      ...(read.summary ? { summary: read.summary } : {}),
+    };
+  } catch (error) {
+    // An Auth Hub that must be updated first: plain words, not a tool error.
+    const refused = refusalOf(error);
+    if (refused) return refused;
+    throw error;
+  }
 }
 
 async function hubActionCapabilities(
@@ -731,7 +797,13 @@ async function hubActionCapabilities(
     !ctx.hubActions
   )
     return { status: 'unavailable' };
-  return ctx.hubActions.capabilities();
+  try {
+    return await ctx.hubActions.capabilities();
+  } catch (error) {
+    const refused = refusalOf(error);
+    if (refused) return refused;
+    throw error;
+  }
 }
 
 async function hubActionOptions(
@@ -746,12 +818,19 @@ async function hubActionOptions(
     !ctx.hubActions
   )
     return { status: 'unavailable' };
-  const options = await ctx.hubActions.options({
-    ownerDid: ctx.user.did,
-    provider: channel.provider,
-    bindingId: channel.bindingId,
-    bindingRevision: channel.bindingRevision,
-  });
+  let options;
+  try {
+    options = await ctx.hubActions.options({
+      ownerDid: ctx.user.did,
+      provider: channel.provider,
+      bindingId: channel.bindingId,
+      bindingRevision: channel.bindingRevision,
+    });
+  } catch (error) {
+    const refused = refusalOf(error);
+    if (refused) return refused;
+    throw error;
+  }
   // The address is read off the owner's DID, so the model can name the
   // account the listed balances belong to without a lookup.
   return { ...options, ownerAddress: ixoAddressOf(ctx.user.did) };

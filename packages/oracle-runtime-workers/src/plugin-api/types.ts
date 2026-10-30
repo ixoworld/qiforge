@@ -18,7 +18,12 @@ import type { BaseMessage } from '@langchain/core/messages';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { UserPreferences } from '../core/state';
 import type { AttachmentViewSurface } from '../attachments/view';
+import type { ChannelAttachment } from '../channels/contract';
 import type { DeliveryConfig } from '../delivery/profile';
+import type {
+  HubOperationStatus,
+  HubReviewStatus,
+} from '../hub-actions/client';
 import type {
   ActionOperationV1,
   ActionReferenceV1,
@@ -551,6 +556,25 @@ export type SessionSurface =
   | { kind: 'stream' }
   | { kind: 'chat'; surface: string; label: string };
 
+/** What `ctx.hubActions.status` reads. */
+export interface HubActionStatusRead {
+  /** False when this owner object holds no action with this id (Auth Hub was not asked). */
+  held: boolean;
+  /**
+   * Auth Hub's review status (`prepared`, `authorized`, `declined`,
+   * `expired`, …) and operation status, each one the protocol lists or
+   * `unknown` for anything else Auth Hub answered; null when not held.
+   * With no outcome yet they tell an action still waiting from one whose
+   * review lapsed.
+   */
+  reviewStatus: HubReviewStatus | null;
+  operationStatus: HubOperationStatus | null;
+  /** The latest authenticated outcome; null when there is none (yet). */
+  outcome: ActionOutcomeV1 | null;
+  /** For a bank-send receipt, the owner-facing line. */
+  summary: string | null;
+}
+
 export interface RuntimeContext<TConfig = MergedConfig> {
   /** Authenticated user identity (validated by core auth middleware). */
   user: {
@@ -575,6 +599,14 @@ export interface RuntimeContext<TConfig = MergedConfig> {
       provider: string;
       bindingId: string;
       bindingRevision: number;
+      /**
+       * Files the person sent with this turn's message (a WhatsApp photo,
+       * video, document or audio file), as the channel gateway serves them:
+       * a capability `url` plus the `sha256` of its bytes. Absent when the
+       * message carried none. The model also sees them through the
+       * attachment pipeline; this is the raw list for tools that keep them.
+       */
+      attachments?: readonly ChannelAttachment[];
     };
     roomId?: string;
     /**
@@ -821,11 +853,20 @@ export interface RuntimeContext<TConfig = MergedConfig> {
       requestKey: string;
       operation: ActionOperationV1;
     }): Promise<ActionReferenceV1>;
-    /** The latest authenticated outcome and, for a transfer, its owner-facing line. */
+    /**
+     * A fresh, authenticated read of one of this owner's actions: Auth
+     * Hub's review and operation status, the latest outcome (null: none
+     * yet) and, for a transfer, its owner-facing line. An action this
+     * owner object never prepared is `held: false` and Auth Hub is not
+     * asked. `timeoutMs` bounds the Hub read (default 10 s). Rejects with
+     * `HubActionRefused` (with `httpStatus`) when Auth Hub refuses the read,
+     * for example when it must be updated first.
+     */
     status(
       ownerDid: string,
       actionId: string,
-    ): Promise<{ outcome: ActionOutcomeV1 | null; summary: string | null }>;
+      opts?: { timeoutMs?: number },
+    ): Promise<HubActionStatusRead>;
   };
 
   decisions: {

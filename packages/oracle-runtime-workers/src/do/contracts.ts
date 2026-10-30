@@ -1,4 +1,5 @@
 import type {
+  ChannelAttachment,
   ChannelControlInput,
   ChannelControlOutcome,
   ChannelReplyContext,
@@ -400,6 +401,8 @@ export interface TurnRequest {
     replyTo?: ChannelReplyReference;
     /** Host-generated direct reply: no agent or tools run for an ambiguous destination. */
     routingClarification?: string;
+    /** Files the person sent with this message, as the gateway serves them. */
+    attachments?: ChannelAttachment[];
   };
   executionProfile?: TaskExecutionProfile;
   identity: TurnIdentity;
