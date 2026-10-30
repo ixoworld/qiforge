@@ -1,0 +1,81 @@
+{
+  "@context": {
+    "ixo": "https://w3id.org/ixo/ns/protocol/",
+    "@id": "@type",
+    "type": "@type",
+    "@protected": true
+  },
+  "type": "ixo:entity#surveyTemplate",
+  "question": {
+    "title": "Survey Registration Form",
+    "description": "Please provide your personal details below to submit your application.",
+    "pages": [
+      {
+        "name": "bidder_info_page",
+        "elements": [
+          {
+            "type": "text",
+            "name": "first_name",
+            "title": "First Name",
+            "isRequired": true,
+            "autocomplete": "given-name",
+            "placeholder": "Enter your first name"
+          },
+          {
+            "type": "text",
+            "name": "surname",
+            "title": "Surname",
+            "isRequired": true,
+            "autocomplete": "family-name",
+            "placeholder": "Enter your surname"
+          },
+          {
+            "type": "text",
+            "name": "age",
+            "title": "Age",
+            "isRequired": true,
+            "validators": [
+              {
+                "type": "numeric",
+                "text": "You must be between 18 and 35 years old to submit a bid.",
+                "minValue": 18,
+                "maxValue": 35
+              }
+            ],
+            "inputType": "number",
+            "placeholder": "Enter your age"
+          },
+          {
+            "type": "radiogroup",
+            "name": "residency_sa",
+            "title": "Do you usually live in South Africa?",
+            "isRequired": true,
+            "choices": [
+              {
+                "value": "yes",
+                "text": "Yes"
+              },
+              {
+                "value": "no",
+                "text": "No"
+              },
+              {
+                "value": "prefer_not_to_say",
+                "text": "Prefer not to say"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "name": "other_country",
+            "visibleIf": "{residency_sa} = 'no'",
+            "title": "Which country do you live in?",
+            "isRequired": true,
+            "placeholder": "Enter the name of your country"
+          }
+        ]
+      }
+    ],
+    "completeText": "Submit Bid"
+  }
+}

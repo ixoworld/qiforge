@@ -192,13 +192,17 @@ async function post(
 export function blocksyncLookup(
   call: ChainCall,
   fields: readonly AliasedField[],
-  opts: { timeoutMs?: number; maxBytes?: number } = {},
+  opts: { timeoutMs?: number; maxBytes?: number; tag?: string } = {},
 ): Promise<Outcome<BlocksyncAnswer>> {
   let first: BlocksyncAnswer | null = null;
   let retried: AliasedField[] = [];
   return withRetry(
     call,
-    { label: 'blocksync', upstream: call.blocksyncUrl },
+    {
+      label: 'blocksync',
+      upstream: call.blocksyncUrl,
+      ...(opts.tag ? { tag: opts.tag } : {}),
+    },
     async () => {
       const asked = first ? retried : fields;
       const read = await post(call, lookupDocument(asked), opts);

@@ -28,7 +28,8 @@
     "./gateway": "./src/gateway-worker.ts",
     "./hub-actions/client": "./src/hub-actions/client.ts",
     "./hub-actions/request": "./src/hub-actions/request.ts",
-    "./prompt": "./src/core/prompt-composer.ts"
+    "./prompt": "./src/core/prompt-composer.ts",
+    "./plugins/yoma": "./src/plugins/yoma/index.ts"
   },
   "files": [
     "src",
@@ -74,7 +75,8 @@
     "zod": "^4.4.3",
     "@ixo/impactxclient-sdk": "^3.0.0",
     "protobufjs": "^7.6.5",
-    "@ixo/topic-protocol": "1.0.0-rc.8"
+    "@ixo/topic-protocol": "1.0.0-rc.8",
+    "survey-core": "2.3.11"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",
