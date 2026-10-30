@@ -52,6 +52,7 @@ import {
   bankReceiptSummary,
   bankStepsInBaseUnits,
 } from '../hub-actions/transfer';
+import { gatewayOutcome } from '../hub-actions/relay';
 import {
   HUB_CHECK_AFTER_EXPIRY_MS,
   HubActionRefused,
@@ -3329,10 +3330,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // The gateway parses with @ixo/action-protocol 0.4.1, whose bank
       // receipt is exact: the 0.5.0 `denom`/`amountBaseUnits` fields are
       // dropped here (the owner-facing amount line comes from
-      // hub_action_status instead), so the emitted shape stays 0.4.1.
+      // hub_action_status instead), so the emitted shape stays 0.4.1. A
+      // failure receipt's technical `detail` is never handed on.
       const hubActionOutcomes = (
         await this.hubOutcomesForRun(ownerDid, result.sessionId, result.runId)
-      ).map((outcome) => ({ ...outcome, receipt: v1Receipt(outcome.receipt) }));
+      ).map(gatewayOutcome);
       return {
         ...result,
         ...(actionOutcomes.length ? { actionOutcomes } : {}),
