@@ -127,6 +127,7 @@ import {
   offloadInlinePayloads,
   parseAttachmentInputs,
   prepareAttachments,
+  ChannelAttachmentLinkStore,
   type AttachmentViewSurface,
   type MatrixMediaSource,
   type ViewAttachmentDeps,
@@ -136,6 +137,12 @@ import {
   readBytesCapped,
   AttachmentTextCacheStore,
 } from '../attachments';
+import {
+  channelTurnLinks,
+  prepareTurnAttachments,
+  turnAttachmentInputs,
+  turnChannelMediaSource,
+} from './turn-attachments';
 import type { RuntimeCore } from '../core';
 import {
   createLlmAdapter,
@@ -565,6 +572,7 @@ function hasUserContext(value: unknown): boolean {
 function admissionApplies(req: TurnRequest): boolean {
   return (
     !req.attachments?.length &&
+    !req.channel?.attachments?.length &&
     !req.taskRunId &&
     !req.sessionId.startsWith(TASK_SESSION_PREFIX) &&
     req.roomKind !== 'group'
@@ -1059,6 +1067,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private lastActionPruneAt: number | null = null;
     /** Text `view_attachment` extracted, per session (`attachments/view-cache.ts`). */
     private attachmentTextCache: AttachmentTextCacheStore | null = null;
+    /** The links behind the `channel:` references of each session's files. */
+    private channelAttachmentLinks: ChannelAttachmentLinkStore | null = null;
     /** Large texts of document ingestion, in memory (a few, minutes). */
     private readonly ingestTextLru = new IngestTextLru();
     /**
@@ -2020,6 +2030,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       });
       await this.resultStore.setup();
       this.attachmentTextCache = new AttachmentTextCacheStore(liveDb, console);
+      this.channelAttachmentLinks = new ChannelAttachmentLinkStore(
+        liveDb,
+        console,
+      );
       // Constructing it touches no SQL. Only an observe turn records (and so
       // creates `domain_context_runs`); a session delete never creates it but
       // still removes rows an earlier observe deployment left behind.
@@ -2367,6 +2381,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.lastHubOptions = null;
       this.topicProposals = null;
       this.attachmentTextCache = null;
+      this.channelAttachmentLinks = null;
       this.domainContextStore = null;
       // Its store is bound to the database just dropped: a caller that sees
       // no scheduler boots again instead of reading a closed connection.
@@ -3848,6 +3863,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           .catch((err: unknown) => {
             console.warn(
               `[user-do] could not delete the cached attachment text of ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          });
+        await this.channelAttachmentLinks
+          ?.forgetSession(sessionId)
+          .catch((err: unknown) => {
+            console.warn(
+              `[user-do] could not delete the channel file links of ${sessionId}; they expire with the links: ${err instanceof Error ? err.message : String(err)}`,
             );
           });
         await this.resultStore
@@ -7040,6 +7062,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       signal: AbortSignal;
       /** Attachments of the turn now running (not necessarily persisted yet). */
       turnMetas: readonly AttachmentMeta[];
+      /** The links of this turn's channel files (earlier ones come from the store). */
+      channelLinks: ReturnType<typeof channelTurnLinks>;
     }): Promise<AttachmentViewSurface> {
       const saver = this.saver!;
       const offloaded = await saver.hasThreadMessageMatching(input.sessionId, {
@@ -7050,6 +7074,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         findPersistedAttachmentMeta(saver, input.sessionId, ref);
       const viewDeps = (): ViewAttachmentDeps => ({
         source: this.matrixMediaSource(),
+        channel: turnChannelMediaSource({
+          sessionId: input.sessionId,
+          turnLinks: input.channelLinks,
+          store: this.channelAttachmentLinks,
+          channelServiceDid: this.env.CHANNEL_SERVICE_DID,
+        }),
         extraction: this.extractionProvider(input.ambientLlm, input.platform),
         caps: getModelCapabilities(input.model),
         roomId: input.roomId,
@@ -7392,32 +7422,47 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // native capabilities, send images/files inline when it reads them,
       // otherwise the `vision` role turns them into text on the platform key;
       // originals are archived to the user's sandbox when one is reachable.
-      const attachmentInputs = parseAttachmentInputs(
-        body.attachments ?? req.attachments,
-      );
+      // A channel turn's files are read by their `channel:` reference; their
+      // links stay on the server (the run request and the session's link
+      // store), out of every message and note.
+      const attachmentInputs = turnAttachmentInputs(req, body.attachments);
       const attachmentModel =
         effectiveModel && isAllowedModel(effectiveModel)
           ? effectiveModel
           : getDefaultModelId(core.validatedEnv);
-      const prepared =
-        attachmentInputs.length > 0
-          ? await prepareAttachments(
-              {
-                text: body.message,
-                attachments: attachmentInputs,
-                roomId: sessionRoomId,
-                model: attachmentModel,
-                caps: getModelCapabilities(attachmentModel),
-              },
-              {
-                source: this.matrixMediaSource(),
-                extraction: this.extractionProvider(baseAmbient.llm, core.llm),
-                sandbox: await this.sandboxArchiveConfig(req.identity.userDid),
-                signal: abortController.signal,
-                logger: console,
-              },
-            )
-          : null;
+      const turnLinks = channelTurnLinks(req);
+      const channelMedia = turnLinks.length
+        ? turnChannelMediaSource({
+            sessionId: req.sessionId,
+            turnLinks,
+            store: this.channelAttachmentLinks,
+            channelServiceDid: this.env.CHANNEL_SERVICE_DID,
+          })
+        : undefined;
+      if (turnLinks.length && !run.resumed)
+        await this.channelAttachmentLinks?.put(req.sessionId, turnLinks);
+      const { prepared, metas: turnMetas } = await prepareTurnAttachments({
+        inputs: attachmentInputs,
+        resumed: run.resumed,
+        prepare: async () =>
+          prepareAttachments(
+            {
+              text: body.message,
+              attachments: attachmentInputs,
+              roomId: sessionRoomId,
+              model: attachmentModel,
+              caps: getModelCapabilities(attachmentModel),
+            },
+            {
+              source: this.matrixMediaSource(),
+              ...(channelMedia ? { channel: channelMedia } : {}),
+              extraction: this.extractionProvider(baseAmbient.llm, core.llm),
+              sandbox: await this.sandboxArchiveConfig(req.identity.userDid),
+              signal: abortController.signal,
+              logger: console,
+            },
+          ),
+      });
       if (prepared) {
         console.log(
           `[user-do] attachments: ${attachmentInputs.length} attached, ${prepared.extracted.length} extracted, ${Array.isArray(prepared.content) ? prepared.content.length - 1 : 0} native`,
@@ -7441,7 +7486,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             ambientLlm: baseAmbient.llm,
             platform: core.llm,
             signal: abortController.signal,
-            turnMetas: prepared?.metas ?? [],
+            turnMetas,
+            channelLinks: turnLinks,
           });
 
       // Request metadata (editor room, space, session run, entity) → state,

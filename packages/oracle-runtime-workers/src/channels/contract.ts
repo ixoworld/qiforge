@@ -1,6 +1,10 @@
 import type { ActionOutcomeWire } from '@ixo/ixo-transaction/topic-proposals';
 import type { ActionOutcomeV1 } from '@ixo/action-protocol';
 import { z } from 'zod';
+import {
+  CHANNEL_MAX_FILE_BYTES,
+  channelAttachmentRef,
+} from '../attachments/channel';
 import type { AttachmentInput } from '../attachments/types';
 import type { ReplyPlan } from '../delivery/types';
 
@@ -110,35 +114,55 @@ export type ChannelControlOutcome =
   | { ok: true; result: ChannelControlResult }
   | Exclude<ChannelTurnOutcome, { ok: true }>;
 
+/** The longest filename a channel file keeps, in code points (the gateway's own bound). */
+export const CHANNEL_FILENAME_MAX = 200;
+
+/**
+ * A filename as the runtime keeps it: at most `CHANNEL_FILENAME_MAX` code
+ * points (a longer one is cut, never refused), and the file's kind when the
+ * name is empty, so a name alone never refuses a turn.
+ */
+export function channelFilename(filename: string, kind: string): string {
+  const clipped = Array.from(filename).slice(0, CHANNEL_FILENAME_MAX).join('');
+  return clipped || (kind === 'image' ? 'photo' : kind);
+}
+
 /**
  * A file the person sent on the channel (a WhatsApp photo, video, document
  * or audio file). The gateway downloads it from the provider and serves it
  * from a capability link of its own; the bytes never ride in the body.
+ * `size` is bounded by the gateway's own per-file limit (50 MiB).
  */
-export const ChannelAttachment = z.strictObject({
-  url: z
-    .string()
-    .max(2000)
-    .url()
-    .refine((value) => value.startsWith('https://'), 'must be an https URL'),
-  filename: z.string().min(1).max(200),
-  mimetype: z.string().min(1).max(100),
-  size: z.number().int().nonnegative().safe(),
-  sha256: z.string().regex(/^[0-9a-f]{64}$/),
-  kind: z.enum(['image', 'video', 'document', 'audio']),
-});
+export const ChannelAttachment = z
+  .strictObject({
+    url: z
+      .string()
+      .max(2000)
+      .url()
+      .refine((value) => value.startsWith('https://'), 'must be an https URL'),
+    filename: z.string(),
+    mimetype: z.string().min(1).max(100),
+    size: z.number().int().nonnegative().max(CHANNEL_MAX_FILE_BYTES),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    kind: z.enum(['image', 'video', 'document', 'audio']),
+  })
+  .transform((attachment) => ({
+    ...attachment,
+    filename: channelFilename(attachment.filename, attachment.kind),
+  }));
 export type ChannelAttachment = z.infer<typeof ChannelAttachment>;
 
 /**
- * The run's attachment inputs for channel files: the capability link is a
- * plain https URL, so the pipeline fetches it like any other (SSRF-guarded),
- * and the model sees the image or the extracted text.
+ * The run's attachment inputs for channel files: each names its file by its
+ * opaque `channel:` reference, never by its link, so the model, the hidden
+ * notes and the stored metadata never see a link. The owner object reads
+ * the bytes through its channel source (`attachments/channel.ts`).
  */
 export function channelAttachmentInputs(
   attachments: readonly ChannelAttachment[],
 ): AttachmentInput[] {
   return attachments.map((attachment) => ({
-    mxcUri: attachment.url,
+    channelRef: channelAttachmentRef(attachment.sha256),
     filename: attachment.filename,
     mimetype: attachment.mimetype,
     size: attachment.size,

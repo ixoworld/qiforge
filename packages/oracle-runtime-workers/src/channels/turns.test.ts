@@ -62,7 +62,7 @@ describe('durable channel requests', () => {
     expect(await stub.count()).toBe(1);
   });
 
-  it('hands the files sent with a message to the run: as attachments for the model and on the channel for tools', async () => {
+  it('hands the files sent with a message to the run on the channel only (the model reads them by reference)', async () => {
     const stub = env.CHANNEL_TURNS_TEST.getByName('attachments');
     const photo = {
       url: 'https://channels.example/media/chb_one/1f0e?exp=1893456000&sig=abc',
@@ -84,15 +84,27 @@ describe('durable channel requests', () => {
       attachments?: unknown;
       channel?: { attachments?: unknown };
     };
-    expect(request.attachments).toEqual([
-      {
-        mxcUri: photo.url,
-        filename: 'shop.jpg',
-        mimetype: 'image/jpeg',
-        size: 120_000,
-      },
-    ]);
+    // The link stays on the run's channel record, for the owner object and
+    // tools; no attachment input on the request carries it.
+    expect(request).not.toHaveProperty('attachments');
     expect(request.channel?.attachments).toEqual([photo]);
+    // The same request ID with other files is another request.
+    expect(
+      await stub.submit({
+        ...message,
+        requestId: 'wa:photo',
+        message: '[photo]',
+        attachments: [{ ...photo, sha256: 'c'.repeat(64) }],
+      }),
+    ).toMatchObject({ ok: false, status: 409, code: 'request_conflict' });
+    // The same body again is the same request.
+    const again = await stub.submit({
+      ...message,
+      requestId: 'wa:photo',
+      message: '[photo]',
+      attachments: [photo],
+    });
+    expect(again.ok && again.result.runId).toBe(outcome.result.runId);
 
     const plain = await stub.submit({ ...message, requestId: 'wa:plain' });
     if (!plain.ok) throw new Error('Turn rejected');

@@ -428,14 +428,42 @@ describe('channel request boundary', () => {
       [{ ...photo, sha256: 'a'.repeat(63) }],
       [{ ...photo, size: -1 }],
       [{ ...photo, size: 1.5 }],
+      // Above the gateway's own 50 MiB bound.
+      [{ ...photo, size: 52_428_801 }],
       [{ ...photo, kind: 'sticker' }],
-      [{ ...photo, filename: '' }],
       [{ ...photo, bytes: 'inline' }],
       Array.from({ length: 11 }, () => photo),
     ])
       expect(ChannelTurnBody.safeParse({ ...input, attachments }).success).toBe(
         false,
       );
+  });
+
+  it('never refuses a turn for a filename: a long one is cut to 200 code points, an empty one named by its kind', () => {
+    const photo = {
+      url: 'https://channels.example/media/chb_one/1f0e?exp=1893456000&sig=abc_-',
+      filename: 'photo.jpg',
+      mimetype: 'image/jpeg',
+      size: 120_000,
+      sha256: 'a'.repeat(64),
+      kind: 'image',
+    };
+    const parse = (filename: string, kind = 'image') => {
+      const parsed = ChannelTurnBody.safeParse({
+        ...input,
+        attachments: [{ ...photo, filename, kind }],
+      });
+      if (!parsed.success) throw new Error('refused');
+      return parsed.data.attachments?.[0]?.filename;
+    };
+    // 150 emoji are 300 UTF-16 units: kept whole.
+    const emoji = `${'\u{1f4f7}'.repeat(150)}.pdf`;
+    expect(parse(emoji, 'document')).toBe(emoji);
+    const long = '\u{1f4f7}'.repeat(250);
+    expect(parse(long)).toBe('\u{1f4f7}'.repeat(200));
+    expect(parse('x'.repeat(5000), 'document')).toBe('x'.repeat(200));
+    expect(parse('')).toBe('photo');
+    expect(parse('', 'document')).toBe('document');
   });
 
   it('accepts both oracle context kinds and refuses any other', () => {

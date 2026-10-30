@@ -7,6 +7,7 @@
  * are cached per session (`deps.cache`); native views are not (they are the
  * bytes themselves).
  */
+import type { ChannelMediaSource } from './channel';
 import { classifyAttachment } from './classify';
 import type { NativeAttachment } from './content-blocks';
 import { loadAttachmentBytes, type MatrixMediaSource } from './download';
@@ -20,7 +21,11 @@ import { categorizeFile, isPlainTextType, verifyMagicBytes } from './magic';
 import { extractPdfText } from './pdf-text';
 import { attachmentMetas, attachmentRef } from './retention';
 import { routeAttachment } from './route';
-import { sanitizeAttachmentFilename } from './sanitize';
+import {
+  NOTE_FILENAME_MAX,
+  NOTE_MIMETYPE_MAX,
+  sanitizeNoteField,
+} from './sanitize';
 import {
   LOCAL_TEXT_EXTRACTION,
   type AttachmentTextCache,
@@ -39,6 +44,8 @@ export type AttachmentView =
 
 export interface ViewAttachmentDeps {
   source: MatrixMediaSource;
+  /** Where `channel:` references are read (the owner object's links). */
+  channel?: ChannelMediaSource;
   extraction: ExtractionProvider | null;
   /** Capabilities of the model that will read the result. */
   caps: ModelInputCapabilities;
@@ -103,6 +110,16 @@ function toInput(meta: AttachmentMeta): AttachmentInput {
     ...(meta.size !== undefined ? { size: meta.size } : {}),
     ...(meta.mxcUri ? { mxcUri: meta.mxcUri } : {}),
     ...(meta.eventId ? { eventId: meta.eventId } : {}),
+    ...(meta.channelRef ? { channelRef: meta.channelRef } : {}),
+  };
+}
+
+/** How `deps` reads bytes: the turn's signal and fetch, and its channel source. */
+function downloadOptions(deps: ViewAttachmentDeps) {
+  return {
+    fetchImpl: deps.fetchImpl,
+    signal: deps.signal,
+    ...(deps.channel ? { channel: deps.channel } : {}),
   };
 }
 
@@ -118,7 +135,7 @@ export async function viewAttachment(
       attachment,
       deps.roomId,
       deps.source,
-      { fetchImpl: deps.fetchImpl, signal: deps.signal },
+      downloadOptions(deps),
     );
     deps.logger.log(
       `[attachments] view "${attachment.filename}" (${mimetype}) kind=${kind} → ${strategy} (${bytes.length} bytes)`,
@@ -147,7 +164,7 @@ export async function viewAttachment(
   if (category === 'unsupported') {
     return {
       kind: 'text',
-      text: `[File "${sanitizeAttachmentFilename(attachment.filename)}" (${attachment.mimetype}) is not a supported file type and could not be processed]`,
+      text: `[File "${sanitizeNoteField(attachment.filename, NOTE_FILENAME_MAX)}" (${sanitizeNoteField(attachment.mimetype, NOTE_MIMETYPE_MAX)}) is not a supported file type and could not be processed]`,
     };
   }
   // Text extracted earlier in this session by the same model is final.
@@ -170,7 +187,7 @@ export async function viewAttachment(
     attachment,
     deps.roomId,
     deps.source,
-    { fetchImpl: deps.fetchImpl, signal: deps.signal },
+    downloadOptions(deps),
   );
   deps.logger.log(
     `[attachments] view "${attachment.filename}" (${mimetype}) kind=${kind} → ${strategy} (${bytes.length} bytes)`,
@@ -202,7 +219,7 @@ function megabytes(bytes: number): string {
 /** The refusal for a scanned or binary file over the helper-model limit. */
 function modelLaneTooLarge(filename: string, bytes: number): Error {
   return new Error(
-    `"${sanitizeAttachmentFilename(filename)}" cannot be read: scanned or binary files up to ${megabytes(MAX_MODEL_LANE_BYTES)} MB can be processed; this one is ${megabytes(bytes)} MB. PDFs with a text layer and text files can be larger.`,
+    `"${sanitizeNoteField(filename, NOTE_FILENAME_MAX)}" cannot be read: scanned or binary files up to ${megabytes(MAX_MODEL_LANE_BYTES)} MB can be processed; this one is ${megabytes(bytes)} MB. PDFs with a text layer and text files can be larger.`,
   );
 }
 
@@ -223,7 +240,7 @@ export async function extractAttachmentText(
   const category = categorizeFile(attachment.mimetype);
   if (category === 'unsupported') {
     throw new Error(
-      `"${sanitizeAttachmentFilename(attachment.filename)}" (${attachment.mimetype}) is not a supported file type`,
+      `"${sanitizeNoteField(attachment.filename, NOTE_FILENAME_MAX)}" (${sanitizeNoteField(attachment.mimetype, NOTE_MIMETYPE_MAX)}) is not a supported file type`,
     );
   }
   const plain = category === 'document' && isPlainTextType(attachment.mimetype);
@@ -306,7 +323,7 @@ export async function extractAttachmentText(
     attachment,
     deps.roomId,
     deps.source,
-    { fetchImpl: deps.fetchImpl, signal: deps.signal },
+    downloadOptions(deps),
   );
   verifyMagicBytes(bytes, category, attachment, (m) =>
     deps.logger.warn(`[attachments] ${m}`),
