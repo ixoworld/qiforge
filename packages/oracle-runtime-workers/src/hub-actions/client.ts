@@ -11,6 +11,7 @@ import {
   type HubActionOptionsV2,
   type HubActionOptionsV3,
 } from '@ixo/action-protocol';
+import { HubActionRefused } from './store';
 import {
   hubPrepareRefusal,
   prepareSubjectOf,
@@ -49,9 +50,23 @@ export interface HubActionTransport {
  * options with the owner's tokens. Version 2 callers (runtime 0.23.0) keep
  * the 0.4.1 shapes. The envelopes stay tagged `ixo.auth-outcome/2` and
  * `ixo.auth-capabilities/2`, which `@ixo/action-protocol` parses.
+ *
+ * An Auth Hub older than version 5 checks `?version=` against its closed
+ * list (1 to 4) and answers every call that declares 5 with 400
+ * `invalid_request`, before anything else: see `HUB_UPDATE_REQUIRED`.
  */
 const HUB_PROTOCOL_VERSION = '5';
 const HUB_PROTOCOL_QUERY = `version=${HUB_PROTOCOL_VERSION}`;
+
+/**
+ * What the model is told when Auth Hub refuses a read (capabilities,
+ * options, status) with 400 `invalid_request`. A read carries nothing but
+ * the protocol version (and, for options, the binding the runtime itself
+ * checked), so that answer comes from a Hub that does not know version 5.
+ * The owner object keeps every action it holds: polls and callbacks pick
+ * the outcomes up once the Hub is updated.
+ */
+export const HUB_UPDATE_REQUIRED = `Auth Hub must be updated before this oracle can use Hub actions: it does not accept protocol version ${HUB_PROTOCOL_VERSION}, which this runtime needs (invalid_request). Tell the person this is not available right now; retrying or changing the fields will not help.`;
 /** Every Hub call but a chain-transaction prepare. */
 const HUB_TIMEOUT_MS = 10_000;
 /**
@@ -128,6 +143,11 @@ export class HubActionClient {
         subject,
       );
       if (refusal) throw refusal;
+    }
+    if (body === undefined && response.status === 400) {
+      const answer: unknown = await response.json().catch(() => null);
+      if (isRecord(answer) && answer.error === 'invalid_request')
+        throw new HubActionRefused('refused', HUB_UPDATE_REQUIRED);
     }
     if (!response.ok)
       throw new Error(`Hub action request returned ${response.status}`);
