@@ -4,6 +4,7 @@ import {
   CHAIN_TX_DISPUTE_REASONS,
   CHAIN_TX_ENTITY_PERMISSIONS,
   CHAIN_TX_MAX_CLAIM_PERMISSION,
+  CHAIN_TX_MAX_MESSAGES,
   CHAIN_TX_MAX_PAYMENT_COINS,
   CHAIN_TX_MAX_SECONDS,
   CHAIN_TX_MAX_TOKEN_LINES,
@@ -255,9 +256,9 @@ const link = (ipfs: boolean, what: string) =>
 const claimCount = (what: string) =>
   z
     .string()
-    .regex(CLAIM_COUNT, 'Digits, 1 to 1000000000.')
+    .regex(CLAIM_COUNT, `Digits, 1 to ${CHAIN_TX_MAX_CLAIM_PERMISSION}.`)
     .refine((value) => Number(value) <= CHAIN_TX_MAX_CLAIM_PERMISSION, {
-      message: 'At most 1000000000.',
+      message: `At most ${CHAIN_TX_MAX_CLAIM_PERMISSION}.`,
     })
     .describe(what);
 const seconds = (what: string) =>
@@ -329,12 +330,18 @@ const iidType = (what: string) =>
     .describe(what);
 /** A display amount: a plain decimal in the token's units, as the user said it. */
 const DISPLAY_AMOUNT = /^(0|[1-9][0-9]*)(\.[0-9]+)?$/;
+/**
+ * A stake's IXO amount: at most 72 whole digits and 6 decimals, so the
+ * converted amount stays within the protocol's base units (78 digits) and an
+ * over-long amount is refused here, as `amount`.
+ */
+const IXO_AMOUNT = /^(0|[1-9][0-9]{0,71})(\.[0-9]{1,6})?$/;
 const ixoAmount = z
   .string()
   .max(80)
   .regex(
-    DISPLAY_AMOUNT,
-    'A plain decimal amount of IXO, such as 100 or 0.5 (never base units).',
+    IXO_AMOUNT,
+    'A plain decimal amount of IXO with at most 6 decimals, such as 100 or 0.5 (never base units).',
   )
   .describe('The amount of IXO as the owner said it (100 = 100 IXO).');
 
@@ -608,7 +615,7 @@ export const CHAIN_TX_CATALOG = {
   'cosmos.staking.delegate': {
     summary: "stake the owner's IXO with a validator so it earns rewards.",
     rules:
-      'Stakes IXO from the owner’s wallet with a validator (one of the operators that run the network) so it earns rewards; the IXO stays theirs. `amount` is IXO as the owner says it ("100", "0.5"), never base units: the runtime converts it and checks it against their IXO balance. Ask how much and with which validator; find validator addresses (`validatorAddress`) and names with chain_lookup staking, or ask the owner. Getting staked IXO back takes the unbonding period (21 days on IXO today; the review card shows the exact time), so never stake all of it: leave some IXO for fees. Staking with a validator also pays out the rewards already earned with it. Say it like: “Stake 100 IXO with Alex’s validator. It keeps earning rewards, and getting it back takes about 21 days.”',
+      'Stakes IXO from the owner’s wallet with a validator (one of the operators that run the network) so it earns rewards; the IXO stays theirs. `amount` is IXO as the owner says it ("100", "0.5"), never base units: the runtime converts it and checks it against their IXO balance. Ask how much and with which validator. The owner names a validator in their own words: find it with chain_lookup validators (`name`: part of its name; it lists active validators with their commission) and copy its `validator` address into `validatorAddress`; when several match, or none is named, show a few by name and commission and let the owner choose. Prefer an active one. Getting staked IXO back takes a waiting period set by the network, which the review card shows, so never stake all of it: leave some IXO for fees. Staking with a validator also pays out the rewards already earned with it. Say it like: “Stake 100 IXO with Alex’s validator. It keeps earning rewards, and the review shows how long getting it back takes.”',
     schema: z.strictObject({
       type: z.literal('cosmos.staking.delegate'),
       validatorAddress: validator('The validator to stake with'),
@@ -617,9 +624,9 @@ export const CHAIN_TX_CATALOG = {
   },
   'cosmos.staking.undelegate': {
     summary:
-      'unstake IXO from a validator; it comes back to the wallet after the unbonding period.',
+      'unstake IXO from a validator; it comes back to the wallet after a waiting period.',
     rules:
-      'Stops staking IXO with a validator. It comes back to the owner’s wallet after the unbonding period (21 days on IXO today) and earns nothing in between. See what they have staked, and with whom, with chain_lookup staking (copy `validatorAddress` from there); ask how much (`amount` in IXO as the owner says it, never base units and never more than they have staked there). Rewards waiting with that validator are paid out at the same time. At most 7 unstakes per validator can be waiting at once. Say it like: “Unstake 50 IXO from Alex’s validator. It’s back in your wallet in about 21 days and earns nothing until then.”',
+      'Stops staking IXO with a validator. It comes back to the owner’s wallet after a waiting period set by the network (the review card shows how long and when) and earns nothing in between. See what they have staked, and with whom, with chain_lookup staking (copy `validatorAddress` from there); ask how much (`amount` in IXO as the owner says it, never base units and never more than they have staked there). Rewards waiting with that validator are paid out at the same time. The network limits how many unstakes from one validator can be waiting at once; when Auth Hub says the limit is reached, tell the owner to wait for one to finish. Say it like: “Unstake 50 IXO from Alex’s validator. It comes back to your wallet after a waiting period (the review shows when) and earns nothing until then.”',
     schema: z.strictObject({
       type: z.literal('cosmos.staking.undelegate'),
       validatorAddress: validator('The validator to unstake from'),
@@ -630,7 +637,7 @@ export const CHAIN_TX_CATALOG = {
     summary:
       'move staked IXO from one validator to another, right away and without waiting.',
     rules:
-      'Moves IXO the owner has staked from one validator (`fromValidatorAddress`) to another (`toValidatorAddress`, a different one) at once; it keeps earning rewards and nothing passes through the wallet. Use chain_lookup staking for what they have staked and with whom; ask how much (`amount` in IXO as the owner says it, never more than they have staked with the first validator) and with whom it should go. Stake moved this way can’t be moved again for the unbonding period (21 days on IXO today). Rewards waiting with both validators are paid out. Say it like: “Move 50 IXO of your stake from Alex’s validator to Bo’s. It keeps earning rewards; you can’t move it again for about 21 days.”',
+      'Moves IXO the owner has staked from one validator (`fromValidatorAddress`) to another (`toValidatorAddress`, a different one) at once; it keeps earning rewards and nothing passes through the wallet. Use chain_lookup staking for what they have staked and with whom, and chain_lookup validators (`name`) to find the validator the owner names for the new one; ask how much (`amount` in IXO as the owner says it, never more than they have staked with the first validator). Stake moved this way can’t be moved again for a while (a waiting period set by the network, which the review card shows). Rewards waiting with both validators are paid out. Say it like: “Move 50 IXO of your stake from Alex’s validator to Bo’s. It keeps earning rewards; you can’t move it again for a while.”',
     schema: z
       .strictObject({
         type: z.literal('cosmos.staking.redelegate'),
@@ -650,8 +657,7 @@ export const CHAIN_TX_CATALOG = {
   'cosmos.distribution.withdraw-rewards': {
     summary:
       'claim the staking rewards the owner has earned with a validator (one message per validator).',
-    rules:
-      'Moves the rewards the owner earned by staking with one validator into their wallet (or to the account they set to receive their rewards). One message per validator, up to 8 in one card: use chain_lookup staking to see which validators have rewards and leave out those with none (Auth Hub refuses a validator with nothing to claim). Staking, unstaking or moving stake with a validator already pays its rewards out. Say it like: “Claim about 12.5 IXO of staking rewards from Alex’s validator.”',
+    rules: `Moves the rewards the owner earned by staking with one validator into their wallet (or to the account they set to receive their rewards). One message per validator, up to ${CHAIN_TX_MAX_MESSAGES} in one card: use chain_lookup staking to see which validators have rewards and leave out those with none (Auth Hub refuses a validator with nothing to claim). Staking, unstaking or moving stake with a validator already pays its rewards out. Say it like: “Claim about 12.5 IXO of staking rewards from Alex’s validator.”`,
     schema: z.strictObject({
       type: z.literal('cosmos.distribution.withdraw-rewards'),
       validatorAddress: validator('The validator the rewards were earned with'),
@@ -683,7 +689,7 @@ export const CHAIN_TX_CATALOG = {
     summary:
       "reserve a collection's payment before filing a claim in it (only where reservations are used).",
     rules:
-      'Sets aside a claim collection’s payment for a claim the owner is about to file, for a limited time; nothing leaves their wallet. Use it only when the collection allows or requires reservations (chain_lookup claim_collection) and the owner is already allowed to file claims there; they can hold one reservation per collection. Afterwards file the claim with `ixo.claims.submit` and `useIntent: true` before the reservation runs out. The runtime adds the owner as the filer. Say it like: “Reserve the payment in the Clean Water collection for the claim you’re about to file.”',
+      'Sets aside a claim collection’s payment for a claim the owner is about to file, for a limited time; nothing leaves their wallet. Use it only when the collection allows or requires reservations (chain_lookup claim_collection) and the owner is already allowed to file claims there; they can hold one reservation per collection. Afterwards file the claim with `ixo.claims.submit` and `useIntent: true` before the reservation runs out. Collections with member budgets (team collections) cannot be reserved in here: the chain needs a member address, which this card does not send, so tell the owner a reservation there cannot be made from here. The runtime adds the owner as the filer. Say it like: “Reserve the payment in the Clean Water collection for the claim you’re about to file.”',
     schema: z.strictObject({
       type: z.literal('ixo.claims.claim-intent'),
       collectionId,
@@ -769,8 +775,7 @@ export const CHAIN_TX_CATALOG = {
   'ixo.claims.create-claim-authorization': {
     summary:
       'let another account file or check claims in a collection the owner manages with a permission from its entity.',
-    rules:
-      'Lets an account (`granteeAddress`) file claims in (`role: file-claims`) or check claims of (`role: check-claims`) one collection, up to `maxClaims` claims (1 to 1000000000). It is for people who manage a collection with a permission from its entity (`authorize-claim-agents`, chain_lookup authz_grants received); when the owner owns the entity, use `ixo.entity.grant-account-authz` instead. `adminAddress` is the collection’s admin account (chain_lookup claim_collection). Ask who, which role, how many claims and until when (`expiresAt`; left out, an end date the account already has for this kind of permission is kept, else it has none). Optional: `reservationSeconds` (file-claims only: how long a reservation holds the payment) and `decideBefore` (check-claims only: the date checks must be done by). Never pick a role the owner did not name. The runtime adds the owner as the one who gives it. Say it like: “Let Thandi (ixo1qy…lvf0) file up to 50 claims in the Clean Water collection until 31 December.”',
+    rules: `Lets an account (\`granteeAddress\`) file claims in (\`role: file-claims\`) or check claims of (\`role: check-claims\`) one collection, up to \`maxClaims\` claims (1 to ${CHAIN_TX_MAX_CLAIM_PERMISSION}). It is for people who manage a collection with a permission from its entity (\`authorize-claim-agents\`, chain_lookup authz_grants received); when the owner owns the entity, use \`ixo.entity.grant-account-authz\` instead. \`adminAddress\` is the collection’s admin account (chain_lookup claim_collection). Ask who, which role, how many claims and until when (\`expiresAt\`; left out, an end date the account already has for this kind of permission is kept, else it has none). Optional: \`reservationSeconds\` (file-claims only: how long a reservation holds the payment) and \`decideBefore\` (check-claims only: the date checks must be done by). Never pick a role the owner did not name. The runtime adds the owner as the one who gives it. Say it like: “Let Thandi (ixo1qy…lvf0) file up to 50 claims in the Clean Water collection until 31 December.”`,
     schema: z
       .strictObject({
         type: z.literal('ixo.claims.create-claim-authorization'),
@@ -780,7 +785,9 @@ export const CHAIN_TX_CATALOG = {
         role: z
           .literal([...CHAIN_TX_CLAIM_ROLES])
           .describe('file-claims or check-claims.'),
-        maxClaims: claimCount('How many claims, 1 to 1000000000.'),
+        maxClaims: claimCount(
+          `How many claims, 1 to ${CHAIN_TX_MAX_CLAIM_PERMISSION}.`,
+        ),
         expiresAt: instant('Optional: when the permission ends.').optional(),
         reservationSeconds: seconds(
           'file-claims only: how long a reservation holds the payment, in seconds.',
@@ -794,8 +801,7 @@ export const CHAIN_TX_CATALOG = {
   'ixo.claims.update-collection-payments': {
     summary:
       'change what a collection pays when claims are filed, checked, approved or rejected.',
-    rules:
-      'Replaces what a claim collection pays, with the same kind of permission and `adminAddress` as `ixo.claims.update-collection-state` (permission `change-collection-payments`). Read the current payments first with chain_lookup claim_collection and send the whole new set: a leg left out pays nothing. Legs: `submission` (to the filer when a claim is filed), `evaluation` (to the checker for each check), `approval` (to the filer when approved; `networkSplit: true` shares it with the network and the oracle) and `rejection` (to the filer when rejected). Each leg has `amount`, up to 4 coins of different tokens, each `{denom, amountBaseUnits}` in base units (IXO: denom `uixo`, 1 IXO = 1000000; another token’s denom copied exactly from a lookup, never a guessed `ibc/…` denom), and optional `payAfterSeconds` (up to 31536000: it can be collected only that much later). Collections that pay in contract tokens can’t be changed here. Say it like: “Pay 50 IXO for each approved claim in the Clean Water collection, and nothing for filing or rejected claims.”',
+    rules: `Replaces what a claim collection pays, with the same kind of permission and \`adminAddress\` as \`ixo.claims.update-collection-state\` (permission \`change-collection-payments\`). Read the current payments first with chain_lookup claim_collection and send the whole new set: a leg left out pays nothing. Legs: \`submission\` (to the filer when a claim is filed), \`evaluation\` (to the checker for each check), \`approval\` (to the filer when approved; \`networkSplit: true\` shares it with the network and the oracle) and \`rejection\` (to the filer when rejected). Each leg has \`amount\`, up to ${CHAIN_TX_MAX_PAYMENT_COINS} coins of different tokens, each \`{denom, amountBaseUnits}\` in base units (IXO: denom \`uixo\`, 1 IXO = 1000000; another token’s denom copied exactly from a lookup, never a guessed \`ibc/…\` denom), and optional \`payAfterSeconds\` (up to ${CHAIN_TX_MAX_SECONDS}: it can be collected only that much later). Collections that pay in contract tokens can’t be changed here. Say it like: “Pay 50 IXO for each approved claim in the Clean Water collection, and nothing for filing or rejected claims.”`,
     schema: z.strictObject({
       type: z.literal('ixo.claims.update-collection-payments'),
       collectionId,
@@ -806,7 +812,7 @@ export const CHAIN_TX_CATALOG = {
   'ixo.claims.create-collection': {
     summary: 'create a claim collection for an entity the owner owns.',
     rules:
-      'Creates a claim collection: a place where people file claims of one kind for an entity the owner owns. Ask for the entity (`entityId`: chain_lookup entities or entity), the kind of claim (`protocolId`, the claim template’s did:ixo DID), when it opens (`startDate`) and closes (`endDate`, or null for no end date; always give the key), how many claims in total (`maxClaims`, "0" = no limit), how it starts (`state`: open, paused or closed), whether claims are reserved first (`reservations`: `allow`, `deny` or `required`) and what it pays (`payments`, as for `ixo.claims.update-collection-payments`, in base units). To manage it from chat later, add `ixo.entity.grant-account-authz` steps to the same card that give the owner’s own address `change-collection-state`, `change-collection-dates`, `change-collection-quota` and `change-collection-payments` (as Portal does). A collection can’t be deleted, only closed. The result does not include the new collection’s number: once the owner has approved it and it went through (hub_action_status), find it with chain_lookup claim_collections. Say it like: “Create a claim collection for Clean Water Project, open from 1 November with no end date, paying 50 IXO for each approved claim.”',
+      'Creates a claim collection: a place where people file claims of one kind for an entity the owner owns. Ask for the entity (`entityId`: chain_lookup entities or entity), the kind of claim (`protocolId`, the claim template’s did:ixo DID), when it opens (`startDate`) and closes (`endDate`, or null for no end date; always give the key), how many claims in total (`maxClaims`, "0" = no limit), how it starts (`state`: open, paused or closed), whether claims are reserved first (`reservations`: `allow`, `deny` or `required`) and what it pays (`payments`, as for `ixo.claims.update-collection-payments`, in base units). Offer to also let the owner manage the collection from chat later: with their yes, and only then, add `ixo.entity.grant-account-authz` steps to the same card that give the owner’s own address `change-collection-state`, `change-collection-dates`, `change-collection-quota` and `change-collection-payments` (as Portal does). Never add a step the owner did not ask for. A collection can’t be deleted, only closed. The result does not include the new collection’s number: once the owner has approved it and it went through (hub_action_status), find it with chain_lookup claim_collections. Say it like: “Create a claim collection for Clean Water Project, open from 1 November with no end date, paying 50 IXO for each approved claim.”',
     schema: z
       .strictObject({
         type: z.literal('ixo.claims.create-collection'),
@@ -880,8 +886,7 @@ export const CHAIN_TX_CATALOG = {
   'ixo.entity.grant-account-authz': {
     summary:
       "let an account (or the owner) act for the owner's entity in one way: file or check claims in a collection, change its collections, or give others claim permissions.",
-    rules:
-      'Gives an account (`granteeAddress`; the owner’s own address is fine) one permission from an entity the owner owns (`entityId`). `permission`: `file-claims` or `check-claims` in one collection (then `collectionId` and `maxClaims`, 1 to 1000000000, are required; optional `reservationSeconds` for file-claims and `decideBefore` for check-claims), or, for every collection of the entity, `change-collection-state`, `change-collection-dates`, `change-collection-quota`, `change-collection-payments` or `authorize-claim-agents` (lets them give others file and check permissions, with no limit); for these five leave `collectionId`, `maxClaims`, `reservationSeconds` and `decideBefore` out. `expiresAt` (optional) ends it; left out, an end date the account already has for this permission is kept, else it never ends. Giving file or check permission for one collection keeps what the account already has for others. Ask who and exactly which permission; never give more than the owner named, and say plainly that changing payments and letting others file or check claims can move money. Say it like: “Let Thandi (ixo1qy…lvf0) check up to 100 claims in the Clean Water collection until 31 December.”',
+    rules: `Gives an account (\`granteeAddress\`; the owner’s own address is fine) one permission from an entity the owner owns (\`entityId\`). \`permission\`: \`file-claims\` or \`check-claims\` in one collection (then \`collectionId\` and \`maxClaims\`, 1 to ${CHAIN_TX_MAX_CLAIM_PERMISSION}, are required; optional \`reservationSeconds\` for file-claims and \`decideBefore\` for check-claims), or, for every collection of the entity, \`change-collection-state\`, \`change-collection-dates\`, \`change-collection-quota\`, \`change-collection-payments\` or \`authorize-claim-agents\` (lets them give others file and check permissions, with no limit); for these five leave \`collectionId\`, \`maxClaims\`, \`reservationSeconds\` and \`decideBefore\` out. \`expiresAt\` (optional) ends it; left out, an end date the account already has for this permission is kept, else it never ends. Giving file or check permission for one collection keeps what the account already has for others. Ask who and exactly which permission; never give more than the owner named, and say plainly that changing payments and letting others file or check claims can move money. Say it like: “Let Thandi (ixo1qy…lvf0) check up to 100 claims in the Clean Water collection until 31 December.”`,
     schema: z
       .strictObject({
         type: z.literal('ixo.entity.grant-account-authz'),
@@ -894,7 +899,7 @@ export const CHAIN_TX_CATALOG = {
           'file-claims and check-claims only: the collection (digits).',
         ).optional(),
         maxClaims: claimCount(
-          'file-claims and check-claims only: how many claims, 1 to 1000000000.',
+          `file-claims and check-claims only: how many claims, 1 to ${CHAIN_TX_MAX_CLAIM_PERMISSION}.`,
         ).optional(),
         reservationSeconds: seconds(
           'file-claims only: how long a reservation holds the payment, in seconds.',
@@ -1142,7 +1147,7 @@ export const CHAIN_TX_CATALOG = {
 export const CHAIN_TX_GENERAL_RULES = [
   'Addresses are 20-byte `ixo1…` account addresses (contract addresses are refused), validators `ixovaloper1…`, entities `did:ixo:entity:…`. Copy every id, address and number exactly from a lookup (chain_lookup, hub_action_options) or from the owner; never invent or guess one. Ids (`claimId`, `collectionId`, token `id`, proofs) use only letters, digits and `: . _ / -`.',
   'Give only the fields listed for a type: the runtime adds the chain, the network, the signer and the owner’s own DID and address where a message needs them, and Auth Hub sets the fee. Amounts: coin sends and stakes are what the owner says in the token’s units ("100" IXO); impact tokens are whole tokens; collection payments are base units (1 IXO = 1000000 uixo). Dates are RFC 3339 with Z or an offset, from the owner’s time zone.',
-  'Up to 8 messages per transaction, run in the order given (put them in the order the owner said them, and keep one decision in one card); all succeed or none do. A step that needs something stored first (a dispute statement, a profile, a document) can only be prepared once it is stored.',
+  `Up to ${CHAIN_TX_MAX_MESSAGES} messages per transaction, run in the order given (put them in the order the owner said them, and keep one decision in one card); all succeed or none do. A step that needs something stored first (a dispute statement, a profile, a document) can only be prepared once it is stored.`,
   'How to talk about it: before preparing, say in one or two plain, everyday sentences what will happen and what it means for the owner (what leaves their wallet, what someone else will be able to do, how long it takes, whether it can be undone), the way each type’s “Say it like” does. Use names (of the validator, collection, entity or person) when a lookup gives them. Never say message type names or chain words such as authz, grant, MsgExec, bech32, valoper, uixo, base units, DID, IID, delegate or redelegate: say stake, unstake, move stake, permission, account, identity and IXO. Show an address only when the owner needs it to check who receives something. The review card in Auth Hub shows every exact value.',
 ].join(' ');
 

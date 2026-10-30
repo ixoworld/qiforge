@@ -2551,6 +2551,90 @@ describe('request_chain_transaction', () => {
     expect(chainTransaction).not.toHaveBeenCalled();
   });
 
+  it('states no network setting that can change, and says what to ask before adding a step', () => {
+    const texts: [string, string][] = [
+      ['general', CHAIN_TX_GENERAL_RULES],
+      ...CHAIN_TX_MESSAGE_TYPES.flatMap((type): [string, string][] => [
+        [`${type} summary`, CHAIN_TX_CATALOG[type].summary],
+        [`${type} rules`, CHAIN_TX_CATALOG[type].rules],
+      ]),
+    ];
+    // Waiting periods and entry limits are network settings governance can
+    // change: the review card shows the live value, the rules never do.
+    expect(
+      texts
+        .filter(([, text]) =>
+          /\b\d+\s*(?:days?|weeks?|hours?|minutes?)\b|unbond|\b\d+\s+(?:unstakes|stake moves|redelegations)\b/i.test(
+            text,
+          ),
+        )
+        .map(([where]) => where),
+    ).toEqual([]);
+    // A person names a validator in words; the lookup finds its address.
+    for (const type of [
+      'cosmos.staking.delegate',
+      'cosmos.staking.redelegate',
+    ] as const)
+      expect(CHAIN_TX_CATALOG[type].rules).toContain('chain_lookup validators');
+    // Steps the owner did not ask for are offered, never added.
+    expect(CHAIN_TX_CATALOG['ixo.claims.create-collection'].rules).toContain(
+      'Never add a step the owner did not ask for',
+    );
+    // A team collection cannot take a reservation from here (no member address).
+    expect(CHAIN_TX_CATALOG['ixo.claims.claim-intent'].rules).toContain(
+      'member budgets',
+    );
+  });
+
+  it.each([
+    ['73 whole digits', `1${'0'.repeat(72)}`],
+    ['7 decimals', '1.0000001'],
+  ])(
+    'refuses a stake amount of %s as the amount, before conversion',
+    async (_name, amount) => {
+      const chainTransaction = vi.fn(async () => reference);
+      for (const type of STAKE_TYPES) {
+        const message = { ...level6[type as Level6Type], amount };
+        expect(
+          await chainTool().handler(
+            { messages: [message] },
+            channelContext(chainTransaction),
+          ),
+        ).toMatchObject({
+          status: 'unavailable',
+          reason: expect.stringContaining(
+            'messages[0].amount: A plain decimal amount of IXO',
+          ),
+        });
+      }
+      // 72 whole digits and 6 decimals still fit the protocol's base units.
+      const largest = `${'9'.repeat(72)}.999999`;
+      expect(
+        await chainTool().handler(
+          {
+            messages: [
+              { ...level6['cosmos.staking.undelegate'], amount: largest },
+            ],
+          },
+          channelContext(chainTransaction),
+        ),
+      ).toMatchObject({ status: 'prepared' });
+      // The protocol's base units hold at most 78 digits: exactly this.
+      expect(
+        chainTxAmountsInBaseUnits(
+          [
+            {
+              type: 'cosmos.staking.undelegate',
+              validatorAddress: VALIDATOR,
+              amount: largest,
+            },
+          ],
+          null,
+        ),
+      ).toEqual([expect.objectContaining({ amountBaseUnits: '9'.repeat(78) })]);
+    },
+  );
+
   it('tells the model to speak plainly, and every type how to say it', () => {
     for (const words of [
       'plain, everyday sentences',

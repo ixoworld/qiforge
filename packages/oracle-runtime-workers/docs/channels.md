@@ -594,8 +594,8 @@ owner's DIDs are filled as above, and the wire is in `@ixo/action-protocol`
 | `type`                                                   | Model fields                                                                                                                                                                        | What it does                                                                                                                                                                                                                               |
 | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `ixo.token.retire`                                       | `tokens` (1–32 lines), `jurisdiction` (`Global` or `KE`, `KE-30`, `ZA-WC 7700`), `reason`                                                                                           | Uses up impact tokens for good (offsetting). Never without the owner clearly asking.                                                                                                                                                       |
-| `cosmos.staking.delegate`                                | `validatorAddress` (`ixovaloper1…`), `amount` (IXO)                                                                                                                                 | Stakes IXO with a validator. The runtime converts `amount` to `amountBaseUnits` (6 decimals) and counts it against the listed IXO balance with the IXO sends.                                                                              |
-| `cosmos.staking.undelegate`                              | `validatorAddress`, `amount` (IXO)                                                                                                                                                  | Unstakes; back after the unbonding period (21 days on IXO when written). Converted like a stake; takes nothing from the wallet.                                                                                                            |
+| `cosmos.staking.delegate`                                | `validatorAddress` (`ixovaloper1…`), `amount` (IXO)                                                                                                                                 | Stakes IXO with a validator. The runtime converts `amount` (at most 72 whole digits and 6 decimals, so it fits the protocol's base units) to `amountBaseUnits` and counts it against the listed IXO balance with the IXO sends.            |
+| `cosmos.staking.undelegate`                              | `validatorAddress`, `amount` (IXO)                                                                                                                                                  | Unstakes; back after a waiting period the network sets (the review card shows it). Converted like a stake; takes nothing from the wallet.                                                                                                  |
 | `cosmos.staking.redelegate`                              | `fromValidatorAddress`, `toValidatorAddress` (different), `amount` (IXO)                                                                                                            | Moves stake at once. Converted like a stake.                                                                                                                                                                                               |
 | `cosmos.distribution.withdraw-rewards`                   | `validatorAddress`                                                                                                                                                                  | Claims rewards from one validator (one message each).                                                                                                                                                                                      |
 | `cosmos.gov.vote`                                        | `proposalId` (≥ 1), `option` (`yes`, `no`, `abstain`, `no_with_veto`)                                                                                                               | Votes on a proposal open for voting; a later vote replaces it.                                                                                                                                                                             |
@@ -619,14 +619,22 @@ owner's DIDs are filled as above, and the wire is in `@ixo/action-protocol`
 | `ixo.iid.add-context` / `delete-context`                 | `did`, `context` (`key`, `val`: https link or IXO DID) / `key`                                                                                                                      |                                                                                                                                                                                                                                            |
 
 Each type's `rules` say what to ask the owner first, which `chain_lookup`
-kind finds its ids (`staking` for validators and rewards, `gov_proposals`,
+kind finds its ids (`validators` for a validator the owner names in words,
+`staking` for their own stake and rewards, `gov_proposals`,
 `claim_collection` / `claim_collections` for a collection and its admin
 account, `authz_grants` for permissions, `entity` / `entities`,
 `did_document`, `claim` / `claims`, `token_balances`), and end with "Say it
 like: “…”", an everyday sentence the model copies the tone of; the shared
 rules tell it to describe each card in plain words before preparing it, and
 never to say message type names or chain terms (authz, MsgExec, bech32,
-valoper, uixo, base units, DID, delegate). Two things are deliberately left
+valoper, uixo, base units, DID, delegate). The rules state no network
+setting that governance can change (waiting periods, how many unstakes may
+wait at once): the review card shows the live value. Protocol limits (8
+messages, 4 payment coins, 10^9 claims, a year of seconds) are taken from
+`@ixo/action-protocol`, not written out. A step the owner did not ask for is
+offered, never added (the collection-permission steps after a new
+collection). A reservation in a collection with member budgets is not
+offered (no member address is sent). Two things are deliberately left
 to the model's next step, after the owner approved and the transaction went
 through (`hub_action_status`): the id of a new collection (`chain_lookup
 claim_collections`) and of a new entity (`chain_lookup entities`), which the
