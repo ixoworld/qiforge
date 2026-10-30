@@ -8,6 +8,7 @@ import {
   type ActionCapabilitiesV1,
   type ActionOutcomeV1,
   type ActionReferenceV1,
+  type ActionReviewView,
   type HubActionOptionsV2,
   type HubActionOptionsV3,
 } from '@ixo/action-protocol';
@@ -18,13 +19,62 @@ import {
   type HubPrepareSubject,
 } from './transfer';
 
+/**
+ * Auth Hub's review and operation status of an action, as
+ * `@ixo/action-protocol` 0.7.0 lists them (`ActionReviewView`), or `unknown`
+ * for any other value: these reach the model, so nothing but a listed
+ * word is passed on.
+ */
+export type HubReviewStatus = ActionReviewView['reviewStatus'] | 'unknown';
+export type HubOperationStatus = ActionReviewView['operationStatus'];
+
+const REVIEW_STATUSES = [
+  'prepared',
+  'superseded',
+  'declined',
+  'expired',
+  'revoked',
+  'signing',
+  'authorized',
+] as const satisfies readonly ActionReviewView['reviewStatus'][];
+const OPERATION_STATUSES = [
+  'awaiting_authorization',
+  'admitted',
+  'submitted',
+  'succeeded',
+  'failed',
+  'requires_review',
+  'unknown',
+  'not_started',
+] as const satisfies readonly HubOperationStatus[];
+// Every status the protocol lists is in the lists above.
+type Missing<All, Listed> = Exclude<All, Listed> extends never ? true : never;
+const reviewListed: Missing<
+  ActionReviewView['reviewStatus'],
+  (typeof REVIEW_STATUSES)[number]
+> = true;
+const operationListed: Missing<
+  HubOperationStatus,
+  (typeof OPERATION_STATUSES)[number]
+> = true;
+void reviewListed;
+void operationListed;
+
+/** `value` when it is a status the protocol lists, else `unknown`. */
+export function hubReviewStatus(value: unknown): HubReviewStatus {
+  return REVIEW_STATUSES.find((status) => status === value) ?? 'unknown';
+}
+export function hubOperationStatus(value: unknown): HubOperationStatus {
+  return OPERATION_STATUSES.find((status) => status === value) ?? 'unknown';
+}
+
 export interface HubActionStatus {
   reference: ActionReferenceV1;
   ownerDid: string;
   revision: number;
   digest: string;
-  reviewStatus: string;
-  operationStatus: string;
+  reviewStatus: HubReviewStatus;
+  operationStatus: HubOperationStatus;
   outcome: ActionOutcomeV1 | null;
 }
 
@@ -269,8 +319,8 @@ export class HubActionClient {
       ownerDid: value.ownerDid,
       revision: Number(value.revision),
       digest: value.digest,
-      reviewStatus: value.reviewStatus,
-      operationStatus: value.operationStatus,
+      reviewStatus: hubReviewStatus(value.reviewStatus),
+      operationStatus: hubOperationStatus(value.operationStatus),
       outcome: value.outcome == null ? null : parseOutcome(value.outcome),
     };
   }

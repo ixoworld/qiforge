@@ -46,7 +46,11 @@ import type {
   ActionProposalSubject,
 } from '@ixo/ixo-transaction/action-proposals';
 import { ChannelTurns } from '../channels/turns';
-import { HubActionClient } from '../hub-actions/client';
+import {
+  HubActionClient,
+  type HubOperationStatus,
+  type HubReviewStatus,
+} from '../hub-actions/client';
 import { chainTxOperation, prepareHubAction } from '../hub-actions/request';
 import {
   bankReceiptSummary,
@@ -3683,8 +3687,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       actionId: string,
       timeoutMs?: number,
     ): Promise<{
-      reviewStatus: string;
-      operationStatus: string;
+      reviewStatus: HubReviewStatus;
+      operationStatus: HubOperationStatus;
       outcome: ActionOutcomeV1 | null;
     } | null> {
       const held = await this.hubActionStore?.get(ownerDid, actionId);
