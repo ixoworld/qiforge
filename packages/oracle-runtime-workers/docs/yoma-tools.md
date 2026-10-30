@@ -39,36 +39,49 @@ some providers' tool schemas (`node-parity.md`). The handler checks the
 fields each action needs (`answer`: `field`, `reply`; `skip`: `field`;
 `section`: `section`, `addAnother`; `discard`: `confirmed`) and answers a
 missing one with `invalid_input` naming it. `submit` sends only with
-`confirmed: true`, which the model passes only after the person clearly said
-yes to the review it read back; without it the answer is
-`needs_confirmation` with the answers, and no card is requested.
+`confirmed: true`, and the plugin checks the consent itself: it records
+which pages of the read-back (`review`, or an unconfirmed `submit`) were
+shown for which answers (`updatedAt`) in which request, and sends only on a
+**later** request (the person's reply) with the same answers and every page
+shown. A `confirmed: true` in the same request as the read-back, after an
+answer changed, or with a page unread answers `needs_confirmation` with the
+next page, and no card is requested.
 
 Identity comes from the runtime: the person's address is
 `ixoAddressOf(ctx.user.did)`. No tool takes an account.
 
-**Prompt footprint** (`toJsonSchema` of both schemas, the two descriptions,
-the operating guide and the manifest): 4,755 characters, against ixo-chain's
-7,403.
+**Prompt footprint** (`z.toJSONSchema` of both schemas, the two
+descriptions, the operating guide and the manifest's JSON, measured
+2026-10-30): 5,033 characters, against ixo-chain's 5,462 measured the same
+way.
 
 ## Where the data comes from
 
-| Data                   | Source                                                                                    | Kept per isolate             |
-| ---------------------- | ----------------------------------------------------------------------------------------- | ---------------------------- |
-| Programmes (the cards) | Jambo worker `GET /v1/entities` (mainnet only: `JOB_LIST_URLS`), at most 50               | 5 min; a failed build 30 s   |
-| Hidden jobs            | Jambo worker `GET /v1/collections/<entity>`                                               | with the list                |
-| Jobs                   | Blocksync `claimCollections(filter: { entity: { in } })`, up to 1,000 read, 300 kept      | with the list                |
-| Names, places, pay     | the entity's `settings.Profile` document; the claim form's title; `payments.approval`     | with the list                |
-| Protocol entities      | Blocksync `entities(filter: { id: { in } })`                                              | 10 min, shared by every tool |
-| Forms                  | the protocol's `#bco` (application) and `#vct` / `#surveyTemplate` (claim), up to 512 KiB | 10 min, LRU: 50 forms, 5 MB  |
-| Can log work           | chain REST `/cosmos/authz/v1beta1/grants?granter=<admin>&grantee=<person>`                | never                        |
-| Logged work            | Blocksync `claims(filter: { agentAddress }, orderBy: SUBMISSION_DATE_DESC)`, `first` ≤ 20 | never                        |
-| Drafts                 | the person's own `ctx.kv`, namespace `yoma`                                               | until submitted or deleted   |
+| Data                   | Source                                                                                                                                 | Kept per isolate             |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| Programmes (the cards) | Jambo worker `GET /v1/entities` (mainnet only: `JOB_LIST_URLS`), at most 50                                                            | 5 min; a failed build 30 s   |
+| Hidden jobs            | Jambo worker `GET /v1/collections/<entity>`                                                                                            | with the list                |
+| Jobs                   | Blocksync `claimCollections(filter: { entity: { in }, state: { equalTo: 0 } })`, pages of 500, at most 4; 300 kept                     | with the list                |
+| Names, places, pay     | the entity's `settings.Profile` document; the claim form's title; `payments.approval`                                                  | with the list                |
+| Protocol entities      | Blocksync `entities(filter: { id: { in } })`                                                                                           | 10 min, shared by every tool |
+| Forms                  | the protocol's first linked resource whose id contains `#bco` (application), else `#vct`, else `surveyTemplate` (claim), up to 128 KiB | 10 min, LRU: 50 forms, 5 MB  |
+| Can log work           | chain REST `/cosmos/authz/v1beta1/grants?granter=<admin>&grantee=<person>`                                                             | never                        |
+| Logged work            | Blocksync `claims(filter: { agentAddress }, orderBy: SUBMISSION_DATE_DESC)`, `first` ≤ 20                                              | never                        |
+| Drafts                 | the person's own `ctx.kv`, namespace `yoma`                                                                                            | until sent or deleted        |
+| Sent work              | the same, key `sent`: the last 50 sent applications and claims (claim id kept)                                                         | newest 50                    |
 
 A programme is an entity on the worker's list, in its order, shown even when
 nothing is open. A job is one of its claim collections, minus the hidden
-ones, the ended ones and the full ones (Jambo still lists the last two).
-After that filter at most 300 jobs are kept and `programmes` says
-`truncated: true` when more were open.
+ones and those the chain would refuse a claim on (x/claims `SubmitClaim`):
+state not OPEN (`CollectionState` OPEN = 0, PAUSED = 1, CLOSED = 2; Blocksync
+stores the number), not started, ended, or full. Jambo lists all but the
+hidden ones. Blocksync keeps collection ids as text (its order puts "10"
+before "9"), so the pages are read in key order and the jobs sorted as
+numbers. At most 300 jobs are kept; `programmes` says `truncated: true` when
+more were open or more pages were left unread. The form matching is Jambo's
+own (`jambo-yoma-v2` `screens/collectionForm.tsx`: `includes('#bco')`,
+`includes('#vct')`, then `includes('surveyTemplate')`), so chat and Jambo
+always open the same form.
 
 **A hide list that cannot be read** (an error other than a 404) marks only
 that programme `unavailable: true` with none of its jobs: a job it hides
@@ -76,27 +89,60 @@ must never be offered, and the other programmes stand. `programme_jobs` for
 it answers `unavailable`, retryable. A 404 is a programme with nothing
 hidden.
 
-One catalog build runs per isolate at a time; a call during a build waits
-for it. A build reads at most 6 upstreams at once.
+One catalog build runs per isolate and network at a time, on its own: its
+own deadline (the 20 s tool budget from its start), its own abort (only that
+deadline) and its own permit pool (`yoma-catalog:<network>`, ixo-chain's 5
+permits), so the caller that started it can leave without failing anyone
+else; every caller waits for it with its own abort. The hide lists, the
+collection pages and the programmes' entities are read at once, then the
+profiles together with the protocols and their forms' titles; protocol
+entities are read 100 per Blocksync read, never dropped. Each hide list,
+profile and form in a build keeps its own unhealthy mark (`healthPerUrl`),
+so one 503 holds back only that address after its own retry. A complete list
+is kept 5 minutes; a failed build, or one with a piece missing (a hide list,
+a profile, a protocol, a job's name: `incomplete`), 30 seconds.
+
+The list is per isolate. Workers' Cache API (`caches.default`) could share it
+across isolates, but the plugin API offers plugins no cache surface and
+nothing in the runtime uses it, so it is not used here; a host that wants it
+can add a cache in front of the job-list worker.
 
 ## Drafts
 
 One key per draft (`draft:<form>:<collectionId>`) and an index key
-(`draft-index`), so a draft never shares the 256 KiB value cap with another.
-Each draft is parsed on its own: one that does not parse is counted in
-`my_drafts` as `unreadable` and skipped, never deleted (it can be deleted on
-request). A person has at most 20 drafts, a draft at most 30 files, a
+(`draft-index`) of the **open** ones, so a draft never shares the 256 KiB
+value cap with another. Each draft is parsed on its own: one that does not
+parse is counted in `my_drafts` as `unreadable` and skipped, never
+overwritten (it can be deleted on request). Every write runs inside
+`ctx.kv.update` on the draft as stored (the form is opened again from the
+stored answers there), is validated against the draft schema, and is refused
+when invalid; so two answers that arrive at once are both kept. A person has
+at most 20 open drafts (sent ones do not count), a draft at most 30 files, a
 repeating section at most 50 items; a reply is at most 4,000 characters by
 schema. A write past the storage caps (`UserKvLimitError`) answers
-`too_large`, not retryable, and leaves the draft as it was. The single-value
-book under `drafts` existed only on unreleased branches and is ignored.
+`too_large`, not retryable, and leaves the draft as it was. A new draft
+saves the form's default values (`openModel` without data); a saved draft
+opens exactly as saved.
+
+**Sent work.** A claim whose card succeeded moves to the `sent` record (its
+claim id kept) and its draft goes, so the next `next` starts a new claim on
+the same job: one `SubmitClaimAuthorization` constraint with `agent_quota`
+N allows N claims (x/claims `authz.go` `Accept` takes one per claim and drops
+the constraint at 0), and the chain has no one-claim-per-agent rule. A sent
+application keeps its draft (`next` answers `submitted`) but leaves the
+index; `discard` deletes it, so they can apply again. `my_drafts` lists the
+open drafts and the last five sent.
+
+The single-value book under `drafts` existed only on unreleased branches and
+is ignored.
 
 ## Rules
 
 1. **Reads never throw.** Every read goes through ixo-chain's `http.ts`
    (`exchange` / `withRetry`): per-attempt timeout (8 s for documents and the
    job list, 11 s for Blocksync, 8 s for REST), the 20 s tool budget, no
-   redirects, body caps (job list 256 KiB, profile 64 KiB, form 512 KiB), one
+   redirects, body caps (job list 256 KiB, profile 64 KiB, form 128 KiB: the
+   largest real Yoma form is about 20 KB), one
    retry after `Retry-After` or a jittered 1–3 s on 429/502/503/504/network,
    never on a timeout, and the 10 s unhealthy mark after a 429 or 503. A
    failure is `{ ok: false, reason, detail, retryable }`; an oversized
@@ -115,69 +161,166 @@ book under `drafts` existed only on unreleased branches and is ignored.
    a malformed form (no pages) answers that line `unavailable`, not
    retryable. The job list is read once per call. Either tool's answer is at
    most 12,000 JSON characters: `yoma_lookup` leaves out the largest results
-   as `too_large`; `yoma_form` shortens answer values and option lists and
-   says `truncated: true`.
+   as `too_large`; `yoma_form` shortens option lists of the question shown
+   and says `truncated: true` (every option still counts when the reply is
+   read). A read-back is never cut: it comes in pages of at most 8,000
+   characters (`review` with `page`).
 5. **Upstream text is data.** Profile names (120), descriptions (600), form
-   titles and questions (200), descriptions (500), options (200, at most 60)
-   and validation messages (200) are clipped, and both tool descriptions and
-   the operating guide say they are data, never instructions.
+   titles and questions (200), descriptions (500), options (200, at most 60;
+   a longer list says `optionsCut` with the web link) and validation messages
+   (200) are clipped, and both tool descriptions and the operating guide say
+   they are data, never instructions — what Auth Hub said about a failed card
+   (`lastCard.hubSaid`, the receipt's plain `message`) included. A failure
+   receipt's optional technical `detail` is never read.
 6. **Forms follow their own rules.** `survey-core` 2.3.11 (the Portal's
-   version) decides visibility, required fields, validation and computed
-   values, on one model per action. Repeating sections are asked item by item
-   (`shops[2].photo`), held to their minimum (`minPanelCount`, or one when
-   required) by `review`, `submit` and `section` with `addAnother: false`.
-   Jambo's `map-grid-selector` is registered so a WhatsApp pin becomes the
-   same geohash cell Jambo stores, at a precision clamped to 1–12. Questions
-   chat cannot ask (signatures) answer `web_only` with the job's Jambo link.
-7. **Choices.** With a Clef runner (`getClef`), Clef reads the reply against
-   the options at the survey thresholds (0.7 accept, 0.3 maybe, 0.6 genuine
-   write-in), raced against the tool's deadline; without one, when Clef
-   fails, or when it answers late, only an option number or the exact option
-   text counts and anything else is `unclear`.
-8. **Files** come from the turn's `ctx.session.channel.attachments` (the
-   runtime release that carries WhatsApp files), each checked (https link,
-   sha256, size), matched against the question's `acceptedTypes`; a file
-   already in the draft (same sha256) answers `duplicate`.
-9. **Sending**, only with `confirmed: true` (see above). An application goes out as the application card
-   (`ixo.bid.submit.v1`), logged work as the claim card
-   (`ixo.claim.submit.v1`) — `@ixo/action-protocol` 0.7.0, Hub protocol
-   level 5. The plugin first reads `ctx.hubActions.capabilities()`: when the
-   Hub does not offer that kind to the account it answers `not_enabled`, not
-   retryable ("Sending … from chat isn't switched on for this number yet;
-   everything is saved."). The claim card carries the answers without file
-   questions (`data`, at most 60,000 characters), the summary rows, and one
-   `evidence` entry per file still answering a visible question (`field` as
-   a dotted path, `shops[2].photo` → `shops.2.photo`; the gateway link,
-   filename, type, size and SHA-256; at most 30). A draft that does not fit
-   answers `too_large`, not retryable. On approval the Hub uploads the files
-   to the collection's claims lane as the person, signs the answers, saves the
-   claim to the claims bot and submits it on chain, in one approval.
-   The request key hashes the draft's last change and its `cardAttempt`: the
-   same answers never make two cards, and a card that was declined, expired,
-   cancelled or failed — or got no outcome by its expiry (plus 60 s) — is
-   cleared and `cardAttempt` bumped, so it can be sent again in a new run.
-   A failed card's receipt (`ixo.submission.failed.v1`) is kept on the draft
-   as `lastCard` (`stoppedAt`, `hubSaid`) until the next card is sent; a
-   submitted claim keeps its `claimId` from `ixo.claim.submission.v1`.
-   Answers are locked while a card waits.
+   version; Jambo renders with 1.9.101, through `survey-react-ui`) decides
+   visibility, required fields, validation and computed values. A question
+   is asked only when it is on the form as the person sees it
+   (`isVisibleInSurvey`: itself, its panel and page, and for a repeating
+   section the section and that item). Repeating sections are asked item by
+   item (`shops[2].photo`); "another item?" is asked right after a section's
+   items, before what follows it, and the section is held to its minimum
+   (`minPanelCount`, or one when required) by `review`, `submit` and
+   `section` with `addAnother: false`. A skipped question that becomes
+   required is asked again, and `review`/`submit` always list a missing
+   required answer. Typed answers are checked before the form sees them
+   (survey-core takes `abc` for a date and drops it for a number without an
+   error): dates `YYYY-MM-DD` (`-`, `/` or `.`), `datetime-local` as
+   `YYYY-MM-DD HH:mm`, numbers with a decimal comma (`1,5`) but not the
+   ambiguous `1,500`, ratings on the form's own scale, emails, links, phones.
+   Questions chat cannot ask (signatures) answer `web_only` with the job's
+   Jambo link.
+
+   **Hidden answers.** What is read back, shown on the card and sent comes
+   from one model whose hidden answers were cleared (every question not
+   `isVisibleInSurvey`, nested ones included), whatever the form's
+   `clearInvisibleValues` says; the draft keeps them in case the person
+   changes the answer that hid them. This follows the Portal (it submits
+   from `onComplete`, after SurveyJS clears them) and differs from Jambo,
+   which submits from `onCompleting`, before the clearing, and so sends hidden
+   answers too.
+
+   **The map question.** Jambo's `map-grid-selector` is registered so a
+   WhatsApp pin becomes a cell like Jambo's: `geoId` (geohash at the form's
+   `gridPrecision`, default 7, clamped to 1–12), `latitude`, `longitude`,
+   `gridPrecision`, and `placeName` from the pin's name. Jambo also stores
+   what HERE reverse-geocoding returns (`placeIdentifier`, `placeDistance`,
+   `postalAddressName`, country, state, county, city, district, road, postal
+   code and house fields); chat produces none of those.
+
+7. **Choices.** The options are the form's choices, then its "None",
+   "Refuse to answer" and "Don't know" items when switched on (found by
+   identity, `noneItem`/`refuseItem`/`dontKnowItem`, never by value: a
+   regular choice may be valued `none`), each stored with the form's own
+   value; on a checkbox those go on their own. "Other" is the form's
+   `otherItem`; an own answer is stored where the form keeps it (a
+   `-Comment` value, or the value itself with `storeOthersAsComment: false`).
+   With a Clef runner (`getClef`), Clef reads the reply against the options
+   at the survey thresholds (0.7 accept, 0.3 maybe, 0.6 genuine write-in),
+   for at most 4.5 s; without one, when Clef fails, or when it answers late,
+   only an option number or the exact option text counts and anything else
+   is `unclear`. When the options are themselves numbers, a typed number is
+   read only as an option's text, never as a position.
+8. **Files** come from the turn's `ctx.session.channel.attachments`. **Hard
+   dependency:** that field arrives with the runtime release that carries
+   WhatsApp files (PR 422, with gateway `feat/whatsapp-media`); without it
+   every file question answers `no_file` and a claim with a required file
+   cannot be sent from chat. Each file is checked (https link, sha256, size)
+   and matched against the question's `acceptedTypes`; a file already in the
+   draft (same sha256) answers `duplicate`. The gateway's link is
+   `<origin>/media/<binding>/<id>?exp=<unix s>&sig=…`, valid 30 days: before
+   a claim is sent, a file whose `exp` is less than an hour away (the card's
+   15-minute review and the Hub's upload) leaves the draft and the answer is
+   `file_expired`, asking for it again. Auth Hub checks only that the link is
+   https on the gateway's host under `/media/`; a lapsed link would fail the
+   card at its `evidence` step.
+9. **Sending**, only on the recorded consent (see above). An application
+   goes out as the application card (`ixo.bid.submit.v1`, role `SA`, as
+   Jambo's bids), logged work as the claim card (`ixo.claim.submit.v1`) —
+   `@ixo/action-protocol` 0.7.0, Hub protocol level 5. The plugin reads
+   `ctx.hubActions.capabilities()`: when the Hub does not offer that kind it
+   answers `not_enabled`, not retryable ("…isn't switched on for this
+   oracle's Auth Hub account yet"). The network is the account's
+   (`capabilities.network`; the Hub names it when bank sends or chain
+   transactions are on), else the oracle's `NETWORK`; one that differs from
+   the oracle's answers `unavailable`, not retryable. An invalid `NETWORK`
+   reads nothing (no mainnet fallback).
+
+   The card's rows are every answer in full: a value longer than the card's
+   500 characters is split over rows ("Describe it (2/3)"); a draft that
+   needs more than the card's 60 rows, more than 30 files or more than
+   60,000 characters of data answers `too_large` with the Jambo link, so
+   nothing is sent that the person was not shown. The claim card carries the
+   answers without file questions (`data`) and one `evidence` entry per file
+   still answering a visible question (`field` as a dotted path,
+   `shops[2].photo` → `shops.2.photo`). On approval the Hub uploads the files
+   to the collection's claims lane as the person, signs the answers, saves
+   the claim to the claims bot and submits it on chain; the person must tick
+   consent on the Hub page.
+
+   **Request keys.** Each send has its own key: SHA-256 of the owner's DID,
+   the run, the tool call and the draft's `cardAttempt` (Auth Hub keys are
+   unique per oracle account and 1–120 characters). The runtime binds a key
+   to the run and request that reserved it (`HubActionStore.reserve`), so a
+   retry on a later message needs a new key; a send that fails bumps
+   `cardAttempt`. What stops a second card is the draft's `card`, set as
+   soon as one is made.
+
+   **Hub refusals** come back in plain words, as the hub-actions plugin
+   relays them: a typed refusal (`HubActionRefused`) in the runtime's words,
+   `refused` (`expired` for a lapsed request), not retryable; an HTTP status
+   the client did not type by code (429 `rate_limited` and 503/504
+   `unavailable` retryable; 401/403, 413 and other codes not); a timeout,
+   retryable.
+
+   **The card's outcome** is read when the draft is next touched (each read
+   at most 3 s; `my_drafts` asks about at most three cards). `succeeded`:
+   sent, with the claim id from `ixo.claim.submission.v1`. `declined`,
+   `expired`, `cancelled`, `failed`: the card is cleared, `cardAttempt`
+   bumped, and a failed card's step and plain `message` kept as `lastCard`
+   (`stoppedAt`, `hubSaid`) until the next card. `authorized`, `submitted`,
+   `unknown` are **in flight** — the Hub's cron finishes the steps (at most 5
+   transient failures or 30 minutes, then `failed`) and a claim can sit at
+   `unknown` until the chain settles — so they are never cleared and never
+   sent again, whatever the time; answers, skips and sections stay locked
+   and `discard` is refused until a final outcome, or a day after the card's
+   expiry with none. No outcome yet: cleared only when the host's status
+   read carries the Hub's `reviewStatus: 'expired'` (Auth Hub records the
+   `expired` outcome itself within a minute of expiry).
+
+   **Known gap:** if the Hub made a card but its answer never arrived (a
+   timeout), the next send makes a second card: the first is not known
+   locally. The person sees both; the Hub page shows each.
 
 10. **Instant permission (optional).** A host may pass
     `instantPermission: { allows(collectionId), grant({ collectionId, admin,
-address, signal }) }`. For a collection it `allows`, `submit` of a
-    finished application sends no card: it calls `grant` (a failure answers
-    `unavailable`, retryable, and the application stays open; the turn's abort
-    is rethrown), marks the application done, reads the permission on chain
-    again and answers `can_log_work` ("it can take a few seconds to show"
-    when the grant is not visible yet). A claim on such a collection without
-    permission answers `apply_first` instead of `not_accepted`. Without the
-    hook, or when `allows` is false, every job waits for the operator to
-    accept the application. The plugin holds no wallet: the host decides
-    which collections and grants with its own key.
+address, answers, signal }) }`. For a collection it `allows`, `submit` of a
+    finished application sends no card and **no bid: the application itself
+    is not sent to the programme**; the person is told so, and the host gets
+    the answers (`answers`, hidden ones and files left out) to record if it
+    must. The plugin records the call on the draft before making it and makes
+    it at most once per application (a call that threw may be made again,
+    one that never answered is not: `permission_pending`, and they can delete
+    the application and apply again); `grant` must still be idempotent. A
+    grant that throws answers `unavailable`, retryable; the turn's abort is
+    rethrown. On success the application moves to the sent record and its
+    draft goes, the permission is read on chain again, and the answer is
+    `can_log_work` ("it can take a few seconds to show" when not visible
+    yet). `next` on that application then answers `submitted` while the
+    permission lasts, and starts a fresh application once it is used up. A
+    claim without permission answers `apply_first` instead of
+    `not_accepted`. Without the hook, or when `allows` is false, every job
+    waits for the operator to accept the application through the bids bot.
+    The plugin holds no wallet.
 
 ## Known limits
 
 - **Lockfile.** `@ixo/action-protocol` is pinned to 0.7.0, which is not on
   npm yet: `pnpm-lock.yaml` must be regenerated once it is published.
+- **Hub status surface.** `ctx.hubActions.status` takes no timeout (the
+  plugin races it against 3 s; the read itself runs on to the client's
+  10 s) and carries no review state today, so a card with no outcome is
+  cleared only once the Hub records `expired`.
 - **Mainnet only for programmes**: the Jambo worker has no testnet or devnet
   list.
 - **Pay** reads as an amount only for USDC (`ibc/6BBE…F97B`, "$1.27") and
