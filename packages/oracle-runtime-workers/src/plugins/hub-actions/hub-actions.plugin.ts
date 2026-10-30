@@ -762,14 +762,21 @@ async function hubActionStatus(
   )
     return { status: 'unavailable' };
   try {
-    const { outcome, summary } = await ctx.hubActions.status(
+    const read = await ctx.hubActions.status(
       ctx.user.did,
       parsed.data.actionId,
     );
+    if (!read.held)
+      return {
+        status: 'unavailable',
+        reason: 'No Hub action with this id was prepared for this owner.',
+      };
     return {
       status: 'known',
-      outcome: modelOutcome(outcome),
-      ...(summary ? { summary } : {}),
+      reviewStatus: read.reviewStatus,
+      operationStatus: read.operationStatus,
+      outcome: modelOutcome(read.outcome),
+      ...(read.summary ? { summary: read.summary } : {}),
     };
   } catch (error) {
     // An Auth Hub that must be updated first: plain words, not a tool error.

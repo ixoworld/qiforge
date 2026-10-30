@@ -551,6 +551,24 @@ export type SessionSurface =
   | { kind: 'stream' }
   | { kind: 'chat'; surface: string; label: string };
 
+/** What `ctx.hubActions.status` reads. */
+export interface HubActionStatusRead {
+  /** False when this owner object holds no action with this id (Auth Hub was not asked). */
+  held: boolean;
+  /**
+   * Auth Hub's review status (`prepared`, `authorized`, `declined`,
+   * `expired`, …) and operation status, as it answered; null when not held.
+   * With no outcome yet they tell an action still waiting from one whose
+   * review lapsed.
+   */
+  reviewStatus: string | null;
+  operationStatus: string | null;
+  /** The latest authenticated outcome; null when there is none (yet). */
+  outcome: ActionOutcomeV1 | null;
+  /** For a bank-send receipt, the owner-facing line. */
+  summary: string | null;
+}
+
 export interface RuntimeContext<TConfig = MergedConfig> {
   /** Authenticated user identity (validated by core auth middleware). */
   user: {
@@ -821,11 +839,20 @@ export interface RuntimeContext<TConfig = MergedConfig> {
       requestKey: string;
       operation: ActionOperationV1;
     }): Promise<ActionReferenceV1>;
-    /** The latest authenticated outcome and, for a transfer, its owner-facing line. */
+    /**
+     * A fresh, authenticated read of one of this owner's actions: Auth
+     * Hub's review and operation status, the latest outcome (null: none
+     * yet) and, for a transfer, its owner-facing line. An action this
+     * owner object never prepared is `held: false` and Auth Hub is not
+     * asked. `timeoutMs` bounds the Hub read (default 10 s). Rejects with
+     * `HubActionRefused` (with `httpStatus`) when Auth Hub refuses the read,
+     * for example when it must be updated first.
+     */
     status(
       ownerDid: string,
       actionId: string,
-    ): Promise<{ outcome: ActionOutcomeV1 | null; summary: string | null }>;
+      opts?: { timeoutMs?: number },
+    ): Promise<HubActionStatusRead>;
   };
 
   decisions: {

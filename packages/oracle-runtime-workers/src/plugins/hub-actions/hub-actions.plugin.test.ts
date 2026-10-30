@@ -28,7 +28,24 @@ import type {
   P2Operation,
 } from '@ixo/action-protocol';
 import { HubActionRefused } from '../../hub-actions/store';
-import type { RuntimeContext } from '../../plugin-api/types';
+import type {
+  HubActionStatusRead,
+  RuntimeContext,
+} from '../../plugin-api/types';
+
+/** A status read of a held action, as the owner object answers it. */
+function heldStatus(
+  outcome: HubActionStatusRead['outcome'] = null,
+  summary: string | null = null,
+): HubActionStatusRead {
+  return {
+    held: true,
+    reviewStatus: 'authorized',
+    operationStatus: 'submitted',
+    outcome,
+    summary,
+  };
+}
 
 const id = 'C'.repeat(32);
 const reference = {
@@ -118,7 +135,7 @@ describe('Hub actions Workers plugin', () => {
         chainTransaction: async () => {
           throw new Error('unused');
         },
-        status: async () => ({ outcome: null, summary: null }),
+        status: async () => heldStatus(),
       },
     });
     const tool = new HubActionsPlugin()
@@ -247,7 +264,7 @@ describe('Hub actions Workers plugin', () => {
         chainTransaction: async () => {
           throw new Error('unused');
         },
-        status: async () => ({ outcome: null, summary: null }),
+        status: async () => heldStatus(),
       },
     });
     const tool = new HubActionsPlugin()
@@ -305,7 +322,7 @@ describe('Hub actions Workers plugin', () => {
         chainTransaction: async () => {
           throw new Error('unused');
         },
-        status: async () => ({ outcome: failed, summary: null }),
+        status: async () => heldStatus(failed),
       },
     });
     const tool = new HubActionsPlugin()
@@ -315,6 +332,8 @@ describe('Hub actions Workers plugin', () => {
     const result = await tool.handler({ actionId: id }, ctx);
     expect(result).toEqual({
       status: 'known',
+      reviewStatus: 'authorized',
+      operationStatus: 'submitted',
       outcome: {
         ...failed,
         receipt: {
@@ -405,7 +424,7 @@ describe('Hub actions Workers plugin', () => {
         chainTransaction: async () => {
           throw new Error('unused');
         },
-        status: async () => ({ outcome: null, summary: null }),
+        status: async () => heldStatus(),
       },
     });
     const tool = new HubActionsPlugin()
@@ -448,7 +467,7 @@ describe('Hub actions Workers plugin', () => {
         chainTransaction: async () => {
           throw new Error('unused');
         },
-        status: async () => ({ outcome: null, summary: null }),
+        status: async () => heldStatus(),
       },
     });
     const tool = new HubActionsPlugin()
@@ -509,7 +528,7 @@ describe('Hub actions Workers plugin', () => {
         chainTransaction: async () => {
           throw new Error('not called');
         },
-        status: async () => ({ outcome: null, summary: null }),
+        status: async () => heldStatus(),
       },
     });
     const tool = new HubActionsPlugin()
@@ -651,7 +670,7 @@ describe('Hub actions Workers plugin', () => {
           chainTransaction: async () => {
             throw new Error('unused');
           },
-          status: async () => ({ outcome: null, summary: null }),
+          status: async () => heldStatus(),
         },
       });
       const tool = new HubActionsPlugin()
@@ -695,7 +714,7 @@ describe('Hub actions Workers plugin', () => {
         chainTransaction: async () => {
           throw new Error('unused');
         },
-        status: async () => ({ outcome: null, summary: null }),
+        status: async () => heldStatus(),
       },
     });
     const tool = new HubActionsPlugin()
@@ -767,7 +786,7 @@ describe('Hub actions Workers plugin', () => {
         chainTransaction: async () => {
           throw new Error('unused');
         },
-        status: async () => ({ outcome: null, summary: null }),
+        status: async () => heldStatus(),
       },
     });
     const tool = new HubActionsPlugin()
@@ -829,7 +848,7 @@ describe('Hub actions Workers plugin', () => {
         options: async () => options,
         request: async () => reference,
         chainTransaction: async () => reference,
-        status: async () => ({ outcome: null, summary: null }),
+        status: async () => heldStatus(),
       },
     });
     const tools = new HubActionsPlugin().getTools();
@@ -883,10 +902,8 @@ describe('Hub actions Workers plugin', () => {
         chainTransaction: async () => {
           throw new Error('unused');
         },
-        status: async () => ({
-          outcome: null,
-          summary: 'Transfer of 1.25 USDC confirmed on chain.',
-        }),
+        status: async () =>
+          heldStatus(null, 'Transfer of 1.25 USDC confirmed on chain.'),
       },
     });
     const tool = new HubActionsPlugin()
@@ -895,8 +912,46 @@ describe('Hub actions Workers plugin', () => {
     if (!tool) throw new Error('status tool missing');
     expect(await tool.handler({ actionId: id }, ctx)).toEqual({
       status: 'known',
+      reviewStatus: 'authorized',
+      operationStatus: 'submitted',
       outcome: null,
       summary: 'Transfer of 1.25 USDC confirmed on chain.',
+    });
+    // Auth Hub's statuses tell "no outcome yet" from a lapsed review.
+    const lapsed = makeRuntimeContext({
+      ...ctx,
+      hubActions: {
+        ...ctx.hubActions!,
+        status: async () => ({
+          ...heldStatus(),
+          reviewStatus: 'expired',
+          operationStatus: 'expired',
+        }),
+      },
+    });
+    expect(await tool.handler({ actionId: id }, lapsed)).toEqual({
+      status: 'known',
+      reviewStatus: 'expired',
+      operationStatus: 'expired',
+      outcome: null,
+    });
+    // An id this owner never prepared is not a status.
+    const unknown = makeRuntimeContext({
+      ...ctx,
+      hubActions: {
+        ...ctx.hubActions!,
+        status: async () => ({
+          held: false,
+          reviewStatus: null,
+          operationStatus: null,
+          outcome: null,
+          summary: null,
+        }),
+      },
+    });
+    expect(await tool.handler({ actionId: id }, unknown)).toEqual({
+      status: 'unavailable',
+      reason: 'No Hub action with this id was prepared for this owner.',
     });
   });
 });
@@ -974,7 +1029,7 @@ describe('request_chain_transaction', () => {
           throw new Error('unused');
         },
         chainTransaction,
-        status: async () => ({ outcome: null, summary: null }),
+        status: async () => heldStatus(),
       },
     });
   }

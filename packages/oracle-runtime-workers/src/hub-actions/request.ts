@@ -190,10 +190,13 @@ export async function prepareHubAction(
     input.operation,
     Math.floor(nowMs / 1000) + 15 * 60,
   );
-  // A retry of a key whose reservation lapsed: the Hub refuses a past
-  // expiry before its idempotency lookup, so a POST could never succeed.
-  // The recorded reference (the first POST's) is the answer if there is
-  // one; otherwise the request is over.
+  // A retry of a key whose reservation lapsed. Auth Hub looks the key up
+  // before it checks the expiry: a POST of a key it already holds (same
+  // binding, expiry and operation) answers the original reference even
+  // after that expiry, and only a key it does not hold is refused with 400
+  // `invalid_expiry`. Here the reference recorded from the first POST is the
+  // answer if there is one; without one the request is treated as over and
+  // nothing is sent.
   if (expiresAt <= Math.floor(nowMs / 1000)) {
     const recorded = await store.byRequestKey?.(input.requestKey);
     if (recorded) return recorded;

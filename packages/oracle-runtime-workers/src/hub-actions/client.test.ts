@@ -416,6 +416,7 @@ describe('Hub action HTTP client', () => {
       name: 'HubActionRefused',
       kind: 'refused',
       message: HUB_UPDATE_REQUIRED,
+      httpStatus: 400,
     };
     await expect(client.capabilities()).rejects.toMatchObject(refused);
     await expect(client.status(id)).rejects.toMatchObject(refused);

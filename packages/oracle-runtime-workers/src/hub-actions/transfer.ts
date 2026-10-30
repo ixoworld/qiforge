@@ -313,7 +313,8 @@ export function hubPrepareRefusal(
 ): HubActionRefused | null {
   const parsed = hubErrorBody(body);
   const unfixable = unfixableRefusal(status, parsed, subject);
-  if (unfixable) return new HubActionRefused('refused', unfixable);
+  if (unfixable)
+    return new HubActionRefused('refused', unfixable, undefined, status);
   if (!parsed) return null;
   const reason = parsed.reason
     ? quoteHubText('reason', parsed.reason, HUB_REASON_MAX)
@@ -326,16 +327,22 @@ export function hubPrepareRefusal(
     return new HubActionRefused(
       'refused',
       `${words(subject)}.${reason ? ` ${reason}.` : ''}`,
+      undefined,
+      status,
     );
   if (HUB_TRANSIENT_CODES[status]?.includes(parsed.error))
     return new HubActionRefused(
       'refused',
       `Auth Hub is temporarily unavailable for this (${parsed.error}); try again shortly.`,
+      undefined,
+      status,
     );
   if (status === 409)
     return new HubActionRefused(
       'refused',
       `This operation is not available for this account (${parsed.error}).${reason ? ` ${reason}.` : ''}`,
+      undefined,
+      status,
     );
   return null;
 }
