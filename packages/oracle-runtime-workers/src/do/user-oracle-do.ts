@@ -52,7 +52,6 @@ import {
   bankReceiptSummary,
   bankStepsInBaseUnits,
 } from '../hub-actions/transfer';
-import { gatewayOutcome } from '../hub-actions/relay';
 import {
   HUB_CHECK_AFTER_EXPIRY_MS,
   HubActionRefused,
@@ -438,6 +437,7 @@ import {
 } from './ucan-service';
 import type {
   ChainTxMessageInput,
+  HubActionStatusRead,
   UcanDelegation,
   UserContextData,
 } from '../plugin-api/types';
@@ -2288,8 +2288,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                 }) => this.requestHubAction(input),
                 chainTransaction: (input) =>
                   this.chainTransactionHubAction(input),
-                status: (ownerDid: string, actionId: string) =>
-                  this.hubActionStatusForTool(ownerDid, actionId),
+                status: (
+                  ownerDid: string,
+                  actionId: string,
+                  opts?: { timeoutMs?: number },
+                ) => this.hubActionStatusForTool(ownerDid, actionId, opts),
               },
             }
           : {}),
@@ -3345,11 +3348,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // The gateway parses with @ixo/action-protocol 0.4.1, whose bank
       // receipt is exact: the 0.5.0 `denom`/`amountBaseUnits` fields are
       // dropped here (the owner-facing amount line comes from
-      // hub_action_status instead), so the emitted shape stays 0.4.1. A
-      // failure receipt's technical `detail` is never handed on.
+      // hub_action_status instead), so the emitted shape stays 0.4.1. Every
+      // other receipt goes as Auth Hub signed it, a failure's `detail`
+      // included: the gateway confirms an outcome by comparing the whole
+      // receipt with Auth Hub's copy. Only what the model sees drops it.
       const hubActionOutcomes = (
         await this.hubOutcomesForRun(ownerDid, result.sessionId, result.runId)
-      ).map(gatewayOutcome);
+      ).map((outcome) => ({ ...outcome, receipt: v1Receipt(outcome.receipt) }));
       return {
         ...result,
         ...(actionOutcomes.length ? { actionOutcomes } : {}),
@@ -3630,24 +3635,58 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /**
-     * `hub_action_status`: the outcome plus, for a bank send, the
-     * owner-facing line (amount from the token stored at preparation).
+     * `ctx.hubActions.status` (and `hub_action_status`): Auth Hub's review
+     * and operation status, the outcome and, for a bank send, the
+     * owner-facing line (amount from the token stored at preparation). An
+     * action this object never prepared is `held: false`, without a Hub
+     * read.
      */
     private async hubActionStatusForTool(
       ownerDid: string,
       actionId: string,
-    ): Promise<{ outcome: ActionOutcomeV1 | null; summary: string | null }> {
-      const outcome = await this.statusHubAction(ownerDid, actionId);
-      if (!outcome) return { outcome, summary: null };
-      const token = await this.hubActionStore!.token(ownerDid, actionId);
-      return { outcome, summary: bankReceiptSummary(outcome.receipt, token) };
+      opts: { timeoutMs?: number } = {},
+    ): Promise<HubActionStatusRead> {
+      const read = await this.statusHubAction(
+        ownerDid,
+        actionId,
+        opts.timeoutMs,
+      );
+      if (!read)
+        return {
+          held: false,
+          reviewStatus: null,
+          operationStatus: null,
+          outcome: null,
+          summary: null,
+        };
+      const token = read.outcome
+        ? await this.hubActionStore!.token(ownerDid, actionId)
+        : null;
+      return {
+        held: true,
+        reviewStatus: read.reviewStatus,
+        operationStatus: read.operationStatus,
+        outcome: read.outcome,
+        summary: read.outcome
+          ? bankReceiptSummary(read.outcome.receipt, token)
+          : null,
+      };
     }
 
+    /**
+     * One authenticated status read of a held action (null: not held), its
+     * outcome recorded when new. An outcome for another revision than the
+     * one Auth Hub reports is not taken (`outcome: null`).
+     */
     private async statusHubAction(
       ownerDid: string,
       actionId: string,
       timeoutMs?: number,
-    ): Promise<ActionOutcomeV1 | null> {
+    ): Promise<{
+      reviewStatus: string;
+      operationStatus: string;
+      outcome: ActionOutcomeV1 | null;
+    } | null> {
       const held = await this.hubActionStore?.get(ownerDid, actionId);
       if (!held || !this.hubActionClient) return null;
       const status = await this.hubActionClient.status(actionId, timeoutMs);
@@ -3656,16 +3695,20 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         canonicalJson(status.reference) !== canonicalJson(held.reference)
       )
         throw new Error('Hub status does not match the prepared action');
+      const read = {
+        reviewStatus: status.reviewStatus,
+        operationStatus: status.operationStatus,
+      };
       if (status.outcome) {
         if (
           status.revision !== status.outcome.authorizedRevision ||
           status.digest !== status.outcome.authorizedDigest
         )
-          return null;
+          return { ...read, outcome: null };
         if (await this.hubActionStore!.recordOutcome(status.outcome))
           this.markDirty();
       }
-      return status.outcome;
+      return { ...read, outcome: status.outcome };
     }
 
     /**
@@ -3704,11 +3747,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           // refreshed writes it, at most one per poll.
           this.markDirty();
           try {
-            const fresh = await this.statusHubAction(
-              ownerDid,
-              row.reference.id,
-              HUB_POLL_TIMEOUT_MS,
-            );
+            const fresh = (
+              await this.statusHubAction(
+                ownerDid,
+                row.reference.id,
+                HUB_POLL_TIMEOUT_MS,
+              )
+            )?.outcome;
             if (fresh && (!latest || fresh.sequence > latest.sequence))
               latest = fresh;
           } catch (error) {

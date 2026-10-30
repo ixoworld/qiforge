@@ -147,7 +147,12 @@ export class HubActionClient {
     if (body === undefined && response.status === 400) {
       const answer: unknown = await response.json().catch(() => null);
       if (isRecord(answer) && answer.error === 'invalid_request')
-        throw new HubActionRefused('refused', HUB_UPDATE_REQUIRED);
+        throw new HubActionRefused(
+          'refused',
+          HUB_UPDATE_REQUIRED,
+          undefined,
+          400,
+        );
     }
     if (!response.ok)
       throw new Error(`Hub action request returned ${response.status}`);

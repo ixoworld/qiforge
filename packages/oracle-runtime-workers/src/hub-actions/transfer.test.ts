@@ -403,6 +403,26 @@ describe('Hub prepare refusals', () => {
     );
   });
 
+  it('carries the HTTP status Auth Hub answered, so a caller can retry a 429 or 503 without reading the words', () => {
+    for (const [status, body] of [
+      [429, { error: 'rate_limited' }],
+      [503, { error: 'transfer_unavailable' }],
+      [409, { error: 'sequence_mismatch' }],
+      [409, { error: 'operation_not_enabled' }],
+      [404, { error: 'not_found' }],
+      [400, { error: 'simulation_failed', reason: 'out of gas' }],
+      [400, { error: 'invalid_request' }],
+    ] as const)
+      expect(hubPrepareRefusal(status, body)).toMatchObject({
+        name: 'HubActionRefused',
+        httpStatus: status,
+      });
+    // A runtime refusal (no Hub answer) has none.
+    expect(() => toBaseUnits('1.2345678', 6)).toThrow(
+      expect.objectContaining({ httpStatus: undefined }),
+    );
+  });
+
   it('tells a temporary Hub condition from a deterministic refusal', () => {
     for (const [status, error] of [
       [409, 'sequence_mismatch'],

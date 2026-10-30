@@ -552,7 +552,7 @@ describe('Hub actions in the owner object', () => {
     });
   });
 
-  it('follows a claim card from authorized through submitted and unknown to its receipt, and hands no failure detail on', async () => {
+  it('follows a claim card from authorized through submitted and unknown to its receipt, relays a failure exactly as signed and keeps its detail from the model', async () => {
     await withHub('hub-claim-card', async (h) => {
       const claim = await h.prepared(21);
       const failedRef = await h.prepared(22);
@@ -609,17 +609,17 @@ describe('Hub actions in the owner object', () => {
         failedAt: 1770000000004,
       };
       await deliver(at(failedRef, 4, 'failed', failure));
-      // The object keeps what Auth Hub sent; the gateway is handed the
-      // receipt without its technical detail.
+      // The object keeps what Auth Hub sent, and the gateway is handed it
+      // exactly as signed (`detail` included): it confirms an outcome by
+      // comparing the whole receipt with Auth Hub's copy.
       expect(
         (await h.store.outcomeAt(OWNER, failedRef.id, 4))?.receipt,
       ).toEqual(failure);
       const relayed = await h.poll();
       expect(relayed.map((o) => o.status)).toEqual(['succeeded', 'failed']);
       expect(relayed[0]!.receipt).toEqual(receipt);
-      const { detail: _detail, ...plain } = failure;
-      expect(relayed[1]!.receipt).toEqual(plain);
-      expect(JSON.stringify(relayed)).not.toContain('answered 503');
+      expect(relayed[1]!.receipt).toEqual(failure);
+      expect(relayed[1]).toEqual(h.outcomes.get(failedRef.id));
       // hub_action_status: no detail, the Hub's words quoted as data.
       const status = new HubActionsPlugin()
         .getTools()
@@ -664,6 +664,47 @@ describe('Hub actions in the owner object', () => {
         },
       });
       expect(JSON.stringify(seen)).not.toContain('detail');
+      expect(JSON.stringify(seen)).not.toContain('answered 503');
+    });
+  });
+
+  it("reads a held action's Hub statuses for plugins, tells an unknown id apart, and bounds the read", async () => {
+    await withHub('hub-status-read', async (h) => {
+      // Never prepared here: no Hub call at all.
+      expect(
+        await call(h.host, 'hubActionStatusForTool', OWNER, 'Z'.repeat(32)),
+      ).toEqual({
+        held: false,
+        reviewStatus: null,
+        operationStatus: null,
+        outcome: null,
+        summary: null,
+      });
+      expect(h.calls).toEqual([]);
+      const ref = await h.prepared(31);
+      // Held, no outcome yet: Auth Hub's own statuses come through.
+      expect(
+        await call(h.host, 'hubActionStatusForTool', OWNER, ref.id),
+      ).toEqual({
+        held: true,
+        reviewStatus: 'authorized',
+        operationStatus: 'submitted',
+        outcome: null,
+        summary: null,
+      });
+      h.outcomes.set(ref.id, outcome(ref, 2, 'succeeded'));
+      expect(
+        await call(h.host, 'hubActionStatusForTool', OWNER, ref.id),
+      ).toMatchObject({ held: true, outcome: outcome(ref, 2, 'succeeded') });
+      // A caller's timeout bounds the Hub read.
+      h.setMode('hang');
+      const started = Date.now();
+      await expect(
+        call(h.host, 'hubActionStatusForTool', OWNER, ref.id, {
+          timeoutMs: 50,
+        }),
+      ).rejects.toThrow();
+      expect(Date.now() - started).toBeLessThan(5_000);
     });
   });
 
@@ -1559,7 +1600,13 @@ describe('Hub actions in the owner object', () => {
       h.setMode('up');
       expect(
         await call(h.host, 'hubActionStatusForTool', OWNER, refused.id),
-      ).toEqual({ outcome: failed, summary: null });
+      ).toEqual({
+        held: true,
+        reviewStatus: 'authorized',
+        operationStatus: 'submitted',
+        outcome: failed,
+        summary: null,
+      });
     });
   });
 });

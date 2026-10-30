@@ -42,13 +42,17 @@ const HUB_RETENTION_SECONDS = 30 * 24 * 60 * 60;
 /**
  * A refusal the model can act on: a cap reached, a request that expired, or
  * an operation the owner's own state rules out (an unknown connection, an
- * email whose earlier send is unconfirmed: `priorActionId`).
+ * email whose earlier send is unconfirmed: `priorActionId`). A refusal
+ * Auth Hub answered carries its HTTP status (`httpStatus`), so a caller can
+ * tell a 429 or 503, which pass with time, from a deterministic refusal
+ * without reading the words.
  */
 export class HubActionRefused extends Error {
   constructor(
     readonly kind: 'limit' | 'expired' | 'refused',
     message: string,
     readonly priorActionId?: string,
+    readonly httpStatus?: number,
   ) {
     super(message);
     this.name = 'HubActionRefused';
