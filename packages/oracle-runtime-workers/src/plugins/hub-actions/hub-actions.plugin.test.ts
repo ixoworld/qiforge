@@ -1,9 +1,23 @@
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { ToolInputParsingException } from '@langchain/core/tools';
-import { HumanMessage } from '@langchain/core/messages';
-import { FakeToolCallingModel, createAgent } from 'langchain';
+import {
+  AIMessage,
+  HumanMessage,
+  ToolMessage,
+  type BaseMessage,
+} from '@langchain/core/messages';
+import { FakeToolCallingModel } from 'langchain';
 import { createMemoryUserKv } from '../../core/user-kv';
+import { isToolNotRun } from '../../core/tool-not-run';
+import { createRuntimeCore } from '../../core';
+import { createMainAgent } from '../../core/main-agent';
+import { contextBudgetFor } from '../../core/context-budget';
+import {
+  createContextGuardMiddleware,
+  type ContextGuardEvent,
+} from '../../core/middlewares/context-guard';
+import type { AmbientServices } from '../../core/runtime-context';
 import {
   CHAIN_TX_LEVEL4_MESSAGE_TYPES,
   CHAIN_TX_MESSAGE_TYPES,
@@ -12,7 +26,7 @@ import {
   type ChainTxMessageType,
 } from '@ixo/action-protocol';
 import { convertToOpenAITool } from '@langchain/core/utils/function_calling';
-import { makeRuntimeContext } from '../../core/test-fixtures';
+import { makeEnv, makeRuntimeContext } from '../../core/test-fixtures';
 import { createNoopAmbient } from '../../core/runtime-context';
 import { wrapPluginTool } from '../../core/wrap-plugin-tool';
 import {
@@ -45,6 +59,7 @@ import type {
   HubActionStatusRead,
   PluginTool,
   RuntimeContext,
+  UserKvSurface,
 } from '../../plugin-api/types';
 
 /** A status read of a held action, as the owner object answers it. */
@@ -3155,6 +3170,7 @@ describe('chain transaction field discovery', () => {
     validatorAddress: VALIDATOR,
     amount: '100',
   };
+  const vote = { type: 'cosmos.gov.vote', proposalId: '5', option: 'yes' };
   const allTypes: ActionCapabilitiesV1 = {
     version: 'ixo.auth-capabilities/2',
     accountId: 'account-three',
@@ -3181,35 +3197,63 @@ describe('chain transaction field discovery', () => {
       status: unused,
     };
   }
-  const session = (id: string) => ({
-    id,
-    client: 'channel' as const,
-    requestId: `request-${id}`,
-    runId: `run-${id}`,
-    channel: {
-      provider: 'whatsapp',
-      bindingId: 'chb_three',
-      bindingRevision: 4,
-    },
-  });
+  const channel = {
+    provider: 'whatsapp',
+    bindingId: 'chb_three',
+    bindingRevision: 4,
+  };
+  /** A turn (`runId`) of `sessionId`, seeing `messages` as its history. */
   function turn(
-    kv: ReturnType<typeof createMemoryUserKv>,
-    id: string,
-    chainTransaction: HubActions['chainTransaction'] = async () => reference,
+    kv: UserKvSurface,
+    sessionId: string,
+    runId: string,
+    options: {
+      messages?: BaseMessage[];
+      chainTransaction?: HubActions['chainTransaction'];
+      warn?: (message: string) => void;
+    } = {},
   ) {
-    return makeRuntimeContext({
-      config: { HUB_ACTIONS_ENABLED: 'true' },
-      user: {
-        did: 'did:ixo:owner',
-        matrixUserId: '@owner:test',
-        ucanDelegation: { raw: 'delegation' },
+    return makeRuntimeContext(
+      {
+        config: { HUB_ACTIONS_ENABLED: 'true' },
+        user: {
+          did: 'did:ixo:owner',
+          matrixUserId: '@owner:test',
+          ucanDelegation: { raw: 'delegation' },
+        },
+        session: {
+          id: sessionId,
+          client: 'channel',
+          requestId: `request-${runId}`,
+          runId,
+          channel,
+        },
+        toolCallId: `call-${runId}`,
+        kv,
+        hubActions: hubActions(
+          options.chainTransaction ?? (async () => reference),
+        ),
+        logger: {
+          log: () => undefined,
+          warn: options.warn ?? (() => undefined),
+          error: () => undefined,
+        },
       },
-      session: session(id),
-      toolCallId: 'tool-call',
-      kv,
-      hubActions: hubActions(chainTransaction),
-    });
+      { state: { messages: options.messages ?? [] } },
+    );
   }
+  /** A finished describe_chain_messages call for `types`, as the history holds it. */
+  const describedTurn = (types: string[], id = 'describe-1'): BaseMessage[] => [
+    new AIMessage({
+      content: '',
+      tool_calls: [{ id, name: 'describe_chain_messages', args: { types } }],
+    }),
+    new ToolMessage({
+      tool_call_id: id,
+      name: 'describe_chain_messages',
+      content: '{"status":"known"}',
+    }),
+  ];
   const describeTool = () => {
     const found = new HubActionsPlugin()
       .getTools()
@@ -3237,13 +3281,15 @@ describe('chain transaction field discovery', () => {
       ).type;
       return named.const === type || named.enum?.includes(type) === true;
     });
+  const fieldsOf = (tool: PluginTool | undefined, type: string) =>
+    Object.keys((branch(tool!, type)?.properties as object | undefined) ?? {});
 
   it('declares fields only for the types described in this session, and names every other type in one open branch', async () => {
     const kv = createMemoryUserKv();
-    const ctx = turn(kv, 'session-a');
     const plugin = new HubActionsPlugin();
-    const [before] = await plugin.getRequestTools(ctx);
-    // Every available type is named in one open branch, none with fields.
+    const [before] = await plugin.getRequestTools(
+      turn(kv, 'session-a', 'run-1'),
+    );
     expect(parameters(before!).properties.messages.items.oneOf).toEqual([
       {
         type: 'object',
@@ -3258,35 +3304,32 @@ describe('chain transaction field discovery', () => {
     expect(before!.description).toContain('`cosmos.staking.delegate`');
     await describeTool().handler(
       { types: ['cosmos.staking.delegate', 'cosmos.gov.vote'] },
-      ctx,
+      turn(kv, 'session-a', 'run-1'),
     );
-    const [after] = await plugin.getRequestTools(ctx);
-    expect(
-      Object.keys(
-        branch(after!, 'cosmos.staking.delegate')!.properties as object,
-      ),
-    ).toEqual(['type', 'validatorAddress', 'amount']);
-    expect(
-      Object.keys(branch(after!, 'cosmos.gov.vote')!.properties as object),
-    ).toEqual(['type', 'proposalId', 'option']);
-    expect(branch(after!, 'ixo.token.retire')!.properties).toEqual({
-      type: {
-        type: 'string',
-        enum: CHAIN_TX_MESSAGE_TYPES.filter(
-          (type) =>
-            type !== 'cosmos.staking.delegate' && type !== 'cosmos.gov.vote',
-        ),
-      },
-    });
+    // The next turn of the session: both carry their fields.
+    const [after] = await plugin.getRequestTools(
+      turn(kv, 'session-a', 'run-2'),
+    );
+    expect(fieldsOf(after, 'cosmos.staking.delegate')).toEqual([
+      'type',
+      'validatorAddress',
+      'amount',
+    ]);
+    expect(fieldsOf(after, 'cosmos.gov.vote')).toEqual([
+      'type',
+      'proposalId',
+      'option',
+    ]);
+    expect(fieldsOf(after, 'ixo.token.retire')).toEqual(['type']);
     // Another session of the same owner starts with none described.
-    const [other] = await plugin.getRequestTools(turn(kv, 'session-b'));
-    expect(
-      Object.keys(
-        branch(other!, 'cosmos.staking.delegate')!.properties as object,
-      ),
-    ).toEqual(['type']);
+    const [other] = await plugin.getRequestTools(
+      turn(kv, 'session-b', 'run-3'),
+    );
+    expect(fieldsOf(other, 'cosmos.staking.delegate')).toEqual(['type']);
     // The same pair is built once.
-    expect((await plugin.getRequestTools(ctx))[0]).toBe(after);
+    expect(
+      (await plugin.getRequestTools(turn(kv, 'session-a', 'run-4')))[0],
+    ).toBe(after);
   });
 
   it('costs about 5 800 characters with 33 types and none described (most of it the summaries), and a type’s fields once described', () => {
@@ -3295,10 +3338,7 @@ describe('chain transaction field discovery', () => {
         convertToOpenAITool(
           wrapPluginTool(
             chainTransactionTool(CHAIN_TX_MESSAGE_TYPES, described)!,
-            {
-              ambient: createNoopAmbient(),
-              state: { messages: [] },
-            },
+            { ambient: createNoopAmbient(), state: { messages: [] } },
           ),
         ),
       ).length;
@@ -3322,42 +3362,114 @@ describe('chain transaction field discovery', () => {
     expect(all).toBeLessThan(20_000);
   });
 
-  it('refuses a type not described in this session before any Hub call, saying what to call', async () => {
+  it('answers a type not described yet with a not-run instruction for the model, before any Hub call', async () => {
     const chainTransaction = vi.fn(async () => reference);
-    const ctx = turn(createMemoryUserKv(), 'session-c', chainTransaction);
+    const kv = createMemoryUserKv();
+    const ctx = turn(kv, 'session-c', 'run-1', { chainTransaction });
     const [tool] = await new HubActionsPlugin().getRequestTools(ctx);
+    const refused = await tool!.handler({ messages: [stake, vote] }, ctx);
+    expect(refused).toBeInstanceOf(ToolMessage);
+    const message = refused as ToolMessage;
+    expect(isToolNotRun(message)).toBe(true);
+    expect(message.status).toBe('error');
+    expect(message.tool_call_id).toBe('call-run-1');
+    expect(message.content).toBe(
+      'For you, not the person: nothing was sent and nothing is wrong. Before a card with `cosmos.staking.delegate`, `cosmos.gov.vote`, read the rules: call describe_chain_messages with types ["cosmos.staking.delegate","cosmos.gov.vote"], then call request_chain_transaction again with exactly the fields it lists. Do not mention this step to the person.',
+    );
+    expect(chainTransaction).not.toHaveBeenCalled();
+    // Described in this turn: once its result is in the history the call
+    // sees, the same tool (built before) prepares it.
+    await describeTool().handler(
+      { types: ['cosmos.staking.delegate', 'cosmos.gov.vote'] },
+      ctx,
+    );
     expect(
       await tool!.handler(
-        {
-          messages: [
-            stake,
-            { type: 'cosmos.gov.vote', proposalId: '5', option: 'yes' },
-          ],
-        },
-        ctx,
+        { messages: [stake, vote] },
+        turn(kv, 'session-c', 'run-1', {
+          chainTransaction,
+          messages: describedTurn([
+            'cosmos.staking.delegate',
+            'cosmos.gov.vote',
+          ]),
+        }),
       ),
-    ).toEqual({
-      status: 'unavailable',
-      reason:
-        'Nothing was sent. Read the rules of `cosmos.staking.delegate`, `cosmos.gov.vote` first: call describe_chain_messages with types ["cosmos.staking.delegate","cosmos.gov.vote"], then send exactly the fields it lists.',
-    });
-    expect(chainTransaction).not.toHaveBeenCalled();
-    // Described: the same tool (built before) prepares it.
-    await describeTool().handler({ types: ['cosmos.staking.delegate'] }, ctx);
-    expect(await tool!.handler({ messages: [stake] }, ctx)).toMatchObject({
-      status: 'prepared',
-    });
+    ).toMatchObject({ status: 'prepared' });
     expect(chainTransaction).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps the described types of a session in the owner store, bounded and with an idle lifetime', async () => {
+  it('does not let a describe in the same model response through, whichever finishes first', async () => {
+    const chainTransaction = vi.fn(async () => reference);
+    const kv = createMemoryUserKv();
+    const ctx = turn(kv, 'session-p', 'run-1', { chainTransaction });
+    const [tool] = await new HubActionsPlugin().getRequestTools(ctx);
+    // The describe beside it has already stored the type, but its result
+    // is not in the history this call sees: still not run.
+    await describeTool().handler({ types: ['cosmos.staking.delegate'] }, ctx);
+    const sameResponse = turn(kv, 'session-p', 'run-1', {
+      chainTransaction,
+      messages: [
+        new AIMessage({
+          content: '',
+          tool_calls: [
+            {
+              id: 'describe-1',
+              name: 'describe_chain_messages',
+              args: { types: ['cosmos.staking.delegate'] },
+            },
+            { id: 'call-run-1', name: 'request_chain_transaction', args: {} },
+          ],
+        }),
+      ],
+    });
+    expect(
+      isToolNotRun(
+        (await tool!.handler(
+          { messages: [stake] },
+          sameResponse,
+        )) as ToolMessage,
+      ),
+    ).toBe(true);
+    // A describe that failed does not count either.
+    const failed = describedTurn(['cosmos.staking.delegate']);
+    failed[1] = new ToolMessage({
+      tool_call_id: 'describe-1',
+      name: 'describe_chain_messages',
+      content: 'error',
+      status: 'error',
+    });
+    expect(
+      await tool!.handler(
+        { messages: [stake] },
+        turn(kv, 'session-p', 'run-1', { chainTransaction, messages: failed }),
+      ),
+    ).toBeInstanceOf(ToolMessage);
+    expect(chainTransaction).not.toHaveBeenCalled();
+    // The next turn of the session: stored by an earlier run, so it counts.
+    expect(
+      await tool!.handler(
+        { messages: [stake] },
+        turn(kv, 'session-p', 'run-2', { chainTransaction }),
+      ),
+    ).toMatchObject({ status: 'prepared' });
+  });
+
+  it('keeps the described types of a session in the owner store with the run that first described them, bounded and with an idle lifetime', async () => {
     let now = 1_800_000_000_000;
     const kv = createMemoryUserKv({ now: () => now });
-    const ctx = turn(kv, 'session-d');
-    await describeTool().handler({ types: ['cosmos.staking.delegate'] }, ctx);
-    await describeTool().handler({ types: ['cosmos.gov.vote'] }, ctx);
+    await describeTool().handler(
+      { types: ['cosmos.staking.delegate'] },
+      turn(kv, 'session-d', 'run-1'),
+    );
+    await describeTool().handler(
+      { types: ['cosmos.staking.delegate', 'cosmos.gov.vote'] },
+      turn(kv, 'session-d', 'run-2'),
+    );
     expect(await kv.get('hub-actions/chain-tx-described', 'session-d')).toEqual(
-      ['cosmos.staking.delegate', 'cosmos.gov.vote'],
+      {
+        'cosmos.staking.delegate': 'run-1',
+        'cosmos.gov.vote': 'run-2',
+      },
     );
     // A week without use forgets them: describe again.
     now += 7 * 24 * 60 * 60_000 + 1;
@@ -3368,32 +3480,88 @@ describe('chain transaction field discovery', () => {
     for (let i = 0; i < 201; i++)
       await describeTool().handler(
         { types: ['cosmos.gov.vote'] },
-        turn(kv, `many-${i}`),
+        turn(kv, `many-${i}`, 'run-1'),
       );
     expect(
       await kv.get('hub-actions/chain-tx-described', 'many-0'),
     ).toBeUndefined();
-    expect(await kv.get('hub-actions/chain-tx-described', 'many-200')).toEqual([
-      'cosmos.gov.vote',
-    ]);
+    expect(await kv.get('hub-actions/chain-tx-described', 'many-200')).toEqual({
+      'cosmos.gov.vote': 'run-1',
+    });
   });
 
-  it('gives the next model call of the same turn the fields just described, while the registered tool runs the call', async () => {
+  it('falls back to every type’s fields, with no refusal, when the store cannot be read or written', async () => {
+    const chainTransaction = vi.fn(async () => reference);
+    const warn = vi.fn();
+    const working = createMemoryUserKv();
+    const broken: UserKvSurface = {
+      ...working,
+      get: async () => {
+        throw new Error('storage read failed');
+      },
+    };
+    const plugin = new HubActionsPlugin();
+    const unreadable = turn(broken, 'session-r', 'run-1', {
+      chainTransaction,
+      warn,
+    });
+    const [tool] = await plugin.getRequestTools(unreadable);
+    expect(fieldsOf(tool, 'cosmos.staking.delegate')).toEqual([
+      'type',
+      'validatorAddress',
+      'amount',
+    ]);
+    expect(
+      await tool!.handler({ messages: [stake] }, unreadable),
+    ).toMatchObject({
+      status: 'prepared',
+    });
+    expect(String(warn.mock.calls[0]?.[0])).toContain('unreadable');
+    // A write that fails: this turn gives every type's fields.
+    const unwritable: UserKvSurface = {
+      ...working,
+      update: async () => {
+        throw new Error('storage write failed');
+      },
+    };
+    const writeFails = turn(unwritable, 'session-w', 'run-1', {
+      chainTransaction,
+      warn,
+    });
+    expect(
+      await describeTool().handler(
+        { types: ['cosmos.staking.delegate'] },
+        writeFails,
+      ),
+    ).toMatchObject({ status: 'known' });
+    expect(await tool!.handler({ messages: [vote] }, writeFails)).toMatchObject(
+      { status: 'prepared' },
+    );
+    expect(chainTransaction).toHaveBeenCalledTimes(2);
+    // The model-call middleware passes a request through when the store
+    // read fails.
+    const [middleware] = plugin.getRequestMiddlewares(unreadable);
+    const request = {
+      tools: [{ name: 'request_chain_transaction', description: 'd' }],
+      messages: [],
+    };
+    const handler = vi.fn(async (seen: unknown) => seen);
+    await middleware!.wrapModelCall!(request as never, handler as never);
+    expect(handler).toHaveBeenCalledWith(request);
+  });
+
+  it('runs a turn through the real capability gate, repetition guard and context guard: hidden, loaded, refused, described, run', async () => {
     const chainTransaction = vi.fn(async () => reference);
     const kv = createMemoryUserKv();
-    const ctx = turn(kv, 'session-e', chainTransaction);
-    const plugin = new HubActionsPlugin();
-    const [request] = await plugin.getRequestTools(ctx);
-    const ambient = {
-      ...createNoopAmbient({ config: { HUB_ACTIONS_ENABLED: 'true' }, kv }),
-      hubActions: hubActions(chainTransaction),
-    };
-    const wrap = (item: PluginTool) =>
-      wrapPluginTool(item, {
-        ambient,
-        state: { messages: [] },
-        fallbackContext: { user: ctx.user, session: ctx.session } as never,
-      });
+    const core = createRuntimeCore({
+      config: { name: 'TestOracle', org: 'Acme', description: 'a test oracle' },
+      plugins: [new HubActionsPlugin()],
+      env: makeEnv({
+        HUB_ACTIONS_ENABLED: 'true',
+        AUTH_HUB_URL: 'https://hub.test',
+        AUTH_HUB_CHANNEL_SERVICE_KEY: 'oracle-key',
+      }),
+    });
     // What each model call was bound with.
     const bound: unknown[][] = [];
     class RecordingModel extends FakeToolCallingModel {
@@ -3408,50 +3576,173 @@ describe('chain transaction field discovery', () => {
       toolCalls: [
         [
           {
-            name: 'describe_chain_messages',
-            args: { types: ['cosmos.staking.delegate'] },
-            id: 'call-1',
+            name: 'load_capability',
+            args: { names: ['hub-actions'] },
+            id: 'c1',
           },
         ],
         [
           {
             name: 'request_chain_transaction',
             args: { messages: [stake] },
-            id: 'call-2',
+            id: 'c2',
+          },
+        ],
+        [
+          {
+            name: 'describe_chain_messages',
+            args: { types: ['cosmos.staking.delegate'] },
+            id: 'c3',
+          },
+        ],
+        // The identical call again: allowed, the first one never ran.
+        [
+          {
+            name: 'request_chain_transaction',
+            args: { messages: [stake] },
+            id: 'c4',
           },
         ],
         [],
       ],
     });
-    const agent = createAgent({
-      model,
-      tools: [wrap(describeTool()), wrap(request!)],
-      middleware: plugin.getRequestMiddlewares(ctx),
+    const ambient: AmbientServices = {
+      ...createNoopAmbient({
+        config: core.validatedEnv,
+        identity: core.identity,
+        availablePlugins: core.availablePlugins,
+        llm: { get: () => model },
+        kv,
+      }),
+      hubActions: hubActions(chainTransaction),
+    };
+    const { agent } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient,
+      requestCtx: {
+        user: {
+          did: 'did:ixo:owner',
+          matrixUserId: '@owner:test',
+          ucanDelegation: { raw: 'ucan' },
+        },
+        session: {
+          id: 'session-agent',
+          client: 'channel',
+          requestId: 'request-agent',
+          runId: 'run-agent',
+          channel,
+        },
+      },
+      state: {},
+      contextBudget: contextBudgetFor({
+        model: 'm',
+        tokens: 200_000,
+        origin: 'override',
+      }),
     });
-    await agent.invoke({
+    const result = (await agent.invoke({
       messages: [new HumanMessage('Stake 100 IXO with Alex')],
-    });
-    const requestDefinition = (call: number) =>
-      bound[call]!.find(
-        (item) =>
+    })) as { messages: BaseMessage[] };
+    const definitionIn = (call: number) =>
+      bound[call]?.find(
+        (item): item is { function: { name: string; parameters: unknown } } =>
           typeof item === 'object' &&
           item !== null &&
           'function' in item &&
           (item as { function: { name: string } }).function.name ===
             'request_chain_transaction',
-      ) as
-        | { function: { parameters: Parameters<typeof JSON.stringify>[0] } }
-        | undefined;
-    // First call: the type is named only; second call (same turn, after
-    // describe): its fields are declared.
-    const first = JSON.stringify(requestDefinition(0)?.function.parameters);
-    const second = JSON.stringify(requestDefinition(1)?.function.parameters);
-    expect(first).not.toContain('"validatorAddress"');
-    expect(second).toContain('"validatorAddress":{"type":"string"}');
-    expect(second).toContain('"amount":{"type":"string"}');
-    // The registered tool ran the call with every field.
-    expect(chainTransaction).toHaveBeenCalledWith(
-      expect.objectContaining({ messages: [stake] }),
+      );
+    // Hidden by the gate before load_capability: nothing added.
+    expect(definitionIn(0)).toBeUndefined();
+    expect(
+      bound[0]?.some(
+        (item) =>
+          typeof item === 'object' &&
+          item !== null &&
+          'name' in item &&
+          item.name === 'request_chain_transaction',
+      ),
+    ).toBe(false);
+    // Loaded: named only; after the describe: its fields.
+    expect(JSON.stringify(definitionIn(1)?.function.parameters)).not.toContain(
+      '"validatorAddress"',
     );
+    expect(JSON.stringify(definitionIn(3)?.function.parameters)).toContain(
+      '"validatorAddress":{"type":"string"}',
+    );
+    // The first request did not run; the identical one after the describe did.
+    const results = result.messages.filter(
+      (message): message is ToolMessage =>
+        ToolMessage.isInstance(message) &&
+        message.name === 'request_chain_transaction',
+    );
+    expect(results.map((message) => message.tool_call_id)).toEqual([
+      'c2',
+      'c4',
+    ]);
+    expect(isToolNotRun(results[0]!)).toBe(true);
+    expect(String(results[1]!.content)).toContain('"status":"prepared"');
+    expect(chainTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('is sized by the context guard as the definition the model is given, not the registered tool', async () => {
+    const plugin = new HubActionsPlugin();
+    const kv = createMemoryUserKv();
+    // Every type described in this turn (eight per call).
+    const history = Array.from({ length: 5 }, (_, i) =>
+      describedTurn(
+        CHAIN_TX_MESSAGE_TYPES.slice(i * 8, i * 8 + 8),
+        `describe-${i}`,
+      ),
+    ).flat();
+    const ctx = turn(kv, 'session-g', 'run-1', { messages: history });
+    const [registered] = await plugin.getRequestTools(
+      turn(kv, 'session-g', 'run-0'),
+    );
+    const wrapped = wrapPluginTool(registered!, {
+      ambient: createNoopAmbient(),
+      state: { messages: [] },
+    });
+    // A request cap between the registered tool (no fields, about 5 800
+    // characters) and what the middleware gives the model once all 33 are
+    // described (about 18 700).
+    const base = contextBudgetFor({
+      model: 'm',
+      tokens: 200_000,
+      origin: 'override',
+    });
+    const events: ContextGuardEvent[] = [];
+    const guard = createContextGuardMiddleware({
+      budget: { ...base, pruneAtTokens: 3_500, requestCapTokens: 3_500 },
+      onEvent: (event) => events.push(event),
+    });
+    const [fields] = plugin.getRequestMiddlewares(ctx);
+    const request = {
+      model: undefined,
+      // The model call's own messages: what the middleware reads.
+      messages: [...history, new HumanMessage('Stake')],
+      systemMessage: undefined,
+      tools: [wrapped],
+      state: { messages: [] },
+      runtime: {},
+    };
+    const model = vi.fn(async () => new AIMessage('ok'));
+    // The registered tool alone fits.
+    await guard.wrapModelCall!(request as never, model as never);
+    expect(model).toHaveBeenCalledTimes(1);
+    // Given to the model with the described fields (the middleware runs
+    // outside the guard, as plugin middlewares do): too large, refused.
+    await expect(
+      fields!.wrapModelCall!(
+        request as never,
+        ((inner: never) =>
+          guard.wrapModelCall!(inner, model as never)) as never,
+      ),
+    ).rejects.toThrow('no longer fits');
+    expect(events.at(-1)).toMatchObject({ kind: 'refused' });
+    expect(model).toHaveBeenCalledTimes(1);
   });
 });

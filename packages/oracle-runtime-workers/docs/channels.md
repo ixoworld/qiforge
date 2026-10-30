@@ -566,30 +566,55 @@ plus the batch bound and `memo`. A described type's fields must be in that
 schema: a model provider holds a tool call to its schema, so a field the
 schema does not declare is dropped before the runtime sees it (this broke
 the first 0.29.0 build, which declared only `type`, as an open object, for
-every type). So the handler refuses a message of a type not described in
-this session, before any Hub call, with "Nothing was sent. Read the rules of
-`<type>` first: call describe_chain_messages with types [...], then send
-exactly the fields it lists.", and a described type is declared in full.
-Each per-type object stays open, so a field a type does not have still
-reaches the handler, which names it in its refusal. When the account's
-types cannot be remembered per session (no `ctx.kv`), every type carries
-its fields as before.
+every type). So the handler does not run a message of a type not described
+yet, before any Hub call: it answers with a "not run" result
+(`toolNotRunMessage`, `src/core/tool-not-run.ts`: an error ToolMessage
+marked in `response_metadata`, never sent to a provider) addressed to the
+model, not the person ("For you, not the person: nothing was sent and
+nothing is wrong. Before a card with `<type>`, read the rules: call
+describe_chain_messages with types [...], then call request_chain_transaction
+again with exactly the fields it lists. Do not mention this step to the
+person."). Being an error, it never counts as a write that happened; like a
+capability-gate refusal, the repetition guard and the turn boundary skip
+it, so the identical call after the describe runs. A described type is
+declared in full. Each per-type object stays open, so a field a type does
+not have still reaches the handler, which names it in its refusal.
+
+A type counts as described by one rule: a `describe_chain_messages` call for
+it whose (non-error) result is in the history the call sees, or a record
+stored by an earlier run of the session. A type the current run stored
+counts only through the history, so a describe made in the same model
+response as the request (parallel tool calls) never lets the request
+through, whichever finishes first. When the session cannot remember (no
+`ctx.kv`), the store cannot be read (logged; the model call goes through
+unchanged), or a describe could not be stored (logged; the rest of that
+turn), every type carries its fields and none is refused: a store failure
+never makes chain cards unusable.
 
 The described types are kept per session id in the owner's key-value rows
-(`ctx.kv`, namespace `hub-actions/chain-tx-described`): durable across
+(`ctx.kv`, namespace `hub-actions/chain-tx-described`, each type with the
+run that first described it): durable across
 restarts of the owner object, forgotten after 7 days without use, at most
 200 sessions per owner; a new session starts with none. Request tools are
 built once per turn (`createMainAgent` runs once per run), not per model
 call, so a type described during a turn would otherwise reach the turn's
 next model call without its fields. A request middleware
-(`chainTxFieldsMiddleware`, inside the capability gate) therefore gives
-every model call the request tool for the session's current described set.
+(`chainTxFieldsMiddleware`, inside the capability gate, so a hidden tool is
+never added, and outside the context guard, which sizes what the model is
+given) therefore gives every model call the request tool for what is
+described by then, using the turn's account types read once at the turn's
+start.
 LangChain refuses a new instance of a registered tool in `wrapModelCall`
 ("Replaced tools are always rejected to preserve ToolNode execution
 identity"), so the model is given the tool as a plain function definition
 (same name and description); the registered tool, whose schema accepts the
-fields of every available type, still runs the call. A test drives
-describe then request in one turn through `createAgent`. No model binding
+fields of every available type, still runs the call. The definition is
+built once per (tool, description). A test drives a whole turn through
+`createMainAgent` (the real capability gate, repetition guard and context
+guard): the tool hidden until `load_capability`, then named only, the
+request answered "not run", the describe, and the identical request run
+with its fields declared; another shows the context guard refusing on the
+size of the definition, not of the registered tool. No model binding
 in the runtime uses strict function calling (`strict`,
 `supportsStrictToolCalling` and native structured output are unset on the
 platform and BYO models); a strict mode would refuse every open object and

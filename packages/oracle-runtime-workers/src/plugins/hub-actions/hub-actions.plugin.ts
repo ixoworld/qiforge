@@ -8,6 +8,11 @@ import {
   type ActionReferenceV1,
   type ChainTxMessageType,
 } from '@ixo/action-protocol';
+import {
+  AIMessage,
+  ToolMessage,
+  type BaseMessage,
+} from '@langchain/core/messages';
 import { tool } from '@langchain/core/tools';
 import { convertToOpenAITool } from '@langchain/core/utils/function_calling';
 import { createMiddleware, type AgentMiddleware } from 'langchain';
@@ -21,6 +26,7 @@ import type {
   RuntimeContext,
 } from '../../plugin-api/types';
 import { ixoAddressOf } from '../../core/user-identity';
+import { toolNotRunMessage } from '../../core/tool-not-run';
 import {
   CHAIN_TX_CATALOG,
   CHAIN_TX_GENERAL_RULES,
@@ -252,47 +258,181 @@ const CHAIN_TRANSACTION_TOOL_CACHE = 32;
 
 /**
  * The message types described in a conversation (`describe_chain_messages`),
- * per session id in the owner's own key-value rows: durable across restarts
- * of the owner object, kept while used (`DESCRIBED_IDLE_TTL_MS`), and at
- * most `DESCRIBED_MAX_SESSIONS` sessions per owner. A new session starts
- * with none.
+ * per session id in the owner's own key-value rows, each with the run that
+ * first described it: durable across restarts of the owner object, kept
+ * while used (`DESCRIBED_IDLE_TTL_MS`), and at most `DESCRIBED_MAX_SESSIONS`
+ * sessions per owner. A new session starts with none.
  */
 const DESCRIBED_NAMESPACE = 'hub-actions/chain-tx-described';
 const DESCRIBED_IDLE_TTL_MS = 7 * 24 * 60 * 60_000;
 const DESCRIBED_MAX_SESSIONS = 200;
 
-/** The catalogue types in `value` (a stored list), in catalogue order. */
-function catalogueTypesIn(value: unknown): ChainTxMessageType[] {
-  return Array.isArray(value)
-    ? CHAIN_TX_MESSAGE_TYPES.filter((type) => value.includes(type))
-    : [];
+/** The stored `{type: runId}` record of a session (anything else: none). */
+function describedRecord(
+  value: unknown,
+): Partial<Record<ChainTxMessageType, string>> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const record: Partial<Record<ChainTxMessageType, string>> = {};
+  for (const type of CHAIN_TX_MESSAGE_TYPES) {
+    const run: unknown = Reflect.get(value, type);
+    if (typeof run === 'string') record[type] = run;
+  }
+  return record;
 }
 
 /**
- * The types described in this session; null when the turn has no
- * key-value store or session to remember them in (every type then carries
- * its fields, as before this was remembered).
+ * The types whose rules a `describe_chain_messages` call in `messages` read:
+ * its arguments (on the AI message that made the call), counted only when
+ * its result is there too and is not an error.
+ */
+function describedInHistory(
+  messages: readonly BaseMessage[],
+): Set<ChainTxMessageType> {
+  const calls = new Map<string, unknown>();
+  for (const message of messages)
+    if (AIMessage.isInstance(message))
+      for (const call of message.tool_calls ?? [])
+        if (call.name === 'describe_chain_messages' && call.id)
+          calls.set(call.id, call.args);
+  const described = new Set<ChainTxMessageType>();
+  for (const message of messages) {
+    if (
+      !ToolMessage.isInstance(message) ||
+      message.name !== 'describe_chain_messages' ||
+      message.status === 'error'
+    )
+      continue;
+    const args = describeChainMessagesSchema.safeParse(
+      calls.get(message.tool_call_id),
+    );
+    if (args.success) for (const type of args.data.types) described.add(type);
+  }
+  return described;
+}
+
+/** This turn in the session: `${sessionId}|${runId}`. */
+const runKeyOf = (ctx: RuntimeContext) =>
+  `${ctx.session.id}|${ctx.session.runId ?? ''}`;
+
+/**
+ * Turns whose described types could not be stored: they fall back to every
+ * type's fields and no refusal (a store failure must not make chain cards
+ * unusable). Bounded; the oldest turn is dropped first.
+ */
+const UNSTORED_TURNS_MAX = 256;
+const unstoredTurns = new Set<string>();
+
+/**
+ * The types this call may use (and whose fields the model is given), by
+ * one rule: described in the history this call sees (`messages`), or
+ * stored by an earlier run of the session. A type the current run stored
+ * counts only once its `describe_chain_messages` result is in that history,
+ * so a describe made in the same model response as the request (a parallel
+ * call) never lets the request through, whichever finishes first. Null when
+ * the session cannot remember (no store or session, or the store failed):
+ * every type then carries its fields and none is refused.
  */
 async function describedChainTxTypes(
   ctx: RuntimeContext,
+  messages: readonly BaseMessage[],
 ): Promise<ChainTxMessageType[] | null> {
-  if (!ctx.kv || !ctx.session.id) return null;
-  return catalogueTypesIn(
-    await ctx.kv.get(DESCRIBED_NAMESPACE, ctx.session.id),
+  if (!ctx.kv || !ctx.session.id || unstoredTurns.has(runKeyOf(ctx)))
+    return null;
+  let stored: Partial<Record<ChainTxMessageType, string>>;
+  try {
+    stored = describedRecord(
+      await ctx.kv.get(DESCRIBED_NAMESPACE, ctx.session.id),
+    );
+  } catch (error) {
+    ctx.logger.warn(
+      `[hub-actions] described chain message types unreadable; every type keeps its fields: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return null;
+  }
+  const inHistory = describedInHistory(messages);
+  const runId = ctx.session.runId ?? '';
+  return CHAIN_TX_MESSAGE_TYPES.filter(
+    (type) =>
+      inHistory.has(type) ||
+      (stored[type] !== undefined && stored[type] !== runId),
   );
 }
 
+/** Records the described types; a type keeps the run that first described it. */
 async function rememberDescribed(
   ctx: RuntimeContext,
   types: readonly ChainTxMessageType[],
 ): Promise<void> {
   if (!ctx.kv || !ctx.session.id) return;
-  await ctx.kv.update(
-    DESCRIBED_NAMESPACE,
-    ctx.session.id,
-    (current) => [...new Set([...catalogueTypesIn(current), ...types])],
-    { idleTtlMs: DESCRIBED_IDLE_TTL_MS, maxEntries: DESCRIBED_MAX_SESSIONS },
-  );
+  const runId = ctx.session.runId ?? '';
+  try {
+    await ctx.kv.update(
+      DESCRIBED_NAMESPACE,
+      ctx.session.id,
+      (current) => ({
+        ...Object.fromEntries(types.map((type) => [type, runId])),
+        ...describedRecord(current),
+      }),
+      { idleTtlMs: DESCRIBED_IDLE_TTL_MS, maxEntries: DESCRIBED_MAX_SESSIONS },
+    );
+  } catch (error) {
+    ctx.logger.warn(
+      `[hub-actions] described chain message types not stored; this turn gives every type's fields: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    if (unstoredTurns.size >= UNSTORED_TURNS_MAX)
+      unstoredTurns.delete(unstoredTurns.values().next().value!);
+    unstoredTurns.add(runKeyOf(ctx));
+  }
+}
+
+/**
+ * The account's chain types for a turn, read once (by the request tool and
+ * then reused by `chainTxFieldsMiddleware` for every model call).
+ */
+const turnChainTxTypes = new WeakMap<
+  RuntimeContext,
+  Promise<readonly ChainTxMessageType[]>
+>();
+function chainTxTypesForTurn(
+  ctx: RuntimeContext,
+): Promise<readonly ChainTxMessageType[]> {
+  let types = turnChainTxTypes.get(ctx);
+  if (!types) {
+    types = availableChainTxTypes(ctx);
+    turnChainTxTypes.set(ctx, types);
+  }
+  return types;
+}
+
+/** The function definition of a request tool, per description, built once. */
+const toolDefinitions = new WeakMap<
+  PluginTool,
+  Map<string, Record<string, unknown>>
+>();
+function definitionOf(
+  pluginTool: PluginTool,
+  description: string,
+): Record<string, unknown> {
+  let byDescription = toolDefinitions.get(pluginTool);
+  if (!byDescription) {
+    byDescription = new Map();
+    toolDefinitions.set(pluginTool, byDescription);
+  }
+  let definition = byDescription.get(description);
+  if (!definition) {
+    const { type, function: fn } = convertToOpenAITool(
+      tool(async () => '', {
+        name: pluginTool.name,
+        description,
+        schema: pluginTool.schema,
+      }),
+    );
+    // A plain object (a server-tool definition to LangChain), not a tool
+    // instance: LangChain refuses a new instance of a registered tool.
+    definition = { type, function: fn };
+    byDescription.set(description, definition);
+  }
+  return definition;
 }
 
 /**
@@ -300,13 +440,14 @@ async function rememberDescribed(
  * described during the turn would reach the next model call without its
  * fields, and a provider drops fields its schema does not declare (the
  * 0.29.0 failure). Before each model call this gives the model the request
- * tool for the session's current described set. LangChain refuses a new
- * instance of a registered tool here, so the model gets the tool as its
- * function definition (same name and description), while the registered
- * tool, whose schema accepts the fields of every type, still runs the call.
+ * tool for what is described by then (`describedChainTxTypes` over the
+ * call's messages), as its function definition with the registered tool's
+ * name and description; the registered tool, whose schema accepts the
+ * fields of every type, still runs the call. A tool the capability gate
+ * hid is not in the request, so nothing is added; a failure to read the
+ * store leaves the request as it is.
  */
 function chainTxFieldsMiddleware(ctx: RuntimeContext) {
-  let available: Promise<readonly ChainTxMessageType[]> | null = null;
   return createMiddleware({
     name: 'HubActionsChainTxFieldsMiddleware',
     wrapModelCall: async (request, handler) => {
@@ -316,21 +457,15 @@ function chainTxFieldsMiddleware(ctx: RuntimeContext) {
       const registered = request.tools[index];
       if (!registered || typeof registered.description !== 'string')
         return handler(request);
-      const described = await describedChainTxTypes(ctx);
+      const described = await describedChainTxTypes(ctx, request.messages);
       if (!described) return handler(request);
-      available ??= availableChainTxTypes(ctx);
-      const current = chainTransactionTool(await available, described);
-      if (!current) return handler(request);
-      // A plain object (a server-tool definition to LangChain), not a tool instance.
-      const { type, function: fn } = convertToOpenAITool(
-        tool(async () => '', {
-          name: 'request_chain_transaction',
-          description: registered.description,
-          schema: current.schema,
-        }),
+      const current = chainTransactionTool(
+        await chainTxTypesForTurn(ctx),
+        described,
       );
+      if (!current) return handler(request);
       const tools = [...request.tools];
-      tools[index] = { type, function: fn };
+      tools[index] = definitionOf(current, registered.description);
       return handler({ ...request, tools });
     },
   });
@@ -506,10 +641,10 @@ async function requestChainTransaction(
   schema: ReturnType<typeof chainTransactionSchemaFor>,
   input: unknown,
   ctx: RuntimeContext,
-): Promise<HubActionRequestResult> {
+): Promise<HubActionRequestResult | ToolMessage> {
   const parsed = schema.safeParse(input);
   if (!parsed.success) return chainTxShapeRefusal(issuesOf(parsed.error));
-  const described = await describedChainTxTypes(ctx);
+  const described = await describedChainTxTypes(ctx, ctx.history.messages);
   if (described) {
     const unread = [
       ...new Set(
@@ -522,10 +657,13 @@ async function requestChainTransaction(
       ),
     ];
     if (unread.length)
-      return {
-        status: 'unavailable',
-        reason: `Nothing was sent. Read the rules of ${unread.map((type) => `\`${type}\``).join(', ')} first: call describe_chain_messages with types ${JSON.stringify(unread)}, then send exactly the fields it lists.`,
-      };
+      // Not run, and not a failure: the repetition guard lets the same
+      // call through once the rules are read.
+      return toolNotRunMessage({
+        toolCallId: ctx.toolCallId ?? '',
+        name: 'request_chain_transaction',
+        content: `For you, not the person: nothing was sent and nothing is wrong. Before a card with ${unread.map((type) => `\`${type}\``).join(', ')}, read the rules: call describe_chain_messages with types ${JSON.stringify(unread)}, then call request_chain_transaction again with exactly the fields it lists. Do not mention this step to the person.`,
+      });
   }
   const checked = strictChainTxMessages(parsed.data.messages);
   if ('issues' in checked) return chainTxShapeRefusal(checked.issues);
@@ -909,8 +1047,8 @@ export class HubActionsPlugin extends OraclePlugin {
    */
   override async getRequestTools(ctx: RuntimeContext): Promise<PluginTool[]> {
     const [available, described] = await Promise.all([
-      availableChainTxTypes(ctx),
-      describedChainTxTypes(ctx),
+      chainTxTypesForTurn(ctx),
+      describedChainTxTypes(ctx, ctx.history.messages),
     ]);
     const tool = chainTransactionTool(available, described);
     return tool ? [tool] : [];
