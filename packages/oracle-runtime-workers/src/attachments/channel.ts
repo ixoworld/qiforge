@@ -1,7 +1,7 @@
 /**
  * Files the person sent on an IXO Channels turn. The channel gateway keeps
  * each file and serves it from a signed link of its own,
- * `https://<gateway host>/media/<binding id>/<object id>?exp=…&sig=…`,
+ * `https://<gateway host>/media/<binding id>/<object id>?exp=…&kid=…&sig=…`,
  * valid for 30 days. That link is a bearer capability: it never enters
  * model context, hidden notes, stored message metadata or traces. The model,
  * the transcript and `view_attachment` name a channel file by an opaque

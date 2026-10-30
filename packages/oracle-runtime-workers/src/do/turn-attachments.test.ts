@@ -29,7 +29,7 @@ async function sha256(bytes: Uint8Array): Promise<string> {
 }
 
 function link(bindingId: string, exp = 1893456000): string {
-  return `https://channels.test/media/${bindingId}/1f0e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b?exp=${exp}&sig=c2ln`;
+  return `https://channels.test/media/${bindingId}/1f0e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b?exp=${exp}&kid=k1&sig=c2ln`;
 }
 
 async function photo(bindingId = 'chb_one') {

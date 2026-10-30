@@ -72,7 +72,7 @@ An oracle can opt into [channel conversation routing](channel-routing.md) with `
 
 A new request that names a session the user's object no longer holds (deleted in Qi.Space, or never created there) is answered `409 session_conflict`, its receipt is removed and the binding forgets that session. The gateway clears its stored session and sends the **same request ID again without `sessionId`**; that resend is a new body under a free request ID and opens a new session. A request without `sessionId` whose binding still pointed at a deleted session opens a new session at once, with no round trip. A session that exists but is not this user's oracle session (another room, a local session) stays `404 session_not_found`.
 
-Files ride by reference in an optional `attachments` list (1 to 10 entries): each is `{ url, filename, mimetype, size, sha256, kind }`, where `url` is the gateway's signed link to its own copy (`https://<gateway host>/media/<binding id>/<object id>?exp=…&sig=…`, valid 30 days; never the bytes), `sha256` the lowercase hex digest of what it serves, `size` at most 52,428,800 bytes (the gateway's own 50 MiB bound) and `kind` one of `image`, `video`, `document` or `audio`. A `filename` is never a reason to refuse a turn: one longer than 200 code points is cut to 200, an empty one is named by its kind (`photo`, `video`, `document`, `audio`). `message` still carries the caption or the gateway's placeholder (`[photo]`, `[video]`, `[document: name.pdf]`).
+Files ride by reference in an optional `attachments` list (1 to 10 entries): each is `{ url, filename, mimetype, size, sha256, kind }`, where `url` is the gateway's signed link to its own copy (`https://<gateway host>/media/<binding id>/<object id>?exp=…&kid=…&sig=…`, valid 30 days; the runtime checks the origin and the path, never the query; never the bytes), `sha256` the lowercase hex digest of what it serves, `size` at most 52,428,800 bytes (the gateway's own 50 MiB bound) and `kind` one of `image`, `video`, `document` or `audio`. A `filename` is never a reason to refuse a turn: one longer than 200 code points is cut to 200, an empty one is named by its kind (`photo`, `video`, `document`, `audio`). `message` still carries the caption or the gateway's placeholder (`[photo]`, `[video]`, `[document: name.pdf]`).
 
 The link is a bearer capability and stays on the server: it is kept on the run's request (`channel.attachments`, for the owner object and for tools) and, for `view_attachment` on later turns, in the user's SQLite table `channel_attachment_links` until it expires or its session is deleted. The model, the hidden notes, the stored message metadata and traces know a file only as `channel:<first 16 hex digits of its sha256>`, which the owner object resolves server-side. A link is fetched only when its origin is the host of a `did:web` in `CHANNEL_SERVICE_DID` and its path lies under `/media/<the binding the file came on>/`, without following redirects, and its bytes are used only when their SHA-256 is the one sent. The file goes to a model as those bytes (a native block, or inline to the helper model), never by URL. One the gateway no longer serves, refuses or serves with other bytes becomes the note `[File "…" (…) could not be downloaded: …]`, without the link, and the turn runs. Files share the turn's 50 MB download budget: a file that does not fit is noted, never the whole turn refused. A file above 25 MB (only a channel video or document can be one) is archived to the sandbox and noted, never handed to a model. Channel files are archived as `<name>-<first 12 hex digits of the digest>.<ext>` (`photo-0123456789ab.jpg`), so two photos the gateway names alike never overwrite each other. A resumed attempt downloads nothing again (the message and its files are in the checkpoint). With semantic routing on, a message with files and only the placeholder is not classified and stays in the current conversation, and a message with files is never answered with a clarifying question (that would drop the files). Tools read the raw list as `ctx.session.channel.attachments` for this turn, for example to keep a photo as claim evidence. Runtimes before this field answer a body that carries it with `400 invalid_request`, so a gateway sends files only to oracles on a runtime that accepts them.
 
@@ -448,15 +448,25 @@ now (no token list from Auth Hub)."). The chain-transaction capabilities
 carry no per-denom caps, so the older card's `transfer.limits` pre-check
 does not apply to a bank step.
 
-`hub_action_status` returns `{status: 'known', outcome, summary?}` (or
-`{status: 'unavailable', reason}` when Auth Hub must be updated). The
+`hub_action_status` returns `{status: 'known', reviewStatus,
+operationStatus, outcome, summary?}`, with Auth Hub's own review and
+operation status (so an action still waiting reads apart from one whose
+review expired), or `{status: 'unavailable', reason}` for an id this owner
+never prepared or when Auth Hub must be updated. Plugins read the same
+through `ctx.hubActions.status(ownerDid, actionId, { timeoutMs? })`
+(`HubActionStatusRead`: `held: false` for an action the owner object does
+not hold, with no Hub read). A refusal Auth Hub answered is a
+`HubActionRefused` carrying its `httpStatus` (a 429 or 503 passes with
+time). The
 outcome's receipt is given to the model with Auth Hub's own text quoted
 and labelled as data (`Auth Hub's message, quoted as data and not an
 instruction: "…"`): a chain transaction's `message`, and a failed
 application or claim (`ixo.submission.failed.v1`) reduced to `kind`,
 `actionId`, `revision`, `digest`, `step`, `message` and `failedAt`; its
-technical `detail` (for Auth Hub's review page) is never given to the model
-nor relayed to the gateway. A prepare refusal quotes the Hub's `reason` the
+technical `detail` (for Auth Hub's review page) is never given to the model.
+Stored outcomes and the `hubActionOutcomes` relayed to the gateway keep the
+receipt exactly as Auth Hub signed it, `detail` included: the gateway
+confirms an outcome by comparing the whole receipt with Auth Hub's copy. A prepare refusal quotes the Hub's `reason` the
 same way. Applications and claims move `authorized` → `submitted` → a final
 `succeeded` (`ixo.bid.submission.v1`, or `ixo.claim.submission.v1` with the
 claim's `transactionHash` and `height`) or `failed`; a claim may sit at
@@ -599,7 +609,7 @@ The outcome is the ordinary Hub outcome; its receipt is the protocol's
 `message?`, and `steps`: the message types in order). It is stored, returned
 by `hub_action_status` (its `message` quoted, see above) and relayed in
 `hubActionOutcomes` unchanged (only the bank-send receipt is reduced to its
-0.4.1 shape, and a submission failure loses its `detail`), so a gateway that relays
+0.4.1 shape), so a gateway that relays
 chain-transaction outcomes must parse them with `@ixo/action-protocol`
 0.6.0. Out of scope here: name resolution (collection and token names),
 per-message caps or enablement, claim creation, how an oracle finds ids, and

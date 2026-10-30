@@ -44,7 +44,7 @@ async function sha256(bytes: Uint8Array): Promise<string> {
 }
 
 function gatewayLink(bindingId = 'chb_one'): string {
-  return `https://channels.test/media/${bindingId}/1f0e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b?exp=1893456000&sig=c2lnbmF0dXJl`;
+  return `https://channels.test/media/${bindingId}/1f0e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b?exp=1893456000&kid=k1&sig=c2lnbmF0dXJl`;
 }
 
 /** A fetch that answers the gateway link with `bytes` and records every URL. */
