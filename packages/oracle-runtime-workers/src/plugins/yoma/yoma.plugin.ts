@@ -53,6 +53,7 @@ import {
   formErrors,
   formTitle,
   gridCell,
+  loadSurveyCore,
   nextStep,
   openModel,
   parsePin,
@@ -748,7 +749,9 @@ type Applied =
  * of logged work. Two tools; reads go through ixo-chain's bounded HTTP
  * policy and never throw. Not bundled: a host adds `new YomaPlugin()` from
  * `@ixo/oracle-runtime-workers/plugins/yoma`, so `survey-core` lands only
- * in oracles that use it.
+ * in oracles that use it, and even there it is loaded on the first Yoma
+ * tool call, not at Worker startup (both tools await `loadSurveyCore`
+ * before any form model is opened).
  */
 export class YomaPlugin extends OraclePlugin {
   readonly name = 'yoma';
@@ -771,7 +774,10 @@ export class YomaPlugin extends OraclePlugin {
         ].join(' '),
         schema: lookupSchema,
         effect: 'read',
-        handler: (input, ctx) => this.lookup(lookupSchema.parse(input), ctx),
+        handler: async (input, ctx) => {
+          await loadSurveyCore();
+          return this.lookup(lookupSchema.parse(input), ctx);
+        },
       },
       {
         name: 'yoma_form',
@@ -781,7 +787,10 @@ export class YomaPlugin extends OraclePlugin {
         ].join(' '),
         schema: formSchema,
         effect: 'write',
-        handler: (input, ctx) => this.form(formSchema.parse(input), ctx),
+        handler: async (input, ctx) => {
+          await loadSurveyCore();
+          return this.form(formSchema.parse(input), ctx);
+        },
       },
     ];
   }

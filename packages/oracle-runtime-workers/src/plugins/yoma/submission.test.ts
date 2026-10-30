@@ -1,10 +1,11 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseOperation, submissionSummaryIssue } from '@ixo/action-protocol';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import type { Evidence } from './drafts';
 import {
   gridCell,
+  loadSurveyCore,
   openModel,
   questionAt,
   setAnswer,
@@ -23,6 +24,8 @@ import {
   REVIEW_PAGE_CHARS,
   reviewPages,
 } from './submission';
+
+beforeAll(loadSurveyCore);
 
 const FIXTURES = join(__dirname, 'fixtures');
 const draft = { collectionId: '9787', title: 'Job' };

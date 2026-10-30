@@ -5,7 +5,13 @@ it lists Yoma's programmes and jobs the way jambo.yoma.world does, takes a
 person through a job's application or claim form one question at a time, and
 says whether their logged work was approved and paid. It is **not** in
 `BUNDLED_WORKERS_PLUGINS`: a host imports it from the subpath, so
-`survey-core` only lands in oracles that use it.
+`survey-core` only lands in oracles that use it. Even there it is not
+evaluated at Worker startup: both tools await `loadSurveyCore()`
+(`engine.ts`) on their first call, a dynamic `import('survey-core')` that the
+bundler keeps behind a lazy initialiser. Evaluating it at startup had pushed
+an oracle with this plugin to the Workers startup-time limit (deploy error
+10021). Only type imports of `survey-core` are allowed in the plugin (an
+ESLint rule); its classes come from `surveyCore()` once loaded.
 
 ```ts
 import {

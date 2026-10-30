@@ -5,17 +5,14 @@ import {
   type ClaimSubmitOperation,
   type SubmissionSummaryRow,
 } from '@ixo/action-protocol';
-import {
-  QuestionPanelDynamicModel,
-  type Model,
-  type Question,
-} from 'survey-core';
+import type { Model, Question } from 'survey-core';
 import type { ChainCall } from '../ixo-chain/http';
 import type { Draft, Evidence } from './drafts';
 import {
   clearHiddenAnswers,
   questionAt,
   submittableData,
+  surveyCore,
   visibleQuestions,
   type FormQuestion,
 } from './engine';
@@ -187,7 +184,7 @@ function labelFor(
     ? `${titleOf(question)}${own && question.getValueName() === own ? ' (own answer)' : ''}`
     : head;
   if (
-    question instanceof QuestionPanelDynamicModel &&
+    question instanceof surveyCore().core.QuestionPanelDynamicModel &&
     rest.length > 1 &&
     /^\d+$/.test(rest[0]!)
   ) {
