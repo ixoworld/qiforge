@@ -1,6 +1,17 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ClefRequest, ClefResponse, ClefRunner } from './clef';
-import { judgeChoice, judgeLiterally, type ChoiceQuestion } from './judge';
+import {
+  CLEF_TIMEOUT_MS,
+  judgeChoice,
+  judgeLiterally,
+  multiChoiceRequest,
+  singleChoiceRequest,
+  type ChoiceQuestion,
+} from './judge';
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 const limits = () => ({
   signal: new AbortController().signal,
@@ -17,9 +28,26 @@ const country: ChoiceQuestion = {
 const skills: ChoiceQuestion = {
   title: 'What can you do?',
   multiple: true,
-  options: ['Photos', 'Mapping', 'Surveys'],
+  // The form's "None" item comes last and goes on its own.
+  options: ['Photos', 'Mapping', 'Surveys', 'None of these'],
+  exclusive: [3],
   otherAllowed: false,
-  noneText: 'None of these',
+};
+
+/** A single choice with the form's "None" and "Don't know" items switched on. */
+const transport: ChoiceQuestion = {
+  title: 'How do you get to work?',
+  multiple: false,
+  options: ['Bus', 'Taxi', 'None', "Don't know"],
+  otherAllowed: false,
+};
+
+/** Options that are numbers themselves. */
+const people: ChoiceQuestion = {
+  title: 'How many people helped?',
+  multiple: false,
+  options: ['5', '10', '20'],
+  otherAllowed: false,
 };
 
 /** A Clef that always picks `pick` with the given probability. */
@@ -45,16 +73,16 @@ describe('reading a choice reply', () => {
   it('takes an option number or the exact option text without Clef', () => {
     expect(judgeLiterally(country, '2')).toMatchObject({
       status: 'accepted',
-      picked: ['Zambia'],
+      picked: [1],
       by: 'number',
     });
     expect(judgeLiterally(country, ' south africa ')).toMatchObject({
       status: 'accepted',
-      picked: ['South Africa'],
+      picked: [0],
     });
     expect(judgeLiterally(skills, '1, 3')).toMatchObject({
       status: 'accepted',
-      picked: ['Photos', 'Surveys'],
+      picked: [0, 2],
     });
     expect(judgeLiterally(country, '1, 3').status).toBe('unclear');
     expect(judgeLiterally(country, '9').status).toBe('unclear');
@@ -71,7 +99,7 @@ describe('reading a choice reply', () => {
       ),
     ).toMatchObject({
       status: 'accepted',
-      picked: ['Lesotho'],
+      picked: [2],
       by: 'clef',
     });
     expect(
@@ -95,7 +123,7 @@ describe('reading a choice reply', () => {
       ),
     ).toMatchObject({
       status: 'accepted',
-      picked: ['Photos'],
+      picked: [0],
     });
   });
 
@@ -125,7 +153,7 @@ describe('reading a choice reply', () => {
       await judgeChoice(down, country, '3', undefined, limits()),
     ).toMatchObject({
       status: 'accepted',
-      picked: ['Lesotho'],
+      picked: [2],
     });
   });
 
@@ -144,5 +172,102 @@ describe('reading a choice reply', () => {
     });
     turn.abort(new Error('turn aborted'));
     await expect(pending).rejects.toThrow('turn aborted');
+  });
+
+  it("offers a single choice's None and Don't know like any option, by number, text and Clef", async () => {
+    expect(judgeLiterally(transport, '3')).toMatchObject({
+      status: 'accepted',
+      picked: [2],
+    });
+    expect(judgeLiterally(transport, "don't know")).toMatchObject({
+      status: 'accepted',
+      picked: [3],
+    });
+    expect(
+      Object.keys(
+        singleChoiceRequest(transport, 'no idea').questions.answer!.type ===
+          'choice'
+          ? (
+              singleChoiceRequest(transport, 'no idea').questions.answer as {
+                criteria: Record<string, string>;
+              }
+            ).criteria
+          : {},
+      ),
+    ).toEqual(['option_1', 'option_2', 'option_3', 'option_4', 'unclear']);
+    expect(
+      await judgeChoice(
+        clefPicking('option_4'),
+        transport,
+        'no idea honestly',
+        undefined,
+        limits(),
+      ),
+    ).toMatchObject({ status: 'accepted', picked: [3] });
+  });
+
+  it("keeps a checkbox's None on its own: picked with others it is unclear", async () => {
+    expect(judgeLiterally(skills, '4')).toMatchObject({
+      status: 'accepted',
+      picked: [3],
+    });
+    expect(judgeLiterally(skills, '1, 4')).toMatchObject({
+      status: 'unclear',
+      candidates: ['Photos', 'None of these'],
+    });
+    expect(Object.keys(multiChoiceRequest(skills, 'x').questions)).toEqual([
+      'option_1',
+      'option_2',
+      'option_3',
+      'option_4',
+    ]);
+    const both: ClefRunner = async (request) => ({
+      model: 'clef',
+      answers: Object.fromEntries(
+        Object.keys(request.questions).map((id) => [
+          id,
+          {
+            type: 'noul' as const,
+            noul: id === 'option_1' || id === 'option_4' ? 0.9 : 0.01,
+          },
+        ]),
+      ),
+    });
+    expect(
+      (
+        await judgeChoice(
+          both,
+          skills,
+          'photos, or nothing',
+          undefined,
+          limits(),
+        )
+      ).status,
+    ).toBe('unclear');
+  });
+
+  it('reads a typed number as an option only by its text when the options are numbers', () => {
+    expect(judgeLiterally(people, '10')).toMatchObject({
+      status: 'accepted',
+      picked: [1],
+    });
+    // "2" is not the second option here: no option reads "2".
+    expect(judgeLiterally(people, '2').status).toBe('unclear');
+    expect(judgeLiterally(country, '2')).toMatchObject({ picked: [1] });
+  });
+
+  it('gives Clef at most its own few seconds, even with the whole tool budget left', async () => {
+    vi.useFakeTimers();
+    const late: ClefRunner = () => new Promise(() => undefined);
+    const pending = judgeChoice(late, country, 'Maseru', undefined, {
+      signal: new AbortController().signal,
+      deadline: Date.now() + 20_000,
+    });
+    await vi.advanceTimersByTimeAsync(CLEF_TIMEOUT_MS + 10);
+    expect(await pending).toMatchObject({
+      status: 'unclear',
+      clefFailed: true,
+    });
+    expect(CLEF_TIMEOUT_MS).toBeLessThanOrEqual(5_000);
   });
 });

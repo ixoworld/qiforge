@@ -32,13 +32,20 @@ export const DOCUMENT_ATTEMPT_TIMEOUT_MS = 8_000;
 export const JOB_LIST_MAX_BYTES = 256 * 1024;
 /** Largest entity profile read. */
 export const PROFILE_MAX_BYTES = 64 * 1024;
-/** Largest form template read (the biggest Yoma form on mainnet is about 20 KB). */
-export const FORM_MAX_BYTES = 512 * 1024;
+/**
+ * Largest form template read: the largest Yoma form on mainnet is about
+ * 20 KB (the real forms in `fixtures/` are 1.9–22.4 KB), so 128 KiB leaves six times that
+ * while bounding what a hostile or broken document host can make each
+ * isolate parse and keep.
+ */
+export const FORM_MAX_BYTES = 128 * 1024;
 
 /**
  * `GET url` as JSON parsed by `schema`, under the shared policy. `what`
  * names the document in a `too_large` answer ("This form is too large to
- * read here.").
+ * read here."). `healthPerUrl`: the unhealthy mark a 429/5xx sets holds back
+ * only this address, not its whole origin (the catalog build reads many
+ * addresses on one origin, each with its own retry).
  */
 export async function getJson<S extends z.ZodType>(
   call: ChainCall,
@@ -50,6 +57,7 @@ export async function getJson<S extends z.ZodType>(
     maxBytes: number;
     what: string;
     notFoundOn404?: boolean;
+    healthPerUrl?: boolean;
   },
 ): Promise<Outcome<z.infer<S>>> {
   const read = await getJsonOnce(call, source, url, schema, opts);
@@ -69,7 +77,12 @@ function getJsonOnce<S extends z.ZodType>(
   source: Extract<Source, 'job-list' | 'document'>,
   url: string,
   schema: S,
-  opts: { label: string; maxBytes: number; notFoundOn404?: boolean },
+  opts: {
+    label: string;
+    maxBytes: number;
+    notFoundOn404?: boolean;
+    healthPerUrl?: boolean;
+  },
 ): Promise<Outcome<z.infer<S>>> {
   let upstream: string;
   try {
@@ -83,7 +96,7 @@ function getJsonOnce<S extends z.ZodType>(
           false,
         ),
       });
-    upstream = parsed.origin;
+    upstream = opts.healthPerUrl ? parsed.href : parsed.origin;
   } catch {
     return Promise.resolve({
       ok: false,

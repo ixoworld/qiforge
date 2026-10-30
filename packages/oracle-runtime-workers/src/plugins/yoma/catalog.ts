@@ -8,12 +8,20 @@
  *   2. Every claim collection those entities own, from Blocksync.
  *   3. Minus the collections admins hid per entity (`GET /v1/collections/<entity>`).
  *
- * Jambo still lists collections that have ended or are full; this does not,
- * as nobody can apply to or claim on them. A job is one collection; its name
- * is its claim form's title, as on Jambo.
+ * Jambo still lists collections that are not open (state PAUSED or CLOSED),
+ * have ended or are full; this does not, as the chain refuses a claim on
+ * them (x/claims `SubmitClaim`: state OPEN, dates, quota). A job is one
+ * collection; its name is its claim form's title, as on Jambo.
  */
 import { z } from 'zod';
-import type { ChainCall, Failure, Outcome } from '../ixo-chain/http';
+import {
+  TOOL_BUDGET_MS,
+  untilAborted,
+  unavailable,
+  type ChainCall,
+  type Failure,
+  type Outcome,
+} from '../ixo-chain/http';
 import {
   blocksyncRead,
   FORM_MAX_BYTES,
@@ -34,12 +42,21 @@ export const COLLECTION_ID = /^[1-9][0-9]{0,11}$/;
 
 /** Programmes read from the worker's list; more are left out. */
 export const MAX_PROGRAMMES = 50;
-/** Collections read for all programmes together, before filtering. */
-const COLLECTIONS_READ = 1000;
+/** Open collections read per Blocksync page, and the pages read; more set `truncated`. */
+export const COLLECTIONS_PAGE = 500;
+export const MAX_COLLECTION_PAGES = 4;
+/** Entities asked in one Blocksync read; more are read in further reads. */
+const ENTITIES_PER_READ = 100;
 /** Open jobs kept after hidden, ended and full ones are dropped; more set `truncated`. */
 export const MAX_JOBS = 300;
-/** Upstream reads one catalog build runs at once. */
+/**
+ * Reads one catalog build queues at once; they then take permits from the
+ * build's own pool (ixo-chain's {@link USER_READ_PERMITS}, keyed by network),
+ * not from the person who happened to start it.
+ */
 const CONCURRENCY = 6;
+/** `x/claims` `CollectionState`: OPEN = 0, PAUSED = 1, CLOSED = 2 (Blocksync stores the number). */
+export const COLLECTION_OPEN = 0;
 /** How long a failed build answers without being tried again. */
 const FAILED_TTL_MS = 30_000;
 /** How long a protocol entity is kept per isolate. */
@@ -93,8 +110,10 @@ export interface Programme {
 export interface Catalog {
   programmes: Programme[];
   jobs: Job[];
-  /** More open jobs than {@link MAX_JOBS}; the rest are left out. */
+  /** More open jobs than {@link MAX_JOBS}, or more collections than were read; the rest are left out. */
   truncated?: true;
+  /** A piece could not be read (a hide list, a profile, a job's name): kept only briefly. */
+  incomplete?: true;
 }
 
 /** A bank coin as Blocksync gives it; an amount that is not whole base units is left out. */
@@ -155,6 +174,7 @@ const collectionSchema = z.object({
   entity: z.string().regex(ENTITY_DID),
   admin: z.string(),
   protocol: z.string(),
+  state: z.number().int(),
   startDate: z.string().nullable(),
   endDate: z.string().nullable(),
   quota: z.union([z.string(), z.number()]).transform(String).nullable(),
@@ -227,9 +247,10 @@ function realDate(value: string | null | undefined): Date | undefined {
 }
 
 export function isOpen(
-  c: Pick<RawCollection, 'startDate' | 'endDate' | 'quota' | 'count'>,
+  c: Pick<RawCollection, 'state' | 'startDate' | 'endDate' | 'quota' | 'count'>,
   now: Date,
 ): boolean {
+  if (c.state !== COLLECTION_OPEN) return false;
   const start = realDate(c.startDate);
   const end = realDate(c.endDate);
   if (start && start > now) return false;
@@ -244,17 +265,15 @@ const entityCache = new Map<string, { at: number; entity: RawEntity }>();
 
 /**
  * Entities by id: the ones read in the last ten minutes from the isolate's
- * cache, the rest in one Blocksync read. Ids that fail the pattern are not
- * asked.
+ * cache, the rest from Blocksync, {@link ENTITIES_PER_READ} per read. Ids
+ * that fail the pattern are not asked. One read that fails fails the whole
+ * answer.
  */
 export async function fetchEntities(
   call: ChainCall,
   ids: readonly string[],
 ): Promise<Outcome<Map<string, RawEntity>>> {
-  const asked = [...new Set(ids.filter((id) => ENTITY_DID.test(id)))].slice(
-    0,
-    MAX_PROGRAMMES * 2,
-  );
+  const asked = [...new Set(ids.filter((id) => ENTITY_DID.test(id)))];
   const found = new Map<string, RawEntity>();
   const now = Date.now();
   const missing: string[] = [];
@@ -266,30 +285,42 @@ export async function fetchEntities(
       missing.push(id);
     }
   }
-  if (!missing.length) return { ok: true, value: found };
-  const read = await blocksyncRead(call, [
-    {
-      alias: 'e',
-      field: `e: entities(filter: { id: { in: [${missing.map(literal).join(', ')}] } }, first: ${missing.length}) { nodes { ${ENTITY_FIELDS} } }`,
-    },
-  ]);
-  if (!read.ok) return read;
-  for (const entity of nodesOf(read.value.e, entitySchema)) {
-    entityCache.set(entity.id, { at: now, entity });
-    found.set(entity.id, entity);
+  const chunks: string[][] = [];
+  for (let at = 0; at < missing.length; at += ENTITIES_PER_READ)
+    chunks.push(missing.slice(at, at + ENTITIES_PER_READ));
+  const reads = await mapLimit(chunks, (chunk) =>
+    blocksyncRead(call, [
+      {
+        alias: 'e',
+        field: `e: entities(filter: { id: { in: [${chunk.map(literal).join(', ')}] } }, first: ${chunk.length}) { nodes { ${ENTITY_FIELDS} } }`,
+      },
+    ]),
+  );
+  for (const read of reads) {
+    if (!read.ok) return read;
+    for (const entity of nodesOf(read.value.e, entitySchema)) {
+      entityCache.set(entity.id, { at: now, entity });
+      found.set(entity.id, entity);
+    }
   }
   return { ok: true, value: found };
 }
 
-/** Where a protocol keeps its forms: `#bco` the application, `#vct` (or `#surveyTemplate`) the claim. */
+/** Where a protocol keeps its forms: `#bco` the application, `#vct` (or `surveyTemplate`) the claim. */
 export type FormKind = 'application' | 'claim';
 
+/**
+ * A protocol's form resource, matched exactly as Jambo matches it
+ * (`jambo-yoma-v2` `screens/collectionForm.tsx`): the first linked
+ * resource whose id contains `#bco` (the application), or `#vct`, else
+ * `surveyTemplate` (the claim).
+ */
 export function formResource(protocol: RawEntity | undefined, form: FormKind) {
   const resources = protocol?.linkedResource ?? [];
   return form === 'application'
-    ? resources.find((r) => /#bco(-\d+)?$/.test(r.id))
-    : (resources.find((r) => /#vct(-\d+)?$/.test(r.id)) ??
-        resources.find((r) => r.id.includes('#surveyTemplate')));
+    ? resources.find((r) => r.id.includes('#bco'))
+    : (resources.find((r) => r.id.includes('#vct')) ??
+        resources.find((r) => r.id.includes('surveyTemplate')));
 }
 
 /** Forms by URL, least recently used first (a Map keeps insertion order). */
@@ -334,6 +365,7 @@ export async function loadForm(
   call: ChainCall,
   protocol: RawEntity | undefined,
   form: FormKind,
+  opts: { healthPerUrl?: boolean } = {},
 ): Promise<Outcome<unknown>> {
   const resource = formResource(protocol, form);
   if (!resource) return { ok: true, value: undefined };
@@ -350,6 +382,7 @@ export async function loadForm(
     label: `${form} form`,
     maxBytes: FORM_MAX_BYTES,
     what: 'This form',
+    ...(opts.healthPerUrl ? { healthPerUrl: true } : {}),
   });
   if (read.ok) rememberForm(url, read.value);
   return read;
@@ -378,13 +411,13 @@ interface Profile {
   description?: string;
 }
 
-/** An entity's profile document, clipped; empty when it has none or it cannot be read. */
+/** An entity's profile document, clipped; empty when it has none, `failed` when it could not be read. */
 async function profileOf(
   call: ChainCall,
   entity: RawEntity | undefined,
-): Promise<Profile> {
+): Promise<{ profile: Profile; failed?: true }> {
   const endpoint = profileEndpoint(entity);
-  if (!endpoint) return {};
+  if (!endpoint) return { profile: {} };
   const read = await getJson(
     call,
     'document',
@@ -395,19 +428,25 @@ async function profileOf(
       maxBytes: PROFILE_MAX_BYTES,
       notFoundOn404: true,
       what: 'A programme profile',
+      healthPerUrl: true,
     },
   );
-  if (!read.ok) return {};
+  if (!read.ok)
+    return read.failure.reason === 'not_found'
+      ? { profile: {} }
+      : { profile: {}, failed: true };
   const doc = read.value;
   const name = clippedText(doc.name, 120);
   const brand = clippedText(doc.brand, 120);
   const location = clippedText(doc.location, 120);
   const description = clippedText(doc.description, 600);
   return {
-    ...(name ? { name } : {}),
-    ...(brand ? { brand } : {}),
-    ...(location ? { location } : {}),
-    ...(description ? { description } : {}),
+    profile: {
+      ...(name ? { name } : {}),
+      ...(brand ? { brand } : {}),
+      ...(location ? { location } : {}),
+      ...(description ? { description } : {}),
+    },
   };
 }
 
@@ -426,10 +465,15 @@ export function resetCatalogCache(): void {
 }
 
 /**
- * The programmes and their open jobs. One build per isolate at a time: a
- * call during a build waits for it. A built list is kept five minutes, a
- * failed one 30 seconds, so a struggling upstream is not asked again by
- * every call.
+ * The programmes and their open jobs. One build per isolate and network at
+ * a time, run on its own: its own deadline ({@link TOOL_BUDGET_MS} from its
+ * start), its own abort (only that deadline ends it) and its own permit pool,
+ * so the caller that started it can be aborted without failing the others.
+ * Every caller, the first included, waits for it with its own abort
+ * (`untilAborted`). A complete list is kept five minutes; a failed build, or
+ * one with a piece missing (a hide list, a profile, a job's name), 30
+ * seconds, so a struggling upstream is not asked by every call and a gap
+ * does not last.
  */
 export async function loadCatalog(
   call: ChainCall,
@@ -437,20 +481,54 @@ export async function loadCatalog(
 ): Promise<Outcome<Catalog>> {
   const base = JOB_LIST_URLS[call.network];
   if (!base) return { ok: true, value: { programmes: [], jobs: [] } };
-  const cached = listCache.get(call.network);
-  if (cached && now.getTime() - cached.at < cached.ttl) return cached.pending;
-  const entry = {
-    at: now.getTime(),
-    ttl: LIST_TTL_MS,
-    pending: buildCatalog(call, base, now),
+  let entry = listCache.get(call.network);
+  if (!entry || now.getTime() - entry.at >= entry.ttl) {
+    const started = {
+      at: now.getTime(),
+      ttl: LIST_TTL_MS,
+      pending: startBuild(call, base, now),
+    };
+    entry = started;
+    listCache.set(call.network, started);
+    void started.pending.then((built) => {
+      if (!built.ok || built.value.incomplete) started.ttl = FAILED_TTL_MS;
+    });
+  }
+  return untilAborted(entry.pending, call.signal);
+}
+
+/** The build's reads: every caller's network and endpoints, but the build's own permits, deadline and abort. */
+function startBuild(
+  caller: ChainCall,
+  base: string,
+  now: Date,
+): Promise<Outcome<Catalog>> {
+  const controller = new AbortController();
+  const call: ChainCall = {
+    network: caller.network,
+    restUrl: caller.restUrl,
+    blocksyncUrl: caller.blocksyncUrl,
+    user: `yoma-catalog:${caller.network}`,
+    deadline: Date.now() + TOOL_BUDGET_MS,
+    signal: controller.signal,
+    fetch: caller.fetch,
   };
-  listCache.set(call.network, entry);
-  const built = await entry.pending.catch((error: unknown) => {
-    listCache.delete(call.network);
-    throw error;
-  });
-  if (!built.ok) entry.ttl = FAILED_TTL_MS;
-  return built;
+  // Every wait inside is bounded by the deadline; the abort is the backstop.
+  const timer = setTimeout(
+    () => controller.abort(new Error('catalog build deadline')),
+    TOOL_BUDGET_MS + 1_000,
+  );
+  return buildCatalog(call, base, now)
+    .catch((error: unknown): Outcome<Catalog> => {
+      console.warn(
+        `[yoma] catalog build failed: ${error instanceof Error ? error.name : 'unknown'}`,
+      );
+      return {
+        ok: false,
+        failure: unavailable('job-list', 'the list could not be built', true),
+      };
+    })
+    .finally(() => clearTimeout(timer));
 }
 
 /** `work` over `items`, at most {@link CONCURRENCY} at a time, results in order. */
@@ -470,6 +548,47 @@ async function mapLimit<T, R>(
     Array.from({ length: Math.min(CONCURRENCY, items.length) }, lane),
   );
   return out;
+}
+
+const pageInfoSchema = z.object({
+  pageInfo: z.object({
+    hasNextPage: z.boolean(),
+    endCursor: z.string().nullable(),
+  }),
+});
+const CURSOR = /^[A-Za-z0-9+/=_-]{1,500}$/;
+
+/**
+ * The OPEN collections the programmes own, page by page
+ * ({@link COLLECTIONS_PAGE} each, at most {@link MAX_COLLECTION_PAGES});
+ * `more` when the last page read was not the last. Blocksync keeps ids as
+ * text (its order puts "10" before "9"), so the caller sorts them as numbers.
+ */
+async function openCollections(
+  call: ChainCall,
+  entityIds: readonly string[],
+): Promise<Outcome<{ rows: RawCollection[]; more: boolean }>> {
+  const ids = entityIds.map(literal).join(', ');
+  const rows: RawCollection[] = [];
+  let after = '';
+  for (let page = 0; page < MAX_COLLECTION_PAGES; page++) {
+    const read = await blocksyncRead(call, [
+      {
+        alias: 'c',
+        field: `c: claimCollections(filter: { entity: { in: [${ids}] }, state: { equalTo: ${COLLECTION_OPEN} } }, first: ${COLLECTIONS_PAGE}${after}, orderBy: PRIMARY_KEY_ASC) { pageInfo { hasNextPage endCursor } nodes { id entity admin protocol state startDate endDate quota count payments } }`,
+      },
+    ]);
+    if (!read.ok) return read;
+    rows.push(...nodesOf(read.value.c, collectionSchema));
+    const info = pageInfoSchema.safeParse(read.value.c);
+    const cursor = info.success ? info.data.pageInfo.endCursor : null;
+    if (!info.success || !info.data.pageInfo.hasNextPage)
+      return { ok: true, value: { rows, more: false } };
+    if (!cursor || !CURSOR.test(cursor))
+      return { ok: true, value: { rows, more: true } };
+    after = `, after: ${literal(cursor)}`;
+  }
+  return { ok: true, value: { rows, more: true } };
 }
 
 async function buildCatalog(
@@ -495,23 +614,33 @@ async function buildCatalog(
   if (!entityIds.length)
     return { ok: true, value: { programmes: [], jobs: [] } };
 
+  // The hide lists, the collections and the programmes' entities at once.
   // A hide list that cannot be read must not show what it hides: that
   // programme shows as unavailable, with none of its jobs; the rest of the
-  // list stands. A 404 is a programme with nothing hidden.
-  const hidden = await mapLimit(entityIds, (id) =>
-    getJson(
-      call,
-      'job-list',
-      `${base}/v1/collections/${encodeURIComponent(id)}`,
-      hideListSchema,
-      {
-        label: 'hide list',
-        maxBytes: JOB_LIST_MAX_BYTES,
-        notFoundOn404: true,
-        what: 'A hide list',
-      },
+  // list stands. A 404 is a programme with nothing hidden. Each hide list,
+  // profile and form keeps its own health mark here, so one 503 holds back
+  // only that address, after its own retry, not the rest of the build.
+  const [hidden, collections, programmeEntities] = await Promise.all([
+    mapLimit(entityIds, (id) =>
+      getJson(
+        call,
+        'job-list',
+        `${base}/v1/collections/${encodeURIComponent(id)}`,
+        hideListSchema,
+        {
+          label: 'hide list',
+          maxBytes: JOB_LIST_MAX_BYTES,
+          notFoundOn404: true,
+          what: 'A hide list',
+          healthPerUrl: true,
+        },
+      ),
     ),
-  );
+    openCollections(call, entityIds),
+    fetchEntities(call, entityIds),
+  ]);
+  if (!collections.ok) return collections;
+  let incomplete = !programmeEntities.ok;
   const hiddenBy = new Map<string, Set<string>>();
   const unreadable = new Set<string>();
   hidden.forEach((read, index) => {
@@ -520,25 +649,10 @@ async function buildCatalog(
     else if (read.failure.reason === 'not_found') hiddenBy.set(id, new Set());
     else unreadable.add(id);
   });
+  if (unreadable.size) incomplete = true;
 
-  const ids = entityIds.map(literal).join(', ');
-  const first = await blocksyncRead(call, [
-    {
-      alias: 'c',
-      field: `c: claimCollections(filter: { entity: { in: [${ids}] } }, first: ${COLLECTIONS_READ}) { nodes { id entity admin protocol startDate endDate quota count payments } }`,
-    },
-    {
-      alias: 'e',
-      field: `e: entities(filter: { id: { in: [${ids}] } }, first: ${entityIds.length}) { nodes { ${ENTITY_FIELDS} } }`,
-    },
-  ]);
-  if (!first.ok) return first;
-  const collections = nodesOf(first.value.c, collectionSchema);
-  const entities = new Map(
-    nodesOf(first.value.e, entitySchema).map((n) => [n.id, n]),
-  );
   const order = new Map(entityIds.map((id, index) => [id, index]));
-  const allOpen = collections
+  const allOpen = collections.value.rows
     .filter(
       (c) =>
         !unreadable.has(c.entity) &&
@@ -552,19 +666,37 @@ async function buildCatalog(
     );
   const open = allOpen.slice(0, MAX_JOBS);
 
+  // Names: profiles, and each protocol's claim form title, at once.
   const protocolIds = [...new Set(open.map((c) => c.protocol))];
-  const protocols = await fetchEntities(call, protocolIds);
-  if (!protocols.ok) return protocols;
-  const profiles = await mapLimit(
-    entityIds,
-    async (id) => [id, await profileOf(call, entities.get(id))] as const,
+  const entityOf = (id: string) =>
+    programmeEntities.ok ? programmeEntities.value.get(id) : undefined;
+  const [profiles, titles] = await Promise.all([
+    mapLimit(
+      entityIds,
+      async (id) => [id, await profileOf(call, entityOf(id))] as const,
+    ),
+    fetchEntities(call, protocolIds).then((protocols) =>
+      protocols.ok
+        ? mapLimit(protocolIds, async (id) => {
+            const form = await loadForm(
+              call,
+              protocols.value.get(id),
+              'claim',
+              { healthPerUrl: true },
+            );
+            return [id, form.ok ? templateTitle(form.value) : null] as const;
+          })
+        : null,
+    ),
+  ]);
+  if (!titles || titles.some(([, title]) => title === null)) incomplete = true;
+  if (profiles.some(([, read]) => read.failed)) incomplete = true;
+  const profileOfId = new Map(profiles.map(([id, read]) => [id, read.profile]));
+  const titleOf = new Map(
+    (titles ?? []).flatMap(([id, title]) =>
+      title ? [[id, title] as const] : [],
+    ),
   );
-  const titles = await mapLimit(protocolIds, async (id) => {
-    const form = await loadForm(call, protocols.value.get(id), 'claim');
-    return [id, form.ok ? templateTitle(form.value) : undefined] as const;
-  });
-  const profileOfId = new Map(profiles);
-  const titleOf = new Map(titles);
 
   const jobs = open.map((c): Job => {
     const profile = profileOfId.get(c.entity) ?? {};
@@ -602,7 +734,10 @@ async function buildCatalog(
     value: {
       programmes,
       jobs,
-      ...(allOpen.length > open.length ? { truncated: true as const } : {}),
+      ...(allOpen.length > open.length || collections.value.more
+        ? { truncated: true as const }
+        : {}),
+      ...(incomplete ? { incomplete: true as const } : {}),
     },
   };
 }

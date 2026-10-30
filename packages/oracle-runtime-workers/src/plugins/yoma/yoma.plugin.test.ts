@@ -4,14 +4,24 @@ import { validateManifest } from '../../core/manifest';
 import { makeRuntimeContext } from '../../core/test-fixtures';
 import { UserKvLimitError } from '../../core/user-kv';
 import type { PluginTool, RuntimeContext } from '../../plugin-api/types';
-import { resetUpstreamHealth } from '../ixo-chain/http';
-import { JOB_LIST_URLS, resetCatalogCache } from './catalog';
+import type { ActionReferenceV1 as ActionReference } from '@ixo/action-protocol';
+import { HubActionClient } from '../../hub-actions/client';
+import { prepareHubAction } from '../../hub-actions/request';
+import {
+  HubActionRefused,
+  type HubActionOrigin,
+} from '../../hub-actions/store';
+import { resetUpstreamHealth, type ChainCall } from '../ixo-chain/http';
+import { fetchEntities, JOB_LIST_URLS, resetCatalogCache } from './catalog';
+import { FORM_MAX_BYTES, getJson } from './reads';
 import type { ClefRequest, ClefResponse, ClefRunner } from './clef';
-import { allDrafts, draftKey, type Kv } from './drafts';
+import { allDrafts, draftKey, updateDraft, type Kv } from './drafts';
 import milestoneApplication from './fixtures/form-9787-bco.json';
 import milestoneClaim from './fixtures/form-9787-vct.json';
 import treePlanting from './fixtures/form-8724-vct.json';
 import {
+  HUB_STATUS_TIMEOUT_MS,
+  MAX_CARD_REFRESHES,
   MAX_RESULT_CHARS,
   YomaPlugin,
   type InstantPermission,
@@ -39,6 +49,7 @@ const COLLECTIONS = [
     entity: ENTITY,
     admin: ADMIN,
     protocol: MILESTONE,
+    state: 0,
     startDate: null,
     endDate: null,
     quota: '0',
@@ -50,6 +61,7 @@ const COLLECTIONS = [
     entity: ENTITY,
     admin: ADMIN,
     protocol: TREES,
+    state: 0,
     startDate: null,
     endDate: null,
     quota: '10',
@@ -62,6 +74,7 @@ const COLLECTIONS = [
     entity: ENTITY,
     admin: ADMIN,
     protocol: MILESTONE,
+    state: 0,
     startDate: null,
     endDate: null,
     quota: '0',
@@ -73,13 +86,30 @@ const COLLECTIONS = [
     entity: ENTITY,
     admin: ADMIN,
     protocol: MILESTONE,
+    state: 0,
     startDate: null,
     endDate: '2026-09-13T00:00:00',
     quota: '0',
     count: '0',
     payments: null,
   },
+  // Paused by its admin (x/claims CollectionState 1): the chain refuses claims on it.
+  {
+    id: '7001',
+    entity: ENTITY,
+    admin: ADMIN,
+    protocol: MILESTONE,
+    state: 1,
+    startDate: null,
+    endDate: null,
+    quota: '0',
+    count: '0',
+    payments: null,
+  },
 ];
+/** A gateway media link valid for a day, as the gateway signs it. */
+const mediaLink = (id: string) =>
+  `https://channels.test/media/binding-1/${id}?exp=${Math.floor(Date.now() / 1000) + 86_400}&sig=x`;
 const ENTITIES = [
   {
     id: ENTITY,
@@ -147,7 +177,12 @@ function graphql(query: string) {
         },
       ],
     };
-  if (query.includes('c: claimCollections')) data.c = { nodes: COLLECTIONS };
+  if (query.includes('c: claimCollections'))
+    data.c = {
+      nodes: query.includes('state: { equalTo: 0 }')
+        ? COLLECTIONS.filter((c) => c.state === 0)
+        : COLLECTIONS,
+    };
   if (query.includes('e: entities'))
     data.e = {
       nodes: ENTITIES.filter((e) => query.includes(JSON.stringify(e.id))),
@@ -313,6 +348,11 @@ function setup(
     operations?: Capabilities['operations'];
     expiresAt?: number;
     instantPermission?: InstantPermission;
+    /** The Hub's review state on a status read with no outcome, as a host may pass it. */
+    reviewStatus?: string;
+    hubActions?: (base: HubActions) => HubActions;
+    capabilities?: Partial<Capabilities>;
+    config?: Record<string, unknown>;
   } = {},
 ) {
   const plugin = new YomaPlugin({
@@ -332,10 +372,14 @@ function setup(
   const kv = opts.kv === undefined ? memoryKv() : opts.kv;
   const attachments: unknown[] = [];
   let runId = 'run-1';
+  let requestId = 'request-1';
+  let toolCalls = 0;
   const unused = () => Promise.reject(new Error('not used by the Yoma plugin'));
   const hubActions: HubActions = {
-    capabilities: async () =>
-      capabilities(opts.operations ?? ['ixo.bid.submit.v1']),
+    capabilities: async () => ({
+      ...capabilities(opts.operations ?? ['ixo.bid.submit.v1']),
+      ...opts.capabilities,
+    }),
     options: unused,
     chainTransaction: unused,
     request: async (input) => {
@@ -348,6 +392,7 @@ function setup(
     status: async (_owner, actionId) => {
       const status = outcomes.get(actionId);
       return {
+        ...(opts.reviewStatus ? { reviewStatus: opts.reviewStatus } : {}),
         outcome: status
           ? {
               version: 'ixo.auth-outcome/2',
@@ -373,9 +418,14 @@ function setup(
     bindingRevision: 1,
     attachments,
   };
-  const context = (): RuntimeContext =>
+  const context = (signal?: AbortSignal): RuntimeContext =>
     makeRuntimeContext({
-      config: { NETWORK: 'mainnet', BLOCKSYNC_GRAPHQL_URL: BLOCKSYNC },
+      config: {
+        NETWORK: 'mainnet',
+        BLOCKSYNC_GRAPHQL_URL: BLOCKSYNC,
+        ...opts.config,
+      },
+      ...(signal ? { abortSignal: signal } : {}),
       user: {
         did: DID,
         matrixUserId: '@user:test',
@@ -384,23 +434,52 @@ function setup(
       session: {
         id: 'session-1',
         client: 'channel',
-        requestId: 'request-1',
+        requestId,
         runId,
         channel,
       },
+      toolCallId: `tool-${++toolCalls}`,
       ...(kv ? { kv } : {}),
-      hubActions,
+      hubActions: opts.hubActions ? opts.hubActions(hubActions) : hubActions,
     });
-  const call = async (name: string, args: Record<string, unknown>) => {
+  const call = async (
+    name: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ) => {
     const tool = tools.get(name);
     if (!tool) throw new Error(`${name} missing`);
-    return answerSchema.parse(await tool.handler(args, context()));
+    return answerSchema.parse(await tool.handler(args, context(signal)));
   };
   const lookup = (...reqs: Array<Record<string, unknown>>) =>
     call('yoma_lookup', { requests: reqs });
+  const lookupWith = (
+    signal: AbortSignal,
+    ...reqs: Array<Record<string, unknown>>
+  ) => call('yoma_lookup', { requests: reqs }, signal);
   const form = (args: Record<string, unknown>) => call('yoma_form', args);
+  const formWith = (signal: AbortSignal, args: Record<string, unknown>) =>
+    call('yoma_form', args, signal);
   const newRun = (id: string) => {
     runId = id;
+  };
+  /** The person's next message: a new request (and run). */
+  let messages = 1;
+  const newMessage = () => {
+    messages += 1;
+    requestId = `request-${messages}`;
+    runId = `run-${messages}`;
+  };
+  /**
+   * Reads every page of the review back, then sends on the person's next
+   * message, as the guide asks.
+   */
+  const confirm = async (ref: Record<string, unknown>) => {
+    const first = await form({ action: 'review', ...ref });
+    for (let page = 2; page <= Number(first.pages ?? 1); page++)
+      await form({ action: 'review', ...ref, page });
+    newMessage();
+    return form({ action: 'submit', confirmed: true, ...ref });
   };
   return {
     kv,
@@ -409,8 +488,12 @@ function setup(
     outcomes,
     receipts,
     lookup,
+    lookupWith,
     form,
+    formWith,
     newRun,
+    newMessage,
+    confirm,
   };
 }
 
@@ -815,12 +898,10 @@ describe('yoma_form', () => {
   });
 
   it('asks the application one question at a time and sends it as a card; locked while it waits', async () => {
-    const { form, requests, outcomes } = setup();
+    const { confirm, form, requests, outcomes } = setup();
     const ref = await fillApplication(form);
     expect((await form({ action: 'review', ...ref })).status).toBe('ready');
-    expect(
-      (await form({ action: 'submit', confirmed: true, ...ref })).status,
-    ).toBe('prepared');
+    expect((await confirm(ref)).status).toBe('prepared');
     const operation = answerSchema.parse(requests[0]!.operation);
     expect(operation).toMatchObject({
       kind: 'ixo.bid.submit.v1',
@@ -837,7 +918,8 @@ describe('yoma_form', () => {
       ownerDid: DID,
       provider: 'meta',
       bindingId: 'binding-1',
-      runId: 'run-1',
+      runId: 'run-2',
+      requestId: 'request-2',
     });
     expect(
       (
@@ -854,45 +936,54 @@ describe('yoma_form', () => {
   });
 
   it('sends a new card after one was declined, with a new request key', async () => {
-    const { form, requests, outcomes, newRun } = setup();
+    const { confirm, form, requests, outcomes, newRun } = setup();
     const ref = await fillApplication(form);
-    expect(
-      (await form({ action: 'submit', confirmed: true, ...ref })).status,
-    ).toBe('prepared');
+    expect((await confirm(ref)).status).toBe('prepared');
     outcomes.set('action-1', 'declined');
     newRun('run-2');
-    expect(
-      (await form({ action: 'submit', confirmed: true, ...ref })).status,
-    ).toBe('prepared');
+    expect((await confirm(ref)).status).toBe('prepared');
     expect(requests).toHaveLength(2);
     expect(requests[1]!.requestKey).not.toBe(requests[0]!.requestKey);
   });
 
-  it('clears a card whose outcome never came once it has expired', async () => {
-    const { form, requests } = setup({
-      expiresAt: Math.floor(Date.now() / 1000) - 3600,
-    });
-    const ref = await fillApplication(form);
-    await form({ action: 'submit', confirmed: true, ...ref });
+  it('never clears a card on time alone: only a final outcome or the Hub saying it expired does', async () => {
+    const expired = Math.floor(Date.now() / 1000) - 3600;
+    const waiting = setup({ expiresAt: expired });
+    const ref = await fillApplication(waiting.form);
+    await waiting.confirm(ref);
     expect(
       (
-        await form({
+        await waiting.form({
           action: 'answer',
           ...ref,
           field: 'schema:name',
           reply: 'Lerato',
         })
+      ).status,
+    ).toBe('waiting_for_confirm');
+    // A host that passes the Hub's review state: `expired` clears it.
+    const told = setup({ expiresAt: expired, reviewStatus: 'expired' });
+    const again = await fillApplication(told.form);
+    await told.confirm(again);
+    expect(
+      (
+        await told.form({
+          action: 'answer',
+          ...again,
+          field: 'schema:name',
+          reply: 'Lerato',
+        })
       ).saved,
     ).toBe('schema:name');
-    expect(requests).toHaveLength(1);
+    expect(told.requests).toHaveLength(1);
   });
 
   it("does not send when the Hub doesn't offer the application card to this account", async () => {
-    const { form, requests } = setup({ operations: ['ixo.bank.send.v1'] });
+    const { confirm, form, requests } = setup({
+      operations: ['ixo.bank.send.v1'],
+    });
     const ref = await fillApplication(form);
-    expect(
-      await form({ action: 'submit', confirmed: true, ...ref }),
-    ).toMatchObject({
+    expect(await confirm(ref)).toMatchObject({
       ok: false,
       reason: 'not_enabled',
       retryable: false,
@@ -907,12 +998,13 @@ describe('yoma_form', () => {
         collectionId: string;
         admin: string;
         address: string;
+        answers: Record<string, unknown>;
       }> = [];
       const instantPermission: InstantPermission = {
         allows: (collectionId) => collectionId === '9787',
-        grant: async ({ collectionId, admin, address }) => {
+        grant: async ({ collectionId, admin, address, answers }) => {
           if (fail) throw new Error('wallet out of gas');
-          grants.push({ collectionId, admin, address });
+          grants.push({ collectionId, admin, address, answers });
           world.allowed = true;
         },
       };
@@ -922,18 +1014,25 @@ describe('yoma_form', () => {
     it('grants on a finished application instead of sending the card', async () => {
       world.allowed = false;
       const { grants, instantPermission } = hook();
-      const { form, requests } = setup({ instantPermission });
+      const { confirm, form, requests } = setup({ instantPermission });
       const ref = await fillApplication(form);
-      expect(
-        await form({ action: 'submit', confirmed: true, ...ref }),
-      ).toMatchObject({
+      expect(await confirm(ref)).toMatchObject({
         ok: true,
         status: 'can_log_work',
-        say: 'They can start logging work now.',
+        say: expect.stringContaining('They can start logging work now.'),
       });
       expect(requests).toHaveLength(0);
       expect(grants).toEqual([
-        { collectionId: '9787', admin: expect.any(String), address: ADDRESS },
+        {
+          collectionId: '9787',
+          admin: expect.any(String),
+          address: ADDRESS,
+          answers: {
+            'schema:name': 'Lebo Mokoena',
+            'schema:identifier': '0001015800085',
+            'schema:telephone': '0712345678',
+          },
+        },
       ]);
       expect((await form({ action: 'next', ...ref })).status).toBe('submitted');
       expect(
@@ -948,21 +1047,17 @@ describe('yoma_form', () => {
         allows: () => true,
         grant: async () => {},
       };
-      const { form } = setup({ instantPermission });
+      const { confirm, form } = setup({ instantPermission });
       const ref = await fillApplication(form);
-      expect(
-        (await form({ action: 'submit', confirmed: true, ...ref })).say,
-      ).toContain('a few seconds');
+      expect((await confirm(ref)).say).toContain('a few seconds');
     });
 
     it('answers unavailable, retryable, when the grant fails, and keeps the application', async () => {
       world.allowed = false;
       const { instantPermission } = hook(true);
-      const { form, requests } = setup({ instantPermission });
+      const { confirm, form, requests } = setup({ instantPermission });
       const ref = await fillApplication(form);
-      expect(
-        await form({ action: 'submit', confirmed: true, ...ref }),
-      ).toMatchObject({
+      expect(await confirm(ref)).toMatchObject({
         ok: false,
         reason: 'unavailable',
         retryable: true,
@@ -992,11 +1087,9 @@ describe('yoma_form', () => {
           throw new Error('must not be called');
         },
       };
-      const { form, requests } = setup({ instantPermission });
+      const { confirm, form, requests } = setup({ instantPermission });
       const ref = await fillApplication(form);
-      expect(
-        (await form({ action: 'submit', confirmed: true, ...ref })).status,
-      ).toBe('prepared');
+      expect((await confirm(ref)).status).toBe('prepared');
       expect(requests).toHaveLength(1);
       expect(grants).toHaveLength(0);
       expect(
@@ -1020,8 +1113,17 @@ describe('yoma_form', () => {
   });
 
   it('takes a file from the message it came with, saves as it goes, and sends the claim card with its evidence', async () => {
-    const { form, kv, attachments, requests, outcomes, receipts, newRun } =
-      setup({ operations: ['ixo.bid.submit.v1', 'ixo.claim.submit.v1'] });
+    const {
+      confirm,
+      form,
+      lookup,
+      kv,
+      attachments,
+      requests,
+      outcomes,
+      receipts,
+      newRun,
+    } = setup({ operations: ['ixo.bid.submit.v1', 'ixo.claim.submit.v1'] });
     if (!kv) throw new Error('storage expected');
     const ref = { form: 'claim', collectionId: '9787' };
     const answer = (field: string, reply: string, value?: string) =>
@@ -1054,7 +1156,10 @@ describe('yoma_form', () => {
       (await answer('ixo:evidenceType_certificate', '[photo]')).status,
     ).toBe('no_file');
     const photo = {
-      url: 'https://channels.test/media/binding-1/abc?exp=1&sig=x',
+      url:
+        'https://channels.test/media/binding-1/abc?exp=' +
+        (Math.floor(Date.now() / 1000) + 86_400) +
+        '&sig=x',
       filename: 'certificate.jpg',
       mimetype: 'image/jpeg',
       size: 123456,
@@ -1087,9 +1192,7 @@ describe('yoma_form', () => {
       label: expect.stringContaining('ertificate'),
       value: '📷 certificate.jpg',
     });
-    expect(
-      (await form({ action: 'submit', confirmed: true, ...ref })).status,
-    ).toBe('prepared');
+    expect((await confirm(ref)).status).toBe('prepared');
     expect(requests).toHaveLength(1);
     const operation = requests[0]!.operation;
     if (operation.kind !== 'ixo.claim.submit.v1')
@@ -1130,9 +1233,7 @@ describe('yoma_form', () => {
       stoppedAt: 'evidence',
       hubSaid: 'A photo did not match the file that was sent',
     });
-    expect(
-      (await form({ action: 'submit', confirmed: true, ...ref })).status,
-    ).toBe('prepared');
+    expect((await confirm(ref)).status).toBe('prepared');
     expect(requests[1]!.requestKey).not.toBe(requests[0]!.requestKey);
     expect(
       (await storedDraft(kv, 'claim', '9787')).cardFailure,
@@ -1148,16 +1249,33 @@ describe('yoma_form', () => {
       collectionId: '9787',
       claimId: 'bafkreiclaim',
       transactionHash: 'a'.repeat(64),
+      height: 1234,
       submittedAt: 3,
     });
     expect(await form({ action: 'next', ...ref })).toMatchObject({
       status: 'submitted',
       claimId: 'bafkreiclaim',
     });
+    // The sent claim moved out of the drafts: the same job takes another.
+    const second = await form({ action: 'next', ...ref });
+    expect(second).toMatchObject({
+      status: 'in_progress',
+      next: { field: 'schema:givenName' },
+    });
+    expect((await storedDraft(kv, 'claim', '9787')).card).toBeUndefined();
+    const [listed] = (await lookup({ kind: 'my_drafts' })).results;
+    expect(listed.sent).toEqual([
+      expect.objectContaining({
+        collectionId: '9787',
+        form: 'claim',
+        state: 'submitted',
+        claimId: 'bafkreiclaim',
+      }),
+    ]);
   });
 
   it('answers not_enabled when the Hub does not offer the claim card', async () => {
-    const { form, requests, attachments } = setup();
+    const { confirm, form, requests, attachments } = setup();
     const ref = { form: 'claim', collectionId: '9787' };
     await form({ action: 'next', ...ref });
     for (const [field, reply, value] of [
@@ -1178,7 +1296,10 @@ describe('yoma_form', () => {
       });
     }
     attachments.push({
-      url: 'https://channels.test/media/binding-1/abc?exp=1&sig=x',
+      url:
+        'https://channels.test/media/binding-1/abc?exp=' +
+        (Math.floor(Date.now() / 1000) + 86_400) +
+        '&sig=x',
       filename: 'certificate.jpg',
       mimetype: 'image/jpeg',
       size: 123456,
@@ -1197,9 +1318,7 @@ describe('yoma_form', () => {
       ...ref,
       field: 'dcterms:description_reflection',
     });
-    expect(
-      await form({ action: 'submit', confirmed: true, ...ref }),
-    ).toMatchObject({
+    expect(await confirm(ref)).toMatchObject({
       ok: false,
       reason: 'not_enabled',
       retryable: false,
@@ -1387,6 +1506,761 @@ describe('yoma_form', () => {
       reason: 'unavailable',
       retryable: false,
     });
+  });
+});
+
+/** Fills the milestone claim (9787) up to its certificate photo, with that photo sent. */
+async function fillClaim(
+  form: (a: Record<string, unknown>) => Promise<Record<string, unknown>>,
+  attachments: unknown[],
+  photoUrl = mediaLink('cert'),
+) {
+  const ref = { form: 'claim', collectionId: '9787' };
+  await form({ action: 'next', ...ref });
+  for (const [field, reply, value] of [
+    ['schema:givenName', 'Lebo'],
+    ['schema:familyName', 'Mokoena'],
+    ['schema:email', 'lebo@gmail.com', 'lebo@gmail.com'],
+    ['schema:addressCountry', 'South Africa'],
+    ['schema:temporalCoverage', 'September'],
+    ['schema:name', 'Data analysis bootcamp'],
+    ['ixo:evidenceType_completionCode', 'UMZ-4411'],
+  ] as Array<[string, string, string?]>)
+    await form({
+      action: 'answer',
+      ...ref,
+      field,
+      reply,
+      ...(value ? { value } : {}),
+    });
+  attachments.push({
+    url: photoUrl,
+    filename: 'certificate.jpg',
+    mimetype: 'image/jpeg',
+    size: 123456,
+    sha256: 'c'.repeat(64),
+    kind: 'image',
+  });
+  await form({
+    action: 'answer',
+    ...ref,
+    field: 'ixo:evidenceType_certificate',
+    reply: '[photo]',
+  });
+  attachments.length = 0;
+  await form({
+    action: 'skip',
+    ...ref,
+    field: 'dcterms:description_reflection',
+  });
+  return ref;
+}
+
+describe('consent to send', () => {
+  it('sends only on a yes in a later message than the read-back of these very answers', async () => {
+    const { form, requests, newMessage } = setup();
+    const ref = await fillApplication(form);
+    // A yes the model claims without any read-back.
+    expect(
+      await form({ action: 'submit', confirmed: true, ...ref }),
+    ).toMatchObject({ status: 'needs_confirmation' });
+    // The read-back and the yes in one message: not the person's answer to it.
+    expect(
+      (await form({ action: 'submit', confirmed: true, ...ref })).status,
+    ).toBe('needs_confirmation');
+    // Answers changed after the read-back: it no longer counts.
+    newMessage();
+    await form({
+      action: 'answer',
+      ...ref,
+      field: 'schema:name',
+      reply: 'Lebo M',
+    });
+    newMessage();
+    expect(
+      (await form({ action: 'submit', confirmed: true, ...ref })).status,
+    ).toBe('needs_confirmation');
+    expect(requests).toHaveLength(0);
+    newMessage();
+    expect(
+      (await form({ action: 'submit', confirmed: true, ...ref })).status,
+    ).toBe('prepared');
+  });
+});
+
+describe('cards in flight', () => {
+  it('treats submitted and unknown as in flight: never cleared, never sent again, whatever the time; then settles late', async () => {
+    const { confirm, form, requests, outcomes, newMessage } = setup({
+      // Expired long ago: time alone must not clear it.
+      expiresAt: Math.floor(Date.now() / 1000) - 3600,
+    });
+    const ref = await fillApplication(form);
+    expect((await confirm(ref)).status).toBe('prepared');
+    for (const status of ['authorized', 'submitted', 'unknown'] as const) {
+      outcomes.set('action-1', status);
+      newMessage();
+      expect(await form({ action: 'next', ...ref })).toMatchObject({
+        status: 'waiting_for_confirm',
+      });
+      expect(
+        (
+          await form({
+            action: 'answer',
+            ...ref,
+            field: 'schema:name',
+            reply: 'Lerato',
+          })
+        ).status,
+      ).toBe('waiting_for_confirm');
+      expect(
+        (await form({ action: 'skip', ...ref, field: 'schema:name' })).status,
+      ).toBe('waiting_for_confirm');
+      expect(
+        (await form({ action: 'submit', confirmed: true, ...ref })).status,
+      ).toBe('waiting_for_confirm');
+      expect(
+        (await form({ action: 'discard', confirmed: true, ...ref })).status,
+      ).toBe('waiting_for_confirm');
+    }
+    expect((await form({ action: 'next', ...ref })).say).toContain(
+      'Do not send it again',
+    );
+    expect(requests).toHaveLength(1);
+    // The chain settles later.
+    outcomes.set('action-1', 'succeeded');
+    expect((await form({ action: 'next', ...ref })).status).toBe('submitted');
+  });
+
+  it('lets a card with no final outcome a day after its expiry be deleted when they ask', async () => {
+    const { confirm, form, outcomes } = setup({
+      expiresAt: Math.floor(Date.now() / 1000) - 2 * 86_400,
+    });
+    const ref = await fillApplication(form);
+    await confirm(ref);
+    outcomes.set('action-1', 'unknown');
+    expect(
+      await form({ action: 'discard', confirmed: true, ...ref }),
+    ).toMatchObject({
+      status: 'deleted',
+      say: expect.stringContaining('my_work'),
+    });
+  });
+
+  it('locks sections while a card waits', async () => {
+    const { confirm, form } = setup();
+    const ref = await fillApplication(form);
+    await confirm(ref);
+    expect(
+      (
+        await form({
+          action: 'section',
+          ...ref,
+          section: 'shops',
+          addAnother: true,
+        })
+      ).status,
+    ).toBe('waiting_for_confirm');
+  });
+});
+
+describe('sent work', () => {
+  it('lets them delete a sent application and apply again', async () => {
+    const { confirm, form, outcomes } = setup();
+    const ref = await fillApplication(form);
+    await confirm(ref);
+    outcomes.set('action-1', 'succeeded');
+    expect((await form({ action: 'next', ...ref })).status).toBe('submitted');
+    expect(
+      (await form({ action: 'discard', confirmed: true, ...ref })).status,
+    ).toBe('deleted');
+    expect(await form({ action: 'next', ...ref })).toMatchObject({
+      status: 'in_progress',
+      next: { field: 'schema:name' },
+    });
+  });
+});
+
+describe('two answers at once', () => {
+  it('keeps both: each lands on the draft as stored, not on a stale copy', async () => {
+    const { form, kv } = setup();
+    if (!kv) throw new Error('storage expected');
+    const ref = { form: 'application', collectionId: '9787' };
+    await form({ action: 'next', ...ref });
+    await Promise.all([
+      form({ action: 'answer', ...ref, field: 'schema:name', reply: 'Lebo' }),
+      form({
+        action: 'answer',
+        ...ref,
+        field: 'schema:identifier',
+        reply: '0001015800085',
+      }),
+    ]);
+    expect((await storedDraft(kv, 'application', '9787')).data).toMatchObject({
+      'schema:name': 'Lebo',
+      'schema:identifier': '0001015800085',
+    });
+  });
+});
+
+describe('sending, when Auth Hub says no', () => {
+  const refusing = (error: unknown) =>
+    setup({
+      hubActions: (base) => ({
+        ...base,
+        request: async () => {
+          throw error;
+        },
+      }),
+    });
+
+  it.each([
+    [
+      new HubActionRefused(
+        'refused',
+        'Auth Hub has no completed account or active channel link for this owner (not_found); retrying or changing the fields will not help.',
+      ),
+      {
+        reason: 'refused',
+        retryable: false,
+        detail: expect.stringContaining('no completed account'),
+      },
+    ],
+    [
+      new HubActionRefused(
+        'limit',
+        'Reviews are prepared only in reply to a message from the user.',
+      ),
+      { reason: 'refused', retryable: false },
+    ],
+    [
+      new HubActionRefused(
+        'expired',
+        'This review request expired before it reached Auth Hub; ask the user to confirm again.',
+      ),
+      { reason: 'expired', retryable: false },
+    ],
+    [
+      new Error('Hub action request returned 503'),
+      { reason: 'unavailable', retryable: true },
+    ],
+    [
+      new Error('Hub action request returned 429'),
+      { reason: 'rate_limited', retryable: true },
+    ],
+    [
+      new Error('Hub action request returned 400'),
+      { reason: 'refused', retryable: false },
+    ],
+    [
+      new Error('Hub action request returned 401'),
+      { reason: 'unavailable', retryable: false },
+    ],
+    [
+      new DOMException('The operation timed out.', 'TimeoutError'),
+      { reason: 'timeout', retryable: true },
+    ],
+    [
+      new Error('Hub action request key belongs to another operation'),
+      { reason: 'unavailable', retryable: false },
+    ],
+  ])(
+    'maps %s to plain words, retryable only when asking again can help',
+    async (error, expected) => {
+      const { confirm, form, kv } = refusing(error);
+      if (!kv) throw new Error('storage expected');
+      const ref = await fillApplication(form);
+      expect(await confirm(ref)).toMatchObject({ ok: false, ...expected });
+      // The next send gets a key of its own.
+      expect((await storedDraft(kv, 'application', '9787')).cardAttempt).toBe(
+        1,
+      );
+    },
+  );
+
+  it('retries after a 503 through the real prepare path: the first key stays bound to its run, the retry gets its own', async () => {
+    const HUB = 'https://hub.test';
+    const id = 'R'.repeat(32);
+    let posts = 0;
+    const client = new HubActionClient({
+      origin: HUB,
+      key: 'service-key',
+      fetcher: {
+        fetch: async (request: Request) => {
+          if (request.method === 'GET')
+            return Response.json(capabilities(['ixo.bid.submit.v1']));
+          posts += 1;
+          if (posts === 1)
+            return Response.json({ error: 'unavailable' }, { status: 503 });
+          const body = (await request.json()) as {
+            bindingId: string;
+            bindingRevision: number;
+            expiresAt: number;
+          };
+          return Response.json({
+            reference: {
+              ...reference(1),
+              id,
+              url: `${HUB}/a/${id}`,
+              bindingId: body.bindingId,
+              bindingRevision: body.bindingRevision,
+              expiresAt: body.expiresAt,
+            },
+          });
+        },
+      },
+    });
+    // The runtime's store rule (`HubActionStore.reserve`): a key is bound to
+    // the run and request that reserved it, and to its operation.
+    const reserved = new Map<
+      string,
+      { runId: string; requestId: string; operation: string }
+    >();
+    const recorded = new Map<string, ActionReference>();
+    const store = {
+      reserve: async (
+        origin: HubActionOrigin,
+        operation: unknown,
+        expiresAt: number,
+      ) => {
+        const held = reserved.get(origin.requestKey);
+        const encoded = JSON.stringify(operation);
+        if (
+          held &&
+          (held.runId !== origin.runId ||
+            held.requestId !== origin.requestId ||
+            held.operation !== encoded)
+        )
+          throw new Error(
+            'Hub action request key belongs to another operation',
+          );
+        reserved.set(origin.requestKey, {
+          runId: origin.runId,
+          requestId: origin.requestId,
+          operation: encoded,
+        });
+        return expiresAt;
+      },
+      record: async (origin: HubActionOrigin, ref: ActionReference) => {
+        recorded.set(origin.requestKey, ref);
+        return ref;
+      },
+      byRequestKey: async (key: string) => recorded.get(key) ?? null,
+    };
+    const { confirm, form, kv } = setup({
+      hubActions: (base) => ({
+        ...base,
+        capabilities: () => client.capabilities(),
+        request: (input) => prepareHubAction(client, store, input),
+      }),
+    });
+    if (!kv) throw new Error('storage expected');
+    const ref = await fillApplication(form);
+    expect(await confirm(ref)).toMatchObject({
+      ok: false,
+      reason: 'unavailable',
+      retryable: true,
+    });
+    expect(await confirm(ref)).toMatchObject({ ok: true, status: 'prepared' });
+    expect(posts).toBe(2);
+    expect(reserved.size).toBe(2);
+    const runs = [...reserved.values()].map((r) => r.runId);
+    expect(new Set(runs).size).toBe(2);
+    expect((await storedDraft(kv, 'application', '9787')).card?.actionId).toBe(
+      id,
+    );
+  });
+});
+
+describe('the network', () => {
+  it("sends on the network Auth Hub's account names, and refuses one that differs from the oracle's", async () => {
+    const other = setup({ capabilities: { network: 'ixo testnet' } });
+    const ref = await fillApplication(other.form);
+    expect(await other.confirm(ref)).toMatchObject({
+      ok: false,
+      reason: 'unavailable',
+      retryable: false,
+      detail: expect.stringContaining('ixo testnet'),
+    });
+    expect(other.requests).toHaveLength(0);
+    // The Hub names none (no bank sends or chain transactions on): the oracle's own.
+    const unnamed = setup({ capabilities: { network: null } });
+    await unnamed.confirm(await fillApplication(unnamed.form));
+    expect(unnamed.requests[0]!.operation).toMatchObject({
+      network: 'ixo mainnet',
+    });
+  });
+
+  it('reads nothing when the oracle names no network, rather than guess mainnet', async () => {
+    expect(
+      await setup({ config: { NETWORK: 'moonnet' } }).lookup({
+        kind: 'programmes',
+      }),
+    ).toMatchObject({ ok: false, reason: 'unavailable', retryable: false });
+  });
+});
+
+describe('files', () => {
+  it('asks for a file again when its gateway link lapses before the Hub could fetch it', async () => {
+    const { confirm, form, kv, attachments, requests } = setup({
+      operations: ['ixo.claim.submit.v1'],
+    });
+    if (!kv) throw new Error('storage expected');
+    const soon = `https://channels.test/media/binding-1/cert?exp=${Math.floor(Date.now() / 1000) + 60}&sig=x`;
+    const ref = await fillClaim(form, attachments, soon);
+    expect(await confirm(ref)).toMatchObject({
+      ok: true,
+      status: 'file_expired',
+      fields: ['ixo:evidenceType_certificate'],
+      next: { field: 'ixo:evidenceType_certificate' },
+    });
+    expect(requests).toHaveLength(0);
+    const stored = await storedDraft(kv, 'claim', '9787');
+    expect(stored.evidence).toEqual([]);
+    expect(stored.data).not.toHaveProperty('ixo:evidenceType_certificate');
+  });
+});
+
+describe('instant permission, at most once', () => {
+  it('never calls the grant again for an application whose grant never answered', async () => {
+    world.allowed = false;
+    let calls = 0;
+    const instantPermission: InstantPermission = {
+      allows: () => true,
+      grant: ({ signal }) => {
+        calls += 1;
+        return new Promise((_resolve, reject) =>
+          signal?.addEventListener('abort', () => reject(new Error('aborted'))),
+        );
+      },
+    };
+    const { form, formWith, newMessage } = setup({ instantPermission });
+    const ref = await fillApplication(form);
+    await form({ action: 'review', ...ref });
+    newMessage();
+    const turn = new AbortController();
+    const pending = formWith(turn.signal, {
+      action: 'submit',
+      confirmed: true,
+      ...ref,
+    });
+    await vi.waitFor(() => expect(calls).toBe(1));
+    turn.abort(new Error('turn ended'));
+    await expect(pending).rejects.toThrow();
+    newMessage();
+    await form({ action: 'review', ...ref });
+    newMessage();
+    expect(
+      (await form({ action: 'submit', confirmed: true, ...ref })).status,
+    ).toBe('permission_pending');
+    expect(calls).toBe(1);
+  });
+
+  it('starts a fresh application once the permission it gave is used up', async () => {
+    world.allowed = false;
+    const instantPermission: InstantPermission = {
+      allows: () => true,
+      grant: async () => {
+        world.allowed = true;
+      },
+    };
+    const { confirm, form } = setup({ instantPermission });
+    const ref = await fillApplication(form);
+    expect((await confirm(ref)).status).toBe('can_log_work');
+    expect((await form({ action: 'next', ...ref })).status).toBe('submitted');
+    world.allowed = false;
+    expect((await form({ action: 'next', ...ref })).status).toBe('in_progress');
+  });
+});
+
+describe('my_drafts under load', () => {
+  it('asks Auth Hub about at most three cards, each for at most 3 s', async () => {
+    let asked = 0;
+    const { lookup, kv } = setup({
+      hubActions: (base) => ({
+        ...base,
+        status: () => {
+          asked += 1;
+          return new Promise(() => undefined);
+        },
+      }),
+    });
+    if (!kv) throw new Error('storage expected');
+    for (const id of ['101', '102', '103', '104'])
+      await updateDraft(kv, 'claim', id, () => ({
+        v: 1,
+        form: 'claim',
+        collectionId: id,
+        entityDid: ENTITY,
+        protocolDid: MILESTONE,
+        admin: ADMIN,
+        title: `Job ${id}`,
+        startedAt: '2026-10-30T00:00:00.000Z',
+        updatedAt: `2026-10-30T00:00:0${id.slice(-1)}.000Z`,
+        data: {},
+        skipped: [],
+        closedSections: [],
+        evidence: [],
+        cardAttempt: 0,
+        card: {
+          actionId: `action-${id}`,
+          requestKey: 'k',
+          sentAt: '2026-10-30T00:00:00.000Z',
+          answersAt: '2026-10-30T00:00:00.000Z',
+        },
+      }));
+    vi.useFakeTimers();
+    const pending = lookup({ kind: 'my_drafts' });
+    await vi.advanceTimersByTimeAsync(HUB_STATUS_TIMEOUT_MS + 50);
+    const [drafts] = (await pending).results;
+    expect(drafts.drafts).toHaveLength(4);
+    expect(asked).toBe(MAX_CARD_REFRESHES);
+  });
+});
+
+describe('the catalog build', () => {
+  it('lists only OPEN collections: a paused one is never offered', async () => {
+    const [jobs] = (
+      await setup().lookup({ kind: 'programme_jobs', programme: ENTITY })
+    ).results;
+    expect(
+      jobs.jobs.map((j: { collectionId: string }) => j.collectionId),
+    ).not.toContain('7001');
+    const query = fetcher.mock.calls
+      .filter(([u]) => u === BLOCKSYNC)
+      .map(([, init]) => String(init.body))
+      .find((body) => body.includes('claimCollections'));
+    expect(query).toContain('state: { equalTo: 0 }');
+  });
+
+  it('reads every page of collections and orders jobs by number, not as text', async () => {
+    const page2 = {
+      ...COLLECTIONS[0],
+      id: '10000',
+    };
+    world.route = (url, init) => {
+      if (url !== BLOCKSYNC) return undefined;
+      const query = JSON.parse(String(init?.body)).query as string;
+      if (!query.includes('c: claimCollections')) return undefined;
+      return query.includes('after:')
+        ? json({
+            data: {
+              c: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [page2],
+              },
+            },
+          })
+        : json({
+            data: {
+              c: {
+                pageInfo: { hasNextPage: true, endCursor: 'Y3Vyc29y' },
+                nodes: COLLECTIONS.filter((c) => c.state === 0),
+              },
+            },
+          });
+    };
+    const [jobs] = (
+      await setup().lookup({ kind: 'programme_jobs', programme: ENTITY })
+    ).results;
+    expect(
+      jobs.jobs.map((j: { collectionId: string }) => j.collectionId),
+    ).toEqual(['8724', '9787', '10000']);
+  });
+
+  it('is not aborted by the caller that started it: another caller waiting on it still gets the list', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    world.route = (url) =>
+      url === `${WORKER}/v1/entities`
+        ? gate.then(() => json({ data: { entities: [ENTITY, QUIET] } }))
+        : undefined;
+    const first = setup();
+    const second = setup();
+    const turn = new AbortController();
+    const started = first.lookupWith(turn.signal, { kind: 'programmes' });
+    const joined = second.lookup({ kind: 'programmes' });
+    turn.abort(new Error('first caller left'));
+    await expect(started).rejects.toThrow('first caller left');
+    release();
+    const [programmes] = (await joined).results;
+    expect(programmes.ok).toBe(true);
+    expect(programmes.programmes).toHaveLength(2);
+    expect(
+      fetcher.mock.calls.filter(([u]) => u === `${WORKER}/v1/entities`),
+    ).toHaveLength(1);
+  });
+
+  it('keeps a list with a piece missing for 30 s only, a complete one for minutes', async () => {
+    vi.useFakeTimers();
+    const listReads = () =>
+      fetcher.mock.calls.filter(([u]) => u === `${WORKER}/v1/entities`).length;
+    world.route = (url) =>
+      url.startsWith(`${WORKER}/v1/collections/${encodeURIComponent(QUIET)}`)
+        ? new Response('nope', { status: 500 })
+        : undefined;
+    const { lookup } = setup();
+    await lookup({ kind: 'programmes' });
+    vi.setSystemTime(Date.now() + 31_000);
+    await lookup({ kind: 'programmes' });
+    expect(listReads()).toBe(2);
+    world.route = undefined;
+    vi.setSystemTime(Date.now() + 31_000);
+    await lookup({ kind: 'programmes' });
+    vi.setSystemTime(Date.now() + 31_000);
+    await lookup({ kind: 'programmes' });
+    expect(listReads()).toBe(3);
+  });
+
+  it('holds back only the address that failed, not its whole origin, when asked to', async () => {
+    vi.useFakeTimers();
+    const call: ChainCall = {
+      network: 'mainnet',
+      restUrl: 'https://rest.test',
+      blocksyncUrl: BLOCKSYNC,
+      user: 'did:ixo:test',
+      deadline: Date.now() + 20_000,
+      signal: new AbortController().signal,
+      fetch: (input, init) => globalThis.fetch(input, init),
+    };
+    const down = `${WORKER}/v1/collections/down`;
+    const up = `${WORKER}/v1/collections/up`;
+    world.route = (url) =>
+      url === down
+        ? new Response('down', { status: 503 })
+        : url === up
+          ? json({ data: { blacklist: [] } })
+          : undefined;
+    const read = (url: string, healthPerUrl: boolean) =>
+      getJson(call, 'job-list', url, z.unknown(), {
+        label: 'hide list',
+        maxBytes: 1024,
+        what: 'A hide list',
+        healthPerUrl,
+      });
+    const failed = read(down, true);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect((await failed).ok).toBe(false);
+    expect((await read(up, true)).ok).toBe(true);
+    resetUpstreamHealth();
+    const failedAgain = read(down, false);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await failedAgain;
+    expect((await read(up, false)).ok).toBe(false);
+  });
+
+  it('reads more than a hundred entities in as many reads as it takes, never dropping one', async () => {
+    const ids = Array.from(
+      { length: 150 },
+      (_, i) => `did:ixo:entity:${i.toString(16).padStart(32, '0')}`,
+    );
+    world.route = (url, init) => {
+      if (url !== BLOCKSYNC) return undefined;
+      const query = JSON.parse(String(init?.body)).query as string;
+      return json({
+        data: {
+          e: {
+            nodes: ids
+              .filter((id) => query.includes(JSON.stringify(id)))
+              .map((id) => ({
+                id,
+                settings: null,
+                service: [],
+                linkedResource: [],
+              })),
+          },
+        },
+      });
+    };
+    const read = await fetchEntities(
+      {
+        network: 'mainnet',
+        restUrl: 'https://rest.test',
+        blocksyncUrl: BLOCKSYNC,
+        user: 'did:ixo:test',
+        deadline: Date.now() + 20_000,
+        signal: new AbortController().signal,
+        fetch: (input, init) => globalThis.fetch(input, init),
+      },
+      ids,
+    );
+    expect(read.ok && read.value.size).toBe(150);
+    expect(fetcher.mock.calls.filter(([u]) => u === BLOCKSYNC)).toHaveLength(2);
+  });
+});
+
+describe('upstream answers the plugin refuses', () => {
+  it('says the index timed out when Blocksync hits its statement timeout', async () => {
+    world.route = (url, init) =>
+      url === BLOCKSYNC && String(init?.body).includes('w: claims')
+        ? json({
+            errors: [
+              { message: 'canceling statement due to statement timeout' },
+            ],
+          })
+        : undefined;
+    expect(
+      (await setup().lookup({ kind: 'my_work' })).results[0],
+    ).toMatchObject({ ok: false, reason: 'index_timeout' });
+  });
+
+  it('never follows a redirect', async () => {
+    world.route = (url) =>
+      url === `${WORKER}/v1/entities`
+        ? new Response(null, {
+            status: 302,
+            headers: { location: 'https://elsewhere.test/' },
+          })
+        : undefined;
+    expect(
+      (await setup().lookup({ kind: 'programmes' })).results[0],
+    ).toMatchObject({
+      ok: false,
+      reason: 'unavailable',
+      detail: expect.stringContaining('redirected'),
+    });
+  });
+
+  it('refuses a form at a plain http address, and one larger than the form cap', async () => {
+    world.route = (url, init) => {
+      if (url !== BLOCKSYNC) return undefined;
+      const query = JSON.parse(String(init?.body)).query as string;
+      if (!query.includes(JSON.stringify(TREES))) return undefined;
+      return json({
+        data: {
+          e: {
+            nodes: [
+              {
+                id: TREES,
+                linkedResource: [
+                  {
+                    id: '{id}#vct',
+                    serviceEndpoint: 'http://forms.test/trees-vct',
+                  },
+                ],
+                service: [],
+              },
+            ],
+          },
+        },
+      });
+    };
+    const [job] = (await setup().lookup({ kind: 'job', collectionId: '8724' }))
+      .results;
+    expect(job.logWork).toMatchObject({
+      ok: false,
+      reason: 'unavailable',
+      retryable: false,
+    });
+    resetCatalogCache();
+    world.route = (url) =>
+      url === 'https://forms.test/trees-vct'
+        ? new Response('x'.repeat(FORM_MAX_BYTES + 1), { status: 200 })
+        : undefined;
+    const [big] = (await setup().lookup({ kind: 'job', collectionId: '8724' }))
+      .results;
+    expect(big.logWork).toMatchObject({ ok: false, reason: 'too_large' });
   });
 });
 

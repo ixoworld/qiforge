@@ -3,13 +3,14 @@ import {
   Model,
   Question,
   QuestionBooleanModel,
+  QuestionCheckboxModel,
   QuestionFileModel,
   QuestionPanelDynamicModel,
   QuestionRatingModel,
   QuestionSelectBase,
   QuestionTextModel,
   Serializer,
-  type PanelModel,
+  type ItemValue,
 } from 'survey-core';
 import { MAX_SECTION_ITEMS } from './drafts';
 import type { ChoiceQuestion } from './judge';
@@ -17,10 +18,9 @@ import { clip } from './text';
 
 /**
  * A job's SurveyJS form (an application `#bco` or a claim `#vct`) asked one
- * question at a time in chat, with the form's own rules: `survey-core` (the
- * library the Portal and Jambo render with) decides which questions are
- * visible, which are required and whether an answer is valid, so web and chat
- * can never disagree about a form.
+ * question at a time in chat, with the form's own rules: `survey-core` 2.3.11
+ * (the Portal's version; Jambo renders with 1.9.101) decides which questions
+ * are visible, which are required and whether an answer is valid.
  *
  * Answers are kept in SurveyJS's data shape, keyed by question name, exactly
  * what the web form would produce. Repeating sections (`paneldynamic`) are
@@ -86,6 +86,8 @@ export type ChatInput =
   | 'text'
   | 'number'
   | 'date'
+  /** `inputType: datetime-local`: a date and a time of day. */
+  | 'datetime'
   | 'email'
   | 'phone'
   | 'url'
@@ -105,11 +107,19 @@ export interface FormQuestion {
   title: string;
   description?: string;
   required: boolean;
-  /** Choice questions: the options as shown, in form order. */
-  options?: Array<{ value: unknown; text: string }>;
-  otherAllowed?: boolean;
-  noneText?: string;
-  /** Rating questions. */
+  /**
+   * Choice questions: the options as shown, in form order, then the special
+   * items the form switches on ("None", "Refuse to answer", "Don't know"),
+   * each with the value the form stores for it. `exclusive`: on a checkbox,
+   * picked only on its own.
+   */
+  options?: ChoiceOption[];
+  /** How many regular options the form has, when more than {@link MAX_OPTIONS} (the rest are not offered in chat). */
+  optionsCut?: number;
+  /** The form's "Other" item: its text, and its value. */
+  other?: { text: string; value: unknown };
+  /** Rating questions: the values the form takes, lowest first. */
+  rateValues?: number[];
   rateMin?: number;
   rateMax?: number;
   /** File questions: `image/*`, `.pdf`, ... as the form accepts them. */
@@ -117,6 +127,13 @@ export interface FormQuestion {
   allowMultiple?: boolean;
   /** Inside a repeating section: which item, 1-based, and the section's title. */
   item?: { section: string; title: string; number: number };
+}
+
+export interface ChoiceOption {
+  value: unknown;
+  text: string;
+  /** A checkbox's "None", "Refuse to answer" or "Don't know": only on its own. */
+  exclusive?: true;
 }
 
 /** A repeating section that is ready for another item, or for the person to say they are done. */
@@ -161,17 +178,23 @@ export function formTitle(template: unknown): string {
   return typeof title === 'string' ? clip(title, 200) : '';
 }
 
+/**
+ * The form as a live model. `data`: a saved draft's answers, which replace
+ * everything (a draft saves the form's default values when it is started,
+ * so they are part of it). Without it the model holds the form's defaults,
+ * as the web form starts.
+ */
 export function openModel(
   template: unknown,
-  data: Record<string, unknown>,
+  data?: Record<string, unknown>,
 ): Model {
   const model = new Model(surveyJson(template));
-  model.data = structuredClone(data);
+  if (data) model.data = structuredClone(data);
   return model;
 }
 
 /** The model's answers in SurveyJS's data shape. */
-function dataOf(model: Model): Record<string, unknown> {
+export function dataOf(model: Model): Record<string, unknown> {
   const data: unknown = model.data;
   return isRecord(data) ? data : {};
 }
@@ -180,16 +203,33 @@ const INPUT_BY_TEXT_TYPE: Record<string, ChatInput> = {
   number: 'number',
   range: 'number',
   date: 'date',
-  'datetime-local': 'date',
+  'datetime-local': 'datetime',
   email: 'email',
   tel: 'phone',
   url: 'url',
 };
 
+/** A rating whose scale is all numbers is a number; one with words is a choice. */
+function numericRating(question: QuestionRatingModel): number[] | undefined {
+  const values = question.visibleRateValues.map((item) => item.value);
+  if (!values.length) return undefined;
+  const numbers = values.map((value) =>
+    typeof value === 'number' ? value : Number(value),
+  );
+  return numbers.every(Number.isFinite) &&
+    values.every(
+      (value) => typeof value === 'number' || /^-?\d+$/.test(String(value)),
+    )
+    ? [...numbers].sort((a, b) => a - b)
+    : undefined;
+}
+
 function inputFor(question: Question): ChatInput | undefined {
   if (question instanceof QuestionTextModel)
     return INPUT_BY_TEXT_TYPE[question.inputType] ?? 'text';
   if (question instanceof QuestionMapGridSelectorModel) return 'location';
+  if (question instanceof QuestionRatingModel)
+    return numericRating(question) ? 'rating' : 'pick-one';
   switch (question.getType()) {
     case 'comment':
       return 'text';
@@ -201,8 +241,6 @@ function inputFor(question: Question): ChatInput | undefined {
       return 'pick-many';
     case 'boolean':
       return 'yes-no';
-    case 'rating':
-      return 'rating';
     case 'file':
       return 'file';
     // Not asked: shown text, computed values and images carry no answer.
@@ -215,14 +253,32 @@ function inputFor(question: Question): ChatInput | undefined {
   }
 }
 
-/** The special items SurveyJS adds to a choice list; asked about through `otherAllowed`/`noneText`. */
-const SPECIAL_CHOICES = new Set([
-  'other',
-  'none',
-  'selectall',
-  'refused',
-  'dontknow',
-]);
+/**
+ * The special items a choice list carries, by identity (a regular choice
+ * may have the value `none` or `other` too): "None", "Refuse to answer" and
+ * "Don't know" are offered as options; "Other" through `other`; "Select
+ * all" is not offered.
+ */
+function specialItems(question: QuestionSelectBase): {
+  extras: ItemValue[];
+  other: ItemValue;
+  skipped: Set<ItemValue>;
+} {
+  const extras = [
+    question.noneItem,
+    question.refuseItem,
+    question.dontKnowItem,
+  ];
+  const skipped = new Set<ItemValue>([...extras, question.otherItem]);
+  if (question instanceof QuestionCheckboxModel)
+    skipped.add(question.selectAllItem);
+  return { extras, other: question.otherItem, skipped };
+}
+
+const optionOf = (item: ItemValue): ChoiceOption => ({
+  value: item.value,
+  text: clip(item.text || String(item.value), 200),
+});
 
 function describe(
   question: Question,
@@ -248,13 +304,24 @@ function describe(
     ...(item ? { item } : {}),
   };
   if (question instanceof QuestionSelectBase) {
-    view.options = question.visibleChoices
-      .filter((choice) => !SPECIAL_CHOICES.has(String(choice.value)))
-      .slice(0, MAX_OPTIONS)
-      .map((choice) => ({ value: choice.value, text: clip(choice.text, 200) }));
-    if (question.showOtherItem) view.otherAllowed = true;
-    if (question.showNoneItem)
-      view.noneText = clip(question.noneText || 'None of these', 200);
+    const { extras, other, skipped } = specialItems(question);
+    const shown = new Set<ItemValue>(question.visibleChoices);
+    const regular = question.visibleChoices.filter((c) => !skipped.has(c));
+    view.options = [
+      ...regular.slice(0, MAX_OPTIONS).map(optionOf),
+      ...extras
+        .filter((c) => shown.has(c))
+        .map((c) => ({
+          ...optionOf(c),
+          ...(view.input === 'pick-many' ? { exclusive: true as const } : {}),
+        })),
+    ];
+    if (regular.length > MAX_OPTIONS) view.optionsCut = regular.length;
+    if (shown.has(other))
+      view.other = {
+        text: clip(other.text || 'Other', 200),
+        value: other.value,
+      };
   }
   if (question instanceof QuestionBooleanModel)
     view.options = [
@@ -268,11 +335,12 @@ function describe(
       },
     ];
   if (question instanceof QuestionRatingModel) {
-    const values = question.visibleRateValues
-      .map((v) => Number(v.value))
-      .filter(Number.isFinite);
-    view.rateMin = values.length ? Math.min(...values) : question.rateMin;
-    view.rateMax = values.length ? Math.max(...values) : question.rateMax;
+    const values = numericRating(question);
+    if (values) {
+      view.rateValues = values;
+      view.rateMin = values[0];
+      view.rateMax = values[values.length - 1];
+    } else view.options = question.visibleRateValues.map(optionOf);
   }
   if (question instanceof QuestionFileModel) {
     if (question.acceptedTypes) view.acceptedTypes = question.acceptedTypes;
@@ -286,31 +354,67 @@ function describe(
 const sectionTitle = (section: QuestionPanelDynamicModel) =>
   clip(section.processedTitle || section.title || section.name, 200);
 
-/** Every visible question that takes an answer, in form order, items of repeating sections inline. */
-export function visibleQuestions(model: Model): FormQuestion[] {
-  const out: FormQuestion[] = [];
-  for (const question of model.getAllQuestions(true)) {
+/**
+ * Whether a question is on the form as the person sees it: itself, its
+ * panel and page, and for a question inside a repeating section the section
+ * and that item (`isVisibleInSurvey`).
+ */
+const shown = (question: Question) => question.isVisibleInSurvey;
+
+/** One step of the form in order: a question, or the end of a repeating section's items. */
+type Walked =
+  | { kind: 'question'; view: FormQuestion }
+  | { kind: 'section-end'; section: QuestionPanelDynamicModel };
+
+/**
+ * The form in order: every visible question that takes an answer, the
+ * items of a repeating section inline (each followed by the section's end,
+ * where "add another?" is asked), never a question the form hides.
+ */
+function* walk(model: Model): Generator<Walked> {
+  for (const question of model.getAllQuestions(false)) {
+    if (!shown(question)) continue;
     if (question instanceof QuestionPanelDynamicModel) {
-      question.panels.forEach((panel: PanelModel, index: number) => {
+      const title = sectionTitle(question);
+      for (const [index, panel] of question.panels.entries()) {
+        if (!panel.isVisible) continue;
         for (const inner of panel.questions) {
-          if (!inner.isVisible) continue;
+          if (!shown(inner)) continue;
           const view = describe(
             inner,
             `${question.name}[${index}].${inner.name}`,
             {
               section: question.name,
-              title: sectionTitle(question),
+              title,
               number: index + 1,
             },
           );
-          if (view) out.push(view);
+          if (view) yield { kind: 'question', view };
         }
-      });
+      }
+      yield { kind: 'section-end', section: question };
       continue;
     }
+    // A question inside a repeating section's template has no place of its own.
+    if (question.parentQuestion) continue;
     const view = describe(question, question.name);
-    if (view) out.push(view);
+    if (view) yield { kind: 'question', view };
   }
+}
+
+/** Every visible question that takes an answer, in form order, items of repeating sections inline. */
+export function visibleQuestions(model: Model): FormQuestion[] {
+  const out: FormQuestion[] = [];
+  for (const step of walk(model))
+    if (step.kind === 'question') out.push(step.view);
+  return out;
+}
+
+/** The visible repeating sections, in form order. */
+function visibleSections(model: Model): QuestionPanelDynamicModel[] {
+  const out: QuestionPanelDynamicModel[] = [];
+  for (const step of walk(model))
+    if (step.kind === 'section-end') out.push(step.section);
   return out;
 }
 
@@ -332,7 +436,7 @@ function dynamicSection(
   return question instanceof QuestionPanelDynamicModel ? question : undefined;
 }
 
-/** The live survey-core question at a path, or undefined when the form has none (or it is hidden). */
+/** The live survey-core question at a path, or undefined when the form has none. */
 export function questionAt(model: Model, path: string): Question | undefined {
   const { section, index, name } = parsePath(path);
   if (section === undefined) return model.getQuestionByName(name) ?? undefined;
@@ -352,48 +456,59 @@ function maxItems(section: QuestionPanelDynamicModel): number {
   );
 }
 
-function sectionPrompts(model: Model, closed: string[]): SectionPrompt[] {
-  const out: SectionPrompt[] = [];
-  for (const question of model.getAllQuestions(true)) {
-    if (
-      !(question instanceof QuestionPanelDynamicModel) ||
-      closed.includes(question.name)
-    )
-      continue;
-    const max = maxItems(question);
-    if (question.panelCount >= max) continue;
-    out.push({
-      section: question.name,
-      title: sectionTitle(question),
-      items: question.panelCount,
-      min: minItems(question),
-      max,
-    });
-  }
-  return out;
-}
-
 /** The fewest items a section needs: its `minPanelCount`, or one when it is required. */
 function minItems(section: QuestionPanelDynamicModel): number {
   return Math.max(section.minPanelCount || 0, section.isRequired ? 1 : 0);
 }
 
+/** "Another item?" for a section that can take one and was not closed; below its minimum it is asked even when closed. */
+function sectionPrompt(
+  section: QuestionPanelDynamicModel,
+  closed: string[],
+): SectionPrompt | undefined {
+  const max = maxItems(section);
+  const min = minItems(section);
+  if (section.panelCount >= max) return undefined;
+  if (closed.includes(section.name) && section.panelCount >= min)
+    return undefined;
+  return {
+    section: section.name,
+    title: sectionTitle(section),
+    items: section.panelCount,
+    min,
+    max,
+  };
+}
+
+/** Whether a question still waits for an answer: empty, and not skipped (a skipped question that has become required is asked again). */
+function waiting(
+  model: Model,
+  view: FormQuestion,
+  skipped: readonly string[],
+): boolean {
+  if (skipped.includes(view.path) && !view.required) return false;
+  return questionAt(model, view.path)?.isEmpty() ?? false;
+}
+
 /**
- * The next thing to ask: the first visible question with no answer that was
- * not skipped, then any repeating section that can take another item and was
- * not closed, then done.
+ * The next thing to ask, in form order: the first visible question with no
+ * answer that was not skipped; at the end of a repeating section's items,
+ * whether there is another item (until the section is closed or full),
+ * before any question after the section; then done.
  */
 export function nextStep(
   model: Model,
   state: Omit<FormProgressState, 'data'>,
 ): FormStep {
-  for (const view of visibleQuestions(model)) {
-    if (state.skipped.includes(view.path)) continue;
-    if (questionAt(model, view.path)?.isEmpty())
-      return { kind: 'question', question: view };
+  for (const step of walk(model)) {
+    if (step.kind === 'question') {
+      if (waiting(model, step.view, state.skipped))
+        return { kind: 'question', question: step.view };
+      continue;
+    }
+    const prompt = sectionPrompt(step.section, state.closedSections);
+    if (prompt) return { kind: 'more', section: prompt };
   }
-  const [section] = sectionPrompts(model, state.closedSections);
-  if (section) return { kind: 'more', section };
   return { kind: 'done' };
 }
 
@@ -405,10 +520,7 @@ export function progressOf(
     (view) => view.input !== 'web-only',
   );
   return {
-    answered: views.filter(
-      (view) =>
-        !questionAt(model, view.path)?.isEmpty() || skipped.includes(view.path),
-    ).length,
+    answered: views.filter((view) => !waiting(model, view, skipped)).length,
     total: views.length,
   };
 }
@@ -439,7 +551,10 @@ export type SetResult =
 
 /**
  * Sets one answer on the open model and checks it the way the web form
- * would. Accepted: the model now holds it, and the data comes back with
+ * would. `otherText`: the person's own answer for the form's "Other" item
+ * (the value holds that item's value), stored where the form stores it (a
+ * `-Comment` value, or the value itself when `storeOthersAsComment` is
+ * off). Accepted: the model now holds it, and the data comes back with
  * every value SurveyJS keeps (computed expressions included). Refused: the
  * model is put back as it was.
  */
@@ -447,21 +562,21 @@ export function setAnswer(
   model: Model,
   path: string,
   value: unknown,
-  comment?: string,
+  otherText?: string,
 ): SetResult {
   const question = questionAt(model, path);
-  if (!question || !question.isVisible)
+  if (!question || !shown(question))
     return {
       ok: false,
       errors: [`There is no question "${path}" to answer now.`],
     };
-  const before = { value: question.value, comment: question.comment };
+  const before = structuredClone(dataOf(model));
   question.value = value;
-  if (comment !== undefined) question.comment = comment;
+  if (otherText !== undefined && question instanceof QuestionSelectBase)
+    question.otherValue = otherText;
   const errors = errorsFor(question);
   if (errors.length) {
-    question.value = before.value;
-    question.comment = before.comment;
+    model.data = before;
     return { ok: false, errors };
   }
   return { ok: true, data: dataOf(model) };
@@ -474,7 +589,7 @@ export type SectionResult =
 /** Adds an empty item to a repeating section, within its maximum. */
 export function addSectionItem(model: Model, section: string): SectionResult {
   const dynamic = dynamicSection(model, section);
-  if (!dynamic)
+  if (!dynamic || !shown(dynamic))
     return { ok: false, detail: `There is no repeating section "${section}".` };
   if (dynamic.panelCount >= maxItems(dynamic))
     return {
@@ -491,7 +606,8 @@ export function sectionBelowMinimum(
   section: string,
 ): string | undefined {
   const dynamic = dynamicSection(model, section);
-  if (!dynamic) return `There is no repeating section "${section}".`;
+  if (!dynamic || !shown(dynamic))
+    return `There is no repeating section "${section}".`;
   const min = minItems(dynamic);
   return dynamic.panelCount < min
     ? `This section needs at least ${min} item${min === 1 ? '' : 's'}.`
@@ -500,7 +616,8 @@ export function sectionBelowMinimum(
 
 /**
  * Whether the whole form would submit on the web: every visible required
- * question answered, every value valid, and every repeating section with at
+ * question answered (a skipped one included: skipping never hides that it
+ * is required), every value valid, and every repeating section with at
  * least its minimum items. Web-only questions count as missing here: such a
  * form cannot be sent from chat.
  */
@@ -508,10 +625,9 @@ export function formErrors(
   model: Model,
 ): Array<{ path: string; errors: string[] }> {
   const out: Array<{ path: string; errors: string[] }> = [];
-  for (const question of model.getAllQuestions(true)) {
-    if (!(question instanceof QuestionPanelDynamicModel)) continue;
-    const below = sectionBelowMinimum(model, question.name);
-    if (below) out.push({ path: question.name, errors: [below] });
+  for (const section of visibleSections(model)) {
+    const below = sectionBelowMinimum(model, section.name);
+    if (below) out.push({ path: section.name, errors: [below] });
   }
   for (const view of visibleQuestions(model)) {
     const question = questionAt(model, view.path);
@@ -522,29 +638,173 @@ export function formErrors(
   return out;
 }
 
+/** Another visible question keeps its answer under the same value name (SurveyJS keeps it then too). */
+function valueKeptByAnother(model: Model, question: Question): boolean {
+  if (question.parentQuestion) return false;
+  return model
+    .getQuestionsByValueName(question.getValueName())
+    .some(
+      (other) => other !== question && !other.parentQuestion && shown(other),
+    );
+}
+
 /**
- * The answers the Hub files: what the form keeps, without file questions
- * (sent separately) and without answers to questions hidden since, as the
- * web form drops them on complete. Changes the model: pass a fresh one.
+ * Clears the answers of every question the form hides now (itself, its
+ * panel or page, a repeating section or one of its items: `isVisibleInSurvey`,
+ * nested questions included), whatever the form's `clearInvisibleValues`
+ * says: what is read back, shown on the card and sent is the same, and
+ * nothing the person cannot see goes out. The saved draft keeps them, so
+ * they come back if the person changes the answer that hid them.
+ */
+export function clearHiddenAnswers(model: Model): void {
+  for (const question of model.getAllQuestions(false, false, true))
+    if (
+      !question.isEmpty() &&
+      !shown(question) &&
+      !valueKeptByAnother(model, question)
+    )
+      question.clearValue();
+}
+
+/**
+ * The answers the Hub files, from a model whose hidden answers were
+ * cleared: what the form keeps, without file questions (sent separately).
+ * Changes the model: read anything else from it first.
  */
 export function submittableData(model: Model): Record<string, unknown> {
-  for (const question of model.getAllQuestions(false))
-    if (!question.isVisible) question.clearValue();
   for (const view of visibleQuestions(model))
     if (view.input === 'file') questionAt(model, view.path)?.clearValue();
   return dataOf(model);
 }
 
-/** A choice question as the judge reads it (`judge.ts`). */
+/** A choice question as the judge reads it (`judge.ts`): every option offered, special items last. */
 export function asChoiceQuestion(view: FormQuestion): ChoiceQuestion {
+  const options = view.options ?? [];
+  const exclusive = options.flatMap((option, index) =>
+    option.exclusive ? [index] : [],
+  );
   return {
     title: view.title,
     ...(view.description ? { description: view.description } : {}),
     multiple: view.input === 'pick-many',
-    options: (view.options ?? []).map((option) => option.text),
-    otherAllowed: view.otherAllowed === true,
-    ...(view.noneText ? { noneText: view.noneText } : {}),
+    options: options.map((option) => option.text),
+    ...(exclusive.length ? { exclusive } : {}),
+    otherAllowed: view.other !== undefined,
   };
+}
+
+/* ── typed answers ────────────────────────────────────────────────────── */
+
+export type Typed = { ok: true; value: unknown } | { ok: false; say: string };
+
+const pad = (n: number) => String(n).padStart(2, '0');
+
+/** A real calendar date `YYYY-MM-DD` (`-`, `/` or `.` between the parts), or undefined. */
+function calendarDate(text: string): string | undefined {
+  const match = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/.exec(text);
+  if (!match) return undefined;
+  const [year, month, day] = [
+    Number(match[1]),
+    Number(match[2]),
+    Number(match[3]),
+  ];
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+    ? `${match[1]}-${pad(month)}-${pad(day)}`
+    : undefined;
+}
+
+/**
+ * A number as people write it: `12`, `-3.5`, `1 500`, `1,5` (a decimal
+ * comma). `1,500` is refused: it is 1.5 in some places and 1500 in others.
+ */
+export function parseNumber(raw: string | number): number | undefined {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : undefined;
+  const text = raw.trim().replace(/\s/g, '');
+  if (/^-?\d+(\.\d+)?$/.test(text)) return Number(text);
+  if (/^-?\d+,\d+$/.test(text) && !/^-?\d{1,3},\d{3}$/.test(text))
+    return Number(text.replace(',', '.'));
+  return undefined;
+}
+
+/**
+ * A typed answer (number, rating, date, date and time, email, link, phone)
+ * checked and put in the form's own format before the form's rules see it:
+ * survey-core takes `abc` for a date and drops it for a number without an
+ * error. Anything else is the reply as written, trimmed.
+ */
+export function typedAnswer(
+  view: FormQuestion,
+  reply: string,
+  value: string | number | undefined,
+): Typed {
+  const raw = value ?? reply;
+  const text = typeof raw === 'string' ? raw.trim() : String(raw);
+  switch (view.input) {
+    case 'number': {
+      const n = parseNumber(raw);
+      return n === undefined
+        ? {
+            ok: false,
+            say: 'This needs a number, like 12 or 2.5 (no thousands commas).',
+          }
+        : { ok: true, value: n };
+    }
+    case 'rating': {
+      const n = parseNumber(raw);
+      const allowed = view.rateValues ?? [];
+      return n !== undefined && allowed.includes(n)
+        ? { ok: true, value: n }
+        : {
+            ok: false,
+            say: `This needs one of these numbers: ${allowed.join(', ')}.`,
+          };
+    }
+    case 'date': {
+      const date = calendarDate(text);
+      return date
+        ? { ok: true, value: date }
+        : { ok: false, say: 'This needs a date, as YYYY-MM-DD (2026-10-30).' };
+    }
+    case 'datetime': {
+      const match = /^(.+?)[T\s](\d{1,2}):(\d{2})(?::\d{2})?$/.exec(text);
+      const date = match ? calendarDate(match[1]!) : undefined;
+      const hours = Number(match?.[2]);
+      const minutes = Number(match?.[3]);
+      return date && hours < 24 && minutes < 60
+        ? { ok: true, value: `${date}T${pad(hours)}:${pad(minutes)}` }
+        : {
+            ok: false,
+            say: 'This needs a date and a time, as YYYY-MM-DD HH:mm (2026-10-30 14:30).',
+          };
+    }
+    case 'email':
+      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text)
+        ? { ok: true, value: text }
+        : { ok: false, say: 'This needs an email address.' };
+    case 'url': {
+      try {
+        const url = new URL(text);
+        if (url.protocol === 'https:' || url.protocol === 'http:')
+          return { ok: true, value: text };
+      } catch {
+        // falls through
+      }
+      return { ok: false, say: 'This needs a link starting with https://.' };
+    }
+    case 'phone': {
+      const digits = text.replace(/\D/g, '');
+      return /^\+?[\d\s().-]+$/.test(text) &&
+        digits.length >= 7 &&
+        digits.length <= 15
+        ? { ok: true, value: text }
+        : { ok: false, say: 'This needs a phone number.' };
+    }
+    default:
+      return { ok: true, value: text };
+  }
 }
 
 const GEOHASH_BASE32 = '0123456789bcdefghjkmnpqrstuvwxyz';

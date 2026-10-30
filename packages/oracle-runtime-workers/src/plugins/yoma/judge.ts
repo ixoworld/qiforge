@@ -18,26 +18,26 @@ export const ACCEPT_THRESHOLD = 0.7;
 export const MAYBE_THRESHOLD = 0.3;
 /** At or above this, a write-in ("Other") reads as a genuine answer. */
 export const GENUINE_THRESHOLD = 0.6;
+/** Longest wait for Clef: past it the reply is read literally (a chat turn must not hang on it). */
+export const CLEF_TIMEOUT_MS = 4_500;
 
 export interface ChoiceQuestion {
   title: string;
   description?: string;
   /** Checkbox (pick one or more) rather than single choice. */
   multiple: boolean;
-  /** The options as shown, in form order. */
+  /** The options as shown and numbered, in form order; special items ("None", "Don't know") last. */
   options: string[];
+  /** Checkbox options picked only on their own ("None", "Refuse to answer", "Don't know"), by index. */
+  exclusive?: number[];
   otherAllowed: boolean;
-  /** The exclusive "none of these" item of a checkbox. */
-  noneText?: string;
 }
 
 export type Judgement =
   | {
       status: 'accepted';
-      /** Option texts; a write-in is kept as the person's own text. */
-      picked: string[];
-      /** True when the person chose the "none of these" item. */
-      none?: true;
+      /** Indexes into the options, in form order; a write-in is `otherText`. */
+      picked: number[];
       /** The person's own answer, when it is none of the options. */
       otherText?: string;
       /** How the answer was read. */
@@ -117,11 +117,6 @@ export function multiChoiceRequest(
       instructions: `Does the reply say the person picks option ${index + 1}, "${option}"?`,
     };
   });
-  if (q.noneText)
-    questions.none = {
-      type: 'noul',
-      instructions: `Does the reply say "${q.noneText}", that none of the options apply to them?`,
-    };
   if (q.otherAllowed) {
     questions.other = {
       type: 'noul',
@@ -153,17 +148,16 @@ function judgeSingle(
   const answer = choiceOf(response, 'answer');
   const order = ranked(answer.probabilities);
   const [topKey, topP] = order[0] ?? [answer.choice, 0];
-  const optionAt = (key: string) =>
-    q.options[Number(key.slice('option_'.length)) - 1];
+  const indexOf = (key: string) => Number(key.slice('option_'.length)) - 1;
   const candidates = order
     .filter(([key]) => key.startsWith('option_'))
     .slice(0, 2)
-    .map(([key]) => optionAt(key))
+    .map(([key]) => q.options[indexOf(key)])
     .filter((o): o is string => o !== undefined);
   if (topKey.startsWith('option_') && topP >= ACCEPT_THRESHOLD) {
-    const option = optionAt(topKey);
-    if (option !== undefined)
-      return { status: 'accepted', picked: [option], by: 'clef' };
+    const index = indexOf(topKey);
+    if (q.options[index] !== undefined)
+      return { status: 'accepted', picked: [index], by: 'clef' };
   }
   if (topKey === 'other' && topP >= ACCEPT_THRESHOLD && q.otherAllowed) {
     if (noulOf(response, 'genuine_write_in').noul >= GENUINE_THRESHOLD)
@@ -194,16 +188,13 @@ function judgeMulti(
   response: Awaited<ReturnType<ClefRunner>>,
   otherText?: string,
 ): Judgement {
-  const picked: string[] = [];
+  const picked: number[] = [];
   const maybe: string[] = [];
   q.options.forEach((option, index) => {
     const p = noulOf(response, optionKey(index)).noul;
-    if (p >= ACCEPT_THRESHOLD) picked.push(option);
+    if (p >= ACCEPT_THRESHOLD) picked.push(index);
     else if (p >= MAYBE_THRESHOLD) maybe.push(option);
   });
-  const saysNone = q.noneText
-    ? noulOf(response, 'none').noul >= ACCEPT_THRESHOLD
-    : false;
   const namesOther = q.otherAllowed
     ? noulOf(response, 'other').noul >= ACCEPT_THRESHOLD
     : false;
@@ -214,14 +205,8 @@ function judgeMulti(
         'Some options were mentioned but not clearly picked. Ask about these.',
       candidates: maybe,
     };
-  if (saysNone && (picked.length || namesOther))
-    return {
-      status: 'unclear',
-      reason: `The reply both says "${q.noneText}" and picks options. Ask which is right.`,
-      candidates: picked,
-    };
-  if (saysNone)
-    return { status: 'accepted', picked: [], none: true, by: 'clef' };
+  const alone = aloneConflict(q, picked, namesOther);
+  if (alone) return alone;
   if (namesOther) {
     if (!otherText?.trim())
       return {
@@ -245,31 +230,63 @@ function judgeMulti(
   if (!picked.length)
     return {
       status: 'unclear',
-      reason: `No option was clearly picked. Ask again; they can pick more than one${q.noneText ? `, or say "${q.noneText}"` : ''}.`,
+      reason:
+        'No option was clearly picked. Ask again; they can pick more than one.',
     };
   return { status: 'accepted', picked, by: 'clef' };
 }
 
+/** A checkbox pick that combines an only-on-its-own option ("None") with others. */
+function aloneConflict(
+  q: ChoiceQuestion,
+  picked: number[],
+  withOther = false,
+): Judgement | undefined {
+  const exclusive = picked.find((index) => q.exclusive?.includes(index));
+  if (exclusive === undefined || (picked.length === 1 && !withOther))
+    return undefined;
+  return {
+    status: 'unclear',
+    reason: `"${q.options[exclusive]}" goes on its own, but the reply also picks other options. Ask which is right.`,
+    candidates: picked.map((index) => q.options[index]!),
+  };
+}
+
 /**
- * Without Clef: option numbers ("2", "1, 3") or the exact option text
- * (any case). Anything else is unclear.
+ * Without Clef: the exact option text (any case), or option numbers ("2",
+ * "1, 3") by position. When options are themselves numbers ("1", "5", "10")
+ * a typed number is only ever read as that option's text, never as a
+ * position. Anything else is unclear.
  */
 export function judgeLiterally(q: ChoiceQuestion, reply: string): Judgement {
-  const text = reply.trim().toLowerCase();
-  const exact = q.options.findIndex((o) => o.trim().toLowerCase() === text);
-  if (exact >= 0)
-    return { status: 'accepted', picked: [q.options[exact]!], by: 'text' };
-  if (q.noneText && q.noneText.trim().toLowerCase() === text && q.multiple)
-    return { status: 'accepted', picked: [], none: true, by: 'text' };
-  const numbers = text.split(/[\s,;&]+|\band\b/).filter(Boolean);
+  const norm = (text: string) => text.trim().toLowerCase();
+  const text = norm(reply);
+  const exact = q.options.findIndex((o) => norm(o) === text);
+  if (exact >= 0) return { status: 'accepted', picked: [exact], by: 'text' };
+  const tokens = text.split(/[\s,;&]+|\band\b/).filter(Boolean);
+  const numericOptions = q.options.some((o) =>
+    /^-?\d+([.,]\d+)?$/.test(norm(o)),
+  );
   if (
-    numbers.length &&
-    numbers.every((n) => /^\d{1,3}$/.test(n)) &&
-    (q.multiple || numbers.length === 1)
+    tokens.length &&
+    tokens.every((n) => /^\d{1,3}$/.test(n)) &&
+    (q.multiple || tokens.length === 1)
   ) {
-    const picked = numbers.map((n) => q.options[Number(n) - 1]);
-    if (picked.every((o): o is string => o !== undefined))
-      return { status: 'accepted', picked: [...new Set(picked)], by: 'number' };
+    const picked = tokens.map((n) =>
+      numericOptions
+        ? q.options.findIndex((o) => norm(o) === n)
+        : Number(n) - 1,
+    );
+    if (picked.every((index) => q.options[index] !== undefined)) {
+      const unique = [...new Set(picked)];
+      return (
+        aloneConflict(q, unique) ?? {
+          status: 'accepted',
+          picked: unique,
+          by: numericOptions ? 'text' : 'number',
+        }
+      );
+    }
   }
   return {
     status: 'unclear',
@@ -307,8 +324,8 @@ function withinDeadline<T>(
 /**
  * What a reply means for one choice question. Clef first when the host
  * gave a runner; an option number or the exact option text is taken
- * without it. Clef is given until the tool's deadline: a failure or a late
- * answer reads the reply literally. Only the turn's own abort is rethrown.
+ * without it. Clef is given {@link CLEF_TIMEOUT_MS} (less when the tool's
+ * deadline is nearer): a failure or a late answer reads the reply literally. Only the turn's own abort is rethrown.
  */
 export async function judgeChoice(
   clef: ClefRunner | undefined,
@@ -327,7 +344,7 @@ export async function judgeChoice(
           ? multiChoiceRequest(q, reply, otherText)
           : singleChoiceRequest(q, reply, otherText),
       ),
-      limits.deadline,
+      Math.min(limits.deadline, Date.now() + CLEF_TIMEOUT_MS),
       limits.signal,
     );
     if (response === 'timeout') return { ...literal, clefFailed: true };
