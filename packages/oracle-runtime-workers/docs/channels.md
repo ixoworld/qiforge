@@ -776,6 +776,21 @@ Hub's `docs/dao-actions-design.md`.
   account (its holdings: `chain_lookup balances` with that address).
   Whether the owner may vote (their weight when a proposal started) is Auth
   Hub's check; the lookups never claim it ([chain tools](chain-tools.md)).
+- Auth Hub's group refusals as worded for the model (`CHAIN_TX_REFUSAL_WORDS`):
+  `group_not_found` (on `dao` or `proposalModule`: not the group or its
+  list, swapped, or no group contract; re-check with `dao_proposals` and
+  try again), `not_in_group` (not one of the group's lists),
+  `list_disabled`, `group_not_supported` (an unsupported contract version
+  or a proposal that ends at a block height), `group_paused` (carrying out
+  a proposal with actions only; new proposals are allowed),
+  `proposal_not_open` (voting has ended), `not_a_member` (also a bare
+  unauthorized in a carry-out simulation), `group_actions_would_fail` (also
+  in groups without close-on-failure). A carry-out whose simulation lacks
+  the list's execute event is refused `simulation_failed` without a reason.
+- Every live group's contract admin can change how the group works without
+  a vote; Auth Hub adds a high-risk fact for it, so the card asks to
+  confirm twice. The rules tell the model to explain that calmly in one
+  sentence if the person asks.
 - Rules for the model: never vote or propose without the owner saying so;
   tell them the proposal's title and when voting closes before asking how
   they vote; say a proposal's deposit may be lost if it does not pass, that

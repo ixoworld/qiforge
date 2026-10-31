@@ -954,5 +954,10 @@ describe('group steps', () => {
     );
     for (const type of CHAIN_TX_GROUP_ACTION_TYPES)
       expect(rules('daodao.proposal.create')).toContain(type);
+    // Why a group card asks to confirm twice, said calmly.
+    for (const type of CHAIN_TX_GROUP_MESSAGE_TYPES)
+      expect(rules(type)).toContain(
+        'one admin account can change how the group works without a vote',
+      );
   });
 });

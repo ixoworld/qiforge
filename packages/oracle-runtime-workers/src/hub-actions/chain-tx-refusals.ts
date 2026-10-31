@@ -45,7 +45,7 @@ export const CHAIN_TX_REFUSAL_WORDS = {
   },
   proposal_not_open: {
     means:
-      'voting on this proposal is not open (it has closed, or not started yet)',
+      'voting on this proposal is not open (it has closed, or a network proposal has not started yet)',
     next: 'Tell them; a vote cannot be recorded now.',
   },
   invalid_vote_option: {
@@ -170,16 +170,17 @@ export const CHAIN_TX_REFUSAL_WORDS = {
   },
   group_not_supported: {
     means:
-      'this group is set up in a way these cards don’t support yet (another version, multiple-choice voting or an approval step)',
+      'this group runs a version these cards don’t support yet, or the proposal ends at a block number rather than a time',
     next: 'Do not retry; tell them to use the group’s own app for this.',
   },
   not_in_group: {
-    means: 'that proposal list is not an active part of this group',
+    means: 'that proposal list is not one of this group’s',
     next: 'Copy `dao` and `proposalModule` again together from chain_lookup dao_proposals or daos.',
   },
   group_paused: {
-    means: 'the group is paused right now',
-    next: 'Do not retry now; tell them it can be done once the group is no longer paused.',
+    means:
+      'the group is paused, so a proposal with actions can’t be carried out right now',
+    next: 'Do not retry now; tell them it can be carried out once the group is no longer paused.',
   },
   no_voting_power: {
     means: 'they had no vote in this group when the proposal started',
@@ -195,7 +196,7 @@ export const CHAIN_TX_REFUSAL_WORDS = {
     next: 'Nothing needs to change; tell them.',
   },
   not_a_member: {
-    means: 'only members of this group can do this',
+    means: 'this group lets only its members do this',
     next: 'Do not retry; tell them a member of the group has to do it.',
   },
   proposal_not_passed: {
@@ -209,7 +210,7 @@ export const CHAIN_TX_REFUSAL_WORDS = {
   },
   group_actions_would_fail: {
     means:
-      'if carried out now, what the proposal makes the group do would fail, and the proposal would then be marked failed for good',
+      'if carried out now, what the proposal makes the group do would fail (in most groups that would mark the proposal failed for good)',
     next: 'Do not retry now; tell them it can be carried out once that is fixed (for example once the group holds enough).',
   },
   deposit_not_supported: {
@@ -231,8 +232,8 @@ export const CHAIN_TX_REFUSAL_WORDS = {
   },
   group_not_found: {
     means:
-      'there is no group or proposal list at that address (the two addresses may be swapped)',
-    next: 'Copy `dao` (the group) and `proposalModule` (its proposal list) again from chain_lookup dao_proposals or daos.',
+      'that address is not the group or its proposal list (the two may be swapped, or it is not a group contract at all)',
+    next: 'Re-check `dao` (the group) and `proposalModule` (its proposal list) with chain_lookup dao_proposals, copy them again and try again.',
   },
   list_disabled: {
     means:

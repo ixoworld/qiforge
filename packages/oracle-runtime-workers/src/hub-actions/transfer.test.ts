@@ -568,7 +568,7 @@ describe('Hub prepare refusals', () => {
       expect(CHAIN_TX_REFUSAL_WORDS[code].next).toMatch(/^Do not retry/);
     // A swapped group address is fixable: copy both again.
     expect(CHAIN_TX_REFUSAL_WORDS.group_not_found.next).toContain(
-      'Copy `dao` (the group) and `proposalModule` (its proposal list) again',
+      'Re-check `dao` (the group) and `proposalModule` (its proposal list) with chain_lookup dao_proposals',
     );
     // The two card-wide codes: nothing to retry.
     for (const [code, field, words] of [
