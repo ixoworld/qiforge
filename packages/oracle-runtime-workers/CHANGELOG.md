@@ -1,5 +1,15 @@
 # @ixo/oracle-runtime-workers
 
+## 0.33.1
+
+### Patch Changes
+
+- [#431](https://github.com/ixoworld/qiforge/pull/431) [`b08bd20`](https://github.com/ixoworld/qiforge/commit/b08bd209eaaef77f7da0dde94ee756d1b413b6cc) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Coins and impact tokens can go to a group's own address (`@ixo/action-protocol` 0.9.1): `cosmos.bank.send` `toAddress` and `ixo.token.transfer` `recipient` accept a 32-byte contract address as well as an account, at top level and inside a group proposal's actions, and the send rule tells the model to find the group's address with `chain_lookup daos` or `dao_proposals` ("Send 2 IXO to the Auth Hub drill group."). Deploy after Auth Hub is on 0.9.1: an Auth Hub on 0.9.0 refuses such a recipient with the field named.
+
+- [#431](https://github.com/ixoworld/qiforge/pull/431) [`b08bd20`](https://github.com/ixoworld/qiforge/commit/b08bd209eaaef77f7da0dde94ee756d1b413b6cc) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Calmer group wording from the devnet test: the `daos` and `dao_proposals` lookups tell the model to leave self-chosen group names and admin-added members out of an ordinary answer (one short note only when it matters, such as "Group names are chosen by the group itself.", and never a suggestion that the person did not join), and carrying out a proposal with no actions is described as "This just marks it as carried out; nothing else happens."
+
+- [#431](https://github.com/ixoworld/qiforge/pull/431) [`b08bd20`](https://github.com/ixoworld/qiforge/commit/b08bd209eaaef77f7da0dde94ee756d1b413b6cc) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Only the capabilities read decides the Hub protocol version. An options or status read that Auth Hub refuses at the settled version no longer walks 7 → 6 → 5 and remembers the lower version (which sent the next prepare at version 5 on devnet when the options route refused 7 and 6): the capabilities read settles the version again, the read is retried once only if that changed it, and otherwise the read fails on its own in plain words.
+
 ## 0.33.0
 
 ### Minor Changes
