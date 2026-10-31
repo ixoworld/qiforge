@@ -367,12 +367,17 @@ caller's level with `400 protocol_version_required`. An older Auth Hub
 reads `?version=` against its closed list (1 to 6 on 0.8.0, 1 to 5 on
 0.7.0) and answers each call that declares a version it does not know with
 `400 invalid_request`. The client then negotiates down the ladder 7, 6, 5
-(`HUB_PROTOCOL_VERSIONS` in `src/hub-actions/client.ts`): a read
-(capabilities, options, status) refused that way is asked again at the next
-lower version until one is answered, and the Hub is spoken to at that
-version for `HUB_PROTOCOL_RECHECK_MS` (10 min, per client, so per owner
-object) before 7 is tried again (a Hub that later refuses the remembered
-version too is stepped down again). A prepare uses the version the
+(`HUB_PROTOCOL_VERSIONS` in `src/hub-actions/client.ts`): the
+capabilities read refused that way is asked again at the next lower
+version until one is answered, and the Hub is spoken to at that version for
+`HUB_PROTOCOL_RECHECK_MS` (10 min, per client, so per owner object) before
+7 is tried again. Only the capabilities read decides the version: an
+options or status read refused at it lets the capabilities read settle the
+version again and is retried once only if that changed it (a Hub rolled
+back); otherwise it fails on its own (`hubReadRefused`) and the operations
+keep their version. On devnet an options route that refused 7 and 6 (a Hub
+bug) once walked the client down to 5 and the next prepare went at 5,
+which this rule prevents. A prepare uses the version the
 capabilities read before it settled on and is never retried at another
 version (its 400 can be a real refusal of the operation). So while Auth Hub
 is still on 0.8.0 every Hub action keeps working and the 33 level-6 types

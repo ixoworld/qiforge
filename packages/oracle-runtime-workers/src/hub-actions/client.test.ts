@@ -3,6 +3,7 @@ import {
   HUB_CHAIN_TX_PREPARE_TIMEOUT_MS,
   HUB_PROTOCOL_RECHECK_MS,
   HUB_UPDATE_REQUIRED,
+  hubReadRefused,
   HubActionClient,
 } from './client';
 import type { ActionReferenceV1, ActionOutcomeV1 } from '@ixo/action-protocol';
@@ -442,7 +443,9 @@ describe('Hub action HTTP client', () => {
     // An Auth Hub before version 5 (before @ixo/action-protocol 0.7.0) reads
     // `?version=` with `z.enum(['1', '2', '3', '4'])` on capabilities,
     // prepare, options and status; the ZodError becomes its router's
-    // 400 `{"error":"invalid_request"}`. Each read tries 7, then 6, then 5.
+    // 400 `{"error":"invalid_request"}`. The capabilities read tries 7, then
+    // 6, then 5; a status or options read refused at 7 lets the capabilities
+    // read settle the version (it refuses all three) instead of walking.
     const seen: string[] = [];
     const client = new HubActionClient({
       origin: 'https://hub.test',
@@ -518,11 +521,13 @@ describe('Hub action HTTP client', () => {
       'GET /api/internal/actions/operations/capabilities?version=6',
       'GET /api/internal/actions/operations/capabilities?version=5',
       `GET /api/internal/actions/operations/${id}?version=7`,
-      `GET /api/internal/actions/operations/${id}?version=6`,
-      `GET /api/internal/actions/operations/${id}?version=5`,
+      'GET /api/internal/actions/operations/capabilities?version=7',
+      'GET /api/internal/actions/operations/capabilities?version=6',
+      'GET /api/internal/actions/operations/capabilities?version=5',
       'GET /api/internal/actions/operations/options?version=7',
-      'GET /api/internal/actions/operations/options?version=6',
-      'GET /api/internal/actions/operations/options?version=5',
+      'GET /api/internal/actions/operations/capabilities?version=7',
+      'GET /api/internal/actions/operations/capabilities?version=6',
+      'GET /api/internal/actions/operations/capabilities?version=5',
       'GET /api/internal/actions/operations/options?version=2',
       // A prepare is never retried at another version: its 400 may be a
       // real refusal of the operation.
@@ -710,6 +715,91 @@ describe('Hub action HTTP client', () => {
     } finally {
       now.mockRestore();
     }
+  });
+
+  it('never lowers the operations version for an options route that refuses 7 and 6: only the capabilities read decides', async () => {
+    // Devnet, 18:19:34Z: the options route refused 7 and 6 (a Hub bug) while
+    // capabilities and operations took 7; the client walked options down to
+    // 5, remembered it, and the next POST went at 5.
+    const seen: string[] = [];
+    const client = new HubActionClient({
+      origin: 'https://hub.test',
+      key: 'oracle-secret',
+      fetcher: {
+        fetch: async (request: Request) => {
+          const url = new URL(request.url);
+          const version = url.searchParams.get('version') ?? '1';
+          seen.push(`${request.method} ${url.pathname}?version=${version}`);
+          if (url.pathname.endsWith('/options'))
+            return ['7', '6'].includes(version)
+              ? Response.json({ error: 'invalid_request' }, { status: 400 })
+              : Response.json({
+                  version: 'ixo.auth-options/3',
+                  accountId: reference.accountId,
+                  ownerDid: 'did:ixo:second',
+                  bindingId: reference.bindingId,
+                  bindingRevision: reference.bindingRevision,
+                  connections: [],
+                  targets: [],
+                  resources: [],
+                  transfer: null,
+                });
+          if (url.pathname.endsWith('/capabilities'))
+            return Response.json({
+              version: 'ixo.auth-capabilities/2',
+              accountId: reference.accountId,
+              oracleDid: 'did:ixo:oracle',
+              network: 'ixo devnet',
+              resourceOrigin: null,
+              operations: ['form.submit.v1'],
+              transfer: null,
+              forms: [],
+            });
+          return Response.json({ reference });
+        },
+      },
+    });
+    const binding = {
+      bindingId: reference.bindingId,
+      bindingRevision: reference.bindingRevision,
+    };
+    await client.capabilities();
+    // The options read fails on its own, in plain words.
+    await expect(client.options(binding)).rejects.toMatchObject({
+      name: 'HubActionRefused',
+      message: hubReadRefused('7'),
+      httpStatus: 400,
+    });
+    expect(client.protocolVersion).toBe('7');
+    await client.request({
+      ...binding,
+      requestKey: 'key-options-bug',
+      expiresAt: 1999999999,
+      operation: {
+        kind: 'form.submit.v1',
+        formId: 'form-one',
+        destination: 'registered-form',
+        fields: [
+          {
+            id: 'answer',
+            label: 'Answer',
+            type: 'text',
+            required: true,
+            value: 'Yes',
+            source: 'user',
+          },
+        ],
+        declaration: null,
+      },
+    });
+    expect(seen).toEqual([
+      'GET /api/internal/actions/operations/capabilities?version=7',
+      'GET /api/internal/actions/operations/options?version=7',
+      // The capabilities read settles the version again: still 7.
+      'GET /api/internal/actions/operations/capabilities?version=7',
+      // The prepare goes at 7.
+      'POST /api/internal/actions/operations?version=7',
+    ]);
   });
 
   it('words a chain authorization refusal by the steps it prepared: a group carry-out never mentions a collection admin', async () => {
