@@ -1067,7 +1067,8 @@ describe('request_chain_transaction', () => {
     recipient: RECIPIENT,
     tokens: [{ id: 'CARBON:bafytoken', amount: '3' }],
   };
-  // A 32-byte (contract) address: `ixo1` and 59 characters.
+  // Neither an account (`ixo1` and 38) nor a contract (`ixo1` and 58):
+  // `ixo1` and 59 characters.
   const CONTRACT = `ixo1${'q'.repeat(59)}`;
 
   /** The request tool as an account offered every type is given it. */
@@ -1265,10 +1266,13 @@ describe('request_chain_transaction', () => {
       'an empty verification proof',
       { messages: [{ ...evaluate, verificationProof: '' }] },
     ],
-    // Addresses: 20 bytes (ixo1 + 38), never a contract.
-    ['a contract recipient', { messages: [{ ...token, recipient: CONTRACT }] }],
+    // Recipients: 20 bytes (ixo1 + 38) or 32 (ixo1 + 58), nothing between.
     [
-      'a contract bank recipient',
+      'a 59-character token recipient',
+      { messages: [{ ...token, recipient: CONTRACT }] },
+    ],
+    [
+      'a 59-character bank recipient',
       { messages: [{ ...bank, toAddress: CONTRACT }] },
     ],
     [
@@ -1430,7 +1434,7 @@ describe('request_chain_transaction', () => {
     ).toEqual({
       status: 'unavailable',
       reason:
-        "The messages do not match a supported message shape (check messages[0].amountBaseUnits: not a field here (describe_chain_messages lists each type's fields); messages[1].toAddress: A 20-byte ixo1… account address (42 characters); contract addresses are refused; messages[2].claimId: Only letters, digits and : . _ / - (copied exactly); messages[3].agentDid: not a field here (describe_chain_messages lists each type's fields)).",
+        "The messages do not match a supported message shape (check messages[0].amountBaseUnits: not a field here (describe_chain_messages lists each type's fields); messages[1].toAddress: An ixo1… account address (42 characters), or a group’s own address (62 characters, `dao` in chain_lookup daos or dao_proposals), copied exactly; messages[2].claimId: Only letters, digits and : . _ / - (copied exactly); messages[3].agentDid: not a field here (describe_chain_messages lists each type's fields)).",
     });
     expect(chainTransaction).not.toHaveBeenCalled();
   });
@@ -1443,7 +1447,7 @@ describe('request_chain_transaction', () => {
     expect(result).toEqual({
       status: 'unavailable',
       reason:
-        'The messages do not match a supported message shape (check messages[1].toAddress: A 20-byte ixo1… account address (42 characters); contract addresses are refused).',
+        'The messages do not match a supported message shape (check messages[1].toAddress: An ixo1… account address (42 characters), or a group’s own address (62 characters, `dao` in chain_lookup daos or dao_proposals), copied exactly).',
     });
     // The batch itself: the model-facing schema's paths, the same way.
     expect(
@@ -3025,7 +3029,7 @@ describe('describe_chain_messages', () => {
     expect(result.status).toBe('known');
     expect(result.general).toBe(CHAIN_TX_GENERAL_RULES);
     for (const words of [
-      '20-byte `ixo1…` account addresses (contract addresses are refused)',
+      'a coin send or impact-token transfer may go to a group’s own address',
       'only letters, digits and `: . _ / -`',
       'never invent or guess one',
       'Auth Hub sets the fee',

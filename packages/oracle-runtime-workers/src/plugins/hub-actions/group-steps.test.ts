@@ -215,27 +215,26 @@ function isObject(value: unknown): value is Record<string, unknown> {
  */
 function onTheWire(message: Record<string, unknown>): Record<string, unknown> {
   if (
-    message.type !== 'daodao.proposal.create' ||
-    !Array.isArray(message.actions)
+    message.type === 'daodao.proposal.create' &&
+    Array.isArray(message.actions)
+  )
+    return { ...message, actions: message.actions.map(inBaseUnits) };
+  return inBaseUnits(message);
+}
+/** A bank or stake message with a plain display amount, in base units (IXO); anything else as written. */
+function inBaseUnits<T>(message: T): T | Record<string, unknown> {
+  if (
+    !isObject(message) ||
+    !(
+      message.type === 'cosmos.bank.send' ||
+      STAKE_TYPES.includes(String(message.type))
+    ) ||
+    typeof message.amount !== 'string' ||
+    !DISPLAY.test(message.amount)
   )
     return message;
-  return {
-    ...message,
-    actions: message.actions.map((action: unknown) => {
-      if (
-        !isObject(action) ||
-        !(
-          action.type === 'cosmos.bank.send' ||
-          STAKE_TYPES.includes(String(action.type))
-        ) ||
-        typeof action.amount !== 'string' ||
-        !DISPLAY.test(action.amount)
-      )
-        return action;
-      const { amount, ...rest } = action;
-      return { ...rest, amountBaseUnits: toBaseUnits(amount, 6).toString() };
-    }),
-  };
+  const { amount, ...rest } = message;
+  return { ...rest, amountBaseUnits: toBaseUnits(amount, 6).toString() };
 }
 
 /** The protocol's reason for one message, as the Hub would get it; null: accepted. */
@@ -382,6 +381,34 @@ describe('group steps', () => {
     expect(GROUP_ACTION_TYPES).toEqual([...CHAIN_TX_GROUP_ACTION_TYPES]);
   });
 
+  it('sends coins and impact tokens to a group’s own address, at top level and from a group, as the protocol does', async () => {
+    const chainTransaction = hostMock();
+    const ctx = channelContext(chainTransaction);
+    const toGroup = [
+      { type: 'cosmos.bank.send', toAddress: DAO, amount: '2' },
+      { ...ACTIONS['ixo.token.transfer'], recipient: DAO },
+    ];
+    for (const message of [
+      ...toGroup,
+      // One group paying another.
+      create(toGroup),
+    ].map((value) => JSON.parse(JSON.stringify(value)))) {
+      expect([
+        message,
+        protocolIssue([message]),
+        chainTool().schema.safeParse({ messages: [message] }).success,
+        await chainTool().handler({ messages: [message] }, ctx),
+      ]).toMatchObject([message, null, true, { status: 'prepared' }]);
+    }
+    // The rule says so, with the group's name.
+    expect(CHAIN_TX_CATALOG['cosmos.bank.send'].rules).toContain(
+      '“Send 2 IXO to the Auth Hub drill group.”',
+    );
+    expect(CHAIN_TX_CATALOG['ixo.token.transfer'].rules).toContain(
+      'a group’s own address',
+    );
+  });
+
   it('puts a group step alone on its card, as the protocol does', async () => {
     const chainTransaction = hostMock();
     for (const messages of [
@@ -459,8 +486,16 @@ describe('group steps', () => {
       ]),
     ],
     [
-      'a send to a contract',
-      create([{ ...ACTIONS['cosmos.bank.send'], toAddress: DAO }]),
+      'a send to a 59-character address',
+      create([
+        { ...ACTIONS['cosmos.bank.send'], toAddress: `ixo1${'q'.repeat(59)}` },
+      ]),
+    ],
+    [
+      'a group’s address as a stake’s admin',
+      create([
+        { ...ACTIONS['ixo.claims.update-collection-state'], adminAddress: DAO },
+      ]),
     ],
     ['an action that is not an object', create([null])],
   ])(
