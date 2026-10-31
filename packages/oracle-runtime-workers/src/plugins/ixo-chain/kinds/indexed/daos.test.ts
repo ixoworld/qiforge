@@ -11,20 +11,27 @@ import {
   planOf,
   refusalOf,
 } from './fixtures/context';
-// Recorded on mainnet on Oct 29 2026 (`first: 3`): the user is in no DAO,
-// so this is the answer for the staker of the cw20 staker table's first
-// row (two cw20 stakes, three of its cw4 groups; no native staker is
-// indexed on mainnet).
+// Recorded on mainnet on Oct 29 2026 (`first: 3`) and again with the
+// proposal lists on Oct 31 2026 (the same rows): the user is in no DAO, so
+// this is the answer for the staker of the cw20 staker table's first row
+// (two cw20 stakes, three of its cw4 groups; no native staker is indexed on
+// mainnet).
 import recorded from './fixtures/daos.json';
 
 const STAKER = 'ixo1xwn45d6xhe3egcz3nqlfc2elpc3h6usy6yw3uk';
-const CORES =
-  'daoCoresByVotingModule(first: 1) { nodes { address name description } }';
+const LISTS =
+  'daoProposalModulesByDaoAddress(first: 3, orderBy: PRIMARY_KEY_ASC) { pageInfo { hasNextPage } nodes { address prefix status moduleType proposalCreationPolicy config daoPreProposeModuleByPreProposeModule { depositInfo openProposalSubmission } } }';
+const CORES = `daoCoresByVotingModule(first: 1) { nodes { address name description ${LISTS} } }`;
 
 const field = (address: string, first: number) =>
   `r0: query { native: daoNativeStakers(filter: { stakerAddress: { equalTo: "${address}" } }, first: ${first}, orderBy: PRIMARY_KEY_ASC) { pageInfo { hasNextPage } nodes { stakedAmount daoVotingModuleByVotingModuleAddress { address moduleType nativeDenom totalWeight ${CORES} } } } cw20: daoCw20Stakers(filter: { stakerAddress: { equalTo: "${address}" } }, first: ${first}, orderBy: PRIMARY_KEY_ASC) { pageInfo { hasNextPage } nodes { stakedAmount daoCw20StakingContractByStakingContract { daoVotingModulesByStakingContract(first: 3) { nodes { address moduleType tokenAddress totalWeight ${CORES} } } } } } cw4: daoCw4Members(filter: { memberAddress: { equalTo: "${address}" } }, first: ${first}, orderBy: PRIMARY_KEY_ASC) { pageInfo { hasNextPage } nodes { weight daoCw4GroupContractByGroupContractAddress { daoVotingModulesByGroupContractAddress(first: 3) { nodes { address moduleType totalWeight ${CORES} } } } } } }`;
 
 const empty = { pageInfo: { hasNextPage: false }, nodes: [] };
+/** A DAO core as the index answers it, with no proposal list. */
+const core = (fields: Record<string, unknown>) => ({
+  daoProposalModulesByDaoAddress: empty,
+  ...fields,
+});
 
 describe('daos', () => {
   it('reads every kind of membership in one alias', () => {
@@ -74,12 +81,41 @@ describe('daos', () => {
           votingModule:
             'ixo17yw4nya4kmqgn0aw4xfecrwc098260n6cnqz72afnmhqxrjp6j3s8h4fpp',
           moduleType: 'dao_voting_cw20_staked',
+          // Where it takes new proposals: members only, with a 1 IXO
+          // deposit returned only when the proposal passes.
+          proposalLists: [
+            {
+              proposalModule:
+                'ixo15sy5qemc86ytfka8xqapvntyjth6vxpan5pvd6k98nt7gn7a4myq9t8qvk',
+              prefix: 'A',
+              membersOnly: true,
+              deposit: {
+                denom: 'uixo',
+                amountBaseUnits: '1000000',
+                symbol: 'IXO',
+                amount: '1',
+                verified: true,
+                refundPolicy: 'only_passed',
+              },
+              votingTime: '5 days',
+              allowRevoting: false,
+            },
+          ],
         },
         expect.objectContaining({
           name: 'Members Group',
           membership: 'cw20-staked',
           staked: { amountBaseUnits: '1000000' },
           votingPowerShare: '0.90%',
+          proposalLists: [
+            expect.objectContaining({
+              deposit: expect.objectContaining({
+                amount: '1000',
+                symbol: 'IXO',
+                refundPolicy: 'only_passed',
+              }),
+            }),
+          ],
         }),
         expect.objectContaining({
           name: 'Administration',
@@ -90,6 +126,17 @@ describe('daos', () => {
           weight: '1',
           votingPowerShare: '50.00%',
           moduleType: 'dao_voting_cw4',
+          // No deposit.
+          proposalLists: [
+            {
+              proposalModule:
+                'ixo1770puc38e2p6cg4shhmum3q70u9jlx5yx3ryvyrhc958694w77rqludyf7',
+              prefix: 'A',
+              membersOnly: true,
+              votingTime: '3 days',
+              allowRevoting: false,
+            },
+          ],
         }),
       ],
     });
@@ -108,7 +155,7 @@ describe('daos', () => {
               nativeDenom: 'uixo',
               totalWeight: null,
               daoCoresByVotingModule: {
-                nodes: [{ address: 'ixo1dao', name: 'Native DAO' }],
+                nodes: [core({ address: 'ixo1dao', name: 'Native DAO' })],
               },
             },
           },
@@ -147,7 +194,7 @@ describe('daos', () => {
             daoVotingModuleByVotingModuleAddress: {
               address: 'ixo1module',
               nativeDenom: 'uixo',
-              daoCoresByVotingModule: { nodes: [{ address: 'ixo1dao' }] },
+              daoCoresByVotingModule: { nodes: [core({ address: 'ixo1dao' })] },
             },
           },
         ],
@@ -163,6 +210,123 @@ describe('daos', () => {
           staked: expect.objectContaining({ amountBaseUnits: '1' }),
           votingModule: 'ixo1module',
         },
+      ],
+    });
+  });
+
+  it('shows where each DAO takes new proposals: who may propose, the deposit and whether cards can use the list', async () => {
+    const list = (fields: Record<string, unknown>) => ({
+      address: 'ixo1list',
+      prefix: 'A',
+      status: 'enabled',
+      moduleType: 'dao_proposal_single',
+      proposalCreationPolicy: { module: { addr: 'ixo1intake' } },
+      config: {
+        allow_revoting: true,
+        only_members_execute: true,
+        max_voting_period: { time: 3_600 },
+      },
+      daoPreProposeModuleByPreProposeModule: {
+        depositInfo: null,
+        openProposalSubmission: true,
+      },
+      ...fields,
+    });
+    const answer = await answerOf(planOf(daos, {}), {
+      native: empty,
+      cw20: empty,
+      cw4: {
+        nodes: [
+          {
+            weight: 1,
+            daoCw4GroupContractByGroupContractAddress: {
+              daoVotingModulesByGroupContractAddress: {
+                nodes: [
+                  {
+                    address: 'ixo1module',
+                    totalWeight: '2',
+                    daoCoresByVotingModule: {
+                      nodes: [
+                        {
+                          address: 'ixo1dao',
+                          daoProposalModulesByDaoAddress: {
+                            pageInfo: { hasNextPage: true },
+                            nodes: [
+                              // Open to anyone through the intake, no deposit.
+                              list({}),
+                              // Straight to the list: anyone, never a deposit.
+                              list({
+                                address: 'ixo1anyone',
+                                prefix: 'B',
+                                proposalCreationPolicy: { anyone: {} },
+                                config: { max_voting_period: { height: 100 } },
+                                daoPreProposeModuleByPreProposeModule: null,
+                              }),
+                              // A deposit in a cw20 token, a multiple-choice
+                              // list and a disabled one: cards cannot use them.
+                              list({
+                                address: 'ixo1cw20',
+                                prefix: 'C',
+                                moduleType: 'dao_proposal_multiple',
+                                status: 'disabled',
+                                daoPreProposeModuleByPreProposeModule: {
+                                  depositInfo: {
+                                    denom: { cw20: 'ixo1token' },
+                                    amount: '5',
+                                    refund_policy: 'always',
+                                  },
+                                  openProposalSubmission: false,
+                                },
+                              }),
+                            ],
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    });
+    expect(answer.data).toEqual({
+      items: [
+        expect.objectContaining({
+          dao: 'ixo1dao',
+          proposalLists: [
+            {
+              proposalModule: 'ixo1list',
+              prefix: 'A',
+              votingTime: '1 hour',
+              allowRevoting: true,
+              membersOnlyCarryOut: true,
+            },
+            {
+              proposalModule: 'ixo1anyone',
+              prefix: 'B',
+              votingTime: '100 blocks',
+            },
+            {
+              proposalModule: 'ixo1cw20',
+              prefix: 'C',
+              disabled: true,
+              multipleChoice: true,
+              membersOnly: true,
+              deposit: {
+                token: 'ixo1token',
+                amountBaseUnits: '5',
+                refundPolicy: 'always',
+                cardCannotPay: true,
+              },
+              votingTime: '1 hour',
+              allowRevoting: true,
+              membersOnlyCarryOut: true,
+            },
+          ],
+          moreProposalLists: true,
+        }),
       ],
     });
   });
@@ -196,11 +360,11 @@ describe('daos', () => {
                     totalWeight: '4',
                     daoCoresByVotingModule: {
                       nodes: [
-                        {
+                        core({
                           address: 'ixo1dao',
                           name: long(300, 'n'),
                           description: long(1000, 'd'),
-                        },
+                        }),
                       ],
                     },
                   },

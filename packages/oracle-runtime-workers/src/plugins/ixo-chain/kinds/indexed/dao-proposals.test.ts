@@ -23,7 +23,7 @@ const DAO = 'ixo14g47ggcgge3xgmzddenqzsgr26ckk854gfngz4g908wc29drwussp0k66n';
 const MODULE = 'ixo1zxmee4zshr3sjfssau8q54rsvm0n6yd0tasr96c3366sjht67l7s08kq6a';
 
 const core = (first: number, open: boolean, voter?: string) =>
-  `address name daoProposalModulesByDaoAddress(first: 3, orderBy: PRIMARY_KEY_ASC) { pageInfo { hasNextPage } nodes { address prefix daoProposalsByProposalModule(${open ? 'filter: { status: { equalTo: "open" } }, ' : ''}first: ${first}, orderBy: PRIMARY_KEY_DESC) { pageInfo { hasNextPage } nodes { id title status proposer startHeight expiration totalPower votes${voter ? ` daoVotesByProposalModuleAndProposalId(filter: { voter: { equalTo: "${voter}" } }, first: 1) { nodes { vote power votedAt } }` : ''} } } } }`;
+  `address name daoProposalModulesByDaoAddress(first: 3, orderBy: PRIMARY_KEY_ASC) { pageInfo { hasNextPage } nodes { address prefix status moduleType daoProposalsByProposalModule(${open ? 'filter: { status: { equalTo: "open" } }, ' : ''}first: ${first}, orderBy: PRIMARY_KEY_DESC) { pageInfo { hasNextPage } nodes { id title status proposer startHeight expiration totalPower votes allowRevoting${voter ? ` daoVotesByProposalModuleAndProposalId(filter: { voter: { equalTo: "${voter}" } }, first: 1) { nodes { vote power votedAt } }` : ''} } } } }`;
 
 const proposal = (overrides: Record<string, unknown>) => ({
   id: '4',
@@ -149,6 +149,10 @@ describe('dao_proposals', () => {
           status: 'open',
           votingEndsAt: '2025-03-14T13:25:45.893Z',
           votingEnded: true,
+          // Voting ended while the index still says open: it may have
+          // passed or not (Auth Hub reads the real result).
+          canRun: true,
+          canClose: true,
           proposer: STAKER,
           tally: { yes: '0', no: '0', abstain: '0' },
           totalPower: '2',
@@ -237,6 +241,81 @@ describe('dao_proposals', () => {
         },
       ],
     });
+  });
+
+  it('says which proposals a card can carry out or close, and whether a vote can change', async () => {
+    const plan = planOf(daoProposals, { dao: DAO, status: 'all' });
+    const items = async (module: Record<string, unknown>) =>
+      (
+        (
+          await answerOf(plan, {
+            ...daoAnswer([]),
+            daoProposalModulesByDaoAddress: {
+              nodes: [
+                {
+                  address: MODULE,
+                  prefix: 'A',
+                  status: 'enabled',
+                  moduleType: 'dao_proposal_single',
+                  ...module,
+                  daoProposalsByProposalModule: {
+                    nodes: [
+                      proposal({
+                        id: '9',
+                        status: 'passed',
+                        allowRevoting: true,
+                      }),
+                      proposal({
+                        id: '8',
+                        status: 'rejected',
+                        allowRevoting: false,
+                      }),
+                      proposal({ id: '7', status: 'executed' }),
+                      proposal({ id: '6', status: 'open' }),
+                    ],
+                  },
+                },
+              ],
+            },
+          })
+        ).data as { items: Record<string, unknown>[] }
+      ).items.map(
+        ({
+          id,
+          canRun,
+          canClose,
+          allowRevoting,
+          multipleChoice,
+          listDisabled,
+        }) => ({
+          id,
+          canRun,
+          canClose,
+          allowRevoting,
+          multipleChoice,
+          listDisabled,
+        }),
+      );
+    expect(await items({})).toEqual([
+      { id: '9', canRun: true, allowRevoting: true },
+      { id: '8', canClose: true, allowRevoting: false },
+      // Carried out, or still being voted on: neither.
+      { id: '7' },
+      { id: '6' },
+    ]);
+    // A multiple-choice or disabled list: no card can act on it.
+    expect(await items({ moduleType: 'dao_proposal_multiple' })).toEqual([
+      { id: '9', allowRevoting: true, multipleChoice: true },
+      { id: '8', allowRevoting: false, multipleChoice: true },
+      { id: '7', multipleChoice: true },
+      { id: '6', multipleChoice: true },
+    ]);
+    expect(await items({ status: 'disabled' })).toEqual([
+      { id: '9', allowRevoting: true, listDisabled: true },
+      { id: '8', allowRevoting: false, listDisabled: true },
+      { id: '7', listDisabled: true },
+      { id: '6', listDisabled: true },
+    ]);
   });
 
   it('judges a missing vote by the network’s vote-indexing height', async () => {
@@ -357,11 +436,29 @@ describe('dao_proposals', () => {
         planOf(daoProposals, { address: STAKER }, ctx),
         recorded,
       );
+      // The overview leaves out where each DAO takes new proposals (the
+      // `daos` kind's proposal lists): it is for what is going on, not for
+      // making a proposal.
+      const { items, ...rest } = daoList.data as {
+        items: Record<string, unknown>[];
+      };
+      expect(items.every((item) => Array.isArray(item.proposalLists))).toBe(
+        true,
+      );
       expect(both).toEqual({
         ok: true,
         subject: 'other',
         first: 3,
-        data: { daos: daoList.data, proposals: proposals.data },
+        data: {
+          daos: {
+            ...rest,
+            items: items.map(
+              ({ proposalLists: _lists, moreProposalLists: _more, ...dao }) =>
+                dao,
+            ),
+          },
+          proposals: proposals.data,
+        },
       });
     });
 
