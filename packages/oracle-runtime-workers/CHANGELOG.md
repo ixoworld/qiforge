@@ -1,5 +1,11 @@
 # @ixo/oracle-runtime-workers
 
+## 0.33.2
+
+### Patch Changes
+
+- [#433](https://github.com/ixoworld/qiforge/pull/433) [`566a90b`](https://github.com/ixoworld/qiforge/commit/566a90ba42f52191059f1a226f6321f98547f9c8) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - When Auth Hub cannot prepare a card because another card is still waiting for the owner's review (409 `sequence_reserved`), the model is told to say "You already have another card waiting for your review. Approve or decline that one first, then I can prepare this." and never to mention sequences; a sequence race (409 `sequence_mismatch`) is described by its effect instead of its code.
+
 ## 0.33.1
 
 ### Patch Changes
