@@ -1,7 +1,0 @@
----
-'@ixo/oracle-runtime-workers': minor
----
-
-Chain transaction cards for groups (`@ixo/action-protocol` 0.9.0, Hub protocol version 7). `request_chain_transaction` can now vote on a proposal of a group (DAO DAO, single choice) the owner belongs to, carry out a passed proposal, close one that did not pass, and put a new proposal to a group: agreement only, or up to 4 things the group's own account then does (coin sends, impact tokens, staking, a network vote, claim collection changes, entity accounts and permissions), each written like that type's own message. A group step goes alone on its card. The rules tell the model never to vote or propose unasked, to name the proposal and when voting closes first, that a proposal's deposit may be lost if it fails, that carrying out may be refused while its actions would fail, and that closing does not return the deposit. A new proposal's coin sends and stakes are display amounts converted like the owner's own, never checked against the owner's balance. `chain_lookup dao_proposals` adds `allowRevoting`, `canRun` and `canClose`, and `daos` adds each group's `proposalLists` (who may propose, the deposit and its refund rule, the voting time). Group refusal codes have their own plain words.
-
-Deploy after Auth Hub and the channel gateways move to protocol 0.9.0. Against an Auth Hub on version 6 the runtime speaks version 6 (the 33 types keep working, the group steps are not offered), against one on version 5 it speaks version 5, and it asks for 7 again every 10 minutes.
