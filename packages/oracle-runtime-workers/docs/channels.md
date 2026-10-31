@@ -367,12 +367,17 @@ caller's level with `400 protocol_version_required`. An older Auth Hub
 reads `?version=` against its closed list (1 to 6 on 0.8.0, 1 to 5 on
 0.7.0) and answers each call that declares a version it does not know with
 `400 invalid_request`. The client then negotiates down the ladder 7, 6, 5
-(`HUB_PROTOCOL_VERSIONS` in `src/hub-actions/client.ts`): a read
-(capabilities, options, status) refused that way is asked again at the next
-lower version until one is answered, and the Hub is spoken to at that
-version for `HUB_PROTOCOL_RECHECK_MS` (10 min, per client, so per owner
-object) before 7 is tried again (a Hub that later refuses the remembered
-version too is stepped down again). A prepare uses the version the
+(`HUB_PROTOCOL_VERSIONS` in `src/hub-actions/client.ts`): the
+capabilities read refused that way is asked again at the next lower
+version until one is answered, and the Hub is spoken to at that version for
+`HUB_PROTOCOL_RECHECK_MS` (10 min, per client, so per owner object) before
+7 is tried again. Only the capabilities read decides the version: an
+options or status read refused at it lets the capabilities read settle the
+version again and is retried once only if that changed it (a Hub rolled
+back); otherwise it fails on its own (`hubReadRefused`) and the operations
+keep their version. On devnet an options route that refused 7 and 6 (a Hub
+bug) once walked the client down to 5 and the next prepare went at 5,
+which this rule prevents. A prepare uses the version the
 capabilities read before it settled on and is never retried at another
 version (its 400 can be a real refusal of the operation). So while Auth Hub
 is still on 0.8.0 every Hub action keeps working and the 33 level-6 types
@@ -686,10 +691,10 @@ The four 0.6.0 message types (level 4 and up):
 
 | `type`                | Fields                                                                                                                           | What it does                                                                                                                                                                                                                                                                                                                                                                                                |
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cosmos.bank.send`    | `toAddress`, `amountBaseUnits`, `denom?` (default `uixo`)                                                                        | Sends coins from the owner's wallet. The model gives `amount` in display units instead; the owner object converts it ([coin sends](#coin-sends-any-token)).                                                                                                                                                                                                                                                 |
+| `cosmos.bank.send`    | `toAddress`, `amountBaseUnits`, `denom?` (default `uixo`)                                                                        | Sends coins from the owner's wallet, to an account or (protocol 0.9.1) a group's own address. The model gives `amount` in display units instead; the owner object converts it ([coin sends](#coin-sends-any-token)).                                                                                                                                                                                        |
 | `ixo.claims.submit`   | `collectionId`, `claimId`, `agentDid`, `adminAddress`, `useIntent?`                                                              | Files a claim the owner already created. Runs under the collection admin's authorization (Auth Hub wraps it in `MsgExec`); the chain agent address is the signer.                                                                                                                                                                                                                                           |
 | `ixo.claims.evaluate` | `claimId`, `collectionId`, `oracle`, `agentDid`, `agentAddress`, `adminAddress`, `status` (1–4), `reason?`, `verificationProof?` | Records the owner's decision, as evaluator, on someone else's claim (1 approve, 2 reject, 3 dispute, 4 invalidate). `agentDid`/`agentAddress` are the owner's own (the evaluator, not the claimant: the chain keys the evaluator and its payout on them); `oracle` is the evaluator DID recorded on the evaluation. Needs evaluator authorization (wrapped in `MsgExec`); an approval can pay the claimant. |
-| `ixo.token.transfer`  | `recipient`, `tokens` (1–32 lines of `id` and whole `amount`)                                                                    | Moves IXO impact tokens (1155-style) from the owner's wallet; the chain owner is the signer. Not the IXO coin.                                                                                                                                                                                                                                                                                              |
+| `ixo.token.transfer`  | `recipient`, `tokens` (1–32 lines of `id` and whole `amount`)                                                                    | Moves IXO impact tokens (1155-style) from the owner's wallet, to an account or (0.9.1) a group's own address; the chain owner is the signer. Not the IXO coin.                                                                                                                                                                                                                                              |
 
 The Fields column is the wire (`@ixo/action-protocol`). The model writes
 neither `agentDid` nor `agentAddress`: the runtime fills them from the signer
@@ -841,8 +846,12 @@ Each message is checked strictly against its type's catalogue schema,
 which mirrors the protocol shapes with Auth Hub's stricter rules; before any
 Hub call the runtime refuses an unknown type, a batch of 0 or more than 8,
 an address that is not a 20-byte `ixo1…` account address (`ixo1` and 38
-characters; a 32-byte contract address is refused, except a group step's
-`dao` and `proposalModule`), a group step with any other message on the
+characters; a 32-byte contract address, `ixo1` and 58, is refused, except
+a coin send's `toAddress` and an impact-token transfer's `recipient` (a
+group's own address, protocol 0.9.1, also inside a group proposal's
+actions) and a group step's `dao` and `proposalModule`; an Auth Hub still
+on 0.9.0 refuses a group recipient with the field reason
+`invalid_message: messages[i].toAddress`, relayed quoted), a group step with any other message on the
 card, a bank `amount` that is
 not a plain decimal, a token amount that is zero or not whole, a non-digit
 collection id (or one with leading zeros), a claim id, token id or

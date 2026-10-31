@@ -115,12 +115,14 @@ export interface HubActionTransport {
  * An Auth Hub older than this runtime's version checks `?version=` against
  * its closed list (1 to 6 on 0.8.0, 1 to 5 on 0.7.0) and answers every call
  * that declares a version it does not know with 400 `invalid_request`,
- * before anything else. This runtime then steps down
+ * before anything else. This runtime's capabilities read then steps down
  * (`HUB_PROTOCOL_VERSIONS`: 7, then 6, then 5) to the highest version that
- * Hub answers (every Hub action the lower level has keeps working while
- * Auth Hub is rolled out: the group steps at 6, the level-6 chain types too
- * at 5) and asks for 7 again after `HUB_PROTOCOL_RECHECK_MS`; a Hub that
- * refuses 5 too is told apart with `HUB_UPDATE_REQUIRED`.
+ * Hub answers, and every other call uses that version (every Hub action
+ * the lower level has keeps working while Auth Hub is rolled out: the group
+ * steps at 6, the level-6 chain types too at 5); it asks for 7 again after
+ * `HUB_PROTOCOL_RECHECK_MS`. Another read refused at that version never
+ * lowers it (`atSettledVersion`). A Hub that refuses 5 too is told apart
+ * with `HUB_UPDATE_REQUIRED`.
  */
 const HUB_PROTOCOL_VERSION = '7';
 /** The lowest version this runtime works at: 7 without the group steps and the level-6 chain types. */
@@ -144,6 +146,14 @@ export const HUB_PROTOCOL_RECHECK_MS = 10 * 60_000;
  * callbacks pick the outcomes up once the Hub is updated.
  */
 export const HUB_UPDATE_REQUIRED = `Auth Hub must be updated before this oracle can use Hub actions: it does not accept protocol version ${HUB_PROTOCOL_LOWEST_VERSION}, the lowest this runtime works with (invalid_request). Tell the person this is not available right now; retrying or changing the fields will not help.`;
+/**
+ * A read (options, status) Auth Hub refused at the version its
+ * capabilities read accepts: a fault on that route, not an older Hub.
+ */
+export function hubReadRefused(version: string): string {
+  return `Auth Hub refused this read at protocol version ${version}, which it accepts for this oracle's other calls (invalid_request). Tell the person this is not available right now and try again later; changing the fields will not help.`;
+}
+
 /** Every Hub call but a chain-transaction prepare. */
 const HUB_TIMEOUT_MS = 10_000;
 /**
@@ -198,12 +208,15 @@ export class HubActionClient {
   }
 
   /**
-   * A read at the current version; when Auth Hub refuses it as unknown,
-   * the same read at each lower version in turn (`HUB_PROTOCOL_VERSIONS`),
-   * and the version it answered is remembered for
-   * `HUB_PROTOCOL_RECHECK_MS`. Only reads do this: a refused read changed
-   * nothing, while a prepare's 400 can be a real refusal of its operation.
-   * A Hub that refuses the lowest version too answers `HUB_UPDATE_REQUIRED`.
+   * The capabilities read at the current version; when Auth Hub refuses it
+   * as unknown, the same read at each lower version in turn
+   * (`HUB_PROTOCOL_VERSIONS`), and the version it answered is remembered for
+   * `HUB_PROTOCOL_RECHECK_MS`. Only the capabilities read decides the
+   * version: a refused read changed nothing, while a prepare's 400 can be a
+   * real refusal of its operation, and another route refusing a version
+   * (an options route bug once refused 7 and 6) must never downgrade the
+   * operations. A Hub that refuses the lowest version too answers
+   * `HUB_UPDATE_REQUIRED`.
    */
   private async negotiated<T>(
     read: (version: HubProtocolVersion) => Promise<T>,
@@ -227,6 +240,37 @@ export class HubActionClient {
     }
     // Unreachable: the loop returns or throws at its last version.
     throw new Error('No Hub protocol version to read at');
+  }
+
+  /**
+   * Another read (options, status) at the version the capabilities read
+   * settled on. When Auth Hub refuses it as unknown, the capabilities read
+   * settles the version again (a Hub rolled back since); only when that
+   * changes the version is the read tried once more, at the new version.
+   * Otherwise this read fails on its own (`hubReadRefused`) and the version
+   * the operations use stays as it is. `timeoutMs` bounds that capabilities
+   * read as it bounds this one.
+   */
+  private async atSettledVersion<T>(
+    read: (version: HubProtocolVersion) => Promise<T>,
+    timeoutMs = HUB_TIMEOUT_MS,
+  ): Promise<T> {
+    const version = this.protocolVersion;
+    try {
+      return await read(version);
+    } catch (error) {
+      if (!isUpdateRequired(error)) throw error;
+    }
+    await this.capabilities(timeoutMs);
+    const settled = this.protocolVersion;
+    if (settled === version)
+      throw new HubActionRefused(
+        'refused',
+        hubReadRefused(version),
+        undefined,
+        400,
+      );
+    return read(settled);
   }
 
   /**
@@ -343,7 +387,7 @@ export class HubActionClient {
     // Options version 3 (asked at the protocol version; version 4 answers
     // the same): version 2 plus the owner's bank tokens
     // (`transfer.tokens`), which any-token transfers are chosen from.
-    const options = await this.negotiated(async (version) => {
+    const options = await this.atSettledVersion(async (version) => {
       const query = new URLSearchParams({
         bindingId: input.bindingId,
         bindingRevision: String(input.bindingRevision),
@@ -391,12 +435,14 @@ export class HubActionClient {
   ): Promise<HubActionStatus> {
     if (!/^[A-Za-z0-9_-]{32}$/.test(id))
       throw new Error('Invalid Hub action id');
-    const raw = await this.negotiated((version) =>
-      this.send(
-        `/api/internal/actions/operations/${id}?version=${version}`,
-        undefined,
-        timeoutMs,
-      ),
+    const raw = await this.atSettledVersion(
+      (version) =>
+        this.send(
+          `/api/internal/actions/operations/${id}?version=${version}`,
+          undefined,
+          timeoutMs,
+        ),
+      timeoutMs,
     );
     if (!isRecord(raw)) throw new Error('Invalid Hub action status');
     const value = raw;

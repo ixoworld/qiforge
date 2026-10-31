@@ -103,6 +103,13 @@ const SERVICE_REF =
  */
 const LINKED_ENTITY_ADDRESS =
   /^(?:\{id\}#)?ixo1(?:[023456789acdefghjklmnpqrstuvwxyz]{38}|[023456789acdefghjklmnpqrstuvwxyz]{58})$/;
+/**
+ * Who receives coins or impact tokens: a 20-byte account or a 32-byte
+ * contract address (a group's own account, its treasury). Never a signer or
+ * identity field.
+ */
+const RECIPIENT_ADDRESS =
+  /^ixo1(?:[023456789acdefghjklmnpqrstuvwxyz]{38}|[023456789acdefghjklmnpqrstuvwxyz]{58})$/;
 /** A 32-byte contract address (a group and its proposal list): `ixo1` and 58 characters. */
 const CONTRACT_ADDRESS = /^ixo1[023456789acdefghjklmnpqrstuvwxyz]{58}$/;
 /**
@@ -193,6 +200,14 @@ const address = (what: string) =>
       'A 20-byte ixo1… account address (42 characters); contract addresses are refused.',
     )
     .describe(`${what} (an ixo1… account address).`);
+const recipient = (what: string) =>
+  z
+    .string()
+    .regex(
+      RECIPIENT_ADDRESS,
+      'An ixo1… account address (42 characters), or a group’s own address (62 characters, `dao` in chain_lookup daos or dao_proposals), copied exactly.',
+    )
+    .describe(`${what} (an ixo1… account address, or a group’s own address).`);
 const validator = (what: string) =>
   z
     .string()
@@ -519,11 +534,12 @@ const OWNER_CATALOG = {
       "Sends coins from the owner's wallet to `toAddress`, alone (a single coin send) or as a step of a batch.",
       '`amount` is the amount as the user said it, in the token’s display units ("1.5" for 1.5 IXO): a plain decimal, never base units. The runtime looks the token up in the owner’s token list (hub_action_options `transfer.tokens`), converts the amount with the listed `decimals`, and refuses a token not in the list, more digits after the point than the token has, zero, and more than the listed balance (the bank and stake steps of one token together).',
       '`denom` is optional and defaults to uixo (IXO, 6 decimals). For another token copy its `denom` exactly from `transfer.tokens` (never guess an `ibc/…` hash); name the full denom to the owner for anything but IXO, and say when the token is unverified (it lists 0 decimals: its amount is a whole number of base units).',
-      'Say it like: “Send 1.5 IXO to Thandi (ixo1qy…lvf0).”',
+      '`toAddress` may also be a group’s own address (62 characters): coins sent there go to the group’s treasury. Find it with chain_lookup daos or dao_proposals (`dao`) when the owner names the group, and say the group’s name.',
+      'Say it like: “Send 1.5 IXO to Thandi (ixo1qy…lvf0).” or “Send 2 IXO to the Auth Hub drill group.”',
     ].join(' '),
     schema: z.strictObject({
       type: z.literal('cosmos.bank.send'),
-      toAddress: address('The recipient'),
+      toAddress: recipient('The recipient'),
       amount: z
         .string()
         .max(80)
@@ -596,10 +612,10 @@ const OWNER_CATALOG = {
   'ixo.token.transfer': {
     summary:
       "move IXO impact tokens (1155-style token ids, whole amounts) from the owner's wallet.",
-    rules: `Moves IXO impact tokens (1155-style: each line a token \`id\` of 32 hex characters and a whole \`amount\`, 1 to ${CHAIN_TX_MAX_TOKEN_LINES} lines) from the owner’s wallet to \`recipient\`. Impact tokens have no decimals: an amount is a whole number of tokens. All tokens in one message must come from one token contract. These are not the IXO coin: coins go through \`cosmos.bank.send\`. Say it like: “Give 3 of your carbon credits to Thandi (ixo1qy…lvf0).”`,
+    rules: `Moves IXO impact tokens (1155-style: each line a token \`id\` of 32 hex characters and a whole \`amount\`, 1 to ${CHAIN_TX_MAX_TOKEN_LINES} lines) from the owner’s wallet to \`recipient\` (an account, or a group’s own address from chain_lookup daos or dao_proposals). Impact tokens have no decimals: an amount is a whole number of tokens. All tokens in one message must come from one token contract. These are not the IXO coin: coins go through \`cosmos.bank.send\`. Say it like: “Give 3 of your carbon credits to Thandi (ixo1qy…lvf0).”`,
     schema: z.strictObject({
       type: z.literal('ixo.token.transfer'),
-      recipient: address('The recipient'),
+      recipient: recipient('The recipient'),
       tokens: z
         .array(
           z.strictObject({
@@ -1315,7 +1331,7 @@ const GROUP_CATALOG = {
   'daodao.proposal.execute': {
     summary:
       'carry out a group proposal that passed, so the group’s own account does what it says.',
-    rules: `${GROUP_RULES} Carries out a proposal that passed (\`canRun\` in dao_proposals): the group’s own account then does the proposal’s actions, which the review card lists. On a proposal list the group switched off (\`listDisabled\`), a proposal with actions can’t be carried out. Only when the owner asks for it. Tell them what the proposal does (its title) before preparing. Some groups let only members carry proposals out. Auth Hub tries it first and refuses the card when the actions would fail now (in most groups a failed run marks the proposal failed for good), for example when the group doesn’t hold enough; tell the owner it can be tried again once that is fixed. It costs the owner only the network fee; a deposit paid with the proposal goes back to whoever proposed it unless the group keeps deposits (the review card says). After it goes through (hub_action_status), read the receipt’s \`groupActions\`: \`"failed"\` means the proposal’s actions did not happen and it can’t be tried again; never say it is done. \`"unknown"\`: check its status with chain_lookup dao_proposals before saying anything. Say it like: “Carry out proposal A3, ‘Pay Thandi’, in Clean Water Group: the group sends Thandi 500 IXO. This can’t be undone.”`,
+    rules: `${GROUP_RULES} Carries out a proposal that passed (\`canRun\` in dao_proposals): the group’s own account then does the proposal’s actions, which the review card lists. A proposal with no actions (one that asked for agreement only) is simply marked as carried out: never describe an action for it; say “This just marks it as carried out; nothing else happens.” On a proposal list the group switched off (\`listDisabled\`), a proposal with actions can’t be carried out. Only when the owner asks for it. Tell them what the proposal does (its title) before preparing. Some groups let only members carry proposals out. Auth Hub tries it first and refuses the card when the actions would fail now (in most groups a failed run marks the proposal failed for good), for example when the group doesn’t hold enough; tell the owner it can be tried again once that is fixed. It costs the owner only the network fee; a deposit paid with the proposal goes back to whoever proposed it unless the group keeps deposits (the review card says). After it goes through (hub_action_status), read the receipt’s \`groupActions\`: \`"failed"\` means the proposal’s actions did not happen and it can’t be tried again; never say it is done. \`"unknown"\`: check its status with chain_lookup dao_proposals before saying anything. Say it like: “Carry out proposal A3, ‘Pay Thandi’, in Clean Water Group: the group sends Thandi 500 IXO. This can’t be undone.”`,
     schema: z
       .strictObject({
         type: z.literal('daodao.proposal.execute'),
@@ -1374,7 +1390,7 @@ export const CHAIN_TX_CATALOG = {
 
 /** What every message type shares, returned once by describe_chain_messages. */
 export const CHAIN_TX_GENERAL_RULES = [
-  'Addresses are 20-byte `ixo1…` account addresses (contract addresses are refused), except a group’s own address and its proposal list in the group steps (32-byte `ixo1…` contract addresses); validators `ixovaloper1…`, entities `did:ixo:entity:…`. Copy every id, address and number exactly from a lookup (chain_lookup, hub_action_options) or from the owner; never invent or guess one. Ids (`claimId`, `collectionId`, token `id`, proofs) use only letters, digits and `: . _ / -`.',
+  'Addresses are 20-byte `ixo1…` account addresses, except where a type says otherwise: a coin send or impact-token transfer may go to a group’s own address, and the group steps take the group’s and its proposal list’s addresses (32-byte `ixo1…` contract addresses, 62 characters); validators `ixovaloper1…`, entities `did:ixo:entity:…`. Copy every id, address and number exactly from a lookup (chain_lookup, hub_action_options) or from the owner; never invent or guess one. Ids (`claimId`, `collectionId`, token `id`, proofs) use only letters, digits and `: . _ / -`.',
   'Give only the fields listed for a type: the runtime adds the chain, the network, the signer and the owner’s own DID and address where a message needs them, and Auth Hub sets the fee. Amounts: coin sends and stakes are what the owner says in the token’s units ("100" IXO); impact tokens are whole tokens; collection payments are base units (1 IXO = 1000000 uixo). Dates are RFC 3339 with Z or an offset, from the owner’s time zone.',
   `Up to ${CHAIN_TX_MAX_MESSAGES} messages per transaction, run in the order given (put them in the order the owner said them, and keep one decision in one card); all succeed or none do. A group step (a vote, carrying out or closing a group proposal, a new group proposal) goes alone on its card. A step that needs something stored first (a dispute statement, a profile, a document) can only be prepared once it is stored.`,
   'How to talk about it: before preparing, say in one or two plain, everyday sentences what will happen and what it means for the owner (what leaves their wallet, what someone else will be able to do, how long it takes, whether it can be undone), the way each type’s “Say it like” does. Use names (of the validator, collection, entity or person) when a lookup gives them. Never say message type names or chain words such as authz, grant, MsgExec, bech32, valoper, uixo, base units, DID, IID, delegate, redelegate, DAO, proposal module, contract or execute: say stake, unstake, move stake, permission, account, identity, IXO, group, proposal, vote, deposit and carry out. Show an address only when the owner needs it to check who receives something. The review card in Auth Hub shows every exact value.',

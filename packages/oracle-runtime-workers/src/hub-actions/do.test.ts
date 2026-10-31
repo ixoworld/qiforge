@@ -490,16 +490,17 @@ describe('Hub actions in the owner object', () => {
       h.outcomes.set(pending.id, outcome(pending, 3, 'succeeded'));
       h.setMode('old');
       // A poll still answers with what the object holds; the one status
-      // read it tries (at version 7, then 6, then 5) is refused and the
-      // action stays scheduled.
+      // read it tries (at version 7) is refused, the capabilities read then
+      // refuses 7, 6 and 5, and the action stays scheduled.
       expect(await h.poll()).toEqual([
         outcome(done, 2, 'declined'),
         outcome(pending, 1, 'authorized'),
       ]);
       expect(h.calls).toEqual([
         `GET /api/internal/actions/operations/${pending.id}`,
-        `GET /api/internal/actions/operations/${pending.id}`,
-        `GET /api/internal/actions/operations/${pending.id}`,
+        'GET /api/internal/actions/operations/capabilities',
+        'GET /api/internal/actions/operations/capabilities',
+        'GET /api/internal/actions/operations/capabilities',
       ]);
       // A callback cannot be confirmed (the route answers 409 and Auth Hub
       // retries it); nothing held is changed or dropped.
