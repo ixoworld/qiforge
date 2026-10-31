@@ -768,8 +768,10 @@ Hub's `docs/dao-actions-design.md`.
 - Where the ids come from: `chain_lookup dao_proposals` gives `dao`,
   `proposalModule` and `id` per proposal, with `allowRevoting`, `canRun`
   (passed, or voting ended while the index still says open) and `canClose`
-  (rejected, or the same), and marks `multipleChoice` / `listDisabled`
-  proposals no card can act on; `chain_lookup daos` gives, per group, its
+  (rejected, or the same), and marks `multipleChoice` proposals no card can
+  act on and `listDisabled` ones (a list the group switched off: votes and
+  closes work, new proposals and carrying out a proposal with actions are
+  refused with `list_disabled`, so `canRun` is not set); `chain_lookup daos` gives, per group, its
   `proposalLists` (where it takes new proposals: `membersOnly`, `deposit`
   with `refundPolicy`, `votingTime`, `allowRevoting`, `membersOnlyCarryOut`;
   a cw20 deposit is marked `cardCannotPay`). `dao` is also the group's own

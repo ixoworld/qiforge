@@ -303,16 +303,19 @@ describe('dao_proposals', () => {
       { id: '7' },
       { id: '6' },
     ]);
-    // A multiple-choice or disabled list: no card can act on it.
+    // A multiple-choice list: no card can act on it.
     expect(await items({ moduleType: 'dao_proposal_multiple' })).toEqual([
       { id: '9', allowRevoting: true, multipleChoice: true },
       { id: '8', allowRevoting: false, multipleChoice: true },
       { id: '7', multipleChoice: true },
       { id: '6', multipleChoice: true },
     ]);
+    // A list the group switched off: votes and closes still work, but a
+    // proposal with actions cannot be carried out there (the index does not
+    // say which have actions), so it is never offered to carry out.
     expect(await items({ status: 'disabled' })).toEqual([
       { id: '9', allowRevoting: true, listDisabled: true },
-      { id: '8', allowRevoting: false, listDisabled: true },
+      { id: '8', canClose: true, allowRevoting: false, listDisabled: true },
       { id: '7', listDisabled: true },
       { id: '6', listDisabled: true },
     ]);

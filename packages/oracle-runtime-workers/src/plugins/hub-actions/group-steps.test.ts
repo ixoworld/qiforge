@@ -954,6 +954,14 @@ describe('group steps', () => {
     );
     for (const type of CHAIN_TX_GROUP_ACTION_TYPES)
       expect(rules('daodao.proposal.create')).toContain(type);
+    // A switched-off list: no new proposal through it, no carrying out a
+    // proposal with actions.
+    expect(rules('daodao.proposal.create')).toContain(
+      'use one that is not `disabled`',
+    );
+    expect(rules('daodao.proposal.execute')).toContain(
+      'a proposal with actions can’t be carried out',
+    );
     // Why a group card asks to confirm twice, said calmly.
     for (const type of CHAIN_TX_GROUP_MESSAGE_TYPES)
       expect(rules(type)).toContain(

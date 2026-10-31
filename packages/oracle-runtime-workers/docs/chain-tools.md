@@ -777,8 +777,10 @@ allowed"` (no `remaining` then), an empty cw20 limit `cw20SpendLimit:
   `refundPolicy` `only_passed` / `always` / `never`; none when the module
   takes proposals from anyone directly), `votingTime` (the module's
   `max_voting_period`), `allowRevoting`, `membersOnlyCarryOut`
-  (`only_members_execute`), and `multipleChoice` / `disabled` for lists no
-  card can use. `dao` is the group's own account too. The account
+  (`only_members_execute`), `multipleChoice` for a list no card can use,
+  and `disabled` for one the group switched off (no new proposals through
+  it and no carrying out a proposal with actions; votes and closes still
+  work). `dao` is the group's own account too. The account
   overview's `daos` section leaves the lists out.
 - `dao_proposals`: dao, daoName, id, `label` (prefix + id, e.g. `A3`),
   proposalModule, title, status, `votingEndsAt` (from the cw-utils
@@ -789,9 +791,11 @@ allowed"` (no `remaining` then), an empty cw20 limit `cw20SpendLimit:
   group cards: `allowRevoting` (the proposal's own), `canRun: true` on a
   passed proposal and `canClose: true` on a rejected one (both on an `open`
   one whose voting ended: it may have passed or not, and Auth Hub reads the
-  real result), and `multipleChoice` / `listDisabled` (the module's
-  `moduleType` is not `dao_proposal_single`, or its `status` is
-  `disabled`), on which neither is set. Whether the person may vote (their
+  real result), `multipleChoice` (the module's `moduleType` is not
+  `dao_proposal_single`; neither is set) and `listDisabled` (its `status` is
+  `disabled`: votes and closes still work, so `canClose` stays; `canRun` is
+  not set, since a proposal with actions can't be carried out there and the
+  index row does not say whether it has any). Whether the person may vote (their
   weight when the proposal started) is never claimed: Auth Hub checks it. ixo-blocksync
   does not index DAO DAO votes cast before its cutoff (mainnet 9,269,290,
   testnet 9,284,120, devnet 5,251,750; `src/constants/daodao_cutoff.ts`),

@@ -237,8 +237,8 @@ export const CHAIN_TX_REFUSAL_WORDS = {
   },
   list_disabled: {
     means:
-      'the group has switched that proposal list off, so nothing in it can be carried out',
-    next: 'Do not retry; tell them the group would have to switch it back on.',
+      'the group has switched that proposal list off: no new proposals can be made through it, and its proposals with actions can’t be carried out (votes and closes still work)',
+    next: 'Do not retry; tell them the group would have to switch it back on, or use another of its proposal lists for a new proposal (chain_lookup daos).',
   },
   closes_too_soon: {
     means: 'voting on this proposal closes before the card could be signed',

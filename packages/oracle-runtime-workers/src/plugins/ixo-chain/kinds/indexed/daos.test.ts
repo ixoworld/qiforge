@@ -291,6 +291,9 @@ describe('daos', () => {
         ],
       },
     });
+    expect(daos.explain).toContain(
+      '`disabled: true`: the group switched it off: no new proposals through it, and its proposals with actions can’t be carried out (votes and closes still work).',
+    );
     expect(answer.data).toEqual({
       items: [
         expect.objectContaining({

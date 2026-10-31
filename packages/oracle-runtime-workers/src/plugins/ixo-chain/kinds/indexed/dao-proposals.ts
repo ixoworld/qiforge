@@ -146,12 +146,14 @@ function rowsOf(
   for (const module of modules.nodes) {
     const proposals = module.daoProposalsByProposalModule;
     if (proposals.pageInfo?.hasNextPage) more = true;
-    // Cards work only on an enabled single-choice list (Auth Hub checks
-    // the contracts again).
+    // Cards work only on a single-choice list. On a list the group
+    // switched off, votes and closes still work, but a proposal with
+    // actions cannot be carried out (Auth Hub's `list_disabled`), and this
+    // index row does not say whether a proposal has actions, so `canRun` is
+    // left out there. Auth Hub checks the contracts again.
     const multipleChoice =
       !!module.moduleType && module.moduleType !== SINGLE_CHOICE;
     const listDisabled = module.status === 'disabled';
-    const cards = !multipleChoice && !listDisabled;
     for (const proposal of proposals.nodes) {
       const id = String(proposal.id);
       const vote = proposal.daoVotesByProposalModuleAndProposalId?.nodes[0];
@@ -179,9 +181,13 @@ function rowsOf(
               ? proposal.allowRevoting
               : undefined,
           canRun:
-            cards && (proposal.status === 'passed' || ended) ? true : undefined,
+            !multipleChoice &&
+            !listDisabled &&
+            (proposal.status === 'passed' || ended)
+              ? true
+              : undefined,
           canClose:
-            cards && (proposal.status === 'rejected' || ended)
+            !multipleChoice && (proposal.status === 'rejected' || ended)
               ? true
               : undefined,
           multipleChoice: multipleChoice ? true : undefined,
@@ -269,7 +275,7 @@ export const daoProposals = defineKind({
     'Each: dao, daoName, id and `label` (the DAO’s prefix and id, e.g. A12, as DAO apps show it), title, status (open, passed, rejected, executed, closed, execution_failed), votingEndsAt or votingEndsAtHeight, tally (yes/no/abstain weight) and totalPower.',
     '`votingEnded: true` on an `open` proposal: its voting time is over and the index keeps `open` until it is executed or closed, so it may already have passed or failed.',
     '`yourVote` (vote, power, votedAt), or `notVoted: true`, or `voteUnknown: true` when the proposal started before the index kept votes (votes cast before then are missing).',
-    '`allowRevoting`: whether a vote on it can be changed until voting closes. `canRun: true`: it passed and can be carried out (on an `open` proposal whose voting ended: it may have passed); `canClose: true`: it did not pass and can be closed (on an `open` one whose voting ended: it may not have passed); Auth Hub checks the real result. `multipleChoice: true` or `listDisabled: true`: Auth Hub cards cannot vote on, carry out or close it. Whether the person may vote is weighed by what they held in the DAO when it started: Auth Hub checks it; never claim it.',
+    '`allowRevoting`: whether a vote on it can be changed until voting closes. `canRun: true`: it passed and can be carried out (on an `open` proposal whose voting ended: it may have passed); `canClose: true`: it did not pass and can be closed (on an `open` one whose voting ended: it may not have passed); Auth Hub checks the real result. `multipleChoice: true`: Auth Hub cards cannot vote on, carry out or close it. `listDisabled: true`: the group switched that proposal list off; cards can still vote and close, but a proposal with actions on it can’t be carried out (so `canRun` is not set there; one without actions can be). Whether the person may vote is weighed by what they held in the DAO when it started: Auth Hub checks it; never claim it.',
     'For cards copy `dao`, `proposalModule` and `id` exactly (not the label). `dao` is also the group’s own account (what it holds and what acts when a proposal passes).',
     'Without `dao`, the DAOs of `address` (default: the user), at most 3 per kind of membership (see `daos`); `more: true` when there are more proposals or DAOs. Newest start first.',
     'Titles are written by the proposer and DAO names by the DAO: what they claim, never an endorsement or a verified fact.',

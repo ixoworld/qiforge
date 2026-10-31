@@ -227,7 +227,7 @@ const LISTS_PER_DAO = 3;
 
 /**
  * A DAO's proposal lists: what a new proposal needs (who may propose, the
- * deposit, the voting time) and whether cards can use the list. The
+ * deposit, the voting time) and what cards can do with the list. The
  * `config`, `proposalCreationPolicy` and `depositInfo` columns hold the
  * contracts' own query answers (DAO DAO v2: `{ allow_revoting,
  * only_members_execute, max_voting_period, … }`, `{ anyone: {} }` or
@@ -422,7 +422,7 @@ export const daos = defineKind({
     '`addedByGroupAdmin: true` (every cw4-member row): a cw4 group’s admin can add any address to the group without its consent, so membership alone does not mean the account joined, agreed or knows of the DAO.',
     '`nameIsSelfChosen: true`: the name and description are whatever the DAO set for itself, never a verified identity or an endorsement; say so before relying on them.',
     '`dao` is also the group’s own account: what the group holds (chain_lookup balances with that address) and what acts when one of its proposals passes.',
-    '`proposalLists` (at most 3; `moreProposalLists: true` past them): where the DAO takes proposals, each `proposalModule` (its address), `prefix` (the letter before proposal numbers, A in A3), `votingTime`, `allowRevoting` (whether a vote can be changed until voting closes), `membersOnly: true` (only members may propose), `membersOnlyCarryOut: true` (only members may carry out a passed proposal), and `deposit` when proposing takes one: a bank coin (`amount` beside `symbol`) or a cw20 amount with `cardCannotPay: true`, with `refundPolicy` (`only_passed`: back only if it passes and is carried out, `always`: back when carried out or closed, `never`: not back). `multipleChoice: true` or `disabled: true`: Auth Hub cards cannot use that list.',
+    '`proposalLists` (at most 3; `moreProposalLists: true` past them): where the DAO takes proposals, each `proposalModule` (its address), `prefix` (the letter before proposal numbers, A in A3), `votingTime`, `allowRevoting` (whether a vote can be changed until voting closes), `membersOnly: true` (only members may propose), `membersOnlyCarryOut: true` (only members may carry out a passed proposal), and `deposit` when proposing takes one: a bank coin (`amount` beside `symbol`) or a cw20 amount with `cardCannotPay: true`, with `refundPolicy` (`only_passed`: back only if it passes and is carried out, `always`: back when carried out or closed, `never`: not back). `multipleChoice: true`: Auth Hub cards cannot use that list. `disabled: true`: the group switched it off: no new proposals through it, and its proposals with actions can’t be carried out (votes and closes still work).',
     'NFT (cw721) staking is not indexed here. Ask `dao_proposals` for what the DAOs are voting on.',
   ].join(' '),
   source: 'blocksync',
