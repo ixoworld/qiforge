@@ -674,8 +674,8 @@ importers:
         specifier: 0.9.2
         version: 0.9.2(@composio/core@0.10.0(ws@8.18.2)(zod@4.4.3))(@langchain/core@1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2))
       '@ixo/action-protocol':
-        specifier: 0.9.0
-        version: 0.9.0
+        specifier: 0.9.1
+        version: 0.9.1
       '@ixo/common':
         specifier: workspace:*
         version: link:../common
@@ -3420,8 +3420,8 @@ packages:
     resolution: {integrity: sha512-XrZyu+jJs+qsWFdjEKkdKXHidxXDZJviW6zNwuNbzn7hf9apMRb3NGmv1XDkYgop+4cgWAuBnb7ZWuFxUJyZ1w==}
     engines: {node: '>=20'}
 
-  '@ixo/action-protocol@0.9.0':
-    resolution: {integrity: sha512-XO6fgZ/wzoeBO/KR0GjndL/UQe5GRVBedXEoQ3rjKuTopsPC94/YyD49FGKIIl0QIiU3i0Emsn0uJ10dyUpGsw==}
+  '@ixo/action-protocol@0.9.1':
+    resolution: {integrity: sha512-wXk0DhDkqE2PmSL9omvlf0wIHNcDIs5ObxTLmm+GZIqgd/6RRemCWtgKEN5oQwIjt5HkaZ5CuG4P6KJyEi4Gyg==}
     engines: {node: '>=20'}
 
   '@ixo/did-provider-x@0.1.1':
@@ -15580,7 +15580,7 @@ snapshots:
 
   '@ixo/action-protocol@0.4.1': {}
 
-  '@ixo/action-protocol@0.9.0': {}
+  '@ixo/action-protocol@0.9.1': {}
 
   '@ixo/did-provider-x@0.1.1':
     dependencies:
