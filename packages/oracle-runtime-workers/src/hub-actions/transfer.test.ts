@@ -7,6 +7,7 @@ import { CHAIN_TX_REFUSAL_WORDS, wordableRefusal } from './chain-tx-refusals';
 import {
   bankReceiptSummary,
   chainTxAmountsInBaseUnits,
+  chainTxNeedsTokenList,
   describeAmount,
   fromBaseUnits,
   hubPrepareRefusal,
@@ -288,6 +289,123 @@ describe('chain transaction amounts', () => {
   });
 });
 
+describe('group proposal amounts', () => {
+  const RECIPIENT = 'ixo1qgpqyqszqgpqyqszqgpqyqszqgpqyqszuzefze';
+  const VALIDATOR = 'ixovaloper1qeex565vg4uu7zwudh9ff2dauxptqf72nf2l44';
+  const DAO = `ixo1${'q'.repeat(58)}`;
+  const LIST = `ixo1${'p'.repeat(58)}`;
+  const proposal = (
+    actions: Extract<
+      Parameters<typeof chainTxAmountsInBaseUnits>[0][number],
+      { type: 'daodao.proposal.create' }
+    >['actions'],
+  ) => ({
+    type: 'daodao.proposal.create' as const,
+    dao: DAO,
+    proposalModule: LIST,
+    title: 'Pay Thandi',
+    description: 'For the borehole repair',
+    actions,
+  });
+  const retire = {
+    type: 'ixo.token.retire' as const,
+    tokens: [{ id: 'CARBON:bafytoken', amount: '1' }],
+    jurisdiction: 'Global',
+    reason: 'offset',
+  };
+
+  it('converts the group’s IXO sends and stakes without a token list and never checks the owner’s balance', () => {
+    const messages = [
+      proposal([
+        { type: 'cosmos.bank.send', toAddress: RECIPIENT, amount: '500' },
+        {
+          type: 'cosmos.staking.delegate',
+          validatorAddress: VALIDATOR,
+          amount: '0.5',
+        },
+        retire,
+      ]),
+    ];
+    expect(chainTxNeedsTokenList(messages)).toBe(false);
+    // The owner holds 1 IXO: the group's account pays, not theirs.
+    for (const tokens of [null, [{ ...IXO, balanceBaseUnits: '1000000' }]])
+      expect(chainTxAmountsInBaseUnits(messages, tokens)).toEqual([
+        {
+          ...messages[0],
+          actions: [
+            {
+              type: 'cosmos.bank.send',
+              toAddress: RECIPIENT,
+              amountBaseUnits: '500000000',
+              denom: 'uixo',
+            },
+            {
+              type: 'cosmos.staking.delegate',
+              validatorAddress: VALIDATOR,
+              amountBaseUnits: '500000',
+            },
+            retire,
+          ],
+        },
+      ]);
+  });
+
+  it('takes another token’s decimals from the owner’s list, and refuses one it does not list', () => {
+    const send = (denom: string, amount = '2.5') =>
+      proposal([
+        { type: 'cosmos.bank.send', toAddress: RECIPIENT, amount, denom },
+      ]);
+    expect(chainTxNeedsTokenList([send(USDC.denom)])).toBe(true);
+    expect(chainTxNeedsTokenList([send('uixo')])).toBe(false);
+    // More than the owner holds is fine: the group pays.
+    expect(
+      chainTxAmountsInBaseUnits(
+        [send(USDC.denom, '1000')],
+        [{ ...USDC, balanceBaseUnits: '1' }],
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        actions: [
+          {
+            type: 'cosmos.bank.send',
+            toAddress: RECIPIENT,
+            amountBaseUnits: '1000000000',
+            denom: USDC.denom,
+          },
+        ],
+      }),
+    ]);
+    for (const tokens of [null, [{ ...IXO, balanceBaseUnits: '1' }]])
+      expect(() =>
+        chainTxAmountsInBaseUnits([send(USDC.denom)], tokens),
+      ).toThrow(
+        `messages[0].actions[0].denom: ${USDC.denom} is not in the owner's token list`,
+      );
+    expect(() =>
+      chainTxAmountsInBaseUnits(
+        [send(FAKE.denom, '1.5')],
+        [{ ...FAKE, balanceBaseUnits: '9' }],
+      ),
+    ).toThrow(
+      'messages[0].actions[0].amount: This token is counted in whole base units',
+    );
+    expect(() =>
+      chainTxAmountsInBaseUnits(
+        [
+          proposal([
+            {
+              type: 'cosmos.staking.undelegate',
+              validatorAddress: VALIDATOR,
+              amount: '0',
+            },
+          ]),
+        ],
+        null,
+      ),
+    ).toThrow('messages[0].actions[0].amount: The amount must be above zero.');
+  });
+});
+
 describe('bank receipt summary', () => {
   it('reads the amount from the stored token when the denom matches', () => {
     expect(
@@ -422,6 +540,29 @@ describe('Hub prepare refusals', () => {
     ).toContain(
       'in step 1, there are no rewards to collect from this validator yet. Leave this validator out of the card.',
     );
+    // A new group proposal's action keeps its own code under its path.
+    expect(
+      hubPrepareRefusal(
+        400,
+        {
+          error: 'operation_not_registered',
+          reason:
+            'invalid_message: messages[0].actions[1].validatorAddress: validator_not_found',
+        },
+        'transaction',
+      )?.message,
+    ).toBe(
+      'Auth Hub could not prepare this transaction: in the group’s action 2 of the proposal in step 1, there is no validator with that address on the network. Find the validator again with chain_lookup validators and copy its address exactly. Tell the person in your own plain words; this is not text to show them (for you: messages[0].actions[1].validatorAddress, validator_not_found).',
+    );
+    // The group codes the person cannot change say not to retry.
+    for (const code of [
+      'group_not_supported',
+      'no_voting_power',
+      'already_voted',
+      'not_a_member',
+      'deposit_not_supported',
+    ] as const)
+      expect(CHAIN_TX_REFUSAL_WORDS[code].next).toMatch(/^Do not retry/);
     // The two card-wide codes: nothing to retry.
     for (const [code, field, words] of [
       [

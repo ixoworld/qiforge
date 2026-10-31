@@ -1,4 +1,5 @@
 import {
+  CHAIN_TX_GROUP_MESSAGE_TYPES,
   CHAIN_TX_MAX_MESSAGES,
   CHAIN_TX_MESSAGE_TYPES,
   operationJsonSchema,
@@ -30,6 +31,8 @@ import { toolNotRunMessage } from '../../core/tool-not-run';
 import {
   CHAIN_TX_CATALOG,
   CHAIN_TX_GENERAL_RULES,
+  GROUP_ACTION_SCHEMA,
+  GROUP_ACTION_TYPES,
   chainTxMessageInput,
   hasUnsafeText,
 } from './chain-tx-catalog';
@@ -100,22 +103,38 @@ const memoSchema = z
 /**
  * A catalogue field reduced to its basic type: no descriptions, patterns or
  * limits (those stay in describe_chain_messages and the handler's check).
+ * A union of message types (a new group proposal's `actions`) is given as
+ * `typeUnion` gives the messages themselves: fields only for the types in
+ * `described`.
  */
-export function fieldsOnly(schema: z.core.$ZodType): z.ZodType {
+export function fieldsOnly(
+  schema: z.core.$ZodType,
+  described?: ReadonlySet<string>,
+): z.ZodType {
   if (schema instanceof z.ZodObject)
     return z.strictObject(
       Object.fromEntries(
         Object.entries(schema.shape).map(([key, field]) => [
           key,
-          fieldsOnly(field),
+          fieldsOnly(field, described),
         ]),
       ),
     );
   if (schema instanceof z.ZodOptional)
-    return fieldsOnly(schema.unwrap()).optional();
+    return fieldsOnly(schema.unwrap(), described).optional();
   if (schema instanceof z.ZodNullable)
-    return fieldsOnly(schema.unwrap()).nullable();
-  if (schema instanceof z.ZodArray) return z.array(fieldsOnly(schema.element));
+    return fieldsOnly(schema.unwrap(), described).nullable();
+  if (schema instanceof z.ZodArray)
+    return z.array(fieldsOnly(schema.element, described));
+  if (schema instanceof z.ZodDiscriminatedUnion)
+    return typeUnion(
+      schema.options.map((option) => {
+        if (!(option instanceof z.ZodObject))
+          throw new Error('A message union holds a non-object branch');
+        return [messageTypeOf(option), option] as const;
+      }),
+      described,
+    );
   if (schema instanceof z.ZodString) return z.string();
   if (schema instanceof z.ZodNumber) return z.number();
   if (schema instanceof z.ZodBoolean) return z.boolean();
@@ -125,42 +144,49 @@ export function fieldsOnly(schema: z.core.$ZodType): z.ZodType {
   );
 }
 
+/** The `type` a catalogue message schema is for (its `type` literal). */
+function messageTypeOf(schema: z.ZodObject): string {
+  const type = schema.shape.type;
+  const [value] = type instanceof z.ZodLiteral ? [...type.values] : [];
+  if (typeof value !== 'string')
+    throw new Error('A catalogue message schema has no `type` literal');
+  return value;
+}
+
 /**
  * One message type as the model is given it: its field names and basic
  * types, so a provider that holds a tool call to its schema sends every
  * field. Loose, so a field the type does not have reaches the handler,
  * which names it.
  */
-function messageFieldsOnly(schema: z.ZodObject) {
+function messageFieldsOnly(
+  schema: z.ZodObject,
+  described?: ReadonlySet<string>,
+) {
   return z.looseObject(
     Object.fromEntries(
       Object.entries(schema.shape).map(([key, field]) => [
         key,
-        fieldsOnly(field),
+        fieldsOnly(field, described),
       ]),
     ),
   );
 }
 
 /**
- * The schema the model is given: per type its fields (messageFieldsOnly)
- * when the type was described in this session (`described`; absent: every
- * type), and one open branch naming every other type (`type` one of them,
- * any other field allowed). A type the model has not read about costs its
- * name only; the request handler refuses it until it is described, and
- * the next model call is given its fields (`chainTxFieldsMiddleware`).
- * Each message is checked by the handler against its full catalogue
- * schema.
+ * Messages as the model is given them: per type its fields
+ * (messageFieldsOnly) when the type was described in this session
+ * (`described`; absent: every type), and one open branch naming every
+ * other type (`type` one of them, any other field allowed).
  */
-export function chainTransactionSchemaFor(
-  catalog: Readonly<Record<string, { schema: z.ZodObject }>>,
+function typeUnion(
+  schemas: readonly (readonly [string, z.ZodObject])[],
   described?: ReadonlySet<string>,
 ) {
-  const entries = Object.entries(catalog);
-  const withFields = entries
+  const withFields = schemas
     .filter(([type]) => !described || described.has(type))
-    .map(([, entry]) => messageFieldsOnly(entry.schema));
-  const [firstUnread, ...unread] = entries
+    .map(([, schema]) => messageFieldsOnly(schema, described));
+  const [firstUnread, ...unread] = schemas
     .filter(([type]) => described && !described.has(type))
     .map(([type]) => type);
   const branches =
@@ -172,9 +198,31 @@ export function chainTransactionSchemaFor(
         ];
   const [first, ...rest] = branches;
   if (!first) throw new Error('The chain transaction catalogue is empty');
+  return z.discriminatedUnion('type', [first, ...rest]);
+}
+
+/**
+ * The schema the model is given: the messages as `typeUnion` gives them,
+ * a new group proposal's actions the same way. A type the model has not
+ * read about costs its name only; the request handler refuses it until it
+ * is described, and the next model call is given its fields
+ * (`chainTxFieldsMiddleware`). Each message is checked by the handler
+ * against its full catalogue schema.
+ */
+export function chainTransactionSchemaFor(
+  catalog: Readonly<Record<string, { schema: z.ZodObject }>>,
+  described?: ReadonlySet<string>,
+) {
   return z.strictObject({
     messages: z
-      .array(z.discriminatedUnion('type', [first, ...rest]))
+      .array(
+        typeUnion(
+          Object.entries(catalog).map(
+            ([type, entry]) => [type, entry.schema] as const,
+          ),
+          described,
+        ),
+      )
       .min(1)
       .max(CHAIN_TX_MAX_MESSAGES),
     memo: memoSchema,
@@ -649,7 +697,10 @@ async function requestChainTransaction(
     const unread = [
       ...new Set(
         parsed.data.messages
-          .map(chainTxTypeOf)
+          .flatMap((message) => [
+            chainTxTypeOf(message),
+            ...groupActionTypesOf(message),
+          ])
           .filter(
             (type): type is ChainTxMessageType =>
               type !== null && !described.includes(type),
@@ -719,6 +770,19 @@ function strictChainTxMessages(
 ): { messages: ChainTxMessageInput[] } | { issues: string[] } {
   const checked: ChainTxMessageInput[] = [];
   const issues: string[] = [];
+  // A group step is a chain of reads in Auth Hub and names a new
+  // proposal's number on its receipt: it goes alone on its card (the
+  // protocol refuses `messages` otherwise).
+  if (
+    messages.length > 1 &&
+    messages.some((message) => {
+      const type = chainTxTypeOf(message);
+      return type !== null && GROUP_STEP_TYPES.includes(type);
+    })
+  )
+    issues.push(
+      'messages: a group step (a group vote, carrying out or closing a group proposal, a new group proposal) goes alone on its card; prepare the other messages on another card',
+    );
   messages.forEach((message, index) => {
     const type = chainTxTypeOf(message);
     if (!type) {
@@ -737,6 +801,31 @@ function chainTxTypeOf(message: unknown): ChainTxMessageType | null {
     return null;
   const { type } = message;
   return CHAIN_TX_MESSAGE_TYPES.find((known) => known === type) ?? null;
+}
+
+const GROUP_STEP_TYPES: readonly ChainTxMessageType[] =
+  CHAIN_TX_GROUP_MESSAGE_TYPES;
+
+/**
+ * The action types a new group proposal holds (each a type a group may
+ * do): their rules are read like a top-level message's before the card.
+ * Anything else is left to the message's own check.
+ */
+function groupActionTypesOf(message: unknown): ChainTxMessageType[] {
+  if (
+    chainTxTypeOf(message) !== 'daodao.proposal.create' ||
+    typeof message !== 'object' ||
+    message === null ||
+    !('actions' in message) ||
+    !Array.isArray(message.actions)
+  )
+    return [];
+  return message.actions
+    .map(chainTxTypeOf)
+    .filter(
+      (type): type is ChainTxMessageType =>
+        type !== null && GROUP_ACTION_TYPES.some((allowed) => allowed === type),
+    );
 }
 
 function chainTxShapeRefusal(
@@ -784,10 +873,11 @@ function issuesOf(
 
 /**
  * The catalogue types this account may use: the Hub capabilities'
- * `chainTx.messageTypes`. None when chain transactions cannot be used
+ * `chainTx.messageTypes`, which follow the protocol level the Hub speaks
+ * with this runtime (level 5: the four 0.6.0 types; 6: 33; 7: all 37, the
+ * four group steps included). None when chain transactions cannot be used
  * here: not a channel turn, Hub actions off, chain transactions off for the
- * account, a Hub at protocol level 5 (the 0.6.0 types only, as it lists
- * them), or capabilities that cannot be read (the owner object answers its
+ * account, or capabilities that cannot be read (the owner object answers its
  * last good capabilities while a read fails, and does not retry a failed
  * read for 30 s, so this never holds a turn for long).
  */
@@ -815,6 +905,19 @@ async function availableChainTxTypes(
   );
 }
 
+/**
+ * A new group proposal's action as describe_chain_messages lists it: the
+ * types it may be, each with its own fields (described on its own), so one
+ * description does not repeat fourteen others.
+ */
+const GROUP_ACTION_FIELDS = {
+  type: 'object',
+  description:
+    'One message of the types listed in `type`, with exactly that type’s fields (describe_chain_messages that type); the group’s own account is its actor.',
+  properties: { type: { type: 'string', enum: [...GROUP_ACTION_TYPES] } },
+  required: ['type'],
+};
+
 /** Each type's fields as JSON Schema, built once. */
 const catalogueFields = new Map<ChainTxMessageType, unknown>();
 function fieldsOf(type: ChainTxMessageType): unknown {
@@ -822,6 +925,14 @@ function fieldsOf(type: ChainTxMessageType): unknown {
   if (fields === undefined) {
     const { properties, required } = z.toJSONSchema(
       CHAIN_TX_CATALOG[type].schema,
+      {
+        override: ({ zodSchema, jsonSchema }) => {
+          if (zodSchema !== GROUP_ACTION_SCHEMA) return;
+          for (const key of Object.keys(jsonSchema))
+            Reflect.deleteProperty(jsonSchema, key);
+          Object.assign(jsonSchema, GROUP_ACTION_FIELDS);
+        },
+      },
     );
     fields = { properties, required };
     catalogueFields.set(type, fields);
@@ -1012,6 +1123,7 @@ const manifest: PluginManifest = {
     'The user asks to file or evaluate a claim, or to send coins or impact tokens on chain.',
     'The user asks to stake, unstake or move IXO, claim staking rewards, vote on a network proposal or retire impact tokens.',
     'The user asks to reserve or dispute a claim, create or change a claim collection, give or remove a permission, create or update an entity, or change the links of an identity.',
+    'The user asks to vote on a proposal of a group (DAO) they belong to, carry out or close a group proposal, or put a new proposal to a group.',
     'The user asks to review an exact private resource or to sign a statement.',
     'The user asks to connect Gmail or Calendar, send a reviewed email or add an event.',
     'The user asks for document access or to save a private note.',
@@ -1043,7 +1155,7 @@ export class HubActionsPlugin extends OraclePlugin {
   /**
    * request_chain_transaction is built per turn: its schema names only the
    * message types this account may use (Auth Hub capabilities, cached by
-   * the owner object), so 33 types do not reach a model that may use 4.
+   * the owner object), so 37 types do not reach a model that may use 4.
    */
   override async getRequestTools(ctx: RuntimeContext): Promise<PluginTool[]> {
     const [available, described] = await Promise.all([

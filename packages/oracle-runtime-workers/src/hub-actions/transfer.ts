@@ -2,10 +2,15 @@ import {
   parseChainTxRefusal,
   type ActionOperationV1,
   type ActionReceiptV1,
+  type ChainTxGroupAction,
   type OptionsToken,
 } from '@ixo/action-protocol';
 import { chainTxRefusalWords, wordableRefusal } from './chain-tx-refusals';
-import type { ChainTxMessageInput } from '../plugin-api/types';
+import type {
+  ChainTxGroupActionInput,
+  ChainTxMessageInput,
+  ChainTxStakeInput,
+} from '../plugin-api/types';
 import { quoteHubText } from './hub-text';
 import type { ChainTxHostMessage } from './request';
 import { HubActionRefused } from './store';
@@ -92,6 +97,84 @@ const IXO_TOKEN: TransferToken = {
   verified: true,
 };
 
+/** `toBaseUnits`, its refusal naming the message's amount (`messages[0].amount`). */
+function converted(at: string, amount: string, decimals: number): bigint {
+  try {
+    return toBaseUnits(amount, decimals);
+  } catch (error) {
+    if (error instanceof HubActionRefused)
+      throw new HubActionRefused('refused', `${at}.amount: ${error.message}`);
+    throw error;
+  }
+}
+
+const isStakeInput = (
+  message: ChainTxMessageInput | ChainTxGroupActionInput,
+): message is ChainTxStakeInput =>
+  message.type === 'cosmos.staking.delegate' ||
+  message.type === 'cosmos.staking.undelegate' ||
+  message.type === 'cosmos.staking.redelegate';
+
+/**
+ * Whether converting `messages` needs the owner's token list: a bank or
+ * stake step (its amount and the owner's balance), or a new group
+ * proposal's coin send of another token than IXO (its decimals).
+ */
+export function chainTxNeedsTokenList(
+  messages: readonly ChainTxMessageInput[],
+): boolean {
+  return messages.some(
+    (message) =>
+      message.type === 'cosmos.bank.send' ||
+      message.type === 'cosmos.staking.delegate' ||
+      (message.type === 'daodao.proposal.create' &&
+        message.actions.some(
+          (action) =>
+            action.type === 'cosmos.bank.send' &&
+            (action.denom ?? IXO_TOKEN.denom) !== IXO_TOKEN.denom,
+        )),
+  );
+}
+
+/**
+ * One action of a new group proposal with its amount in base units: a
+ * stake's IXO with 6 decimals, a coin send's with the decimals of its token
+ * (IXO without a list; another token from the owner's list, which is the
+ * only place the runtime learns a token's decimals). No balance is
+ * checked: the group's own account pays when it carries the proposal out,
+ * and the network checks it then.
+ */
+function groupActionInBaseUnits(
+  action: ChainTxGroupActionInput,
+  at: string,
+  tokens: readonly OptionsToken[] | null,
+): ChainTxGroupAction {
+  if (isStakeInput(action)) {
+    const { amount, ...rest } = action;
+    return {
+      ...rest,
+      amountBaseUnits: converted(at, amount, IXO_TOKEN.decimals).toString(),
+    };
+  }
+  if (action.type !== 'cosmos.bank.send') return action;
+  const denom = action.denom ?? IXO_TOKEN.denom;
+  const token =
+    denom === IXO_TOKEN.denom
+      ? IXO_TOKEN
+      : tokens?.find((item) => item.denom === denom);
+  if (!token)
+    throw new HubActionRefused(
+      'refused',
+      `${at}.denom: ${denom} is not in the owner's token list, so its decimals are unknown here; a group proposal can send IXO, or a token exactly as hub_action_options lists it.`,
+    );
+  return {
+    type: 'cosmos.bank.send',
+    toAddress: action.toAddress,
+    amountBaseUnits: converted(at, action.amount, token.decimals).toString(),
+    denom: token.denom,
+  };
+}
+
 /**
  * A chain transaction's amounts in base units; messages without one pass
  * unchanged. Each bank step names a display `amount` of a token from the
@@ -103,10 +186,13 @@ const IXO_TOKEN: TransferToken = {
  * move stake) names a display `amount` of IXO, converted with IXO's 6
  * decimals; what a stake takes from the wallet counts against the listed
  * IXO balance together with the IXO bank steps, when the list has IXO
- * (Auth Hub checks every balance again before the card is made). `tokens`
- * is the owner's list (hub_action_options `transfer.tokens`), null when the
- * Hub listed none; the caller reads it only when there is a bank or stake
- * step.
+ * (Auth Hub checks every balance again before the card is made). A new
+ * group proposal's bank and stake actions convert the same way
+ * (`groupActionInBaseUnits`) and are never checked against the owner's
+ * balance: the group's own account pays them when the group carries the
+ * proposal out. `tokens` is the owner's list (hub_action_options
+ * `transfer.tokens`), null when the Hub listed none; the caller reads it
+ * only when `chainTxNeedsTokenList`.
  */
 export function chainTxAmountsInBaseUnits(
   messages: readonly ChainTxMessageInput[],
@@ -128,17 +214,15 @@ export function chainTxAmountsInBaseUnits(
         `${at}.amount: the owner holds ${describeAmount(token.balanceBaseUnits, token)}, less than ${total === amount ? what : 'what the steps of this transaction take of it together'}.`,
       );
   };
-  const converted = (at: string, amount: string, decimals: number) => {
-    try {
-      return toBaseUnits(amount, decimals);
-    } catch (error) {
-      if (error instanceof HubActionRefused)
-        throw new HubActionRefused('refused', `${at}.amount: ${error.message}`);
-      throw error;
-    }
-  };
   return messages.map((message, index): ChainTxHostMessage => {
     const at = `messages[${index}]`;
+    if (message.type === 'daodao.proposal.create')
+      return {
+        ...message,
+        actions: message.actions.map((action, j) =>
+          groupActionInBaseUnits(action, `${at}.actions[${j}]`, tokens),
+        ),
+      };
     if (
       message.type === 'cosmos.staking.delegate' ||
       message.type === 'cosmos.staking.undelegate' ||

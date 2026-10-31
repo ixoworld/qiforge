@@ -86,8 +86,13 @@ export interface HubActionTransport {
 
 /**
  * The protocol version this runtime declares on every operation call
- * (capabilities, POST operations, GET status, options). Version 6 is the
- * 0.8.0 contract: version 5 plus 29 more `ixo.chain.tx.v1` message types
+ * (capabilities, POST operations, GET status, options). Version 7 is the
+ * 0.9.0 contract: version 6 plus the four group steps on `ixo.chain.tx.v1`
+ * (a vote on a group proposal, carrying out a passed one, closing a failed
+ * one, a new proposal), which a 0.8.0 parser cannot read in capabilities,
+ * review steps or receipts, so the Hub lists and accepts them only at
+ * level 7; options answer as at version 3. Version 6 is the 0.8.0
+ * contract: version 5 plus 29 more `ixo.chain.tx.v1` message types
  * (staking, voting, retiring impact tokens, claim collections, entities and
  * identity-record links), which a 0.7.0 parser cannot read in capabilities,
  * review steps or receipts, so the Hub lists and accepts them only at level
@@ -106,32 +111,38 @@ export interface HubActionTransport {
  * the 0.4.1 shapes. The envelopes stay tagged `ixo.auth-outcome/2` and
  * `ixo.auth-capabilities/2`, which `@ixo/action-protocol` parses.
  *
- * An Auth Hub older than version 6 checks `?version=` against its closed
- * list (1 to 5) and answers every call that declares 6 with 400
- * `invalid_request`, before anything else. This runtime then speaks
- * version 5 to it (every Hub action but the level-6 chain types keeps
- * working while Auth Hub is rolled out) and asks for 6 again after
- * `HUB_PROTOCOL_RECHECK_MS`; a Hub that refuses 5 too is told apart with
- * `HUB_UPDATE_REQUIRED`.
+ * An Auth Hub older than this runtime's version checks `?version=` against
+ * its closed list (1 to 6 on 0.8.0, 1 to 5 on 0.7.0) and answers every call
+ * that declares a version it does not know with 400 `invalid_request`,
+ * before anything else. This runtime then steps down
+ * (`HUB_PROTOCOL_VERSIONS`: 7, then 6, then 5) to the highest version that
+ * Hub answers (every Hub action the lower level has keeps working while
+ * Auth Hub is rolled out: the group steps at 6, the level-6 chain types too
+ * at 5) and asks for 7 again after `HUB_PROTOCOL_RECHECK_MS`; a Hub that
+ * refuses 5 too is told apart with `HUB_UPDATE_REQUIRED`.
  */
-const HUB_PROTOCOL_VERSION = '6';
-/** The lowest version this runtime works at: 6 without the level-6 chain types. */
-const HUB_PROTOCOL_FALLBACK_VERSION = '5';
-type HubProtocolVersion =
-  | typeof HUB_PROTOCOL_VERSION
-  | typeof HUB_PROTOCOL_FALLBACK_VERSION;
-/** How long a Hub that refused version 6 is spoken to at version 5 before 6 is tried again. */
+const HUB_PROTOCOL_VERSION = '7';
+/** The lowest version this runtime works at: 7 without the group steps and the level-6 chain types. */
+const HUB_PROTOCOL_LOWEST_VERSION = '5';
+/** Every version this runtime speaks, highest first. */
+const HUB_PROTOCOL_VERSIONS = [
+  HUB_PROTOCOL_VERSION,
+  '6',
+  HUB_PROTOCOL_LOWEST_VERSION,
+] as const;
+type HubProtocolVersion = (typeof HUB_PROTOCOL_VERSIONS)[number];
+/** How long a Hub that refused a version is spoken to at a lower one before the highest is tried again. */
 export const HUB_PROTOCOL_RECHECK_MS = 10 * 60_000;
 
 /**
  * What the model is told when Auth Hub refuses a read (capabilities,
  * options, status) with 400 `invalid_request`. A read carries nothing but
  * the protocol version (and, for options, the binding the runtime itself
- * checked), so that answer comes from a Hub that does not know version 6.
- * The owner object keeps every action it holds: polls and callbacks pick
- * the outcomes up once the Hub is updated.
+ * checked), so that answer comes from a Hub that does not know the version
+ * declared. The owner object keeps every action it holds: polls and
+ * callbacks pick the outcomes up once the Hub is updated.
  */
-export const HUB_UPDATE_REQUIRED = `Auth Hub must be updated before this oracle can use Hub actions: it does not accept protocol version ${HUB_PROTOCOL_FALLBACK_VERSION}, the lowest this runtime works with (invalid_request). Tell the person this is not available right now; retrying or changing the fields will not help.`;
+export const HUB_UPDATE_REQUIRED = `Auth Hub must be updated before this oracle can use Hub actions: it does not accept protocol version ${HUB_PROTOCOL_LOWEST_VERSION}, the lowest this runtime works with (invalid_request). Tell the person this is not available right now; retrying or changing the fields will not help.`;
 /** Every Hub call but a chain-transaction prepare. */
 const HUB_TIMEOUT_MS = 10_000;
 /**
@@ -155,7 +166,9 @@ function isUpdateRequired(error: unknown): boolean {
 
 export class HubActionClient {
   private readonly origin: string;
-  /** Until when this Hub is spoken to at version 5 (it refused 6). */
+  /** The lower version this Hub answered after refusing a higher one. */
+  private fallbackVersion: HubProtocolVersion = HUB_PROTOCOL_VERSION;
+  /** Until when this Hub is spoken to at `fallbackVersion`. */
   private fallbackUntil = 0;
 
   constructor(private readonly transport: HubActionTransport) {
@@ -179,29 +192,40 @@ export class HubActionClient {
   /** The protocol version the next call declares. */
   get protocolVersion(): HubProtocolVersion {
     return Date.now() < this.fallbackUntil
-      ? HUB_PROTOCOL_FALLBACK_VERSION
+      ? this.fallbackVersion
       : HUB_PROTOCOL_VERSION;
   }
 
   /**
-   * A read at the current version; when Auth Hub refuses version 6 as
-   * unknown, the same read at version 5, remembered for
+   * A read at the current version; when Auth Hub refuses it as unknown,
+   * the same read at each lower version in turn (`HUB_PROTOCOL_VERSIONS`),
+   * and the version it answered is remembered for
    * `HUB_PROTOCOL_RECHECK_MS`. Only reads do this: a refused read changed
    * nothing, while a prepare's 400 can be a real refusal of its operation.
+   * A Hub that refuses the lowest version too answers `HUB_UPDATE_REQUIRED`.
    */
   private async negotiated<T>(
     read: (version: HubProtocolVersion) => Promise<T>,
   ): Promise<T> {
-    const version = this.protocolVersion;
-    try {
-      return await read(version);
-    } catch (error) {
-      if (version !== HUB_PROTOCOL_VERSION || !isUpdateRequired(error))
-        throw error;
-      const answer = await read(HUB_PROTOCOL_FALLBACK_VERSION);
-      this.fallbackUntil = Date.now() + HUB_PROTOCOL_RECHECK_MS;
-      return answer;
+    const current = this.protocolVersion;
+    const versions = HUB_PROTOCOL_VERSIONS.slice(
+      HUB_PROTOCOL_VERSIONS.indexOf(current),
+    );
+    for (const [step, version] of versions.entries()) {
+      try {
+        const answer = await read(version);
+        if (step > 0) {
+          this.fallbackVersion = version;
+          this.fallbackUntil = Date.now() + HUB_PROTOCOL_RECHECK_MS;
+        }
+        return answer;
+      } catch (error) {
+        if (step === versions.length - 1 || !isUpdateRequired(error))
+          throw error;
+      }
     }
+    // Unreachable: the loop returns or throws at its last version.
+    throw new Error('No Hub protocol version to read at');
   }
 
   /** `subject`: what a refused prepare is called in the model's words. */

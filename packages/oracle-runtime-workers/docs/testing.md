@@ -240,7 +240,18 @@ checks that every field of every type (nested ones included) survives into
 the schema a provider is sent (`convertToOpenAITool`), that the request tool
 offers only the account's types per turn, and bounds its size; the
 `src/hub-actions` tests cover stake conversion and the owner identity of the
-new types through the owner object, a level-5 Auth Hub spoken to at version 5 (and one that predates 5 refused in plain words), and the turn's capabilities read (its short timeout, no re-read within 30 s of a failure, the last good answer).
+new types through the owner object, a level-5 Auth Hub spoken to at version 5 and a level-6 one at version 6 (and one that predates 5 refused in plain words; the client steps 7 → 6 → 5 and asks for 7 again after the recheck), and the turn's capabilities read (its short timeout, no re-read within 30 s of a failure, the last good answer).
+The group steps (protocol 0.9.0) have their own plugin test,
+`src/plugins/hub-actions/group-steps.test.ts`: every step and a new
+proposal holding each of the 14 action types accepted by the runtime and
+the protocol alike; named refusals checked against `chainTxIssue`; a seeded
+random run of 2 000 single changes to valid group steps in which the
+runtime accepts exactly what the protocol accepts (and, where it names one
+field, names the protocol's); one group step per card; the provider-facing
+`actions` branches and their discovery; and the plain-words rules. The
+owner object test prepares a proposal whose IXO send and stake are
+converted without the owner's balance, and reads options only for another
+token's decimals.
 `src/delivery/plan.test.ts` checks direct structured Reply Plan projection.
 These tests use local fixtures; full signed transfer, registered form submission,
 and private resource return need the coordinated Hub and gateway acceptance run.

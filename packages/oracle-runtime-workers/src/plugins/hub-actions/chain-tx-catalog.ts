@@ -3,7 +3,10 @@ import {
   CHAIN_TX_COLLECTION_STATES,
   CHAIN_TX_DISPUTE_REASONS,
   CHAIN_TX_ENTITY_PERMISSIONS,
+  CHAIN_TX_GROUP_ACTION_TYPES,
+  CHAIN_TX_GROUP_VOTE_OPTIONS,
   CHAIN_TX_MAX_CLAIM_PERMISSION,
+  CHAIN_TX_MAX_GROUP_ACTIONS,
   CHAIN_TX_MAX_MESSAGES,
   CHAIN_TX_MAX_PAYMENT_COINS,
   CHAIN_TX_MAX_SECONDS,
@@ -12,6 +15,8 @@ import {
   CHAIN_TX_VOTE_OPTIONS,
   DENOM,
   sanitizePublishedText,
+  type ChainTxGroupActionType,
+  type ChainTxGroupMessageType,
   type ChainTxMessageType,
 } from '@ixo/action-protocol';
 import { z } from 'zod';
@@ -98,6 +103,13 @@ const SERVICE_REF =
  */
 const LINKED_ENTITY_ADDRESS =
   /^(?:\{id\}#)?ixo1(?:[023456789acdefghjklmnpqrstuvwxyz]{38}|[023456789acdefghjklmnpqrstuvwxyz]{58})$/;
+/** A 32-byte contract address (a group and its proposal list): `ixo1` and 58 characters. */
+const CONTRACT_ADDRESS = /^ixo1[023456789acdefghjklmnpqrstuvwxyz]{58}$/;
+/**
+ * A group proposal's number: digits without leading zeros, at most
+ * 2^53 − 1 (Auth Hub writes it as a JSON number).
+ */
+const GROUP_PROPOSAL_ID = /^[1-9][0-9]{0,15}$/;
 
 /**
  * Characters that would let text render as something else: C0 and C1
@@ -494,11 +506,12 @@ const IID_REMOVE_RULE =
   'Copy the id exactly as the lookup shows it, whatever its form (`#api`, `{id}#ixo1…`): Auth Hub checks it is there before it makes the card.';
 
 /**
- * The catalogue. Every `rules` text ends with how to say the step to the
- * owner: plain everyday words, never the message type or chain terms (the
- * review card in Auth Hub shows the exact values).
+ * The types the owner's own account does (every type but the four group
+ * steps). Every `rules` text ends with how to say the step to the owner:
+ * plain everyday words, never the message type or chain terms (the review
+ * card in Auth Hub shows the exact values).
  */
-export const CHAIN_TX_CATALOG = {
+const OWNER_CATALOG = {
   'cosmos.bank.send': {
     summary:
       "send coins (IXO or another token the owner holds) from the owner's wallet.",
@@ -1158,14 +1171,213 @@ export const CHAIN_TX_CATALOG = {
       ),
     }),
   },
+} as const satisfies Record<
+  Exclude<ChainTxMessageType, ChainTxGroupMessageType>,
+  ChainTxCatalogEntry
+>;
+
+// ---- Groups (DAO DAO groups with single-choice proposals) ----
+
+const contractAddress = (what: string) =>
+  z
+    .string()
+    .regex(
+      CONTRACT_ADDRESS,
+      'A 32-byte ixo1… contract address (62 characters), copied exactly from chain_lookup daos or dao_proposals.',
+    )
+    .describe(what);
+const groupDao = contractAddress(
+  'The group: its own address (`dao` in chain_lookup daos or dao_proposals).',
+);
+const proposalModule = contractAddress(
+  'The group’s proposal list the step acts on (`proposalModule` in chain_lookup dao_proposals, or a `proposalLists` entry in daos); never the group’s own address.',
+);
+const groupProposalId = z
+  .string()
+  .regex(
+    GROUP_PROPOSAL_ID,
+    'The proposal number: digits from 1, no leading zeros (the `id`, not the label such as A3).',
+  )
+  // zod runs every check: a value the pattern refused is not parsed here.
+  .refine(
+    (value) =>
+      !GROUP_PROPOSAL_ID.test(value) ||
+      BigInt(value) <= BigInt(Number.MAX_SAFE_INTEGER),
+    { message: `At most ${Number.MAX_SAFE_INTEGER}.` },
+  )
+  .describe(
+    'The proposal’s number in its proposal list (`id` in chain_lookup dao_proposals, not the label).',
+  );
+/** Text published on chain with a group step: plain and shown exactly as written. */
+const groupText = (max: number, what: string) =>
+  plainText(max, what).refine(shownAsIs, { message: SHOWN_AS_IS });
+/** `dao` and `proposalModule` are two different contracts (the protocol names `proposalModule`). */
+function twoContracts(
+  message: { dao: string; proposalModule: string },
+  ctx: z.RefinementCtx,
+): void {
+  if (message.proposalModule === message.dao)
+    ctx.addIssue({
+      code: 'custom',
+      path: ['proposalModule'],
+      message:
+        'The proposal list, a different address than the group’s own (`dao`).',
+    });
+}
+
+/**
+ * What a group proposal's action may be, by type: exactly the top-level
+ * message of that type (same fields, same rules), with the group's own
+ * account as the actor. A dates change names both dates: a date left out
+ * would be read now and be out of date when the group carries it out.
+ */
+const GROUP_ACTION_SCHEMAS = {
+  'cosmos.bank.send': OWNER_CATALOG['cosmos.bank.send'].schema,
+  'ixo.token.transfer': OWNER_CATALOG['ixo.token.transfer'].schema,
+  'ixo.token.retire': OWNER_CATALOG['ixo.token.retire'].schema,
+  'cosmos.staking.delegate': OWNER_CATALOG['cosmos.staking.delegate'].schema,
+  'cosmos.staking.undelegate':
+    OWNER_CATALOG['cosmos.staking.undelegate'].schema,
+  'cosmos.staking.redelegate':
+    OWNER_CATALOG['cosmos.staking.redelegate'].schema,
+  'cosmos.distribution.withdraw-rewards':
+    OWNER_CATALOG['cosmos.distribution.withdraw-rewards'].schema,
+  'cosmos.gov.vote': OWNER_CATALOG['cosmos.gov.vote'].schema,
+  'ixo.claims.update-collection-state':
+    OWNER_CATALOG['ixo.claims.update-collection-state'].schema,
+  'ixo.claims.update-collection-dates': z
+    .strictObject({
+      type: z.literal('ixo.claims.update-collection-dates'),
+      collectionId,
+      adminAddress,
+      startDate: instant('When it opens (always given in a group proposal).'),
+      endDate: instant(
+        'When it closes; null: no end date (always given in a group proposal).',
+      ).nullable(),
+    })
+    .superRefine(endAfterStart),
+  'ixo.claims.update-collection-quota':
+    OWNER_CATALOG['ixo.claims.update-collection-quota'].schema,
+  'ixo.claims.create-collection':
+    OWNER_CATALOG['ixo.claims.create-collection'].schema,
+  'ixo.entity.create-account':
+    OWNER_CATALOG['ixo.entity.create-account'].schema,
+  'ixo.entity.revoke-account-authz':
+    OWNER_CATALOG['ixo.entity.revoke-account-authz'].schema,
+} as const satisfies Record<ChainTxGroupActionType, z.ZodObject>;
+
+/** The action types a group proposal may hold, in the protocol's order. */
+export const GROUP_ACTION_TYPES: readonly ChainTxGroupActionType[] =
+  CHAIN_TX_GROUP_ACTION_TYPES;
+
+const [firstGroupAction, ...otherGroupActions] = GROUP_ACTION_TYPES.map(
+  (type) => GROUP_ACTION_SCHEMAS[type],
+);
+if (!firstGroupAction)
+  throw new Error('The protocol lists no group action types');
+/**
+ * One action of a new group proposal: its `type` picks the schema. A type a
+ * group cannot do is refused on `actions[j].type`, as the protocol does.
+ */
+export const GROUP_ACTION_SCHEMA = z.discriminatedUnion(
+  'type',
+  [firstGroupAction, ...otherGroupActions],
+  {
+    error: `A group proposal can only hold these actions: ${GROUP_ACTION_TYPES.join(', ')}.`,
+  },
+);
+
+/** Said once for the four group steps. */
+const GROUP_RULES =
+  'A group here is a DAO DAO group on the IXO network (people say group, club, cooperative or DAO). Find it and its proposals with chain_lookup dao_proposals (`dao`, `proposalModule`, `id`, `label`, title, status, when voting closes) or chain_lookup daos (the person’s groups and, per group, `proposalLists` for new proposals). Copy `dao`, `proposalModule` and `proposalId` exactly from there: `dao` is the group’s own address, `proposalModule` its proposal list (a different address), `proposalId` the number without the list’s letter. Auth Hub checks the group and its proposal on chain and refuses what the group does not allow. One group step per card: nothing else goes on the same card. Only single-choice proposals are supported (not multiple choice).';
+
+const GROUP_CATALOG = {
+  'daodao.proposal.vote': {
+    summary:
+      'vote yes, no or abstain on a proposal in a group (DAO) the owner belongs to.',
+    rules: `${GROUP_RULES} Records the owner’s vote on one group proposal while its voting is open (\`votingEnded\` absent in dao_proposals). Before asking how they vote, tell the owner the proposal’s title and label and when voting closes, and whether they can change the vote later (\`allowRevoting\`); never vote without the owner saying how, in this conversation. \`vote\`: \`yes\`, \`no\` or \`abstain\`. \`rationale\` is optional: the owner’s reason, published with the vote, up to 300 characters, exactly as they said it (no links, no hidden characters, one line). The weight of the vote is what the owner had in the group when the proposal started: Auth Hub refuses the card when they had none, and when they already voted on a proposal that doesn’t allow changing a vote. A vote on a proposal whose result is already decided still counts until voting closes. Say it like: “Vote Yes on A3, ‘Fix the borehole’, in Clean Water Group. This group doesn’t let you change your vote later.”`,
+    schema: z
+      .strictObject({
+        type: z.literal('daodao.proposal.vote'),
+        dao: groupDao,
+        proposalModule,
+        proposalId: groupProposalId,
+        vote: z
+          .literal([...CHAIN_TX_GROUP_VOTE_OPTIONS])
+          .describe('yes, no or abstain.'),
+        rationale: groupText(
+          300,
+          'Optional: the owner’s reason, published with the vote.',
+        ).optional(),
+      })
+      .superRefine(twoContracts),
+  },
+  'daodao.proposal.execute': {
+    summary:
+      'carry out a group proposal that passed, so the group’s own account does what it says.',
+    rules: `${GROUP_RULES} Carries out a proposal that passed (\`canRun\` in dao_proposals): the group’s own account then does the proposal’s actions, which the review card lists. Only when the owner asks for it. Tell them what the proposal does (its title) before preparing. Some groups let only members carry proposals out. Auth Hub tries it first and refuses the card when the actions would fail now (the proposal would then be marked failed for good), for example when the group doesn’t hold enough; tell the owner it can be tried again once that is fixed. It costs the owner only the network fee; a deposit paid with the proposal goes back to whoever proposed it unless the group keeps deposits (the review card says). Say it like: “Carry out A3 for Clean Water Group. The group’s account sends 500 IXO to Thandi.”`,
+    schema: z
+      .strictObject({
+        type: z.literal('daodao.proposal.execute'),
+        dao: groupDao,
+        proposalModule,
+        proposalId: groupProposalId,
+      })
+      .superRefine(twoContracts),
+  },
+  'daodao.proposal.close': {
+    summary:
+      'close a group proposal that did not pass (its actions will never happen).',
+    rules: `${GROUP_RULES} Closes a proposal that did not pass (\`canClose\` in dao_proposals): none of its actions will happen. Only when the owner asks for it. Closing does not give its deposit back to whoever proposed it: in most groups the deposit goes to the group (the review card says where it goes); say so. Say it like: “Close A3 in Clean Water Group. It was voted down, and the 1 IXO deposit goes to the group.”`,
+    schema: z
+      .strictObject({
+        type: z.literal('daodao.proposal.close'),
+        dao: groupDao,
+        proposalModule,
+        proposalId: groupProposalId,
+      })
+      .superRefine(twoContracts),
+  },
+  'daodao.proposal.create': {
+    summary:
+      'ask a group (DAO) to vote on a new proposal: agreement only, or up to 4 things the group’s own account then does.',
+    rules: `${GROUP_RULES} Asks the group to vote on a new proposal from the owner. Never propose without the owner asking for it and agreeing to the exact title, description and actions. \`proposalModule\` is one of the group’s \`proposalLists\` in chain_lookup daos (use one whose \`deposit\` a card can pay; \`membersOnly: true\`: only members may propose). \`title\` (up to 100 characters) and \`description\` (up to 300) are published as written: plain text on one line, no links, no hidden characters. \`actions\` is what the group’s own account does if the proposal passes: \`[]\` asks for agreement only; otherwise up to ${CHAIN_TX_MAX_GROUP_ACTIONS} actions, each written exactly like a top-level message of its type (describe that type too), of these types only: ${GROUP_ACTION_TYPES.join(', ')}. In an action the group is the actor, not the owner: a coin send goes from the group’s own account (\`dao\`; check what it holds with chain_lookup balances for that address), a stake stakes the group’s IXO, a collection change needs a permission given to the group’s address, a new collection or an entity account needs an entity the group owns, and a collection dates change gives both \`startDate\` and \`endDate\` (null = no end). Amounts are display units as at top level (IXO by default; another token only one listed in hub_action_options \`transfer.tokens\`, for its decimals); the owner’s own balance is not used. The network checks each action only when the group carries the proposal out, possibly days later; if one fails then, none happen. When the group takes a deposit, it comes from the owner’s wallet: say how much, and that it may be lost if the proposal doesn’t pass (it comes back only as the group’s refund rule says, \`refundPolicy\` in daos). A proposal can’t be withdrawn once made. Once it went through (hub_action_status), the receipt names the new proposal’s number. Say it like: “Propose to Clean Water Group: ‘Pay Thandi for the borehole repair’. If it passes, the group sends her 500 IXO; proposing costs you a 1 IXO deposit, returned only if it passes.”`,
+    schema: z
+      .strictObject({
+        type: z.literal('daodao.proposal.create'),
+        dao: groupDao,
+        proposalModule,
+        title: groupText(100, 'The proposal’s title, as published.'),
+        description: groupText(
+          300,
+          'What the proposal asks, as published (one line).',
+        ),
+        actions: z
+          .array(GROUP_ACTION_SCHEMA)
+          .max(CHAIN_TX_MAX_GROUP_ACTIONS)
+          .describe(
+            `What the group’s own account does if it passes: [] for agreement only, or up to ${CHAIN_TX_MAX_GROUP_ACTIONS} actions, each a message of one of: ${GROUP_ACTION_TYPES.join(', ')}.`,
+          ),
+      })
+      .superRefine(twoContracts),
+  },
+} as const satisfies Record<ChainTxGroupMessageType, ChainTxCatalogEntry>;
+
+/**
+ * The catalogue: every message type the protocol knows, the owner's own
+ * types first, then the four group steps (the protocol's order).
+ */
+export const CHAIN_TX_CATALOG = {
+  ...OWNER_CATALOG,
+  ...GROUP_CATALOG,
 } as const satisfies Record<ChainTxMessageType, ChainTxCatalogEntry>;
 
 /** What every message type shares, returned once by describe_chain_messages. */
 export const CHAIN_TX_GENERAL_RULES = [
-  'Addresses are 20-byte `ixo1…` account addresses (contract addresses are refused), validators `ixovaloper1…`, entities `did:ixo:entity:…`. Copy every id, address and number exactly from a lookup (chain_lookup, hub_action_options) or from the owner; never invent or guess one. Ids (`claimId`, `collectionId`, token `id`, proofs) use only letters, digits and `: . _ / -`.',
+  'Addresses are 20-byte `ixo1…` account addresses (contract addresses are refused), except a group’s own address and its proposal list in the group steps (32-byte `ixo1…` contract addresses); validators `ixovaloper1…`, entities `did:ixo:entity:…`. Copy every id, address and number exactly from a lookup (chain_lookup, hub_action_options) or from the owner; never invent or guess one. Ids (`claimId`, `collectionId`, token `id`, proofs) use only letters, digits and `: . _ / -`.',
   'Give only the fields listed for a type: the runtime adds the chain, the network, the signer and the owner’s own DID and address where a message needs them, and Auth Hub sets the fee. Amounts: coin sends and stakes are what the owner says in the token’s units ("100" IXO); impact tokens are whole tokens; collection payments are base units (1 IXO = 1000000 uixo). Dates are RFC 3339 with Z or an offset, from the owner’s time zone.',
-  `Up to ${CHAIN_TX_MAX_MESSAGES} messages per transaction, run in the order given (put them in the order the owner said them, and keep one decision in one card); all succeed or none do. A step that needs something stored first (a dispute statement, a profile, a document) can only be prepared once it is stored.`,
-  'How to talk about it: before preparing, say in one or two plain, everyday sentences what will happen and what it means for the owner (what leaves their wallet, what someone else will be able to do, how long it takes, whether it can be undone), the way each type’s “Say it like” does. Use names (of the validator, collection, entity or person) when a lookup gives them. Never say message type names or chain words such as authz, grant, MsgExec, bech32, valoper, uixo, base units, DID, IID, delegate or redelegate: say stake, unstake, move stake, permission, account, identity and IXO. Show an address only when the owner needs it to check who receives something. The review card in Auth Hub shows every exact value.',
+  `Up to ${CHAIN_TX_MAX_MESSAGES} messages per transaction, run in the order given (put them in the order the owner said them, and keep one decision in one card); all succeed or none do. A group step (a vote, carrying out or closing a group proposal, a new group proposal) goes alone on its card. A step that needs something stored first (a dispute statement, a profile, a document) can only be prepared once it is stored.`,
+  'How to talk about it: before preparing, say in one or two plain, everyday sentences what will happen and what it means for the owner (what leaves their wallet, what someone else will be able to do, how long it takes, whether it can be undone), the way each type’s “Say it like” does. Use names (of the validator, collection, entity or person) when a lookup gives them. Never say message type names or chain words such as authz, grant, MsgExec, bech32, valoper, uixo, base units, DID, IID, delegate, redelegate, DAO, proposal module, contract or execute: say stake, unstake, move stake, permission, account, identity, IXO, group, proposal, vote, deposit and carry out. Show an address only when the owner needs it to check who receives something. The review card in Auth Hub shows every exact value.',
 ].join(' ');
 
 /** A catalogue message as its schema parses it. */

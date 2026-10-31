@@ -247,8 +247,8 @@ the active binding again before calling Auth Hub. The model cannot supply those
 identity fields or approve an action. The existing `prepare_action` Portal card
 path remains available independently.
 
-The contract is `@ixo/action-protocol` 0.8.0 (published to npm with the
-Auth Hub release that serves it). This runtime declares protocol version 6
+The contract is `@ixo/action-protocol` 0.9.0 (published to npm with the
+Auth Hub release that serves it). This runtime declares protocol version 7
 on its Hub calls (see below). Outcomes still
 arrive as `ixo.auth-outcome/2`, so it needs a gateway that parses that
 envelope (gateway PR 20); the bank receipts it hands the gateway keep the
@@ -352,29 +352,35 @@ checks for hosts with a durable `reserve`/`record` store. Envelope versions
 are `ixo.auth-action/1`, `ixo.auth-capabilities/2`, `ixo.auth-outcome/2` and
 `ixo.auth-options/3`; unsupported kinds and versions fail closed.
 
-The runtime declares protocol version 6 (`?version=6`) on the capabilities,
-prepare, status and options calls. Version 6 is the 0.8.0 contract: version
-5 plus 29 more `ixo.chain.tx.v1` message types ([chain
-transactions](#chain-transactions)); options still answer
-`ixo.auth-options/3`. Every 0.7.0 parser refuses a capabilities document,
-review step or receipt that names a type it does not know, so Auth Hub lists
-and accepts the new types only at version 6
-(`chainTxMessageTypesForLevel`): a version 4 or 5 caller keeps exactly the
-four 0.6.0 types, and a prepare with a new type from such a caller is
-refused with `400 protocol_version_required`. An Auth Hub without version 6
-reads `?version=` against its closed list (1 to 5) and answers each call
-that declares 6 with `400 invalid_request`. The client then negotiates: a
-read (capabilities, options, status) refused that way is asked again at
-version 5, and the Hub is spoken to at version 5 for
-`HUB_PROTOCOL_RECHECK_MS` (10 min, per client, so per owner object) before
-6 is tried again; a prepare uses the version the capabilities read before
-it settled on and is never retried at another version (its 400 can be a
-real refusal of the operation). So while Auth Hub is still on 0.7.0 every
-Hub action keeps working and only the 0.6.0 chain types are offered (the
-Hub lists only those at version 5); a Hub that refuses version 5 too gets
-`HUB_UPDATE_REQUIRED` (below). The order stays: Auth Hub (with its website)
-on 0.8.0, then the channel gateways on 0.8.0 (a 0.7.0 gateway cannot parse
-a receipt with a new step type and drops the outcome), then this runtime. Version 5 is the 0.7.0 contract: version 4
+The runtime declares protocol version 7 (`?version=7`) on the capabilities,
+prepare, status and options calls. Version 7 is the 0.9.0 contract: version
+6 plus the four group steps on `ixo.chain.tx.v1` ([group
+steps](#group-steps)); options still answer
+`ixo.auth-options/3`. Version 6 is the 0.8.0 contract: version 5 plus 29
+more `ixo.chain.tx.v1` message types ([chain
+transactions](#chain-transactions)). Every parser refuses a capabilities
+document, review step or receipt that names a type it does not know, so
+Auth Hub lists and accepts each level's types only from callers at that
+level or above (`chainTxMessageTypesForLevel`: the four 0.6.0 types at 4 and
+5, the 33 at 6, all 37 at 7), and refuses a prepare with a type above the
+caller's level with `400 protocol_version_required`. An older Auth Hub
+reads `?version=` against its closed list (1 to 6 on 0.8.0, 1 to 5 on
+0.7.0) and answers each call that declares a version it does not know with
+`400 invalid_request`. The client then negotiates down the ladder 7, 6, 5
+(`HUB_PROTOCOL_VERSIONS` in `src/hub-actions/client.ts`): a read
+(capabilities, options, status) refused that way is asked again at the next
+lower version until one is answered, and the Hub is spoken to at that
+version for `HUB_PROTOCOL_RECHECK_MS` (10 min, per client, so per owner
+object) before 7 is tried again (a Hub that later refuses the remembered
+version too is stepped down again). A prepare uses the version the
+capabilities read before it settled on and is never retried at another
+version (its 400 can be a real refusal of the operation). So while Auth Hub
+is still on 0.8.0 every Hub action keeps working and the 33 level-6 types
+are offered without the group steps; on 0.7.0 only the 0.6.0 chain types
+are offered; a Hub that refuses version 5 too gets `HUB_UPDATE_REQUIRED`
+(below). The order stays: Auth Hub (with its website) on 0.9.0, then the
+channel gateways on 0.9.0 (a 0.8.0 gateway cannot parse a receipt with a
+group step and drops the outcome), then this runtime. Version 5 is the 0.7.0 contract: version 4
 plus the application card (`ixo.bid.submit.v1`) and the claim card
 (`ixo.claim.submit.v1`), with their receipts `ixo.bid.submission.v1`,
 `ixo.claim.submission.v1` and `ixo.submission.failed.v1`; options still
@@ -396,7 +402,7 @@ would fail on it) and refuses an `ixo.chain.tx.v1` prepare from an older
 caller with `400 protocol_version_required`, so Auth Hub must accept version 4
 before this runtime is deployed.
 
-Deploy order: Auth Hub and its website on @ixo/action-protocol 0.8.0 (accepts version 6) → channel gateways on 0.8.0 → runtimes.
+Deploy order: Auth Hub and its website on @ixo/action-protocol 0.9.0 (accepts version 7) → channel gateways on 0.9.0 → runtimes.
 
 Version 3 is the 0.5.0 contract:
 capabilities with per-denom `transfer.limits`, any-denom bank sends, receipts
@@ -444,14 +450,19 @@ display units (`"1.5"` for 1.5 IXO) and an optional `denom` copied from
 `decimals`, `verified`, `balanceBaseUnits`; absent = `uixo`). When a
 transaction has at least one bank step or stake (`cosmos.staking.delegate`),
 the owner object reads the options once for the call, fresh (the balances
-must be current, at the protocol version: version 6, answered as options
+must be current, at the protocol version: version 7, answered as options
 version 3), and for each bank step refuses a denom that is not in the list
 (it never guesses an `ibc/…` hash), converts the amount to base units with
 the listed `decimals` using integer arithmetic (`toBaseUnits`), refuses more
 fraction digits than the token has and a zero amount, and refuses when the
 bank steps of one token together, with the stakes for IXO, exceed its listed
 balance (`chainTxAmountsInBaseUnits`). A transaction without a bank step or
-stake reads no options. Refusals name the step: `messages[0].denom: …`,
+stake reads no options. A new group proposal's coin sends and stakes
+([group steps](#group-steps)) are converted the same way
+but never checked against the owner's balance (the group's own account
+pays when it carries the proposal out); IXO needs no options read, another
+token's decimals come from the same list (`chainTxNeedsTokenList`), and a
+token it does not list is refused (`messages[0].actions[1].denom: …`). Refusals name the step: `messages[0].denom: …`,
 `messages[2].amount: the owner holds 5 IXO, less than what the steps of this
 transaction take of it together.` What reaches Auth Hub is the protocol's
 `cosmos.bank.send` (`toAddress`, `amountBaseUnits`, `denom` = the listed
@@ -632,26 +643,40 @@ is one entry: its summary line and its field names on every request it is
 offered on, and its rules only when asked for. The catalogue lives in
 `src/plugins/hub-actions/chain-tx-catalog.ts`.
 
-Measured with protocol 0.8.0, as a provider is sent it (LangChain's
+Measured with protocol 0.9.0, as a provider is sent it (LangChain's
 `convertToOpenAITool` over the wrapped tool, JSON characters):
 
-| Types offered                      | Described in the session                              | Whole tool | Parameters | Description |
-| ---------------------------------- | ----------------------------------------------------- | ---------- | ---------- | ----------- |
-| all 33                             | none                                                  | 5 803      | 1 358      | 4 311       |
-| all 33                             | 1 (bank send)                                         | 6 019      | 1 574      | 4 311       |
-| all 33                             | 2 (bank send, stake)                                  | 6 223      | 1 778      | 4 311       |
-| all 33                             | 4 (bank send, stake, claim submit, create collection) | 8 432      | 3 987      | 4 311       |
-| all 33                             | all 33 (or no session store)                          | 18 735     | 14 290     | 4 311       |
-| the four 0.6.0 types (level 4 / 5) | none                                                  | 1 846      | 523        | 1 218       |
-| the four 0.6.0 types (level 4 / 5) | all four                                              | 2 962      | 1 639      | 1 218       |
+| Types offered                      | Described in the session                              | Whole tool |
+| ---------------------------------- | ----------------------------------------------------- | ---------- |
+| all 37                             | none                                                  | 6 366      |
+| all 37                             | 1 (bank send)                                         | 6 582      |
+| all 37                             | 2 (bank send, stake)                                  | 6 786      |
+| all 37                             | 4 (bank send, stake, claim submit, create collection) | 8 995      |
+| all 37                             | 1 (group vote)                                        | 6 696      |
+| all 37                             | 1 (new group proposal)                                | 7 212      |
+| all 37                             | 2 (new group proposal, bank send)                     | 7 644      |
+| all 37                             | the four group steps                                  | 8 018      |
+| all 37                             | all 37 (or no session store)                          | 26 228     |
+| the 33 of level 6                  | none                                                  | 5 803      |
+| the 33 of level 6                  | all 33                                                | 18 735     |
+| the four 0.6.0 types (level 4 / 5) | all four                                              | 2 962      |
 
-`describe_chain_messages`, a boot-time tool whose `types` enum names all 33
-types whatever the account may use, is 1 586 characters. A test keeps the
-request tool under 3 500 (four types), 6 500 (33, none described), 9 000
-(33, four described) and 20 000 (33, all described). For comparison, the protocol's own JSON schema for the
-`ixo.chain.tx.v1` operation (patterns and limits included) is 29 711
-characters with 33 types; the runtime never sends it to a model
-(`request_hub_action` leaves the runtime-built kinds out).
+The four group steps add 563 characters while none is described (their
+summary lines). A new proposal's `actions` follow the same discovery: the
+proposal described alone names the 14 action types in one open branch, and
+an action type's fields are declared once that type is described too (7 212
+→ 7 644 for a coin send); every field of all 14 is in the tool only when
+everything is described or the session store fails (26 228, against 18 735
+for the 33 types of 0.8.0). `describe_chain_messages` for
+`daodao.proposal.create` lists its `actions` items by type name only (each
+action type is described on its own): 8 403 characters with the shared
+rules and the 37 available types. A test keeps the request tool under 3 500
+(four types), 20 000 (33, all described), 7 000 (37, none described), 9 500
+(37, four described), 8 500 (the four group steps described) and 28 000
+(37, all described). For comparison, the protocol's own JSON schema for the
+`ixo.chain.tx.v1` operation (patterns and limits included) is 41 872
+characters with 37 types (29 711 with 33); the runtime never sends it to a
+model (`request_hub_action` leaves the runtime-built kinds out).
 
 The four 0.6.0 message types (level 4 and up):
 
@@ -698,6 +723,63 @@ owner's DIDs are filled as above, and the wire is in `@ixo/action-protocol`
 | `ixo.iid.add-linked-entity` / `delete-linked-entity`     | `did`, `entity` (`id`: an IXO DID, an ixo address or `{id}#ixo1…`; `type`; `relationship`, mixed case; `service?`, `""` allowed) / `entityId`                                       |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `ixo.iid.add-context` / `delete-context`                 | `did`, `context` (`key`, `val`: https link or IXO DID) / `key`                                                                                                                      |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
+### Group steps
+
+Wire level 7 (protocol 0.9.0) adds four steps on a DAO DAO group (v2.0.3
+contracts, single-choice proposals; Auth Hub checks the contract versions
+and refuses the rest with `group_not_supported`). The person signs each
+directly; the runtime fills nothing in them beyond the chain id, network
+and signer, and none of them names the owner. The design record is Auth
+Hub's `docs/dao-actions-design.md`.
+
+| `type`                    | Model fields                                                                         | What it does                                                                                                                                                                                                                                                                                    |
+| ------------------------- | ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `daodao.proposal.vote`    | `dao`, `proposalModule`, `proposalId`, `vote` (`yes`, `no`, `abstain`), `rationale?` | Casts the owner's vote, with an optional published reason. Its weight is what the owner held when the proposal started (Auth Hub's `no_voting_power`); a group may not allow changing a vote (`already_voted`).                                                                                 |
+| `daodao.proposal.execute` | `dao`, `proposalModule`, `proposalId`                                                | Carries out a passed proposal: the group's own account does its actions. Auth Hub simulates it and refuses the card when the actions would fail (`group_actions_would_fail`), because a failed run marks the proposal failed for good.                                                          |
+| `daodao.proposal.close`   | `dao`, `proposalModule`, `proposalId`                                                | Closes a proposal that did not pass. The deposit usually goes to the group, not back to the proposer (the card says).                                                                                                                                                                           |
+| `daodao.proposal.create`  | `dao`, `proposalModule`, `title` (≤ 100), `description` (≤ 300), `actions` (0 to 4)  | Asks the group to vote on a new proposal; Auth Hub adds the group's deposit from the owner's wallet. `actions: []` asks for agreement only; otherwise each action is written exactly like a top-level message of one of the 14 types a group may do, with the group's own account as its actor. |
+
+- Fields: `dao` and `proposalModule` are 32-byte `ixo1…` contract addresses
+  (62 characters) and differ; `proposalId` is decimal text without leading
+  zeros, 1 to 2^53 − 1 (Auth Hub writes it as a JSON number); `title`,
+  `description` and `rationale` are plain text shown exactly as written
+  (`sanitizePublishedText`, as for a retirement reason); `rationale` may be
+  left out but not `null`.
+- The 14 action types (`CHAIN_TX_GROUP_ACTION_TYPES`): `cosmos.bank.send`,
+  `ixo.token.transfer`, `ixo.token.retire`, the three staking types,
+  `cosmos.distribution.withdraw-rewards`, `cosmos.gov.vote`,
+  `ixo.claims.update-collection-state`, `-dates` (both `startDate` and
+  `endDate`: a date left out would be read now and be out of date when the
+  group carries it out), `-quota`, `ixo.claims.create-collection`,
+  `ixo.entity.create-account` and `ixo.entity.revoke-account-authz`. Each
+  uses its top-level catalogue schema (`GROUP_ACTION_SCHEMA`, a union on
+  `type`); a type a group cannot do is refused on `actions[j].type`, as the
+  protocol does. Coin sends and stakes are display amounts, converted as
+  in [coin sends](#coin-sends-any-token) without a balance check.
+- One group step per card (the protocol's D5): a group step with any other
+  message is refused on `messages` before any Hub call.
+- Discovery: a new proposal's action types must be described too; the
+  handler's "not run" answer names the undescribed ones (top level and
+  inside `actions`).
+- Where the ids come from: `chain_lookup dao_proposals` gives `dao`,
+  `proposalModule` and `id` per proposal, with `allowRevoting`, `canRun`
+  (passed, or voting ended while the index still says open) and `canClose`
+  (rejected, or the same), and marks `multipleChoice` / `listDisabled`
+  proposals no card can act on; `chain_lookup daos` gives, per group, its
+  `proposalLists` (where it takes new proposals: `membersOnly`, `deposit`
+  with `refundPolicy`, `votingTime`, `allowRevoting`, `membersOnlyCarryOut`;
+  a cw20 deposit is marked `cardCannotPay`). `dao` is also the group's own
+  account (its holdings: `chain_lookup balances` with that address).
+  Whether the owner may vote (their weight when a proposal started) is Auth
+  Hub's check; the lookups never claim it ([chain tools](chain-tools.md)).
+- Rules for the model: never vote or propose without the owner saying so;
+  tell them the proposal's title and when voting closes before asking how
+  they vote; say a proposal's deposit may be lost if it does not pass, that
+  carrying out may be refused while its actions would fail, and that
+  closing does not return the deposit. The receipt of a new proposal names
+  its number (`proposalId`, or `null` when Auth Hub could not read it); a
+  carry-out's says whether the group's actions ran (`groupActions`).
+
 Each type's `rules` say what to ask the owner first, which `chain_lookup`
 kind finds its ids (`validators` for a validator the owner names in words,
 `staking` for their own stake and rewards, `gov_proposals`,
@@ -727,7 +809,9 @@ Each message is checked strictly against its type's catalogue schema,
 which mirrors the protocol shapes with Auth Hub's stricter rules; before any
 Hub call the runtime refuses an unknown type, a batch of 0 or more than 8,
 an address that is not a 20-byte `ixo1…` account address (`ixo1` and 38
-characters; a 32-byte contract address is refused), a bank `amount` that is
+characters; a 32-byte contract address is refused, except a group step's
+`dao` and `proposalModule`), a group step with any other message on the
+card, a bank `amount` that is
 not a plain decimal, a token amount that is zero or not whole, a non-digit
 collection id (or one with leading zeros), a claim id, token id or
 verification proof outside `^[A-Za-z0-9:._/-]+$` (the 0.8.0 types: every
@@ -775,7 +859,15 @@ words for the code (`CHAIN_TX_REFUSAL_WORDS` in
 `CHAIN_TX_REFUSAL_CODES` entry): the step, what it means for the person and
 what to do next (`not_available`: the Hub does not offer that type here; `chain_data_too_large`: too large to seal in a card; neither is retried), for example "in step 1, there are no rewards to collect
 from this validator yet. Leave this validator out of the card.", with the
-field and code marked as not for the person. A reason without a code, or
+field and code marked as not for the person. Protocol 0.9.0 adds the group
+codes (`group_not_supported`, `not_in_group`, `group_paused`,
+`no_voting_power`, `already_voted`, `same_vote`, `not_a_member`,
+`proposal_not_passed`, `proposal_not_rejected`, `group_actions_would_fail`,
+`deposit_not_supported`, `proposal_too_large`, `not_for_groups`,
+`not_group_owned`); those the person cannot change say not to retry. A new
+proposal's action keeps its own codes under its path
+(`messages[0].actions[1].validatorAddress: validator_not_found`), worded as
+"in the group's action 2 of the proposal in step 1, …". A reason without a code, or
 with one this runtime does not know, is handled as before. Otherwise Auth
 Hub refusals reach the model in plain words as `{status: 'unavailable',
 reason}`, with the Hub's `reason` appended (at most 200 characters): `400 operation_not_registered` ("Auth Hub did not accept this
@@ -803,7 +895,9 @@ by `hub_action_status` (its `message` quoted, see above) and relayed in
 `hubActionOutcomes` unchanged (only the bank-send receipt is reduced to its
 0.4.1 shape), so a gateway that relays
 chain-transaction outcomes must parse them with `@ixo/action-protocol`
-0.6.0, and 0.8.0 once a level-6 type can appear. Out of scope here: name
+0.6.0, 0.8.0 once a level-6 type can appear, and 0.9.0 once a group step
+can (a new proposal's step carries `proposalId`, a carry-out's
+`groupActions`, on a succeeded receipt only). Out of scope here: name
 resolution (collection and token names), per-message caps or enablement,
 claim creation, storing a dispute statement or Profile, and mainnet
 enablement.
@@ -836,9 +930,9 @@ rejected (for example `Invalid fromAddress`). The Gmail service requires fresh i
 attestations and confirmed proxy no-retry behavior; missing evidence disables
 the journey. Local conformance fixtures do not establish those activation gates.
 
-Both shared packages come from the npm registry: `@ixo/action-protocol` 0.8.0
+Both shared packages come from the npm registry: `@ixo/action-protocol` 0.9.0
 and `@ixo/topic-protocol` 1.0.0-rc.8 (the Worker-safe build with precompiled
-validators), pinned exactly in the runtime. 0.8.0 is published with the Auth
+validators), pinned exactly in the runtime. 0.9.0 is published with the Auth
 Hub release that serves it; `pnpm-lock.yaml` is regenerated then (a local
 build links the Hub's package through a workspace override that is never
 committed). No workspace override or vendored archive is committed. `prepublishOnly`

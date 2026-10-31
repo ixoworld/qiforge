@@ -34,7 +34,7 @@ const outcome: ActionOutcomeV1 = {
 };
 
 describe('Hub action HTTP client', () => {
-  it('requests version 3 options (with the owner tokens) at protocol version 6 for the trusted binding', async () => {
+  it('requests version 3 options (with the owner tokens) at protocol version 7 for the trusted binding', async () => {
     const requests: Request[] = [];
     const options = {
       version: 'ixo.auth-options/3',
@@ -80,7 +80,7 @@ describe('Hub action HTTP client', () => {
         bindingRevision: reference.bindingRevision,
       }),
     ).toEqual(options);
-    expect(new URL(requests[0]!.url).searchParams.get('version')).toBe('6');
+    expect(new URL(requests[0]!.url).searchParams.get('version')).toBe('7');
     expect(new URL(requests[0]!.url).searchParams.get('bindingId')).toBe(
       'chb_two',
     );
@@ -261,9 +261,9 @@ describe('Hub action HTTP client', () => {
     });
     expect((await client.status(id)).outcome).toEqual(v2);
     expect(urls).toEqual([
-      'GET /api/internal/actions/operations/capabilities?version=6',
-      'POST /api/internal/actions/operations?version=6',
-      `GET /api/internal/actions/operations/${id}?version=6`,
+      'GET /api/internal/actions/operations/capabilities?version=7',
+      'POST /api/internal/actions/operations?version=7',
+      `GET /api/internal/actions/operations/${id}?version=7`,
     ]);
   });
 
@@ -442,7 +442,7 @@ describe('Hub action HTTP client', () => {
     // An Auth Hub before version 5 (before @ixo/action-protocol 0.7.0) reads
     // `?version=` with `z.enum(['1', '2', '3', '4'])` on capabilities,
     // prepare, options and status; the ZodError becomes its router's
-    // 400 `{"error":"invalid_request"}`. Each read tries 6, then 5.
+    // 400 `{"error":"invalid_request"}`. Each read tries 7, then 6, then 5.
     const seen: string[] = [];
     const client = new HubActionClient({
       origin: 'https://hub.test',
@@ -514,20 +514,23 @@ describe('Hub action HTTP client', () => {
       }),
     ).rejects.toMatchObject({ name: 'HubActionRefused', kind: 'refused' });
     expect(seen).toEqual([
+      'GET /api/internal/actions/operations/capabilities?version=7',
       'GET /api/internal/actions/operations/capabilities?version=6',
       'GET /api/internal/actions/operations/capabilities?version=5',
+      `GET /api/internal/actions/operations/${id}?version=7`,
       `GET /api/internal/actions/operations/${id}?version=6`,
       `GET /api/internal/actions/operations/${id}?version=5`,
+      'GET /api/internal/actions/operations/options?version=7',
       'GET /api/internal/actions/operations/options?version=6',
       'GET /api/internal/actions/operations/options?version=5',
       'GET /api/internal/actions/operations/options?version=2',
       // A prepare is never retried at another version: its 400 may be a
       // real refusal of the operation.
-      'POST /api/internal/actions/operations?version=6',
+      'POST /api/internal/actions/operations?version=7',
     ]);
   });
 
-  it('speaks version 5 to a level-5 Auth Hub during the rollout, and asks for 6 again later', async () => {
+  it('speaks version 5 to a level-5 Auth Hub during the rollout, and asks for 7 again later', async () => {
     // A Hub on @ixo/action-protocol 0.7.0: every Hub action still works at
     // version 5; only the level-6 chain types are missing from what it lists.
     const seen: string[] = [];
@@ -616,19 +619,94 @@ describe('Hub action HTTP client', () => {
         },
       });
       expect(seen).toEqual([
+        'GET /api/internal/actions/operations/capabilities?version=7',
         'GET /api/internal/actions/operations/capabilities?version=6',
         'GET /api/internal/actions/operations/capabilities?version=5',
         'GET /api/internal/actions/operations/options?version=5',
         'POST /api/internal/actions/operations?version=5',
       ]);
-      // Once Auth Hub is updated, the next read after the recheck asks for 6.
-      accepted = [...level5, '6'];
+      // Once Auth Hub is updated, the next read after the recheck asks for 7.
+      accepted = [...level5, '6', '7'];
       now.mockReturnValue(start + HUB_PROTOCOL_RECHECK_MS);
-      expect(client.protocolVersion).toBe('6');
+      expect(client.protocolVersion).toBe('7');
       await client.capabilities();
       expect(seen.at(-1)).toBe(
-        'GET /api/internal/actions/operations/capabilities?version=6',
+        'GET /api/internal/actions/operations/capabilities?version=7',
       );
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('speaks version 6 to a level-6 Auth Hub (the 33 types, no group steps), steps down to 5 if it then refuses 6, and asks for 7 again later', async () => {
+    // A Hub on @ixo/action-protocol 0.8.0 knows versions 1 to 6.
+    const seen: string[] = [];
+    let accepted = ['1', '2', '3', '4', '5', '6'];
+    const level6Types = [
+      'cosmos.bank.send',
+      'ixo.claims.submit',
+      'ixo.claims.evaluate',
+      'ixo.token.transfer',
+      'cosmos.gov.vote',
+    ];
+    const client = new HubActionClient({
+      origin: 'https://hub.test',
+      key: 'oracle-secret',
+      fetcher: {
+        fetch: async (request: Request) => {
+          const url = new URL(request.url);
+          const version = url.searchParams.get('version') ?? '1';
+          seen.push(`${request.method} ${url.pathname}?version=${version}`);
+          if (!accepted.includes(version))
+            return Response.json({ error: 'invalid_request' }, { status: 400 });
+          return Response.json({
+            version: 'ixo.auth-capabilities/2',
+            accountId: reference.accountId,
+            oracleDid: 'did:ixo:oracle',
+            network: 'ixo testnet',
+            resourceOrigin: null,
+            operations: ['ixo.chain.tx.v1'],
+            transfer: null,
+            chainTx: { messageTypes: level6Types, maxMessages: 8 },
+            forms: [],
+          });
+        },
+      },
+    });
+    const now = vi.spyOn(Date, 'now');
+    const start = 1_800_000_000_000;
+    now.mockReturnValue(start);
+    try {
+      expect((await client.capabilities()).chainTx?.messageTypes).toEqual(
+        level6Types,
+      );
+      expect(client.protocolVersion).toBe('6');
+      await client.capabilities();
+      expect(seen).toEqual([
+        'GET /api/internal/actions/operations/capabilities?version=7',
+        'GET /api/internal/actions/operations/capabilities?version=6',
+        // Remembered: the next read asks for 6 straight away.
+        'GET /api/internal/actions/operations/capabilities?version=6',
+      ]);
+      // A Hub rolled back to 0.7.0 while 6 is remembered: down to 5.
+      accepted = ['1', '2', '3', '4', '5'];
+      seen.length = 0;
+      await client.capabilities();
+      expect(client.protocolVersion).toBe('5');
+      expect(seen).toEqual([
+        'GET /api/internal/actions/operations/capabilities?version=6',
+        'GET /api/internal/actions/operations/capabilities?version=5',
+      ]);
+      // Updated to 0.9.0: after the recheck the next read asks for 7.
+      accepted = ['1', '2', '3', '4', '5', '6', '7'];
+      now.mockReturnValue(start + HUB_PROTOCOL_RECHECK_MS);
+      expect(client.protocolVersion).toBe('7');
+      seen.length = 0;
+      await client.capabilities();
+      expect(seen).toEqual([
+        'GET /api/internal/actions/operations/capabilities?version=7',
+      ]);
+      expect(client.protocolVersion).toBe('7');
     } finally {
       now.mockRestore();
     }

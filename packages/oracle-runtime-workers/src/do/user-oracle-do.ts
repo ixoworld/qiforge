@@ -55,6 +55,7 @@ import { chainTxOperation, prepareHubAction } from '../hub-actions/request';
 import {
   bankReceiptSummary,
   chainTxAmountsInBaseUnits,
+  chainTxNeedsTokenList,
 } from '../hub-actions/transfer';
 import {
   HUB_CHECK_AFTER_EXPIRY_MS,
@@ -3652,8 +3653,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * steps an amount of IXO: with at least one of either, the owner's
      * options are read once, fresh (the balances must be current), and each
      * amount is converted to base units and checked against the listed
-     * balance (`chainTxAmountsInBaseUnits`). No fee is sent: the Hub
-     * simulates gas and sets it.
+     * balance (`chainTxAmountsInBaseUnits`). A new group proposal's coin
+     * send of another token than IXO reads them too, for the token's
+     * decimals only. No fee is sent: the Hub simulates gas and sets it.
      */
     private async chainTransactionHubAction(input: {
       ownerDid: string;
@@ -3684,11 +3686,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const chainId = chainIdsFromConfig(chainIdConfigSchema.parse(this.env))[
         HUB_NETWORK_CHAIN[capabilities.network]
       ];
-      const tokens = input.messages.some(
-        (message) =>
-          message.type === 'cosmos.bank.send' ||
-          message.type === 'cosmos.staking.delegate',
-      )
+      const tokens = chainTxNeedsTokenList(input.messages)
         ? ((await this.hubActionOptions(input, true)).transfer?.tokens ?? null)
         : null;
       const operation = chainTxOperation({
