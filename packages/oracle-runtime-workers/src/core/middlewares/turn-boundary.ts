@@ -22,6 +22,7 @@ import {
 } from '@langchain/core/messages';
 import { isAttachmentViewMessage } from '../../attachments/retention';
 import { isCapabilityGateRefusal } from './capability-gate';
+import { isToolNotRun } from '../tool-not-run';
 
 export const SUMMARY_PREFIX = 'Here is a summary of the conversation to date:';
 
@@ -140,7 +141,11 @@ export function carriedCallsOfTurn(
         if (call.id) calls.set(call.id, { name: call.name, args: call.args });
       continue;
     }
-    if (!ToolMessage.isInstance(message) || isCapabilityGateRefusal(message))
+    if (
+      !ToolMessage.isInstance(message) ||
+      isCapabilityGateRefusal(message) ||
+      isToolNotRun(message)
+    )
       continue;
     const call = calls.get(message.tool_call_id);
     if (!call) continue;

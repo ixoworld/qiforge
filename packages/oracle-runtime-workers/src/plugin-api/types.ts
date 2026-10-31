@@ -32,13 +32,40 @@ import type {
   ChainTxMessage,
 } from '@ixo/action-protocol';
 
+/** `Omit` applied to each member of a union (plain `Omit` merges them). */
+export type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
+  ? Omit<T, K>
+  : never;
+
+/**
+ * The owner's own identity in chain-transaction messages, which the host
+ * fills and the model never names: the filer's or disputer's `agentDid`
+ * (claims, reservations, disputes), an evaluation's `agentDid` and
+ * `agentAddress`, a claim permission's `creatorDid`, an entity update's
+ * `controllerDid` and a new entity's `ownerDid`: always `did:ixo:<signer>`,
+ * or the signer for an address.
+ */
+export type ChainTxOwnerField =
+  | 'agentDid'
+  | 'agentAddress'
+  | 'creatorDid'
+  | 'controllerDid'
+  | 'ownerDid';
+
+/** The stake steps: their amount is IXO, written in display units. */
+export type ChainTxStakeType =
+  | 'cosmos.staking.delegate'
+  | 'cosmos.staking.undelegate'
+  | 'cosmos.staking.redelegate';
+
 /**
  * A chain-transaction message as the model writes it: the protocol's
- * message without the owner's identity, which the host fills (a claim's
- * `agentDid`, an evaluation's `agentDid` and `agentAddress`: the signer's).
- * A bank step names a display `amount` of a token from the owner's list
- * (`denom`, absent = uixo); the host converts it to the protocol's
- * `amountBaseUnits` from the listed decimals.
+ * message without the owner's identity (`ChainTxOwnerField`), which the
+ * host fills. A bank step names a display `amount` of a token from the
+ * owner's list (`denom`, absent = uixo); a stake step a display `amount` of
+ * IXO. The host converts both to the protocol's `amountBaseUnits` (the
+ * listed decimals; 6 for IXO). Every other amount (impact tokens, a
+ * collection's payments) is already in the protocol's units.
  */
 export type ChainTxMessageInput =
   | {
@@ -48,11 +75,16 @@ export type ChainTxMessageInput =
       amount: string;
       denom?: string;
     }
-  | Extract<ChainTxMessage, { type: 'ixo.token.transfer' }>
-  | Omit<Extract<ChainTxMessage, { type: 'ixo.claims.submit' }>, 'agentDid'>
-  | Omit<
-      Extract<ChainTxMessage, { type: 'ixo.claims.evaluate' }>,
-      'agentDid' | 'agentAddress'
+  | (DistributiveOmit<
+      Extract<ChainTxMessage, { type: ChainTxStakeType }>,
+      'amountBaseUnits'
+    > & {
+      /** A plain decimal in IXO ("100" or "0.5"). */
+      amount: string;
+    })
+  | DistributiveOmit<
+      Exclude<ChainTxMessage, { type: 'cosmos.bank.send' | ChainTxStakeType }>,
+      ChainTxOwnerField
     >;
 
 /**
@@ -812,7 +844,13 @@ export interface RuntimeContext<TConfig = MergedConfig> {
 
   /** Host-owned action coordinator. It accepts only runtime-derived channel context. */
   hubActions?: {
-    capabilities(): Promise<ActionCapabilitiesV1>;
+    /**
+     * The Hub's capabilities for this oracle account (cached 60 s).
+     * `turn`: a read on a turn's critical path (a tool list): a short
+     * timeout, no new read within 30 s of a failed one, and the last
+     * capabilities read while reads fail.
+     */
+    capabilities(opts?: { turn?: boolean }): Promise<ActionCapabilitiesV1>;
     options(input: {
       ownerDid: string;
       provider: string;
@@ -822,13 +860,16 @@ export interface RuntimeContext<TConfig = MergedConfig> {
     /**
      * One chain transaction (`ixo.chain.tx.v1`) of 1–8 messages: the host
      * adds the chain id and network (the account's), the signer (the
-     * owner's address) and the owner's identity in claims messages
-     * (`agentDid` = `did:ixo:<signer>`, an evaluation's `agentAddress` = the
-     * signer) and prepares it like any operation (no fee: the Hub simulates
-     * gas and sets it). A bank step's display `amount` is converted to base
-     * units from the owner's token list (one options read per call, only
-     * when there is a bank step), refused for a token not listed, more
-     * digits than its decimals, zero or more than the listed balance.
+     * owner's address) and the owner's identity (`ChainTxOwnerField`:
+     * `did:ixo:<signer>`, an evaluation's `agentAddress` = the signer) and
+     * prepares it like any operation (no fee: the Hub simulates gas and
+     * sets it). A bank step's display `amount` is converted to base units
+     * from the owner's token list (one options read per call, only when
+     * there is a bank or stake step), refused for a token not listed, more
+     * digits than its decimals, zero or more than the listed balance. A
+     * stake step's IXO `amount` is converted with 6 decimals; what a stake
+     * takes from the wallet counts against the listed IXO balance with the
+     * IXO bank steps, when the list has IXO.
      */
     chainTransaction(input: {
       ownerDid: string;

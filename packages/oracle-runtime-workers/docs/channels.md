@@ -247,8 +247,9 @@ the active binding again before calling Auth Hub. The model cannot supply those
 identity fields or approve an action. The existing `prepare_action` Portal card
 path remains available independently.
 
-The contract is `@ixo/action-protocol` 0.7.0 from npm. This runtime
-declares protocol version 5 on its Hub calls (see below). Outcomes still
+The contract is `@ixo/action-protocol` 0.8.0 (published to npm with the
+Auth Hub release that serves it). This runtime declares protocol version 6
+on its Hub calls (see below). Outcomes still
 arrive as `ixo.auth-outcome/2`, so it needs a gateway that parses that
 envelope (gateway PR 20); the bank receipts it hands the gateway keep the
 0.4.1 shape (see [coin sends](#coin-sends-any-token)).
@@ -351,18 +352,38 @@ checks for hosts with a durable `reserve`/`record` store. Envelope versions
 are `ixo.auth-action/1`, `ixo.auth-capabilities/2`, `ixo.auth-outcome/2` and
 `ixo.auth-options/3`; unsupported kinds and versions fail closed.
 
-The runtime declares protocol version 5 (`?version=5`) on the capabilities,
-prepare, status and options calls. Version 5 is the 0.7.0 contract: version 4
+The runtime declares protocol version 6 (`?version=6`) on the capabilities,
+prepare, status and options calls. Version 6 is the 0.8.0 contract: version
+5 plus 29 more `ixo.chain.tx.v1` message types ([chain
+transactions](#chain-transactions)); options still answer
+`ixo.auth-options/3`. Every 0.7.0 parser refuses a capabilities document,
+review step or receipt that names a type it does not know, so Auth Hub lists
+and accepts the new types only at version 6
+(`chainTxMessageTypesForLevel`): a version 4 or 5 caller keeps exactly the
+four 0.6.0 types, and a prepare with a new type from such a caller is
+refused with `400 protocol_version_required`. An Auth Hub without version 6
+reads `?version=` against its closed list (1 to 5) and answers each call
+that declares 6 with `400 invalid_request`. The client then negotiates: a
+read (capabilities, options, status) refused that way is asked again at
+version 5, and the Hub is spoken to at version 5 for
+`HUB_PROTOCOL_RECHECK_MS` (10 min, per client, so per owner object) before
+6 is tried again; a prepare uses the version the capabilities read before
+it settled on and is never retried at another version (its 400 can be a
+real refusal of the operation). So while Auth Hub is still on 0.7.0 every
+Hub action keeps working and only the 0.6.0 chain types are offered (the
+Hub lists only those at version 5); a Hub that refuses version 5 too gets
+`HUB_UPDATE_REQUIRED` (below). The order stays: Auth Hub (with its website)
+on 0.8.0, then the channel gateways on 0.8.0 (a 0.7.0 gateway cannot parse
+a receipt with a new step type and drops the outcome), then this runtime. Version 5 is the 0.7.0 contract: version 4
 plus the application card (`ixo.bid.submit.v1`) and the claim card
 (`ixo.claim.submit.v1`), with their receipts `ixo.bid.submission.v1`,
 `ixo.claim.submission.v1` and `ixo.submission.failed.v1`; options still
 answer `ixo.auth-options/3`. Auth Hub lists and accepts those kinds only at
 version 5 (a 0.6.0 parser cannot read them), so Auth Hub must accept version
-5 before this runtime is deployed: this runtime needs Auth Hub PR 86 (the
-version 5 Hub) deployed on every network it runs on first. An Auth Hub
-without version 5 reads `?version=` against its closed list (1 to 4) and
-answers each capabilities, prepare, options and status call that declares 5
-with `400 invalid_request`: the runtime then tells the model, in fixed
+5 before a version 5 runtime is deployed (Auth Hub PR 86). An Auth Hub
+that refuses version 5 as well (its closed list is 1 to 4) answers each
+capabilities, prepare, options and status call with `400 invalid_request`:
+the runtime then tells the model, in fixed
 words, that Auth Hub must be updated (`HUB_UPDATE_REQUIRED`), and keeps
 every action and outcome it holds; polls keep answering from SQLite and a
 Hub callback that cannot be confirmed is refused (`409`), so Auth Hub
@@ -375,7 +396,7 @@ would fail on it) and refuses an `ixo.chain.tx.v1` prepare from an older
 caller with `400 protocol_version_required`, so Auth Hub must accept version 4
 before this runtime is deployed.
 
-Deploy order: Auth Hub (accepts version 5) → channel gateways on @ixo/action-protocol 0.7.0 → runtimes.
+Deploy order: Auth Hub and its website on @ixo/action-protocol 0.8.0 (accepts version 6) → channel gateways on 0.8.0 → runtimes.
 
 Version 3 is the 0.5.0 contract:
 capabilities with per-denom `transfer.limits`, any-denom bank sends, receipts
@@ -421,17 +442,18 @@ The model supplies only the recipient, a decimal `amount` in the token's
 display units (`"1.5"` for 1.5 IXO) and an optional `denom` copied from
 `hub_action_options` `transfer.tokens` (at most 50: `denom`, `symbol`,
 `decimals`, `verified`, `balanceBaseUnits`; absent = `uixo`). When a
-transaction has at least one bank step, the owner object reads the options
-once for the call, fresh (the balances must be current, at the protocol
-version: version 5, answered as options version 3), and for each bank step
-refuses a denom that is not in the list (it never guesses an `ibc/…` hash),
-converts the amount to base units with the listed `decimals` using integer
-arithmetic (`toBaseUnits`), refuses more fraction digits than the token has
-and a zero amount, and refuses when the bank steps of one token together
-exceed its listed balance. A transaction without a bank step reads no
-options. Refusals name the step: `messages[0].denom: …`,
-`messages[2].amount: the owner holds 5 IXO, less than the bank steps of this
-token in this transaction.` What reaches Auth Hub is the protocol's
+transaction has at least one bank step or stake (`cosmos.staking.delegate`),
+the owner object reads the options once for the call, fresh (the balances
+must be current, at the protocol version: version 6, answered as options
+version 3), and for each bank step refuses a denom that is not in the list
+(it never guesses an `ibc/…` hash), converts the amount to base units with
+the listed `decimals` using integer arithmetic (`toBaseUnits`), refuses more
+fraction digits than the token has and a zero amount, and refuses when the
+bank steps of one token together, with the stakes for IXO, exceed its listed
+balance (`chainTxAmountsInBaseUnits`). A transaction without a bank step or
+stake reads no options. Refusals name the step: `messages[0].denom: …`,
+`messages[2].amount: the owner holds 5 IXO, less than what the steps of this
+transaction take of it together.` What reaches Auth Hub is the protocol's
 `cosmos.bank.send` (`toAddress`, `amountBaseUnits`, `denom` = the listed
 token's). These are client-side pre-checks: Auth Hub enforces its own. No
 fee is sent: Auth Hub simulates gas and sets the fee. A token that is not
@@ -453,7 +475,12 @@ operationStatus, outcome, summary?}`, with Auth Hub's own review and
 operation status (so an action still waiting reads apart from one whose
 review expired; each is a status `@ixo/action-protocol` lists, anything else
 Auth Hub answers reads `unknown`), or `{status: 'unavailable', reason}` for an id this owner
-never prepared or when Auth Hub must be updated. Plugins read the same
+never prepared or when Auth Hub must be updated. A `cancelled` outcome also
+carries `meaning` (`CANCELLED_MEANING`): nothing was sent, and the person
+may have cancelled the card or Auth Hub withdrew it because something it
+depended on changed after the review (a chain card's `409 review_changed`
+with reason `chain_changed`, which only the review page sees); the model
+must not say the person cancelled it. Plugins read the same
 through `ctx.hubActions.status(ownerDid, actionId, { timeoutMs? })`
 (`HubActionStatusRead`: `held: false` for an action the owner object does
 not hold, with no Hub read). A refusal Auth Hub answered is a
@@ -496,11 +523,16 @@ evidence link. The model supplies only `messages` and an optional `memo` (at mos
 256 UTF-8 bytes); the owner object adds the chain id (this Worker's
 `IXO_TRANSACTION_CHAIN_ID_*` for the account's network), the network (the
 account's capability), the signer (the owner's address, from their DID
-`did:ixo:<address>`, as a transfer's sender) and the owner's identity in
-claims messages: `agentDid` is `did:ixo:<signer>` (the owner's DID, the form
-the runtime authenticates to Auth Hub with) on a submit and an evaluation,
-and an evaluation's `agentAddress` is the signer. The model never supplies
-either: they are not in the tool's schema, and a stray one is overwritten.
+`did:ixo:<address>`, as a transfer's sender) and the owner's identity in the
+messages (`ChainTxOwnerField`): `did:ixo:<signer>` (the owner's DID, the
+form the runtime authenticates to Auth Hub with) as the `agentDid` of a
+submit, an evaluation, a reservation and a dispute, the `creatorDid` of a
+claim permission, the `controllerDid` of an entity update and the
+`ownerDid` of a new entity, and the signer as an evaluation's
+`agentAddress`. The model never supplies any of them: they are not in the
+tool's schema, and a stray one is overwritten. Signer-derived chain
+addresses (delegator, voter, owner, creator, controller, `signer`) are not
+wire fields at all: Auth Hub fills them.
 An owner DID that is not `did:ixo:<address>` leaves no signer, refused in
 fixed words (below). No fee is sent:
 Auth Hub simulates gas and sets it. There are no per-message caps and no
@@ -508,33 +540,120 @@ per-message enablement: the kind is on by default in Auth Hub, and an
 operator can still disable it for an account like any kind.
 
 The model uses two tools, discover then request, so the per-request token
-cost grows only slowly with the catalogue. `request_chain_transaction`'s
-description is a few sentences plus one summary line per message type. Its
-JSON Schema lists, per type, the field names and their basic types only (no
-descriptions, patterns or limits), plus the batch bound and `memo`. The
-fields must be in that schema: a model provider holds a tool call to its
-schema, so a field the schema does not declare is dropped before the
-runtime sees it (this broke the first 0.29.0 build, which declared only
-`type`). Each per-type object stays open, so a field a type does not have
-still reaches the handler, which names it in its refusal. Before a type's
+cost grows only slowly with the catalogue. `request_chain_transaction` is a
+request-time tool (`getRequestTools`): each turn it is built from
+`availableTypes` (below), so its description and schema name only the
+types this account may use, a message of another type is refused before
+any Hub call, and a turn that cannot use chain transactions gets no such
+tool (`describe_chain_messages` then answers `availableTypes: []`): not a
+channel turn, Hub actions off, chain transactions off for the account, or
+capabilities that cannot be read; never a guess at the whole catalogue. The
+tool is built once per (types, described types) pair and cached (at most
+32 pairs per isolate, least recently used dropped).
+The capabilities behind it are a turn read of the owner object
+(`capabilities({ turn: true })`): the 60 s cache while fresh, else one read
+with a 3 s timeout (not the Hub calls' 10 s) shared by concurrent turns;
+after a failed read no turn reads again for 30 s, and while reads fail the
+last capabilities read are used (with none, no tool). A slow or failing Hub
+therefore costs a turn at most 3 s once per 30 s; a prepare still reads
+with the full timeout. Its
+description is a few sentences plus one summary line per available message
+type. Its JSON Schema declares field lists only for the types described in
+this conversation: per described type, the field names and their basic
+types (no descriptions, patterns or limits); every other available type is
+named in one open branch (`type` one of them, any other field allowed);
+plus the batch bound and `memo`. A described type's fields must be in that
+schema: a model provider holds a tool call to its schema, so a field the
+schema does not declare is dropped before the runtime sees it (this broke
+the first 0.29.0 build, which declared only `type`, as an open object, for
+every type). So the handler does not run a message of a type not described
+yet, before any Hub call: it answers with a "not run" result
+(`toolNotRunMessage`, `src/core/tool-not-run.ts`: an error ToolMessage
+marked in `response_metadata`, never sent to a provider) addressed to the
+model, not the person ("For you, not the person: nothing was sent and
+nothing is wrong. Before a card with `<type>`, read the rules: call
+describe_chain_messages with types [...], then call request_chain_transaction
+again with exactly the fields it lists. Do not mention this step to the
+person."). Being an error, it never counts as a write that happened; like a
+capability-gate refusal, the repetition guard and the turn boundary skip
+it, so the identical call after the describe runs. A described type is
+declared in full. Each per-type object stays open, so a field a type does
+not have still reaches the handler, which names it in its refusal.
+
+A type counts as described by one rule: a `describe_chain_messages` call for
+it whose (non-error) result is in the history the call sees, or a record
+stored by an earlier run of the session. A type the current run stored
+counts only through the history, so a describe made in the same model
+response as the request (parallel tool calls) never lets the request
+through, whichever finishes first. When the session cannot remember (no
+`ctx.kv`), the store cannot be read (logged; the model call goes through
+unchanged), or a describe could not be stored (logged; the rest of that
+turn), every type carries its fields and none is refused: a store failure
+never makes chain cards unusable.
+
+The described types are kept per session id in the owner's key-value rows
+(`ctx.kv`, namespace `hub-actions/chain-tx-described`, each type with the
+run that first described it): durable across
+restarts of the owner object, forgotten after 7 days without use, at most
+200 sessions per owner; a new session starts with none. Request tools are
+built once per turn (`createMainAgent` runs once per run), not per model
+call, so a type described during a turn would otherwise reach the turn's
+next model call without its fields. A request middleware
+(`chainTxFieldsMiddleware`, inside the capability gate, so a hidden tool is
+never added, and outside the context guard, which sizes what the model is
+given) therefore gives every model call the request tool for what is
+described by then, using the turn's account types read once at the turn's
+start.
+LangChain refuses a new instance of a registered tool in `wrapModelCall`
+("Replaced tools are always rejected to preserve ToolNode execution
+identity"), so the model is given the tool as a plain function definition
+(same name and description); the registered tool, whose schema accepts the
+fields of every available type, still runs the call. The definition is
+built once per (tool, description). A test drives a whole turn through
+`createMainAgent` (the real capability gate, repetition guard and context
+guard): the tool hidden until `load_capability`, then named only, the
+request answered "not run", the describe, and the identical request run
+with its fields declared; another shows the context guard refusing on the
+size of the definition, not of the registered tool. No model binding
+in the runtime uses strict function calling (`strict`,
+`supportsStrictToolCalling` and native structured output are unset on the
+platform and BYO models); a strict mode would refuse every open object and
+optional field the runtime's tools use, not only this one. Before a type's
 first use in a conversation the model calls `describe_chain_messages`
 (`{types: [...]}`, 1 to 8 distinct catalogue types), which returns, per
 type, its full rules (purpose, what the runtime fills, chain caveats) and
 its fields as JSON Schema (meaning, format, limits), the rules every type
 shares, and `availableTypes`: the catalogue filtered by the account's
-capabilities `chainTx.messageTypes` (none when chain transactions are off
-for the account; the whole catalogue when the capabilities cannot be read
-or the turn is not a channel turn). The catalogue is one structure in the
+capabilities `chainTx.messageTypes`, read the same way (none in the cases
+above). The catalogue is one structure in the
 plugin (`CHAIN_TX_CATALOG`: per type a `summary`, `rules` and a strict zod
 `schema`, from which the model-facing field list is derived), so a new type
-is one entry: its summary line and its field names on every request, and
-its rules only when asked for. At the time of writing the two tools cost
-about 3.4 KB of description and schema per model request, against about
-7.6 KB for the earlier per-type schema and description plus the separate
-send tool.
+is one entry: its summary line and its field names on every request it is
+offered on, and its rules only when asked for. The catalogue lives in
+`src/plugins/hub-actions/chain-tx-catalog.ts`.
 
-The four message types (`describe_chain_messages` teaches them to the
-model):
+Measured with protocol 0.8.0, as a provider is sent it (LangChain's
+`convertToOpenAITool` over the wrapped tool, JSON characters):
+
+| Types offered                      | Described in the session                              | Whole tool | Parameters | Description |
+| ---------------------------------- | ----------------------------------------------------- | ---------- | ---------- | ----------- |
+| all 33                             | none                                                  | 5 803      | 1 358      | 4 311       |
+| all 33                             | 1 (bank send)                                         | 6 019      | 1 574      | 4 311       |
+| all 33                             | 2 (bank send, stake)                                  | 6 223      | 1 778      | 4 311       |
+| all 33                             | 4 (bank send, stake, claim submit, create collection) | 8 432      | 3 987      | 4 311       |
+| all 33                             | all 33 (or no session store)                          | 18 735     | 14 290     | 4 311       |
+| the four 0.6.0 types (level 4 / 5) | none                                                  | 1 846      | 523        | 1 218       |
+| the four 0.6.0 types (level 4 / 5) | all four                                              | 2 962      | 1 639      | 1 218       |
+
+`describe_chain_messages`, a boot-time tool whose `types` enum names all 33
+types whatever the account may use, is 1 586 characters. A test keeps the
+request tool under 3 500 (four types), 6 500 (33, none described), 9 000
+(33, four described) and 20 000 (33, all described). For comparison, the protocol's own JSON schema for the
+`ixo.chain.tx.v1` operation (patterns and limits included) is 29 711
+characters with 33 types; the runtime never sends it to a model
+(`request_hub_action` leaves the runtime-built kinds out).
+
+The four 0.6.0 message types (level 4 and up):
 
 | `type`                | Fields                                                                                                                           | What it does                                                                                                                                                                                                                                                                                                                                                                                                |
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -548,6 +667,62 @@ neither `agentDid` nor `agentAddress`: the runtime fills them from the signer
 as above. A bank step's `amountBaseUnits` is the runtime's too: the model
 writes a display `amount`.
 
+The 29 types of 0.8.0 (level 6). Fields are what the model writes; the
+owner's DIDs are filled as above, and the wire is in `@ixo/action-protocol`
+0.8.0 (`CHANGELOG.md`, `ChainTxMessage`):
+
+| `type`                                                   | Model fields                                                                                                                                                                        | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ixo.token.retire`                                       | `tokens` (1–32 lines), `jurisdiction` (`Global` or `KE`, `KE-30`, `ZA-WC 7700`), `reason`                                                                                           | Uses up impact tokens for good (offsetting). Never without the owner clearly asking. `reason` is written on chain exactly as the review shows it (no link-like or hidden characters, single spaces), as are a linked document's or claim's `description` and `right`; the runtime checks it with the protocol's `sanitizePublishedText` (a link is a URL with a scheme, `www.`, an email address or a host followed by a path; a file name or a bare domain is fine; tag characters are refused). |
+| `cosmos.staking.delegate`                                | `validatorAddress` (`ixovaloper1…`), `amount` (IXO)                                                                                                                                 | Stakes IXO with a validator. The runtime converts `amount` (at most 72 whole digits and 6 decimals, so it fits the protocol's base units) to `amountBaseUnits` and counts it against the listed IXO balance with the IXO sends.                                                                                                                                                                                                                                                                   |
+| `cosmos.staking.undelegate`                              | `validatorAddress`, `amount` (IXO)                                                                                                                                                  | Unstakes; back after a waiting period the network sets (the review card shows it). Converted like a stake; takes nothing from the wallet.                                                                                                                                                                                                                                                                                                                                                         |
+| `cosmos.staking.redelegate`                              | `fromValidatorAddress`, `toValidatorAddress` (different), `amount` (IXO)                                                                                                            | Moves stake at once. Converted like a stake.                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `cosmos.distribution.withdraw-rewards`                   | `validatorAddress`                                                                                                                                                                  | Claims rewards from one validator (one message each).                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `cosmos.gov.vote`                                        | `proposalId` (≥ 1), `option` (`yes`, `no`, `abstain`, `no_with_veto`)                                                                                                               | Votes on a proposal open for voting; a later vote replaces it.                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `ixo.claims.claim-intent`                                | `collectionId`                                                                                                                                                                      | Reserves a collection's payment before filing (`agentDid` filled).                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `ixo.claims.dispute`                                     | `claimId`, `collectionId`, `reason` (`not_as_asked`, `not_delivered`, `check_wrong`, `other`), `evidence` (`uri`, `type`, `proof`, `encrypted?`)                                    | Opens a dispute (`agentDid` filled); may take the collection's deposit. The statement must already be stored: no storage tool exists yet (see below).                                                                                                                                                                                                                                                                                                                                             |
+| `ixo.claims.update-collection-state`                     | `collectionId`, `adminAddress`, `state` (`open`, `paused`, `closed`)                                                                                                                | Collection changes run under a permission from the collection's admin account (MsgExec); Auth Hub checks `adminAddress` against the collection.                                                                                                                                                                                                                                                                                                                                                   |
+| `ixo.claims.update-collection-dates`                     | `collectionId`, `adminAddress`, `startDate?`, `endDate?` (`null` = no end; at least one)                                                                                            | Changes when it takes claims; a date left out is kept.                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `ixo.claims.update-collection-quota`                     | `collectionId`, `adminAddress`, `maxClaims` (`"0"` = no limit)                                                                                                                      | Changes the total claim limit.                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `ixo.claims.create-claim-authorization`                  | `collectionId`, `adminAddress`, `granteeAddress`, `role` (`file-claims`, `check-claims`), `maxClaims`, `expiresAt?`, `reservationSeconds?` (file), `decideBefore?` (check)          | Lets an account file or check claims (`creatorDid` filled). One flat object for the model; the runtime refuses an option the role does not take and hands the host the protocol's role-specific shape.                                                                                                                                                                                                                                                                                            |
+| `ixo.claims.update-collection-payments`                  | `collectionId`, `adminAddress`, `payments`                                                                                                                                          | Changes what it pays: a leg left out keeps what it pays now, `amount: []` stops it, a leg that pays contract tokens cannot be replaced. Payment amounts are base units of any denom (not converted: a payment denom need not be in the owner's token list).                                                                                                                                                                                                                                       |
+| `ixo.claims.create-collection`                           | `entityId`, `protocolId`, `startDate`, `endDate` (or `null`, key required), `maxClaims`, `state`, `reservations` (`allow`, `deny`, `required`), `payments`                          | Creates a collection for an entity the owner owns.                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `ixo.entity.create-account`                              | `entityId`, `name` (not `admin`)                                                                                                                                                    | Adds a named account to an entity.                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `ixo.entity.update`                                      | `entityId`, `startDate?`, `endDate?` (`null` clears it; at least one)                                                                                                               | Changes an entity's dates (`controllerDid` filled). There is no `status`: its meaning is defined by each app, and Auth Hub keeps it as it is.                                                                                                                                                                                                                                                                                                                                                     |
+| `ixo.entity.revoke-account-authz`                        | `entityId`, `granteeAddress`, `permission`                                                                                                                                          | Removes one permission the entity's admin account gave.                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `ixo.entity.grant-account-authz`                         | `entityId`, `granteeAddress`, `permission`, `collectionId` + `maxClaims` (only and always for `file-claims` / `check-claims`), `reservationSeconds?`, `decideBefore?`, `expiresAt?` | Gives one permission. Flat for the model, narrowed by permission as above.                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `ixo.entity.create`                                      | `entityType`, `profile?` (`serviceEndpoint`, `proof`), `protocolId?`, `startDate?`, `endDate?`                                                                                      | Creates an entity (`ownerDid` filled). The Profile must already be stored.                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `ixo.iid.add-service` / `delete-service`                 | `did`, `service` (`id`, `type`, `serviceEndpoint`) / `serviceId`                                                                                                                    | Identity-record links of an entity the owner controls, or of the owner's own record (`did`). Removes take the id exactly as the record holds it (any 1–300 characters without whitespace or unsafe characters); Auth Hub reads the record.                                                                                                                                                                                                                                                        |
+| `ixo.iid.add-linked-resource` / `delete-linked-resource` | `did`, `resource` (`id`, `type`, `description`, `mediaType`, `serviceEndpoint`, `proof`, `encrypted`, `right?`) / `resourceId`                                                      | `proof`, `description` and `right` may be `""` (Portal's app links).                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `ixo.iid.add-linked-claim` / `delete-linked-claim`       | `did`, `claim` (`id`, `type`, `description`, `serviceEndpoint`, `proof`, `encrypted`, `right?`) / `claimId`                                                                         |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `ixo.iid.add-linked-entity` / `delete-linked-entity`     | `did`, `entity` (`id`: an IXO DID, an ixo address or `{id}#ixo1…`; `type`; `relationship`, mixed case; `service?`, `""` allowed) / `entityId`                                       |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `ixo.iid.add-context` / `delete-context`                 | `did`, `context` (`key`, `val`: https link or IXO DID) / `key`                                                                                                                      |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+
+Each type's `rules` say what to ask the owner first, which `chain_lookup`
+kind finds its ids (`validators` for a validator the owner names in words,
+`staking` for their own stake and rewards, `gov_proposals`,
+`claim_collection` / `claim_collections` for a collection and its admin
+account, `authz_grants` for permissions, `entity` / `entities`,
+`did_document`, `claim` / `claims`, `token_balances`), and end with "Say it
+like: “…”", an everyday sentence the model copies the tone of; the shared
+rules tell it to describe each card in plain words before preparing it, and
+never to say message type names or chain terms (authz, MsgExec, bech32,
+valoper, uixo, base units, DID, delegate). The rules state no network
+setting that governance can change (waiting periods, how many unstakes may
+wait at once): the review card shows the live value. Protocol limits (8
+messages, 4 payment coins, 10^9 claims, a year of seconds) are taken from
+`@ixo/action-protocol`, not written out. A step the owner did not ask for is
+offered, never added (the collection-permission steps after a new
+collection). A reservation in a collection with member budgets is not
+offered (no member address is sent). Two things are deliberately left
+to the model's next step, after the owner approved and the transaction went
+through (`hub_action_status`): the id of a new collection (`chain_lookup
+claim_collections`) and of a new entity (`chain_lookup entities`), which the
+receipt does not carry. A dispute's statement and an entity's Profile (and a
+linked document) must already be stored: the runtime has no tool that
+stores them yet, and the rules tell the model to say so rather than prepare
+the card (a follow-up).
+
 Each message is checked strictly against its type's catalogue schema,
 which mirrors the protocol shapes with Auth Hub's stricter rules; before any
 Hub call the runtime refuses an unknown type, a batch of 0 or more than 8,
@@ -555,7 +730,12 @@ an address that is not a 20-byte `ixo1…` account address (`ixo1` and 38
 characters; a 32-byte contract address is refused), a bank `amount` that is
 not a plain decimal, a token amount that is zero or not whole, a non-digit
 collection id (or one with leading zeros), a claim id, token id or
-verification proof outside `^[A-Za-z0-9:._/-]+$`, a verification proof
+verification proof outside `^[A-Za-z0-9:._/-]+$` (the 0.8.0 types: every
+pattern, length, enum, calendar date, link and cross-field rule of the
+protocol, such as an end date after its start, two different validators, a
+role's or permission's own options, one coin per token in a payment and an
+account not named `admin`; tests check each refusal against the protocol's
+`chainTxIssue`), a verification proof
 over 300 characters, an `oracle` DID with a `%` not followed by two hex
 digits, a pending (0) or unknown evaluation status, 0 or more than 32 token
 lines, a memo over 256 bytes or with a control, invisible or text-direction
@@ -563,8 +743,8 @@ character (U+0000–U+001F, U+007F–U+009F, U+061C, U+200B–U+200F,
 U+2028–U+2029, U+202A–U+202E, U+2066–U+2069, U+FEFF; one shared helper,
 `hasUnsafeText`), and any field a type does not have, the ones the runtime
 fills included (`signer`, `chainId`, `network`, `agentDid`, an evaluation's
-or submit's `agentAddress`, a token `owner`, a bank `amountBaseUnits`, a
-fee). On a model turn LangChain first validates the arguments against the
+or submit's `agentAddress`, `creatorDid`, `controllerDid`, `ownerDid`, a
+token `owner`, a bank or stake `amountBaseUnits`, a fee). On a model turn LangChain first validates the arguments against the
 model-facing schema (the batch size, each `type`, the memo, no other
 top-level argument), so the model reads zod's issues for those
 (`Received tool input did not match expected schema`, `→ at
@@ -576,7 +756,7 @@ contract addresses are refused; messages[3].agentDid: not a field here
 (describe_chain_messages lists each type's fields)).` The owner object then
 runs the turn-origin refusal, validates the binding, reads the (cached)
 capabilities and refuses when the account does not list `ixo.chain.tx.v1`
-with `chainTx` or has no network, converts bank steps (above), fills the
+with `chainTx` or has no network, converts bank and stake amounts (above), fills the
 owner's identity, and `@ixo/action-protocol` parses the whole operation
 ("The transaction is incomplete (…)" on a field from the messages). The
 request path pre-checks the capabilities' `chainTx.messageTypes` and
@@ -585,9 +765,20 @@ request path pre-checks the capabilities' `chainTx.messageTypes` and
 handling). How the model finds claim ids, collection ids, DIDs and
 addresses is not this tool's job: it asks the owner or uses other tools.
 
-Auth Hub refusals reach the model in plain words as `{status:
-'unavailable', reason}`, with the Hub's `reason` appended (at most 200
-characters): `400 operation_not_registered` ("Auth Hub did not accept this
+Since protocol 0.8.0 a chain transaction the Hub would not make from what
+it read on chain, or whose simulation named one message, is refused (400
+`operation_not_registered` or `simulation_failed`) with a coded reason,
+`invalid_message: messages[<i>].<field>: <code>`. The runtime parses it with
+`parseChainTxRefusal` and gives the model, instead of the reason, its own
+words for the code (`CHAIN_TX_REFUSAL_WORDS` in
+`src/hub-actions/chain-tx-refusals.ts`, which must cover every
+`CHAIN_TX_REFUSAL_CODES` entry): the step, what it means for the person and
+what to do next (`not_available`: the Hub does not offer that type here; `chain_data_too_large`: too large to seal in a card; neither is retried), for example "in step 1, there are no rewards to collect
+from this validator yet. Leave this validator out of the card.", with the
+field and code marked as not for the person. A reason without a code, or
+with one this runtime does not know, is handled as before. Otherwise Auth
+Hub refusals reach the model in plain words as `{status: 'unavailable',
+reason}`, with the Hub's `reason` appended (at most 200 characters): `400 operation_not_registered` ("Auth Hub did not accept this
 transaction as written: invalid_message: messages[1].toAddress."),
 `not_authorized` (no authorization from the collection admin),
 `insufficient_funds`, `fee_above_ceiling` and `simulation_failed`; `409
@@ -612,9 +803,10 @@ by `hub_action_status` (its `message` quoted, see above) and relayed in
 `hubActionOutcomes` unchanged (only the bank-send receipt is reduced to its
 0.4.1 shape), so a gateway that relays
 chain-transaction outcomes must parse them with `@ixo/action-protocol`
-0.6.0. Out of scope here: name resolution (collection and token names),
-per-message caps or enablement, claim creation, how an oracle finds ids, and
-mainnet enablement.
+0.6.0, and 0.8.0 once a level-6 type can appear. Out of scope here: name
+resolution (collection and token names), per-message caps or enablement,
+claim creation, storing a dispute statement or Profile, and mainnet
+enablement.
 
 The owner completes each review in Auth Hub. Gmail and Calendar setup return a fresh
 review with the account and scopes selected at Google; setup alone does not
@@ -644,10 +836,12 @@ rejected (for example `Invalid fromAddress`). The Gmail service requires fresh i
 attestations and confirmed proxy no-retry behavior; missing evidence disables
 the journey. Local conformance fixtures do not establish those activation gates.
 
-Both shared packages come from the npm registry: `@ixo/action-protocol` 0.7.0
+Both shared packages come from the npm registry: `@ixo/action-protocol` 0.8.0
 and `@ixo/topic-protocol` 1.0.0-rc.8 (the Worker-safe build with precompiled
-validators), pinned exactly in the runtime and in `@ixo/ixo-transaction`. No
-workspace override or vendored archive remains. `prepublishOnly`
+validators), pinned exactly in the runtime. 0.8.0 is published with the Auth
+Hub release that serves it; `pnpm-lock.yaml` is regenerated then (a local
+build links the Hub's package through a workspace override that is never
+committed). No workspace override or vendored archive is committed. `prepublishOnly`
 (`scripts/assert-no-vendored-overrides.mjs`) refuses to publish with a
 workspace override from `file:vendor/` or a `file:` dependency of the
 package being published (a locally packed archive resolves only on the

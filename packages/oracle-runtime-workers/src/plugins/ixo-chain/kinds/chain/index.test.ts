@@ -10,6 +10,7 @@ describe('CHAIN_KINDS', () => {
       'smart_account',
       'account',
       'staking',
+      'validators',
       'spendable',
       'liquid_staking',
       'network_economics',
@@ -33,6 +34,12 @@ describe('CHAIN_KINDS', () => {
   it('mark the kinds that return a list of `first` rows', () => {
     expect(
       CHAIN_KINDS.filter((kind) => kind.list).map((kind) => kind.name),
-    ).toEqual(['fee_grants', 'authz_grants', 'gov_proposals', 'claim_intents']);
+    ).toEqual([
+      'fee_grants',
+      'authz_grants',
+      'validators',
+      'gov_proposals',
+      'claim_intents',
+    ]);
   });
 });

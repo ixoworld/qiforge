@@ -54,7 +54,7 @@ import {
 import { chainTxOperation, prepareHubAction } from '../hub-actions/request';
 import {
   bankReceiptSummary,
-  bankStepsInBaseUnits,
+  chainTxAmountsInBaseUnits,
 } from '../hub-actions/transfer';
 import {
   HUB_CHECK_AFTER_EXPIRY_MS,
@@ -638,6 +638,14 @@ const ACTION_TICK_BUDGET_MS = 15_000;
 const ACTION_PRUNE_INTERVAL_MS = 60 * 60_000;
 /** How long the Hub's capabilities answer is reused per object. */
 const HUB_CAPABILITIES_CACHE_MS = 60_000;
+/**
+ * A capabilities read on a turn's critical path (the chain transaction
+ * tool's types): a short timeout, and after a failed read none for this
+ * long, so a slow or failing Hub costs a turn at most this timeout once per
+ * window instead of the full Hub timeout on every turn.
+ */
+const HUB_TURN_CAPABILITIES_TIMEOUT_MS = 3_000;
+const HUB_CAPABILITIES_FAILURE_CACHE_MS = 30_000;
 /** A Hub network name as the chain-id config key it is configured under. */
 /**
  * Whether two Hub outcomes are the same event. Receipts are compared in the
@@ -1054,11 +1062,17 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private actionProposals: ActionProposalStore | null = null;
     private hubActionStore: HubActionStore | null = null;
     private hubActionClient: HubActionClient | null = null;
-    /** The Hub's capabilities for this oracle account, reused for `HUB_CAPABILITIES_CACHE_MS`. */
+    /** The Hub's capabilities for this oracle account, reused for `HUB_CAPABILITIES_CACHE_MS` (and on a turn, while a read fails). */
     private hubCapabilities: {
       value: ActionCapabilitiesV1;
       at: number;
     } | null = null;
+    /** The last failed capabilities read: a turn does not read again within `HUB_CAPABILITIES_FAILURE_CACHE_MS`. */
+    private hubCapabilitiesFailure: { error: unknown; at: number } | null =
+      null;
+    /** A turn's capabilities read in flight, shared by concurrent turns. */
+    private hubTurnCapabilitiesRead: Promise<ActionCapabilitiesV1> | null =
+      null;
     /** The last `hub_action_options` answer for this owner (Gmail connection checks). */
     private lastHubOptions: {
       value: HubActionOptionsV2 | HubActionOptionsV3;
@@ -2277,7 +2291,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         ...(this.hubActionStore && this.hubActionClient
           ? {
               hubActions: {
-                capabilities: () => this.cachedHubCapabilities(),
+                capabilities: (opts) =>
+                  opts?.turn
+                    ? this.turnHubCapabilities()
+                    : this.cachedHubCapabilities(),
                 options: (input) => this.hubActionOptions(input),
                 request: (input: {
                   ownerDid: string;
@@ -2385,6 +2402,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.hubActionStore = null;
       this.hubActionClient = null;
       this.hubCapabilities = null;
+      this.hubCapabilitiesFailure = null;
+      this.hubTurnCapabilitiesRead = null;
       this.lastHubOptions = null;
       this.topicProposals = null;
       this.attachmentTextCache = null;
@@ -3524,16 +3543,57 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /** The Hub's capabilities, cached per object for `HUB_CAPABILITIES_CACHE_MS`. */
-    private async cachedHubCapabilities(): Promise<ActionCapabilitiesV1> {
+    private async cachedHubCapabilities(
+      timeoutMs?: number,
+    ): Promise<ActionCapabilitiesV1> {
       const client = this.hubActionClient;
       if (!client) throw new Error('Hub actions are unavailable');
       const now = Date.now();
       const cached = this.hubCapabilities ?? null;
       if (cached && now - cached.at < HUB_CAPABILITIES_CACHE_MS)
         return cached.value;
-      const value = await client.capabilities();
-      this.hubCapabilities = { value, at: now };
-      return value;
+      try {
+        const value = await client.capabilities(timeoutMs);
+        this.hubCapabilities = { value, at: Date.now() };
+        this.hubCapabilitiesFailure = null;
+        return value;
+      } catch (error) {
+        this.hubCapabilitiesFailure = { error, at: Date.now() };
+        throw error;
+      }
+    }
+
+    /**
+     * The capabilities for a turn's tool list: the cached ones while fresh;
+     * else one read with `HUB_TURN_CAPABILITIES_TIMEOUT_MS`, shared by
+     * concurrent turns and not repeated within
+     * `HUB_CAPABILITIES_FAILURE_CACHE_MS` of a failed read. While reads
+     * fail, the last capabilities read are answered (the Hub enforces its
+     * own on every prepare); with none, the failure.
+     */
+    private async turnHubCapabilities(): Promise<ActionCapabilitiesV1> {
+      const cached = this.hubCapabilities;
+      if (cached && Date.now() - cached.at < HUB_CAPABILITIES_CACHE_MS)
+        return cached.value;
+      const failure = this.hubCapabilitiesFailure;
+      if (
+        failure &&
+        Date.now() - failure.at < HUB_CAPABILITIES_FAILURE_CACHE_MS
+      ) {
+        if (cached) return cached.value;
+        throw failure.error;
+      }
+      this.hubTurnCapabilitiesRead ??= this.cachedHubCapabilities(
+        HUB_TURN_CAPABILITIES_TIMEOUT_MS,
+      ).finally(() => {
+        this.hubTurnCapabilitiesRead = null;
+      });
+      try {
+        return await this.hubTurnCapabilitiesRead;
+      } catch (error) {
+        if (cached) return cached.value;
+        throw error;
+      }
     }
 
     /**
@@ -3586,13 +3646,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     /**
      * One chain transaction of the model's messages. The network is the
      * account's capability, the chain id this Worker's own for that
-     * network; the signer and the owner's identity in claims messages come
+     * network; the signer and the owner's identity in the messages come
      * from the owner's DID (`chainTxOperation`). The model names none of
-     * them. Bank steps name a listed token and a display amount: with at
-     * least one, the owner's options are read once, fresh (the balances
-     * must be current), and each step is converted to base units and
-     * checked against the listed balance (`bankStepsInBaseUnits`). No fee
-     * is sent: the Hub simulates gas and sets it.
+     * them. Bank steps name a listed token and a display amount, stake
+     * steps an amount of IXO: with at least one of either, the owner's
+     * options are read once, fresh (the balances must be current), and each
+     * amount is converted to base units and checked against the listed
+     * balance (`chainTxAmountsInBaseUnits`). No fee is sent: the Hub
+     * simulates gas and sets it.
      */
     private async chainTransactionHubAction(input: {
       ownerDid: string;
@@ -3624,7 +3685,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         HUB_NETWORK_CHAIN[capabilities.network]
       ];
       const tokens = input.messages.some(
-        (message) => message.type === 'cosmos.bank.send',
+        (message) =>
+          message.type === 'cosmos.bank.send' ||
+          message.type === 'cosmos.staking.delegate',
       )
         ? ((await this.hubActionOptions(input, true)).transfer?.tokens ?? null)
         : null;
@@ -3633,7 +3696,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         chainId,
         network: capabilities.network,
         memo: input.memo,
-        messages: bankStepsInBaseUnits(input.messages, tokens),
+        messages: chainTxAmountsInBaseUnits(input.messages, tokens),
       });
       return this.requestHubAction({ ...input, operation }, true);
     }

@@ -1,8 +1,10 @@
-import type {
-  ActionOperationV1,
-  ActionReceiptV1,
-  OptionsToken,
+import {
+  parseChainTxRefusal,
+  type ActionOperationV1,
+  type ActionReceiptV1,
+  type OptionsToken,
 } from '@ixo/action-protocol';
+import { chainTxRefusalWords, wordableRefusal } from './chain-tx-refusals';
 import type { ChainTxMessageInput } from '../plugin-api/types';
 import { quoteHubText } from './hub-text';
 import type { ChainTxHostMessage } from './request';
@@ -91,24 +93,67 @@ const IXO_TOKEN: TransferToken = {
 };
 
 /**
- * A chain transaction's bank steps in base units; the other messages pass
+ * A chain transaction's amounts in base units; messages without one pass
  * unchanged. Each bank step names a display `amount` of a token from the
  * owner's list (`denom`, absent = uixo): the token must be listed, the
  * amount converts with its listed decimals (`toBaseUnits`: a plain decimal,
  * no more digits after the point than the decimals, above zero; an
  * unverified token lists 0: base units), and the bank steps of one token
- * together stay within its listed balance. `tokens` is the owner's list
- * (hub_action_options `transfer.tokens`), null when the Hub listed none;
- * the caller reads it only when there is a bank step.
+ * together stay within its listed balance. Each stake step (stake, unstake,
+ * move stake) names a display `amount` of IXO, converted with IXO's 6
+ * decimals; what a stake takes from the wallet counts against the listed
+ * IXO balance together with the IXO bank steps, when the list has IXO
+ * (Auth Hub checks every balance again before the card is made). `tokens`
+ * is the owner's list (hub_action_options `transfer.tokens`), null when the
+ * Hub listed none; the caller reads it only when there is a bank or stake
+ * step.
  */
-export function bankStepsInBaseUnits(
+export function chainTxAmountsInBaseUnits(
   messages: readonly ChainTxMessageInput[],
   tokens: readonly OptionsToken[] | null,
 ): ChainTxHostMessage[] {
   const spent = new Map<string, bigint>();
-  return messages.map((message, index) => {
-    if (message.type !== 'cosmos.bank.send') return message;
+  /** The bank and stake steps of one listed token together, within its listed balance. */
+  const spend = (
+    at: string,
+    token: OptionsToken,
+    amount: bigint,
+    what: string,
+  ) => {
+    const total = (spent.get(token.denom) ?? 0n) + amount;
+    spent.set(token.denom, total);
+    if (total > BigInt(token.balanceBaseUnits))
+      throw new HubActionRefused(
+        'refused',
+        `${at}.amount: the owner holds ${describeAmount(token.balanceBaseUnits, token)}, less than ${total === amount ? what : 'what the steps of this transaction take of it together'}.`,
+      );
+  };
+  const converted = (at: string, amount: string, decimals: number) => {
+    try {
+      return toBaseUnits(amount, decimals);
+    } catch (error) {
+      if (error instanceof HubActionRefused)
+        throw new HubActionRefused('refused', `${at}.amount: ${error.message}`);
+      throw error;
+    }
+  };
+  return messages.map((message, index): ChainTxHostMessage => {
     const at = `messages[${index}]`;
+    if (
+      message.type === 'cosmos.staking.delegate' ||
+      message.type === 'cosmos.staking.undelegate' ||
+      message.type === 'cosmos.staking.redelegate'
+    ) {
+      const { amount: display, ...rest } = message;
+      const amount = converted(at, display, IXO_TOKEN.decimals);
+      // Only a stake takes IXO from the wallet: unstaking and moving stake
+      // work on what is already staked.
+      const ixo = tokens?.find((item) => item.denom === IXO_TOKEN.denom);
+      if (message.type === 'cosmos.staking.delegate' && ixo)
+        spend(at, ixo, amount, 'this stake');
+      return { ...rest, amountBaseUnits: amount.toString() };
+    }
+    if (message.type !== 'cosmos.bank.send') return message;
     if (!tokens?.length)
       throw new HubActionRefused(
         'refused',
@@ -124,21 +169,8 @@ export function bankStepsInBaseUnits(
           .slice(0, 10)
           .join(', ')}).`,
       );
-    let amount: bigint;
-    try {
-      amount = toBaseUnits(message.amount, token.decimals);
-    } catch (error) {
-      if (error instanceof HubActionRefused)
-        throw new HubActionRefused('refused', `${at}.amount: ${error.message}`);
-      throw error;
-    }
-    const total = (spent.get(token.denom) ?? 0n) + amount;
-    spent.set(token.denom, total);
-    if (total > BigInt(token.balanceBaseUnits))
-      throw new HubActionRefused(
-        'refused',
-        `${at}.amount: the owner holds ${describeAmount(token.balanceBaseUnits, token)}, less than ${total === amount ? 'this send' : 'the bank steps of this token in this transaction'}.`,
-      );
+    const amount = converted(at, message.amount, token.decimals);
+    spend(at, token, amount, 'this send');
     return {
       type: 'cosmos.bank.send',
       toAddress: message.toAddress,
@@ -316,6 +348,24 @@ export function hubPrepareRefusal(
   if (unfixable)
     return new HubActionRefused('refused', unfixable, undefined, status);
   if (!parsed) return null;
+  // A chain transaction Auth Hub would not make from what it read on chain,
+  // or whose simulation named one message: a fixed code, in the runtime's
+  // own words (the reason text is not passed on). Without a code, the
+  // reason is passed on quoted, as below.
+  const coded =
+    status === 400 &&
+    subject === 'transaction' &&
+    (parsed.error === 'operation_not_registered' ||
+      parsed.error === 'simulation_failed')
+      ? wordableRefusal(parseChainTxRefusal(parsed.reason))
+      : null;
+  if (coded)
+    return new HubActionRefused(
+      'refused',
+      chainTxRefusalWords(coded),
+      undefined,
+      status,
+    );
   const reason = parsed.reason
     ? quoteHubText('reason', parsed.reason, HUB_REASON_MAX)
     : '';

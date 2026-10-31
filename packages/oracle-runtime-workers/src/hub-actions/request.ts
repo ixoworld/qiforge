@@ -7,32 +7,28 @@ import {
   type ChainTxMessage,
   type ChainTxOperation,
 } from '@ixo/action-protocol';
+import type { ChainTxOwnerField, DistributiveOmit } from '../plugin-api/types';
 import type { HubActionClient } from './client';
 import { HubActionRefused, type HubActionOrigin } from './store';
 
 /**
- * A chain-transaction message as the owner object completes it: bank
- * amounts already in base units (`bankStepsInBaseUnits`), the owner's
- * identity in claims messages still to add (`chainTxOperation`).
+ * A chain-transaction message as the owner object completes it: bank and
+ * stake amounts already in base units (`chainTxAmountsInBaseUnits`), the
+ * owner's identity (`ChainTxOwnerField`) still to add (`chainTxOperation`).
  */
-export type ChainTxHostMessage =
-  | Extract<
-      ChainTxMessage,
-      { type: 'cosmos.bank.send' } | { type: 'ixo.token.transfer' }
-    >
-  | Omit<Extract<ChainTxMessage, { type: 'ixo.claims.submit' }>, 'agentDid'>
-  | Omit<
-      Extract<ChainTxMessage, { type: 'ixo.claims.evaluate' }>,
-      'agentDid' | 'agentAddress'
-    >;
+export type ChainTxHostMessage = DistributiveOmit<
+  ChainTxMessage,
+  ChainTxOwnerField
+>;
 
 /**
  * The chain transaction (`ixo.chain.tx.v1`) of the model's messages: the
  * signer is the owner's account (their DID is `did:ixo:<address>`), and
- * the owner's identity in claims messages is the signer's: `agentDid` is
- * `did:ixo:<signer>` (the DID the runtime authenticates to the Hub as) and
- * an evaluation's `agentAddress` is the signer (the chain records the
- * evaluator, and pays it, by that address; Auth Hub requires both). The
+ * the owner's identity in the messages is the signer's: `agentDid`,
+ * `creatorDid`, `controllerDid` and `ownerDid` are `did:ixo:<signer>` (the
+ * DID the runtime authenticates to the Hub as) and an evaluation's
+ * `agentAddress` is the signer (the chain records the evaluator, and pays
+ * it, by that address; Auth Hub requires each to be the owner's). The
  * protocol parses the result; a field the runtime sets (signer, network,
  * chain id) is refused in fixed words, a field from the model's messages
  * in the protocol's (`Invalid messages[0].tokens[0].id`).
@@ -49,15 +45,26 @@ export function chainTxOperation(input: {
   const signer = input.ownerDid.startsWith('did:ixo:')
     ? input.ownerDid.slice('did:ixo:'.length)
     : '';
-  const agentDid = `did:ixo:${signer}`;
+  const ownDid = `did:ixo:${signer}`;
   // Identity last: a stray identity field cannot survive.
-  const messages: ChainTxMessage[] = input.messages.map((message) =>
-    message.type === 'ixo.claims.submit'
-      ? { ...message, agentDid }
-      : message.type === 'ixo.claims.evaluate'
-        ? { ...message, agentDid, agentAddress: signer }
-        : message,
-  );
+  const messages = input.messages.map((message): ChainTxMessage => {
+    switch (message.type) {
+      case 'ixo.claims.submit':
+      case 'ixo.claims.claim-intent':
+      case 'ixo.claims.dispute':
+        return { ...message, agentDid: ownDid };
+      case 'ixo.claims.evaluate':
+        return { ...message, agentDid: ownDid, agentAddress: signer };
+      case 'ixo.claims.create-claim-authorization':
+        return { ...message, creatorDid: ownDid };
+      case 'ixo.entity.update':
+        return { ...message, controllerDid: ownDid };
+      case 'ixo.entity.create':
+        return { ...message, ownerDid: ownDid };
+      default:
+        return message;
+    }
+  });
   try {
     return parseOperation({
       kind: 'ixo.chain.tx.v1',

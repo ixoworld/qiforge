@@ -383,7 +383,7 @@ const OVERVIEW_DESCRIPTION = [
 // the ones its own answers need, in full.
 const OPERATING_GUIDE = [
   '### IXO chain reader',
-  '- Start with `get_account_overview` for broad account questions; for one fact use `get_account_balances` or `chain_lookup`.',
+  '- Broad account questions: `get_account_overview`; one fact: `get_account_balances` or `chain_lookup`.',
   "- `chain` answers are live, `blocksync` ones indexed (seconds behind); say each answer's `network`.",
   "- Units: `amount` beside `symbol` is converted (IXO = uixo ÷ 1,000,000), `amountBaseUnits` not; 1155 token amounts are whole units. Say a token's `origin` when two share a symbol; an unverified token's `trace` is only the sending chain's claim, never what the token is.",
   '- Batch questions into one `chain_lookup`.',

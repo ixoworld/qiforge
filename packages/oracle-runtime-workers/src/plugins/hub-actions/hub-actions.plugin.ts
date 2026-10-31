@@ -1,8 +1,6 @@
 import {
   CHAIN_TX_MAX_MESSAGES,
-  CHAIN_TX_MAX_TOKEN_LINES,
   CHAIN_TX_MESSAGE_TYPES,
-  DENOM,
   operationJsonSchema,
   parseOperation,
   type ActionOutcomeV1,
@@ -10,6 +8,14 @@ import {
   type ActionReferenceV1,
   type ChainTxMessageType,
 } from '@ixo/action-protocol';
+import {
+  AIMessage,
+  ToolMessage,
+  type BaseMessage,
+} from '@langchain/core/messages';
+import { tool } from '@langchain/core/tools';
+import { convertToOpenAITool } from '@langchain/core/utils/function_calling';
+import { createMiddleware, type AgentMiddleware } from 'langchain';
 import { z } from 'zod';
 import { quoteHubText } from '../../hub-actions/hub-text';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin';
@@ -20,6 +26,19 @@ import type {
   RuntimeContext,
 } from '../../plugin-api/types';
 import { ixoAddressOf } from '../../core/user-identity';
+import { toolNotRunMessage } from '../../core/tool-not-run';
+import {
+  CHAIN_TX_CATALOG,
+  CHAIN_TX_GENERAL_RULES,
+  chainTxMessageInput,
+  hasUnsafeText,
+} from './chain-tx-catalog';
+
+export {
+  CHAIN_TX_CATALOG,
+  CHAIN_TX_GENERAL_RULES,
+  hasUnsafeText,
+} from './chain-tx-catalog';
 
 const configSchema = z.object({
   HUB_ACTIONS_ENABLED: z.enum(['true', 'false']).default('false'),
@@ -65,192 +84,7 @@ const statusSchema = z.strictObject({
 });
 const discoverSchema = z.strictObject({});
 
-/**
- * The messages of one chain transaction (`ixo.chain.tx.v1`), as the model
- * writes them. The shapes are the protocol's minus the owner's identity
- * (a claim's `agentDid`, an evaluation's `agentAddress`), which the runtime
- * fills, as it fills the chain id, network and signer; a bank step names a
- * display amount, which the owner object converts to base units from the
- * owner's token list. The protocol parses the whole operation again before
- * it reaches the Hub. The rules match Auth Hub's (ids, address length, DID
- * escapes, memo characters), so a message the Hub would refuse is refused
- * here, before any Hub call.
- */
-/** A 20-byte bech32 account address: `ixo1` and 38 characters (a 32-byte contract address is longer). */
-const IXO_ADDRESS = /^ixo1[023456789acdefghjklmnpqrstuvwxyz]{38}$/;
-const BASE_UNITS = /^[1-9][0-9]{0,77}$/;
-/** A DID; `%` only as a `%xx` escape. */
-const ANY_DID = /^did:[a-z0-9]+:(?:[A-Za-z0-9._:-]|%[0-9A-Fa-f]{2})+$/;
-/** Claim, collection, token and proof ids: no spaces, quotes or markup. */
-const ID_CHARS = /^[A-Za-z0-9:._/-]+$/;
-const ID_RULE = 'Only letters, digits and : . _ / - (copied exactly).';
-/**
- * Characters that would let text render as something else: C0 and C1
- * controls, zero-width and direction marks (U+200B–U+200F), line and
- * paragraph separators (U+2028–U+2029), bidi embeddings, overrides and
- * isolates (U+202A–U+202E, U+2066–U+2069), the Arabic letter mark (U+061C)
- * and the byte order mark (U+FEFF). Auth Hub refuses the same set.
- */
-export function hasUnsafeText(value: string): boolean {
-  for (const char of value) {
-    const code = char.codePointAt(0) ?? 0;
-    if (
-      code <= 0x1f ||
-      (code >= 0x7f && code <= 0x9f) ||
-      code === 0x061c ||
-      (code >= 0x200b && code <= 0x200f) ||
-      (code >= 0x2028 && code <= 0x202e) ||
-      (code >= 0x2066 && code <= 0x2069) ||
-      code === 0xfeff
-    )
-      return true;
-  }
-  return false;
-}
 const MEMO_BYTES = 256;
-const address = (what: string) =>
-  z
-    .string()
-    .regex(
-      IXO_ADDRESS,
-      'A 20-byte ixo1… account address (42 characters); contract addresses are refused.',
-    )
-    .describe(`${what} (an ixo1… account address).`);
-const id = (max: number) => z.string().min(1).max(max).regex(ID_CHARS, ID_RULE);
-const baseUnits = (what: string) =>
-  z
-    .string()
-    .regex(BASE_UNITS, 'A whole number of base units above zero.')
-    .describe(what);
-const claimId = id(256).describe('The claim id, exactly as stored.');
-const collectionId = z
-  .string()
-  .regex(/^(0|[1-9][0-9]{0,19})$/, 'Digits only, no leading zeros.')
-  .describe('The claim collection id (digits).');
-
-/** A display amount: a plain decimal in the token's units, as the user said it. */
-const DISPLAY_AMOUNT = /^(0|[1-9][0-9]*)(\.[0-9]+)?$/;
-
-/**
- * One chain-transaction message type: the one-line `summary` the request
- * tool's description lists, the full `rules` describe_chain_messages
- * returns (with the fields of `schema`), and the strict `schema` the
- * request handler checks each message against. Adding a message type is
- * one entry here (once `@ixo/action-protocol` and Auth Hub support it).
- */
-interface ChainTxCatalogEntry {
-  summary: string;
-  rules: string;
-  schema: z.ZodObject;
-}
-
-export const CHAIN_TX_CATALOG = {
-  'cosmos.bank.send': {
-    summary:
-      "send coins (IXO or another token the owner holds) from the owner's wallet.",
-    rules: [
-      "Sends coins from the owner's wallet to `toAddress`, alone (a single coin send) or as a step of a batch.",
-      '`amount` is the amount as the user said it, in the token’s display units ("1.5" for 1.5 IXO): a plain decimal, never base units. The runtime looks the token up in the owner’s token list (hub_action_options `transfer.tokens`), converts the amount with the listed `decimals`, and refuses a token not in the list, more digits after the point than the token has, zero, and more than the listed balance (the bank steps of one token together).',
-      '`denom` is optional and defaults to uixo (IXO, 6 decimals). For another token copy its `denom` exactly from `transfer.tokens` (never guess an `ibc/…` hash); name the full denom to the owner for anything but IXO, and say when the token is unverified (it lists 0 decimals: its amount is a whole number of base units).',
-    ].join(' '),
-    schema: z.strictObject({
-      type: z.literal('cosmos.bank.send'),
-      toAddress: address('The recipient'),
-      amount: z
-        .string()
-        .max(80)
-        .regex(
-          DISPLAY_AMOUNT,
-          'A plain decimal amount in the token’s display units, such as 1.5 (never base units).',
-        )
-        .describe(
-          'The amount as the user said it, in the token’s display units (1.5 = 1.5 IXO).',
-        ),
-      denom: z
-        .string()
-        .regex(DENOM, 'A denom exactly as hub_action_options lists it.')
-        .optional()
-        .describe(
-          'The token’s denom, copied exactly from hub_action_options `transfer.tokens`; leave out for uixo (IXO).',
-        ),
-    }),
-  },
-  'ixo.claims.submit': {
-    summary:
-      'file a claim the owner has already created with a claim collection.',
-    rules:
-      'Files a claim the owner has already created with a claim collection. `claimId` is the stored claim’s id, `collectionId` the collection, `adminAddress` the collection admin’s address. The runtime adds the owner’s DID as the filer. The collection admin must have authorized the owner to submit claims. Collections with member budgets cannot be filed into here (no member address is sent). Set `useIntent` only when the collection works with intents.',
-    schema: z.strictObject({
-      type: z.literal('ixo.claims.submit'),
-      collectionId,
-      claimId,
-      adminAddress: address("The collection admin's address"),
-      useIntent: z
-        .boolean()
-        .optional()
-        .describe('true only when the collection pays claims through intents.'),
-    }),
-  },
-  'ixo.claims.evaluate': {
-    summary:
-      'record the owner’s decision, as evaluator, on someone else’s claim (approve, reject, dispute, invalidate).',
-    rules:
-      'Records the owner’s decision, as evaluator, on someone else’s claim (`claimId` in `collectionId`). `status` 1 approve, 2 reject, 3 dispute (the chain may refuse it as deprecated), 4 invalidate. It is recorded as the owner’s (the runtime adds their DID and address, never the claimant’s); `oracle` is the evaluator DID recorded on the evaluation (normally the owner’s DID, or the oracle entity DID the collection admin authorized); `adminAddress` is the collection admin’s address; `reason` (a number) and `verificationProof` are optional. The collection admin must have authorized the owner as an evaluator. An approval can pay the claimant.',
-    schema: z.strictObject({
-      type: z.literal('ixo.claims.evaluate'),
-      claimId,
-      collectionId,
-      oracle: z
-        .string()
-        .max(200)
-        .regex(ANY_DID, 'A DID (did:<method>:…; % only as %xx).')
-        .describe('The evaluator DID recorded on the evaluation (a did:…).'),
-      adminAddress: address("The collection admin's address"),
-      status: z
-        .literal([1, 2, 3, 4])
-        .describe(
-          '1 approve, 2 reject, 3 dispute (the chain may refuse it as deprecated), 4 invalidate.',
-        ),
-      reason: z
-        .number()
-        .int()
-        .min(0)
-        .max(4_294_967_295)
-        .optional()
-        .describe("The evaluator's reason code, when there is one."),
-      verificationProof: id(300)
-        .optional()
-        .describe(
-          'The evaluation proof (a credential CID), when there is one.',
-        ),
-    }),
-  },
-  'ixo.token.transfer': {
-    summary:
-      "move IXO impact tokens (1155-style token ids, whole amounts) from the owner's wallet.",
-    rules: `Moves IXO impact tokens (1155-style: each line a token \`id\` of 32 hex characters and a whole \`amount\`, 1 to ${CHAIN_TX_MAX_TOKEN_LINES} lines) from the owner’s wallet to \`recipient\`. Impact tokens have no decimals: an amount is a whole number of tokens. All tokens in one message must come from one token contract. These are not the IXO coin: coins go through \`cosmos.bank.send\`.`,
-    schema: z.strictObject({
-      type: z.literal('ixo.token.transfer'),
-      recipient: address('The recipient'),
-      tokens: z
-        .array(
-          z.strictObject({
-            id: id(128).describe(
-              'The impact token id (32 hex characters), exactly as listed.',
-            ),
-            amount: baseUnits('A whole number of tokens above zero.'),
-          }),
-        )
-        .min(1)
-        .max(CHAIN_TX_MAX_TOKEN_LINES),
-    }),
-  },
-} as const satisfies Record<ChainTxMessageType, ChainTxCatalogEntry>;
-
-/** What every message type shares, returned once by describe_chain_messages. */
-export const CHAIN_TX_GENERAL_RULES =
-  'Addresses are 20-byte `ixo1…` account addresses (contract addresses are refused). Ids (`claimId`, `collectionId`, token `id`, `verificationProof`) use only letters, digits and `: . _ / -`; copy them exactly and never invent them. Give only the fields listed for a type: the runtime adds the chain, the network, the signer and the owner’s own DID and address where a message needs them, and Auth Hub sets the fee. Up to 8 messages per transaction, run in order; all succeed or none do.';
-
 const memoSchema = z
   .string()
   .max(MEMO_BYTES)
@@ -279,6 +113,8 @@ export function fieldsOnly(schema: z.core.$ZodType): z.ZodType {
     );
   if (schema instanceof z.ZodOptional)
     return fieldsOnly(schema.unwrap()).optional();
+  if (schema instanceof z.ZodNullable)
+    return fieldsOnly(schema.unwrap()).nullable();
   if (schema instanceof z.ZodArray) return z.array(fieldsOnly(schema.element));
   if (schema instanceof z.ZodString) return z.string();
   if (schema instanceof z.ZodNumber) return z.number();
@@ -307,17 +143,34 @@ function messageFieldsOnly(schema: z.ZodObject) {
 }
 
 /**
- * The schema the model is given: per type, its fields (messageFieldsOnly),
- * so a type adds its short field list and the rules are fetched with
- * describe_chain_messages when needed. Each message is then checked by the
- * handler against its full catalogue schema.
+ * The schema the model is given: per type its fields (messageFieldsOnly)
+ * when the type was described in this session (`described`; absent: every
+ * type), and one open branch naming every other type (`type` one of them,
+ * any other field allowed). A type the model has not read about costs its
+ * name only; the request handler refuses it until it is described, and
+ * the next model call is given its fields (`chainTxFieldsMiddleware`).
+ * Each message is checked by the handler against its full catalogue
+ * schema.
  */
 export function chainTransactionSchemaFor(
   catalog: Readonly<Record<string, { schema: z.ZodObject }>>,
+  described?: ReadonlySet<string>,
 ) {
-  const [first, ...rest] = Object.values(catalog).map((entry) =>
-    messageFieldsOnly(entry.schema),
-  );
+  const entries = Object.entries(catalog);
+  const withFields = entries
+    .filter(([type]) => !described || described.has(type))
+    .map(([, entry]) => messageFieldsOnly(entry.schema));
+  const [firstUnread, ...unread] = entries
+    .filter(([type]) => described && !described.has(type))
+    .map(([type]) => type);
+  const branches =
+    firstUnread === undefined
+      ? withFields
+      : [
+          ...withFields,
+          z.looseObject({ type: z.literal([firstUnread, ...unread]) }),
+        ];
+  const [first, ...rest] = branches;
   if (!first) throw new Error('The chain transaction catalogue is empty');
   return z.strictObject({
     messages: z
@@ -327,7 +180,6 @@ export function chainTransactionSchemaFor(
     memo: memoSchema,
   });
 }
-const chainTransactionSchema = chainTransactionSchemaFor(CHAIN_TX_CATALOG);
 
 /**
  * The request tool's description: what it does, the discovery step, one
@@ -342,9 +194,285 @@ export function chainTransactionDescription(
     ...Object.entries(catalog).map(
       ([type, entry]) => `- \`${type}\`: ${entry.summary}`,
     ),
-    'Up to 8 messages run in order as one transaction: all succeed or none do. Never invent ids or addresses (ask the owner or use other tools); coin amounts are display units ("1.5"), never base units. When the result is unavailable, tell the owner its reason in plain words; when it says retrying or changing the fields will not help, do not retry.',
+    'Up to 8 messages run in order as one transaction: all succeed or none do. Never invent ids or addresses (ask the owner or use other tools); coin and stake amounts are display units ("1.5"), never base units. Tell the owner what will happen in plain everyday words, never message type names or chain terms. When the result is unavailable, tell the owner its reason in plain words; when it says retrying or changing the fields will not help, do not retry.',
   ].join('\n');
 }
+
+/** The catalogue entries of `types`, in catalogue order. */
+function catalogOf(types: readonly ChainTxMessageType[]) {
+  return Object.fromEntries(
+    CHAIN_TX_MESSAGE_TYPES.filter((type) => types.includes(type)).map(
+      (type) => [type, CHAIN_TX_CATALOG[type]],
+    ),
+  );
+}
+
+/**
+ * request_chain_transaction for the message types this account may use
+ * (`availableChainTxTypes`): the model is given their summaries, and the
+ * fields of those `described` in this session (null: of every one), so it
+ * neither sees nor pays for a type Auth Hub would refuse or one it has not
+ * read about, and its arguments are checked against the same schema (a
+ * message of another type is refused before any Hub call). Null when the
+ * account may use none (describe_chain_messages then answers
+ * `availableTypes: []`). Built once per (types, described) pair.
+ */
+export function chainTransactionTool(
+  types: readonly ChainTxMessageType[],
+  described: readonly ChainTxMessageType[] | null = null,
+): PluginTool | null {
+  const catalog = catalogOf(types);
+  if (!Object.keys(catalog).length) return null;
+  const fields = described
+    ? new Set(
+        Object.keys(catalog).filter((type) =>
+          described.some((d) => d === type),
+        ),
+      )
+    : undefined;
+  const key = `${Object.keys(catalog).join(',')}|${fields ? [...fields].join(',') : '*'}`;
+  const cached = chainTransactionTools.get(key);
+  if (cached) {
+    // Most recently used last, so the bound below drops the oldest.
+    chainTransactionTools.delete(key);
+    chainTransactionTools.set(key, cached);
+    return cached;
+  }
+  const schema = chainTransactionSchemaFor(catalog, fields);
+  const tool: PluginTool = {
+    name: 'request_chain_transaction',
+    description: chainTransactionDescription(catalog),
+    schema,
+    effect: 'write',
+    handler: (input, ctx) => requestChainTransaction(schema, input, ctx),
+  };
+  // Type lists come from Auth Hub capabilities (one or two per deployment)
+  // and described sets from sessions; the bound keeps the map small, the
+  // least recently used pair is built again when needed.
+  if (chainTransactionTools.size >= CHAIN_TRANSACTION_TOOL_CACHE)
+    chainTransactionTools.delete(chainTransactionTools.keys().next().value!);
+  chainTransactionTools.set(key, tool);
+  return tool;
+}
+const CHAIN_TRANSACTION_TOOL_CACHE = 32;
+
+/**
+ * The message types described in a conversation (`describe_chain_messages`),
+ * per session id in the owner's own key-value rows, each with the run that
+ * first described it: durable across restarts of the owner object, kept
+ * while used (`DESCRIBED_IDLE_TTL_MS`), and at most `DESCRIBED_MAX_SESSIONS`
+ * sessions per owner. A new session starts with none.
+ */
+const DESCRIBED_NAMESPACE = 'hub-actions/chain-tx-described';
+const DESCRIBED_IDLE_TTL_MS = 7 * 24 * 60 * 60_000;
+const DESCRIBED_MAX_SESSIONS = 200;
+
+/** The stored `{type: runId}` record of a session (anything else: none). */
+function describedRecord(
+  value: unknown,
+): Partial<Record<ChainTxMessageType, string>> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const record: Partial<Record<ChainTxMessageType, string>> = {};
+  for (const type of CHAIN_TX_MESSAGE_TYPES) {
+    const run: unknown = Reflect.get(value, type);
+    if (typeof run === 'string') record[type] = run;
+  }
+  return record;
+}
+
+/**
+ * The types whose rules a `describe_chain_messages` call in `messages` read:
+ * its arguments (on the AI message that made the call), counted only when
+ * its result is there too and is not an error.
+ */
+function describedInHistory(
+  messages: readonly BaseMessage[],
+): Set<ChainTxMessageType> {
+  const calls = new Map<string, unknown>();
+  for (const message of messages)
+    if (AIMessage.isInstance(message))
+      for (const call of message.tool_calls ?? [])
+        if (call.name === 'describe_chain_messages' && call.id)
+          calls.set(call.id, call.args);
+  const described = new Set<ChainTxMessageType>();
+  for (const message of messages) {
+    if (
+      !ToolMessage.isInstance(message) ||
+      message.name !== 'describe_chain_messages' ||
+      message.status === 'error'
+    )
+      continue;
+    const args = describeChainMessagesSchema.safeParse(
+      calls.get(message.tool_call_id),
+    );
+    if (args.success) for (const type of args.data.types) described.add(type);
+  }
+  return described;
+}
+
+/** This turn in the session: `${sessionId}|${runId}`. */
+const runKeyOf = (ctx: RuntimeContext) =>
+  `${ctx.session.id}|${ctx.session.runId ?? ''}`;
+
+/**
+ * Turns whose described types could not be stored: they fall back to every
+ * type's fields and no refusal (a store failure must not make chain cards
+ * unusable). Bounded; the oldest turn is dropped first.
+ */
+const UNSTORED_TURNS_MAX = 256;
+const unstoredTurns = new Set<string>();
+
+/**
+ * The types this call may use (and whose fields the model is given), by
+ * one rule: described in the history this call sees (`messages`), or
+ * stored by an earlier run of the session. A type the current run stored
+ * counts only once its `describe_chain_messages` result is in that history,
+ * so a describe made in the same model response as the request (a parallel
+ * call) never lets the request through, whichever finishes first. Null when
+ * the session cannot remember (no store or session, or the store failed):
+ * every type then carries its fields and none is refused.
+ */
+async function describedChainTxTypes(
+  ctx: RuntimeContext,
+  messages: readonly BaseMessage[],
+): Promise<ChainTxMessageType[] | null> {
+  if (!ctx.kv || !ctx.session.id || unstoredTurns.has(runKeyOf(ctx)))
+    return null;
+  let stored: Partial<Record<ChainTxMessageType, string>>;
+  try {
+    stored = describedRecord(
+      await ctx.kv.get(DESCRIBED_NAMESPACE, ctx.session.id),
+    );
+  } catch (error) {
+    ctx.logger.warn(
+      `[hub-actions] described chain message types unreadable; every type keeps its fields: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return null;
+  }
+  const inHistory = describedInHistory(messages);
+  const runId = ctx.session.runId ?? '';
+  return CHAIN_TX_MESSAGE_TYPES.filter(
+    (type) =>
+      inHistory.has(type) ||
+      (stored[type] !== undefined && stored[type] !== runId),
+  );
+}
+
+/** Records the described types; a type keeps the run that first described it. */
+async function rememberDescribed(
+  ctx: RuntimeContext,
+  types: readonly ChainTxMessageType[],
+): Promise<void> {
+  if (!ctx.kv || !ctx.session.id) return;
+  const runId = ctx.session.runId ?? '';
+  try {
+    await ctx.kv.update(
+      DESCRIBED_NAMESPACE,
+      ctx.session.id,
+      (current) => ({
+        ...Object.fromEntries(types.map((type) => [type, runId])),
+        ...describedRecord(current),
+      }),
+      { idleTtlMs: DESCRIBED_IDLE_TTL_MS, maxEntries: DESCRIBED_MAX_SESSIONS },
+    );
+  } catch (error) {
+    ctx.logger.warn(
+      `[hub-actions] described chain message types not stored; this turn gives every type's fields: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    if (unstoredTurns.size >= UNSTORED_TURNS_MAX)
+      unstoredTurns.delete(unstoredTurns.values().next().value!);
+    unstoredTurns.add(runKeyOf(ctx));
+  }
+}
+
+/**
+ * The account's chain types for a turn, read once (by the request tool and
+ * then reused by `chainTxFieldsMiddleware` for every model call).
+ */
+const turnChainTxTypes = new WeakMap<
+  RuntimeContext,
+  Promise<readonly ChainTxMessageType[]>
+>();
+function chainTxTypesForTurn(
+  ctx: RuntimeContext,
+): Promise<readonly ChainTxMessageType[]> {
+  let types = turnChainTxTypes.get(ctx);
+  if (!types) {
+    types = availableChainTxTypes(ctx);
+    turnChainTxTypes.set(ctx, types);
+  }
+  return types;
+}
+
+/** The function definition of a request tool, per description, built once. */
+const toolDefinitions = new WeakMap<
+  PluginTool,
+  Map<string, Record<string, unknown>>
+>();
+function definitionOf(
+  pluginTool: PluginTool,
+  description: string,
+): Record<string, unknown> {
+  let byDescription = toolDefinitions.get(pluginTool);
+  if (!byDescription) {
+    byDescription = new Map();
+    toolDefinitions.set(pluginTool, byDescription);
+  }
+  let definition = byDescription.get(description);
+  if (!definition) {
+    const { type, function: fn } = convertToOpenAITool(
+      tool(async () => '', {
+        name: pluginTool.name,
+        description,
+        schema: pluginTool.schema,
+      }),
+    );
+    // A plain object (a server-tool definition to LangChain), not a tool
+    // instance: LangChain refuses a new instance of a registered tool.
+    definition = { type, function: fn };
+    byDescription.set(description, definition);
+  }
+  return definition;
+}
+
+/**
+ * The per-turn tool is built before the turn's first model call, so a type
+ * described during the turn would reach the next model call without its
+ * fields, and a provider drops fields its schema does not declare (the
+ * 0.29.0 failure). Before each model call this gives the model the request
+ * tool for what is described by then (`describedChainTxTypes` over the
+ * call's messages), as its function definition with the registered tool's
+ * name and description; the registered tool, whose schema accepts the
+ * fields of every type, still runs the call. A tool the capability gate
+ * hid is not in the request, so nothing is added; a failure to read the
+ * store leaves the request as it is.
+ */
+function chainTxFieldsMiddleware(ctx: RuntimeContext) {
+  return createMiddleware({
+    name: 'HubActionsChainTxFieldsMiddleware',
+    wrapModelCall: async (request, handler) => {
+      const index = request.tools.findIndex(
+        (entry) => entry.name === 'request_chain_transaction',
+      );
+      const registered = request.tools[index];
+      if (!registered || typeof registered.description !== 'string')
+        return handler(request);
+      const described = await describedChainTxTypes(ctx, request.messages);
+      if (!described) return handler(request);
+      const current = chainTransactionTool(
+        await chainTxTypesForTurn(ctx),
+        described,
+      );
+      if (!current) return handler(request);
+      const tools = [...request.tools];
+      tools[index] = definitionOf(current, registered.description);
+      return handler({ ...request, tools });
+    },
+  });
+}
+const chainTransactionTools = new Map<string, PluginTool>();
+
+/** The request tool as the whole catalogue gives it (no account capabilities). */
 export const CHAIN_TRANSACTION_TOOL_DESCRIPTION =
   chainTransactionDescription(CHAIN_TX_CATALOG);
 
@@ -360,7 +488,7 @@ const describeChainMessagesSchema = z.strictObject({
 });
 
 export const DESCRIBE_CHAIN_MESSAGES_TOOL_DESCRIPTION =
-  'Read the full rules of chain-transaction message types before using them in request_chain_transaction: every field with its meaning, format and limits, what the runtime fills, and chain caveats. Ask only for the types you need. Also returns `availableTypes`: the types this account may use.';
+  'Read the full rules of chain-transaction message types before using them in request_chain_transaction: every field with its meaning, format and limits, what the runtime fills, and chain caveats. Ask only for the types you need: request_chain_transaction takes only types described in this conversation, and gives their fields from the next call on. Also returns `availableTypes`: the types this account may use.';
 
 export type HubActionRequestResult =
   | {
@@ -510,11 +638,33 @@ async function requestHubAction(
 }
 
 async function requestChainTransaction(
+  schema: ReturnType<typeof chainTransactionSchemaFor>,
   input: unknown,
   ctx: RuntimeContext,
-): Promise<HubActionRequestResult> {
-  const parsed = chainTransactionSchema.safeParse(input);
+): Promise<HubActionRequestResult | ToolMessage> {
+  const parsed = schema.safeParse(input);
   if (!parsed.success) return chainTxShapeRefusal(issuesOf(parsed.error));
+  const described = await describedChainTxTypes(ctx, ctx.history.messages);
+  if (described) {
+    const unread = [
+      ...new Set(
+        parsed.data.messages
+          .map(chainTxTypeOf)
+          .filter(
+            (type): type is ChainTxMessageType =>
+              type !== null && !described.includes(type),
+          ),
+      ),
+    ];
+    if (unread.length)
+      // Not run, and not a failure: the repetition guard lets the same
+      // call through once the rules are read.
+      return toolNotRunMessage({
+        toolCallId: ctx.toolCallId ?? '',
+        name: 'request_chain_transaction',
+        content: `For you, not the person: nothing was sent and nothing is wrong. Before a card with ${unread.map((type) => `\`${type}\``).join(', ')}, read the rules: call describe_chain_messages with types ${JSON.stringify(unread)}, then call request_chain_transaction again with exactly the fields it lists. Do not mention this step to the person.`,
+      });
+  }
   const checked = strictChainTxMessages(parsed.data.messages);
   if ('issues' in checked) return chainTxShapeRefusal(checked.issues);
   if (ctx.config.HUB_ACTIONS_ENABLED !== 'true' || !ctx.hubActions)
@@ -576,7 +726,7 @@ function strictChainTxMessages(
       return;
     }
     const result = CHAIN_TX_CATALOG[type].schema.safeParse(message);
-    if (result.success) checked.push(result.data);
+    if (result.success) checked.push(chainTxMessageInput(result.data));
     else issues.push(...issuesOf(result.error, ['messages', index]));
   });
   return issues.length ? { issues } : { messages: checked };
@@ -634,9 +784,12 @@ function issuesOf(
 
 /**
  * The catalogue types this account may use: the Hub capabilities'
- * `chainTx.messageTypes` (none when chain transactions are off for the
- * account), or the whole catalogue when the capabilities cannot be read
- * (not a channel turn, or the Hub did not answer).
+ * `chainTx.messageTypes`. None when chain transactions cannot be used
+ * here: not a channel turn, Hub actions off, chain transactions off for the
+ * account, a Hub at protocol level 5 (the 0.6.0 types only, as it lists
+ * them), or capabilities that cannot be read (the owner object answers its
+ * last good capabilities while a read fails, and does not retry a failed
+ * read for 30 s, so this never holds a turn for long).
  */
 async function availableChainTxTypes(
   ctx: RuntimeContext,
@@ -647,15 +800,15 @@ async function availableChainTxTypes(
     !ctx.session.channel ||
     !ctx.hubActions
   )
-    return CHAIN_TX_MESSAGE_TYPES;
+    return [];
   let chainTx;
   try {
-    chainTx = (await ctx.hubActions.capabilities()).chainTx;
+    chainTx = (await ctx.hubActions.capabilities({ turn: true })).chainTx;
   } catch (error) {
     ctx.logger.warn(
-      `[hub-actions] capabilities unavailable for describe_chain_messages: ${error instanceof Error ? error.message : String(error)}`,
+      `[hub-actions] capabilities unavailable, no chain transaction types this turn: ${error instanceof Error ? error.message : String(error)}`,
     );
-    return CHAIN_TX_MESSAGE_TYPES;
+    return [];
   }
   return CHAIN_TX_MESSAGE_TYPES.filter((type) =>
     chainTx?.messageTypes.includes(type),
@@ -686,6 +839,7 @@ async function describeChainMessages(
       status: 'unavailable',
       reason: `Name 1 to ${CHAIN_TX_MAX_MESSAGES} different message types, each one of: ${CHAIN_TX_MESSAGE_TYPES.join(', ')}.`,
     };
+  await rememberDescribed(ctx, parsed.data.types);
   return {
     status: 'known',
     general: CHAIN_TX_GENERAL_RULES,
@@ -750,6 +904,16 @@ export function modelOutcome(
   return { ...outcome, receipt: modelReceipt(outcome.receipt) };
 }
 
+/**
+ * What a `cancelled` outcome means. Auth Hub withdraws a card when the
+ * person cancels it, and also on its own: a chain transaction whose details
+ * changed on chain after the review (`409 review_changed`, reason
+ * `chain_changed`, shown on the review page only). The oracle gets
+ * `cancelled` either way, so the model must not say who withdrew it.
+ */
+export const CANCELLED_MEANING =
+  'Withdrawn before anything was sent: nothing happened on chain. The person may have cancelled it, or Auth Hub withdrew it because something it depended on changed after the review; do not say the person cancelled it. If they still want it, offer to prepare a fresh one.';
+
 async function hubActionStatus(
   input: unknown,
   ctx: RuntimeContext,
@@ -777,6 +941,9 @@ async function hubActionStatus(
       operationStatus: read.operationStatus,
       outcome: modelOutcome(read.outcome),
       ...(read.summary ? { summary: read.summary } : {}),
+      ...(read.outcome?.status === 'cancelled'
+        ? { meaning: CANCELLED_MEANING }
+        : {}),
     };
   } catch (error) {
     // An Auth Hub that must be updated first: plain words, not a tool error.
@@ -843,6 +1010,8 @@ const manifest: PluginManifest = {
   whenToUse: [
     'The user requests a registered form submission or a coin send.',
     'The user asks to file or evaluate a claim, or to send coins or impact tokens on chain.',
+    'The user asks to stake, unstake or move IXO, claim staking rewards, vote on a network proposal or retire impact tokens.',
+    'The user asks to reserve or dispute a claim, create or change a claim collection, give or remove a permission, create or update an entity, or change the links of an identity.',
     'The user asks to review an exact private resource or to sign a statement.',
     'The user asks to connect Gmail or Calendar, send a reviewed email or add an event.',
     'The user asks for document access or to save a private note.',
@@ -870,6 +1039,23 @@ export class HubActionsPlugin extends OraclePlugin {
       typeof env.AUTH_HUB_CHANNEL_SERVICE_KEY === 'string' &&
       env.AUTH_HUB_CHANNEL_SERVICE_KEY.length > 0
     );
+  }
+  /**
+   * request_chain_transaction is built per turn: its schema names only the
+   * message types this account may use (Auth Hub capabilities, cached by
+   * the owner object), so 33 types do not reach a model that may use 4.
+   */
+  override async getRequestTools(ctx: RuntimeContext): Promise<PluginTool[]> {
+    const [available, described] = await Promise.all([
+      chainTxTypesForTurn(ctx),
+      describedChainTxTypes(ctx, ctx.history.messages),
+    ]);
+    const tool = chainTransactionTool(available, described);
+    return tool ? [tool] : [];
+  }
+  /** Gives each model call the request tool with the fields described so far in the turn. */
+  override getRequestMiddlewares(ctx: RuntimeContext): AgentMiddleware[] {
+    return [chainTxFieldsMiddleware(ctx)];
   }
   override getTools(): PluginTool[] {
     return [
@@ -905,16 +1091,9 @@ export class HubActionsPlugin extends OraclePlugin {
         handler: describeChainMessages,
       },
       {
-        name: 'request_chain_transaction',
-        description: CHAIN_TRANSACTION_TOOL_DESCRIPTION,
-        schema: chainTransactionSchema,
-        effect: 'write',
-        handler: requestChainTransaction,
-      },
-      {
         name: 'hub_action_status',
         description:
-          'Read the verified status of a Hub action already prepared for this owner. Never executes.',
+          'Read the verified status of a Hub action already prepared for this owner. Never executes. A `cancelled` outcome was withdrawn before anything was sent, by the person or by Auth Hub (`meaning` says so): never say the person cancelled it.',
         schema: statusSchema,
         effect: 'read',
         handler: hubActionStatus,
