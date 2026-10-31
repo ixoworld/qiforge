@@ -1,6 +1,7 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  CHAIN_TX_LEVEL6_MESSAGE_TYPES,
   CHAIN_TX_MESSAGE_TYPES,
   parseOutcome,
   type ActionOutcomeV1,
@@ -92,10 +93,10 @@ function outcome(
 
 /**
  * `old`: an Auth Hub before protocol version 5, which this runtime cannot
- * use; `level5`: one on version 5 (the rollout of version 6), which it can
- * (see the branches below).
+ * use; `level5` and `level6`: one on version 5 or 6 (the rollouts of
+ * versions 6 and 7), which it can (see the branches below).
  */
-type HubMode = 'up' | 'down' | 'hang' | 'old' | 'level5';
+type HubMode = 'up' | 'down' | 'hang' | 'old' | 'level5' | 'level6';
 const GMAIL = { id: 'gmail-one', label: 'alex@example.test' };
 
 async function harness(state: DurableObjectState) {
@@ -166,19 +167,21 @@ async function harness(state: DurableObjectState) {
         return Response.json({ active: hubState.bindingActive });
       // An older Auth Hub checks `?version=` against its closed list on
       // every operations call and answers anything else with 400
-      // invalid_request: 1 to 4 before version 5, 1 to 5 before version 6.
+      // invalid_request: 1 to 4 before version 5, 1 to 5 before version 6,
+      // 1 to 6 before version 7.
       const declared = new URL(request.url).searchParams.get('version') ?? '1';
       if (
         (mode === 'old' && !['1', '2', '3', '4'].includes(declared)) ||
-        (mode === 'level5' && declared === '6')
+        (mode === 'level5' && ['6', '7'].includes(declared)) ||
+        (mode === 'level6' && declared === '7')
       )
         return Response.json({ error: 'invalid_request' }, { status: 400 });
       hubState.versions.push(declared);
       if (path === '/api/internal/actions/operations/options') {
         // Version 3 adds the owner's tokens (the Hub reads balances for it);
-        // versions 4 to 6 answer as version 3.
+        // versions 4 to 7 answer as version 3.
         const version = new URL(request.url).searchParams.get('version') ?? '';
-        const v3 = ['3', '4', '5', '6'].includes(version);
+        const v3 = ['3', '4', '5', '6', '7'].includes(version);
         hubState.optionsVersions.push(version);
         return Response.json({
           version: v3 ? 'ixo.auth-options/3' : 'ixo.auth-options/2',
@@ -487,13 +490,14 @@ describe('Hub actions in the owner object', () => {
       h.outcomes.set(pending.id, outcome(pending, 3, 'succeeded'));
       h.setMode('old');
       // A poll still answers with what the object holds; the one status
-      // read it tries (at version 6, then 5) is refused and the action
-      // stays scheduled.
+      // read it tries (at version 7, then 6, then 5) is refused and the
+      // action stays scheduled.
       expect(await h.poll()).toEqual([
         outcome(done, 2, 'declined'),
         outcome(pending, 1, 'authorized'),
       ]);
       expect(h.calls).toEqual([
+        `GET /api/internal/actions/operations/${pending.id}`,
         `GET /api/internal/actions/operations/${pending.id}`,
         `GET /api/internal/actions/operations/${pending.id}`,
       ]);
@@ -586,7 +590,7 @@ describe('Hub actions in the owner object', () => {
           ]),
         ),
       ).toMatchObject({ id: expect.any(String) });
-      // Refused at 6 once, then everything at 5, the prepare included.
+      // Refused at 7 and 6 once, then everything at 5, the prepare included.
       expect(new Set(h.hubState.versions)).toEqual(new Set(['5']));
       // A level-6 type is refused before any POST: the Hub lists the four.
       const posted = h.hubState.posted.length;
@@ -1382,6 +1386,147 @@ describe('Hub actions in the owner object', () => {
     });
   });
 
+  it('prepares a group proposal with the group’s IXO send and stake in base units, reading options only for another token’s decimals', async () => {
+    await withHub('hub-chain-group', async (h) => {
+      await h.channelRun('run-chain');
+      h.hubState.prepare = 'ok';
+      // The owner holds 5 IXO and 1 base unit of USDC: the group pays.
+      const USDC = `ibc/${'A'.repeat(64)}`;
+      h.hubState.tokens = [
+        IXO_LISTED,
+        {
+          denom: USDC,
+          symbol: 'USDC',
+          decimals: 6,
+          verified: true,
+          balanceBaseUnits: '1',
+        },
+      ];
+      h.hubState.chainTx = {
+        messageTypes: [...CHAIN_TX_MESSAGE_TYPES],
+        maxMessages: 8,
+      };
+      const VALIDATOR = 'ixovaloper1qeex565vg4uu7zwudh9ff2dauxptqf72nf2l44';
+      const proposal = (actions: unknown[]) => ({
+        type: 'daodao.proposal.create',
+        dao: `ixo1${'q'.repeat(58)}`,
+        proposalModule: `ixo1${'p'.repeat(58)}`,
+        title: 'Pay Thandi',
+        description: 'For the borehole repair',
+        actions,
+      });
+      expect(
+        await call(
+          h.host,
+          'chainTransactionHubAction',
+          chainInput('h'.repeat(64), [
+            proposal([
+              { type: 'cosmos.bank.send', toAddress: RECIPIENT, amount: '500' },
+              {
+                type: 'cosmos.staking.delegate',
+                validatorAddress: VALIDATOR,
+                amount: '100',
+              },
+            ]),
+          ]),
+        ),
+      ).toMatchObject({ id: expect.any(String) });
+      // IXO only: no options read, and no owner identity added.
+      expect(h.calls.filter((c) => c.endsWith('/options'))).toHaveLength(0);
+      const posted = () =>
+        (
+          h.hubState.posted.at(-1) as {
+            operation: { signer: string; messages: unknown[] };
+          }
+        ).operation;
+      expect(posted().signer).toBe(SIGNER);
+      expect(posted().messages).toEqual([
+        proposal([
+          {
+            type: 'cosmos.bank.send',
+            toAddress: RECIPIENT,
+            amountBaseUnits: '500000000',
+            denom: 'uixo',
+          },
+          {
+            type: 'cosmos.staking.delegate',
+            validatorAddress: VALIDATOR,
+            amountBaseUnits: '100000000',
+          },
+        ]),
+      ]);
+      // Another token: the options give its decimals, its balance is not
+      // the owner's to check.
+      await call(
+        h.host,
+        'chainTransactionHubAction',
+        chainInput('i'.repeat(64), [
+          proposal([
+            {
+              type: 'cosmos.bank.send',
+              toAddress: RECIPIENT,
+              amount: '25',
+              denom: USDC,
+            },
+          ]),
+        ]),
+      );
+      expect(h.calls.filter((c) => c.endsWith('/options'))).toHaveLength(1);
+      expect(posted().messages).toEqual([
+        proposal([
+          {
+            type: 'cosmos.bank.send',
+            toAddress: RECIPIENT,
+            amountBaseUnits: '25000000',
+            denom: USDC,
+          },
+        ]),
+      ]);
+    });
+  });
+
+  it('works at version 6 with a level-6 Auth Hub: the 33 types, no group step', async () => {
+    await withHub('hub-level-6', async (h) => {
+      await h.channelRun('run-chain');
+      h.hubState.prepare = 'ok';
+      h.hubState.tokens = [IXO_LISTED];
+      // A level-6 Hub lists the 33 types it knows.
+      h.hubState.chainTx = {
+        messageTypes: [...CHAIN_TX_LEVEL6_MESSAGE_TYPES],
+        maxMessages: 8,
+      };
+      h.setMode('level6');
+      expect(
+        await call(
+          h.host,
+          'chainTransactionHubAction',
+          chainInput('j'.repeat(64), [
+            { type: 'cosmos.gov.vote', proposalId: '506', option: 'yes' },
+          ]),
+        ),
+      ).toMatchObject({ id: expect.any(String) });
+      // Refused at 7 once, then everything at 6, the prepare included.
+      expect(new Set(h.hubState.versions)).toEqual(new Set(['6']));
+      const posted = h.hubState.posted.length;
+      await expect(
+        call(
+          h.host,
+          'chainTransactionHubAction',
+          chainInput('k'.repeat(64), [
+            {
+              type: 'daodao.proposal.vote',
+              dao: `ixo1${'q'.repeat(58)}`,
+              proposalModule: `ixo1${'p'.repeat(58)}`,
+              proposalId: '3',
+              vote: 'yes',
+            },
+          ]),
+        ),
+      ).rejects.toThrow('This account cannot use daodao.proposal.vote');
+      expect(h.hubState.posted).toHaveLength(posted);
+    });
+  });
+
   it('fills the owner identity into the level-6 messages and converts stake amounts from IXO, reading options only for a stake', async () => {
     await withHub('hub-chain-level6', async (h) => {
       await h.channelRun('run-chain');
@@ -1620,9 +1765,9 @@ describe('Hub actions in the owner object', () => {
       });
       // No display amount and no fee reach the Hub.
       expect(JSON.stringify(operation)).not.toMatch(/"amount":"1\.5|fee/i);
-      // Options read at the protocol version (6, answered as options
+      // Options read at the protocol version (7, answered as options
       // version 3), with the owner's balances.
-      expect(new Set(h.hubState.optionsVersions)).toEqual(new Set(['6']));
+      expect(new Set(h.hubState.optionsVersions)).toEqual(new Set(['7']));
       // No bank step: no options read at all.
       const reads = optionReads();
       expect(await prepare('b', [submit, token])).toMatchObject({

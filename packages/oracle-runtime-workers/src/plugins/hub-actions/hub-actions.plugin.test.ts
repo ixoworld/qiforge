@@ -19,7 +19,9 @@ import {
 } from '../../core/middlewares/context-guard';
 import type { AmbientServices } from '../../core/runtime-context';
 import {
+  CHAIN_TX_GROUP_MESSAGE_TYPES,
   CHAIN_TX_LEVEL4_MESSAGE_TYPES,
+  CHAIN_TX_LEVEL6_MESSAGE_TYPES,
   CHAIN_TX_MESSAGE_TYPES,
   chainTxIssue,
   operationKinds,
@@ -1664,7 +1666,7 @@ describe('request_chain_transaction', () => {
     ).toContain('"null"');
   });
 
-  it('sends a provider only the offered types: 4 cost about 3 000 characters, 33 about 19 000', () => {
+  it('sends a provider only the offered types: 4 cost about 3 000 characters, 33 about 19 000, 37 about 21 000', () => {
     const size = (types: readonly ChainTxMessageType[]) => {
       const tool = chainTransactionTool(types);
       if (!tool) throw new Error('no tool');
@@ -1678,10 +1680,16 @@ describe('request_chain_transaction', () => {
       ).length;
     };
     const four = size(CHAIN_TX_LEVEL4_MESSAGE_TYPES);
+    const level6 = size(CHAIN_TX_LEVEL6_MESSAGE_TYPES);
     const all = size(CHAIN_TX_MESSAGE_TYPES);
-    // Recorded in docs/channels.md (2 962 and 18 739 when measured).
+    // Recorded in docs/channels.md (2 962, 18 735 and 20 950 when
+    // measured): every field of every type, a new group proposal's 14
+    // action types by name only (their fields are their own top-level
+    // branches). A session that remembers what it described pays far less
+    // (see the field discovery tests).
     expect(four).toBeLessThan(3_500);
-    expect(all).toBeLessThan(20_000);
+    expect(level6).toBeLessThan(20_000);
+    expect(all).toBeLessThan(21_500);
     const fourTool = JSON.stringify(
       providerParameters(chainTransactionTool(CHAIN_TX_LEVEL4_MESSAGE_TYPES)!),
     );
@@ -1699,7 +1707,8 @@ describe('request_chain_transaction', () => {
     'https://mx.ixo.earth/_matrix/media/v3/download/ixo.earth/statement';
   type Level6Type = Exclude<
     ChainTxMessageType,
-    (typeof CHAIN_TX_LEVEL4_MESSAGE_TYPES)[number]
+    | (typeof CHAIN_TX_LEVEL4_MESSAGE_TYPES)[number]
+    | (typeof CHAIN_TX_GROUP_MESSAGE_TYPES)[number]
   >;
   /** One message of each 0.8.0 type as the model writes it, optional fields included. */
   const level6: Record<
@@ -2799,12 +2808,14 @@ describe('request_chain_transaction', () => {
     const example = (type: ChainTxMessageType) =>
       /Say it like: “([^”]+)”/.exec(CHAIN_TX_CATALOG[type].rules)?.[1];
     expect(CHAIN_TX_MESSAGE_TYPES.filter((type) => !example(type))).toEqual([]);
-    // The example the model copies is in everyday words.
+    // The example the model copies is in everyday words: no chain terms
+    // and no type names ("IXO." ending a sentence and "didn’t" are words).
     expect(
-      CHAIN_TX_MESSAGE_TYPES.filter((type) =>
-        /authz|bech32|uixo|valoper|MsgExec|delegat|base units|DID|IID|did:ixo|\.v1|cosmos\.|ixo\./i.test(
-          example(type) ?? '',
-        ),
+      CHAIN_TX_MESSAGE_TYPES.filter(
+        (type) =>
+          /authz|bech32|uixo|valoper|MsgExec|delegat|base units|did:ixo|\.v1|cosmos\.\S|ixo\.\S/i.test(
+            example(type) ?? '',
+          ) || /\bDIDs?\b|\bIID\b/.test(example(type) ?? ''),
       ),
     ).toEqual([]);
     // The cards that need something stored first say so, and the new ids
@@ -2926,7 +2937,7 @@ describe('request_chain_transaction', () => {
     if (!tool) throw new Error('capabilities tool missing');
     expect(await tool.handler({}, withClient)).toEqual(capabilities);
     expect(urls).toEqual([
-      'https://hub.test/api/internal/actions/operations/capabilities?version=6',
+      'https://hub.test/api/internal/actions/operations/capabilities?version=7',
     ]);
   });
 });
@@ -3332,7 +3343,7 @@ describe('chain transaction field discovery', () => {
     ).toBe(after);
   });
 
-  it('costs about 5 800 characters with 33 types and none described (most of it the summaries), and a type’s fields once described', () => {
+  it('costs about 6 400 characters with 37 types and none described (most of it the summaries), and a type’s fields once described', () => {
     const size = (described: readonly ChainTxMessageType[]) =>
       JSON.stringify(
         convertToOpenAITool(
@@ -3351,15 +3362,27 @@ describe('chain transaction field discovery', () => {
       'ixo.claims.submit',
       'ixo.claims.create-collection',
     ]);
+    const groupSteps = size(CHAIN_TX_GROUP_MESSAGE_TYPES);
+    const proposal = size(['daodao.proposal.create']);
+    const proposalWithSend = size([
+      'daodao.proposal.create',
+      'cosmos.bank.send',
+    ]);
     const all = size(CHAIN_TX_MESSAGE_TYPES);
-    // Recorded in docs/channels.md (5 803, 6 019, 6 223, 8 432 and 18 735
-    // when measured).
-    expect(none).toBeLessThan(6_500);
+    // Recorded in docs/channels.md (6 366, 6 582, 6 786, 8 995, 8 018,
+    // 7 212, 7 644 and 26 228 when measured).
+    expect(none).toBeLessThan(7_000);
     expect(none).toBeLessThan(one);
     expect(one).toBeLessThan(two);
     expect(two).toBeLessThan(four);
-    expect(four).toBeLessThan(9_000);
-    expect(all).toBeLessThan(20_000);
+    expect(four).toBeLessThan(9_500);
+    // A new proposal described alone gives its own fields and only the
+    // names of the actions it may hold; an action type's fields follow
+    // once that type is described too.
+    expect(proposal).toBeLessThan(proposalWithSend);
+    expect(proposalWithSend).toBeLessThan(8_000);
+    expect(groupSteps).toBeLessThan(8_500);
+    expect(all).toBeLessThan(28_000);
   });
 
   it('answers a type not described yet with a not-run instruction for the model, before any Hub call', async () => {

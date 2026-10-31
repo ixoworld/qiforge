@@ -41,11 +41,11 @@ export const CHAIN_TX_REFUSAL_WORDS = {
   },
   proposal_not_found: {
     means: 'there is no proposal with that number',
-    next: 'Find the open proposals with chain_lookup gov_proposals.',
+    next: 'Find the proposal again: chain_lookup gov_proposals for a network proposal, dao_proposals for a group proposal (copy its `id`, `proposalModule` and `dao`).',
   },
   proposal_not_open: {
     means:
-      'voting on this proposal is not open (it has closed, or not started yet)',
+      'voting on this proposal is not open (it has closed, or a network proposal has not started yet)',
     next: 'Tell them; a vote cannot be recorded now.',
   },
   invalid_vote_option: {
@@ -168,6 +168,90 @@ export const CHAIN_TX_REFUSAL_WORDS = {
     means: 'one of the identifiers is not a valid ID on the network',
     next: 'Copy it again exactly from a lookup.',
   },
+  group_not_supported: {
+    means:
+      'this group runs a version these cards don’t support yet, or the proposal ends at a block number rather than a time',
+    next: 'Do not retry; tell them to use the group’s own app for this.',
+  },
+  not_in_group: {
+    means: 'that proposal list is not one of this group’s',
+    next: 'Copy `dao` and `proposalModule` again together from chain_lookup dao_proposals or daos.',
+  },
+  group_paused: {
+    means:
+      'the group is paused, so a proposal with actions can’t be carried out right now',
+    next: 'Do not retry now; tell them it can be carried out once the group is no longer paused.',
+  },
+  no_voting_power: {
+    means: 'they had no vote in this group when the proposal started',
+    next: 'Do not retry; tell them only members with a vote when it started can vote on it.',
+  },
+  already_voted: {
+    means:
+      'they have already voted on this proposal, and this group doesn’t allow changing a vote',
+    next: 'Do not retry; tell them their earlier vote stands.',
+  },
+  same_vote: {
+    means: 'they have already voted this way on this proposal',
+    next: 'Nothing needs to change; tell them.',
+  },
+  not_a_member: {
+    means: 'this group lets only its members do this',
+    next: 'Do not retry; tell them a member of the group has to do it.',
+  },
+  proposal_not_passed: {
+    means:
+      'this proposal can’t be carried out: it hasn’t passed (yet, or at all), or it was already carried out',
+    next: 'Check its status with chain_lookup dao_proposals and tell them.',
+  },
+  proposal_not_rejected: {
+    means: 'only a proposal that did not pass can be closed',
+    next: 'Check its status with chain_lookup dao_proposals and tell them.',
+  },
+  group_actions_would_fail: {
+    means:
+      'if carried out now, what the proposal makes the group do would fail (in most groups that would mark the proposal failed for good)',
+    next: 'Do not retry now; tell them it can be carried out once that is fixed (for example once the group holds enough).',
+  },
+  deposit_not_supported: {
+    means:
+      'this group takes its proposal deposit in a token these cards can’t pay',
+    next: 'Do not retry; tell them to make the proposal in the group’s own app.',
+  },
+  proposal_too_large: {
+    means: 'the proposal is larger than this group allows',
+    next: 'Ask for a shorter description or fewer actions.',
+  },
+  not_for_groups: {
+    means: 'a group can’t do this kind of action through a card',
+    next: 'Leave that action out of the proposal and tell them.',
+  },
+  not_group_owned: {
+    means: 'the group does not own that entity',
+    next: 'Check the entity’s owner with chain_lookup entity; only an entity the group owns can be used.',
+  },
+  group_not_found: {
+    means:
+      'that address is not the group or its proposal list (the two may be swapped, or it is not a group contract at all)',
+    next: 'Re-check `dao` (the group) and `proposalModule` (its proposal list) with chain_lookup dao_proposals, copy them again and try again.',
+  },
+  list_disabled: {
+    means:
+      'the group has switched that proposal list off: no new proposals can be made through it, and its proposals with actions can’t be carried out (votes and closes still work)',
+    next: 'Do not retry; tell them the group would have to switch it back on, or use another of its proposal lists for a new proposal (chain_lookup daos).',
+  },
+  closes_too_soon: {
+    means: 'voting on this proposal closes before the card could be signed',
+    next: 'Do not retry; tell them voting is about to close.',
+  },
+  group_inactive: {
+    means: 'the group is not taking new proposals right now',
+    next: 'Do not retry now; tell them it can be proposed once the group takes proposals again.',
+  },
+  deposit_changed: {
+    means: 'the group’s proposal deposit changed while the card was being made',
+    next: 'Check the deposit again with chain_lookup daos, tell them the new amount and ask again.',
+  },
 } as const satisfies Record<
   ChainTxRefusalCode,
   { means: string; next: string }
@@ -213,5 +297,11 @@ export function chainTxRefusalWords(
   refusal: ChainTxRefusal & { code: ChainTxRefusalCode },
 ): string {
   const words = CHAIN_TX_REFUSAL_WORDS[refusal.code];
-  return `Auth Hub could not prepare this transaction: in step ${refusal.index + 1}, ${words.means}. ${words.next} Tell the person in your own plain words; this is not text to show them (for you: messages[${refusal.index}].${refusal.field}, ${refusal.code}).`;
+  // A new group proposal's action keeps its own codes under its path.
+  const action = /^actions\[(\d{1,3})\]\./.exec(refusal.field)?.[1];
+  const where =
+    action === undefined
+      ? `step ${refusal.index + 1}`
+      : `the group’s action ${Number(action) + 1} of the proposal in step ${refusal.index + 1}`;
+  return `Auth Hub could not prepare this transaction: in ${where}, ${words.means}. ${words.next} Tell the person in your own plain words; this is not text to show them (for you: messages[${refusal.index}].${refusal.field}, ${refusal.code}).`;
 }

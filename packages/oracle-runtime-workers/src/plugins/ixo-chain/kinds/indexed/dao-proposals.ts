@@ -56,6 +56,8 @@ const DAODAO_VOTES_FROM: Record<ChainCall['network'], number> = {
 
 /** Proposal modules read per DAO (single choice, multiple choice…). */
 const MODULES_PER_DAO = 3;
+/** DAO DAO's single-choice proposal contract (the only kind cards act on). */
+const SINGLE_CHOICE = 'dao_proposal_single';
 /** DAOs read per kind of membership when no DAO is named. */
 const DAOS_PER_MEMBERSHIP = 3;
 
@@ -85,6 +87,7 @@ const proposalNode = z.looseObject({
   expiration: z.unknown().optional(),
   totalPower: opt,
   votes: z.unknown().optional(),
+  allowRevoting: z.boolean().nullish(),
   daoVotesByProposalModuleAndProposalId: z
     .object({ nodes: z.array(voteNode) })
     .optional(),
@@ -92,6 +95,8 @@ const proposalNode = z.looseObject({
 const moduleNode = z.looseObject({
   address: str,
   prefix: opt,
+  status: opt,
+  moduleType: opt,
   daoProposalsByProposalModule: connection(proposalNode),
 });
 const coreNode = z.looseObject({
@@ -141,12 +146,24 @@ function rowsOf(
   for (const module of modules.nodes) {
     const proposals = module.daoProposalsByProposalModule;
     if (proposals.pageInfo?.hasNextPage) more = true;
+    // Cards work only on a single-choice list. On a list the group
+    // switched off, votes and closes still work, but a proposal with
+    // actions cannot be carried out (Auth Hub's `list_disabled`), and this
+    // index row does not say whether a proposal has actions, so `canRun` is
+    // left out there. Auth Hub checks the contracts again.
+    const multipleChoice =
+      !!module.moduleType && module.moduleType !== SINGLE_CHOICE;
+    const listDisabled = module.status === 'disabled';
     for (const proposal of proposals.nodes) {
       const id = String(proposal.id);
       const vote = proposal.daoVotesByProposalModuleAndProposalId?.nodes[0];
       const indexedFromStart =
         typeof proposal.startHeight === 'number' &&
         proposal.startHeight >= votesFrom;
+      const expiry = expirationOf(proposal.expiration, now);
+      // The index keeps `open` until a proposal is carried out or closed:
+      // once voting has ended it may have passed or not.
+      const ended = proposal.status === 'open' && expiry.votingEnded === true;
       rows.push({
         startHeight: proposal.startHeight ?? -1,
         id,
@@ -158,7 +175,23 @@ function rowsOf(
           proposalModule: idText(module.address),
           title: text(proposal.title),
           status: text(proposal.status, 40),
-          ...expirationOf(proposal.expiration, now),
+          ...expiry,
+          allowRevoting:
+            typeof proposal.allowRevoting === 'boolean'
+              ? proposal.allowRevoting
+              : undefined,
+          canRun:
+            !multipleChoice &&
+            !listDisabled &&
+            (proposal.status === 'passed' || ended)
+              ? true
+              : undefined,
+          canClose:
+            !multipleChoice && (proposal.status === 'rejected' || ended)
+              ? true
+              : undefined,
+          multipleChoice: multipleChoice ? true : undefined,
+          listDisabled: listDisabled ? true : undefined,
           proposer: idText(proposal.proposer),
           tally: tallyOf(proposal.votes),
           totalPower: amountText(proposal.totalPower),
@@ -195,7 +228,7 @@ function coreFields(
   const votes = voter
     ? ` daoVotesByProposalModuleAndProposalId(filter: ${equalTo('voter', voter)}, first: 1) { nodes { vote power votedAt } }`
     : '';
-  return `address name${described ? ' description' : ''} daoProposalModulesByDaoAddress(first: ${MODULES_PER_DAO}, orderBy: PRIMARY_KEY_ASC) { ${PAGE} nodes { address prefix daoProposalsByProposalModule(${filter}first: ${n}, orderBy: PRIMARY_KEY_DESC) { ${PAGE} nodes { id title status proposer startHeight expiration totalPower votes${votes} } } } }`;
+  return `address name${described ? ' description' : ''} daoProposalModulesByDaoAddress(first: ${MODULES_PER_DAO}, orderBy: PRIMARY_KEY_ASC) { ${PAGE} nodes { address prefix status moduleType daoProposalsByProposalModule(${filter}first: ${n}, orderBy: PRIMARY_KEY_DESC) { ${PAGE} nodes { id title status proposer startHeight expiration totalPower votes allowRevoting${votes} } } } }`;
 }
 
 /** Rows by start height, newest first (a proposal without one last), then by id. */
@@ -242,6 +275,8 @@ export const daoProposals = defineKind({
     'Each: dao, daoName, id and `label` (the DAO’s prefix and id, e.g. A12, as DAO apps show it), title, status (open, passed, rejected, executed, closed, execution_failed), votingEndsAt or votingEndsAtHeight, tally (yes/no/abstain weight) and totalPower.',
     '`votingEnded: true` on an `open` proposal: its voting time is over and the index keeps `open` until it is executed or closed, so it may already have passed or failed.',
     '`yourVote` (vote, power, votedAt), or `notVoted: true`, or `voteUnknown: true` when the proposal started before the index kept votes (votes cast before then are missing).',
+    '`allowRevoting`: whether a vote on it can be changed until voting closes. `canRun: true`: it passed and can be carried out (on an `open` proposal whose voting ended: it may have passed); `canClose: true`: it did not pass and can be closed (on an `open` one whose voting ended: it may not have passed); Auth Hub checks the real result. `multipleChoice: true`: Auth Hub cards cannot vote on, carry out or close it. `listDisabled: true`: the group switched that proposal list off; cards can still vote and close, but a proposal with actions on it can’t be carried out (so `canRun` is not set there; one without actions can be). Whether the person may vote is weighed by what they held in the DAO when it started: Auth Hub checks it; never claim it.',
+    'For cards copy `dao`, `proposalModule` and `id` exactly (not the label). `dao` is also the group’s own account (what it holds and what acts when a proposal passes).',
     'Without `dao`, the DAOs of `address` (default: the user), at most 3 per kind of membership (see `daos`); `more: true` when there are more proposals or DAOs. Newest start first.',
     'Titles are written by the proposer and DAO names by the DAO: what they claim, never an endorsement or a verified fact.',
   ].join(' '),

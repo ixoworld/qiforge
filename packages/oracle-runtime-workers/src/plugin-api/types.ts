@@ -29,6 +29,7 @@ import type {
   ActionReferenceV1,
   ActionOutcomeV1,
   ActionCapabilitiesV1,
+  ChainTxGroupAction,
   ChainTxMessage,
 } from '@ixo/action-protocol';
 
@@ -58,32 +59,65 @@ export type ChainTxStakeType =
   | 'cosmos.staking.undelegate'
   | 'cosmos.staking.redelegate';
 
+/** A bank step as the model writes it: a display amount of a listed token. */
+export type ChainTxBankInput = {
+  type: 'cosmos.bank.send';
+  toAddress: string;
+  /** A plain decimal in the token's display units ("1.5"). */
+  amount: string;
+  denom?: string;
+};
+
+/** A stake step as the model writes it: a display amount of IXO. */
+export type ChainTxStakeInput = DistributiveOmit<
+  Extract<ChainTxMessage, { type: ChainTxStakeType }>,
+  'amountBaseUnits'
+> & {
+  /** A plain decimal in IXO ("100" or "0.5"). */
+  amount: string;
+};
+
+/**
+ * One action of a new group proposal (`daodao.proposal.create` `actions`)
+ * as the model writes it: the protocol's action, with a bank or stake
+ * action's amount in display units as at top level. The group's own
+ * account is its actor, so none of them names the owner.
+ */
+export type ChainTxGroupActionInput =
+  | ChainTxBankInput
+  | ChainTxStakeInput
+  | Exclude<
+      ChainTxGroupAction,
+      { type: 'cosmos.bank.send' | ChainTxStakeType }
+    >;
+
 /**
  * A chain-transaction message as the model writes it: the protocol's
  * message without the owner's identity (`ChainTxOwnerField`), which the
  * host fills. A bank step names a display `amount` of a token from the
  * owner's list (`denom`, absent = uixo); a stake step a display `amount` of
  * IXO. The host converts both to the protocol's `amountBaseUnits` (the
- * listed decimals; 6 for IXO). Every other amount (impact tokens, a
- * collection's payments) is already in the protocol's units.
+ * listed decimals; 6 for IXO), at top level and inside a new group
+ * proposal's actions. Every other amount (impact tokens, a collection's
+ * payments) is already in the protocol's units.
  */
 export type ChainTxMessageInput =
-  | {
-      type: 'cosmos.bank.send';
-      toAddress: string;
-      /** A plain decimal in the token's display units ("1.5"). */
-      amount: string;
-      denom?: string;
-    }
-  | (DistributiveOmit<
-      Extract<ChainTxMessage, { type: ChainTxStakeType }>,
-      'amountBaseUnits'
-    > & {
-      /** A plain decimal in IXO ("100" or "0.5"). */
-      amount: string;
-    })
+  | ChainTxBankInput
+  | ChainTxStakeInput
+  | (Omit<
+      Extract<ChainTxMessage, { type: 'daodao.proposal.create' }>,
+      'actions'
+    > & { actions: ChainTxGroupActionInput[] })
   | DistributiveOmit<
-      Exclude<ChainTxMessage, { type: 'cosmos.bank.send' | ChainTxStakeType }>,
+      Exclude<
+        ChainTxMessage,
+        {
+          type:
+            | 'cosmos.bank.send'
+            | ChainTxStakeType
+            | 'daodao.proposal.create';
+        }
+      >,
       ChainTxOwnerField
     >;
 
@@ -869,7 +903,10 @@ export interface RuntimeContext<TConfig = MergedConfig> {
      * digits than its decimals, zero or more than the listed balance. A
      * stake step's IXO `amount` is converted with 6 decimals; what a stake
      * takes from the wallet counts against the listed IXO balance with the
-     * IXO bank steps, when the list has IXO.
+     * IXO bank steps, when the list has IXO. A new group proposal's bank and
+     * stake actions are converted the same way but never checked against
+     * the owner's balance: the group's own account pays them when the group
+     * carries the proposal out.
      */
     chainTransaction(input: {
       ownerDid: string;

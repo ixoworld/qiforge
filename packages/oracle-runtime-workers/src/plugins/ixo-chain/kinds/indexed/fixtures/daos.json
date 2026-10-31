@@ -25,7 +25,55 @@
                     {
                       "address": "ixo16z0mp6hq24uzct8snu940gkz8kt7vssw0hq2wmxpmgpvjg0zrvmskqem5e",
                       "name": "Staking Group",
-                      "description": "The ReFi Cape Town community members staking group to submit and vote on governance proposals surrounding the strategic direction of ReFi Cape Town."
+                      "description": "The ReFi Cape Town community members staking group to submit and vote on governance proposals surrounding the strategic direction of ReFi Cape Town.",
+                      "daoProposalModulesByDaoAddress": {
+                        "pageInfo": {
+                          "hasNextPage": false
+                        },
+                        "nodes": [
+                          {
+                            "address": "ixo15sy5qemc86ytfka8xqapvntyjth6vxpan5pvd6k98nt7gn7a4myq9t8qvk",
+                            "prefix": "A",
+                            "status": "enabled",
+                            "moduleType": "dao_proposal_single",
+                            "proposalCreationPolicy": {
+                              "module": {
+                                "addr": "ixo1rwpggyhce88huyf5drlgm43n29mczaqm6svdzzjjq48625nnnsvsej2dhv"
+                              }
+                            },
+                            "config": {
+                              "dao": "ixo16z0mp6hq24uzct8snu940gkz8kt7vssw0hq2wmxpmgpvjg0zrvmskqem5e",
+                              "threshold": {
+                                "threshold_quorum": {
+                                  "quorum": {
+                                    "percent": "0.5"
+                                  },
+                                  "threshold": {
+                                    "majority": {}
+                                  }
+                                }
+                              },
+                              "allow_revoting": false,
+                              "max_voting_period": {
+                                "time": 432000
+                              },
+                              "min_voting_period": null,
+                              "only_members_execute": false,
+                              "close_proposal_on_execution_failure": true
+                            },
+                            "daoPreProposeModuleByPreProposeModule": {
+                              "depositInfo": {
+                                "denom": {
+                                  "native": "uixo"
+                                },
+                                "amount": "1000000",
+                                "refund_policy": "only_passed"
+                              },
+                              "openProposalSubmission": false
+                            }
+                          }
+                        ]
+                      }
                     }
                   ]
                 }
@@ -49,7 +97,55 @@
                     {
                       "address": "ixo1up07dctjqud4fns75cnpejr4frmjtddzsmwgcktlyxd4zekhwecql0vjwy",
                       "name": "Members Group",
-                      "description": "The virtual assembly of all cooperative members and ultimate decision-making body of the Impacts DAO Cooperative."
+                      "description": "The virtual assembly of all cooperative members and ultimate decision-making body of the Impacts DAO Cooperative.",
+                      "daoProposalModulesByDaoAddress": {
+                        "pageInfo": {
+                          "hasNextPage": false
+                        },
+                        "nodes": [
+                          {
+                            "address": "ixo1j2x4vsm2a5qefkvgr7gl30gf2puvsa504plzwgdhwl3wvm5lxayqgk3fau",
+                            "prefix": "A",
+                            "status": "enabled",
+                            "moduleType": "dao_proposal_single",
+                            "proposalCreationPolicy": {
+                              "module": {
+                                "addr": "ixo1l6z44fupg8l5mapmuxnrnmvxyclw5wnh5f5hfrtkaq5r0d9s24ms0acyfk"
+                              }
+                            },
+                            "config": {
+                              "dao": "ixo1up07dctjqud4fns75cnpejr4frmjtddzsmwgcktlyxd4zekhwecql0vjwy",
+                              "threshold": {
+                                "threshold_quorum": {
+                                  "quorum": {
+                                    "percent": "0.5"
+                                  },
+                                  "threshold": {
+                                    "majority": {}
+                                  }
+                                }
+                              },
+                              "allow_revoting": false,
+                              "max_voting_period": {
+                                "time": 432000
+                              },
+                              "min_voting_period": null,
+                              "only_members_execute": false,
+                              "close_proposal_on_execution_failure": true
+                            },
+                            "daoPreProposeModuleByPreProposeModule": {
+                              "depositInfo": {
+                                "denom": {
+                                  "native": "uixo"
+                                },
+                                "amount": "1000000000",
+                                "refund_policy": "only_passed"
+                              },
+                              "openProposalSubmission": false
+                            }
+                          }
+                        ]
+                      }
                     }
                   ]
                 }
@@ -79,7 +175,49 @@
                     {
                       "address": "ixo1paa5dm2glgmets9yxafa4w68w5hymthh0as8em80684ntmd930jqcp0xey",
                       "name": "Administration",
-                      "description": "This group manages the administrative decisions and day-to-day activities of the ReFi Cape Town DAO."
+                      "description": "This group manages the administrative decisions and day-to-day activities of the ReFi Cape Town DAO.",
+                      "daoProposalModulesByDaoAddress": {
+                        "pageInfo": {
+                          "hasNextPage": false
+                        },
+                        "nodes": [
+                          {
+                            "address": "ixo1770puc38e2p6cg4shhmum3q70u9jlx5yx3ryvyrhc958694w77rqludyf7",
+                            "prefix": "A",
+                            "status": "enabled",
+                            "moduleType": "dao_proposal_single",
+                            "proposalCreationPolicy": {
+                              "module": {
+                                "addr": "ixo19v3herxcvuhkng5rel3fd8fklv3zz6jltk69drvhyvnr7fzjhh2qgsnl4v"
+                              }
+                            },
+                            "config": {
+                              "dao": "ixo1paa5dm2glgmets9yxafa4w68w5hymthh0as8em80684ntmd930jqcp0xey",
+                              "threshold": {
+                                "threshold_quorum": {
+                                  "quorum": {
+                                    "percent": "0.5"
+                                  },
+                                  "threshold": {
+                                    "majority": {}
+                                  }
+                                }
+                              },
+                              "allow_revoting": false,
+                              "max_voting_period": {
+                                "time": 259200
+                              },
+                              "min_voting_period": null,
+                              "only_members_execute": false,
+                              "close_proposal_on_execution_failure": true
+                            },
+                            "daoPreProposeModuleByPreProposeModule": {
+                              "depositInfo": null,
+                              "openProposalSubmission": false
+                            }
+                          }
+                        ]
+                      }
                     }
                   ]
                 }
@@ -102,7 +240,49 @@
                     {
                       "address": "ixo14g47ggcgge3xgmzddenqzsgr26ckk854gfngz4g908wc29drwussp0k66n",
                       "name": "Test",
-                      "description": "Test"
+                      "description": "Test",
+                      "daoProposalModulesByDaoAddress": {
+                        "pageInfo": {
+                          "hasNextPage": false
+                        },
+                        "nodes": [
+                          {
+                            "address": "ixo1zxmee4zshr3sjfssau8q54rsvm0n6yd0tasr96c3366sjht67l7s08kq6a",
+                            "prefix": "A",
+                            "status": "enabled",
+                            "moduleType": "dao_proposal_single",
+                            "proposalCreationPolicy": {
+                              "module": {
+                                "addr": "ixo142spug0aj7p07zn25vccpkl5jzzcwmudery93l3nq4mnayfcx4lsvymrre"
+                              }
+                            },
+                            "config": {
+                              "dao": "ixo14g47ggcgge3xgmzddenqzsgr26ckk854gfngz4g908wc29drwussp0k66n",
+                              "threshold": {
+                                "threshold_quorum": {
+                                  "quorum": {
+                                    "percent": "0.01"
+                                  },
+                                  "threshold": {
+                                    "majority": {}
+                                  }
+                                }
+                              },
+                              "allow_revoting": false,
+                              "max_voting_period": {
+                                "time": 86400
+                              },
+                              "min_voting_period": null,
+                              "only_members_execute": false,
+                              "close_proposal_on_execution_failure": true
+                            },
+                            "daoPreProposeModuleByPreProposeModule": {
+                              "depositInfo": null,
+                              "openProposalSubmission": false
+                            }
+                          }
+                        ]
+                      }
                     }
                   ]
                 }
@@ -125,7 +305,55 @@
                     {
                       "address": "ixo1xs37f2v7epzusk0c7dwa25snzrn7er5xy0a630ktd4yv7x5g5tvqp095mp",
                       "name": "The Agora",
-                      "description": "The Cosmos Rangers assembly and the Consultative branch of C4H.\nL'Agora rassemble tous les Cosmos Rangers membres de l'ONG. \nL'Agora élit les Sénateurs et vote sur l'attribution du label C4H."
+                      "description": "The Cosmos Rangers assembly and the Consultative branch of C4H.\nL'Agora rassemble tous les Cosmos Rangers membres de l'ONG. \nL'Agora élit les Sénateurs et vote sur l'attribution du label C4H.",
+                      "daoProposalModulesByDaoAddress": {
+                        "pageInfo": {
+                          "hasNextPage": false
+                        },
+                        "nodes": [
+                          {
+                            "address": "ixo1s82hq28kzq28ta807dk2udr04v2rq8trdc4q3y95y54wldw5zp0szcvxvq",
+                            "prefix": "A",
+                            "status": "enabled",
+                            "moduleType": "dao_proposal_single",
+                            "proposalCreationPolicy": {
+                              "module": {
+                                "addr": "ixo1rt7nddc9myt0xshygp6u5xdjrsjnsl5apt7wpkndadns4pn5d8gqjmm2gm"
+                              }
+                            },
+                            "config": {
+                              "dao": "ixo1xs37f2v7epzusk0c7dwa25snzrn7er5xy0a630ktd4yv7x5g5tvqp095mp",
+                              "threshold": {
+                                "threshold_quorum": {
+                                  "quorum": {
+                                    "percent": "0.2"
+                                  },
+                                  "threshold": {
+                                    "majority": {}
+                                  }
+                                }
+                              },
+                              "allow_revoting": true,
+                              "max_voting_period": {
+                                "time": 604800
+                              },
+                              "min_voting_period": null,
+                              "only_members_execute": false,
+                              "close_proposal_on_execution_failure": true
+                            },
+                            "daoPreProposeModuleByPreProposeModule": {
+                              "depositInfo": {
+                                "denom": {
+                                  "native": "uixo"
+                                },
+                                "amount": "1000000000",
+                                "refund_policy": "only_passed"
+                              },
+                              "openProposalSubmission": false
+                            }
+                          }
+                        ]
+                      }
                     }
                   ]
                 }
