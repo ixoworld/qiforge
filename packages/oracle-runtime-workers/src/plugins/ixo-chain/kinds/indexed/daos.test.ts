@@ -334,6 +334,20 @@ describe('daos', () => {
     });
   });
 
+  it('guides a calm note on self-chosen names and admin-added members, never that the person did not join', () => {
+    expect(daos.explain).toContain(
+      'Group names are chosen by the group itself.',
+    );
+    expect(daos.explain).toContain('never suggest the person did not join');
+    expect(daos.explain).toContain('leave it out of an ordinary answer');
+    for (const alarm of [
+      'without its consent',
+      'does not mean the account joined',
+      'never a verified identity or an endorsement',
+    ])
+      expect(daos.explain).not.toContain(alarm);
+  });
+
   it('answers no memberships and refuses an unexpected shape', async () => {
     const plan = planOf(daos, {});
     expect(

@@ -954,6 +954,10 @@ describe('group steps', () => {
     );
     for (const type of CHAIN_TX_GROUP_ACTION_TYPES)
       expect(rules('daodao.proposal.create')).toContain(type);
+    // A proposal with no actions: only marked as carried out.
+    expect(rules('daodao.proposal.execute')).toContain(
+      'say “This just marks it as carried out; nothing else happens.”',
+    );
     // A switched-off list: no new proposal through it, no carrying out a
     // proposal with actions.
     expect(rules('daodao.proposal.create')).toContain(

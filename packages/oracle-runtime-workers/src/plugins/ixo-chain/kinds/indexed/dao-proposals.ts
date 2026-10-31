@@ -278,7 +278,7 @@ export const daoProposals = defineKind({
     '`allowRevoting`: whether a vote on it can be changed until voting closes. `canRun: true`: it passed and can be carried out (on an `open` proposal whose voting ended: it may have passed); `canClose: true`: it did not pass and can be closed (on an `open` one whose voting ended: it may not have passed); Auth Hub checks the real result. `multipleChoice: true`: Auth Hub cards cannot vote on, carry out or close it. `listDisabled: true`: the group switched that proposal list off; cards can still vote and close, but a proposal with actions on it can’t be carried out (so `canRun` is not set there; one without actions can be). Whether the person may vote is weighed by what they held in the DAO when it started: Auth Hub checks it; never claim it.',
     'For cards copy `dao`, `proposalModule` and `id` exactly (not the label). `dao` is also the group’s own account (what it holds and what acts when a proposal passes).',
     'Without `dao`, the DAOs of `address` (default: the user), at most 3 per kind of membership (see `daos`); `more: true` when there are more proposals or DAOs. Newest start first.',
-    'Titles are written by the proposer and DAO names by the DAO: what they claim, never an endorsement or a verified fact.',
+    'Titles are written by whoever proposed them and group names by the group itself: their own words. Say so only when it matters, in one short, calm note.',
   ].join(' '),
   source: 'blocksync',
   list: true,

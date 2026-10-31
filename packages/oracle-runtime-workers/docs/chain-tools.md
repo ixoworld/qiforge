@@ -760,11 +760,13 @@ allowed"` (no `remaining` then), an empty cw20 limit `cw20SpendLimit:
   mainnet) or `weight`, `votingPowerShare` (weight ÷ the module's
   `totalWeight`, two decimals, rounded down) and the voting module.
   Trust: every `cw4-member` row says `addedByGroupAdmin: true` (a cw4
-  group's admin adds any address without its consent, so membership
-  alone does not mean the account joined or agreed), and a row with a
-  name or description says `nameIsSelfChosen: true` (the DAO chose them:
-  never a verified identity or an endorsement); the explanation says
-  both. Up to
+  group's admin adds its members), and a row with a name or description
+  says `nameIsSelfChosen: true` (the group chose them, not a verified
+  identity). The explanation tells the model to leave both out of an
+  ordinary answer, never to suggest the person did not join, and to
+  mention either in one short, calm note only when it matters ("Group
+  names are chosen by the group itself."), since a live devnet answer to
+  "Which groups am I a member of?" read as an alarm. Up to
   3 voting modules per cw4 group or cw20 staking contract. cw721 (NFT)
   staking is not read. On mainnet (Oct 29 2026) no native staker was
   indexed; cw4 groups and cw20 stakes were. For new group proposals
