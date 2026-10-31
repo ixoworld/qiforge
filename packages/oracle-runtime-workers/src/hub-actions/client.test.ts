@@ -7,6 +7,7 @@ import {
   HubActionClient,
 } from './client';
 import type { ActionReferenceV1, ActionOutcomeV1 } from '@ixo/action-protocol';
+import { PENDING_CARD_WORDS } from './transfer';
 
 const id = 'B'.repeat(32);
 const reference: ActionReferenceV1 = {
@@ -884,17 +885,33 @@ describe('Hub action HTTP client', () => {
     answer = { error: 'invalid_operation' };
     await expect(send()).rejects.toThrow('Hub action request returned 400');
     // Temporary: a sequence race (409) or the transfer path down (503).
-    for (const [code, error] of [
-      [409, 'sequence_mismatch'],
-      [503, 'transfer_unavailable'],
+    for (const [code, error, message] of [
+      [
+        409,
+        'sequence_mismatch',
+        'Auth Hub could not prepare this just now because the account changed while it was being prepared; try again shortly.',
+      ],
+      [
+        503,
+        'transfer_unavailable',
+        'Auth Hub is temporarily unavailable for this (transfer_unavailable); try again shortly.',
+      ],
     ] as const) {
       status = code;
       answer = { error };
       await expect(send()).rejects.toMatchObject({
         name: 'HubActionRefused',
-        message: `Auth Hub is temporarily unavailable for this (${error}); try again shortly.`,
+        message,
       });
     }
+    // Another card waiting for the owner's review holds the account.
+    status = 409;
+    answer = { error: 'sequence_reserved' };
+    await expect(send()).rejects.toMatchObject({
+      name: 'HubActionRefused',
+      message: PENDING_CARD_WORDS,
+      httpStatus: 409,
+    });
     // Deterministic: any other 409 is not available for this account.
     status = 409;
     answer = { error: 'operation_not_enabled' };

@@ -406,6 +406,16 @@ const HUB_TRANSIENT_CODES: Readonly<Record<number, readonly string[]>> = {
   503: ['transfer_unavailable'],
 };
 
+/**
+ * Auth Hub's 409 `sequence_reserved`: another card of the owner's is still
+ * waiting for their review and holds the account's next transaction, so no
+ * new card can be made until that one is approved or declined. Plain words
+ * and the next step; the account's sequence is never named (the model
+ * repeated "reserved transaction sequence" to the person on devnet).
+ */
+export const PENDING_CARD_WORDS =
+  'The owner already has another card waiting for their review, so this one cannot be prepared yet. Tell them, in these words or close to them: “You already have another card waiting for your review. Approve or decline that one first, then I can prepare this.” Do not retry until they have, and never mention sequences or anything technical.';
+
 function hubErrorBody(
   body: unknown,
 ): { error: string; reason?: string } | null {
@@ -436,6 +446,8 @@ const HUB_REASON_MAX = 200;
  *   `not_authorized`, `operation_not_registered`: the transfer or
  *   transaction as asked cannot go ahead (with the Hub's reason, quoted and
  *   labelled as data, see `quoteHubText`);
+ * - 409 `sequence_reserved`: another card is waiting for the owner's
+ *   review; approve or decline it first (`PENDING_CARD_WORDS`);
  * - 409 `sequence_mismatch`, 503 `transfer_unavailable`: temporary, try
  *   again shortly;
  * - any other 409: the account may not use this operation (deterministic,
@@ -484,10 +496,16 @@ export function hubPrepareRefusal(
       undefined,
       status,
     );
+  if (status === 409 && parsed.error === 'sequence_reserved')
+    return new HubActionRefused('refused', PENDING_CARD_WORDS, undefined, 409);
   if (HUB_TRANSIENT_CODES[status]?.includes(parsed.error))
     return new HubActionRefused(
       'refused',
-      `Auth Hub is temporarily unavailable for this (${parsed.error}); try again shortly.`,
+      // A sequence race is named by its effect only: the code would read as
+      // jargon if repeated to the person.
+      parsed.error === 'sequence_mismatch'
+        ? 'Auth Hub could not prepare this just now because the account changed while it was being prepared; try again shortly.'
+        : `Auth Hub is temporarily unavailable for this (${parsed.error}); try again shortly.`,
       undefined,
       status,
     );

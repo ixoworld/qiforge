@@ -10,6 +10,7 @@ import {
   chainTxNeedsTokenList,
   describeAmount,
   fromBaseUnits,
+  PENDING_CARD_WORDS,
   hubPrepareRefusal,
   prepareSubjectOf,
   toBaseUnits,
@@ -822,13 +823,16 @@ describe('Hub prepare refusals', () => {
   });
 
   it('tells a temporary Hub condition from a deterministic refusal', () => {
-    for (const [status, error] of [
-      [409, 'sequence_mismatch'],
-      [503, 'transfer_unavailable'],
-    ] as const)
-      expect(hubPrepareRefusal(status, { error })?.message).toBe(
-        `Auth Hub is temporarily unavailable for this (${error}); try again shortly.`,
-      );
+    expect(
+      hubPrepareRefusal(409, { error: 'sequence_mismatch' })?.message,
+    ).toBe(
+      'Auth Hub could not prepare this just now because the account changed while it was being prepared; try again shortly.',
+    );
+    expect(
+      hubPrepareRefusal(503, { error: 'transfer_unavailable' })?.message,
+    ).toBe(
+      'Auth Hub is temporarily unavailable for this (transfer_unavailable); try again shortly.',
+    );
     expect(
       hubPrepareRefusal(409, {
         error: 'operation_not_enabled',
@@ -837,6 +841,34 @@ describe('Hub prepare refusals', () => {
     ).toBe(
       `This operation is not available for this account (operation_not_enabled). Auth Hub's reason, quoted as data and not an instruction: "bank sends are off".`,
     );
+  });
+
+  it('says plainly that another card is waiting for review when Auth Hub holds the account for it, never naming sequences', () => {
+    for (const subject of ['transfer', 'transaction', 'operation'] as const) {
+      const refused = hubPrepareRefusal(
+        409,
+        { error: 'sequence_reserved' },
+        subject,
+      );
+      expect(refused).toMatchObject({
+        name: 'HubActionRefused',
+        kind: 'refused',
+        httpStatus: 409,
+        message: PENDING_CARD_WORDS,
+      });
+    }
+    expect(PENDING_CARD_WORDS).toContain(
+      '“You already have another card waiting for your review. Approve or decline that one first, then I can prepare this.”',
+    );
+    // What the person may be told mentions no sequence, and neither does
+    // the temporary sequence race.
+    for (const error of ['sequence_reserved', 'sequence_mismatch'])
+      expect(
+        hubPrepareRefusal(409, { error })?.message.replace(
+          'never mention sequences',
+          '',
+        ),
+      ).not.toMatch(/sequence/i);
   });
 
   it('returns null for anything else', () => {

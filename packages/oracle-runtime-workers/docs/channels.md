@@ -918,7 +918,13 @@ transaction as written: invalid_message: messages[1].toAddress."),
 `not_authorized` (worded by the steps: a claim's collection admin, a group that lets only members act, or neither),
 `insufficient_funds`, `fee_above_ceiling` and `simulation_failed`; `409
 sequence_mismatch` and `503 transfer_unavailable` are temporary ("try again
-shortly"). Refusals the model cannot fix get fixed words ending "retrying or
+shortly"; the sequence race is named by its effect, never its code). `409
+sequence_reserved` means another card of the owner's is still waiting for
+their review and holds the account: the model is told to say "You already
+have another card waiting for your review. Approve or decline that one
+first, then I can prepare this." and never to mention sequences
+(`PENDING_CARD_WORDS`); on devnet it had relayed "a reserved transaction
+sequence". Refusals the model cannot fix get fixed words ending "retrying or
 changing the fields will not help": `400 operation_not_registered` with
 reason `kind_disabled` or `invalid_operation: signer|network|chainId` (fields
 the runtime sets), `400 protocol_version_required` and `invalid_request`, any
