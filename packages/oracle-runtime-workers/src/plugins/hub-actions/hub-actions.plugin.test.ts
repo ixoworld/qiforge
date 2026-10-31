@@ -1666,7 +1666,7 @@ describe('request_chain_transaction', () => {
     ).toContain('"null"');
   });
 
-  it('sends a provider only the offered types: 4 cost about 3 000 characters, 33 about 19 000, 37 about 26 000', () => {
+  it('sends a provider only the offered types: 4 cost about 3 000 characters, 33 about 19 000, 37 about 21 000', () => {
     const size = (types: readonly ChainTxMessageType[]) => {
       const tool = chainTransactionTool(types);
       if (!tool) throw new Error('no tool');
@@ -1682,13 +1682,14 @@ describe('request_chain_transaction', () => {
     const four = size(CHAIN_TX_LEVEL4_MESSAGE_TYPES);
     const level6 = size(CHAIN_TX_LEVEL6_MESSAGE_TYPES);
     const all = size(CHAIN_TX_MESSAGE_TYPES);
-    // Recorded in docs/channels.md (2 962, 18 735 and 26 228 when
+    // Recorded in docs/channels.md (2 962, 18 735 and 20 950 when
     // measured): every field of every type, a new group proposal's 14
-    // action types included. A session that remembers what it described
-    // pays far less (see the field discovery tests).
+    // action types by name only (their fields are their own top-level
+    // branches). A session that remembers what it described pays far less
+    // (see the field discovery tests).
     expect(four).toBeLessThan(3_500);
     expect(level6).toBeLessThan(20_000);
-    expect(all).toBeLessThan(28_000);
+    expect(all).toBeLessThan(21_500);
     const fourTool = JSON.stringify(
       providerParameters(chainTransactionTool(CHAIN_TX_LEVEL4_MESSAGE_TYPES)!),
     );
@@ -2807,12 +2808,14 @@ describe('request_chain_transaction', () => {
     const example = (type: ChainTxMessageType) =>
       /Say it like: “([^”]+)”/.exec(CHAIN_TX_CATALOG[type].rules)?.[1];
     expect(CHAIN_TX_MESSAGE_TYPES.filter((type) => !example(type))).toEqual([]);
-    // The example the model copies is in everyday words.
+    // The example the model copies is in everyday words: no chain terms
+    // and no type names ("IXO." ending a sentence and "didn’t" are words).
     expect(
-      CHAIN_TX_MESSAGE_TYPES.filter((type) =>
-        /authz|bech32|uixo|valoper|MsgExec|delegat|base units|DID|IID|did:ixo|\.v1|cosmos\.|ixo\./i.test(
-          example(type) ?? '',
-        ),
+      CHAIN_TX_MESSAGE_TYPES.filter(
+        (type) =>
+          /authz|bech32|uixo|valoper|MsgExec|delegat|base units|did:ixo|\.v1|cosmos\.\S|ixo\.\S/i.test(
+            example(type) ?? '',
+          ) || /\bDIDs?\b|\bIID\b/.test(example(type) ?? ''),
       ),
     ).toEqual([]);
     // The cards that need something stored first say so, and the new ids

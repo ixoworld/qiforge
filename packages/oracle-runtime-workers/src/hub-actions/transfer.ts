@@ -1,8 +1,10 @@
 import {
+  CHAIN_TX_GROUP_MESSAGE_TYPES,
   parseChainTxRefusal,
   type ActionOperationV1,
   type ActionReceiptV1,
   type ChainTxGroupAction,
+  type ChainTxMessageType,
   type OptionsToken,
 } from '@ixo/action-protocol';
 import { chainTxRefusalWords, wordableRefusal } from './chain-tx-refusals';
@@ -315,10 +317,26 @@ export function prepareSubjectOf(
       : 'operation';
 }
 
+/**
+ * Why the chain's authorization check refused a chain transaction, by its
+ * steps: a group step (the group may let only members carry proposals out
+ * or propose), a claim step (the collection admin's authorization), or
+ * neither.
+ */
+function notAuthorizedWhy(steps: readonly ChainTxMessageType[]): string {
+  if (steps.some((type) => GROUP_STEP_TYPES.includes(type)))
+    return ' (for a group step, the group may let only its members do this)';
+  if (steps.some((type) => type.startsWith('ixo.claims.')))
+    return ' (for claims, the collection admin has not granted the authorization)';
+  return '';
+}
+const GROUP_STEP_TYPES: readonly ChainTxMessageType[] =
+  CHAIN_TX_GROUP_MESSAGE_TYPES;
+
 /** What the model is told when Auth Hub refuses a prepare (400). */
 const HUB_PREPARE_REFUSALS: Record<
   string,
-  (subject: HubPrepareSubject) => string
+  (subject: HubPrepareSubject, steps: readonly ChainTxMessageType[]) => string
 > = {
   simulation_failed: (subject) =>
     `Auth Hub simulated this ${subject} and it would fail on chain`,
@@ -331,10 +349,11 @@ const HUB_PREPARE_REFUSALS: Record<
   // it or tell the owner what was wrong.
   operation_not_registered: (subject) =>
     `Auth Hub did not accept this ${subject} as written`,
-  // The chain's authorization module refused the simulation: for claims,
-  // the collection admin has not authorized this account.
-  not_authorized: (subject) =>
-    `The account is not authorized on chain for this ${subject} (for claims, the collection admin has not granted the authorization)`,
+  // The chain's authorization check refused the simulation: for claims,
+  // the collection admin has not authorized this account; for a group step,
+  // the group lets only its members do it.
+  not_authorized: (subject, steps) =>
+    `The account is not authorized on chain for this ${subject}${notAuthorizedWhy(steps)}`,
 };
 /** Appended to every refusal no retry or change of arguments can lift. */
 const NOT_FIXABLE = 'retrying or changing the fields will not help';
@@ -426,6 +445,7 @@ export function hubPrepareRefusal(
   status: number,
   body: unknown,
   subject: HubPrepareSubject = 'transfer',
+  steps: readonly ChainTxMessageType[] = [],
 ): HubActionRefused | null {
   const parsed = hubErrorBody(body);
   const unfixable = unfixableRefusal(status, parsed, subject);
@@ -460,7 +480,7 @@ export function hubPrepareRefusal(
   if (words)
     return new HubActionRefused(
       'refused',
-      `${words(subject)}.${reason ? ` ${reason}.` : ''}`,
+      `${words(subject, steps)}.${reason ? ` ${reason}.` : ''}`,
       undefined,
       status,
     );

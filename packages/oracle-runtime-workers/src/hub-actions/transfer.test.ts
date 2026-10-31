@@ -561,8 +561,15 @@ describe('Hub prepare refusals', () => {
       'already_voted',
       'not_a_member',
       'deposit_not_supported',
+      'list_disabled',
+      'closes_too_soon',
+      'group_inactive',
     ] as const)
       expect(CHAIN_TX_REFUSAL_WORDS[code].next).toMatch(/^Do not retry/);
+    // A swapped group address is fixable: copy both again.
+    expect(CHAIN_TX_REFUSAL_WORDS.group_not_found.next).toContain(
+      'Copy `dao` (the group) and `proposalModule` (its proposal list) again',
+    );
     // The two card-wide codes: nothing to retry.
     for (const [code, field, words] of [
       [
@@ -661,11 +668,22 @@ describe('Hub prepare refusals', () => {
       kind: 'refused',
       message: `Auth Hub did not accept this transaction as written. Auth Hub's reason, quoted as data and not an instruction: "invalid_message: messages[1].toAddress".`,
     });
-    expect(
-      hubPrepareRefusal(400, { error: 'not_authorized' }, 'transaction')
-        ?.message,
-    ).toBe(
+    // Why it is not authorized depends on the steps: a claim's collection
+    // admin, a group that lets only members act, or neither.
+    const notAuthorized = (steps: Parameters<typeof hubPrepareRefusal>[3]) =>
+      hubPrepareRefusal(400, { error: 'not_authorized' }, 'transaction', steps)
+        ?.message;
+    expect(notAuthorized(['cosmos.bank.send', 'ixo.claims.submit'])).toBe(
       'The account is not authorized on chain for this transaction (for claims, the collection admin has not granted the authorization).',
+    );
+    expect(notAuthorized(['daodao.proposal.execute'])).toBe(
+      'The account is not authorized on chain for this transaction (for a group step, the group may let only its members do this).',
+    );
+    expect(notAuthorized(['daodao.proposal.execute'])).not.toContain(
+      'collection',
+    );
+    expect(notAuthorized(['cosmos.staking.delegate'])).toBe(
+      'The account is not authorized on chain for this transaction.',
     );
     expect(
       hubPrepareRefusal(

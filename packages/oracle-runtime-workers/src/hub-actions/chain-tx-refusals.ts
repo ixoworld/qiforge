@@ -229,6 +229,28 @@ export const CHAIN_TX_REFUSAL_WORDS = {
     means: 'the group does not own that entity',
     next: 'Check the entity’s owner with chain_lookup entity; only an entity the group owns can be used.',
   },
+  group_not_found: {
+    means:
+      'there is no group or proposal list at that address (the two addresses may be swapped)',
+    next: 'Copy `dao` (the group) and `proposalModule` (its proposal list) again from chain_lookup dao_proposals or daos.',
+  },
+  list_disabled: {
+    means:
+      'the group has switched that proposal list off, so nothing in it can be carried out',
+    next: 'Do not retry; tell them the group would have to switch it back on.',
+  },
+  closes_too_soon: {
+    means: 'voting on this proposal closes before the card could be signed',
+    next: 'Do not retry; tell them voting is about to close.',
+  },
+  group_inactive: {
+    means: 'the group is not taking new proposals right now',
+    next: 'Do not retry now; tell them it can be proposed once the group takes proposals again.',
+  },
+  deposit_changed: {
+    means: 'the group’s proposal deposit changed while the card was being made',
+    next: 'Check the deposit again with chain_lookup daos, tell them the new amount and ask again.',
+  },
 } as const satisfies Record<
   ChainTxRefusalCode,
   { means: string; next: string }

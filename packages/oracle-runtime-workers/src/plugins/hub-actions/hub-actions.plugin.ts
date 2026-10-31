@@ -177,15 +177,17 @@ function messageFieldsOnly(
  * Messages as the model is given them: per type its fields
  * (messageFieldsOnly) when the type was described in this session
  * (`described`; absent: every type), and one open branch naming every
- * other type (`type` one of them, any other field allowed).
+ * other type (`type` one of them, any other field allowed). A union inside
+ * a message (a new group proposal's `actions`) takes `nested` instead.
  */
 function typeUnion(
   schemas: readonly (readonly [string, z.ZodObject])[],
   described?: ReadonlySet<string>,
+  nested: ReadonlySet<string> | undefined = described,
 ) {
   const withFields = schemas
     .filter(([type]) => !described || described.has(type))
-    .map(([, schema]) => messageFieldsOnly(schema, described));
+    .map(([, schema]) => messageFieldsOnly(schema, nested));
   const [firstUnread, ...unread] = schemas
     .filter(([type]) => described && !described.has(type))
     .map(([type]) => type);
@@ -206,8 +208,12 @@ function typeUnion(
  * a new group proposal's actions the same way. A type the model has not
  * read about costs its name only; the request handler refuses it until it
  * is described, and the next model call is given its fields
- * (`chainTxFieldsMiddleware`). Each message is checked by the handler
- * against its full catalogue schema.
+ * (`chainTxFieldsMiddleware`). Without a session store (`described`
+ * absent) every message type carries its fields, but a new proposal's
+ * actions are named only: the 14 action types' fields would repeat their
+ * top-level branches (26 228 characters instead of 20 950); the
+ * handler names any field it misses. Each message is checked by the
+ * handler against its full catalogue schema.
  */
 export function chainTransactionSchemaFor(
   catalog: Readonly<Record<string, { schema: z.ZodObject }>>,
@@ -221,6 +227,7 @@ export function chainTransactionSchemaFor(
             ([type, entry]) => [type, entry.schema] as const,
           ),
           described,
+          described ?? new Set<string>(),
         ),
       )
       .min(1)
@@ -1025,6 +1032,45 @@ export function modelOutcome(
 export const CANCELLED_MEANING =
   'Withdrawn before anything was sent: nothing happened on chain. The person may have cancelled it, or Auth Hub withdrew it because something it depended on changed after the review; do not say the person cancelled it. If they still want it, offer to prepare a fresh one.';
 
+/**
+ * A carried-out group proposal whose actions failed: the transaction
+ * succeeds (code 0) even then, and the network marks the proposal failed
+ * for good, so the receipt's `groupActions` is the only sign.
+ */
+export const GROUP_ACTIONS_FAILED_MEANING =
+  'The transaction went through, but the proposal’s actions failed: nothing in the proposal happened, the network has marked it failed for good and it can’t be carried out again. The network fee was used unless a fee grant covered it. Never say it is done; tell the person plainly.';
+
+/** A carried-out group proposal whose transaction did not show whether its actions ran. */
+export const GROUP_ACTIONS_UNKNOWN_MEANING =
+  'The transaction went through, but Auth Hub could not tell from it whether the proposal’s actions happened. Check the proposal’s status with chain_lookup dao_proposals (executed: they happened; execution_failed: they did not) before saying anything about it; never say it is done until then.';
+
+/** A new group proposal whose number Auth Hub could not read from the transaction. */
+export const PROPOSAL_NUMBER_UNKNOWN_MEANING =
+  'The new proposal was made, but Auth Hub could not read its number from the transaction. Find the new proposal with chain_lookup dao_proposals (the group’s newest) before naming it; never guess its number.';
+
+/**
+ * What an outcome means beyond its fields, for the model: a withdrawn card,
+ * a carried-out proposal whose actions failed or may have, a new proposal
+ * without its number. Undefined for anything else.
+ */
+export function outcomeMeaning(
+  outcome: ActionOutcomeV1 | null,
+): string | undefined {
+  if (!outcome) return undefined;
+  if (outcome.status === 'cancelled') return CANCELLED_MEANING;
+  const receipt = outcome.receipt;
+  if (receipt?.kind !== 'ixo.chain.tx.v1') return undefined;
+  for (const step of receipt.steps) {
+    if (step.type === 'daodao.proposal.execute') {
+      if (step.groupActions === 'failed') return GROUP_ACTIONS_FAILED_MEANING;
+      if (step.groupActions === 'unknown') return GROUP_ACTIONS_UNKNOWN_MEANING;
+    }
+    if (step.type === 'daodao.proposal.create' && step.proposalId === null)
+      return PROPOSAL_NUMBER_UNKNOWN_MEANING;
+  }
+  return undefined;
+}
+
 async function hubActionStatus(
   input: unknown,
   ctx: RuntimeContext,
@@ -1046,15 +1092,14 @@ async function hubActionStatus(
         status: 'unavailable',
         reason: 'No Hub action with this id was prepared for this owner.',
       };
+    const meaning = outcomeMeaning(read.outcome);
     return {
       status: 'known',
       reviewStatus: read.reviewStatus,
       operationStatus: read.operationStatus,
       outcome: modelOutcome(read.outcome),
       ...(read.summary ? { summary: read.summary } : {}),
-      ...(read.outcome?.status === 'cancelled'
-        ? { meaning: CANCELLED_MEANING }
-        : {}),
+      ...(meaning ? { meaning } : {}),
     };
   } catch (error) {
     // An Auth Hub that must be updated first: plain words, not a tool error.
@@ -1205,7 +1250,7 @@ export class HubActionsPlugin extends OraclePlugin {
       {
         name: 'hub_action_status',
         description:
-          'Read the verified status of a Hub action already prepared for this owner. Never executes. A `cancelled` outcome was withdrawn before anything was sent, by the person or by Auth Hub (`meaning` says so): never say the person cancelled it.',
+          'Read the verified status of a Hub action already prepared for this owner. Never executes. A `cancelled` outcome was withdrawn before anything was sent, by the person or by Auth Hub (`meaning` says so): never say the person cancelled it. When `meaning` is present, it says what the outcome means for the person (for example a carried-out group proposal whose actions failed): follow it.',
         schema: statusSchema,
         effect: 'read',
         handler: hubActionStatus,

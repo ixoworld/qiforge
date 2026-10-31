@@ -656,7 +656,8 @@ Measured with protocol 0.9.0, as a provider is sent it (LangChain's
 | all 37                             | 1 (new group proposal)                                | 7 212      |
 | all 37                             | 2 (new group proposal, bank send)                     | 7 644      |
 | all 37                             | the four group steps                                  | 8 018      |
-| all 37                             | all 37 (or no session store)                          | 26 228     |
+| all 37                             | all 37                                                | 26 228     |
+| all 37                             | no session store (every type's fields)                | 20 950     |
 | the 33 of level 6                  | none                                                  | 5 803      |
 | the 33 of level 6                  | all 33                                                | 18 735     |
 | the four 0.6.0 types (level 4 / 5) | all four                                              | 2 962      |
@@ -666,14 +667,17 @@ summary lines). A new proposal's `actions` follow the same discovery: the
 proposal described alone names the 14 action types in one open branch, and
 an action type's fields are declared once that type is described too (7 212
 → 7 644 for a coin send); every field of all 14 is in the tool only when
-everything is described or the session store fails (26 228, against 18 735
-for the 33 types of 0.8.0). `describe_chain_messages` for
+everything is described (26 228, against 18 735 for the 33 types of 0.8.0).
+Without a session store every top-level type carries its fields but a new
+proposal's actions stay named only (20 950): their fields would repeat the
+top-level branches. A provider that holds a call to its schema may then
+drop an action's fields; the handler names what is missing. `describe_chain_messages` for
 `daodao.proposal.create` lists its `actions` items by type name only (each
 action type is described on its own): 8 403 characters with the shared
 rules and the 37 available types. A test keeps the request tool under 3 500
 (four types), 20 000 (33, all described), 7 000 (37, none described), 9 500
-(37, four described), 8 500 (the four group steps described) and 28 000
-(37, all described). For comparison, the protocol's own JSON schema for the
+(37, four described), 8 500 (the four group steps described), 28 000
+(37, all described) and 21 500 (37, no session store). For comparison, the protocol's own JSON schema for the
 `ixo.chain.tx.v1` operation (patterns and limits included) is 41 872
 characters with 37 types (29 711 with 33); the runtime never sends it to a
 model (`request_hub_action` leaves the runtime-built kinds out).
@@ -779,6 +783,17 @@ Hub's `docs/dao-actions-design.md`.
   closing does not return the deposit. The receipt of a new proposal names
   its number (`proposalId`, or `null` when Auth Hub could not read it); a
   carry-out's says whether the group's actions ran (`groupActions`).
+  `hub_action_status` adds a `meaning` for the cases the model must not
+  misread (`outcomeMeaning`): `groupActions: "failed"` (the transaction
+  went through but nothing in the proposal happened, it can't be carried
+  out again, the fee was used unless a fee grant covered it; never "done"),
+  `groupActions: "unknown"` (Auth Hub found no proof either way: check the
+  proposal's status with `chain_lookup dao_proposals` first),
+  and `proposalId: null` (find the new proposal with `chain_lookup
+dao_proposals`; never guess its number). A Hub `not_authorized` refusal
+  is worded by the card's steps: a group step says the group may let only
+  members do it, a claim step names the collection admin's authorization,
+  anything else neither.
 
 Each type's `rules` say what to ask the owner first, which `chain_lookup`
 kind finds its ids (`validators` for a validator the owner names in words,
@@ -864,7 +879,9 @@ codes (`group_not_supported`, `not_in_group`, `group_paused`,
 `no_voting_power`, `already_voted`, `same_vote`, `not_a_member`,
 `proposal_not_passed`, `proposal_not_rejected`, `group_actions_would_fail`,
 `deposit_not_supported`, `proposal_too_large`, `not_for_groups`,
-`not_group_owned`); those the person cannot change say not to retry. A new
+`not_group_owned`, and from the 0.9.0 review `group_not_found`,
+`list_disabled`, `closes_too_soon`, `group_inactive`, `deposit_changed`);
+those the person cannot change say not to retry. A new
 proposal's action keeps its own codes under its path
 (`messages[0].actions[1].validatorAddress: validator_not_found`), worded as
 "in the group's action 2 of the proposal in step 1, …". A reason without a code, or
@@ -872,7 +889,7 @@ with one this runtime does not know, is handled as before. Otherwise Auth
 Hub refusals reach the model in plain words as `{status: 'unavailable',
 reason}`, with the Hub's `reason` appended (at most 200 characters): `400 operation_not_registered` ("Auth Hub did not accept this
 transaction as written: invalid_message: messages[1].toAddress."),
-`not_authorized` (no authorization from the collection admin),
+`not_authorized` (worded by the steps: a claim's collection admin, a group that lets only members act, or neither),
 `insufficient_funds`, `fee_above_ceiling` and `simulation_failed`; `409
 sequence_mismatch` and `503 transfer_unavailable` are temporary ("try again
 shortly"). Refusals the model cannot fix get fixed words ending "retrying or

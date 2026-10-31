@@ -9,6 +9,7 @@ import {
   type ActionOutcomeV1,
   type ActionReferenceV1,
   type ActionReviewView,
+  type ChainTxMessageType,
   type HubActionOptionsV2,
   type HubActionOptionsV3,
 } from '@ixo/action-protocol';
@@ -228,12 +229,17 @@ export class HubActionClient {
     throw new Error('No Hub protocol version to read at');
   }
 
-  /** `subject`: what a refused prepare is called in the model's words. */
+  /**
+   * `subject`: what a refused prepare is called in the model's words;
+   * `steps`: a chain transaction's message types, for the words of a refusal
+   * that depends on them.
+   */
   private async send(
     path: string,
     body?: unknown,
     timeoutMs = HUB_TIMEOUT_MS,
     subject?: HubPrepareSubject,
+    steps?: readonly ChainTxMessageType[],
   ): Promise<unknown> {
     const request = new Request(new URL(path, this.origin), {
       method: body === undefined ? 'GET' : 'POST',
@@ -267,6 +273,7 @@ export class HubActionClient {
         response.status,
         await response.json().catch(() => null),
         subject,
+        steps,
       );
       if (refusal) throw refusal;
     }
@@ -305,6 +312,9 @@ export class HubActionClient {
         ? HUB_CHAIN_TX_PREPARE_TIMEOUT_MS
         : HUB_TIMEOUT_MS,
       prepareSubjectOf(operation.kind),
+      operation.kind === 'ixo.chain.tx.v1'
+        ? operation.messages.map((message) => message.type)
+        : [],
     );
     if (!response || typeof response !== 'object' || !('reference' in response))
       throw new Error('Hub action response has no reference');

@@ -6,7 +6,10 @@ import {
   CHAIN_TX_GROUP_MESSAGE_TYPES,
   CHAIN_TX_MESSAGE_TYPES,
   chainTxIssue,
+  parseOutcome,
+  type ActionOutcomeV1,
   type ChainTxGroupActionType,
+  type ChainTxReceiptStep,
   type ChainTxMessageType,
 } from '@ixo/action-protocol';
 import { createMemoryUserKv } from '../../core/user-kv';
@@ -27,7 +30,10 @@ import type {
 import { GROUP_ACTION_TYPES } from './chain-tx-catalog';
 import {
   CHAIN_TX_CATALOG,
+  GROUP_ACTIONS_FAILED_MEANING,
+  GROUP_ACTIONS_UNKNOWN_MEANING,
   HubActionsPlugin,
+  PROPOSAL_NUMBER_UNKNOWN_MEANING,
   chainTransactionTool,
 } from './hub-actions.plugin';
 
@@ -667,8 +673,10 @@ describe('group steps', () => {
     expect(singlyNamed).toBeGreaterThan(refused / 2);
   });
 
-  it('gives a provider every field of a new proposal’s actions, each action type its own branch', () => {
-    const item = actionsItem(chainTool());
+  it('gives a provider every field of a new proposal’s actions once every type is described, each action type its own branch', () => {
+    const item = actionsItem(
+      chainTransactionTool(CHAIN_TX_MESSAGE_TYPES, CHAIN_TX_MESSAGE_TYPES)!,
+    );
     const branches = branchesOf(item);
     expect([...branches.keys()]).toEqual([...CHAIN_TX_GROUP_ACTION_TYPES]);
     for (const type of CHAIN_TX_GROUP_ACTION_TYPES) {
@@ -694,7 +702,11 @@ describe('group steps', () => {
       branches.get('ixo.claims.update-collection-dates')?.required,
     ).toEqual(expect.arrayContaining(['startDate', 'endDate']));
     // The four steps name no signer and no owner identity.
-    const text = JSON.stringify(providerParameters(chainTool()));
+    const text = JSON.stringify(
+      providerParameters(
+        chainTransactionTool(CHAIN_TX_MESSAGE_TYPES, CHAIN_TX_MESSAGE_TYPES)!,
+      ),
+    );
     for (const field of [
       '"signer"',
       '"delegatorAddress"',
@@ -703,6 +715,27 @@ describe('group steps', () => {
       '"proposer"',
     ])
       expect(text).not.toContain(field);
+  });
+
+  it('names a new proposal’s action types only, without a session store (every top-level type has its fields)', () => {
+    const fallback = chainTool();
+    expect(actionsItem(fallback)?.oneOf).toEqual([
+      {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: [...CHAIN_TX_GROUP_ACTION_TYPES] },
+        },
+        required: ['type'],
+        additionalProperties: {},
+      },
+    ]);
+    expect(
+      Object.keys(
+        branchesOf(
+          providerParameters(fallback).properties?.messages?.items,
+        ).get('cosmos.bank.send')?.properties ?? {},
+      ),
+    ).toEqual(['type', 'toAddress', 'amount', 'denom']);
   });
 
   it('gives a new proposal’s action types only their names until each is described', () => {
@@ -787,6 +820,114 @@ describe('group steps', () => {
     ).toMatchObject({ status: 'prepared' });
   });
 
+  it('tells the model when a carried-out proposal’s actions failed, or a new proposal’s number is unknown, through hub_action_status', async () => {
+    /** A succeeded chain receipt with `step`, parsed by the protocol. */
+    const succeeded = (step: ChainTxReceiptStep): ActionOutcomeV1 =>
+      parseOutcome({
+        version: 'ixo.auth-outcome/2',
+        eventId: 'event-group',
+        reference,
+        ownerDid: OWNER_DID,
+        authorizedRevision: 1,
+        authorizedDigest: reference.digest,
+        sequence: 3,
+        status: 'succeeded',
+        receipt: {
+          kind: 'ixo.chain.tx.v1',
+          actionId: id,
+          revision: 1,
+          digest: reference.digest,
+          chainId: 'ixo-5',
+          txHash: 'f'.repeat(64),
+          height: 100,
+          code: 0,
+          steps: [step],
+        },
+        occurredAt: 1770000000003,
+      });
+    const unused = async () => {
+      throw new Error('unused');
+    };
+    const status = new HubActionsPlugin()
+      .getTools()
+      .find((tool) => tool.name === 'hub_action_status');
+    if (!status) throw new Error('status tool missing');
+    const read = (outcome: ActionOutcomeV1) =>
+      status.handler(
+        { actionId: id },
+        makeRuntimeContext({
+          config: { HUB_ACTIONS_ENABLED: 'true' },
+          hubActions: {
+            capabilities: unused,
+            options: unused,
+            request: unused,
+            chainTransaction: unused,
+            status: async () => ({
+              held: true,
+              reviewStatus: 'authorized',
+              operationStatus: 'succeeded',
+              outcome,
+              summary: null,
+            }),
+          },
+        }),
+      );
+    // Code 0, yet nothing in the proposal happened: never "done".
+    expect(
+      await read(
+        succeeded({ type: 'daodao.proposal.execute', groupActions: 'failed' }),
+      ),
+    ).toMatchObject({
+      status: 'known',
+      outcome: {
+        receipt: {
+          steps: [{ type: 'daodao.proposal.execute', groupActions: 'failed' }],
+        },
+      },
+      meaning: GROUP_ACTIONS_FAILED_MEANING,
+    });
+    for (const words of [
+      'nothing in the proposal happened',
+      'can’t be carried out again',
+      'unless a fee grant covered it',
+      'Never say it is done',
+    ])
+      expect(GROUP_ACTIONS_FAILED_MEANING).toContain(words);
+    expect(
+      await read(
+        succeeded({ type: 'daodao.proposal.execute', groupActions: 'done' }),
+      ),
+    ).not.toHaveProperty('meaning');
+    // No proof either way: never read as done.
+    expect(
+      await read(
+        succeeded({ type: 'daodao.proposal.execute', groupActions: 'unknown' }),
+      ),
+    ).toMatchObject({ meaning: GROUP_ACTIONS_UNKNOWN_MEANING });
+    expect(GROUP_ACTIONS_UNKNOWN_MEANING).toContain('never say it is done');
+    // A new proposal whose number Auth Hub could not read.
+    expect(
+      await read(
+        succeeded({ type: 'daodao.proposal.create', proposalId: null }),
+      ),
+    ).toMatchObject({ meaning: PROPOSAL_NUMBER_UNKNOWN_MEANING });
+    expect(PROPOSAL_NUMBER_UNKNOWN_MEANING).toContain(
+      'chain_lookup dao_proposals',
+    );
+    expect(
+      await read(
+        succeeded({ type: 'daodao.proposal.create', proposalId: '4' }),
+      ),
+    ).not.toHaveProperty('meaning');
+    // The rules say the same before the card.
+    expect(CHAIN_TX_CATALOG['daodao.proposal.execute'].rules).toContain(
+      'read the receipt’s `groupActions`: `"failed"` means the proposal’s actions did not happen and it can’t be tried again; never say it is done.',
+    );
+    expect(CHAIN_TX_CATALOG['daodao.proposal.create'].rules).toContain(
+      'when it is null, find the new proposal with chain_lookup dao_proposals',
+    );
+  });
+
   it('describes each group step in plain words: where the ids come from, what to say first and what can be lost', () => {
     const rules = (type: ChainTxMessageType) => CHAIN_TX_CATALOG[type].rules;
     for (const type of CHAIN_TX_GROUP_MESSAGE_TYPES) {
@@ -799,7 +940,12 @@ describe('group steps', () => {
     expect(rules('daodao.proposal.create')).toContain(
       'Never propose without the owner asking for it',
     );
-    expect(rules('daodao.proposal.create')).toContain('may be lost');
+    expect(rules('daodao.proposal.create')).toContain(
+      'it may be lost if the proposal doesn’t pass or is never carried out',
+    );
+    expect(rules('daodao.proposal.vote')).toContain(
+      'is still recorded until voting closes, but can’t change the result',
+    );
     expect(rules('daodao.proposal.execute')).toContain(
       'refuses the card when the actions would fail',
     );

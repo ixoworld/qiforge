@@ -712,6 +712,44 @@ describe('Hub action HTTP client', () => {
     }
   });
 
+  it('words a chain authorization refusal by the steps it prepared: a group carry-out never mentions a collection admin', async () => {
+    const client = new HubActionClient({
+      origin: 'https://hub.test',
+      key: 'oracle-secret',
+      fetcher: {
+        fetch: async () =>
+          Response.json({ error: 'not_authorized' }, { status: 400 }),
+      },
+    });
+    await expect(
+      client.request({
+        bindingId: reference.bindingId,
+        bindingRevision: reference.bindingRevision,
+        requestKey: 'g'.repeat(64),
+        expiresAt: 1999999999,
+        operation: {
+          kind: 'ixo.chain.tx.v1',
+          chainId: 'ixo-5',
+          network: 'ixo mainnet',
+          signer: 'ixo1qyqszqgpqyqszqgpqyqszqgpqyqszqgpdxlvf0',
+          memo: '',
+          messages: [
+            {
+              type: 'daodao.proposal.execute',
+              dao: `ixo1${'q'.repeat(58)}`,
+              proposalModule: `ixo1${'p'.repeat(58)}`,
+              proposalId: '3',
+            },
+          ],
+        },
+      }),
+    ).rejects.toMatchObject({
+      name: 'HubActionRefused',
+      message:
+        'The account is not authorized on chain for this transaction (for a group step, the group may let only its members do this).',
+    });
+  });
+
   it('turns a Hub transfer refusal (400) into a refusal the model can relay', async () => {
     let answer: unknown = {
       error: 'fee_above_ceiling',
