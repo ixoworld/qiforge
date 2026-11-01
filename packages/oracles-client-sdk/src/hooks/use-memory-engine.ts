@@ -10,8 +10,9 @@ export const useMemoryEngine = (oracleDid: string) => {
     () =>
       new MatrixClient({
         userAccessToken: wallet?.matrix.accessToken ?? '',
+        homeserverUrl: wallet?.matrix.homeServer,
       }),
-    [wallet?.matrix.accessToken],
+    [wallet?.matrix.accessToken, wallet?.matrix.homeServer],
   );
 
   const { data: authzConfig } = useQuery(

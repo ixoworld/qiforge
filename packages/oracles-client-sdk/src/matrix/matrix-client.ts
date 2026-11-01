@@ -31,12 +31,16 @@ function extractHomeServerFromUserId(userId: string): string {
 /**
  * MatrixClient for user operations in the browser.
  *
- * Methods support DID-based URL resolution for decoupled Matrix infrastructure.
- * When a userDid is provided, the homeserver is resolved from the DID document.
- * When no userDid is provided, constructor defaults are used (backwards compatible).
+ * The access token goes only to the homeserver that issued it: the session's
+ * `homeserverUrl` when the caller gives one, else the homeserver named by the
+ * user's DID, else the constructor default. Bots are resolved from the DID and
+ * get a UCAN from `getRoomsBotAuth`, never the token.
  */
 class MatrixClient {
+  private readonly sessionHomeServerUrl?: string;
+
   constructor(public readonly params: MatrixClientConstructorParams) {
+    this.sessionHomeServerUrl = this.params.homeserverUrl;
     this.params.appServiceBotUrl =
       this.params.appServiceBotUrl ??
       MatrixRoomBotServerUrl[chainNetwork ?? 'devnet'];
@@ -50,6 +54,12 @@ class MatrixClient {
   }
 
   private async resolveHomeServerUrl(userDid?: string): Promise<string> {
+    if (this.sessionHomeServerUrl) {
+      return (
+        normalizeMatrixHomeServerUrl(this.sessionHomeServerUrl) ||
+        this.sessionHomeServerUrl
+      );
+    }
     if (userDid) {
       const matrixUrls = await getMatrixUrlsForDid(userDid);
       return matrixUrls.homeServer;
@@ -121,6 +131,11 @@ class MatrixClient {
   public async createAndJoinOracleRoomWithDid(
     payload: CreateAndJoinOracleRoomPayload,
   ): Promise<string> {
+    if (!this.params.getRoomsBotAuth) {
+      throw new Error(
+        'Creating an oracle room needs getRoomsBotAuth: a rooms bot takes a UCAN, never the Matrix token',
+      );
+    }
     const roomsBotUrl = await this.resolveRoomsBotUrl(payload.userDid);
     const url = `${roomsBotUrl}/spaces/oracle/create`;
     const response = await request<{ roomId: string }>(url, 'POST', {
@@ -128,10 +143,7 @@ class MatrixClient {
         did: payload.userDid,
         oracleDid: payload.oracleEntityDid,
       }),
-      headers: {
-        Authorization: `Bearer ${this.params.userAccessToken}`,
-        'Content-Type': 'application/json',
-      },
+      headers: await this.params.getRoomsBotAuth(roomsBotUrl),
     });
 
     return this.joinSpaceOrRoomWithDid({
@@ -215,7 +227,8 @@ class MatrixClient {
     const oracleRoomAlias = `${getEntityRoomAliasFromDid(userDid)}_${getEntityRoomAliasFromDid(oracleEntityDid)}`;
     const oracleRoomFullAlias = `#${oracleRoomAlias}:${hostname}`;
 
-    const url = `${matrixUrls.homeServer}/_matrix/client/v3/directory/room/${encodeURIComponent(oracleRoomFullAlias)}`;
+    const homeServerUrl = await this.resolveHomeServerUrl(userDid);
+    const url = `${homeServerUrl}/_matrix/client/v3/directory/room/${encodeURIComponent(oracleRoomFullAlias)}`;
     const res = await fetch(url, {
       method: 'GET',
       headers: {
