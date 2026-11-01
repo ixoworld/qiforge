@@ -1,5 +1,13 @@
 # @ixo/common
 
+## 1.7.2
+
+### Patch Changes
+
+- Updated dependencies [[`e90df77`](https://github.com/ixoworld/qiforge/commit/e90df770503fe0a43be1e6897de2c70ed3f874cd)]:
+  - @ixo/oracles-chain-client@2.1.4
+  - @ixo/ixo-transaction@0.2.0
+
 ## 1.7.1
 
 ### Patch Changes

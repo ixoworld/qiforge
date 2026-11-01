@@ -1,5 +1,13 @@
 # @ixo/oracle-runtime-workers
 
+## 0.35.1
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @ixo/common@1.7.2
+  - @ixo/ixo-transaction@0.2.0
+
 ## 0.35.0
 
 ### Minor Changes
