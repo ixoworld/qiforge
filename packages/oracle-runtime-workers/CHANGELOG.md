@@ -1,5 +1,11 @@
 # @ixo/oracle-runtime-workers
 
+## 0.34.1
+
+### Patch Changes
+
+- [#438](https://github.com/ixoworld/qiforge/pull/438) [`b3f1152`](https://github.com/ixoworld/qiforge/commit/b3f11528cedfbfb67aae716c28fc11ebf4c44f23) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - `ixo-chain` names wait up to 6 s instead of 4 s, and a slow batch now keeps the names that were ready. Each request sends the IXO Names worker's `options.budgetMs` (5 s): the worker answers with what it has, the rest come back `partial`, and it finishes them in the background for the next call. Before, a batch that took longer than the wait got no names at all.
+
 ## 0.34.0
 
 ### Minor Changes
