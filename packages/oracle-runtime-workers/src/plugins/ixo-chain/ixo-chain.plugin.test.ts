@@ -5,15 +5,23 @@ import { validateManifest } from '../../core/manifest';
 import { makeEnv, makeRuntimeContext } from '../../core/test-fixtures';
 import type { PluginTool, RuntimeContext } from '../../plugin-api/types';
 import { resetDenomMetadataCache } from './denoms';
-import { resetUpstreamHealth } from './http';
+import { resetUpstreamHealth, TOOL_BUDGET_MS } from './http';
 import {
   CHAIN_REST_URLS,
   IxoChainPlugin,
+  NAMES_BUDGET_MS,
+  NAMES_RESERVE_MS,
   chainLookupSchema,
   chainRestUrl,
+  namesClientId,
+  namesUrl,
 } from './ixo-chain.plugin';
+import feeReceived from './kinds/chain/fixtures/fee-grants-received.json';
 import { KINDS } from './kinds/registry';
 import { MAX_RESULT_CHARS } from './lookup';
+import { BATCH_WINDOW_MS, NAMES_URLS, resetNamesClient } from './names/client';
+import type { NameInfo, NameMap } from './names/types';
+import { resetOverviewCache } from './overview';
 import { TOKEN_DECIMALS_NOTE } from './summaries';
 
 const ADDRESS = 'ixo1cra6p0jefu8f907gqngkfzxur26k7f73an4v95';
@@ -35,6 +43,8 @@ function ctxFor(
     config: {
       NETWORK: 'mainnet',
       BLOCKSYNC_GRAPHQL_URL: blocksyncUrl,
+      // The chain reads are tested on their own; the names tests turn it on.
+      IXO_NAMES: 'off',
       ...config,
     },
     user: {
@@ -67,6 +77,7 @@ let warn: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   resetDenomMetadataCache();
   resetUpstreamHealth();
+  resetNamesClient();
   warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 });
 afterEach(() => {
@@ -155,8 +166,14 @@ describe('IxoChainPlugin', () => {
       expect(tool?.description).toContain('`network`');
     // The overview is bound beside `chain_lookup` and points to its rules.
     expect(overview?.description).toContain(
-      'Units and text as in `chain_lookup`.',
+      'Units, text and names as in `chain_lookup`.',
     );
+    const names =
+      'Call people and things by their `names` entry; give an address or DID only when asked; beside a `selfChosen` name the user did not pick, also give the short address (first 12 … last 6 characters).';
+    expect(plugin.operatingGuide).toContain(`- ${names}`);
+    expect(lookup?.description).toContain(names);
+    expect(balances?.description).toContain('Names as in `chain_lookup`.');
+    expect(describe?.description).not.toContain('names');
     expect(overview?.description).toContain(
       'for one fact use `get_account_balances` or `chain_lookup`',
     );
@@ -182,7 +199,10 @@ describe('IxoChainPlugin', () => {
           tool.description.length,
         plugin.operatingGuide.length,
       );
-    expect(footprint).toBeLessThanOrEqual(4_000);
+    // Raised from 4,000 for the names rule, which the guide and the
+    // `chain_lookup` description both state (a router preload shows no
+    // guide).
+    expect(footprint).toBeLessThanOrEqual(4_420);
     // The lookup schema names each kind once, in its `kind` enum.
     const lookupSchema = JSON.stringify(z.toJSONSchema(chainLookupSchema));
     expect(lookupSchema).toContain(
@@ -255,6 +275,62 @@ describe('IxoChainPlugin', () => {
           field: 'IXO_CHAIN_IBC_DENOMS',
         }),
       ]);
+  });
+
+  it('validates IXO_NAMES and IXO_NAMES_URL at boot, names on by default', () => {
+    const { schema, pluginOwnership } = composeEnvSchema(
+      [new IxoChainPlugin()],
+      baseEnvSchema,
+    );
+    expect(
+      validateEnv(schema, makeEnv(), pluginOwnership).config.IXO_NAMES,
+    ).toBe('on');
+    for (const good of [
+      { IXO_NAMES: 'off' },
+      { IXO_NAMES_URL: 'https://names.example' },
+    ])
+      expect(validateEnv(schema, makeEnv(good), pluginOwnership).valid).toBe(
+        true,
+      );
+    for (const [field, bad] of [
+      ['IXO_NAMES', 'no'],
+      ['IXO_NAMES_URL', 'http://names.example'],
+      ['IXO_NAMES_URL', 'https://u:p@names.example'],
+      ['IXO_NAMES_URL', 'names.example'],
+    ] as const)
+      expect(
+        validateEnv(schema, makeEnv({ [field]: bad }), pluginOwnership).errors,
+      ).toEqual([expect.objectContaining({ plugin: 'ixo-chain', field })]);
+  });
+
+  it('picks the names worker per NETWORK unless IXO_NAMES_URL is set', () => {
+    expect(namesUrl({ NETWORK: 'mainnet' })).toBe('https://names.ixo.earth');
+    expect(namesUrl({ NETWORK: 'testnet' })).toBe(
+      'https://testnet.names.ixo.earth',
+    );
+    expect(namesUrl({ NETWORK: 'devnet' })).toBe(
+      'https://devnet.names.ixo.earth',
+    );
+    expect(namesUrl({})).toBe(NAMES_URLS.mainnet);
+    expect(
+      namesUrl({ NETWORK: 'devnet', IXO_NAMES_URL: 'https://names.test/' }),
+    ).toBe('https://names.test');
+  });
+
+  it('asks the names worker under a stable client id of at most 64 [a-z0-9-]', () => {
+    expect(
+      namesClientId({ ORACLE_NAME: 'Qi Companion', NETWORK: 'testnet' }),
+    ).toBe('ixo-chain-qi-companion-testnet');
+    expect(namesClientId({ ORACLE_NAME: '  ✨ ', NETWORK: 'devnet' })).toBe(
+      'ixo-chain-oracle-devnet',
+    );
+    expect(namesClientId({})).toBe('ixo-chain-oracle-mainnet');
+    const long = namesClientId({
+      ORACLE_NAME: `${'Very Long Oracle Name '.repeat(5)}`,
+      NETWORK: 'mainnet',
+    });
+    expect(long.length).toBeLessThanOrEqual(64);
+    expect(long).toMatch(/^ixo-chain-[a-z0-9]+(?:-[a-z0-9]+)*-mainnet$/);
   });
 
   it('picks the chain REST gateway per NETWORK unless CHAIN_REST_URL is set', () => {
@@ -1162,5 +1238,493 @@ describe('describe_chain_kinds', () => {
     ).toBe(false);
     expect(schema.safeParse({ kinds: ['x'.repeat(65)] }).success).toBe(false);
     expect(schema.safeParse({ other: true }).success).toBe(false);
+  });
+});
+
+describe('names', () => {
+  const ENTITY = `did:ixo:entity:${'e'.repeat(32)}`;
+  const PROTOCOL = `did:ixo:entity:${'b'.repeat(32)}`;
+  /** The fee granter of the recorded fee grant. */
+  const GRANTER = 'ixo1vafr2dqhgz8frc7gf22njz8y2u0fue4kuetey6';
+  const NAMES = 'https://names.ixo.earth/v1/resolve';
+  const info = (name: string, selfChosen = false): NameInfo => ({
+    name,
+    source: selfChosen ? 'matrix' : 'entity',
+    selfChosen,
+  });
+  const idsSchema = z.object({ ids: z.array(z.string()) });
+
+  /** The names worker's answer naming what `table` names. */
+  function namesAnswer(init: RequestInit | undefined, table: NameMap) {
+    const { ids } = idsSchema.parse(JSON.parse(String(init?.body)));
+    return json({
+      network: 'mainnet',
+      results: Object.fromEntries(
+        ids.map((id) => {
+          const found = table[id];
+          return [
+            id,
+            {
+              id,
+              kind: 'entity',
+              normalized: id,
+              display: found?.name ?? id,
+              status: found ? 'resolved' : 'unresolved',
+              complete: true,
+              name: found?.name ?? null,
+              source: found?.source ?? null,
+              selfChosen: found?.selfChosen ?? false,
+              cache: { hit: 'none', freshUntil: null },
+            },
+          ];
+        }),
+      ),
+      meta: {},
+    });
+  }
+
+  /** Stubs fetch: the names worker answers from `table`, `route` everything else. */
+  function stubWithNames(
+    table: NameMap,
+    route: (url: string, init?: RequestInit) => Response | Promise<Response>,
+  ) {
+    const asked: string[][] = [];
+    const fetcher = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url !== NAMES) return route(url, init);
+        asked.push(idsSchema.parse(JSON.parse(String(init?.body))).ids);
+        return namesAnswer(init, table);
+      },
+    );
+    vi.stubGlobal('fetch', fetcher);
+    return { fetcher, asked };
+  }
+
+  const on = (config: Record<string, unknown> = {}) =>
+    ctxFor(DID, BLOCKSYNC, { IXO_NAMES: 'on', ...config });
+
+  /** The Blocksync answer of one `claim_collections` request. */
+  const collections = (nodes: unknown[]) =>
+    json({ data: { r0: { totalCount: nodes.length, nodes } } });
+  const collectionNode = (id: string) => ({
+    id,
+    entity: ENTITY,
+    admin: ADDRESS,
+    protocol: PROTOCOL,
+  });
+
+  beforeEach(() => resetOverviewCache());
+
+  it('names another account in get_account_balances, never the user', async () => {
+    const { asked } = stubWithNames({ [OTHER]: info('Alice', true) }, () =>
+      json({ balances: [] }),
+    );
+    const balances = tool('get_account_balances');
+    expect(await balances.handler({ address: OTHER }, on())).toEqual({
+      ok: true,
+      network: 'mainnet',
+      source: 'chain',
+      fetchedAt: expect.any(String),
+      address: OTHER,
+      subject: 'other',
+      tokens: [],
+      names: { [OTHER]: info('Alice', true) },
+    });
+    const own = await balances.handler({}, on());
+    expect(own).not.toHaveProperty('names');
+    expect(asked).toEqual([[OTHER]]);
+  });
+
+  it("gives chain_lookup one names map for its results, collection ids included, without the user's own", async () => {
+    const { asked } = stubWithNames(
+      {
+        'collection:8250': info('Clean cooking claims', true),
+        [ENTITY]: info('Supamoto Malawi'),
+        [PROTOCOL]: info('Clean cooking protocol'),
+        // Not in the answer: never asked, never named.
+        [GRANTER]: info('Not here'),
+      },
+      () => collections([collectionNode('8250')]),
+    );
+    const result = await tool('chain_lookup').handler(
+      { requests: [{ kind: 'claim_collections' }] },
+      on(),
+    );
+    expect(asked).toEqual([['collection:8250', ENTITY, PROTOCOL]]);
+    expect(result).toMatchObject({
+      ok: true,
+      results: [
+        {
+          kind: 'claim_collections',
+          ok: true,
+          data: { items: [{ id: '8250', admin: ADDRESS, entity: ENTITY }] },
+        },
+      ],
+    });
+    const { names } = z
+      .object({ names: z.record(z.string(), z.unknown()) })
+      .parse(result);
+    expect(names).toEqual({
+      'collection:8250': info('Clean cooking claims', true),
+      [ENTITY]: info('Supamoto Malawi'),
+      [PROTOCOL]: info('Clean cooking protocol'),
+    });
+    expect(Object.keys(names)).toEqual(['collection:8250', ENTITY, PROTOCOL]);
+  });
+
+  it('adds names to the overview per call, never to the kept answer', async () => {
+    stubWithNames({ [GRANTER]: info('IXO fee payer') }, (url) => {
+      if (url.includes('/cosmos/feegrant/v1beta1/allowances/'))
+        return json(feeReceived);
+      throw new Error(`unexpected ${url}`);
+    });
+    const overview = tool('get_account_overview');
+    const first = await overview.handler({ sections: ['fee_grants'] }, on());
+    expect(first).toMatchObject({
+      ok: true,
+      sections: {
+        fee_grants: {
+          ok: true,
+          summary: { top: [expect.objectContaining({ granter: GRANTER })] },
+        },
+      },
+      names: { [GRANTER]: info('IXO fee payer') },
+    });
+    // The kept answer (20 s) serves the next call, names off, without the first one's names.
+    const again = await overview.handler(
+      { sections: ['fee_grants'] },
+      ctxFor(),
+    );
+    expect(again).not.toHaveProperty('names');
+  });
+
+  it('asks nothing for describe_chain_kinds, nor anything at all with IXO_NAMES=off', async () => {
+    const { asked } = stubWithNames({ [OTHER]: info('Alice') }, () =>
+      json({ balances: [] }),
+    );
+    expect(
+      await tool('describe_chain_kinds').handler({}, on()),
+    ).not.toHaveProperty('names');
+    expect(
+      await tool('get_account_balances').handler(
+        { address: OTHER },
+        ctxFor(DID, BLOCKSYNC, { IXO_NAMES: 'off' }),
+      ),
+    ).not.toHaveProperty('names');
+    expect(asked).toEqual([]);
+  });
+
+  it('asks the worker of IXO_NAMES_URL, under the oracle client id', async () => {
+    const fetcher = stubFetch((url) =>
+      url.startsWith('https://names.test/')
+        ? json({ network: 'mainnet', results: {} })
+        : json({ balances: [] }),
+    );
+    await tool('get_account_balances').handler(
+      { address: OTHER },
+      on({ IXO_NAMES_URL: 'https://names.test', ORACLE_NAME: 'Qi' }),
+    );
+    const post = fetcher.mock.calls.find(([url]) =>
+      String(url).startsWith('https://names.test/'),
+    );
+    expect(String(post?.[0])).toBe('https://names.test/v1/resolve');
+    expect(new Headers(post?.[1]?.headers).get('x-client-id')).toBe(
+      'ixo-chain-qi-mainnet',
+    );
+  });
+
+  it('leaves the answer as it was when the worker names nothing or fails', async () => {
+    const request = { requests: [{ kind: 'claim_collections' }] };
+    stubFetch(() => collections([collectionNode('8250')]));
+    const plain = await tool('chain_lookup').handler(request, ctxFor());
+    expect(plain).not.toHaveProperty('names');
+    for (const worker of [
+      async (init?: RequestInit) => namesAnswer(init, {}),
+      async () => new Response('', { status: 500 }),
+      async () => new Response('not json', { status: 200 }),
+      async (): Promise<Response> => {
+        throw new TypeError('network down');
+      },
+    ]) {
+      resetNamesClient();
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) =>
+          String(input) === NAMES
+            ? worker(init)
+            : collections([collectionNode('8250')]),
+        ),
+      );
+      const result = await tool('chain_lookup').handler(request, on());
+      expect(result).toEqual({
+        ...Object(plain),
+        fetchedAt: expect.any(String),
+      });
+    }
+  });
+
+  it(`waits at most ${NAMES_BUDGET_MS / 1000} s for names, then answers without them`, async () => {
+    vi.useFakeTimers();
+    // The worker never answers.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) =>
+        String(input) === NAMES
+          ? new Promise<Response>((_resolve, reject) =>
+              init?.signal?.addEventListener('abort', () =>
+                reject(new DOMException('aborted', 'AbortError')),
+              ),
+            )
+          : json({ balances: [] }),
+      ),
+    );
+    const pending = tool('get_account_balances').handler(
+      { address: OTHER },
+      on(),
+    );
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(NAMES_BUDGET_MS - 1);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settled).toBe(true);
+    expect(await pending).toMatchObject({ ok: true, address: OTHER });
+    expect(await pending).not.toHaveProperty('names');
+  });
+
+  it(`never waits for names into the last ${NAMES_RESERVE_MS / 1000} s of the call's budget`, async () => {
+    vi.useFakeTimers();
+    const denoms = Array.from({ length: 12 }, (_, i) => `ufoo${i}`);
+    /** Bank balances at once; each denom's metadata a 404 after `ms`; the worker after 3 s. */
+    const slow = (ms: number) => {
+      const asked: number[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.includes('/cosmos/bank/v1beta1/balances/'))
+            return json({
+              balances: denoms.map((denom) => ({ denom, amount: '1' })),
+            });
+          if (url === NAMES) asked.push(Date.now());
+          const answer = () =>
+            url === NAMES
+              ? namesAnswer(init, { [OTHER]: info('Alice', true) })
+              : new Response('', { status: 404 });
+          return new Promise<Response>((resolve, reject) => {
+            const timer = setTimeout(
+              () => resolve(answer()),
+              url === NAMES ? 3_000 : ms,
+            );
+            init?.signal?.addEventListener('abort', () => {
+              clearTimeout(timer);
+              reject(new DOMException('aborted', 'AbortError'));
+            });
+          });
+        }),
+      );
+      return asked;
+    };
+    const balances = tool('get_account_balances');
+
+    // Twelve denoms read four at a time, 5 s each: the balances read ends
+    // 15 s into the call, so names get their whole 4 s.
+    let asked = slow(5_000);
+    let start = Date.now();
+    let pending = balances.handler({ address: OTHER }, on());
+    await vi.advanceTimersByTimeAsync(TOOL_BUDGET_MS);
+    expect(await pending).toMatchObject({
+      names: { [OTHER]: info('Alice', true) },
+    });
+    expect(asked).toEqual([start + 15_000 + BATCH_WINDOW_MS]);
+
+    // 6 s each: the read ends 18 s in, leaving names 1 s, too short for
+    // the worker's 3 s.
+    resetDenomMetadataCache();
+    resetNamesClient();
+    asked = slow(6_000);
+    start = Date.now();
+    pending = balances.handler({ address: OTHER }, on());
+    await vi.advanceTimersByTimeAsync(18_000 + 999);
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settled).toBe(true);
+    expect(await pending).not.toHaveProperty('names');
+    expect(asked).toEqual([start + 18_000 + BATCH_WINDOW_MS]);
+
+    // 6.5 s each: the read ends 19.5 s in; no names are asked at all.
+    resetDenomMetadataCache();
+    resetNamesClient();
+    asked = slow(6_500);
+    pending = balances.handler({ address: OTHER }, on());
+    await vi.advanceTimersByTimeAsync(TOOL_BUDGET_MS);
+    expect(await pending).not.toHaveProperty('names');
+    expect(asked).toEqual([]);
+  });
+
+  it("throws the turn's abort while names are read", async () => {
+    const controller = new AbortController();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input) !== NAMES) return json({ balances: [] });
+        controller.abort(new Error('turn aborted'));
+        return new Promise<Response>(() => undefined);
+      }),
+    );
+    const ctx = { ...on(), abortSignal: controller.signal };
+    await expect(
+      tool('get_account_balances').handler({ address: OTHER }, ctx),
+    ).rejects.toThrow('turn aborted');
+  });
+
+  it('cuts rows before names to stay within the size cap, keeping the names still in the answer', async () => {
+    const ids = Array.from(
+      { length: 20 },
+      (_, n) => `did:ixo:entity:${n.toString(16).padStart(32, '0')}`,
+    );
+    const page = {
+      totalCount: ids.length,
+      nodes: ids.map((id, n) => ({
+        id: `${n}`,
+        entity: id,
+        admin: ADDRESS,
+        startDate: 'd'.repeat(110),
+        endDate: 'd'.repeat(110),
+      })),
+    };
+    const table = Object.fromEntries(
+      ids.map((id) => [id, info(`${'N'.repeat(110)} ${id.slice(-4)}`)]),
+    );
+    stubWithNames(table, () => json({ data: { r0: page, r1: page } }));
+    const request = {
+      requests: [
+        { kind: 'claim_collections', args: { first: 20 } },
+        { kind: 'claim_collections', args: { entity: ENTITY, first: 20 } },
+      ],
+    };
+    const shape = z.object({
+      results: z.array(
+        z.object({
+          data: z.object({ items: z.array(z.object({ entity: z.string() })) }),
+        }),
+      ),
+    });
+    const rowsOf = (answer: unknown) =>
+      shape
+        .parse(answer)
+        .results.reduce((sum, entry) => sum + entry.data.items.length, 0);
+    const unnamed = await tool('chain_lookup').handler(request, ctxFor());
+    const result = await tool('chain_lookup').handler(request, on());
+    expect(JSON.stringify(result).length).toBeLessThanOrEqual(MAX_RESULT_CHARS);
+    // Rows were cut to make room for the names.
+    expect(rowsOf(result)).toBeLessThan(rowsOf(unnamed));
+    const parsed = z
+      .object({
+        results: z.array(
+          z.object({
+            ok: z.literal(true),
+            truncated: z.literal(true),
+            data: z.object({
+              items: z.array(z.object({ entity: z.string() })),
+            }),
+          }),
+        ),
+        names: z.record(z.string(), z.unknown()),
+      })
+      .parse(result);
+    const present = new Set(
+      parsed.results.flatMap((entry) =>
+        entry.data.items.map((row) => row.entity),
+      ),
+    );
+    expect(present.size).toBeGreaterThan(0);
+    expect(present.size).toBeLessThan(ids.length);
+    expect(Object.keys(parsed.names)).toEqual(
+      ids.filter((id) => present.has(id)),
+    );
+  });
+
+  it('cuts get_account_balances tokens one at a time to make room for names', async () => {
+    // The worker cleans names to at most 120 characters.
+    const long = info('A'.repeat(120), true);
+    let count = 1;
+    stubWithNames({ [OTHER]: long }, (url) =>
+      url.includes('/cosmos/bank/v1beta1/balances/')
+        ? json({
+            balances: Array.from({ length: count }, (_, i) => ({
+              denom: `ufoo${i}`,
+              amount: '1',
+            })),
+          })
+        : new Response('', { status: 404 }),
+    );
+    const answerShape = z.looseObject({
+      tokens: z.array(z.unknown()),
+      names: z.record(z.string(), z.unknown()).optional(),
+    });
+    const balancesOf = async (tokens: number, names: 'on' | 'off') => {
+      count = tokens;
+      resetDenomMetadataCache();
+      return answerShape.parse(
+        await tool('get_account_balances').handler(
+          { address: OTHER },
+          ctxFor(DID, BLOCKSYNC, { IXO_NAMES: names }),
+        ),
+      );
+    };
+    // The most tokens that fit without names: then the names entry, longer
+    // than one token, cannot fit without a cut.
+    const tokenSize =
+      JSON.stringify(await balancesOf(2, 'off')).length -
+      JSON.stringify(await balancesOf(1, 'off')).length;
+    const nameSize = JSON.stringify({ names: { [OTHER]: long } }).length;
+    expect(tokenSize).toBeLessThan(nameSize);
+    // The answer is halved once it is over the cap: the first count that
+    // comes back truncated is one too many.
+    let fitting = 1;
+    while (fitting < 1_000 && !(await balancesOf(fitting + 1, 'off')).truncated)
+      fitting += 1;
+    const unnamed = await balancesOf(fitting, 'off');
+    expect(unnamed.tokens).toHaveLength(fitting);
+    expect(unnamed).not.toHaveProperty('truncated');
+
+    const named = await balancesOf(fitting, 'on');
+    expect(JSON.stringify(named).length).toBeLessThanOrEqual(MAX_RESULT_CHARS);
+    expect(named.names).toEqual({ [OTHER]: long });
+    expect(named.truncated).toBe(true);
+    const kept = named.tokens.length;
+    expect(kept).toBeLessThan(fitting);
+    expect(named.tokens).toEqual(unnamed.tokens.slice(0, kept));
+    // One more token would not fit: the cut went row by row.
+    const withOneMore = { ...named, tokens: unnamed.tokens.slice(0, kept + 1) };
+    expect(JSON.stringify(withOneMore).length).toBeGreaterThan(
+      MAX_RESULT_CHARS,
+    );
+  });
+
+  it('logs a failed names request once, with its status and never an identifier', async () => {
+    stubFetch((url) =>
+      url === NAMES
+        ? new Response('', { status: 503 })
+        : json({ balances: [] }),
+    );
+    const result = await tool('get_account_balances').handler(
+      { address: OTHER },
+      on(),
+    );
+    expect(result).not.toHaveProperty('names');
+    expect(warn).toHaveBeenCalledTimes(1);
+    const line = String(warn.mock.calls[0]?.[0]);
+    expect(line).toBe('[ixo-chain] names: HTTP 503; paused for 60 s');
+    expect(line).not.toContain(OTHER);
   });
 });

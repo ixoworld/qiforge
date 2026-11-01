@@ -42,6 +42,8 @@ import type {
   KindRestOptions,
   KindResult,
 } from './kinds/types';
+import { dropLastName, pruneNames } from './names/collect';
+import type { NameMap } from './names/types';
 import { firstOf, type Subject } from './queries';
 import { restJson, type Absent } from './rest';
 import { isRecord } from './summaries';
@@ -396,6 +398,60 @@ export function shrink(
 }
 
 /**
+ * One row cut: the last row of the largest list inside `within` left out
+ * and `holder` marked `truncated`; false when no list has more than one
+ * row left.
+ */
+export function cutRow(
+  holder: { truncated?: boolean },
+  within: unknown,
+): boolean {
+  const found = largestArray(within);
+  if (!found) return false;
+  found.list.pop();
+  holder.truncated = true;
+  return true;
+}
+
+/**
+ * One row cut across `results`: the last row of the largest list in any
+ * `ok` result left out and that result marked `truncated`; false when no
+ * result has a list of more than one row left.
+ */
+export function cutRowAcross(results: LookupResult[]): boolean {
+  let largest: { result: LookupResult; size: number } | undefined;
+  for (const result of results) {
+    if (!result.ok) continue;
+    const found = largestArray(result.data);
+    if (found && (!largest || found.size > largest.size))
+      largest = { result, size: found.size };
+  }
+  return largest?.result.ok
+    ? cutRow(largest.result, largest.result.data)
+    : false;
+}
+
+/**
+ * Fits `answer`, which carries `names`, into {@link MAX_RESULT_CHARS}.
+ * Rows go first, one `cutRows` at a time (one row each: {@link cutRow},
+ * {@link cutRowAcross}), each cut followed by leaving out the names of
+ * identifiers no longer in the answer; with no row left to cut, names go
+ * from the end of the map (the least placed identifiers). An answer is
+ * never left out whole to make room for names. An empty map is removed.
+ */
+export function fitNames(
+  answer: { names?: NameMap },
+  cutRows: () => boolean,
+): void {
+  while (size(answer) > MAX_RESULT_CHARS) {
+    if (!cutRows()) break;
+    pruneNames(answer);
+  }
+  while (size(answer) > MAX_RESULT_CHARS) if (!dropLastName(answer)) break;
+  if (answer.names && !Object.keys(answer.names).length) delete answer.names;
+}
+
+/**
  * Fits `parts` (the results inside `whole`) into what
  * {@link MAX_RESULT_CHARS} leaves after the envelope: each part gets an
  * equal share, smallest first, and a share a part does not use passes to
@@ -446,18 +502,22 @@ export function fitResults(whole: unknown, results: LookupResult[]): void {
   }
 }
 
+export interface LookupAnswer {
+  ok: true;
+  network: ChainCall['network'];
+  fetchedAt: string;
+  results: LookupResult[];
+  /** What the identifiers in the results are called (added by the tool). */
+  names?: NameMap;
+}
+
 /** `chain_lookup`'s answer: every request's result in order, cut to size. */
 export async function chainLookup(
   call: ChainCall,
   identity: UserIdentity,
   requests: readonly KindRequest[],
   options: LookupOptions,
-): Promise<{
-  ok: true;
-  network: ChainCall['network'];
-  fetchedAt: string;
-  results: LookupResult[];
-}> {
+): Promise<LookupAnswer> {
   const results = await runRequests(call, identity, requests, options);
   const whole = {
     ok: true as const,

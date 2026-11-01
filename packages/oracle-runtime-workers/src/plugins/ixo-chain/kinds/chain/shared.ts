@@ -7,9 +7,10 @@
 import { z } from 'zod';
 import {
   BUDGET_SPENT,
+  ReadsInFlight,
   hasBudget,
   throwIfAborted,
-  untilAborted,
+  untilDeadline,
   type Failure,
   type Outcome,
 } from '../../http';
@@ -213,12 +214,14 @@ export function resetChainKindCaches(): void {
  * is never kept. A read in flight is shared by every call that needs the
  * same key. A call that joined a read which then timed out (the upstream,
  * or the launching call's budget) or was aborted by its launching turn
- * reads again itself while its own budget allows; it waits on its own
- * turn's abort and throws only that, never another turn's.
+ * reads again itself while its own budget allows; it waits until its own
+ * deadline at most, on its own turn's abort, and throws only that, never
+ * another turn's. A read that died with its actor is replaced by the next
+ * caller past its age limit ({@link ReadsInFlight}).
  */
 export class ReadCache<T> {
   private readonly answers = new Map<string, { value: T; expiresAt: number }>();
-  private readonly inflight = new Map<string, Promise<Outcome<T>>>();
+  private readonly inflight = new ReadsInFlight<Outcome<T>>();
 
   constructor(
     private readonly ttlMs: number,
@@ -237,33 +240,33 @@ export class ReadCache<T> {
     if (hit && hit.expiresAt > Date.now())
       return { ok: true, value: hit.value };
     if (hit) this.answers.delete(id);
-    const running = this.inflight.get(id);
+    const running = this.inflight.joinable(id);
     if (running) {
       const shared = await this.join(running, ctx);
       if (shared && (shared.ok || shared.failure.reason !== 'timeout'))
         return shared;
-      // The shared read timed out, or its launching turn was aborted.
+      // The shared read timed out, its launching turn was aborted, or this
+      // call's deadline came first.
       if (hasBudget(ctx.call)) return this.get(ctx, key, read);
       return shared ?? { ok: false, failure: BUDGET_SPENT };
     }
-    const pending = read().finally(() => this.inflight.delete(id));
-    this.inflight.set(id, pending);
-    const outcome = await pending;
+    const outcome = await this.inflight.track(id, ctx.call, read());
     if (outcome.ok) this.remember(id, outcome.value);
     return outcome;
   }
 
   /**
    * A read another call started, as this call waits for it: its outcome,
-   * or null when it threw (its launching turn was aborted). This turn's
-   * own abort is thrown as soon as it happens.
+   * or null when it threw (its launching turn was aborted) or this call's
+   * deadline came first. This turn's own abort is thrown as soon as it
+   * happens.
    */
   private async join(
     running: Promise<Outcome<T>>,
     ctx: KindContext,
   ): Promise<Outcome<T> | null> {
     try {
-      return await untilAborted(running, ctx.call.signal);
+      return (await untilDeadline(running, ctx.call)) ?? null;
     } catch {
       throwIfAborted(ctx.call.signal);
       return null;

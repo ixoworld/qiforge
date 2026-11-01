@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { UserIdentity } from '../../core/user-identity';
 import { ibcDenomTable } from './denoms';
-import { TOOL_BUDGET_MS, USER_READ_PERMITS, type ChainCall } from './http';
+import {
+  READ_GRACE_MS,
+  TOOL_BUDGET_MS,
+  USER_READ_PERMITS,
+  type ChainCall,
+} from './http';
 import claims from './fixtures/claims-michael.json';
 import accountBase from './kinds/chain/fixtures/account-base.json';
 import authzReceived from './kinds/chain/fixtures/authz-received.json';
@@ -41,6 +46,7 @@ import {
   OVERVIEW_TTL_MS,
   SECTIONS,
   accountOverview,
+  cutTopRow,
   resetOverviewCache,
   type OverviewAnswer,
   type OverviewFailure,
@@ -868,6 +874,38 @@ describe('get_account_overview', () => {
     expect(posts).toHaveLength(1);
   });
 
+  it('ends a joining call at its own deadline when the shared read died with its actor, and the next call past the age limit reads itself', async () => {
+    vi.useFakeTimers({ now: new Date('2026-10-29T12:00:00Z') });
+    const { fetcher } = overviewFetch({});
+    let alive = false;
+    const reads = vi.fn<typeof fetch>((input, init) =>
+      alive ? fetcher(input, init) : new Promise<Response>(() => undefined),
+    );
+    const input = { sections: ['claims' as const] };
+    void accountOverview(callFor(reads), USER, input, OPTIONS);
+    await vi.advanceTimersByTimeAsync(0);
+    const asked = reads.mock.calls.length;
+    const joining = accountOverview(
+      callFor(reads, undefined, 3_000),
+      USER,
+      input,
+      OPTIONS,
+    );
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(okAnswer(await joining).sections.claims).toMatchObject({
+      ok: false,
+      reason: 'timeout',
+    });
+    // Out of budget, it asks nothing more of the upstream.
+    expect(reads.mock.calls).toHaveLength(asked);
+    alive = true;
+    await vi.advanceTimersByTimeAsync(TOOL_BUDGET_MS + READ_GRACE_MS - 3_000);
+    const next = accountOverview(callFor(reads), USER, input, OPTIONS);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(okAnswer(await next).sections.claims?.ok).toBe(true);
+    expect(reads.mock.calls.length).toBeGreaterThan(asked);
+  });
+
   it('leaves fee grants given out by default and names the request that reads them', async () => {
     const mine = overviewFetch(restRoutes(MICHAEL));
     const { sections } = await overview(mine.fetcher, {
@@ -1011,3 +1049,121 @@ const TAMPERED: SectionAnswer = {
   detail: 'changed by the caller',
   retryable: false,
 };
+
+describe('cutTopRow', () => {
+  const A = 'ixo10d07y265gmmuvt4z0w9aw880jnsr700j9hdhjq';
+  const B = 'ixo1476xwgx5zs0fz57ck33cg7n8vghzfp6ggnt334';
+  const C = 'ixo15jqvx0k6uz2q7yxn4u9wdfct3j5w6pn3k555nc';
+  const answerOf = (
+    sections: OverviewAnswer['sections'],
+    subject: 'user' | 'other' = 'other',
+  ): OverviewAnswer => ({
+    ok: true,
+    network: 'mainnet',
+    fetchedAt: '2026-10-30T00:00:00.000Z',
+    address: OTHER,
+    subject,
+    sections,
+  });
+
+  it('cuts the last top row of the largest section and points `more` at its part', () => {
+    const answer = answerOf({
+      balances: {
+        ok: true,
+        summary: { counts: { tokens: 1 }, top: [{ denom: 'uixo' }] },
+      },
+      authz: {
+        ok: true,
+        summary: {
+          counts: { received: 2, given: 1 },
+          top: [
+            { list: 'received', granter: A },
+            { list: 'given', grantee: B },
+            { list: 'received', granter: C },
+          ],
+        },
+      },
+    });
+    expect(cutTopRow(answer)).toBe(true);
+    expect(answer.sections.authz).toEqual({
+      ok: true,
+      summary: {
+        counts: { received: 2, given: 1 },
+        top: [
+          { list: 'received', granter: A },
+          { list: 'given', grantee: B },
+        ],
+      },
+      more: {
+        kind: 'authz_grants',
+        args: { direction: 'received', address: OTHER },
+      },
+      truncated: true,
+    });
+    // A later part's row: `more` stays on the first part with rows not shown.
+    expect(cutTopRow(answer)).toBe(true);
+    expect(answer.sections.authz).toMatchObject({
+      summary: { top: [{ list: 'received', granter: A }] },
+      more: { args: { direction: 'received' } },
+    });
+    expect(answer.sections.balances).not.toHaveProperty('truncated');
+  });
+
+  it("moves `more` to an earlier part once that part's row is cut", () => {
+    const answer = answerOf(
+      {
+        authz: {
+          ok: true,
+          summary: {
+            counts: { received: 2, given: '3+' },
+            top: [
+              { list: 'received', granter: A },
+              { list: 'given', grantee: B },
+              { list: 'received', granter: C },
+            ],
+          },
+          more: { kind: 'authz_grants', args: { direction: 'given' } },
+        },
+      },
+      'user',
+    );
+    cutTopRow(answer);
+    expect(answer.sections.authz).toMatchObject({
+      more: { kind: 'authz_grants', args: { direction: 'received' } },
+      truncated: true,
+    });
+  });
+
+  it('names the tool that reads the rest of a balances section', () => {
+    const answer = answerOf({
+      balances: {
+        ok: true,
+        summary: {
+          counts: { tokens: 2 },
+          top: [{ denom: 'uixo' }, { denom: 'upay' }],
+        },
+      },
+    });
+    cutTopRow(answer);
+    expect(answer.sections.balances).toMatchObject({
+      summary: { top: [{ denom: 'uixo' }] },
+      more: { tool: 'get_account_balances', args: { address: OTHER } },
+      truncated: true,
+    });
+  });
+
+  it('cuts nothing when no section has a top row left', () => {
+    const answer = answerOf({
+      balances: { ok: true, summary: { counts: { tokens: 0 }, top: [] } },
+      staking: {
+        ok: false,
+        reason: 'timeout',
+        detail: 'out of time',
+        retryable: true,
+      },
+    });
+    const before = structuredClone(answer);
+    expect(cutTopRow(answer)).toBe(false);
+    expect(answer).toEqual(before);
+  });
+});

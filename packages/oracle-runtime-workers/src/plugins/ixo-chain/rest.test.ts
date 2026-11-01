@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   BUDGET_SPENT,
   ERROR_BODY_MAX_BYTES,
+  READ_GRACE_MS,
   RETRY_DELAY_MAX_MS,
   RETRY_DELAY_MIN_MS,
   TOOL_BUDGET_MS,
@@ -301,6 +302,40 @@ describe('the time budget', () => {
 });
 
 describe("the user's read permits", () => {
+  it("takes back a permit its read never returned, once past that read's deadline and the grace", async () => {
+    vi.useFakeTimers();
+    // Reads whose actor died: nothing after the fetch ever runs.
+    const dead = vi.fn(() => new Promise<Response>(() => undefined));
+    const budget = 2_000;
+    for (let n = 0; n < USER_READ_PERMITS; n += 1)
+      void restJson(
+        callWith(dead, { deadline: Date.now() + budget }),
+        `/dead/${n}`,
+        schema,
+        { label: 'x' },
+      );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(dead).toHaveBeenCalledTimes(USER_READ_PERMITS);
+    const live = vi.fn(
+      async () => new Response(JSON.stringify({ balances: [] })),
+    );
+    // Until then none is free: the read ends without one.
+    const queued = restJson(
+      callWith(live, { deadline: Date.now() + budget }),
+      '/queued',
+      schema,
+      { label: 'x' },
+    );
+    await vi.advanceTimersByTimeAsync(budget - 1_000);
+    expect(await queued).toEqual({ ok: false, failure: BUDGET_SPENT });
+    expect(live).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_000 + READ_GRACE_MS);
+    expect(
+      await restJson(callWith(live), '/live', schema, { label: 'x' }),
+    ).toEqual({ ok: true, value: { balances: [] } });
+    expect(usersReading()).toBe(0);
+  });
+
   it(`lets ${USER_READ_PERMITS} reads of a user run at once and queues the rest, oldest first`, async () => {
     vi.useFakeTimers();
     const fetcher = vi.fn(hang);

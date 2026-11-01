@@ -34,9 +34,10 @@
  */
 import { z } from 'zod';
 import {
+  ReadsInFlight,
   hasBudget,
   throwIfAborted,
-  untilAborted,
+  untilDeadline,
   type ChainCall,
 } from './http';
 import { restJson } from './rest';
@@ -253,15 +254,17 @@ type Lookup<T> = { value: T | null } | 'failed' | 'timeout' | 'aborted';
  * read in flight is shared by every call of the isolate that needs the
  * same key; none is started with less than 1 s of the budget left. A call
  * that joined a read which then timed out or was aborted by its launching
- * turn reads again itself while its own budget allows; it waits on its own
- * turn's abort, never another's.
+ * turn reads again itself while its own budget allows; it waits until its
+ * own deadline at most (`timeout` then), on its own turn's abort, never
+ * another's. A read that died with its actor is replaced by the next
+ * caller past its age limit ({@link ReadsInFlight}).
  */
 class ReadCache<T> {
   private readonly answers = new Map<
     string,
     { lookup: Lookup<T>; expiresAt: number }
   >();
-  private readonly inflight = new Map<string, Promise<Lookup<T>>>();
+  private readonly inflight = new ReadsInFlight<Lookup<T>>();
 
   constructor(private readonly foundTtlMs: number) {}
 
@@ -273,22 +276,22 @@ class ReadCache<T> {
     const id = `${call.restUrl}|${key}`;
     const hit = this.answers.get(id);
     if (hit && hit.expiresAt > Date.now()) return hit.lookup;
-    const running = this.inflight.get(id);
+    const running = this.inflight.joinable(id);
     if (running) {
-      const lookup = await untilAborted(running, call.signal);
+      const lookup = (await untilDeadline(running, call)) ?? 'timeout';
       return (lookup === 'timeout' || lookup === 'aborted') && hasBudget(call)
         ? this.get(call, key, read)
         : lookup;
     }
     if (!hasBudget(call)) return 'timeout';
-    const pending = read()
-      .then((lookup) => {
+    return this.inflight.track(
+      id,
+      call,
+      read().then((lookup) => {
         this.remember(id, lookup);
         return lookup;
-      })
-      .finally(() => this.inflight.delete(id));
-    this.inflight.set(id, pending);
-    return pending;
+      }),
+    );
   }
 
   clear(): void {
