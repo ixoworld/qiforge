@@ -59,9 +59,9 @@ Gets claim collection details.
 const collection = await Entities.getClaimCollection('collection-456');
 ```
 
-### `getSettingsResource(params, matrixAccessToken?)`
+### `getSettingsResource(params, matrixAccessToken?, matrixHomeServer?)`
 
-Fetches entity settings and configuration.
+Fetches entity settings and configuration. The access token is sent only for media on `matrixHomeServer`, the caller's own homeserver; every other URL is fetched with no credential.
 
 ```typescript
 const settings = await Entities.getSettingsResource({

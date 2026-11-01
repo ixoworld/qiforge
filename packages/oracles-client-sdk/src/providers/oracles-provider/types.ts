@@ -1,12 +1,13 @@
 import type { TransactionFn } from '@ixo/oracles-chain-client/react';
 import type { QueryClient } from '@tanstack/react-query';
 import type { AgAction } from '../../hooks/use-ag-action.js';
+import type { RoomsBotAuthFn } from '../../matrix/types.js';
 import type {
   AuthRenewalStage,
   RefusedCredentials,
 } from '../../utils/auth-renewal.js';
 
-export type { AuthRenewalStage, RefusedCredentials };
+export type { AuthRenewalStage, RefusedCredentials, RoomsBotAuthFn };
 
 export interface IMatrixLoginProps {
   accessToken: string;
@@ -69,6 +70,7 @@ export interface AuthedRequestOptions {
 export interface IOraclesContextProps {
   wallet: IWalletProps | null;
   transactSignX: TransactionFn;
+  getRoomsBotAuth?: RoomsBotAuthFn;
   authedRequest: <T>(
     url: string,
     method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH',
@@ -144,6 +146,12 @@ export interface IOraclesProviderProps {
   transactSignX: TransactionFn;
   createDelegation: CreateDelegationFn;
   createInvocation?: CreateInvocationFn;
+  /**
+   * UCAN headers for the rooms bot at this URL, audience `did:web:<its host>`,
+   * `with: 'ixo:matrix-rooms-bot'`. Required by `contractOracle`: a rooms bot
+   * never receives the Matrix access token.
+   */
+  getRoomsBotAuth?: RoomsBotAuthFn;
   /**
    * A delegation was minted to replace one the oracle refused (stage 2 of
    * `renewOracleAuth`). The oracle adopts it from the next request that

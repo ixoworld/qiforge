@@ -1,7 +1,16 @@
+/** UCAN headers for a rooms bot. A bot never receives the Matrix access token. */
+type RoomsBotAuthFn = (roomsBotUrl: string) => Promise<Record<string, string>>;
+
 type MatrixClientConstructorParams = {
   userAccessToken: string;
   appServiceBotUrl?: string;
+  /**
+   * The homeserver this session logged in to, which issued `userAccessToken`.
+   * When set, every call carrying the token goes here. Without it, the
+   * homeserver comes from the user's DID.
+   */
   homeserverUrl?: string;
+  getRoomsBotAuth?: RoomsBotAuthFn;
 };
 
 type SourceSpacePayload = {
@@ -52,6 +61,7 @@ export type {
   MatrixPowerLevels,
   MatrixRoomMember,
   MatrixRoomMembersResponse,
+  RoomsBotAuthFn,
   SourceSpacePayload,
 };
 export interface IOpenIDToken {
