@@ -162,6 +162,14 @@ const CHANNEL_TOPIC_LOOKBACK = 5;
 /** Ids per statement: a Durable Object binds at most 100 parameters. */
 const CHANNEL_IDS_PER_STATEMENT = 50;
 
+/**
+ * The text the gateway sends for a file with no caption: `[photo]`,
+ * `[video]`, `[audio]` or `[document: <name>]`.
+ */
+export function isAttachmentPlaceholder(message: string): boolean {
+  return /^\[(?:photo|video|audio)\]$|^\[document: [^\n]*\]$/.test(message);
+}
+
 function clipCodePoints(text: string, limit: number): string {
   const points = Array.from(text);
   return points.length > limit ? points.slice(0, limit).join('') : text;
@@ -1463,7 +1471,14 @@ export class ChannelTurns {
           assignment.destination = { kind: 'session', sessionId: session };
       } else if (mode === 'on')
         assignment.destination = { kind: 'clarify', text: ambiguousThreadText };
-    } else {
+    } else if (
+      input.attachments?.length &&
+      isAttachmentPlaceholder(input.message)
+    )
+      // A file with no caption, only the gateway's placeholder: nothing to
+      // classify, so it stays in the current conversation.
+      assignment.reason = 'attachment-placeholder';
+    else {
       const candidates = await this.routingCandidates(input, baseline);
       if (candidates.length) {
         const evidence = {
@@ -1516,6 +1531,10 @@ export class ChannelTurns {
         } else assignment.reason = 'shadow';
       }
     }
+    // A clarifying question is answered instead of the message, so the files
+    // would be dropped: a turn that carries files stays where it is.
+    if (input.attachments?.length && assignment.destination.kind === 'clarify')
+      assignment.destination = { kind: 'session', sessionId: baseline };
     await this.serialize(async () => {
       await this.assertNotCancelled(input);
       await this.db.run(
@@ -1861,6 +1880,9 @@ export class ChannelTurns {
         bindingId: input.bindingId,
         bindingRevision: input.bindingRevision,
         remoteMessageRef: input.remoteMessageRef,
+        ...(input.attachments?.length
+          ? { attachments: input.attachments }
+          : {}),
         ...(replyContext ? { replyContext } : {}),
         ...(input.replyTo ? { replyTo: input.replyTo } : {}),
         ...(routing?.destination.kind === 'clarify'

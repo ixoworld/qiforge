@@ -36,6 +36,7 @@ function callWith(
     network: 'mainnet',
     restUrl: 'https://rest.test/rest',
     blocksyncUrl: 'https://blocksync.test/graphql',
+    user: 'did:ixo:ixo1test',
     deadline: Date.now() + TOOL_BUDGET_MS,
     signal: new AbortController().signal,
     fetch: fetcher,
@@ -110,10 +111,10 @@ describe('blocksyncLookup', () => {
     );
   });
 
-  it('honours Retry-After up to 5 s', async () => {
+  it('waits a Retry-After of up to 5 s before the retry', async () => {
     vi.useFakeTimers();
     const { fetcher } = sequence(
-      () => new Response('', { status: 429, headers: { 'retry-after': '30' } }),
+      () => new Response('', { status: 429, headers: { 'retry-after': '5' } }),
       () => new Response('', { status: 429 }),
     );
     const pending = blocksyncLookup(callWith(fetcher), FIELDS);
@@ -130,6 +131,28 @@ describe('blocksyncLookup', () => {
       },
     });
     expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not ask again when Retry-After is over 5 s, and says how long to wait', async () => {
+    for (const status of [429, 503]) {
+      resetUpstreamHealth();
+      const { fetcher } = sequence(
+        () => new Response('', { status, headers: { 'retry-after': '30' } }),
+      );
+      expect(await blocksyncLookup(callWith(fetcher), FIELDS)).toEqual({
+        ok: false,
+        failure: {
+          reason: 'rate_limited',
+          detail:
+            'Blocksync is rate-limiting requests and asks to wait 30 s before asking again.',
+          retryable: true,
+        },
+      });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenLastCalledWith(
+        `[ixo-chain] blocksync attempt 1 failed: HTTP ${status}, Retry-After 30 s`,
+      );
+    }
   });
 
   it('gives up as unavailable (retryable) after two 503s', async () => {
@@ -201,6 +224,28 @@ describe('blocksyncLookup', () => {
       ok: true,
       value: { data: { r0: { claimId: 'x' } }, errors: [] },
     });
+  });
+
+  it('asks again after the database ran out of connections', async () => {
+    vi.useFakeTimers();
+    for (const message of [
+      'timeout exceeded when trying to connect',
+      'sorry, too many clients already',
+      'too many clients already',
+      'remaining connection slots are reserved for non-replication superuser connections',
+    ]) {
+      const { fetcher } = sequence(
+        () => json({ data: { r0: null }, errors: [{ message, path: ['r0'] }] }),
+        () => json({ data: { r0: { claimId: 'x' } } }),
+      );
+      const pending = blocksyncLookup(callWith(fetcher), FIELDS);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(pending).resolves.toEqual({
+        ok: true,
+        value: { data: { r0: { claimId: 'x' } }, errors: [] },
+      });
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    }
   });
 
   it('keeps a transient answer when the budget leaves no room to ask again', async () => {
@@ -467,19 +512,22 @@ describe('blocksyncLookup', () => {
     );
   });
 
-  it('caps a future HTTP-date Retry-After at 5 s', async () => {
-    vi.useFakeTimers();
+  it('gives up at once on an HTTP-date Retry-After more than 5 s away', async () => {
+    vi.useFakeTimers({ now: new Date('2026-10-29T10:00:00Z') });
     const at = new Date(Date.now() + 60_000).toUTCString();
     const { fetcher } = sequence(
       () => new Response('', { status: 429, headers: { 'retry-after': at } }),
-      () => json({ data: { r0: null } }),
     );
-    const pending = blocksyncLookup(callWith(fetcher), FIELDS);
-    await vi.advanceTimersByTimeAsync(4_999);
+    await expect(blocksyncLookup(callWith(fetcher), FIELDS)).resolves.toEqual({
+      ok: false,
+      failure: {
+        reason: 'rate_limited',
+        detail:
+          'Blocksync is rate-limiting requests and asks to wait 60 s before asking again.',
+        retryable: true,
+      },
+    });
     expect(fetcher).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(1);
-    await expect(pending).resolves.toMatchObject({ ok: true });
-    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
   it('honours Retry-After on 502, 503 and 504 too', async () => {
@@ -566,7 +614,7 @@ describe('blocksyncLookup', () => {
     );
     expect(fetcher).toHaveBeenCalledTimes(2);
     expect(warn).toHaveBeenLastCalledWith(
-      '[ixo-chain] blocksync not attempted: the upstream answered 429 moments ago',
+      '[ixo-chain] blocksync not attempted: the upstream failed moments ago (HTTP 429)',
     );
     // Another upstream is asked as usual.
     await expect(
@@ -580,6 +628,57 @@ describe('blocksyncLookup', () => {
       blocksyncLookup(callWith(fetcher), FIELDS),
     ).resolves.toMatchObject({ ok: true });
     expect(fetcher).toHaveBeenCalledTimes(4);
+  });
+
+  it('marks the upstream unhealthy after a 502, 504 or network error, never after a timeout of ours', async () => {
+    vi.useFakeTimers();
+    const failing: [string, () => Response][] = [
+      ['HTTP 502', () => new Response('', { status: 502 })],
+      ['HTTP 504', () => new Response('', { status: 504 })],
+      [
+        'network error (TypeError)',
+        () => {
+          throw new TypeError('fetch failed');
+        },
+      ],
+    ];
+    for (const [note, fail] of failing) {
+      resetUpstreamHealth();
+      const { fetcher } = sequence(fail, fail);
+      const first = blocksyncLookup(callWith(fetcher), FIELDS);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(first).resolves.toMatchObject({ ok: false });
+      await expect(
+        blocksyncLookup(callWith(fetcher), FIELDS),
+      ).resolves.toMatchObject({
+        ok: false,
+        failure: { reason: 'unavailable' },
+      });
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(warn).toHaveBeenLastCalledWith(
+        `[ixo-chain] blocksync not attempted: the upstream failed moments ago (${note})`,
+      );
+    }
+    resetUpstreamHealth();
+    const slow = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('aborted', 'AbortError')),
+          );
+        }),
+    );
+    const timedOut = blocksyncLookup(callWith(slow), FIELDS);
+    await vi.advanceTimersByTimeAsync(11_000);
+    await expect(timedOut).resolves.toMatchObject({
+      ok: false,
+      failure: { reason: 'timeout' },
+    });
+    const { fetcher: next } = sequence(() => json({ data: { r0: null } }));
+    await expect(
+      blocksyncLookup(callWith(next), FIELDS),
+    ).resolves.toMatchObject({ ok: true });
+    expect(next).toHaveBeenCalledTimes(1);
   });
 
   it('marks an upstream unavailable after a 503 and clears the mark once it answers', async () => {

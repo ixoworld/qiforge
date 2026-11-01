@@ -1,0 +1,33 @@
+{
+  "retired": {
+    "pageInfo": {
+      "hasNextPage": true
+    },
+    "nodes": [
+      {
+        "aid": 369689834,
+        "id": "8b6a62d7466c2b27c755099b93586285",
+        "name": "SUPA-ZMW",
+        "amount": "13000",
+        "reason": "SUPA payment consumed for bag transfer",
+        "jurisdiction": "ZM"
+      },
+      {
+        "aid": 369689833,
+        "id": "081624d290e89a593ad2b93ad6fa8c17",
+        "name": "SUPA-ZMW",
+        "amount": "13000",
+        "reason": "SUPA payment consumed for bag transfer",
+        "jurisdiction": "ZM"
+      },
+      {
+        "aid": 369689832,
+        "id": "4bd3a62b422a8add814ffe33639c5fea",
+        "name": "SUPA-ZMW",
+        "amount": "13000",
+        "reason": "SUPA payment consumed for bag transfer",
+        "jurisdiction": "ZM"
+      }
+    ]
+  }
+}

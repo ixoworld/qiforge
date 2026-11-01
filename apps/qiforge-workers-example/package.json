@@ -1,6 +1,6 @@
 {
   "name": "qiforge-workers-example",
-  "version": "0.0.22",
+  "version": "0.0.29",
   "description": "Reference QiForge oracle running on Cloudflare Workers (@ixo/oracle-runtime-workers).",
   "private": true,
   "type": "module",

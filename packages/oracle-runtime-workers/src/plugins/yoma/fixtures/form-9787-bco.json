@@ -1,0 +1,58 @@
+{
+  "@context": {
+    "ixo": "https://w3id.org/ixo/ns/protocol/",
+    "@id": "@type",
+    "type": "@type",
+    "@protected": true
+  },
+  "type": "ixo:entity#surveyTemplate",
+  "question": {
+    "_namespaces": {
+      "schema": "https://schema.org/"
+    },
+    "title": "Apply to submit claims — Milestone Verification",
+    "description": "Use this form to ask for access to submit Milestone Verification claims. We only need to know who you are. Your milestone details go in the claim form, not here. A red star * means you must answer.",
+    "showProgressBar": "off",
+    "showQuestionNumbers": "off",
+    "questionErrorLocation": "bottom",
+    "requiredText": "*",
+    "completeText": "Send application",
+    "pages": [
+      {
+        "name": "page_bid",
+        "elements": [
+          {
+            "type": "panel",
+            "name": "schema:Person",
+            "title": "Who you are",
+            "elements": [
+              {
+                "type": "text",
+                "name": "schema:name",
+                "title": "Your full name",
+                "isRequired": true,
+                "requiredErrorText": "Please write your full name."
+              },
+              {
+                "type": "text",
+                "name": "schema:identifier",
+                "title": "Your ID number or phone number",
+                "description": "This is how we tell people apart.",
+                "isRequired": true,
+                "requiredErrorText": "Please write your ID or phone number."
+              },
+              {
+                "type": "text",
+                "name": "schema:telephone",
+                "title": "A phone number we can reach you on",
+                "inputType": "tel",
+                "isRequired": true,
+                "requiredErrorText": "Please write a phone number."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

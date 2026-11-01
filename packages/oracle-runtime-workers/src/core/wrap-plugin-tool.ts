@@ -1,3 +1,4 @@
+import { ToolMessage } from '@langchain/core/messages';
 import { Command } from '@langchain/langgraph';
 import { capToolResult, type ResultCapConfig } from './middlewares/result-cap';
 import { tool } from '@langchain/core/tools';
@@ -125,7 +126,14 @@ export function wrapPluginTool(
       if (pluginName !== undefined)
         requireToolPlane(ctx, pluginName, pluginTool);
       const output = await pluginTool.handler(args, ctx);
-      if (!resultCap || output instanceof Command || output == null)
+      // A tool's own message (a result that says the tool did not run) is
+      // returned whole, never capped into text.
+      if (
+        !resultCap ||
+        output instanceof Command ||
+        ToolMessage.isInstance(output) ||
+        output == null
+      )
         return output;
       const text = typeof output === 'string' ? output : JSON.stringify(output);
       if (typeof text !== 'string' || text.length <= resultCap.capChars)

@@ -1,3 +1,22 @@
+export {
+  CHANNEL_MAX_FILE_BYTES,
+  CHANNEL_REF_PREFIX,
+  channelArchiveName,
+  channelAttachmentRef,
+  ChannelFileUnavailableError,
+  channelMediaOrigins,
+  createChannelMediaSource,
+  downloadChannelFile,
+  isChannelAttachmentRef,
+  isGatewayMediaUrl,
+  type ChannelMediaLink,
+  type ChannelMediaSource,
+} from './channel';
+export {
+  CHANNEL_LINK_DEFAULT_TTL_MS,
+  ChannelAttachmentLinkStore,
+  channelLinkExpiry,
+} from './channel-links';
 export { classifyAttachment, type AttachmentKind } from './classify';
 export {
   buildUserMessageContent,
@@ -40,6 +59,7 @@ export {
   type FileCategory,
 } from './magic';
 export {
+  attachmentMetaFor,
   nativeAttachmentNote,
   prepareAttachments,
   SANDBOX_TRUNCATE_LIMIT,
@@ -61,8 +81,11 @@ export {
   type SandboxUploadResult,
 } from './sandbox-archive';
 export {
+  NOTE_FILENAME_MAX,
+  NOTE_MIMETYPE_MAX,
   SANDBOX_OUTPUT_PREFIX,
   sanitizeAttachmentFilename,
+  sanitizeNoteField,
   sanitizeSandboxPath,
 } from './sanitize';
 export {

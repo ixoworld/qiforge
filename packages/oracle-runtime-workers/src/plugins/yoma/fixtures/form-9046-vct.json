@@ -1,0 +1,92 @@
+{
+  "@context": {
+    "ixo": "https://w3id.org/ixo/ns/protocol/",
+    "@id": "@type",
+    "type": "@type",
+    "@protected": true
+  },
+  "type": "ixo:entity#surveyTemplate",
+  "question": {
+    "_namespaces": {
+      "schema": "https://schema.org/",
+      "ixo": "https://w3id.org/ixo/vocab/",
+      "custom": "https://w3id.org/ixo/vocab/supasparks/"
+    },
+    "title": "Spark 1: Set up and show up",
+    "description": "Four things from your first day: the Google Form, your profile, your post in the group chat and your replies. About 5 minutes. A red star * means you must answer.",
+    "logoPosition": "right",
+    "showProgressBar": "off",
+    "showQuestionNumbers": "off",
+    "questionErrorLocation": "bottom",
+    "requiredText": "*",
+    "completeText": "Send",
+    "pageNextText": "Next",
+    "pagePrevText": "Back",
+    "completedHtml": "<h4>Thank you. We have your Spark.</h4><p>A SupaMoto Academy reviewer will check it. If something is missing, you can send the Spark again.</p>",
+    "pages": [
+      {
+        "name": "spark1",
+        "elements": [
+          {
+            "type": "html",
+            "name": "custom:googleFormLink",
+            "html": "<div><strong>Do the Google Form first:</strong> <a href=\"https://forms.gle/1RZWYSzkcpzTXQuw8\" target=\"_blank\" rel=\"noopener\">forms.gle/1RZWYSzkcpzTXQuw8</a> (also in the group chat).</div>"
+          },
+          {
+            "type": "file",
+            "maxSize": 10485760,
+            "storeDataAsText": false,
+            "waitForUpload": true,
+            "allowMultiple": true,
+            "sourceType": "file-camera",
+            "acceptedTypes": "image/*",
+            "name": "schema:image_profileScreenshot",
+            "title": "Send a screenshot of your profile set up successfully.",
+            "description": "The profile you set up today. Take the screenshot after it is fully set up. On most phones you take a screenshot by pressing the power button and volume-down together, then find the picture in your Gallery.",
+            "isRequired": true,
+            "requiredErrorText": "Please add the screenshot of your profile."
+          },
+          {
+            "type": "file",
+            "maxSize": 10485760,
+            "storeDataAsText": false,
+            "waitForUpload": true,
+            "allowMultiple": true,
+            "sourceType": "file-camera",
+            "acceptedTypes": "image/*",
+            "name": "schema:image_groupPostScreenshot",
+            "title": "Send a screenshot of your post in the group chat.",
+            "description": "Your post must show your name, one talent (any talent, big or small) and what you look forward to in the programme. If your post is long, send two screenshots.",
+            "isRequired": true,
+            "requiredErrorText": "Please add the screenshot of your group chat post."
+          },
+          {
+            "type": "boolean",
+            "name": "custom:googleFormCompleted",
+            "title": "I was able to fill in the Google Form.",
+            "description": "Choose True if you filled it in. If you could not, choose False. You can still send this Spark and fill in the Google Form later.",
+            "isRequired": true,
+            "requiredErrorText": "Please choose True or False.",
+            "renderAs": "radio",
+            "labelTrue": "True",
+            "labelFalse": "False"
+          },
+          {
+            "type": "file",
+            "maxSize": 10485760,
+            "storeDataAsText": false,
+            "waitForUpload": true,
+            "allowMultiple": true,
+            "sourceType": "file-camera",
+            "acceptedTypes": "image/*",
+            "name": "schema:image_commentRepliesScreenshot",
+            "title": "Send a screenshot of your replies to at least two comments on another learner's post.",
+            "description": "One screenshot is fine if both replies are in it. You can add more than one.",
+            "isRequired": true,
+            "requiredErrorText": "Please add the screenshot of your replies."
+          }
+        ]
+      }
+    ]
+  }
+}

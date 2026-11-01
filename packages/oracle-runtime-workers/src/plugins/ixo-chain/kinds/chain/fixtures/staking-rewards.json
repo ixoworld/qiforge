@@ -1,0 +1,19 @@
+{
+  "rewards": [
+    {
+      "validator_address": "ixovaloper1qeex565vg4uu7zwudh9ff2dauxptqf72nf2l44",
+      "reward": [
+        {
+          "denom": "uixo",
+          "amount": "570925.434280604784000000"
+        }
+      ]
+    }
+  ],
+  "total": [
+    {
+      "denom": "uixo",
+      "amount": "570925.434280604784000000"
+    }
+  ]
+}

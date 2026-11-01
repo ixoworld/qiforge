@@ -1,0 +1,316 @@
+{
+  "native": {
+    "pageInfo": {
+      "hasNextPage": false
+    },
+    "nodes": []
+  },
+  "cw20": {
+    "pageInfo": {
+      "hasNextPage": false
+    },
+    "nodes": [
+      {
+        "stakedAmount": "100000000",
+        "daoCw20StakingContractByStakingContract": {
+          "daoVotingModulesByStakingContract": {
+            "nodes": [
+              {
+                "address": "ixo17yw4nya4kmqgn0aw4xfecrwc098260n6cnqz72afnmhqxrjp6j3s8h4fpp",
+                "moduleType": "dao_voting_cw20_staked",
+                "tokenAddress": null,
+                "totalWeight": "100000000",
+                "daoCoresByVotingModule": {
+                  "nodes": [
+                    {
+                      "address": "ixo16z0mp6hq24uzct8snu940gkz8kt7vssw0hq2wmxpmgpvjg0zrvmskqem5e",
+                      "name": "Staking Group",
+                      "daoProposalModulesByDaoAddress": {
+                        "pageInfo": {
+                          "hasNextPage": false
+                        },
+                        "nodes": [
+                          {
+                            "address": "ixo15sy5qemc86ytfka8xqapvntyjth6vxpan5pvd6k98nt7gn7a4myq9t8qvk",
+                            "prefix": "A",
+                            "daoProposalsByProposalModule": {
+                              "pageInfo": {
+                                "hasNextPage": false
+                              },
+                              "nodes": []
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "stakedAmount": "1000000",
+        "daoCw20StakingContractByStakingContract": {
+          "daoVotingModulesByStakingContract": {
+            "nodes": [
+              {
+                "address": "ixo1z3trg3965f75fuvl8fz9957zzk08eedxxnujhyytdxez5ga8tsssa7uau8",
+                "moduleType": "dao_voting_cw20_staked",
+                "tokenAddress": null,
+                "totalWeight": "111000000",
+                "daoCoresByVotingModule": {
+                  "nodes": [
+                    {
+                      "address": "ixo1up07dctjqud4fns75cnpejr4frmjtddzsmwgcktlyxd4zekhwecql0vjwy",
+                      "name": "Members Group",
+                      "daoProposalModulesByDaoAddress": {
+                        "pageInfo": {
+                          "hasNextPage": false
+                        },
+                        "nodes": [
+                          {
+                            "address": "ixo1j2x4vsm2a5qefkvgr7gl30gf2puvsa504plzwgdhwl3wvm5lxayqgk3fau",
+                            "prefix": "A",
+                            "daoProposalsByProposalModule": {
+                              "pageInfo": {
+                                "hasNextPage": true
+                              },
+                              "nodes": [
+                                {
+                                  "id": "18",
+                                  "title": "Cosmos for Humanity application to join the Impacts DAO Cooperative",
+                                  "status": "executed",
+                                  "proposer": "ixo1xlwyzvg3khmxxr7vl76phsvqgj0pu7t42wf9ek",
+                                  "startHeight": 6535745,
+                                  "expiration": {
+                                    "at_time": "1718529880367228435"
+                                  },
+                                  "totalPower": "110000000",
+                                  "votes": {
+                                    "no": "0",
+                                    "yes": "101000000",
+                                    "abstain": "0"
+                                  },
+                                  "daoVotesByProposalModuleAndProposalId": {
+                                    "nodes": []
+                                  }
+                                },
+                                {
+                                  "id": "17",
+                                  "title": "Formation of the Finance Group",
+                                  "status": "executed",
+                                  "proposer": "ixo15jqvx0k6uz2q7yxn4u9wdfct3j5w6pn3k555nc",
+                                  "startHeight": 5078441,
+                                  "expiration": {
+                                    "at_time": "1710076328554312042"
+                                  },
+                                  "totalPower": "110000000",
+                                  "votes": {
+                                    "no": "0",
+                                    "yes": "104000000",
+                                    "abstain": "0"
+                                  },
+                                  "daoVotesByProposalModuleAndProposalId": {
+                                    "nodes": []
+                                  }
+                                },
+                                {
+                                  "id": "16",
+                                  "title": "Establish a Member Enrolment Group",
+                                  "status": "executed",
+                                  "proposer": "ixo15jqvx0k6uz2q7yxn4u9wdfct3j5w6pn3k555nc",
+                                  "startHeight": 5074543,
+                                  "expiration": {
+                                    "at_time": "1710053689927364325"
+                                  },
+                                  "totalPower": "110000000",
+                                  "votes": {
+                                    "no": "0",
+                                    "yes": "105000000",
+                                    "abstain": "0"
+                                  },
+                                  "daoVotesByProposalModuleAndProposalId": {
+                                    "nodes": []
+                                  }
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "cw4": {
+    "pageInfo": {
+      "hasNextPage": true
+    },
+    "nodes": [
+      {
+        "weight": 1,
+        "daoCw4GroupContractByGroupContractAddress": {
+          "daoVotingModulesByGroupContractAddress": {
+            "nodes": [
+              {
+                "address": "ixo1mf309nyvr4k4zv0m7m40am9n7nqjf6gupa0wukamwmhgntqj0gxsncdac6",
+                "moduleType": "dao_voting_cw4",
+                "totalWeight": "2",
+                "daoCoresByVotingModule": {
+                  "nodes": [
+                    {
+                      "address": "ixo1paa5dm2glgmets9yxafa4w68w5hymthh0as8em80684ntmd930jqcp0xey",
+                      "name": "Administration",
+                      "daoProposalModulesByDaoAddress": {
+                        "pageInfo": {
+                          "hasNextPage": false
+                        },
+                        "nodes": [
+                          {
+                            "address": "ixo1770puc38e2p6cg4shhmum3q70u9jlx5yx3ryvyrhc958694w77rqludyf7",
+                            "prefix": "A",
+                            "daoProposalsByProposalModule": {
+                              "pageInfo": {
+                                "hasNextPage": false
+                              },
+                              "nodes": [
+                                {
+                                  "id": "3",
+                                  "title": "Manage members of the group",
+                                  "status": "open",
+                                  "proposer": "ixo1xwn45d6xhe3egcz3nqlfc2elpc3h6usy6yw3uk",
+                                  "startHeight": 10633101,
+                                  "expiration": {
+                                    "at_time": "1741958745893257246"
+                                  },
+                                  "totalPower": "2",
+                                  "votes": {
+                                    "no": "0",
+                                    "yes": "0",
+                                    "abstain": "0"
+                                  },
+                                  "daoVotesByProposalModuleAndProposalId": {
+                                    "nodes": []
+                                  }
+                                },
+                                {
+                                  "id": "2",
+                                  "title": "ReFi Cape Town Website ",
+                                  "status": "executed",
+                                  "proposer": "ixo1crawa9mrd8e0r0jgja5f2ectepmjkp5nhvr5t7",
+                                  "startHeight": 4485450,
+                                  "expiration": {
+                                    "at_time": "1706452199969139746"
+                                  },
+                                  "totalPower": "2",
+                                  "votes": {
+                                    "no": "0",
+                                    "yes": "2",
+                                    "abstain": "0"
+                                  },
+                                  "daoVotesByProposalModuleAndProposalId": {
+                                    "nodes": []
+                                  }
+                                },
+                                {
+                                  "id": "1",
+                                  "title": "Proposal to have a year end event ",
+                                  "status": "rejected",
+                                  "proposer": "ixo1crawa9mrd8e0r0jgja5f2ectepmjkp5nhvr5t7",
+                                  "startHeight": 3833782,
+                                  "expiration": {
+                                    "at_time": "1702649888255237607"
+                                  },
+                                  "totalPower": "2",
+                                  "votes": {
+                                    "no": "0",
+                                    "yes": "0",
+                                    "abstain": "0"
+                                  },
+                                  "daoVotesByProposalModuleAndProposalId": {
+                                    "nodes": []
+                                  }
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "weight": 1,
+        "daoCw4GroupContractByGroupContractAddress": {
+          "daoVotingModulesByGroupContractAddress": {
+            "nodes": [
+              {
+                "address": "ixo1aveh9x3pqcxplxyk62se349h55ytdu49cf0exhhd0v86asv4y8jske7rwk",
+                "moduleType": "dao_voting_cw4",
+                "totalWeight": "14",
+                "daoCoresByVotingModule": {
+                  "nodes": [
+                    {
+                      "address": "ixo14g47ggcgge3xgmzddenqzsgr26ckk854gfngz4g908wc29drwussp0k66n",
+                      "name": "Test",
+                      "daoProposalModulesByDaoAddress": {
+                        "pageInfo": {
+                          "hasNextPage": false
+                        },
+                        "nodes": [
+                          {
+                            "address": "ixo1zxmee4zshr3sjfssau8q54rsvm0n6yd0tasr96c3366sjht67l7s08kq6a",
+                            "prefix": "A",
+                            "daoProposalsByProposalModule": {
+                              "pageInfo": {
+                                "hasNextPage": false
+                              },
+                              "nodes": [
+                                {
+                                  "id": "1",
+                                  "title": "Add",
+                                  "status": "executed",
+                                  "proposer": "ixo1xlwyzvg3khmxxr7vl76phsvqgj0pu7t42wf9ek",
+                                  "startHeight": 8142494,
+                                  "expiration": {
+                                    "at_time": "1727467170801072647"
+                                  },
+                                  "totalPower": "2",
+                                  "votes": {
+                                    "no": "0",
+                                    "yes": "2",
+                                    "abstain": "0"
+                                  },
+                                  "daoVotesByProposalModuleAndProposalId": {
+                                    "nodes": []
+                                  }
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

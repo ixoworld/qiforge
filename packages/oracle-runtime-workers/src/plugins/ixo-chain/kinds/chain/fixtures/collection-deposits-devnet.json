@@ -1,0 +1,14 @@
+{
+  "balances": [
+    {
+      "collection_id": "794",
+      "agent_address": "ixo1u4m0hwtysne8y7pkq9tj45ksp38ps9p347a5tr",
+      "amount": [{ "denom": "uixo", "amount": "500000" }],
+      "withdrawable_at": null
+    }
+  ],
+  "pagination": {
+    "next_key": "aXhvMXlucmNxczJ2MHN1NXg2Zjd0bGdwbTVsbjc0NnA1OWZteXVubGM3",
+    "total": "0"
+  }
+}

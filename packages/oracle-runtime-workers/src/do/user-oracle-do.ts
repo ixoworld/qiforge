@@ -46,11 +46,16 @@ import type {
   ActionProposalSubject,
 } from '@ixo/ixo-transaction/action-proposals';
 import { ChannelTurns } from '../channels/turns';
-import { HubActionClient } from '../hub-actions/client';
+import {
+  HubActionClient,
+  type HubOperationStatus,
+  type HubReviewStatus,
+} from '../hub-actions/client';
 import { chainTxOperation, prepareHubAction } from '../hub-actions/request';
 import {
   bankReceiptSummary,
-  bankStepsInBaseUnits,
+  chainTxAmountsInBaseUnits,
+  chainTxNeedsTokenList,
 } from '../hub-actions/transfer';
 import {
   HUB_CHECK_AFTER_EXPIRY_MS,
@@ -126,6 +131,7 @@ import {
   offloadInlinePayloads,
   parseAttachmentInputs,
   prepareAttachments,
+  ChannelAttachmentLinkStore,
   type AttachmentViewSurface,
   type MatrixMediaSource,
   type ViewAttachmentDeps,
@@ -135,6 +141,12 @@ import {
   readBytesCapped,
   AttachmentTextCacheStore,
 } from '../attachments';
+import {
+  channelTurnLinks,
+  prepareTurnAttachments,
+  turnAttachmentInputs,
+  turnChannelMediaSource,
+} from './turn-attachments';
 import type { RuntimeCore } from '../core';
 import {
   createLlmAdapter,
@@ -431,6 +443,7 @@ import {
 import type {
   ChainSigningSurface,
   ChainTxMessageInput,
+  HubActionStatusRead,
   UcanDelegation,
   UserContextData,
 } from '../plugin-api/types';
@@ -566,6 +579,7 @@ function hasUserContext(value: unknown): boolean {
 function admissionApplies(req: TurnRequest): boolean {
   return (
     !req.attachments?.length &&
+    !req.channel?.attachments?.length &&
     !req.taskRunId &&
     !req.sessionId.startsWith(TASK_SESSION_PREFIX) &&
     req.roomKind !== 'group'
@@ -627,6 +641,14 @@ const ACTION_TICK_BUDGET_MS = 15_000;
 const ACTION_PRUNE_INTERVAL_MS = 60 * 60_000;
 /** How long the Hub's capabilities answer is reused per object. */
 const HUB_CAPABILITIES_CACHE_MS = 60_000;
+/**
+ * A capabilities read on a turn's critical path (the chain transaction
+ * tool's types): a short timeout, and after a failed read none for this
+ * long, so a slow or failing Hub costs a turn at most this timeout once per
+ * window instead of the full Hub timeout on every turn.
+ */
+const HUB_TURN_CAPABILITIES_TIMEOUT_MS = 3_000;
+const HUB_CAPABILITIES_FAILURE_CACHE_MS = 30_000;
 /** A Hub network name as the chain-id config key it is configured under. */
 /**
  * Whether two Hub outcomes are the same event. Receipts are compared in the
@@ -1043,11 +1065,17 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private actionProposals: ActionProposalStore | null = null;
     private hubActionStore: HubActionStore | null = null;
     private hubActionClient: HubActionClient | null = null;
-    /** The Hub's capabilities for this oracle account, reused for `HUB_CAPABILITIES_CACHE_MS`. */
+    /** The Hub's capabilities for this oracle account, reused for `HUB_CAPABILITIES_CACHE_MS` (and on a turn, while a read fails). */
     private hubCapabilities: {
       value: ActionCapabilitiesV1;
       at: number;
     } | null = null;
+    /** The last failed capabilities read: a turn does not read again within `HUB_CAPABILITIES_FAILURE_CACHE_MS`. */
+    private hubCapabilitiesFailure: { error: unknown; at: number } | null =
+      null;
+    /** A turn's capabilities read in flight, shared by concurrent turns. */
+    private hubTurnCapabilitiesRead: Promise<ActionCapabilitiesV1> | null =
+      null;
     /** The last `hub_action_options` answer for this owner (Gmail connection checks). */
     private lastHubOptions: {
       value: HubActionOptionsV2 | HubActionOptionsV3;
@@ -1060,6 +1088,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private lastActionPruneAt: number | null = null;
     /** Text `view_attachment` extracted, per session (`attachments/view-cache.ts`). */
     private attachmentTextCache: AttachmentTextCacheStore | null = null;
+    /** The links behind the `channel:` references of each session's files. */
+    private channelAttachmentLinks: ChannelAttachmentLinkStore | null = null;
     /** Large texts of document ingestion, in memory (a few, minutes). */
     private readonly ingestTextLru = new IngestTextLru();
     /**
@@ -2021,6 +2051,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       });
       await this.resultStore.setup();
       this.attachmentTextCache = new AttachmentTextCacheStore(liveDb, console);
+      this.channelAttachmentLinks = new ChannelAttachmentLinkStore(
+        liveDb,
+        console,
+      );
       // Constructing it touches no SQL. Only an observe turn records (and so
       // creates `domain_context_runs`); a session delete never creates it but
       // still removes rows an earlier observe deployment left behind.
@@ -2260,7 +2294,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         ...(this.hubActionStore && this.hubActionClient
           ? {
               hubActions: {
-                capabilities: () => this.cachedHubCapabilities(),
+                capabilities: (opts) =>
+                  opts?.turn
+                    ? this.turnHubCapabilities()
+                    : this.cachedHubCapabilities(),
                 options: (input) => this.hubActionOptions(input),
                 request: (input: {
                   ownerDid: string;
@@ -2275,8 +2312,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                 }) => this.requestHubAction(input),
                 chainTransaction: (input) =>
                   this.chainTransactionHubAction(input),
-                status: (ownerDid: string, actionId: string) =>
-                  this.hubActionStatusForTool(ownerDid, actionId),
+                status: (
+                  ownerDid: string,
+                  actionId: string,
+                  opts?: { timeoutMs?: number },
+                ) => this.hubActionStatusForTool(ownerDid, actionId, opts),
               },
             }
           : {}),
@@ -2387,9 +2427,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.hubActionStore = null;
       this.hubActionClient = null;
       this.hubCapabilities = null;
+      this.hubCapabilitiesFailure = null;
+      this.hubTurnCapabilitiesRead = null;
       this.lastHubOptions = null;
       this.topicProposals = null;
       this.attachmentTextCache = null;
+      this.channelAttachmentLinks = null;
       this.domainContextStore = null;
       // Its store is bound to the database just dropped: a caller that sees
       // no scheduler boots again instead of reading a closed connection.
@@ -3353,7 +3396,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // The gateway parses with @ixo/action-protocol 0.4.1, whose bank
       // receipt is exact: the 0.5.0 `denom`/`amountBaseUnits` fields are
       // dropped here (the owner-facing amount line comes from
-      // hub_action_status instead), so the emitted shape stays 0.4.1.
+      // hub_action_status instead), so the emitted shape stays 0.4.1. Every
+      // other receipt goes as Auth Hub signed it, a failure's `detail`
+      // included: the gateway confirms an outcome by comparing the whole
+      // receipt with Auth Hub's copy. Only what the model sees drops it.
       const hubActionOutcomes = (
         await this.hubOutcomesForRun(ownerDid, result.sessionId, result.runId)
       ).map((outcome) => ({ ...outcome, receipt: v1Receipt(outcome.receipt) }));
@@ -3522,16 +3568,57 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /** The Hub's capabilities, cached per object for `HUB_CAPABILITIES_CACHE_MS`. */
-    private async cachedHubCapabilities(): Promise<ActionCapabilitiesV1> {
+    private async cachedHubCapabilities(
+      timeoutMs?: number,
+    ): Promise<ActionCapabilitiesV1> {
       const client = this.hubActionClient;
       if (!client) throw new Error('Hub actions are unavailable');
       const now = Date.now();
       const cached = this.hubCapabilities ?? null;
       if (cached && now - cached.at < HUB_CAPABILITIES_CACHE_MS)
         return cached.value;
-      const value = await client.capabilities();
-      this.hubCapabilities = { value, at: now };
-      return value;
+      try {
+        const value = await client.capabilities(timeoutMs);
+        this.hubCapabilities = { value, at: Date.now() };
+        this.hubCapabilitiesFailure = null;
+        return value;
+      } catch (error) {
+        this.hubCapabilitiesFailure = { error, at: Date.now() };
+        throw error;
+      }
+    }
+
+    /**
+     * The capabilities for a turn's tool list: the cached ones while fresh;
+     * else one read with `HUB_TURN_CAPABILITIES_TIMEOUT_MS`, shared by
+     * concurrent turns and not repeated within
+     * `HUB_CAPABILITIES_FAILURE_CACHE_MS` of a failed read. While reads
+     * fail, the last capabilities read are answered (the Hub enforces its
+     * own on every prepare); with none, the failure.
+     */
+    private async turnHubCapabilities(): Promise<ActionCapabilitiesV1> {
+      const cached = this.hubCapabilities;
+      if (cached && Date.now() - cached.at < HUB_CAPABILITIES_CACHE_MS)
+        return cached.value;
+      const failure = this.hubCapabilitiesFailure;
+      if (
+        failure &&
+        Date.now() - failure.at < HUB_CAPABILITIES_FAILURE_CACHE_MS
+      ) {
+        if (cached) return cached.value;
+        throw failure.error;
+      }
+      this.hubTurnCapabilitiesRead ??= this.cachedHubCapabilities(
+        HUB_TURN_CAPABILITIES_TIMEOUT_MS,
+      ).finally(() => {
+        this.hubTurnCapabilitiesRead = null;
+      });
+      try {
+        return await this.hubTurnCapabilitiesRead;
+      } catch (error) {
+        if (cached) return cached.value;
+        throw error;
+      }
     }
 
     /**
@@ -3584,13 +3671,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     /**
      * One chain transaction of the model's messages. The network is the
      * account's capability, the chain id this Worker's own for that
-     * network; the signer and the owner's identity in claims messages come
+     * network; the signer and the owner's identity in the messages come
      * from the owner's DID (`chainTxOperation`). The model names none of
-     * them. Bank steps name a listed token and a display amount: with at
-     * least one, the owner's options are read once, fresh (the balances
-     * must be current), and each step is converted to base units and
-     * checked against the listed balance (`bankStepsInBaseUnits`). No fee
-     * is sent: the Hub simulates gas and sets it.
+     * them. Bank steps name a listed token and a display amount, stake
+     * steps an amount of IXO: with at least one of either, the owner's
+     * options are read once, fresh (the balances must be current), and each
+     * amount is converted to base units and checked against the listed
+     * balance (`chainTxAmountsInBaseUnits`). A new group proposal's coin
+     * send of another token than IXO reads them too, for the token's
+     * decimals only. No fee is sent: the Hub simulates gas and sets it.
      */
     private async chainTransactionHubAction(input: {
       ownerDid: string;
@@ -3621,9 +3710,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const chainId = chainIdsFromConfig(chainIdConfigSchema.parse(this.env))[
         HUB_NETWORK_CHAIN[capabilities.network]
       ];
-      const tokens = input.messages.some(
-        (message) => message.type === 'cosmos.bank.send',
-      )
+      const tokens = chainTxNeedsTokenList(input.messages)
         ? ((await this.hubActionOptions(input, true)).transfer?.tokens ?? null)
         : null;
       const operation = chainTxOperation({
@@ -3631,30 +3718,64 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         chainId,
         network: capabilities.network,
         memo: input.memo,
-        messages: bankStepsInBaseUnits(input.messages, tokens),
+        messages: chainTxAmountsInBaseUnits(input.messages, tokens),
       });
       return this.requestHubAction({ ...input, operation }, true);
     }
 
     /**
-     * `hub_action_status`: the outcome plus, for a bank send, the
-     * owner-facing line (amount from the token stored at preparation).
+     * `ctx.hubActions.status` (and `hub_action_status`): Auth Hub's review
+     * and operation status, the outcome and, for a bank send, the
+     * owner-facing line (amount from the token stored at preparation). An
+     * action this object never prepared is `held: false`, without a Hub
+     * read.
      */
     private async hubActionStatusForTool(
       ownerDid: string,
       actionId: string,
-    ): Promise<{ outcome: ActionOutcomeV1 | null; summary: string | null }> {
-      const outcome = await this.statusHubAction(ownerDid, actionId);
-      if (!outcome) return { outcome, summary: null };
-      const token = await this.hubActionStore!.token(ownerDid, actionId);
-      return { outcome, summary: bankReceiptSummary(outcome.receipt, token) };
+      opts: { timeoutMs?: number } = {},
+    ): Promise<HubActionStatusRead> {
+      const read = await this.statusHubAction(
+        ownerDid,
+        actionId,
+        opts.timeoutMs,
+      );
+      if (!read)
+        return {
+          held: false,
+          reviewStatus: null,
+          operationStatus: null,
+          outcome: null,
+          summary: null,
+        };
+      const token = read.outcome
+        ? await this.hubActionStore!.token(ownerDid, actionId)
+        : null;
+      return {
+        held: true,
+        reviewStatus: read.reviewStatus,
+        operationStatus: read.operationStatus,
+        outcome: read.outcome,
+        summary: read.outcome
+          ? bankReceiptSummary(read.outcome.receipt, token)
+          : null,
+      };
     }
 
+    /**
+     * One authenticated status read of a held action (null: not held), its
+     * outcome recorded when new. An outcome for another revision than the
+     * one Auth Hub reports is not taken (`outcome: null`).
+     */
     private async statusHubAction(
       ownerDid: string,
       actionId: string,
       timeoutMs?: number,
-    ): Promise<ActionOutcomeV1 | null> {
+    ): Promise<{
+      reviewStatus: HubReviewStatus;
+      operationStatus: HubOperationStatus;
+      outcome: ActionOutcomeV1 | null;
+    } | null> {
       const held = await this.hubActionStore?.get(ownerDid, actionId);
       if (!held || !this.hubActionClient) return null;
       const status = await this.hubActionClient.status(actionId, timeoutMs);
@@ -3663,16 +3784,20 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         canonicalJson(status.reference) !== canonicalJson(held.reference)
       )
         throw new Error('Hub status does not match the prepared action');
+      const read = {
+        reviewStatus: status.reviewStatus,
+        operationStatus: status.operationStatus,
+      };
       if (status.outcome) {
         if (
           status.revision !== status.outcome.authorizedRevision ||
           status.digest !== status.outcome.authorizedDigest
         )
-          return null;
+          return { ...read, outcome: null };
         if (await this.hubActionStore!.recordOutcome(status.outcome))
           this.markDirty();
       }
-      return status.outcome;
+      return { ...read, outcome: status.outcome };
     }
 
     /**
@@ -3711,11 +3836,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           // refreshed writes it, at most one per poll.
           this.markDirty();
           try {
-            const fresh = await this.statusHubAction(
-              ownerDid,
-              row.reference.id,
-              HUB_POLL_TIMEOUT_MS,
-            );
+            const fresh = (
+              await this.statusHubAction(
+                ownerDid,
+                row.reference.id,
+                HUB_POLL_TIMEOUT_MS,
+              )
+            )?.outcome;
             if (fresh && (!latest || fresh.sequence > latest.sequence))
               latest = fresh;
           } catch (error) {
@@ -3870,6 +3997,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           .catch((err: unknown) => {
             console.warn(
               `[user-do] could not delete the cached attachment text of ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          });
+        await this.channelAttachmentLinks
+          ?.forgetSession(sessionId)
+          .catch((err: unknown) => {
+            console.warn(
+              `[user-do] could not delete the channel file links of ${sessionId}; they expire with the links: ${err instanceof Error ? err.message : String(err)}`,
             );
           });
         await this.resultStore
@@ -7062,6 +7196,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       signal: AbortSignal;
       /** Attachments of the turn now running (not necessarily persisted yet). */
       turnMetas: readonly AttachmentMeta[];
+      /** The links of this turn's channel files (earlier ones come from the store). */
+      channelLinks: ReturnType<typeof channelTurnLinks>;
     }): Promise<AttachmentViewSurface> {
       const saver = this.saver!;
       const offloaded = await saver.hasThreadMessageMatching(input.sessionId, {
@@ -7072,6 +7208,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         findPersistedAttachmentMeta(saver, input.sessionId, ref);
       const viewDeps = (): ViewAttachmentDeps => ({
         source: this.matrixMediaSource(),
+        channel: turnChannelMediaSource({
+          sessionId: input.sessionId,
+          turnLinks: input.channelLinks,
+          store: this.channelAttachmentLinks,
+          channelServiceDid: this.env.CHANNEL_SERVICE_DID,
+        }),
         extraction: this.extractionProvider(input.ambientLlm, input.platform),
         caps: getModelCapabilities(input.model),
         roomId: input.roomId,
@@ -7414,32 +7556,47 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // native capabilities, send images/files inline when it reads them,
       // otherwise the `vision` role turns them into text on the platform key;
       // originals are archived to the user's sandbox when one is reachable.
-      const attachmentInputs = parseAttachmentInputs(
-        body.attachments ?? req.attachments,
-      );
+      // A channel turn's files are read by their `channel:` reference; their
+      // links stay on the server (the run request and the session's link
+      // store), out of every message and note.
+      const attachmentInputs = turnAttachmentInputs(req, body.attachments);
       const attachmentModel =
         effectiveModel && isAllowedModel(effectiveModel)
           ? effectiveModel
           : getDefaultModelId(core.validatedEnv);
-      const prepared =
-        attachmentInputs.length > 0
-          ? await prepareAttachments(
-              {
-                text: body.message,
-                attachments: attachmentInputs,
-                roomId: sessionRoomId,
-                model: attachmentModel,
-                caps: getModelCapabilities(attachmentModel),
-              },
-              {
-                source: this.matrixMediaSource(),
-                extraction: this.extractionProvider(baseAmbient.llm, core.llm),
-                sandbox: await this.sandboxArchiveConfig(req.identity.userDid),
-                signal: abortController.signal,
-                logger: console,
-              },
-            )
-          : null;
+      const turnLinks = channelTurnLinks(req);
+      const channelMedia = turnLinks.length
+        ? turnChannelMediaSource({
+            sessionId: req.sessionId,
+            turnLinks,
+            store: this.channelAttachmentLinks,
+            channelServiceDid: this.env.CHANNEL_SERVICE_DID,
+          })
+        : undefined;
+      if (turnLinks.length && !run.resumed)
+        await this.channelAttachmentLinks?.put(req.sessionId, turnLinks);
+      const { prepared, metas: turnMetas } = await prepareTurnAttachments({
+        inputs: attachmentInputs,
+        resumed: run.resumed,
+        prepare: async () =>
+          prepareAttachments(
+            {
+              text: body.message,
+              attachments: attachmentInputs,
+              roomId: sessionRoomId,
+              model: attachmentModel,
+              caps: getModelCapabilities(attachmentModel),
+            },
+            {
+              source: this.matrixMediaSource(),
+              ...(channelMedia ? { channel: channelMedia } : {}),
+              extraction: this.extractionProvider(baseAmbient.llm, core.llm),
+              sandbox: await this.sandboxArchiveConfig(req.identity.userDid),
+              signal: abortController.signal,
+              logger: console,
+            },
+          ),
+      });
       if (prepared) {
         console.log(
           `[user-do] attachments: ${attachmentInputs.length} attached, ${prepared.extracted.length} extracted, ${Array.isArray(prepared.content) ? prepared.content.length - 1 : 0} native`,
@@ -7463,7 +7620,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             ambientLlm: baseAmbient.llm,
             platform: core.llm,
             signal: abortController.signal,
-            turnMetas: prepared?.metas ?? [],
+            turnMetas,
+            channelLinks: turnLinks,
           });
 
       // Request metadata (editor room, space, session run, entity) → state,
@@ -7797,6 +7955,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                     provider: req.channel.provider,
                     bindingId: req.channel.bindingId,
                     bindingRevision: req.channel.bindingRevision,
+                    ...(req.channel.attachments?.length
+                      ? { attachments: req.channel.attachments }
+                      : {}),
                   },
                 }
               : {}),

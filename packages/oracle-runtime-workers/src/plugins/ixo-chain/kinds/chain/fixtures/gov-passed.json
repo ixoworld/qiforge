@@ -1,0 +1,81 @@
+{
+  "proposals": [
+    {
+      "id": "505",
+      "messages": [
+        {
+          "@type": "/ixo.liquidstake.v1beta1.MsgCreatePool",
+          "authority": "ixo10d07y265gmmuvt4z0w9aw880jnsr700j9hdhjq",
+          "pool_id": "pay",
+          "liquid_bond_denom": "upay",
+          "initial_admin_address": "ixo1axp72yt8qltre8pxgtt2g909s76794v2n7xw2h",
+          "initial_fee_account_address": "ixo1jsmd43wyn4wazs0pswyq2nh36dgxe8rd5h4ncq"
+        }
+      ],
+      "status": "PROPOSAL_STATUS_PASSED",
+      "final_tally_result": {
+        "yes_count": "40567456716924",
+        "abstain_count": "0",
+        "no_count": "0",
+        "no_with_veto_count": "0"
+      },
+      "submit_time": "2026-07-29T14:20:16.490715076Z",
+      "deposit_end_time": "2026-07-31T14:20:16.490715076Z",
+      "total_deposit": [
+        {
+          "denom": "uixo",
+          "amount": "10000000000"
+        }
+      ],
+      "voting_start_time": "2026-07-29T14:20:16.490715076Z",
+      "voting_end_time": "2026-08-03T14:20:16.490715076Z",
+      "metadata": "",
+      "title": "Create the PAY Liquid Staking Pool",
+      "summary": "This is a proposal to create a new liquid staking pool on the Impact Hub Network via the `x/liquidstake` module, with pool ID **pay** and liquid staking token denom **upay** (display: **PAY**, 6 decimals). The PAY token is created and managed by the Pay Pod DAO.\n\n## Summary of the Proposal\n\nThis proposal executes a single `MsgCreatePool` message. It registers the **pay** pool with its own LST deno",
+      "proposer": "ixo15rwc9v3jfvypve8zemdr7y68dydsrh9m2urvjn",
+      "expedited": false,
+      "failed_reason": ""
+    },
+    {
+      "id": "504",
+      "messages": [
+        {
+          "@type": "/cosmwasm.wasm.v1.MsgStoreCode",
+          "sender": "ixo10d07y265gmmuvt4z0w9aw880jnsr700j9hdhjq",
+          "wasm_byte_code": "AGFzbQEAAAABywEaYAJ/fwF/YAJ/fwBgA39/fwF/YAN/f38AYAR/f39/AGABfwBg",
+          "instantiate_permission": {
+            "permission": "Everybody",
+            "addresses": []
+          }
+        }
+      ],
+      "status": "PROPOSAL_STATUS_PASSED",
+      "final_tally_result": {
+        "yes_count": "40567456716924",
+        "abstain_count": "0",
+        "no_count": "0",
+        "no_with_veto_count": "0"
+      },
+      "submit_time": "2026-07-29T13:25:52.739872528Z",
+      "deposit_end_time": "2026-07-31T13:25:52.739872528Z",
+      "total_deposit": [
+        {
+          "denom": "uixo",
+          "amount": "10000000000"
+        }
+      ],
+      "voting_start_time": "2026-07-29T13:25:52.739872528Z",
+      "voting_end_time": "2026-08-03T13:25:52.739872528Z",
+      "metadata": "",
+      "title": "DAO DAO v2.7.1 Upload (22/22): cw20-stake-reward-distributor",
+      "summary": "## DAO DAO v2.7.1 Contract Upload \u2014 22 of 22: cw20-stake-reward-distributor\n\nThis proposal stores the `cw20_stake_reward_distributor.wasm` bytecode from the official audited [DAO DAO v2.7.1 release](https://github.com/DA0-DA0/dao-contracts/releases/tag/v2.7.1) on Impact Hub.\n\n**About this contract:** continuous reward funding for the cw20 staking contract.\n\n**Why this series:** Impact Hub's DAO co",
+      "proposer": "ixo15rwc9v3jfvypve8zemdr7y68dydsrh9m2urvjn",
+      "expedited": false,
+      "failed_reason": ""
+    }
+  ],
+  "pagination": {
+    "next_key": "AAAAAAAAAfc=",
+    "total": "0"
+  }
+}

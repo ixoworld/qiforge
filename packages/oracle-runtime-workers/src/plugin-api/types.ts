@@ -18,36 +18,107 @@ import type { BaseMessage } from '@langchain/core/messages';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { UserPreferences } from '../core/state';
 import type { AttachmentViewSurface } from '../attachments/view';
+import type { ChannelAttachment } from '../channels/contract';
 import type { DeliveryConfig } from '../delivery/profile';
+import type {
+  HubOperationStatus,
+  HubReviewStatus,
+} from '../hub-actions/client';
 import type {
   ActionOperationV1,
   ActionReferenceV1,
   ActionOutcomeV1,
   ActionCapabilitiesV1,
+  ChainTxGroupAction,
   ChainTxMessage,
 } from '@ixo/action-protocol';
 
+/** `Omit` applied to each member of a union (plain `Omit` merges them). */
+export type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
+  ? Omit<T, K>
+  : never;
+
+/**
+ * The owner's own identity in chain-transaction messages, which the host
+ * fills and the model never names: the filer's or disputer's `agentDid`
+ * (claims, reservations, disputes), an evaluation's `agentDid` and
+ * `agentAddress`, a claim permission's `creatorDid`, an entity update's
+ * `controllerDid` and a new entity's `ownerDid`: always `did:ixo:<signer>`,
+ * or the signer for an address.
+ */
+export type ChainTxOwnerField =
+  | 'agentDid'
+  | 'agentAddress'
+  | 'creatorDid'
+  | 'controllerDid'
+  | 'ownerDid';
+
+/** The stake steps: their amount is IXO, written in display units. */
+export type ChainTxStakeType =
+  | 'cosmos.staking.delegate'
+  | 'cosmos.staking.undelegate'
+  | 'cosmos.staking.redelegate';
+
+/** A bank step as the model writes it: a display amount of a listed token. */
+export type ChainTxBankInput = {
+  type: 'cosmos.bank.send';
+  toAddress: string;
+  /** A plain decimal in the token's display units ("1.5"). */
+  amount: string;
+  denom?: string;
+};
+
+/** A stake step as the model writes it: a display amount of IXO. */
+export type ChainTxStakeInput = DistributiveOmit<
+  Extract<ChainTxMessage, { type: ChainTxStakeType }>,
+  'amountBaseUnits'
+> & {
+  /** A plain decimal in IXO ("100" or "0.5"). */
+  amount: string;
+};
+
+/**
+ * One action of a new group proposal (`daodao.proposal.create` `actions`)
+ * as the model writes it: the protocol's action, with a bank or stake
+ * action's amount in display units as at top level. The group's own
+ * account is its actor, so none of them names the owner.
+ */
+export type ChainTxGroupActionInput =
+  | ChainTxBankInput
+  | ChainTxStakeInput
+  | Exclude<
+      ChainTxGroupAction,
+      { type: 'cosmos.bank.send' | ChainTxStakeType }
+    >;
+
 /**
  * A chain-transaction message as the model writes it: the protocol's
- * message without the owner's identity, which the host fills (a claim's
- * `agentDid`, an evaluation's `agentDid` and `agentAddress`: the signer's).
- * A bank step names a display `amount` of a token from the owner's list
- * (`denom`, absent = uixo); the host converts it to the protocol's
- * `amountBaseUnits` from the listed decimals.
+ * message without the owner's identity (`ChainTxOwnerField`), which the
+ * host fills. A bank step names a display `amount` of a token from the
+ * owner's list (`denom`, absent = uixo); a stake step a display `amount` of
+ * IXO. The host converts both to the protocol's `amountBaseUnits` (the
+ * listed decimals; 6 for IXO), at top level and inside a new group
+ * proposal's actions. Every other amount (impact tokens, a collection's
+ * payments) is already in the protocol's units.
  */
 export type ChainTxMessageInput =
-  | {
-      type: 'cosmos.bank.send';
-      toAddress: string;
-      /** A plain decimal in the token's display units ("1.5"). */
-      amount: string;
-      denom?: string;
-    }
-  | Extract<ChainTxMessage, { type: 'ixo.token.transfer' }>
-  | Omit<Extract<ChainTxMessage, { type: 'ixo.claims.submit' }>, 'agentDid'>
-  | Omit<
-      Extract<ChainTxMessage, { type: 'ixo.claims.evaluate' }>,
-      'agentDid' | 'agentAddress'
+  | ChainTxBankInput
+  | ChainTxStakeInput
+  | (Omit<
+      Extract<ChainTxMessage, { type: 'daodao.proposal.create' }>,
+      'actions'
+    > & { actions: ChainTxGroupActionInput[] })
+  | DistributiveOmit<
+      Exclude<
+        ChainTxMessage,
+        {
+          type:
+            | 'cosmos.bank.send'
+            | ChainTxStakeType
+            | 'daodao.proposal.create';
+        }
+      >,
+      ChainTxOwnerField
     >;
 
 /**
@@ -569,6 +640,25 @@ export type SessionSurface =
   | { kind: 'stream' }
   | { kind: 'chat'; surface: string; label: string };
 
+/** What `ctx.hubActions.status` reads. */
+export interface HubActionStatusRead {
+  /** False when this owner object holds no action with this id (Auth Hub was not asked). */
+  held: boolean;
+  /**
+   * Auth Hub's review status (`prepared`, `authorized`, `declined`,
+   * `expired`, …) and operation status, each one the protocol lists or
+   * `unknown` for anything else Auth Hub answered; null when not held.
+   * With no outcome yet they tell an action still waiting from one whose
+   * review lapsed.
+   */
+  reviewStatus: HubReviewStatus | null;
+  operationStatus: HubOperationStatus | null;
+  /** The latest authenticated outcome; null when there is none (yet). */
+  outcome: ActionOutcomeV1 | null;
+  /** For a bank-send receipt, the owner-facing line. */
+  summary: string | null;
+}
+
 export interface RuntimeContext<TConfig = MergedConfig> {
   /** Authenticated user identity (validated by core auth middleware). */
   user: {
@@ -593,6 +683,14 @@ export interface RuntimeContext<TConfig = MergedConfig> {
       provider: string;
       bindingId: string;
       bindingRevision: number;
+      /**
+       * Files the person sent with this turn's message (a WhatsApp photo,
+       * video, document or audio file), as the channel gateway serves them:
+       * a capability `url` plus the `sha256` of its bytes. Absent when the
+       * message carried none. The model also sees them through the
+       * attachment pipeline; this is the raw list for tools that keep them.
+       */
+      attachments?: readonly ChannelAttachment[];
     };
     roomId?: string;
     /**
@@ -798,7 +896,13 @@ export interface RuntimeContext<TConfig = MergedConfig> {
 
   /** Host-owned action coordinator. It accepts only runtime-derived channel context. */
   hubActions?: {
-    capabilities(): Promise<ActionCapabilitiesV1>;
+    /**
+     * The Hub's capabilities for this oracle account (cached 60 s).
+     * `turn`: a read on a turn's critical path (a tool list): a short
+     * timeout, no new read within 30 s of a failed one, and the last
+     * capabilities read while reads fail.
+     */
+    capabilities(opts?: { turn?: boolean }): Promise<ActionCapabilitiesV1>;
     options(input: {
       ownerDid: string;
       provider: string;
@@ -808,13 +912,19 @@ export interface RuntimeContext<TConfig = MergedConfig> {
     /**
      * One chain transaction (`ixo.chain.tx.v1`) of 1–8 messages: the host
      * adds the chain id and network (the account's), the signer (the
-     * owner's address) and the owner's identity in claims messages
-     * (`agentDid` = `did:ixo:<signer>`, an evaluation's `agentAddress` = the
-     * signer) and prepares it like any operation (no fee: the Hub simulates
-     * gas and sets it). A bank step's display `amount` is converted to base
-     * units from the owner's token list (one options read per call, only
-     * when there is a bank step), refused for a token not listed, more
-     * digits than its decimals, zero or more than the listed balance.
+     * owner's address) and the owner's identity (`ChainTxOwnerField`:
+     * `did:ixo:<signer>`, an evaluation's `agentAddress` = the signer) and
+     * prepares it like any operation (no fee: the Hub simulates gas and
+     * sets it). A bank step's display `amount` is converted to base units
+     * from the owner's token list (one options read per call, only when
+     * there is a bank or stake step), refused for a token not listed, more
+     * digits than its decimals, zero or more than the listed balance. A
+     * stake step's IXO `amount` is converted with 6 decimals; what a stake
+     * takes from the wallet counts against the listed IXO balance with the
+     * IXO bank steps, when the list has IXO. A new group proposal's bank and
+     * stake actions are converted the same way but never checked against
+     * the owner's balance: the group's own account pays them when the group
+     * carries the proposal out.
      */
     chainTransaction(input: {
       ownerDid: string;
@@ -839,11 +949,20 @@ export interface RuntimeContext<TConfig = MergedConfig> {
       requestKey: string;
       operation: ActionOperationV1;
     }): Promise<ActionReferenceV1>;
-    /** The latest authenticated outcome and, for a transfer, its owner-facing line. */
+    /**
+     * A fresh, authenticated read of one of this owner's actions: Auth
+     * Hub's review and operation status, the latest outcome (null: none
+     * yet) and, for a transfer, its owner-facing line. An action this
+     * owner object never prepared is `held: false` and Auth Hub is not
+     * asked. `timeoutMs` bounds the Hub read (default 10 s). Rejects with
+     * `HubActionRefused` (with `httpStatus`) when Auth Hub refuses the read,
+     * for example when it must be updated first.
+     */
     status(
       ownerDid: string,
       actionId: string,
-    ): Promise<{ outcome: ActionOutcomeV1 | null; summary: string | null }>;
+      opts?: { timeoutMs?: number },
+    ): Promise<HubActionStatusRead>;
   };
 
   decisions: {
