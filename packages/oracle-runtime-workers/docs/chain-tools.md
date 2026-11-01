@@ -928,12 +928,17 @@ or 5xx also pauses every names request to that worker from the isolate
 for its `Retry-After` (60 s without one, at most 300 s); the memo still
 answers meanwhile.
 
-**Rate limits.** The worker allows 6,000 requests a minute per caller and
-client id. A caller is the calling Worker's zone (`worker:<zone>`, for a
-Worker on another zone), an IPv6 /64 or an IPv4 address. Its uncached work
-is limited per caller alone, so every oracle on one zone shares that
-budget: ids over it come back `partial`, no 429, and are asked again by a
-later call. There is no service key.
+**Rate limits.** The worker allows 6,000 requests a minute per caller. A
+caller is the calling Worker's zone (`worker:<zone>`), an IPv6 /64 or an
+IPv4 address. Cloudflare shows a Durable Object's calls as
+`<account>.workers.dev`, even for a Worker with its own domain, so
+Companion's are `worker:ixo-api.workers.dev`. On the worker's trusted zones
+(`ixo.earth`, `ixo-api.workers.dev`, `openhands.network`) every limiter
+also keys on `x-client-id`, so each oracle has its own buckets per network.
+On any other zone the header is only logged, and every oracle on that zone
+shares one bucket. Uncached work has its own limit under the same key: ids
+over it come back `partial`, no 429, and are asked again by a later call.
+There is no service key.
 
 **Size.** `names` counts toward the 12,000-character cap: rows are cut
 first, one at a time (the last row of the largest list; the overview's
