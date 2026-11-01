@@ -7,6 +7,8 @@
  *      (`GET /v1/entities`): one programme each, in the worker's order.
  *   2. Every claim collection those entities own, from Blocksync.
  *   3. Minus the collections admins hid per entity (`GET /v1/collections/<entity>`).
+ *   4. Plus the host's bot-only jobs ({@link BotOnlyJob}): test collections
+ *      offered in chat but not on jambo.yoma.world, after Jambo's programmes.
  *
  * Jambo still lists collections that are not open (state PAUSED or CLOSED),
  * have ended or are full; this does not, as the chain refuses a claim on
@@ -105,6 +107,23 @@ export interface Programme {
    * hides must never be offered. The rest of the list stands.
    */
   unavailable?: true;
+}
+
+/**
+ * A job the host offers in chat only, strictly for testing on a production
+ * collection: the test runs on mainnet with real cards and payments, while
+ * jambo.yoma.world, and so the partners' and opportunity providers' own
+ * listings and results, never show it. Not for real opportunities: those
+ * belong on Jambo's list. One collection of a programme's entity, shown
+ * whether or not Jambo lists the entity. Its programme comes after Jambo's
+ * (an entity Jambo lists keeps its place) and shows only its bot-only jobs;
+ * Jambo's hide list does not apply to it. The chain still decides whether it
+ * is open, so closing or pausing the collection ends the test.
+ */
+export interface BotOnlyJob {
+  /** The entity that owns the collection (`did:ixo:entity:…`). */
+  programme: string;
+  collectionId: string;
 }
 
 export interface Catalog {
@@ -473,23 +492,34 @@ export function resetCatalogCache(): void {
  * (`untilAborted`). A complete list is kept five minutes; a failed build, or
  * one with a piece missing (a hide list, a profile, a job's name), 30
  * seconds, so a struggling upstream is not asked by every call and a gap
- * does not last.
+ * does not last. `botOnly`: the host's bot-only jobs (malformed ones are
+ * left out).
  */
 export async function loadCatalog(
   call: ChainCall,
   now = new Date(),
+  botOnly: readonly BotOnlyJob[] = [],
 ): Promise<Outcome<Catalog>> {
   const base = JOB_LIST_URLS[call.network];
-  if (!base) return { ok: true, value: { programmes: [], jobs: [] } };
-  let entry = listCache.get(call.network);
+  const extra = botOnly.filter(
+    (job) =>
+      ENTITY_DID.test(job.programme) && COLLECTION_ID.test(job.collectionId),
+  );
+  if (!base && !extra.length)
+    return { ok: true, value: { programmes: [], jobs: [] } };
+  const key = [
+    call.network,
+    ...extra.map((job) => `${job.programme}/${job.collectionId}`),
+  ].join('|');
+  let entry = listCache.get(key);
   if (!entry || now.getTime() - entry.at >= entry.ttl) {
     const started = {
       at: now.getTime(),
       ttl: LIST_TTL_MS,
-      pending: startBuild(call, base, now),
+      pending: startBuild(call, base, now, extra),
     };
     entry = started;
-    listCache.set(call.network, started);
+    listCache.set(key, started);
     void started.pending.then((built) => {
       if (!built.ok || built.value.incomplete) started.ttl = FAILED_TTL_MS;
     });
@@ -500,8 +530,9 @@ export async function loadCatalog(
 /** The build's reads: every caller's network and endpoints, but the build's own permits, deadline and abort. */
 function startBuild(
   caller: ChainCall,
-  base: string,
+  base: string | undefined,
   now: Date,
+  botOnly: readonly BotOnlyJob[],
 ): Promise<Outcome<Catalog>> {
   const controller = new AbortController();
   const call: ChainCall = {
@@ -518,7 +549,7 @@ function startBuild(
     () => controller.abort(new Error('catalog build deadline')),
     TOOL_BUDGET_MS + 1_000,
   );
-  return buildCatalog(call, base, now)
+  return buildCatalog(call, base, now, botOnly)
     .catch((error: unknown): Outcome<Catalog> => {
       console.warn(
         `[yoma] catalog build failed: ${error instanceof Error ? error.name : 'unknown'}`,
@@ -593,24 +624,43 @@ async function openCollections(
 
 async function buildCatalog(
   call: ChainCall,
-  base: string,
+  base: string | undefined,
   now: Date,
+  botOnly: readonly BotOnlyJob[],
 ): Promise<Outcome<Catalog>> {
-  const listed = await getJson(
-    call,
-    'job-list',
-    `${base}/v1/entities`,
-    entityListSchema,
-    {
-      label: 'job list',
-      maxBytes: JOB_LIST_MAX_BYTES,
-      what: 'The Yoma job list',
-    },
-  );
-  if (!listed.ok) return listed;
+  let jamboIds: string[] = [];
+  if (base) {
+    const listed = await getJson(
+      call,
+      'job-list',
+      `${base}/v1/entities`,
+      entityListSchema,
+      {
+        label: 'job list',
+        maxBytes: JOB_LIST_MAX_BYTES,
+        what: 'The Yoma job list',
+      },
+    );
+    if (!listed.ok) return listed;
+    jamboIds = [
+      ...new Set(
+        listed.value.data.entities.filter((id) => ENTITY_DID.test(id)),
+      ),
+    ].slice(0, MAX_PROGRAMMES);
+  }
+  // Bot-only programmes after Jambo's; one Jambo lists keeps its place.
+  const onJambo = new Set(jamboIds);
   const entityIds = [
-    ...new Set(listed.value.data.entities.filter((id) => ENTITY_DID.test(id))),
-  ].slice(0, MAX_PROGRAMMES);
+    ...jamboIds,
+    ...new Set(
+      botOnly.map((job) => job.programme).filter((id) => !onJambo.has(id)),
+    ),
+  ];
+  const botOnlyJobs = new Set(
+    botOnly.map((job) => `${job.programme}/${job.collectionId}`),
+  );
+  const isBotOnly = (c: { entity: string; id: string }) =>
+    botOnlyJobs.has(`${c.entity}/${c.id}`);
   if (!entityIds.length)
     return { ok: true, value: { programmes: [], jobs: [] } };
 
@@ -620,8 +670,9 @@ async function buildCatalog(
   // list stands. A 404 is a programme with nothing hidden. Each hide list,
   // profile and form keeps its own health mark here, so one 503 holds back
   // only that address, after its own retry, not the rest of the build.
+  // A bot-only programme has no hide list: only its bot-only jobs show.
   const [hidden, collections, programmeEntities] = await Promise.all([
-    mapLimit(entityIds, (id) =>
+    mapLimit(jamboIds, (id) =>
       getJson(
         call,
         'job-list',
@@ -644,7 +695,7 @@ async function buildCatalog(
   const hiddenBy = new Map<string, Set<string>>();
   const unreadable = new Set<string>();
   hidden.forEach((read, index) => {
-    const id = entityIds[index]!;
+    const id = jamboIds[index]!;
     if (read.ok) hiddenBy.set(id, new Set(read.value.data?.blacklist ?? []));
     else if (read.failure.reason === 'not_found') hiddenBy.set(id, new Set());
     else unreadable.add(id);
@@ -655,8 +706,10 @@ async function buildCatalog(
   const allOpen = collections.value.rows
     .filter(
       (c) =>
-        !unreadable.has(c.entity) &&
-        !hiddenBy.get(c.entity)?.has(c.id) &&
+        (isBotOnly(c) ||
+          (onJambo.has(c.entity) &&
+            !unreadable.has(c.entity) &&
+            !hiddenBy.get(c.entity)?.has(c.id))) &&
         isOpen(c, now),
     )
     .sort(
