@@ -441,11 +441,13 @@ import {
   WorkersUcanService,
 } from './ucan-service';
 import type {
+  ChainSigningSurface,
   ChainTxMessageInput,
   HubActionStatusRead,
   UcanDelegation,
   UserContextData,
 } from '../plugin-api/types';
+import { createChainSurface, defaultRpcUrl } from '../chain';
 
 /**
  * The gateway's topic read errors that describe what the homeserver
@@ -2325,6 +2327,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         ...(this.taskScheduler ? { tasks: this.taskScheduler.surface } : {}),
         preferences: this.preferences,
         kv: new SqliteUserKv(liveDb),
+        ...(this.chainSurface() ?? {}),
         frontend: this.realtime.frontend,
         config: core.validatedEnv,
         identity: core.identity,
@@ -2345,6 +2348,27 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         logger: console,
         background: (work) => this.ctx.waitUntil(work),
       });
+    }
+
+    /**
+     * `ctx.chain`: the oracle's secp account signing through the
+     * `SEQUENCE_MANAGER` sequence keeper (one DO per signer address). Off
+     * unless both the mnemonic and the binding are configured.
+     */
+    private chainSurface(): { chain: ChainSigningSurface } | undefined {
+      const mnemonic = this.env.ORACLE_SECP_MNEMONIC;
+      const sequences = this.env.SEQUENCE_MANAGER;
+      if (!mnemonic || !sequences) return undefined;
+      return {
+        chain: createChainSurface({
+          mnemonic,
+          rpcUrl:
+            this.env.CHAIN_RPC_URL ??
+            defaultRpcUrl(this.env.NETWORK ?? 'devnet'),
+          sequenceFor: (address) =>
+            sequences.get(sequences.idFromName(address)),
+        }),
+      };
     }
 
     /**

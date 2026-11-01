@@ -12,6 +12,7 @@
  *  - emit      → routed to the SSE writer of the turn that owns the
  *                payload's `sessionId` (same shape as the Node `wsEmitter`).
  */
+import type { ChainSigningSurface } from '../plugin-api/types';
 import type { DecisionEvaluator } from '@ixo/common/ai/decisions';
 import type {
   AmbientServices,
@@ -273,6 +274,8 @@ export interface CreateAmbientInput {
   preferences?: import('../plugin-api/types').UserPreferencesSurface;
   /** `ctx.kv` over the user's working copy (`SqliteUserKv`). */
   kv?: UserKvSurface;
+  /** The oracle's chain signer, when the Worker has a secp mnemonic + sequence keeper. */
+  chain?: ChainSigningSurface;
   /** Host bridge to the user's browser (realtime channel), when terminated here. */
   frontend?: import('../plugin-api/types').FrontendCallSurface;
   /** Per-turn cleanup registry (see `RuntimeContext.onTurnEnd`). */
@@ -310,6 +313,7 @@ export function createAmbientServices(
     ...(input.hubActions ? { hubActions: input.hubActions } : {}),
     ...(input.preferences ? { preferences: input.preferences } : {}),
     ...(input.kv ? { kv: input.kv } : {}),
+    ...(input.chain ? { chain: input.chain } : {}),
     ...(input.frontend ? { frontend: input.frontend } : {}),
     ...(input.onTurnEnd ? { onTurnEnd: input.onTurnEnd } : {}),
     ...(input.background ? { background: input.background } : {}),
