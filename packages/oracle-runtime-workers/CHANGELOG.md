@@ -1,5 +1,11 @@
 # @ixo/oracle-runtime-workers
 
+## 0.35.0
+
+### Minor Changes
+
+- [#440](https://github.com/ixoworld/qiforge/pull/440) [`f03b2dd`](https://github.com/ixoworld/qiforge/commit/f03b2ddc9506262618cfd9d8161c64409566a057) Thanks [@Zach-ixo](https://github.com/Zach-ixo)! - Yoma plugin: `botOnlyJobs` option, strictly for testing on a production collection without affecting partners' and opportunity providers' listings or results. A host lists test collections (`{ programme, collectionId }`) to offer in chat but not on jambo.yoma.world; their programmes come after Jambo's, show only those jobs, and Jambo's hide list does not apply to them.
+
 ## 0.34.1
 
 ### Patch Changes
