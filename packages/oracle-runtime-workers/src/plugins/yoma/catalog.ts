@@ -7,8 +7,8 @@
  *      (`GET /v1/entities`): one programme each, in the worker's order.
  *   2. Every claim collection those entities own, from Blocksync.
  *   3. Minus the collections admins hid per entity (`GET /v1/collections/<entity>`).
- *   4. Plus the host's bot-only jobs ({@link BotOnlyJob}): collections offered
- *      in chat but not on jambo.yoma.world, after Jambo's programmes.
+ *   4. Plus the host's bot-only jobs ({@link BotOnlyJob}): test collections
+ *      offered in chat but not on jambo.yoma.world, after Jambo's programmes.
  *
  * Jambo still lists collections that are not open (state PAUSED or CLOSED),
  * have ended or are full; this does not, as the chain refuses a claim on
@@ -110,11 +110,15 @@ export interface Programme {
 }
 
 /**
- * A job the host offers in chat only: one collection of a programme's
- * entity, shown whether or not Jambo lists the entity. Its programme comes
- * after Jambo's (an entity Jambo lists keeps its place) and shows only its
- * bot-only jobs; Jambo's hide list does not apply to it. The chain still
- * decides whether it is open.
+ * A job the host offers in chat only, strictly for testing on a production
+ * collection: the test runs on mainnet with real cards and payments, while
+ * jambo.yoma.world, and so the partners' and opportunity providers' own
+ * listings and results, never show it. Not for real opportunities: those
+ * belong on Jambo's list. One collection of a programme's entity, shown
+ * whether or not Jambo lists the entity. Its programme comes after Jambo's
+ * (an entity Jambo lists keeps its place) and shows only its bot-only jobs;
+ * Jambo's hide list does not apply to it. The chain still decides whether it
+ * is open, so closing or pausing the collection ends the test.
  */
 export interface BotOnlyJob {
   /** The entity that owns the collection (`did:ixo:entity:…`). */

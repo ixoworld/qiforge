@@ -89,8 +89,12 @@ own (`jambo-yoma-v2` `screens/collectionForm.tsx`: `includes('#bco')`,
 `includes('#vct')`, then `includes('surveyTemplate')`), so chat and Jambo
 always open the same form.
 
-**Bot-only jobs (optional).** A host may pass `botOnlyJobs: [{ programme,
-collectionId }]`: collections offered in chat but not on jambo.yoma.world.
+**Bot-only jobs (optional, testing only).** A host may pass `botOnlyJobs:
+[{ programme, collectionId }]`: test collections offered in chat but not on
+jambo.yoma.world. It exists strictly to test on a collection in production
+(real cards, claims and payments on mainnet) without touching what partners
+and opportunity providers see or get on Jambo. Real opportunities belong on
+Jambo's list, not here. Closing or pausing the collection ends the test.
 Their programmes come after Jambo's (one Jambo lists keeps its place) and a
 programme Jambo does not list shows only its bot-only jobs. Jambo's hide
 list does not apply to them; the chain's rules (open, dates, quota) do. Ids

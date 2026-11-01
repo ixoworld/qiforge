@@ -634,7 +634,7 @@ export interface YomaPluginOptions {
   getClef?: () => ClefRunner | undefined;
   /** Collections where a finished application gives permission at once, granted by the host. Absent: every job waits for acceptance. */
   instantPermission?: InstantPermission;
-  /** Jobs offered in chat but not on jambo.yoma.world, after Jambo's programmes. */
+  /** Test collections offered in chat but not on jambo.yoma.world, so partners' and opportunity providers' listings are untouched (see {@link BotOnlyJob}). Testing only. */
   botOnlyJobs?: readonly BotOnlyJob[];
 }
 
