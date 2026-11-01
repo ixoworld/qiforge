@@ -1,5 +1,18 @@
 # @ixo/oracles-client-sdk
 
+## 1.8.0
+
+### Minor Changes
+
+- [#442](https://github.com/ixoworld/qiforge/pull/442) [`e90df77`](https://github.com/ixoworld/qiforge/commit/e90df770503fe0a43be1e6897de2c70ed3f874cd) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - `MatrixClient` sends the access token to the session's homeserver instead of the one the user's DID names, and `getOracleRoomIdWithDid` does the same (the room alias still comes from the DID). The hooks pass `wallet.matrix.homeServer`; a direct `new MatrixClient()` without `homeserverUrl` keeps resolving from the DID.
+
+  `createAndJoinOracleRoomWithDid` sends the rooms bot a UCAN instead of the access token. Hosts pass the new `getRoomsBotAuth` prop on `OraclesProvider`; `contractOracle` throws without it.
+
+### Patch Changes
+
+- Updated dependencies [[`e90df77`](https://github.com/ixoworld/qiforge/commit/e90df770503fe0a43be1e6897de2c70ed3f874cd)]:
+  - @ixo/oracles-chain-client@2.1.4
+
 ## 1.7.0
 
 ### Minor Changes
