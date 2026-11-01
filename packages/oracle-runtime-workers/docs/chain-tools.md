@@ -867,7 +867,7 @@ nothing named has no `names`.
 **The request.** `POST <worker>/v1/resolve`, `content-type:
 application/json`, `x-client-id: ixo-chain-<ORACLE_NAME as a slug, or
 oracle>-<network>` (at most 64 characters of `[a-z0-9-]`), body
-`{ "ids": [...], "options": { "include": ["name", "cache"] } }`, at most
+`{ "ids": [...], "options": { "include": ["name", "cache"], "budgetMs": 5000 } }`, at most
 40 ids. Workers per `NETWORK` (`IXO_NAMES_URL` overrides; `IXO_NAMES=off`
 turns names off): mainnet `https://names.ixo.earth`, testnet
 `https://testnet.names.ixo.earth`, devnet `https://devnet.names.ixo.earth`.
@@ -906,10 +906,15 @@ sent 10 ms after its first id (`BATCH_WINDOW_MS`) or as soon as it holds
 batch. An id already queued or in flight is not asked again: the call
 joins its promise (until the age limits below). At most 200 ids are queued or in flight per batcher
 (`MAX_OUTSTANDING_IDS`); a miss past that goes unnamed for that call. A
-POST belongs to no call: it runs under its own 4 s timeout
-(`POST_TIMEOUT_MS`), and the batcher's POSTs share five permits.
+POST belongs to no call: it runs under its own 6 s timeout
+(`POST_TIMEOUT_MS`), and the batcher's POSTs share five permits. Each POST
+asks the worker to answer by 5 s (`RESPONSE_BUDGET_MS`, `options.budgetMs`)
+with what is ready: the rest come back `partial`, the worker finishes them
+in the background, and the next call finds them in its cache. The second
+between the two is for network time and the worker's D1 reads, which come
+on top of the budget: an answer past the timeout would lose every id.
 
-**Budget.** A call waits for its own ids only, at most 4 s and never into
+**Budget.** A call waits for its own ids only, at most 6 s and never into
 the last 1 s of its 20 s budget, and stops early on its turn's abort
 (which it throws). Stopping never cancels the POST or another call's
 wait: the answer still lands in the memo for the next call (the worker's
@@ -961,7 +966,7 @@ finishing: it recovers by age, noticed by the next caller.
   next caller queues its ids afresh under its own entries and sends them
   with its own fetch. A live call that joined the batch still gets its
   answer.
-- An id outstanding longer than 5 s (`OUTSTANDING_MAX_MS`, the POST's 4 s
+- An id outstanding longer than 7 s (`OUTSTANDING_MAX_MS`, the POST's 6 s
   plus `READ_GRACE_MS`, 1 s) is dropped: it no longer counts toward the
   200 and the next call that needs it asks it afresh. A POST that settles
   after all leaves the new entry alone.
