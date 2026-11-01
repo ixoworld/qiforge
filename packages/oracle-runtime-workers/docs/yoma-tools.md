@@ -89,6 +89,14 @@ own (`jambo-yoma-v2` `screens/collectionForm.tsx`: `includes('#bco')`,
 `includes('#vct')`, then `includes('surveyTemplate')`), so chat and Jambo
 always open the same form.
 
+**Bot-only jobs (optional).** A host may pass `botOnlyJobs: [{ programme,
+collectionId }]`: collections offered in chat but not on jambo.yoma.world.
+Their programmes come after Jambo's (one Jambo lists keeps its place) and a
+programme Jambo does not list shows only its bot-only jobs. Jambo's hide
+list does not apply to them; the chain's rules (open, dates, quota) do. Ids
+that are not an entity DID and a collection id are left out. They are read
+on any network, not only mainnet.
+
 **A hide list that cannot be read** (an error other than a 404) marks only
 that programme `unavailable: true` with none of its jobs: a job it hides
 must never be offered, and the other programmes stand. `programme_jobs` for
