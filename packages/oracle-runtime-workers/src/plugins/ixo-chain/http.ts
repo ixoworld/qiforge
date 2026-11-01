@@ -1,5 +1,5 @@
 /**
- * The network edge shared by the chain REST and Blocksync reads: one bounded
+ * The network edge shared by the chain REST, Blocksync and names reads: one bounded
  * HTTP exchange per attempt, the retry policy around it, and the per-user
  * permits every attempt takes. Upstream failures become a {@link Failure}
  * the tools hand to the model; nothing here throws for them. Only the
@@ -11,11 +11,12 @@ import {
 } from '../../core/domain-context/transport';
 
 /**
- * Where a read goes. `chain` and `blocksync` are ixo-chain's; the Yoma
- * plugin (`../yoma`) adds the Jambo worker's job list and the documents
- * entities link to (profiles, forms), under the same policy.
+ * Where a read goes. `chain`, `blocksync` and `names` (the IXO Names
+ * worker) are ixo-chain's; the Yoma plugin (`../yoma`) adds the Jambo
+ * worker's job list and the documents entities link to (profiles, forms),
+ * under the same policy.
  */
-export type Source = 'chain' | 'blocksync' | 'job-list' | 'document';
+export type Source = 'chain' | 'blocksync' | 'names' | 'job-list' | 'document';
 
 export type FailureReason =
   | 'rate_limited'
@@ -49,6 +50,12 @@ export const TOOL_BUDGET_MS = 20_000;
 /** An attempt, the first one included, is not started with less time than this left in the budget. */
 export const MIN_ATTEMPT_MS = 1_000;
 /**
+ * How long past its call's deadline a read still counts as running. Every
+ * wait inside a read ends by that deadline, so a read older than this will
+ * never settle: it died with the actor that started it.
+ */
+export const READ_GRACE_MS = 1_000;
+/**
  * How long a 429, 502, 503, 504 or network error answers the isolate's
  * other reads of that upstream without asking it.
  */
@@ -66,6 +73,7 @@ export const ERROR_BODY_MAX_BYTES = 8 * 1024;
 const SOURCE_NAME: Record<Source, string> = {
   chain: 'The chain node',
   blocksync: 'Blocksync',
+  names: 'The IXO Names worker',
   'job-list': 'The Yoma job list',
   document: 'The document host',
 };
@@ -158,7 +166,11 @@ export type Attempt<T> =
       ok: false;
       failure: Failure;
       retry: boolean;
-      /** The upstream's `Retry-After`, at most {@link MAX_RETRY_DELAY_MS}. */
+      /**
+       * The upstream's `Retry-After` on a 429/502/503/504. {@link withRetry}
+       * waits it only when the attempt asks for a retry, which
+       * {@link exchange} does for at most {@link MAX_RETRY_DELAY_MS}.
+       */
       retryAfterMs?: number;
       /**
        * A 429, 502, 503, 504 or network error: the upstream is marked
@@ -209,6 +221,70 @@ export function untilAborted<T>(
   return Promise.race([shared, aborted]).finally(() =>
     signal.removeEventListener('abort', onAbort),
   );
+}
+
+/**
+ * `shared` as this call waits for it, as {@link untilAborted}, and no longer
+ * than the call's own deadline: `undefined` then. The read may belong to an
+ * actor that died, and such a read never settles.
+ */
+export async function untilDeadline<T>(
+  shared: Promise<T>,
+  call: Pick<ChainCall, 'deadline' | 'signal'>,
+): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<undefined>((resolve) => {
+    timer = setTimeout(
+      () => resolve(undefined),
+      Math.max(0, call.deadline - Date.now()),
+    );
+  });
+  try {
+    return await untilAborted(Promise.race([shared, deadline]), call.signal);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Reads in flight that other calls may join, by key. The map is shared by
+ * every Durable Object of the isolate, while a read lives and dies with the
+ * actor that started it: a dead one never settles, so its `finally` never
+ * runs. Age recovers it instead: past its call's deadline and
+ * {@link READ_GRACE_MS} a read is forgotten by the next caller, who reads
+ * for itself. A replaced read that settles after all leaves its
+ * replacement in place.
+ */
+export class ReadsInFlight<T> {
+  private readonly reads = new Map<
+    string,
+    { read: Promise<T>; forgetAt: number }
+  >();
+
+  /** The read of `key` a call can join, if one is running. */
+  joinable(key: string): Promise<T> | undefined {
+    const entry = this.reads.get(key);
+    if (!entry) return undefined;
+    if (entry.forgetAt > Date.now()) return entry.read;
+    this.reads.delete(key);
+    return undefined;
+  }
+
+  /** Shares `read`, started for `call`, until it settles; what comes back is what joiners get. */
+  track(key: string, call: ChainCall, read: Promise<T>): Promise<T> {
+    const entry = {
+      read: read.finally(() => {
+        if (this.reads.get(key) === entry) this.reads.delete(key);
+      }),
+      forgetAt: call.deadline + READ_GRACE_MS,
+    };
+    this.reads.set(key, entry);
+    return entry.read;
+  }
+
+  clear(): void {
+    this.reads.clear();
+  }
 }
 
 /** Resolves after `ms`; rejects with the turn's abort reason if it ends first. */
@@ -349,9 +425,12 @@ const REDIRECTED = 'ixo-chain-redirect';
 
 /* ── per-user permits ─────────────────────────────────────────────────── */
 
-/** One user's permits: how many are taken, and the reads waiting for one, oldest first. */
+/**
+ * One user's permits: those taken, each with the moment it counts as lost,
+ * and the reads waiting for one, oldest first.
+ */
 interface Permits {
-  taken: number;
+  held: Set<{ lostAt: number }>;
   waiting: Set<() => void>;
 }
 
@@ -366,19 +445,18 @@ export function usersReading(): number {
   return permitsByUser.size;
 }
 
-/** Gives a permit back: to the oldest waiting read, else to the user's pool. */
-function releaserOf(user: string, permits: Permits): () => void {
-  let released = false;
+/**
+ * Takes a permit for `call`, as the function that gives it back: to the
+ * oldest waiting read, else to the user's pool.
+ */
+function holdPermit(call: ChainCall, permits: Permits): () => void {
+  const permit = { lostAt: call.deadline + READ_GRACE_MS };
+  permits.held.add(permit);
   return () => {
-    if (released) return;
-    released = true;
+    if (!permits.held.delete(permit)) return;
     const next = permits.waiting.values().next();
-    if (!next.done) {
-      next.value();
-      return;
-    }
-    permits.taken -= 1;
-    if (permits.taken === 0) permitsByUser.delete(user);
+    if (!next.done) next.value();
+    else if (permits.held.size === 0) permitsByUser.delete(call.user);
   };
 }
 
@@ -386,28 +464,29 @@ function releaserOf(user: string, permits: Permits): () => void {
  * One of the call's user's {@link USER_READ_PERMITS} permits, as the
  * function that gives it back; null when none frees up while the call
  * still has {@link MIN_ATTEMPT_MS} of its budget left. Rejects with the
- * turn's abort reason when the turn ends while it waits.
+ * turn's abort reason when the turn ends while it waits. A permit past its
+ * read's deadline and {@link READ_GRACE_MS} is taken back here, by the next
+ * caller: a read that died with its actor never returns the one it holds.
  */
 function takePermit(call: ChainCall): Promise<(() => void) | null> {
-  const permits = permitsByUser.get(call.user) ?? {
-    taken: 0,
-    waiting: new Set<() => void>(),
+  const permits: Permits = permitsByUser.get(call.user) ?? {
+    held: new Set(),
+    waiting: new Set(),
   };
   permitsByUser.set(call.user, permits);
-  if (permits.taken < USER_READ_PERMITS) {
-    permits.taken += 1;
-    return Promise.resolve(releaserOf(call.user, permits));
-  }
+  for (const permit of permits.held)
+    if (permit.lostAt <= Date.now()) permits.held.delete(permit);
+  if (permits.held.size < USER_READ_PERMITS)
+    return Promise.resolve(holdPermit(call, permits));
   return new Promise((resolve, reject) => {
     const leave = () => {
       permits.waiting.delete(handOver);
       clearTimeout(timer);
       call.signal.removeEventListener('abort', onAbort);
     };
-    // A released permit passes straight to this read: `taken` is unchanged.
     const handOver = () => {
       leave();
-      resolve(releaserOf(call.user, permits));
+      resolve(holdPermit(call, permits));
     };
     const onAbort = () => {
       leave();
@@ -546,6 +625,7 @@ async function exchangeHolding(
             retry: false,
             unhealthy: true,
             status,
+            retryAfterMs: wait,
             note: `HTTP ${status}, Retry-After ${Math.ceil(wait / 1000)} s`,
           };
         return {

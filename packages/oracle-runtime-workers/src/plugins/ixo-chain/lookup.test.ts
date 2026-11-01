@@ -14,12 +14,17 @@ import { CORE_KINDS } from './kinds/core';
 import { defineKind, type KindContext, type KindDef } from './kinds/types';
 import {
   chainLookup,
+  cutRow,
+  cutRowAcross,
+  fitNames,
   MAX_DISPLAY_DENOMS,
   MAX_RESULT_CHARS,
   runRequests,
   type KindRequest,
+  type LookupAnswer,
   type LookupOptions,
 } from './lookup';
+import type { NameMap } from './names/types';
 import { restJson } from './rest';
 
 const ADDRESS = 'ixo1cra6p0jefu8f907gqngkfzxur26k7f73an4v95';
@@ -746,5 +751,127 @@ describe('chainLookup', () => {
     expect(answer.results).toMatchObject([
       { kind: 'rows', ok: true, truncated: true },
     ]);
+  });
+});
+
+describe('fitNames', () => {
+  const entity = (n: number) =>
+    `did:ixo:entity:${n.toString(16).padStart(32, '0')}`;
+  const namesOf = (ids: readonly string[]): NameMap =>
+    Object.fromEntries(
+      ids.map((id) => [
+        id,
+        {
+          name: `Entity ${id.slice(-4)} ${'n'.repeat(100)}`,
+          source: 'entity',
+          selfChosen: false,
+        },
+      ]),
+    );
+  const answerOf = (data: unknown, names: NameMap): LookupAnswer => ({
+    ok: true,
+    network: 'mainnet',
+    fetchedAt: '2026-10-30T00:00:00.000Z',
+    results: [{ kind: 'entities', source: 'blocksync', ok: true, data }],
+    names,
+  });
+  const fit = (answer: LookupAnswer) =>
+    fitNames(answer, () => cutRowAcross(answer.results));
+
+  it('leaves an answer that fits as it is', () => {
+    const ids = [entity(1), entity(2)];
+    const answer = answerOf({ items: ids.map((id) => ({ id })) }, namesOf(ids));
+    const before = structuredClone(answer);
+    fit(answer);
+    expect(answer).toEqual(before);
+  });
+
+  it('cuts rows first, one at a time, then leaves out the names of the identifiers cut', () => {
+    const ids = Array.from({ length: 40 }, (_, n) => entity(n));
+    const rowsOf = (count: number) =>
+      ids.slice(0, count).map((id) => ({ id, pad: 'p'.repeat(200) }));
+    const answer = answerOf({ items: rowsOf(40) }, namesOf(ids));
+    expect(JSON.stringify(answer).length).toBeGreaterThan(MAX_RESULT_CHARS);
+    fit(answer);
+    expect(JSON.stringify(answer).length).toBeLessThanOrEqual(MAX_RESULT_CHARS);
+    expect(answer.results).toMatchObject([{ ok: true, truncated: true }]);
+    const [result] = answer.results;
+    const { items: kept } = z
+      .object({ items: z.array(z.object({ id: z.string() })) })
+      .parse(result?.ok ? result.data : null);
+    // The most rows that fit with their names: one more would not.
+    const fits = (count: number) => {
+      const candidate = answerOf(
+        { items: rowsOf(count) },
+        namesOf(ids.slice(0, count)),
+      );
+      const [only] = candidate.results;
+      if (only?.ok) only.truncated = true;
+      return JSON.stringify(candidate).length <= MAX_RESULT_CHARS;
+    };
+    expect(fits(kept.length)).toBe(true);
+    expect(fits(kept.length + 1)).toBe(false);
+    expect(kept.length).toBeGreaterThan(20);
+    expect(kept.map((row) => row.id)).toEqual(ids.slice(0, kept.length));
+    expect(Object.keys(answer.names ?? {})).toEqual(kept.map((row) => row.id));
+  });
+
+  it('cuts the last row of the largest list in any result', () => {
+    const answer = answerOf(
+      { small: [1, 2], large: ['a'.repeat(50), 'b'.repeat(50), 'c'] },
+      {},
+    );
+    answer.results.push({
+      kind: 'other',
+      source: 'chain',
+      ok: true,
+      data: { rows: ['x', 'y'] },
+    });
+    expect(cutRowAcross(answer.results)).toBe(true);
+    expect(answer.results).toMatchObject([
+      {
+        ok: true,
+        truncated: true,
+        data: { small: [1, 2], large: ['a'.repeat(50), 'b'.repeat(50)] },
+      },
+      { ok: true, data: { rows: ['x', 'y'] } },
+    ]);
+    expect(answer.results[1]).not.toHaveProperty('truncated');
+  });
+
+  it('cutRow keeps one row of every list and says when none is left to cut', () => {
+    const holder: { truncated?: boolean; tokens: string[] } = {
+      tokens: ['a', 'b'],
+    };
+    expect(cutRow(holder, holder.tokens)).toBe(true);
+    expect(holder).toEqual({ tokens: ['a'], truncated: true });
+    expect(cutRow(holder, holder.tokens)).toBe(false);
+    expect(holder.tokens).toEqual(['a']);
+  });
+
+  it('with no row left to cut, leaves out names from the end, never a result', () => {
+    const ids = Array.from({ length: 10 }, (_, n) => entity(n));
+    const record = Object.fromEntries(ids.map((id, n) => [`e${n}`, id]));
+    const answer = answerOf(
+      { ...record, blob: 'x'.repeat(10_500) },
+      namesOf(ids),
+    );
+    fit(answer);
+    expect(JSON.stringify(answer).length).toBeLessThanOrEqual(MAX_RESULT_CHARS);
+    expect(answer.results).toMatchObject([{ ok: true, kind: 'entities' }]);
+    expect(answer.results[0]).not.toHaveProperty('truncated');
+    const left = Object.keys(answer.names ?? {});
+    expect(left.length).toBeGreaterThan(0);
+    expect(left).toEqual(ids.slice(0, left.length));
+  });
+
+  it('removes the map once no name is left', () => {
+    const answer = answerOf(
+      { owner: entity(1), blob: 'x'.repeat(11_700) },
+      namesOf([entity(1)]),
+    );
+    fit(answer);
+    expect(answer).not.toHaveProperty('names');
+    expect(JSON.stringify(answer).length).toBeLessThanOrEqual(MAX_RESULT_CHARS);
   });
 });

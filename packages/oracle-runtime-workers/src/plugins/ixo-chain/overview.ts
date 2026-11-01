@@ -9,16 +9,19 @@
  * on its own: its counts and top rows, with the request that reads the
  * rest, or why it failed. The answer is cut to {@link MAX_RESULT_CHARS},
  * top rows first, and an answer without any failure is kept per isolate
- * for {@link OVERVIEW_TTL_MS}.
+ * for {@link OVERVIEW_TTL_MS}. Its `names` are not kept: each call adds
+ * its own to its own copy, cutting top rows ({@link cutTopRow}) to make
+ * room.
  */
 import { z } from 'zod';
 import type { UserIdentity } from '../../core/user-identity';
 import { balancesKind } from './balances';
 import {
+  ReadsInFlight,
   hasBudget,
   throwIfAborted,
   tooLarge,
-  untilAborted,
+  untilDeadline,
   type ChainCall,
   type Failure,
   type Outcome,
@@ -34,6 +37,7 @@ import {
   type LookupOptions,
   type LookupResult,
 } from './lookup';
+import type { NameMap } from './names/types';
 import { accountOf, type Subject } from './queries';
 import type { Absent } from './rest';
 import { isRecord } from './summaries';
@@ -639,6 +643,8 @@ export type OverviewAnswer = {
   address: string;
   subject: Subject;
   sections: Partial<Record<Section, SectionAnswer>>;
+  /** What the identifiers in the answer are called (added after the cache, per call). */
+  names?: NameMap;
 };
 
 export type OverviewFailure = {
@@ -654,6 +660,23 @@ const SHAPE_FAILED: Failure = {
 const LEFT_OUT = tooLarge(
   'Left out to keep the answer small; ask for this section on its own.',
 );
+
+type MoreArgs = (part: Part) => Record<string, unknown>;
+
+/** The account is named in `more` only when it is not the user's (the kinds' default). */
+const moreArgsOf =
+  (account: { address: string; subject: Subject }): MoreArgs =>
+  (part) =>
+    account.subject === 'user'
+      ? { ...part.args }
+      : { ...part.args, [part.account]: account.address };
+
+/** The request that reads the rest of `part`. */
+function moreOf(part: Part, moreArgs: MoreArgs): More {
+  return part.tool
+    ? { tool: part.tool, args: moreArgs(part) }
+    : { kind: part.kind.name, args: moreArgs(part) };
+}
 
 /** A part that answered, with its rows. */
 interface Answered {
@@ -712,7 +735,7 @@ function gather(
 function render(
   gathered: Gathered,
   limit: number,
-  moreArgs: (part: Part) => Record<string, unknown>,
+  moreArgs: MoreArgs,
 ): SectionAnswer {
   const { answered, failed, tagged } = gathered;
   const first = failed[0];
@@ -751,11 +774,7 @@ function render(
     (entry, index) =>
       entry.rows.more || entry.rows.rows.length > (shown[index] ?? 0),
   );
-  const more: More | undefined = !rest
-    ? undefined
-    : rest.part.tool
-      ? { tool: rest.part.tool, args: moreArgs(rest.part) }
-      : { kind: rest.part.kind.name, args: moreArgs(rest.part) };
+  const more = rest ? moreOf(rest.part, moreArgs) : undefined;
   return {
     ok: true,
     summary: { counts, ...(totals ? { totals } : {}), top },
@@ -814,12 +833,7 @@ async function readOverview(
     return index;
   });
   const answers = await runRequests(call, identity, requests, options);
-  // The account is named in `more` only when it is not the user's (the
-  // kinds' default).
-  const moreArgs = (part: Part) =>
-    account.subject === 'user'
-      ? { ...part.args }
-      : { ...part.args, [part.account]: account.address };
+  const moreArgs = moreArgsOf(account);
   const state = sections.map((section) => {
     const results = planned.flatMap((entry, index) =>
       entry.section === section ? [answers[requestOf[index] ?? -1]] : [],
@@ -894,6 +908,48 @@ async function readOverview(
   return answer;
 }
 
+/**
+ * One cut of a rendered answer that must make room (for its `names`): the
+ * last top row of the largest section that still has one, as a smaller
+ * `limit` renders it. The section is marked `truncated`, and its `more`
+ * names the first of its parts with rows not shown. False when no section
+ * has a top row left.
+ */
+export function cutTopRow(answer: OverviewAnswer): boolean {
+  let largest: Section | undefined;
+  let largestSize = -1;
+  for (const section of SECTIONS) {
+    const shown = answer.sections[section];
+    if (!shown?.ok || !shown.summary.top.length) continue;
+    const bytes = size(shown);
+    if (bytes > largestSize) {
+      largest = section;
+      largestSize = bytes;
+    }
+  }
+  const shown = largest ? answer.sections[largest] : undefined;
+  if (!largest || !shown?.ok) return false;
+  const row = shown.summary.top.pop();
+  const parts = PARTS[largest];
+  // A section of several parts tags each top row with its part's `list`.
+  const cut =
+    parts.length > 1
+      ? parts.find((part) => isRecord(row) && row.list === part.list)
+      : parts[0];
+  if (cut) {
+    const moreArgs = moreArgsOf(answer);
+    // -1 when the section has no `more` yet.
+    const current = JSON.stringify(shown.more);
+    const named = parts.findIndex(
+      (part) => JSON.stringify(moreOf(part, moreArgs)) === current,
+    );
+    if (named < 0 || parts.indexOf(cut) < named)
+      shown.more = moreOf(cut, moreArgs);
+  }
+  shown.truncated = true;
+  return true;
+}
+
 /* ── cache ────────────────────────────────────────────────────────────── */
 
 /**
@@ -937,17 +993,19 @@ function timedOut(answer: OverviewAnswer): boolean {
  * Overview answers per isolate: each complete one kept for
  * {@link OVERVIEW_TTL_MS}, at most {@link OVERVIEW_CACHE_LIMIT} (the
  * oldest dropped first). A read in flight is shared by every call that
- * asks the same; a joining call waits on its own turn's abort only and
- * throws its own abort reason. It reads again itself when the shared read
- * ended in the starting turn's abort, or when that read ran out of time
- * and the joining call still has budget. Every call gets its own copy.
+ * asks the same; a joining call waits until its own deadline at most, on
+ * its own turn's abort only, and throws its own abort reason. It reads
+ * again itself when the shared read ended in the starting turn's abort, or
+ * when that read ran out of time and the joining call still has budget. A
+ * read that died with its actor is replaced by the next caller past its
+ * age limit ({@link ReadsInFlight}). Every call gets its own copy.
  */
 class OverviewCache {
   private readonly answers = new Map<
     string,
     { answer: OverviewAnswer; expiresAt: number }
   >();
-  private readonly inflight = new Map<string, Promise<OverviewAnswer>>();
+  private readonly inflight = new ReadsInFlight<OverviewAnswer>();
 
   async get(
     key: string,
@@ -957,19 +1015,22 @@ class OverviewCache {
     const hit = this.answers.get(key);
     if (hit && hit.expiresAt > Date.now()) return structuredClone(hit.answer);
     if (hit) this.answers.delete(key);
-    const running = this.inflight.get(key);
-    if (!running) return this.start(key, read);
-    let shared: OverviewAnswer;
+    const running = this.inflight.joinable(key);
+    if (!running) return this.start(key, call, read);
+    let shared: OverviewAnswer | undefined;
     try {
-      shared = await untilAborted(running, call.signal);
+      shared = await untilDeadline(running, call);
     } catch {
       // This turn's abort, or the starting turn's (the only error a read
       // throws): only this turn's is thrown; after the other's this call
       // reads on its own.
       throwIfAborted(call.signal);
-      return this.start(key, read);
+      return this.start(key, call, read);
     }
-    if (timedOut(shared) && hasBudget(call)) return this.start(key, read);
+    // Its own deadline came first. With no budget left this read asks
+    // nothing: every section is the spent budget's timeout. It is not shared.
+    if (shared === undefined) return read();
+    if (timedOut(shared) && hasBudget(call)) return this.start(key, call, read);
     return structuredClone(shared);
   }
 
@@ -980,17 +1041,14 @@ class OverviewCache {
 
   private async start(
     key: string,
+    call: ChainCall,
     read: () => Promise<OverviewAnswer>,
   ): Promise<OverviewAnswer> {
-    const pending = read();
-    this.inflight.set(key, pending);
-    try {
-      const answer = await pending;
-      if (complete(answer)) this.remember(key, answer);
-      return answer;
-    } finally {
-      if (this.inflight.get(key) === pending) this.inflight.delete(key);
-    }
+    const answer = await this.inflight.track(key, call, read());
+    if (complete(answer)) this.remember(key, answer);
+    // The calls joining this read copy `answer` when they wake; the
+    // caller adds its names to its own copy.
+    return structuredClone(answer);
   }
 
   private remember(key: string, answer: OverviewAnswer): void {

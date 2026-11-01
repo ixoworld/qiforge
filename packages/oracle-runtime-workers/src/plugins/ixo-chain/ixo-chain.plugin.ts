@@ -24,8 +24,18 @@ import {
 } from './http';
 import { KINDS, kindByName, kindNames } from './kinds/registry';
 import type { KindDef } from './kinds/types';
-import { chainLookup, MAX_RESULT_CHARS, shrink } from './lookup';
-import { accountOverview, overviewSchema } from './overview';
+import {
+  chainLookup,
+  cutRow,
+  cutRowAcross,
+  fitNames,
+  MAX_RESULT_CHARS,
+  shrink,
+} from './lookup';
+import { NAMES_URLS, resolveNames } from './names/client';
+import { collectIdentifiers } from './names/collect';
+import type { NameMap } from './names/types';
+import { accountOverview, cutTopRow, overviewSchema } from './overview';
 import { accountOf, type Subject } from './queries';
 import { restJson } from './rest';
 
@@ -54,6 +64,10 @@ const configSchema = z.object({
       if (!parsed.ok) ctx.addIssue({ code: 'custom', message: parsed.error });
     })
     .optional(),
+  /** The IXO Names worker's origin; defaults per `NETWORK`. https only. */
+  IXO_NAMES_URL: rpcOriginSchema.optional(),
+  /** `off` leaves `names` out of every answer; unset or `on` adds them. */
+  IXO_NAMES: z.enum(['on', 'off']).default('on'),
 });
 
 type Network = z.infer<typeof NetworkSchema>;
@@ -71,6 +85,37 @@ export function chainRestUrl(config: MergedConfig): string {
   return override.success && override.data
     ? override.data
     : CHAIN_REST_URLS[networkOf(config)];
+}
+
+/** The names worker's origin: `IXO_NAMES_URL` when set, else the network's default. */
+export function namesUrl(config: MergedConfig): string {
+  const override = configSchema.shape.IXO_NAMES_URL.safeParse(
+    config.IXO_NAMES_URL,
+  );
+  // The worker's routes sit at the origin's root.
+  return override.success && override.data
+    ? new URL(override.data).origin
+    : NAMES_URLS[networkOf(config)];
+}
+
+/** The longest `x-client-id` the worker takes. */
+const CLIENT_ID_MAX = 64;
+
+/**
+ * The stable id the oracle asks the names worker under:
+ * `ixo-chain-<ORACLE_NAME as a slug, or "oracle">-<network>`, at most 64
+ * characters of `[a-z0-9-]`.
+ */
+export function namesClientId(config: MergedConfig): string {
+  const network = networkOf(config);
+  const name = typeof config.ORACLE_NAME === 'string' ? config.ORACLE_NAME : '';
+  const room = CLIENT_ID_MAX - `ixo-chain--${network}`.length;
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .slice(0, room)
+    .replace(/^-+|-+$/g, '');
+  return `ixo-chain-${slug || 'oracle'}-${network}`;
 }
 
 /**
@@ -131,6 +176,49 @@ function invalidInput(detail: string): Failure {
   return { reason: 'invalid_input', detail, retryable: false };
 }
 
+/* ── names ────────────────────────────────────────────────────────────── */
+
+/** The longest a call waits for its names. */
+export const NAMES_BUDGET_MS = 4_000;
+/** What the names wait leaves of the call's budget. */
+export const NAMES_RESERVE_MS = 1_000;
+
+/**
+ * `answer` with the `names` of the identifiers it carries (the user's own
+ * left out), then fitted to {@link MAX_RESULT_CHARS} with `cutRows` cutting
+ * its rows first. Waits at most {@link NAMES_BUDGET_MS}, and never into the
+ * last {@link NAMES_RESERVE_MS} of the call's budget. Unchanged when names
+ * are off, it carries no identifier or none was named in time; only the
+ * turn's abort is thrown.
+ */
+async function withNames<T extends { names?: NameMap }>(
+  call: ChainCall,
+  ctx: RuntimeContext,
+  answer: T,
+  cutRows: () => boolean,
+): Promise<T> {
+  if (ctx.config.IXO_NAMES === 'off') return answer;
+  const identifiers = collectIdentifiers(answer, identityOf(ctx));
+  if (!identifiers.length) return answer;
+  const deadline = Math.min(
+    Date.now() + NAMES_BUDGET_MS,
+    call.deadline - NAMES_RESERVE_MS,
+  );
+  if (deadline <= Date.now()) return answer;
+  const names = await resolveNames(identifiers, {
+    network: call.network,
+    baseUrl: namesUrl(ctx.config),
+    clientId: namesClientId(ctx.config),
+    fetch: call.fetch,
+    deadline,
+    signal: call.signal,
+  });
+  if (!Object.keys(names).length) return answer;
+  answer.names = names;
+  fitNames(answer, cutRows);
+  return answer;
+}
+
 /* ── get_account_balances ─────────────────────────────────────────────── */
 
 // `address` is bounded by `accountOf`'s patterns, not by a length cap here.
@@ -174,6 +262,7 @@ async function getAccountBalances(
     tokens: BalanceToken[];
     moreDenoms?: true;
     truncated?: boolean;
+    names?: NameMap;
   } = {
     ok: true,
     network: call.network,
@@ -185,7 +274,7 @@ async function getAccountBalances(
     ...(moreDenoms ? { moreDenoms: true } : {}),
   };
   shrink(answer, answer.tokens, MAX_RESULT_CHARS);
-  return answer;
+  return withNames(call, ctx, answer, () => cutRow(answer, answer.tokens));
 }
 
 /* ── chain_lookup ─────────────────────────────────────────────────────── */
@@ -216,35 +305,42 @@ function registeredKind(name: string): KindDef {
   return kind;
 }
 
-function lookupHandler(input: unknown, ctx: RuntimeContext): Promise<unknown> {
+async function lookupHandler(
+  input: unknown,
+  ctx: RuntimeContext,
+): Promise<unknown> {
   // The tool layer validates `input` against the schema before the
   // handler runs (an unknown kind or key rejects the whole call there); a
   // mismatch here is a programmer error and throws.
   const { requests } = chainLookupSchema.parse(input);
   const call = chainCall(ctx);
-  return chainLookup(
+  const answer = await chainLookup(
     call,
     identityOf(ctx),
     requests.map(({ kind, args }) => ({ kind: registeredKind(kind), args })),
     { ibcDenoms: ibcDenomsOf(ctx, call) },
   );
+  return withNames(call, ctx, answer, () => cutRowAcross(answer.results));
 }
 
 /* ── get_account_overview ─────────────────────────────────────────────── */
 
-function overviewHandler(
+async function overviewHandler(
   input: unknown,
   ctx: RuntimeContext,
 ): Promise<unknown> {
   // Validated by the tool layer before the handler runs.
   const { address, sections } = overviewSchema.parse(input);
   const call = chainCall(ctx);
-  return accountOverview(
+  const answer = await accountOverview(
     call,
     identityOf(ctx),
     { address, sections },
     { ibcDenoms: ibcDenomsOf(ctx, call) },
   );
+  return answer.ok
+    ? withNames(call, ctx, answer, () => cutTopRow(answer))
+    : answer;
 }
 
 /* ── describe_chain_kinds ─────────────────────────────────────────────── */
@@ -373,20 +469,29 @@ const ORIGIN_RULE =
 const LOOKUP_UNITS_RULE =
   '`amountBaseUnits` is base units (uixo ÷ 1,000,000 = IXO), an `amount` beside a `symbol` converted; 1155 token amounts are whole units.';
 
-/** Says the overview is broad and costly; its units and text rules are `chain_lookup`'s, bound beside it. */
+/**
+ * Every answer's `names` map (`{ [id]: { name, source, selfChosen } }`);
+ * in the guide and the `chain_lookup` description, which the other tools'
+ * descriptions point to. Anyone can pick a self-chosen name, so the short
+ * address beside it tells look-alikes apart.
+ */
+const NAMES_RULE =
+  'Call people and things by their `names` entry; give an address or DID only when asked; beside a `selfChosen` name the user did not pick, also give the short address (first 12 … last 6 characters).';
+
+/** Says the overview is broad and costly; its units, text and names rules are `chain_lookup`'s, bound beside it. */
 const OVERVIEW_DESCRIPTION = [
   "A broad look at an IXO account (default: the user's) by `sections` (default: all): per section: counts, top 3 rows, `more` (the request for the rest).",
-  'Several reads: for one fact use `get_account_balances` or `chain_lookup`. Units and text as in `chain_lookup`.',
+  'Several reads: for one fact use `get_account_balances` or `chain_lookup`. Units, text and names as in `chain_lookup`.',
 ].join(' ');
 
 // The guide states every rule once, briefly; each tool description carries
 // the ones its own answers need, in full.
 const OPERATING_GUIDE = [
   '### IXO chain reader',
-  '- Broad account questions: `get_account_overview`; one fact: `get_account_balances` or `chain_lookup`.',
+  '- Broad account questions: `get_account_overview`; one fact: `get_account_balances` or `chain_lookup`. Batch questions into one `chain_lookup`.',
   "- `chain` answers are live, `blocksync` ones indexed (seconds behind); say each answer's `network`.",
   "- Units: `amount` beside `symbol` is converted (IXO = uixo ÷ 1,000,000), `amountBaseUnits` not; 1155 token amounts are whole units. Say a token's `origin` when two share a symbol; an unverified token's `trace` is only the sending chain's claim, never what the token is.",
-  '- Batch questions into one `chain_lookup`.',
+  `- ${NAMES_RULE}`,
   `- ${READ_ONLY_RULE}`,
   `- ${UNTRUSTED_TEXT_RULE}`,
 ].join('\n');
@@ -396,9 +501,10 @@ const OPERATING_GUIDE = [
  * gateway, `get_account_overview` (several kinds per account section in
  * one lookup call), and `chain_lookup` over a catalogue of kinds — chain
  * REST reads and one batched Blocksync GraphQL document per call — with
- * `describe_chain_kinds` giving each kind's arguments on request. Public
- * data only: no delegation capability is needed. On unless
- * `IXO_CHAIN_TOOLS=off`.
+ * `describe_chain_kinds` giving each kind's arguments on request. Every
+ * answer but the catalogue's also carries `names` for the identifiers in
+ * it, from the IXO Names worker. Public data only: no delegation
+ * capability is needed. On unless `IXO_CHAIN_TOOLS=off`.
  */
 export class IxoChainPlugin extends OraclePlugin {
   readonly name = 'ixo-chain';
@@ -419,6 +525,7 @@ export class IxoChainPlugin extends OraclePlugin {
           '`amount` is display units (IXO = uixo ÷ 1,000,000), `amountBaseUnits` base units; unverified tokens: base units, full denom; `metadataUnavailable`: may still be verified.',
           ORIGIN_RULE,
           NETWORK_RULE,
+          'Names as in `chain_lookup`.',
           READ_ONLY_RULE,
         ].join(' '),
         schema: balancesSchema,
@@ -440,6 +547,7 @@ export class IxoChainPlugin extends OraclePlugin {
           '`source`: `chain` live, `blocksync` indexed (seconds behind).',
           LOOKUP_UNITS_RULE,
           NETWORK_RULE,
+          NAMES_RULE,
           UNTRUSTED_TEXT_RULE,
         ].join(' '),
         schema: chainLookupSchema,

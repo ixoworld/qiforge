@@ -15,7 +15,12 @@ import {
   trustedDenomDisplay,
   type IbcDenomTable,
 } from './denoms';
-import { TOOL_BUDGET_MS, resetUpstreamHealth, type ChainCall } from './http';
+import {
+  READ_GRACE_MS,
+  TOOL_BUDGET_MS,
+  resetUpstreamHealth,
+  type ChainCall,
+} from './http';
 
 const USDC =
   'ibc/6BBE9BD4246F8E04948D5A4EEE7164B2630263B9EBB5E7DC5F0A46C62A2FF97B';
@@ -426,6 +431,29 @@ describe('denomDisplay', () => {
     answer(usdcMetadata());
     await expect(launching).resolves.toEqual(USDC_VERIFIED);
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('ends a joiner at its own deadline when the shared read died with its actor, and the next call past the age limit reads itself', async () => {
+    vi.useFakeTimers();
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockImplementationOnce(() => new Promise<Response>(() => undefined))
+      .mockImplementation(async () => usdcMetadata());
+    void denomDisplay(callWith(fetcher), USDC, NONE);
+    await vi.advanceTimersByTimeAsync(0);
+    const joining = denomDisplay(
+      callWith(fetcher, { deadline: Date.now() + 3_000 }),
+      USDC,
+      NONE,
+    );
+    await vi.advanceTimersByTimeAsync(3_000);
+    await expect(joining).resolves.toEqual(UNVERIFIED_UNAVAILABLE);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(TOOL_BUDGET_MS + READ_GRACE_MS - 3_000);
+    await expect(denomDisplay(callWith(fetcher), USDC, NONE)).resolves.toEqual(
+      USDC_VERIFIED,
+    );
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
   it(`keeps at most ${DENOM_CACHE_LIMIT} answers, dropping the oldest first`, async () => {

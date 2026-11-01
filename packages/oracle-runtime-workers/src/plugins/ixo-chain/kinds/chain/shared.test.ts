@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Outcome } from '../../http';
+import {
+  BUDGET_SPENT,
+  READ_GRACE_MS,
+  TOOL_BUDGET_MS,
+  type Outcome,
+} from '../../http';
 import { chainFetch, contextOf } from './fixtures/context';
 import {
   DEC_ONE,
@@ -201,6 +206,82 @@ describe('ReadCache', () => {
     finish(found('a'));
     expect(await launching).toEqual(found('a'));
     expect(shared).toHaveBeenCalledTimes(1);
+  });
+
+  describe('a read that died with its actor', () => {
+    const dead = () => new Promise<Outcome<string>>(() => undefined);
+    const shortly = () =>
+      contextOf(chainFetch({}), { deadline: Date.now() + 3_000 });
+
+    it('ends a joiner at its own deadline, and the next caller past the age limit reads itself', async () => {
+      vi.useFakeTimers();
+      const cache = new ReadCache<string>(60_000, 10);
+      const read = vi.fn(dead);
+      void cache.get(ctx(), 'k', read);
+      const joining = cache.get(shortly(), 'k', read);
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(await joining).toEqual({ ok: false, failure: BUDGET_SPENT });
+      // Up to the limit it is still joined.
+      await vi.advanceTimersByTimeAsync(TOOL_BUDGET_MS + READ_GRACE_MS - 3_001);
+      const atLimit = cache.get(
+        contextOf(chainFetch({}), { deadline: Date.now() + 1 }),
+        'k',
+        read,
+      );
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await atLimit).toEqual({ ok: false, failure: BUDGET_SPENT });
+      expect(read).toHaveBeenCalledTimes(1);
+      const own = vi.fn(async () => found('fresh'));
+      expect(await cache.get(ctx(), 'k', own)).toEqual(found('fresh'));
+      expect(await cache.get(ctx(), 'k', own)).toEqual(found('fresh'));
+      expect(own).toHaveBeenCalledTimes(1);
+    });
+
+    it('ages out by the deadline of the call that started it, not a whole budget', async () => {
+      vi.useFakeTimers();
+      const cache = new ReadCache<string>(60_000, 10);
+      void cache.get(shortly(), 'k', dead);
+      await vi.advanceTimersByTimeAsync(3_000 + READ_GRACE_MS);
+      expect(await cache.get(ctx(), 'k', async () => found('fresh'))).toEqual(
+        found('fresh'),
+      );
+    });
+
+    it('leaves the replacement in flight when the replaced read settles after all', async () => {
+      vi.useFakeTimers();
+      const cache = new ReadCache<string>(60_000, 10);
+      let settleOld: (value: Outcome<string>) => void = () => undefined;
+      let settleNew: (value: Outcome<string>) => void = () => undefined;
+      const replaced = cache.get(
+        ctx(),
+        'k',
+        () =>
+          new Promise((resolve) => {
+            settleOld = resolve;
+          }),
+      );
+      await vi.advanceTimersByTimeAsync(TOOL_BUDGET_MS + READ_GRACE_MS);
+      const replacing = cache.get(
+        ctx(),
+        'k',
+        () =>
+          new Promise((resolve) => {
+            settleNew = resolve;
+          }),
+      );
+      const failure: Outcome<string> = {
+        ok: false,
+        failure: { reason: 'unavailable', detail: 'x', retryable: true },
+      };
+      settleOld(failure);
+      expect(await replaced).toEqual(failure);
+      const unused = vi.fn(async () => found('never read'));
+      const joining = cache.get(ctx(), 'k', unused);
+      settleNew(found('new'));
+      expect(await replacing).toEqual(found('new'));
+      expect(await joining).toEqual(found('new'));
+      expect(unused).not.toHaveBeenCalled();
+    });
   });
 
   it('drops the oldest entry past its size cap', async () => {
