@@ -179,7 +179,7 @@ function invalidInput(detail: string): Failure {
 /* ── names ────────────────────────────────────────────────────────────── */
 
 /** The longest a call waits for its names. */
-export const NAMES_BUDGET_MS = 4_000;
+export const NAMES_BUDGET_MS = 6_000;
 /** What the names wait leaves of the call's budget. */
 export const NAMES_RESERVE_MS = 1_000;
 

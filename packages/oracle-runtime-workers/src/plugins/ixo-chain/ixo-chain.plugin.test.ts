@@ -1531,7 +1531,7 @@ describe('names', () => {
     const balances = tool('get_account_balances');
 
     // Twelve denoms read four at a time, 5 s each: the balances read ends
-    // 15 s into the call, so names get their whole 4 s.
+    // 15 s into the call, so names get the 4 s left of the budget.
     let asked = slow(5_000);
     let start = Date.now();
     let pending = balances.handler({ address: OTHER }, on());
