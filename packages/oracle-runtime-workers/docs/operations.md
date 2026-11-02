@@ -824,6 +824,7 @@ the model natively or through the helper model's extraction:
   native block, by a turn or by `view_attachment`: the turn hands the bytes
   it already downloaded to the extraction lane, whose content check notes
   the mismatch.
+- **Chat-channel files are never native blocks** (WhatsApp turns, `channelRef`): photos, documents and videos go to the helper model and the turn's model gets the text, whatever it reads natively, and `view_attachment` returns them as text. A native block is base64 the size of the file in a message that is replayed on every later turn, counted at chars/4 against the context budget and copied several times over in the isolate; a 600 KB PDF from WhatsApp reset the user object on every attempt. Tools still read the file itself through `ctx.session.channel.attachments`.
 - **`view_attachment`** keeps the text it extracted in the user's SQLite
   (`attachment_text_cache`, per session, attachment and extraction model,
   at most 65,536 characters per entry, `VIEW_CACHE_MAX_CHARS`), so a second
