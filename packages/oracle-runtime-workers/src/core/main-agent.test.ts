@@ -1077,7 +1077,7 @@ describe('createMainAgent', () => {
     expect(boundToolNames).toContain('read_result');
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining(
-        '[context] model=m window=32000 (override) summarizeAt=18400 pruneAt=11200 resultCap=15360c',
+        '[context] model=m window=32000 (override) budgetWindow=32000 summarizeAt=18400 pruneAt=11200 resultCap=15360c',
       ),
     );
 

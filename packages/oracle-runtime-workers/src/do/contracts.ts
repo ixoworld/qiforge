@@ -280,11 +280,13 @@ export interface OracleWorkerEnv {
   RUN_SEGMENT_FLUSH_MS?: string;
   RUN_SEGMENT_BYTES?: string;
   RUN_RECOVERY_ATTEMPTS?: string;
+  RUN_RECOVERY_TOTAL_ATTEMPTS?: string;
   RUN_RECOVERY_DELAYS_MS?: string;
   TURN_MULTITASK_DEFAULT?: string;
   /** Context-budget knobs (docs/plans/context-budgets.md). */
   MODEL_CONTEXT_TOKENS?: string;
   MODEL_CONTEXT_OVERRIDES?: string;
+  CONTEXT_MEMORY_WINDOW_TOKENS?: string;
   CONTEXT_SUMMARIZE_FRACTION?: string;
   CONTEXT_PRUNE_FRACTION?: string;
   CONTEXT_RESULT_CAP_FRACTION?: string;
@@ -499,7 +501,16 @@ export interface UserContextPrefetchStatus {
 export interface ContextStatus {
   model: string;
   byoProvider?: string;
-  window: { tokens: number; origin: string; catalogId?: string };
+  /**
+   * `tokens` is the model's window; `budgetTokens` the window every limit
+   * is derived from (`tokens`, at most `CONTEXT_MEMORY_WINDOW_TOKENS`).
+   */
+  window: {
+    tokens: number;
+    origin: string;
+    catalogId?: string;
+    budgetTokens: number;
+  };
   budget: {
     summarizeAtTokens: number;
     pruneAtTokens: number;
@@ -581,6 +592,7 @@ export interface RunsStatus {
     segmentFlushMs: number;
     segmentBytes: number;
     recoveryAttempts: number;
+    recoveryTotalAttempts: number;
     recoveryDelaysMs: readonly number[];
     multitaskDefault: 'interrupt' | 'enqueue';
   };

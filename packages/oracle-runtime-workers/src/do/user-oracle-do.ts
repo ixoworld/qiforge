@@ -7019,6 +7019,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           tokens: window.tokens,
           origin: window.origin,
           ...(window.catalogId ? { catalogId: window.catalogId } : {}),
+          budgetTokens: budget.budgetWindowTokens,
         },
         budget: {
           summarizeAtTokens: budget.summarizeAtTokens,

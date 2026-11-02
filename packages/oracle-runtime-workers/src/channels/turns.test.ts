@@ -753,6 +753,48 @@ describe('oracle room mirrors stay off the channel path', () => {
   });
 });
 
+describe('a run the object keeps resetting under', () => {
+  it('ends interrupted after 8 recoveries, though every attempt made progress, and the channel answers it as over without a reply', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('reset-loop');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    // Eight restarts: each recovers the run and resumes it.
+    expect(await stub.resetDuringRun(8)).toEqual([]);
+    expect(await stub.run(first.result.runId)).toMatchObject({
+      status: 'running',
+      attempts: 1,
+      generation: 8,
+    });
+    expect(await stub.poll(message)).toMatchObject({
+      ok: true,
+      result: { status: 'running' },
+    });
+    // The ninth closes it.
+    expect(await stub.resetDuringRun(1)).toEqual(['interrupted']);
+    expect(await stub.run(first.result.runId)).toMatchObject({
+      status: 'interrupted',
+      generation: 9,
+    });
+    // What the gateway polls: a terminal status and no reply text. The
+    // channel gateway turns `interrupted` (like `failed`) into
+    // `turn_failed` and sends the user its failure message.
+    const polled = await stub.poll(message);
+    expect(polled).toMatchObject({
+      ok: true,
+      result: { runId: first.result.runId, status: 'interrupted' },
+    });
+    if (!polled?.ok) throw new Error('Not answered');
+    expect(polled.result).not.toHaveProperty('text');
+    expect(polled.result).not.toHaveProperty('plan');
+    // The room is owed no reply.
+    expect(await stub.receipt(message.requestId)).toMatchObject({
+      reply_mirrored: 2,
+      mirror_pending: 0,
+    });
+    expect(await stub.mirrors()).toEqual({ user: 1, oracle: 0 });
+  });
+});
+
 describe('channel record pruning', () => {
   it('removes, from the alarm, receipts that never started a run and run tombstones once 7 days old', async () => {
     const stub = env.CHANNEL_TURNS_TEST.getByName('pruning');

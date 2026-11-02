@@ -56,20 +56,21 @@ two checks; and a provider rejection ended the turn with a raw error.
 
 ## Knobs
 
-| Env                             | Default | Meaning                                                                     |
-| ------------------------------- | ------- | --------------------------------------------------------------------------- |
-| `MODEL_CONTEXT_TOKENS`          | 100000  | Window for models no source knows (min 16000)                               |
-| `MODEL_CONTEXT_OVERRIDES`       | —       | `model=tokens,…` explicit windows (win over everything but a learned limit) |
-| `CONTEXT_SUMMARIZE_FRACTION`    | 0.5     | Summarize the history at this share of the window                           |
-| `CONTEXT_PRUNE_FRACTION`        | 0.35    | Prune old tool results in the request above this share                      |
-| `CONTEXT_RESULT_CAP_FRACTION`   | 0.12    | One tool result may occupy this share (×4 chars)                            |
-| `CONTEXT_RESULT_CAP_MAX_CHARS`  | 200000  | Ceiling on that cap (≈ 50k tokens), whatever the window                     |
-| `CONTEXT_REQUEST_FRACTION`      | 0.95    | A request may use this share, reply reserve included                        |
-| `CONTEXT_OUTPUT_RESERVE_TOKENS` | 8000    | Reserved for the reply (capped at a quarter of the window)                  |
-| `CONTEXT_SUMMARIZE_MESSAGES`    | unset   | Optional message-count trigger on top of the token one                      |
-| `CONTEXT_KEEP_MESSAGES`         | 10      | Recent messages the summarizer keeps verbatim                               |
-| `TOOL_RESULT_TTL_HOURS`         | 24      | Saved-result lifetime                                                       |
-| `TOOL_RESULT_R2_MIN_BYTES`      | 1000000 | Results this size or larger go to R2 (64 KiB … 1.5 MB)                      |
+| Env                             | Default | Meaning                                                                                                        |
+| ------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------- |
+| `MODEL_CONTEXT_TOKENS`          | 100000  | Window for models no source knows (min 16000)                                                                  |
+| `MODEL_CONTEXT_OVERRIDES`       | —       | `model=tokens,…` explicit windows (win over everything but a learned limit)                                    |
+| `CONTEXT_MEMORY_WINDOW_TOKENS`  | 100000  | Every share below is of the model's window, at most this (the 128 MB isolate, not the model, bounds a request) |
+| `CONTEXT_SUMMARIZE_FRACTION`    | 0.5     | Summarize the history at this share of the window                                                              |
+| `CONTEXT_PRUNE_FRACTION`        | 0.35    | Prune old tool results in the request above this share                                                         |
+| `CONTEXT_RESULT_CAP_FRACTION`   | 0.12    | One tool result may occupy this share (×4 chars)                                                               |
+| `CONTEXT_RESULT_CAP_MAX_CHARS`  | 200000  | Ceiling on that cap (≈ 50k tokens), whatever the window                                                        |
+| `CONTEXT_REQUEST_FRACTION`      | 0.95    | A request may use this share, reply reserve included                                                           |
+| `CONTEXT_OUTPUT_RESERVE_TOKENS` | 8000    | Reserved for the reply (capped at a quarter of the window)                                                     |
+| `CONTEXT_SUMMARIZE_MESSAGES`    | unset   | Optional message-count trigger on top of the token one                                                         |
+| `CONTEXT_KEEP_MESSAGES`         | 10      | Recent messages the summarizer keeps verbatim                                                                  |
+| `TOOL_RESULT_TTL_HOURS`         | 24      | Saved-result lifetime                                                                                          |
+| `TOOL_RESULT_R2_MIN_BYTES`      | 1000000 | Results this size or larger go to R2 (64 KiB … 1.5 MB)                                                         |
 
 ## Adding a model
 
