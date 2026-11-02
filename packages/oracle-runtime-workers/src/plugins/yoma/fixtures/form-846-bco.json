@@ -1,0 +1,157 @@
+{
+  "@context": {
+    "ixo": "https://w3id.org/ixo/ns/protocol/",
+    "@id": "@type",
+    "type": "@type",
+    "@protected": true
+  },
+  "type": "ixo:entity#surveyTemplate",
+  "question": {
+    "_namespaces": {
+      "schema": "https://schema.org/",
+      "org": "http://www.w3.org/ns/org#"
+    },
+    "title": "Group Registration",
+    "description": "Register your group for the Youth Climate Mapping fellowship. It takes about 5 minutes. A red star * means you must answer.",
+    "pages": [
+      {
+        "name": "page_registration",
+        "title": "Group Registration",
+        "description": "Tell us who leads your group and who is in it.",
+        "elements": [
+          {
+            "type": "panel",
+            "name": "schema:Person",
+            "title": "Group Lead",
+            "elements": [
+              {
+                "type": "text",
+                "name": "schema:email",
+                "title": "Email",
+                "description": "We use this to reply to you. For example: jane@example.com",
+                "isRequired": true,
+                "inputType": "email",
+                "validators": [
+                  {
+                    "type": "email",
+                    "text": "Please write a working email address, like jane@example.com"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "name": "schema:name",
+                "title": "Group Lead's Name",
+                "description": "The full name of the person who leads the group.",
+                "isRequired": true
+              },
+              {
+                "type": "text",
+                "name": "schema:telephone",
+                "title": "Group Lead's WhatsApp Number",
+                "description": "Start with your country code. For example: +27 82 123 4567",
+                "isRequired": true,
+                "validators": [
+                  {
+                    "type": "regex",
+                    "text": "Please write the number with the country code, like +27 82 123 4567",
+                    "regex": "^\\+?[0-9][0-9 ()\\-]{6,19}$"
+                  }
+                ]
+              },
+              {
+                "type": "radiogroup",
+                "name": "schema:gender",
+                "title": "Gender",
+                "isRequired": true,
+                "choices": [
+                  {
+                    "value": "male",
+                    "text": "Male"
+                  },
+                  {
+                    "value": "female",
+                    "text": "Female"
+                  },
+                  {
+                    "value": "nonBinary",
+                    "text": "Non-binary"
+                  },
+                  {
+                    "value": "preferNotToSay",
+                    "text": "Prefer not to say"
+                  }
+                ],
+                "showOtherItem": true,
+                "otherText": "Other",
+                "otherPlaceholder": "Please tell us"
+              }
+            ]
+          },
+          {
+            "type": "panel",
+            "name": "schema:Organization",
+            "title": "Your Group",
+            "elements": [
+              {
+                "type": "text",
+                "name": "schema:legalName",
+                "title": "Group Name",
+                "description": "The name your group is known by.",
+                "isRequired": true
+              },
+              {
+                "type": "dropdown",
+                "name": "schema:addressCountry",
+                "title": "Country",
+                "description": "The country your group works in. Pick Other if your country is not on the list.",
+                "isRequired": true,
+                "choices": [
+                  "Lesotho",
+                  "South Africa",
+                  "eSwatini",
+                  "Botswana",
+                  "Namibia",
+                  "Zimbabwe"
+                ],
+                "showOtherItem": true,
+                "otherText": "Other",
+                "otherPlaceholder": "Please tell us your country"
+              },
+              {
+                "type": "paneldynamic",
+                "name": "org:hasMember",
+                "title": "List of the names of the group's Participants",
+                "description": "Add each participant one at a time. Your group needs at least 20 participants. Use \"Add another participant\" if you have more.",
+                "isRequired": true,
+                "templateTitle": "Participant {panelIndex}",
+                "templateElements": [
+                  {
+                    "type": "text",
+                    "name": "schema:name",
+                    "title": "Full name",
+                    "isRequired": true
+                  }
+                ],
+                "panelCount": 1,
+                "minPanelCount": 1,
+                "maxPanelCount": 100,
+                "panelAddText": "Add another participant",
+                "panelRemoveText": "Remove",
+                "confirmDelete": true,
+                "confirmDeleteText": "Remove this participant?",
+                "showQuestionNumbers": "off"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "showQuestionNumbers": "on",
+    "questionErrorLocation": "bottom",
+    "requiredText": "*",
+    "pagePrevText": "Back",
+    "pageNextText": "Next",
+    "completeText": "Submit Registration"
+  }
+}

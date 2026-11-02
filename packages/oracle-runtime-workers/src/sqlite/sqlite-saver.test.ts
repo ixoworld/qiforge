@@ -9,6 +9,7 @@
 import {
   AIMessage,
   HumanMessage,
+  ToolMessage,
   type BaseMessage,
 } from '@langchain/core/messages';
 import {
@@ -18,12 +19,16 @@ import {
   uuid6,
 } from '@langchain/langgraph-checkpoint';
 import { env, runInDurableObject } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import type * as Zlib from 'node:zlib';
+import { gzipSync } from 'node:zlib';
+import { describe, expect, it, vi } from 'vitest';
+
 import {
   stripTurnTimeNote,
   TURN_TIME_NOTE_KWARG,
   withTurnTimeNote,
 } from '../core/turn-time-note';
+import { CHANNEL_REPLY_NOTE_KWARG } from '../channels/replies';
 import {
   type CarriedToolCall,
   SUMMARY_PREFIX,
@@ -39,6 +44,12 @@ import {
 } from './serialization';
 import { PRUNE_SLACK, SqliteSaver } from './sqlite-saver';
 import type { SqliteTestDO } from './test-do';
+
+// Counts the gzips the codec makes (`countGzips`).
+vi.mock('node:zlib', async (importOriginal) => {
+  const zlib = await importOriginal<typeof Zlib>();
+  return { ...zlib, gzipSync: vi.fn(zlib.gzipSync) };
+});
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace -- augmenting the ambient `Cloudflare.Env` needs namespace syntax
@@ -126,21 +137,9 @@ async function integrityOk(db: DoSqliteDatabase): Promise<boolean> {
 
 /** Count gzip pipelines started while `fn` runs. */
 async function countGzips(fn: () => Promise<void>): Promise<number> {
-  const Original = CompressionStream;
-  let count = 0;
-  class Counting extends Original {
-    constructor(format: ConstructorParameters<typeof CompressionStream>[0]) {
-      count++;
-      super(format);
-    }
-  }
-  Reflect.set(globalThis, 'CompressionStream', Counting);
-  try {
-    await fn();
-  } finally {
-    Reflect.set(globalThis, 'CompressionStream', Original);
-  }
-  return count;
+  const before = vi.mocked(gzipSync).mock.calls.length;
+  await fn();
+  return vi.mocked(gzipSync).mock.calls.length - before;
 }
 
 describe('SqliteSaver message rows', () => {
@@ -681,6 +680,43 @@ describe('the turn time note kwarg', () => {
     });
   });
 
+  it('keeps the quoted-reply note and the channel provenance, dropping malformed ones', () => {
+    const base = { timestamp: '2026-01-01T00:00:00.000Z' };
+    const origin = { v: 1, transport: 'whatsapp' };
+    const reply = { kind: 'known', requestId: 'wa:prior', author: 'oracle' };
+    expect(
+      cleanAdditionalKwargs(
+        {
+          ...base,
+          [CHANNEL_REPLY_NOTE_KWARG]: '[WhatsApp reply: …]',
+          'org.ixo.qi.origin': origin,
+          'org.ixo.qi.reply': reply,
+        },
+        false,
+        'O',
+      ),
+    ).toEqual({
+      msgFromMatrixRoom: false,
+      oracleName: 'O',
+      ...base,
+      [CHANNEL_REPLY_NOTE_KWARG]: '[WhatsApp reply: …]',
+      'org.ixo.qi.origin': origin,
+      'org.ixo.qi.reply': reply,
+    });
+    expect(
+      cleanAdditionalKwargs(
+        {
+          ...base,
+          [CHANNEL_REPLY_NOTE_KWARG]: 7,
+          'org.ixo.qi.origin': 'whatsapp',
+          'org.ixo.qi.reply': null,
+        },
+        false,
+        'O',
+      ),
+    ).toEqual({ msgFromMatrixRoom: false, oracleName: 'O', ...base });
+  });
+
   it('drops a non-string value under the key and leaves every other kwarg as before', () => {
     const base = { timestamp: '2026-01-01T00:00:00.000Z', lc_source: 'x' };
     expect(
@@ -730,6 +766,42 @@ describe('the turn carry of a mid-turn summary', () => {
 
   it('is stored under the key the summarizer writes', () => {
     expect(Object.keys(turnCarryKwargs([]))).toEqual([TURN_CARRY_KWARG]);
+  });
+
+  it('keeps a sent file through put → getTuple, carried or on its tool message', async () => {
+    await runInDurableObject(stub('saver-send-file'), async (_i, state) => {
+      const db = await DoSqliteDatabase.open(state, 'send-file.db');
+      const saver = new SqliteSaver(db);
+      const file = { url: 'https://r2.example/o', filename: 'a.pdf' };
+      const carried: CarriedToolCall = {
+        name: 'send_file',
+        args: { path: '/output/a.pdf' },
+        status: 'success',
+        result: '{"ok":true}',
+        artifact: file,
+      };
+      await put(saver, 'f', [
+        summaryCarrying('s', [carried]),
+        new ToolMessage({
+          id: 't',
+          tool_call_id: 'f1',
+          name: 'send_file',
+          content: '{"ok":true}',
+          artifact: file,
+        }),
+      ]);
+      const tuple = await saver.getTuple(config('f'));
+      const value = tuple?.checkpoint.channel_values['messages'];
+      const messages = Array.isArray(value) ? value : [];
+      const summary = messages.find(
+        (m): m is HumanMessage => m instanceof HumanMessage && m.id === 's',
+      );
+      expect(summary && turnCarryOf(summary)).toEqual([carried]);
+      const tool = messages.find(
+        (m): m is ToolMessage => m instanceof ToolMessage,
+      );
+      expect(tool?.artifact).toEqual(file);
+    });
   });
 
   it('survives put → getTuple and the transcript read', async () => {

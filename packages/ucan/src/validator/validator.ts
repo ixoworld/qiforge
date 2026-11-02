@@ -114,29 +114,295 @@ async function reserveInvocation(
   };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 /**
- * True when `resource` names `issuer` exactly or as a whole segment: the DID
- * starts the URI or follows `:` or `/`, and ends it or is followed by `/`.
- * A DID that is only a prefix of the named DID (`did:web:victim.co` inside
- * `…/did:web:victim.com`) does not match.
+ * True when `issuer` names the AUTHORITY of `resource`, i.e. the part of the
+ * URI that says whose resource it is: the whole resource (`did:key:z6Mk…`),
+ * the authority after the scheme (`ixo:did:key:z6Mk…`, `ixo:tenant:did:key:z6Mk…`,
+ * optionally followed by `/path`), or the first path segment under a named
+ * authority (`ixo:tenant/did:key:z6Mk…`, `ixo:filesystem/did:key:z6Mk…/files`).
+ *
+ * A DID deeper in the path does NOT count (`ixo:filesystem/alice/did:key:z6Mk…`
+ * is Alice's resource that happens to mention the DID, for example a folder
+ * shared with it), and neither does a DID that is only a prefix of the named
+ * one (`did:web:victim.co` inside `…/did:web:victim.com`) or part of a longer
+ * segment. When the authority is itself a DID (`ixo:did:key:alice/…`) the
+ * resource is that DID's alone: it must equal the issuer, and the first path
+ * segment is not consulted (`did:web:alice.com:did:key:zBob` is a DID Alice
+ * controls, not Bob's). A resource with a query or fragment never self-issues
+ * unless it equals the issuer. The rule is strictly tighter than the one in
+ * 2.2.1.
  */
-function resourceNamesIssuer(resource: string, issuer: string): boolean {
+export function resourceNamesIssuer(resource: string, issuer: string): boolean {
   if (!issuer) return false;
   if (resource === issuer) return true;
-  let from = 0;
-  for (;;) {
-    const at = resource.indexOf(issuer, from);
-    if (at === -1) return false;
-    const before = at === 0 ? undefined : resource[at - 1];
-    const after = resource[at + issuer.length];
-    if (
-      (before === undefined || before === ':' || before === '/') &&
-      (after === undefined || after === '/')
-    ) {
-      return true;
-    }
-    from = at + 1;
+  // A resource that is itself a DID names exactly that DID.
+  if (resource.startsWith('did:')) return false;
+  // A query or fragment never carries authority; a DID inside one
+  // (`ixo:tenant?x=:did:…`) must not self-issue.
+  if (resource.includes('?') || resource.includes('#')) return false;
+  const schemeEnd = resource.indexOf(':');
+  if (schemeEnd === -1) return false;
+  const rest = resource.slice(schemeEnd + 1);
+  const slash = rest.indexOf('/');
+  const authority = slash === -1 ? rest : rest.slice(0, slash);
+  if (authority === '') return false;
+  if (authority === issuer) return true;
+  // A DID authority names exactly that DID: no suffix match (a did:web may
+  // legitimately contain `:did:…`), and nothing below it is somebody else's.
+  if (authority.startsWith('did:')) return false;
+  if (authority.endsWith(`:${issuer}`)) return true;
+  if (authority.includes(':did:')) return false;
+  if (slash === -1) return false;
+  const path = rest.slice(slash + 1);
+  const nextSlash = path.indexOf('/');
+  const firstSegment = nextSlash === -1 ? path : path.slice(0, nextSlash);
+  return firstSegment === issuer;
+}
+
+// =============================================================================
+// Proof-chain shape bounds
+// =============================================================================
+
+/**
+ * Bounds on the shape of the RAW proof tree of a token, checked before any
+ * signature is verified or any DID resolved.
+ *
+ * ucanto verifies every proof it reaches and backtracks through every path
+ * when one fails, without de-duplicating shared nodes, and it branches on
+ * every capability of a proof that could match, so a small token whose proofs
+ * reference the same blocks several times at every level, or repeat a
+ * capability a few times per link, costs exponential CPU and produces an error
+ * message that enumerates every path. Counts are over VISITS (a node reached
+ * through two parents counts twice), which is what the verification work is
+ * proportional to; `maxWork` bounds the product of those branch factors.
+ */
+export interface ProofChainLimits {
+  /** Delegation links below the token itself (the token is depth 0). */
+  maxDepth: number;
+  /** Nodes visited over the whole tree, the token included. */
+  maxNodes: number;
+  /** Proofs attached to any single delegation (or to the token). */
+  maxProofsPerLink: number;
+  /** Capabilities on any single delegation (or on the token). */
+  maxCapabilitiesPerLink: number;
+  /**
+   * Distinct issuer DIDs over the whole tree. Each is a DID resolution (the
+   * resolver is memoised per validation; validateDelegation() also resolves
+   * proof audiences, which maxNodes bounds).
+   */
+  maxIssuers: number;
+  /**
+   * Upper bound on the verification work ucanto may do for the token: each
+   * node costs its capability count (at least 1) times one plus the work of
+   * its proofs, so a leaf costs its capability count and every path is
+   * charged at every link it passes through: about one signature check per
+   * unit, about 1 ms each. A real 3-link chain is 4, a 10-capability grant
+   * re-delegated once is 111; three capabilities repeated at each of ten
+   * links is over 3^11 from 11 nodes.
+   */
+  maxWork: number;
+}
+
+/**
+ * Defaults, generous for real chains: a user → agent → sub-agent re-share is
+ * 2–3 deep with one issuer per link; a client that attaches every grant it
+ * holds at one scope attaches a handful, each with its own parent; a bundled
+ * grant for several services carries a capability per service.
+ */
+export const DEFAULT_PROOF_CHAIN_LIMITS: Readonly<ProofChainLimits> = {
+  maxDepth: 10,
+  maxNodes: 64,
+  maxProofsPerLink: 16,
+  maxCapabilitiesPerLink: 32,
+  maxIssuers: 16,
+  maxWork: 256,
+};
+
+/**
+ * Longest `error.message` the validator returns by default. ucanto's messages
+ * can list every explored path of a proof tree.
+ */
+export const DEFAULT_MAX_ERROR_MESSAGE_CHARS = 1024;
+
+function positiveInteger(value: unknown, name: string): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+    throw new RangeError(
+      `${name} must be a positive integer, got ${String(value)}`,
+    );
   }
+  return value;
+}
+
+function resolveProofChainLimits(
+  option: Partial<ProofChainLimits> | false | undefined,
+): ProofChainLimits | null {
+  if (option === false) return null;
+  const limits: ProofChainLimits = { ...DEFAULT_PROOF_CHAIN_LIMITS };
+  for (const key of Object.keys(
+    DEFAULT_PROOF_CHAIN_LIMITS,
+  ) as (keyof ProofChainLimits)[]) {
+    // An undefined key (the usual env-wiring shape) keeps the default.
+    const value = option?.[key];
+    if (value !== undefined) {
+      limits[key] = positiveInteger(value, `proofChainLimits.${key}`);
+    }
+  }
+  return limits;
+}
+
+interface RawChainNode {
+  issuer?: { did(): string };
+  proofs?: unknown[];
+  capabilities?: unknown[];
+}
+
+function asChainNode(node: unknown): RawChainNode | null {
+  return node && typeof node === 'object' ? node : null;
+}
+
+/**
+ * Walk the raw proof tree of `root` and return a short reason when its shape
+ * exceeds `limits`, else null. A proof that travelled as a bare CID link (its
+ * block not embedded) has no issuer, capabilities or proofs; it counts as one
+ * node and one unit of work.
+ */
+function proofChainShapeError(
+  root: unknown,
+  limits: ProofChainLimits,
+): string | null {
+  let visits = 0;
+  const issuers = new Set<string>();
+  let reason: string | null = null;
+  const fail = (why: string): number => {
+    reason ??= why;
+    return Infinity;
+  };
+  /** Work for `value` (see ProofChainLimits.maxWork), or Infinity once a bound failed. */
+  const walk = (value: unknown, depth: number): number => {
+    const node = asChainNode(value);
+    if (!node) return 1;
+    if (depth > limits.maxDepth) {
+      return fail(`Proof chain is deeper than ${limits.maxDepth} links`);
+    }
+    if (++visits > limits.maxNodes) {
+      return fail(`Proof chain has more than ${limits.maxNodes} nodes`);
+    }
+    const issuer = node.issuer?.did?.();
+    if (typeof issuer === 'string') issuers.add(issuer);
+    if (issuers.size > limits.maxIssuers) {
+      return fail(
+        `Proof chain involves more than ${limits.maxIssuers} issuers`,
+      );
+    }
+    const capabilities = Array.isArray(node.capabilities)
+      ? node.capabilities.length
+      : 0;
+    if (capabilities > limits.maxCapabilitiesPerLink) {
+      return fail(
+        `A delegation carries more than ${limits.maxCapabilitiesPerLink} capabilities`,
+      );
+    }
+    const proofs = Array.isArray(node.proofs) ? node.proofs : [];
+    if (proofs.length > limits.maxProofsPerLink) {
+      return fail(
+        `A delegation carries more than ${limits.maxProofsPerLink} proofs`,
+      );
+    }
+    let below = 0;
+    for (const proof of proofs) {
+      below += walk(proof, depth + 1);
+      if (below > limits.maxWork) break;
+    }
+    const work = Math.max(1, capabilities) * (1 + below);
+    if (work > limits.maxWork) {
+      return fail(
+        `Proof chain needs more than ${limits.maxWork} units of verification work`,
+      );
+    }
+    return work;
+  };
+  walk(root, 0);
+  return reason;
+}
+
+/** ucanto's universal resource: a capability on it matches any resource. */
+const UNIVERSAL_RESOURCE = 'ucan:*';
+
+/**
+ * True when the token or any proof in its raw tree carries a capability on
+ * `ucan:*`. Each block is visited once (keyed by CID: ucanto materialises a
+ * new Delegation object per parent, so object identity would not de-duplicate
+ * a shared block), so this stays linear in the token size even with the shape
+ * limits disabled.
+ */
+function chainUsesUniversalResource(root: unknown): boolean {
+  const seen = new Set<string>();
+  const walk = (value: unknown): boolean => {
+    const node = asChainNode(value);
+    if (!node) return false;
+    const cid = nodeCid(node);
+    if (cid !== undefined) {
+      if (seen.has(cid)) return false;
+      seen.add(cid);
+    }
+    for (const cap of Array.isArray(node.capabilities)
+      ? node.capabilities
+      : []) {
+      if (isRecord(cap) && cap.with === UNIVERSAL_RESOURCE) return true;
+    }
+    for (const proof of Array.isArray(node.proofs) ? node.proofs : []) {
+      if (walk(proof)) return true;
+    }
+    return false;
+  };
+  return walk(root);
+}
+
+/** Cut `message` to at most `max` characters, the last one `…` when cut. */
+function clipMessage(message: string, max: number): string {
+  if (message.length <= max) return message;
+  let end = max - 1;
+  // Do not split a surrogate pair.
+  const last = message.charCodeAt(end - 1);
+  if (end > 0 && last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return `${message.slice(0, end)}…`;
+}
+
+/**
+ * The form ucanto reports a resource in: `URI.match` reads it through the URL
+ * parser, so `IXO:company/A` is reported as `ixo:company/A`. A value that is
+ * not a URL is compared as given.
+ */
+function canonicalResource(value: string): string {
+  try {
+    return new URL(value).href;
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * Remember every DID lookup for the rest of ONE validation: ucanto resolves
+ * the issuer of every proof it checks, and the same DID issues several links
+ * of most real chains (an owner who attached every grant it holds, an agent
+ * that re-shared twice). Failures are remembered too — the answer cannot
+ * change within one request. Nothing is kept across validations.
+ */
+function memoizeResolver<D, R>(
+  resolve: (did: D) => Promise<R>,
+): (did: D) => Promise<R> {
+  const inflight = new Map<D, Promise<R>>();
+  return (did) => {
+    const hit = inflight.get(did);
+    if (hit) return hit;
+    const pending = resolve(did);
+    inflight.set(did, pending);
+    return pending;
+  };
 }
 
 /**
@@ -199,10 +465,6 @@ function chainTimeBounds(
 
   visit(root);
   return { expiration, notBefore };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -285,6 +547,54 @@ export interface CreateValidatorOptions {
    * forever.
    */
   requireExpiration?: boolean;
+
+  /**
+   * Bounds on the shape of a token's raw proof tree, checked before any
+   * signature is verified or DID resolved (see ProofChainLimits). Defaults to
+   * DEFAULT_PROOF_CHAIN_LIMITS; pass some keys to override them, or `false`
+   * to disable the check. A token over a bound fails with 'INVALID_FORMAT'.
+   */
+  proofChainLimits?: Partial<ProofChainLimits> | false;
+
+  /**
+   * Longest `error.message` returned; a longer message is cut to this length
+   * and ends with `…`. Default DEFAULT_MAX_ERROR_MESSAGE_CHARS (1,024).
+   * ucanto's messages can enumerate every explored path of a proof tree.
+   */
+  maxErrorMessageChars?: number;
+
+  /**
+   * Most capabilities an invocation may carry. Unlimited by default. A service
+   * that mints one capability per invocation and routes requests by it should
+   * set 1: ucanto authorises the first capability it can prove, which may not
+   * be the one the service read. An invocation over the limit fails with
+   * 'INVALID_FORMAT'. See also `ValidateInvocationOptions.expect`.
+   */
+  maxCapabilities?: number;
+
+  /**
+   * Whether a capability on ucanto's universal resource `ucan:*` (it matches
+   * any resource) is accepted anywhere in a token or its proof chain. True by
+   * default. A service whose capability definitions reason about resources
+   * should set false; such a token then fails with 'UNAUTHORIZED'.
+   */
+  allowUniversalResource?: boolean;
+}
+
+/**
+ * Per-call options of `validate()`.
+ */
+export interface ValidateInvocationOptions {
+  /**
+   * The capability the caller read from the invocation and will act on. After
+   * ucanto authorised the invocation, its authorised `can` and/or `with` must
+   * equal these exactly (no wildcard tolerance; `with` in URL-canonical form,
+   * as ucanto reports it), else the result is 'UNAUTHORIZED'. Without it,
+   * `with` is still checked against `resource` (exact, or a `/*` / `:*`
+   * wildcard prefix) as before. `nb` is not pinned: act on `result.capability`
+   * and set `maxCapabilities: 1` when the invocation must carry one.
+   */
+  expect?: { can?: string; with?: string };
 }
 
 /**
@@ -358,6 +668,7 @@ export interface UCANValidator {
    * @param invocationBase64 - Base64-encoded CAR containing the invocation
    * @param capabilityDef - Capability definition from defineCapability()
    * @param resource - The specific resource URI to validate against
+   * @param options - Per-call options (see ValidateInvocationOptions)
    * @returns Validation result
    *
    * @example
@@ -373,6 +684,7 @@ export interface UCANValidator {
     invocationBase64: string,
     capabilityDef: CapabilityParser,
     resource: string,
+    options?: ValidateInvocationOptions,
   ): Promise<ValidateResult>;
 
   /**
@@ -443,6 +755,16 @@ export async function createUCANValidator(
 ): Promise<UCANValidator> {
   const invocationStore =
     options.invocationStore ?? new InMemoryInvocationStore();
+  const proofChainLimits = resolveProofChainLimits(options.proofChainLimits);
+  const maxErrorMessageChars = positiveInteger(
+    options.maxErrorMessageChars ?? DEFAULT_MAX_ERROR_MESSAGE_CHARS,
+    'maxErrorMessageChars',
+  );
+  const maxCapabilities =
+    options.maxCapabilities === undefined
+      ? undefined
+      : positiveInteger(options.maxCapabilities, 'maxCapabilities');
+  const allowUniversalResource = options.allowUniversalResource !== false;
 
   // Lazily resolve server DID to a Verifier.
   // Only needed for validate() (invocations), NOT for validateDelegation().
@@ -500,7 +822,9 @@ export async function createUCANValidator(
     );
   }
 
-  // Create DID resolver for use during validation (for issuers in delegation chain)
+  // Create DID resolver for use during validation (for issuers in delegation
+  // chain). Each validation wraps it in a per-request memo (see
+  // memoizeResolver); nothing is cached across validations here.
   const resolveDIDKey = async (did: `did:${string}:${string}`) => {
     // Defensive: ensure did is a string
     if (typeof did !== 'string') {
@@ -562,12 +886,15 @@ export async function createUCANValidator(
    * Recursively traverses the first proof of each delegation.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- delegation type from Delegation.extract() is complex
-  function buildProofChain(delegation: any): string[] {
-    if (!delegation?.proofs || delegation.proofs.length === 0) {
+  function buildProofChain(delegation: any): string[] | null {
+    // A proof that travelled as a bare CID link (block not embedded) has no
+    // issuer: the chain is incomplete and has no structural root.
+    if (typeof delegation?.issuer?.did !== 'function') return null;
+    if (!delegation.proofs || delegation.proofs.length === 0) {
       return [delegation.issuer.did()];
     }
     const parentChain = buildProofChain(delegation.proofs[0]);
-    return [...parentChain, delegation.issuer.did()];
+    return parentChain && [...parentChain, delegation.issuer.did()];
   }
 
   /**
@@ -709,13 +1036,12 @@ export async function createUCANValidator(
   async function verifyDelegationChain(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ucanto's parsed-delegation type is internal/union-heavy; we treat it structurally
     delegation: any,
+    resolve: typeof resolveDIDKey,
   ): Promise<ValidateResult> {
     const issuerDid: string = delegation.issuer.did();
 
     // Resolve issuer DID to did:key
-    const resolved = await resolveDIDKey(
-      issuerDid as `did:${string}:${string}`,
-    );
+    const resolved = await resolve(issuerDid as `did:${string}:${string}`);
     if ('error' in resolved) {
       return {
         ok: false,
@@ -780,11 +1106,21 @@ export async function createUCANValidator(
     // Recursively verify proofs
     if (delegation.proofs && delegation.proofs.length > 0) {
       for (const proof of delegation.proofs) {
+        if (typeof proof?.audience?.did !== 'function') {
+          return {
+            ok: false,
+            error: {
+              code: 'UNAUTHORIZED',
+              message:
+                'Proof chain incomplete: a proof block is not embedded in the token',
+            },
+          };
+        }
         // Chain consistency: proof's audience should match this delegation's issuer
         const proofAudience: string = proof.audience.did();
         if (proofAudience !== issuerDid) {
           // Allow DID equivalence: proof audience (did:key) may resolve to same key as issuer (did:ixo)
-          const proofAudResolved = await resolveDIDKey(
+          const proofAudResolved = await resolve(
             proofAudience as `did:${string}:${string}`,
           );
           const proofAudKeys =
@@ -805,7 +1141,7 @@ export async function createUCANValidator(
           }
         }
 
-        const proofResult = await verifyDelegationChain(proof);
+        const proofResult = await verifyDelegationChain(proof, resolve);
         if (!proofResult.ok) {
           return proofResult;
         }
@@ -824,6 +1160,8 @@ export async function createUCANValidator(
     invocation: UcantoDelegation,
     capabilityDef: CapabilityParser,
     resource: string,
+    resolve: typeof resolveDIDKey,
+    expect: ValidateInvocationOptions['expect'],
   ): Promise<ValidateResult> {
     // 6. Determine the authorization policy for ucanto's claim().
     //
@@ -844,8 +1182,10 @@ export async function createUCANValidator(
     // verification. Self-issued invocations (no proofs) are unaffected:
     // their structural root IS the invoker, so canIssue accepts them.
     const wildcard = options.rootIssuers.includes('*');
+    // An incomplete chain (a proof block missing from the token) has no
+    // structural root: nobody is accepted as one, so the chain is refused.
     const structuralRoot = wildcard
-      ? buildProofChain(invocation)[0]
+      ? buildProofChain(invocation)?.[0]
       : undefined;
 
     // Server verifier is resolved lazily (first call resolves, subsequent calls use cache)
@@ -854,7 +1194,7 @@ export async function createUCANValidator(
       authority: resolvedVerifier,
       principal: ed25519.Verifier,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ucanto claim() expects a specific DID resolver signature incompatible with our async resolver
-      resolveDIDKey: resolveDIDKey as any,
+      resolveDIDKey: resolve as any,
       canIssue: (cap: { with: string }, issuer: string) => {
         // Explicitly allowlisted roots (non-wildcard config). ucanto still
         // verifies the chain up to one of these because canIssue is false
@@ -940,6 +1280,28 @@ export async function createUCANValidator(
       }
     }
 
+    // 7b. Pin the authorised capability to the one the caller read and will
+    // act on: ucanto authorises the first capability it can prove, and a
+    // caller that routes by the invocation's first capability must never act
+    // on a different one than the one proven here. Exact match, no wildcard
+    // tolerance; `with` is compared in the form ucanto reports it (see
+    // canonicalResource).
+    if (
+      (expect?.can !== undefined && validatedCap.can !== expect.can) ||
+      (expect?.with !== undefined &&
+        validatedCap.with !== canonicalResource(expect.with))
+    ) {
+      return {
+        ok: false,
+        error: {
+          code: 'UNAUTHORIZED',
+          message:
+            `Authorised capability {can: ${validatedCap.can}, with: ${validatedCap.with}} ` +
+            `is not the expected {can: ${expect?.can ?? '(any)'}, with: ${expect?.with ?? '(any)'}}`,
+        },
+      };
+    }
+
     // 8. Build proof chain and compute effective expiration.
     // proofChain and the expiry MUST come from the VERIFIED authorization
     // (see verifiedProofChain) — never from the invocation's raw stapled
@@ -985,230 +1347,310 @@ export async function createUCANValidator(
     };
   }
 
+  /** Cut an over-long error message (see maxErrorMessageChars). */
+  function clipped(result: ValidateResult): ValidateResult {
+    if (!result.error || result.error.message.length <= maxErrorMessageChars) {
+      return result;
+    }
+    return {
+      ...result,
+      error: {
+        ...result.error,
+        message: clipMessage(result.error.message, maxErrorMessageChars),
+      },
+    };
+  }
+
+  /**
+   * Structural checks shared by validate() and validateDelegation(), run
+   * before any signature is verified or DID resolved: proof-tree shape bounds,
+   * then the universal-resource rule. Returns a failing result or null.
+   */
+  function structuralError(token: unknown): ValidateResult | null {
+    if (proofChainLimits) {
+      const reason = proofChainShapeError(token, proofChainLimits);
+      if (reason) {
+        return {
+          ok: false,
+          error: { code: 'INVALID_FORMAT', message: reason },
+        };
+      }
+    }
+    if (!allowUniversalResource && chainUsesUniversalResource(token)) {
+      return {
+        ok: false,
+        error: {
+          code: 'UNAUTHORIZED',
+          message: `A capability on the universal resource ${UNIVERSAL_RESOURCE} is not accepted by this validator`,
+        },
+      };
+    }
+    return null;
+  }
+
+  async function validateInvocation(
+    invocationBase64: string,
+    capabilityDef: CapabilityParser,
+    resource: string,
+    callOptions: ValidateInvocationOptions | undefined,
+  ): Promise<ValidateResult> {
+    try {
+      // 1. Decode the invocation from base64 CAR
+      const carBytes = new Uint8Array(Buffer.from(invocationBase64, 'base64'));
+
+      // 2. Extract the invocation from CAR
+      const extracted = await Delegation.extract(carBytes);
+      if (extracted.error) {
+        return {
+          ok: false,
+          error: {
+            code: 'INVALID_FORMAT',
+            message: `Failed to decode: ${extracted.error?.message ?? 'unknown'}`,
+          },
+        };
+      }
+
+      const invocation = 'ok' in extracted ? extracted.ok : extracted;
+
+      // 3. Basic validation - check we have required fields
+      if (!invocation?.issuer?.did || !invocation?.audience?.did) {
+        return {
+          ok: false,
+          error: {
+            code: 'INVALID_FORMAT',
+            message: 'Invocation missing issuer or audience',
+          },
+        };
+      }
+
+      // 4. Check audience matches this server's public DID
+      const audienceDid = invocation.audience.did();
+      if (audienceDid !== options.serverDid) {
+        return {
+          ok: false,
+          error: {
+            code: 'UNAUTHORIZED',
+            message: `Invocation addressed to ${audienceDid}, not ${options.serverDid}`,
+          },
+        };
+      }
+
+      // 4b. Structural rules, cheapest first: capability count, proof-tree
+      // shape, universal resource. All before the replay reservation and
+      // before any DID is resolved or signature verified.
+      const capabilityCount = invocation.capabilities?.length ?? 0;
+      if (maxCapabilities !== undefined && capabilityCount > maxCapabilities) {
+        return {
+          ok: false,
+          error: {
+            code: 'INVALID_FORMAT',
+            message: `Invocation carries ${capabilityCount} capabilities; this validator accepts at most ${maxCapabilities}`,
+          },
+        };
+      }
+      const structural = structuralError(invocation);
+      if (structural) return structural;
+
+      // 5. Replay protection. The CID is reserved BEFORE any verification
+      // (DID resolution, claim(), revocation are all asynchronous), so two
+      // concurrent presentations of one invocation cannot both pass. The
+      // reservation is released when validation fails afterwards, so a
+      // rejected attempt does not use up the token, and kept for the
+      // invocation's own lifetime when it succeeds.
+      const invocationCid = invocation.cid?.toString();
+      const reservation = invocationCid
+        ? await reserveInvocation(
+            invocationStore,
+            invocationCid,
+            replayMarkTtlMs(invocation.expiration),
+          )
+        : undefined;
+      if (reservation === null) {
+        return {
+          ok: false,
+          error: {
+            code: 'REPLAY',
+            message: 'Invocation has already been used',
+          },
+        };
+      }
+
+      let accepted = false;
+      try {
+        const result = await authorizeInvocation(
+          invocation,
+          capabilityDef,
+          resource,
+          memoizeResolver(resolveDIDKey),
+          callOptions?.expect,
+        );
+        if (result.ok) {
+          await reservation?.commit();
+          accepted = true;
+        }
+        return result;
+      } finally {
+        if (!accepted) {
+          // A store that cannot drop the mark leaves the token used; the
+          // validation result stands either way.
+          await reservation?.release().catch(() => undefined);
+        }
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      return { ok: false, error: { code: 'INVALID_FORMAT', message } };
+    }
+  }
+
+  async function validateDelegationToken(
+    delegationBase64: string,
+  ): Promise<ValidateResult> {
+    try {
+      // 1. Decode the delegation from base64 CAR
+      const carBytes = new Uint8Array(Buffer.from(delegationBase64, 'base64'));
+
+      // 2. Extract the delegation from CAR
+      const extracted = await Delegation.extract(carBytes);
+      if (extracted.error) {
+        return {
+          ok: false,
+          error: {
+            code: 'INVALID_FORMAT',
+            message: `Failed to decode: ${extracted.error?.message ?? 'unknown'}`,
+          },
+        };
+      }
+
+      const delegation = 'ok' in extracted ? extracted.ok : extracted;
+
+      // 3. Basic validation
+      if (!delegation?.issuer?.did || !delegation?.audience?.did) {
+        return {
+          ok: false,
+          error: {
+            code: 'INVALID_FORMAT',
+            message: 'Delegation missing issuer or audience',
+          },
+        };
+      }
+
+      // 4. Check audience matches this server's public DID
+      const audienceDid = delegation.audience.did();
+      if (audienceDid !== options.serverDid) {
+        return {
+          ok: false,
+          error: {
+            code: 'UNAUTHORIZED',
+            message: `Delegation addressed to ${audienceDid}, not ${options.serverDid}`,
+          },
+        };
+      }
+
+      // 4b. Structural rules (proof-tree shape, universal resource) before
+      // the recursive signature walk below.
+      const structural = structuralError(delegation);
+      if (structural) return structural;
+
+      // 5. Check the validity window: the effective expiration is the
+      // earliest and the effective not-before the latest over the
+      // delegation and EVERY proof in its chain (all of which step 6
+      // verifies).
+      const { expiration, notBefore } = chainTimeBounds(
+        delegation,
+        (node) => node,
+      );
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      if (expiration !== undefined && expiration < nowSeconds) {
+        return {
+          ok: false,
+          error: {
+            code: 'EXPIRED',
+            message: `Delegation expired at ${new Date(expiration * 1000).toISOString()}`,
+          },
+        };
+      }
+      if (notBefore !== undefined && notBefore > nowSeconds) {
+        return {
+          ok: false,
+          error: {
+            code: 'UNAUTHORIZED',
+            message: `Delegation is not valid before ${new Date(notBefore * 1000).toISOString()}`,
+          },
+        };
+      }
+
+      if (options.requireExpiration === true && expiration === undefined) {
+        return {
+          ok: false,
+          error: {
+            code: 'UNAUTHORIZED',
+            message:
+              'Delegation has no expiration; this validator requires a bounded expiry',
+          },
+        };
+      }
+
+      // 6. Verify signatures across the entire delegation chain, resolving
+      // each DID at most once for this call.
+      const sigResult = await verifyDelegationChain(
+        delegation,
+        memoizeResolver(resolveDIDKey),
+      );
+      if (!sigResult.ok) {
+        return sigResult;
+      }
+
+      // 7. Revocation: check this delegation and its whole (now verified)
+      // proof chain in one batched call.
+      const proofChainCids = delegationChainCids(delegation);
+      const revocation = await checkRevoked(proofChainCids);
+      if (revocation) return revocation;
+
+      // 8. Success — return delegation details
+      const proofChain = buildProofChain(delegation) ?? undefined;
+      const cap = delegation.capabilities?.[0];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- delegation type from Delegation.extract() is complex
+      const facts = (delegation as any).facts as
+        | Record<string, unknown>[]
+        | undefined;
+
+      return {
+        ok: true,
+        invoker: delegation.issuer.did(),
+        capability: cap
+          ? {
+              can: cap.can,
+              with: cap.with,
+              nb: cap.nb as Record<string, unknown> | undefined,
+            }
+          : undefined,
+        expiration,
+        proofChain,
+        proofChainCids,
+        facts: facts && facts.length > 0 ? facts : undefined,
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      return { ok: false, error: { code: 'INVALID_FORMAT', message } };
+    }
+  }
+
   return {
     serverDid: options.serverDid,
 
-    async validate(
-      invocationBase64,
-      capabilityDef,
-      resource,
-    ): Promise<ValidateResult> {
-      try {
-        // 1. Decode the invocation from base64 CAR
-        const carBytes = new Uint8Array(
-          Buffer.from(invocationBase64, 'base64'),
-        );
-
-        // 2. Extract the invocation from CAR
-        const extracted = await Delegation.extract(carBytes);
-        if (extracted.error) {
-          return {
-            ok: false,
-            error: {
-              code: 'INVALID_FORMAT',
-              message: `Failed to decode: ${extracted.error?.message ?? 'unknown'}`,
-            },
-          };
-        }
-
-        const invocation = 'ok' in extracted ? extracted.ok : extracted;
-
-        // 3. Basic validation - check we have required fields
-        if (!invocation?.issuer?.did || !invocation?.audience?.did) {
-          return {
-            ok: false,
-            error: {
-              code: 'INVALID_FORMAT',
-              message: 'Invocation missing issuer or audience',
-            },
-          };
-        }
-
-        // 4. Check audience matches this server's public DID
-        const audienceDid = invocation.audience.did();
-        if (audienceDid !== options.serverDid) {
-          return {
-            ok: false,
-            error: {
-              code: 'UNAUTHORIZED',
-              message: `Invocation addressed to ${audienceDid}, not ${options.serverDid}`,
-            },
-          };
-        }
-
-        // 5. Replay protection. The CID is reserved BEFORE any verification
-        // (DID resolution, claim(), revocation are all asynchronous), so two
-        // concurrent presentations of one invocation cannot both pass. The
-        // reservation is released when validation fails afterwards, so a
-        // rejected attempt does not use up the token, and kept for the
-        // invocation's own lifetime when it succeeds.
-        const invocationCid = invocation.cid?.toString();
-        const reservation = invocationCid
-          ? await reserveInvocation(
-              invocationStore,
-              invocationCid,
-              replayMarkTtlMs(invocation.expiration),
-            )
-          : undefined;
-        if (reservation === null) {
-          return {
-            ok: false,
-            error: {
-              code: 'REPLAY',
-              message: 'Invocation has already been used',
-            },
-          };
-        }
-
-        let accepted = false;
-        try {
-          const result = await authorizeInvocation(
-            invocation,
-            capabilityDef,
-            resource,
-          );
-          if (result.ok) {
-            await reservation?.commit();
-            accepted = true;
-          }
-          return result;
-        } finally {
-          if (!accepted) {
-            // A store that cannot drop the mark leaves the token used; the
-            // validation result stands either way.
-            await reservation?.release().catch(() => undefined);
-          }
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Unknown error';
-        return { ok: false, error: { code: 'INVALID_FORMAT', message } };
-      }
+    async validate(invocationBase64, capabilityDef, resource, callOptions) {
+      return clipped(
+        await validateInvocation(
+          invocationBase64,
+          capabilityDef,
+          resource,
+          callOptions,
+        ),
+      );
     },
 
-    async validateDelegation(
-      delegationBase64: string,
-    ): Promise<ValidateResult> {
-      try {
-        // 1. Decode the delegation from base64 CAR
-        const carBytes = new Uint8Array(
-          Buffer.from(delegationBase64, 'base64'),
-        );
-
-        // 2. Extract the delegation from CAR
-        const extracted = await Delegation.extract(carBytes);
-        if (extracted.error) {
-          return {
-            ok: false,
-            error: {
-              code: 'INVALID_FORMAT',
-              message: `Failed to decode: ${extracted.error?.message ?? 'unknown'}`,
-            },
-          };
-        }
-
-        const delegation = 'ok' in extracted ? extracted.ok : extracted;
-
-        // 3. Basic validation
-        if (!delegation?.issuer?.did || !delegation?.audience?.did) {
-          return {
-            ok: false,
-            error: {
-              code: 'INVALID_FORMAT',
-              message: 'Delegation missing issuer or audience',
-            },
-          };
-        }
-
-        // 4. Check audience matches this server's public DID
-        const audienceDid = delegation.audience.did();
-        if (audienceDid !== options.serverDid) {
-          return {
-            ok: false,
-            error: {
-              code: 'UNAUTHORIZED',
-              message: `Delegation addressed to ${audienceDid}, not ${options.serverDid}`,
-            },
-          };
-        }
-
-        // 5. Check the validity window: the effective expiration is the
-        // earliest and the effective not-before the latest over the
-        // delegation and EVERY proof in its chain (all of which step 6
-        // verifies).
-        const { expiration, notBefore } = chainTimeBounds(
-          delegation,
-          (node) => node,
-        );
-        const nowSeconds = Math.floor(Date.now() / 1000);
-        if (expiration !== undefined && expiration < nowSeconds) {
-          return {
-            ok: false,
-            error: {
-              code: 'EXPIRED',
-              message: `Delegation expired at ${new Date(expiration * 1000).toISOString()}`,
-            },
-          };
-        }
-        if (notBefore !== undefined && notBefore > nowSeconds) {
-          return {
-            ok: false,
-            error: {
-              code: 'UNAUTHORIZED',
-              message: `Delegation is not valid before ${new Date(notBefore * 1000).toISOString()}`,
-            },
-          };
-        }
-
-        if (options.requireExpiration === true && expiration === undefined) {
-          return {
-            ok: false,
-            error: {
-              code: 'UNAUTHORIZED',
-              message:
-                'Delegation has no expiration; this validator requires a bounded expiry',
-            },
-          };
-        }
-
-        // 6. Verify signatures across the entire delegation chain
-        const sigResult = await verifyDelegationChain(delegation);
-        if (!sigResult.ok) {
-          return sigResult;
-        }
-
-        // 7. Revocation: check this delegation and its whole (now verified)
-        // proof chain in one batched call.
-        const proofChainCids = delegationChainCids(delegation);
-        const revocation = await checkRevoked(proofChainCids);
-        if (revocation) return revocation;
-
-        // 8. Success — return delegation details
-        const proofChain = buildProofChain(delegation);
-        const cap = delegation.capabilities?.[0];
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- delegation type from Delegation.extract() is complex
-        const facts = (delegation as any).facts as
-          | Record<string, unknown>[]
-          | undefined;
-
-        return {
-          ok: true,
-          invoker: delegation.issuer.did(),
-          capability: cap
-            ? {
-                can: cap.can,
-                with: cap.with,
-                nb: cap.nb as Record<string, unknown> | undefined,
-              }
-            : undefined,
-          expiration,
-          proofChain,
-          proofChainCids,
-          facts: facts && facts.length > 0 ? facts : undefined,
-        };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Unknown error';
-        return { ok: false, error: { code: 'INVALID_FORMAT', message } };
-      }
+    async validateDelegation(delegationBase64) {
+      return clipped(await validateDelegationToken(delegationBase64));
     },
   };
 }

@@ -27,7 +27,7 @@ function surface(
   view: AttachmentViewSurface['view'],
   offloaded = true,
 ): AttachmentViewSurface {
-  return { offloaded, view };
+  return { offloaded, view, extractText: async () => null };
 }
 
 function ctxWith(

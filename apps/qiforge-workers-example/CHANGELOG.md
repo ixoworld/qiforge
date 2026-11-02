@@ -1,5 +1,166 @@
 # qiforge-workers-example
 
+## 0.0.35
+
+### Patch Changes
+
+- Updated dependencies [[`b7dd124`](https://github.com/ixoworld/qiforge/commit/b7dd124e3bc4f5522713a7de4e76f3c651e8ba98), [`93be63d`](https://github.com/ixoworld/qiforge/commit/93be63db8043fae1d7797b400e488dabe83f235c)]:
+  - @ixo/oracle-runtime-workers@0.36.1
+
+## 0.0.34
+
+### Patch Changes
+
+- Updated dependencies [[`3f988c5`](https://github.com/ixoworld/qiforge/commit/3f988c5fd4b29fe770233017998bc953cb3b10ec), [`8de7258`](https://github.com/ixoworld/qiforge/commit/8de7258904ffff532c0f807de4887e7460d3f2ce), [`ea2c08d`](https://github.com/ixoworld/qiforge/commit/ea2c08df7417708a571f6a0bae8af07a141d0e10), [`8048724`](https://github.com/ixoworld/qiforge/commit/8048724b7460eb965559d39658ba91aca6eac8b3), [`0282be6`](https://github.com/ixoworld/qiforge/commit/0282be67bb192bf929d28bf7ce5f8b7f72bc88cc)]:
+  - @ixo/oracle-runtime-workers@0.36.0
+
+## 0.0.33
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @ixo/oracle-runtime-workers@0.35.1
+
+## 0.0.32
+
+### Patch Changes
+
+- Updated dependencies [[`f03b2dd`](https://github.com/ixoworld/qiforge/commit/f03b2ddc9506262618cfd9d8161c64409566a057)]:
+  - @ixo/oracle-runtime-workers@0.35.0
+
+## 0.0.31
+
+### Patch Changes
+
+- Updated dependencies [[`b3f1152`](https://github.com/ixoworld/qiforge/commit/b3f11528cedfbfb67aae716c28fc11ebf4c44f23)]:
+  - @ixo/oracle-runtime-workers@0.34.1
+
+## 0.0.30
+
+### Patch Changes
+
+- Updated dependencies [[`4085175`](https://github.com/ixoworld/qiforge/commit/40851750dab2746d4105d4efd46857b399aa8c86)]:
+  - @ixo/oracle-runtime-workers@0.34.0
+
+## 0.0.29
+
+### Patch Changes
+
+- Updated dependencies [[`566a90b`](https://github.com/ixoworld/qiforge/commit/566a90ba42f52191059f1a226f6321f98547f9c8)]:
+  - @ixo/oracle-runtime-workers@0.33.2
+
+## 0.0.28
+
+### Patch Changes
+
+- Updated dependencies [[`b08bd20`](https://github.com/ixoworld/qiforge/commit/b08bd209eaaef77f7da0dde94ee756d1b413b6cc), [`b08bd20`](https://github.com/ixoworld/qiforge/commit/b08bd209eaaef77f7da0dde94ee756d1b413b6cc), [`b08bd20`](https://github.com/ixoworld/qiforge/commit/b08bd209eaaef77f7da0dde94ee756d1b413b6cc)]:
+  - @ixo/oracle-runtime-workers@0.33.1
+
+## 0.0.27
+
+### Patch Changes
+
+- Updated dependencies [[`d7268c1`](https://github.com/ixoworld/qiforge/commit/d7268c16e937e50a588249cbe78453fc49e23563)]:
+  - @ixo/oracle-runtime-workers@0.33.0
+
+## 0.0.26
+
+### Patch Changes
+
+- Updated dependencies [[`c7b67dd`](https://github.com/ixoworld/qiforge/commit/c7b67dd3d7d36d410271c55da34959608248abd4), [`5cb5776`](https://github.com/ixoworld/qiforge/commit/5cb5776e39b40007f60352a63eaa0cb72995d12b)]:
+  - @ixo/oracle-runtime-workers@0.32.0
+
+## 0.0.25
+
+### Patch Changes
+
+- Updated dependencies [[`cd9179f`](https://github.com/ixoworld/qiforge/commit/cd9179fedbe055c5b6fa65285dc5c8a617f09095), [`3855929`](https://github.com/ixoworld/qiforge/commit/38559290521520e4eac3e933ddb809dcd0f06150), [`9240425`](https://github.com/ixoworld/qiforge/commit/92404254b2bf6cac6f6943db803ee74c82483c46)]:
+  - @ixo/oracle-runtime-workers@0.31.0
+
+## 0.0.24
+
+### Patch Changes
+
+- Updated dependencies [[`91c5c49`](https://github.com/ixoworld/qiforge/commit/91c5c4998384ac12f2d2d3697a7d6c624235072a)]:
+  - @ixo/oracle-runtime-workers@0.30.0
+
+## 0.0.23
+
+### Patch Changes
+
+- Updated dependencies [[`b9595f6`](https://github.com/ixoworld/qiforge/commit/b9595f6a3837d3491098cb4deac92dab490511f8)]:
+  - @ixo/oracle-runtime-workers@0.29.1
+
+## 0.0.22
+
+### Patch Changes
+
+- Updated dependencies [[`1c94029`](https://github.com/ixoworld/qiforge/commit/1c94029e203f24c6b7e5f93bfa6e7f4a437eadbe)]:
+  - @ixo/oracle-runtime-workers@0.29.0
+
+## 0.0.21
+
+### Patch Changes
+
+- Updated dependencies [[`15d7641`](https://github.com/ixoworld/qiforge/commit/15d76414bae6b699f0163ac80b538c1ba77ad1dc)]:
+  - @ixo/oracle-runtime-workers@0.28.2
+
+## 0.0.20
+
+### Patch Changes
+
+- Updated dependencies [[`911e637`](https://github.com/ixoworld/qiforge/commit/911e637ee855199c42439842f85ccb74d424f732)]:
+  - @ixo/oracle-runtime-workers@0.28.1
+
+## 0.0.19
+
+### Patch Changes
+
+- Updated dependencies [[`bdb1dd8`](https://github.com/ixoworld/qiforge/commit/bdb1dd8c39cd1bc3808f067787843b73d4115314)]:
+  - @ixo/oracle-runtime-workers@0.28.0
+
+## 0.0.18
+
+### Patch Changes
+
+- Updated dependencies [[`a70f6e2`](https://github.com/ixoworld/qiforge/commit/a70f6e2e0c27e4938352d6e496fb648d804f91ce)]:
+  - @ixo/oracle-runtime-workers@0.27.0
+
+## 0.0.17
+
+### Patch Changes
+
+- Updated dependencies [[`d045644`](https://github.com/ixoworld/qiforge/commit/d04564404dcde57848ecba0a86f05c64768baf85)]:
+  - @ixo/oracle-runtime-workers@0.26.0
+
+## 0.0.16
+
+### Patch Changes
+
+- Updated dependencies [[`e24e59d`](https://github.com/ixoworld/qiforge/commit/e24e59d2551c05e4ac247a7fe02d8718963c9148)]:
+  - @ixo/oracle-runtime-workers@0.25.0
+
+## 0.0.15
+
+### Patch Changes
+
+- Updated dependencies [[`375c6ee`](https://github.com/ixoworld/qiforge/commit/375c6ee0ab17941febe1e8863daff83893020061)]:
+  - @ixo/oracle-runtime-workers@0.24.0
+
+## 0.0.14
+
+### Patch Changes
+
+- Updated dependencies [[`02f293c`](https://github.com/ixoworld/qiforge/commit/02f293cc55da175cbc50d9de9939bad007306ed2), [`b964fdc`](https://github.com/ixoworld/qiforge/commit/b964fdc6a208da4933a52715c4cc0f46df933d7b), [`5bac08b`](https://github.com/ixoworld/qiforge/commit/5bac08bdf4707f36544a4b94cb02931ae9517610)]:
+  - @ixo/oracle-runtime-workers@0.23.0
+
+## 0.0.13
+
+### Patch Changes
+
+- Updated dependencies [[`5135b53`](https://github.com/ixoworld/qiforge/commit/5135b5332d48baaf85f6a2ae4e6c3cdbad269282), [`5135b53`](https://github.com/ixoworld/qiforge/commit/5135b5332d48baaf85f6a2ae4e6c3cdbad269282)]:
+  - @ixo/oracle-runtime-workers@0.22.0
+
 ## 0.0.12
 
 ### Patch Changes

@@ -1,0 +1,13 @@
+{
+  "account": {
+    "@type": "/cosmos.auth.v1beta1.ModuleAccount",
+    "base_account": {
+      "address": "ixo17xpfvakm2amg962yls6f84z3kell8c5l0vaj0w",
+      "pub_key": null,
+      "account_number": "81",
+      "sequence": "0"
+    },
+    "name": "fee_collector",
+    "permissions": []
+  }
+}

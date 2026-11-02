@@ -4,6 +4,7 @@ import {
   interactionValuesDigest,
   PrepareInteractionSchema,
   UpdateInteractionSchema,
+  InteractionSchema,
   createActionInteractionsClient,
 } from './index.js';
 
@@ -96,6 +97,83 @@ describe('portable interaction contract', () => {
       status: 409,
       code: 'stale_revision',
     });
+  });
+  it('reads records from a newer runtime but refuses unknown request fields', () => {
+    const record = {
+      version: 1,
+      id: crypto.randomUUID(),
+      revision: 2,
+      sessionId: '$session',
+      oracleDid: 'did:ixo:oracle',
+      owner: { kind: 'question', requestId: 'q', newOwnerField: 1 },
+      values: { a: 1 },
+      updatedByUser: [],
+      status: 'cancelled',
+      cancelReason: 'not-submitted',
+      createdAt: 1,
+      expiresAt: 2,
+      newRecordField: true,
+    };
+    const parsed = InteractionSchema.parse(record);
+    expect(parsed).not.toHaveProperty('newRecordField');
+    expect(parsed.owner).not.toHaveProperty('newOwnerField');
+    expect(
+      PrepareInteractionSchema.safeParse({
+        version: 1,
+        requestId: crypto.randomUUID(),
+        sessionId: '$session',
+        owner: { kind: 'question', requestId: 'q', newOwnerField: 1 },
+        values: {},
+      }).success,
+    ).toBe(false);
+  });
+  it('turns a non-JSON error page into a typed error and skips unreadable list items', async () => {
+    const page = createActionInteractionsClient({
+      baseUrl: 'https://oracle.example',
+      headers: async () => ({}),
+      fetch: async () => new Response('Payload Too Large', { status: 413 }),
+    });
+    await expect(page.list('$session')).rejects.toMatchObject({
+      status: 413,
+      code: 'request_failed',
+    });
+    const good = {
+      version: 1,
+      id: crypto.randomUUID(),
+      revision: 1,
+      sessionId: '$session',
+      oracleDid: 'did:ixo:oracle',
+      owner: { kind: 'artifact', artifactId: 'a' },
+      values: {},
+      updatedByUser: [],
+      status: 'draft',
+      createdAt: 1,
+      expiresAt: 2,
+    };
+    const mixed = createActionInteractionsClient({
+      baseUrl: 'https://oracle.example',
+      headers: async () => ({}),
+      fetch: async () => Response.json([good, { version: 9 }]),
+    });
+    expect((await mixed.list('$session')).map((r) => r.id)).toEqual([good.id]);
+  });
+  it("codes the shell's own 401 and 429 bodies by status", async () => {
+    for (const [status, code] of [
+      [401, 'unauthorized'],
+      [429, 'rate_limited'],
+    ] as const) {
+      const client = createActionInteractionsClient({
+        baseUrl: 'https://oracle.example',
+        headers: async () => ({}),
+        fetch: async () =>
+          Response.json({ statusCode: status, message: 'nope' }, { status }),
+      });
+      await expect(client.list('$session')).rejects.toMatchObject({
+        status,
+        code,
+        message: 'nope',
+      });
+    }
   });
 });
 

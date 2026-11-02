@@ -24,7 +24,11 @@ import type {
   RuntimeContext,
 } from '../../plugin-api/types';
 import { logFrontendAction } from './action-log';
-import { describeDropped, sanitizeDeclaredTools } from './declared-tools';
+import {
+  declaredToolEffect,
+  describeDropped,
+  sanitizeDeclaredTools,
+} from './declared-tools';
 
 const manifest: PluginManifest = {
   title: 'Portal',
@@ -79,6 +83,7 @@ const BROWSER_TOOL_SHAPE = z.object({
   name: z.string(),
   description: z.string(),
   schema: z.record(z.string(), z.unknown()),
+  effect: z.unknown().optional(),
 });
 
 const ARGS_RECORD_SHAPE = z.record(z.string(), z.unknown());
@@ -92,7 +97,9 @@ export function parseBrowserTools(value: unknown): BrowserToolCall[] {
     const parsed = BROWSER_TOOL_SHAPE.safeParse(entry);
     if (!parsed.success || names.has(parsed.data.name)) continue;
     names.add(parsed.data.name);
-    out.push(parsed.data);
+    const { effect: rawEffect, ...declaration } = parsed.data;
+    const effect = declaredToolEffect(rawEffect);
+    out.push(effect ? { ...declaration, effect } : declaration);
   }
   return out;
 }
@@ -170,11 +177,8 @@ export function buildBrowserTool(
           `Browser tool ${descriptor.name} needs the realtime channel, which this host does not provide.`,
         );
       }
-      if (!frontend.hasClient(sessionId)) {
-        throw new Error(
-          `No browser is connected to session ${sessionId}, so browser tool ${descriptor.name} cannot run — the client must open the realtime (socket.io) channel for this session first.`,
-        );
-      }
+      // No browser of the session connected yet: the bridge parks the call
+      // until one joins (or its park deadline / the turn's abort ends it).
       const args = withRuntimeSuppliedArgs(
         parseArgs(input),
         descriptor,
@@ -189,6 +193,7 @@ export function buildBrowserTool(
         args,
         timeoutMs: browserToolTimeoutMs(descriptor.name),
         signal: ctx.abortSignal,
+        ...(ctx.markDispatched ? { onDispatched: ctx.markDispatched } : {}),
         onInvocation: (id) => {
           invocationId = id;
         },
@@ -202,9 +207,18 @@ export function buildBrowserTool(
       schema,
       // A browser step (scroll, page, click) repeated is a new step.
       repeatable: !HUMAN_DECISION_TOOLS.has(descriptor.name),
+      // It runs in this session's browser tab: scheduled in the session's
+      // frontend lane, so a parked call (or a question to the user) holds
+      // no slot another chat needs.
+      surface: 'frontend',
+      // A question to the user is a write whatever the client declares:
+      // it is never asked twice after a restart once it was sent. Any
+      // other tool keeps the effect its declaration names, if any.
       ...(HUMAN_DECISION_TOOLS.has(descriptor.name)
         ? { effect: 'write' as const }
-        : {}),
+        : descriptor.effect
+          ? { effect: descriptor.effect }
+          : {}),
     },
   );
 }

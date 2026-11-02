@@ -81,6 +81,8 @@ describe('createUserContextInvalidationMiddleware', () => {
   it('covers every memory write and delete tool, and only those', () => {
     expect([...MEMORY_WRITE_TOOL_NAMES].sort()).toEqual(
       [
+        'add_oracle_document',
+        'delete_oracle_document',
         MEMORY_ADD_MCP_NAME,
         MEMORY_ADD_ORACLE_KNOWLEDGE_MCP_NAME,
         MEMORY_CLEAR_MCP_NAME,
@@ -89,6 +91,7 @@ describe('createUserContextInvalidationMiddleware', () => {
       ].sort(),
     );
     expect(MEMORY_WRITE_TOOL_NAMES).not.toContain(MEMORY_SEARCH_MCP_NAME);
+    expect(MEMORY_WRITE_TOOL_NAMES).not.toContain('list_oracle_documents');
   });
 
   it.each(MEMORY_WRITE_TOOL_NAMES.map((name) => [name]))(

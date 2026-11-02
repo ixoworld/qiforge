@@ -1,0 +1,15 @@
+{
+  "address": "ixo14hj2tavq8fpesdwxxcu44rty3hh90vhujrvcmstl4zr3txmfvw9sqa3vn7",
+  "contract_info": {
+    "code_id": "1",
+    "creator": "ixo1vafr2dqhgz8frc7gf22njz8y2u0fue4kuetey6",
+    "admin": "ixo1g7xtrvc8ejkenee8a3gryvx6d4n9uu6gpsx63z",
+    "label": "initiate_entity_nft_contract",
+    "created": {
+      "block_height": "87646",
+      "tx_index": "0"
+    },
+    "ibc_port_id": "",
+    "extension": null
+  }
+}

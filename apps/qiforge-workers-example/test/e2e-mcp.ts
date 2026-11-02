@@ -22,11 +22,16 @@
  *      second memory write invalidates the room again, the runtime POSTs the
  *      engine's `/search-enhanced-batch` once (UCAN headers + `x-room-id`)
  *      and the model answers without a memory tool;
- *   5. every request the memory engine received (MCP and batch) carries the
+ *   5. every request the memory engine received (MCP, batch and the
+ *      session-history upload) carries the
  *      per-user UCAN invocation headers (Authorization: Bearer +
  *      X-Auth-Type: ucan) minted from the user's `ixo:memory` delegation —
  *      the mint targets the service DID resolved from the engine's
- *      /.well-known/did.json.
+ *      /.well-known/did.json — and `x-oracle-entity-did` naming the oracle's
+ *      domain entity, which the engine keys every memory space by. The
+ *      oracle is provisioned with an entity DISTINCT from its account DID,
+ *      so the drill proves the header (and the batch's `oracle_dids`) carry
+ *      the entity and never the account.
  */
 import assert from 'node:assert/strict';
 import { ChatClient } from './lib/chat-client';
@@ -40,6 +45,7 @@ import { ensureUserOracleRoom } from './lib/matrix-room';
 import {
   BOT_USER_ID,
   ORACLE_DID,
+  ORACLE_ENTITY_DID,
   provisionDevVars,
   startOracle,
   waitForMatrixGateway,
@@ -118,13 +124,18 @@ async function main(): Promise<void> {
   console.log(`mock memory-engine MCP at ${mock.mcpUrl} (${mock.did})`);
   await provisionDevVars({
     signing: true,
+    // The memory plugin requires a domain entity; a distinct one lets every
+    // assertion below tell it from the account DID.
+    distinctEntity: true,
     extra: {
       MEMORY_MCP_URL: mock.mcpUrl,
       MEMORY_ENGINE_URL: mock.origin,
     },
   });
+  assert.match(ORACLE_ENTITY_DID, /^did:ixo:entity:[0-9a-f]{32}$/);
+  assert.notEqual(ORACLE_ENTITY_DID, ORACLE_DID);
   const oracle = await startOracle();
-  console.log(`oracle at ${oracle.url}`);
+  console.log(`oracle at ${oracle.url} (entity ${ORACLE_ENTITY_DID})`);
   try {
     const user = await ensureNamedAccount('qf-mcp-user');
     const invocation = await mintAuthInvocation(user, ORACLE_DID);
@@ -146,13 +157,14 @@ async function main(): Promise<void> {
 
     // Every memory-engine call carries the user↔oracle room (`x-room-id`);
     // the prefetch is skipped without one. In production the rooms
-    // appservice creates it; on the harness the user does.
+    // appservice creates it; on the harness the user does. The gateway maps
+    // the room through its alias, which names the oracle's entity.
     await step('the user↔oracle room exists and the bot is in it', async () => {
       const session = await matrixLogin(user.matrixUserId, user.matrixPassword);
       await ensureUserOracleRoom({
         session,
         userDid: user.did,
-        oracleDid: ORACLE_DID,
+        oracleDid: ORACLE_ENTITY_DID,
         botUserId: BOT_USER_ID,
         roomName: 'qf-mcp-user ↔ QiForge Workers',
       });
@@ -286,7 +298,17 @@ async function main(): Promise<void> {
           'the batch request carried no Bearer UCAN invocation',
         );
         assert.ok(batch.xRoomId, 'the batch request carried no x-room-id');
+        assert.equal(
+          batch.xOracleEntityDid,
+          ORACLE_ENTITY_DID,
+          'the batch request did not name the oracle entity',
+        );
         assert.equal(batch.queryCount, 6, 'the batch is the six context slots');
+        assert.deepEqual(
+          batch.oracleDids,
+          Array.from({ length: 6 }, () => [ORACLE_ENTITY_DID]),
+          'every batch query searches the oracle entity (oracle_dids), not the account DID',
+        );
         assert.equal(
           searchCalls(),
           searchesBefore,
@@ -330,6 +352,12 @@ async function main(): Promise<void> {
           mock.state.requests.filter(
             (q) => q.pathname === '/search-enhanced-batch',
           ).length;
+        // Creating a session uploads the previous one to the engine, and an
+        // accepted upload drops the room's prefetched context (new history
+        // may hold new facts). This step is about the cache, so the mock
+        // refuses uploads until the step ends (the runtime gives up after
+        // its retries; nothing is retried later).
+        mock.state.historyUploads = 'refuse';
         mock.state.batchDelayMs = 5000;
         try {
           const before = batchRequests();
@@ -357,34 +385,60 @@ async function main(): Promise<void> {
             `the late gather did not settle: ${JSON.stringify(after)}`,
           );
           assert.equal(after.cached, true, JSON.stringify(after));
+          mock.state.batchDelayMs = 0;
+
+          // The next session is served from that cache: no new request.
+          const before2 = batchRequests();
+          const next = await client.createSession();
+          const r2 = await client.stream(
+            next,
+            'Without using any tool, what is my favourite river? ' +
+              'Reply with only its name.',
+          );
+          const status = await readUserContextDebug(next);
+          assert.match(
+            r2.text,
+            /Danube/i,
+            `expected Danube in "${r2.text}" (prefetch: ${JSON.stringify(status)})`,
+          );
+          assert.equal(status.lastOutcome, 'cached', JSON.stringify(status));
+          assert.equal(batchRequests() - before2, 0, 'served from the cache');
         } finally {
           mock.state.batchDelayMs = 0;
+          mock.state.historyUploads = 'accept';
         }
-
-        // The next session is served from that cache: no new request.
-        const before = batchRequests();
-        const next = await client.createSession();
-        const r = await client.stream(
-          next,
-          'Without using any tool, what is my favourite river? ' +
-            'Reply with only its name.',
-        );
-        const status = await readUserContextDebug(next);
-        assert.match(
-          r.text,
-          /Danube/i,
-          `expected Danube in "${r.text}" (prefetch: ${JSON.stringify(status)})`,
-        );
-        assert.equal(status.lastOutcome, 'cached', JSON.stringify(status));
-        assert.equal(batchRequests() - before, 0, 'served from the cache');
       },
     );
 
     await step(
-      'every memory-engine request carried the per-user UCAN headers',
+      'every memory-engine request carried the per-user UCAN headers and the oracle entity',
       async () => {
         const engineRequests = mock.state.requests;
         assert.ok(engineRequests.length > 0, 'no memory-engine requests');
+        assert.ok(
+          engineRequests.some((q) => q.pathname === '/mcp') &&
+            engineRequests.some((q) => q.pathname === '/search-enhanced-batch'),
+          'expected both MCP and batch requests',
+        );
+        // The session-history indexer uploads the earlier sessions when new
+        // ones are created; its upload names the entity like every request.
+        // (The cache step above refused its uploads; the earlier steps'
+        // were accepted.)
+        const uploads = engineRequests.filter(
+          (q) => q.pathname === '/messages',
+        );
+        assert.ok(uploads.length > 0, 'no session-history upload (/messages)');
+        assert.ok(
+          uploads.some((q) => !q.refused && (q.messageCount ?? 0) > 0),
+          'no accepted session-history upload carrying messages',
+        );
+        for (const upload of uploads) {
+          assert.equal(
+            upload.xOracleEntityDid,
+            ORACLE_ENTITY_DID,
+            'the session-history upload did not name the oracle entity',
+          );
+        }
         for (const q of engineRequests) {
           const what = `${q.pathname} ${q.rpcMethods.join(',')}`;
           assert.equal(q.xAuthType, 'ucan', `x-auth-type missing on ${what}`);
@@ -392,6 +446,11 @@ async function main(): Promise<void> {
             q.authorization?.startsWith('Bearer ') &&
               q.authorization.length > 100,
             `no Bearer UCAN invocation on ${what}`,
+          );
+          assert.equal(
+            q.xOracleEntityDid,
+            ORACLE_ENTITY_DID,
+            `x-oracle-entity-did is not the oracle entity on ${what}`,
           );
         }
       },

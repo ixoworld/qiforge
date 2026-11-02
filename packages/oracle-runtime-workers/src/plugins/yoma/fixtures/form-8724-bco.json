@@ -1,0 +1,94 @@
+{
+  "@context": {
+    "ixo": "https://w3id.org/ixo/ns/protocol/",
+    "@id": "@type",
+    "type": "@type",
+    "@protected": true
+  },
+  "type": "ixo:entity#surveyTemplate",
+  "question": {
+    "title": "K2C Tree Planter Application",
+    "description": "Submit your details to apply",
+    "pages": [
+      {
+        "name": "page1",
+        "elements": [
+          {
+            "type": "text",
+            "name": "fullName",
+            "title": "Full Names",
+            "isRequired": true
+          },
+          {
+            "type": "text",
+            "name": "age",
+            "title": "Age",
+            "isRequired": true,
+            "validators": [
+              {
+                "type": "numeric",
+                "text": "Age must be between 18 and 35.",
+                "minValue": 18,
+                "maxValue": 35
+              }
+            ],
+            "inputType": "number"
+          },
+          {
+            "type": "dropdown",
+            "name": "localMunicipality",
+            "title": "Local Municipality Name",
+            "isRequired": true,
+            "choices": [
+              "Bushbuckridge",
+              "Maruleng",
+              "Ba-Phalaborwa",
+              "Fetakgomo Tubatse",
+              "Thaba Chweu",
+              "Other K2C Region"
+            ]
+          },
+          {
+            "type": "text",
+            "name": "villageName",
+            "title": "Village Name",
+            "isRequired": true
+          },
+          {
+            "type": "radiogroup",
+            "name": "hasExperience",
+            "title": "Do you have tree planting experience?",
+            "isRequired": true,
+            "choices": [
+              {
+                "value": "yes",
+                "text": "Yes"
+              },
+              {
+                "value": "no",
+                "text": "No"
+              }
+            ]
+          },
+          {
+            "type": "comment",
+            "name": "experienceDetails",
+            "visibleIf": "{hasExperience} = 'yes'",
+            "title": "Please expand on your tree planting experience:",
+            "isRequired": true,
+            "placeholder": "Describe your past project experience, types of trees planted, or relevant training..."
+          },
+          {
+            "type": "comment",
+            "name": "motivationText",
+            "title": "Motivation: Why do you want to be a tree planting agent?",
+            "isRequired": true,
+            "placeholder": "Share your reasons for wanting to join this community initiative..."
+          }
+        ],
+        "title": "Apply to Become a Tree Planting Agent",
+        "description": "Interested youth (18-35) participants should apply to become tree planting agents. You need to be living or working in the K2C Biosphere, preferably unemployed with experience in planting trees. Candidates will be approved using the geolocation (where you are based) and motivation on why you'd like to be part of the programme."
+      }
+    ]
+  }
+}

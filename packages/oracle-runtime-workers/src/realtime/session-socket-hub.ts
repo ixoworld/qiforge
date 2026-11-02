@@ -10,7 +10,14 @@
  * (`serializeAttachment`), so the set is rebuilt losslessly from
  * `ctx.getWebSockets()` whenever the object wakes from hibernation or
  * restarts. Nothing here is kept only in memory.
+ *
+ * A socket is a foreground executor (a tab showing the chat: it renders the
+ * session's events and runs any frontend call) unless its CONNECT declared
+ * itself a background executor: then it runs only the browser tools it
+ * named — never an AG-UI action, which renders on the chat's own surface or
+ * asks the user (a wallet signature) — and receives no fan-out.
  */
+import type { FrontendCallKind } from './frontend-call-registry';
 import { ENGINE_PING, encodeEvent } from './socket-io-codec';
 
 export interface SocketAttachment {
@@ -32,7 +39,39 @@ export interface SocketAttachment {
    * engine.io pongs do not count — a background tab answers those too.
    */
   lastActiveAt?: number;
+  /** Set when the CONNECT declared a background executor; absent = foreground. */
+  executor?: 'background';
+  /** The tools a background executor can run (validated, bounded; see `realtime-endpoint.ts`). */
+  tools?: string[];
 }
+
+/** An executor socket with its attachment. */
+export interface HubEntry<S> {
+  socket: S;
+  attachment: SocketAttachment;
+}
+
+const isForeground = (attachment: SocketAttachment): boolean =>
+  attachment.executor !== 'background';
+
+/**
+ * Whether the socket may run a call of `kind` to `toolName`: any call in
+ * the foreground; in the background only a browser tool it declared.
+ */
+export function canRunTool(
+  attachment: SocketAttachment,
+  kind: FrontendCallKind,
+  toolName: string,
+): boolean {
+  return (
+    isForeground(attachment) ||
+    (kind === 'browser' && (attachment.tools ?? []).includes(toolName))
+  );
+}
+
+/** Most recent client event, else open time (see `executorFor`). */
+const recency = (attachment: SocketAttachment): number =>
+  attachment.lastActiveAt ?? attachment.openedAt;
 
 /** The subset of the Workers `WebSocket` the hub needs (tests use fakes). */
 export interface HubSocket {
@@ -148,14 +187,14 @@ export class SessionSocketHub<S extends HubSocket = HubSocket> {
   }
 
   /** Every socket with its heartbeat bookkeeping (diagnostics). */
-  entries(): Array<{ socket: S; attachment: SocketAttachment }> {
+  entries(): Array<HubEntry<S>> {
     return [...this.sockets].map(([socket, attachment]) => ({
       socket,
       attachment,
     }));
   }
 
-  /** Authenticated sockets subscribed to `sessionId`. */
+  /** Authenticated sockets subscribed to `sessionId`, background executors included. */
   forSession(sessionId: string): S[] {
     const out: S[] = [];
     for (const [socket, meta] of this.sockets) {
@@ -168,42 +207,74 @@ export class SessionSocketHub<S extends HubSocket = HubSocket> {
     return this.forSession(sessionId).length > 0;
   }
 
-  /** A client event arrived on the socket: persist the time (see `executorForSession`). */
+  /** Whether a foreground (chat-rendering) socket of `sessionId` is authenticated. */
+  hasForegroundSession(sessionId: string): boolean {
+    for (const meta of this.sockets.values())
+      if (meta.userDid && meta.sessionId === sessionId && isForeground(meta))
+        return true;
+    return false;
+  }
+
+  /** A client event arrived on the socket: persist the time (see `executorFor`). */
   noteActivity(socket: S): void {
     if (this.sockets.has(socket))
       this.update(socket, { lastActiveAt: this.now() });
   }
 
   /**
-   * The authenticated socket of `sessionId` a frontend call runs on: the one
-   * with the most recent client event, else the one opened last. The tab the
-   * user acted in last is the likeliest to be in front; the tab that
-   * connected last is often just a background tab that reconnected after a
-   * laptop woke. Ties go to the socket registered later.
+   * The authenticated socket of `sessionId` a frontend call of `kind` to
+   * `toolName` runs on. A foreground socket first: the one with the most recent client
+   * event, else the one opened last — the tab the user acted in last is the
+   * likeliest to be in front; the tab that connected last is often just a
+   * background tab that reconnected after a laptop woke. Without one, a
+   * background executor that declared the browser tool `toolName`, by the
+   * same recency.
+   * Ties go to the socket registered later. Undefined when no socket of the
+   * session can run the tool.
    */
-  executorForSession(
+  executorFor(
     sessionId: string,
-  ): { socket: S; attachment: SocketAttachment } | undefined {
-    const recency = (attachment: SocketAttachment): number =>
-      attachment.lastActiveAt ?? attachment.openedAt;
-    let chosen: { socket: S; attachment: SocketAttachment } | undefined;
+    kind: FrontendCallKind,
+    toolName: string,
+  ): HubEntry<S> | undefined {
+    let foreground: HubEntry<S> | undefined;
+    let background: HubEntry<S> | undefined;
     for (const [socket, attachment] of this.sockets) {
       if (!attachment.userDid || attachment.sessionId !== sessionId) continue;
-      if (!chosen || recency(attachment) >= recency(chosen.attachment))
-        chosen = { socket, attachment };
+      if (isForeground(attachment)) {
+        if (
+          !foreground ||
+          recency(attachment) >= recency(foreground.attachment)
+        )
+          foreground = { socket, attachment };
+      } else if (
+        canRunTool(attachment, kind, toolName) &&
+        (!background || recency(attachment) >= recency(background.attachment))
+      )
+        background = { socket, attachment };
     }
-    return chosen;
+    return foreground ?? background;
   }
 
-  /** Fan an event out to every authenticated socket of the session. */
+  /**
+   * Fan an event out to the session's authenticated FOREGROUND sockets: a
+   * background executor runs calls, it does not render the chat.
+   */
   emitToSession(
     sessionId: string,
     eventName: string,
     payload: unknown,
   ): number {
-    const frame = encodeEvent(eventName, payload);
+    // Encoded once, and only when a socket will take it: most events of a
+    // session nobody has open (or only background executors) cost nothing.
+    let frame: string | undefined;
     let sent = 0;
-    for (const socket of this.forSession(sessionId)) {
+    // A failed send removes that socket; deleting the entry being visited
+    // is safe while iterating a Map.
+    for (const [socket, meta] of this.sockets) {
+      if (!meta.userDid || meta.sessionId !== sessionId || !isForeground(meta))
+        continue;
+      frame ??= encodeEvent(eventName, payload);
       if (this.trySend(socket, frame)) sent += 1;
     }
     return sent;

@@ -12,6 +12,8 @@ const mockPort = Number(process.argv[2] ?? 34675);
 async function main(): Promise<void> {
   await provisionDevVars({
     signing: true,
+    // The memory plugin requires a domain entity distinct from the account.
+    distinctEntity: true,
     extra: {
       MEMORY_MCP_URL: `http://localhost:${mockPort}/mcp`,
       MEMORY_ENGINE_URL: `http://localhost:${mockPort}`,

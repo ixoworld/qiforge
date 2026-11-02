@@ -55,6 +55,7 @@ vi.mock('../use-oracles-config.js', () => ({
 vi.mock('./tool-executor.js', () => ({
   executeBrowserToolCall: state.execute,
   executeToolAndEmitResult: state.action,
+  refuseBrowserToolCall: vi.fn(),
 }));
 import { useWebSocketEvents } from './use-websocket-events.js';
 import type { IBrowserTools } from '../../types/browser-tool.type.js';

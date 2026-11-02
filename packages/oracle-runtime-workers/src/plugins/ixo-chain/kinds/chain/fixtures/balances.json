@@ -1,0 +1,24 @@
+{
+  "balances": [
+    {
+      "denom": "ibc/6BBE9BD4246F8E04948D5A4EEE7164B2630263B9EBB5E7DC5F0A46C62A2FF97B",
+      "amount": "25069999"
+    },
+    {
+      "denom": "ibc/77C12480BD8C29BF0ACEC2143736C15BAF8CD232CA27BAE09336677B828955E6",
+      "amount": "2199004"
+    },
+    {
+      "denom": "uixo",
+      "amount": "9000000"
+    },
+    {
+      "denom": "upay",
+      "amount": "5740000"
+    }
+  ],
+  "pagination": {
+    "next_key": null,
+    "total": "0"
+  }
+}

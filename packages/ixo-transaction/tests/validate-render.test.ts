@@ -529,11 +529,11 @@ describe('validation and signing action args', () => {
       );
 
     await expect(
-      sign([{ typeUrl: '/cosmos.bank.v1beta1.MsgSend', value: {} }]),
+      sign([{ typeUrl: '/cosmos.bank.v1beta1.MsgMultiSend', value: {} }]),
     ).resolves.toEqual({
       success: false,
       error:
-        'Unsupported message typeUrl /cosmos.bank.v1beta1.MsgSend: not in the IXO transaction catalog',
+        'Unsupported message typeUrl /cosmos.bank.v1beta1.MsgMultiSend: not in the IXO transaction catalog',
     });
     await expect(
       sign([{ ...message, value: { ...message.value, feeGranter: ADDRESS } }]),

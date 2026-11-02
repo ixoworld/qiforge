@@ -7,6 +7,19 @@ import type {
   InteractionOutcome,
 } from '../action-interactions/store';
 import type {
+  ChannelAttachment,
+  ChannelControlInput,
+  ChannelControlOutcome,
+  ChannelReplyContext,
+  ChannelReplyReference,
+} from '../channels/contract';
+import type {
+  BeginTopicStep,
+  TopicReceiptReferences,
+} from '@ixo/ixo-transaction/topic-proposals';
+import type { ProposalCommand } from '../action-proposals/store';
+import type { ActionOutcomeV1 } from '@ixo/action-protocol';
+import type {
   TopicDeliverableCommand,
   TopicDeliverableResult,
 } from '../tasks/topic-deliverables';
@@ -22,9 +35,11 @@ import type {
 } from '@ixo/common/ai/decisions';
 import type { TranscriptPageOptions } from './transcript';
 import type { TurnUsage } from '../core/turn-budget';
+import type { ToolSchedulerSnapshot } from '../core/tool-scheduler';
 import type { BotStatus, EncryptedFileInfo } from '@ixo/matrix-bot-workers-sdk';
 import type { AttachmentInput } from '../attachments/types';
 import type { RealtimeStatus } from '../realtime/realtime-endpoint';
+import type { FrontendWaitingFor } from '../plugin-api/types';
 import type { TierFlushResult, TierStatus } from '../sqlite/do-vfs';
 import type { OwnedArtifact } from '../artifacts/store';
 import type {
@@ -57,6 +72,12 @@ import type { DomainContextProvenance } from '../core/domain-context';
 export interface OracleWorkerEnv {
   ACTION_INTERACTIONS_ENABLED?: string;
   TOPIC_DELIVERABLES_ENABLED?: string;
+  ACTION_PROPOSALS_RPC_TESTNET?: string;
+  ACTION_PROPOSALS_RPC_DEVNET?: string;
+  ACTION_PROPOSALS_RPC_MAINNET?: string;
+  ACTION_PROPOSALS_ENABLED?: string;
+  ACTION_TOPIC_PROPOSALS_ENABLED?: string;
+  ACTION_PROPOSALS_PORTAL_ORIGIN?: string;
   USER_ORACLE: DurableObjectNamespace<UserOracleObject>;
   MATRIX_GATEWAY: DurableObjectNamespace<MatrixGatewayObject>;
 
@@ -79,6 +100,7 @@ export interface OracleWorkerEnv {
   AUTH_HUB?: Fetcher;
   AUTH_HUB_URL?: string;
   AUTH_HUB_CHANNEL_SERVICE_KEY?: string;
+  HUB_ACTIONS_ENABLED?: string;
 
   // --- matrix -------------------------------------------------------------
   MATRIX_BASE_URL: string;
@@ -260,11 +282,14 @@ export interface OracleWorkerEnv {
   TURN_MAX_IDENTICAL_READS?: string;
   /** Time limit per request-admission handler in ms (default 2000). */
   REQUEST_ADMISSION_TIMEOUT_MS?: string;
+  /** How long a frontend call waits unsent for a browser, in ms (default 300000). */
+  FRONTEND_PARK_TIMEOUT_MS?: string;
   /** Durable-run knobs (docs/plans/durable-runs.md); see `runDurabilityConfig`. */
   RUN_KEEPALIVE_MS?: string;
   RUN_SEGMENT_FLUSH_MS?: string;
   RUN_SEGMENT_BYTES?: string;
   RUN_RECOVERY_ATTEMPTS?: string;
+  RUN_RECOVERY_TOTAL_ATTEMPTS?: string;
   RUN_RECOVERY_DELAYS_MS?: string;
   TURN_MULTITASK_DEFAULT?: string;
   /** Context-budget knobs (docs/plans/context-budgets.md). */
@@ -306,6 +331,10 @@ export interface OracleWorkerEnv {
    * `on` preloads the predicted on-demand plugin's tools for the turn.
    */
   CAPABILITY_ROUTER?: CapabilityRouterMode;
+  /** Applies exclusively to authenticated channel admission; Portal/Matrix turns never route. */
+  CHANNEL_SEMANTIC_ROUTING?: 'off' | 'shadow' | 'on';
+  CHANNEL_SEMANTIC_ROUTING_BINDINGS?: string;
+  CHANNEL_SEMANTIC_ROUTING_MIN_PROBABILITY?: string;
 
   // --- langsmith tracing ---------------------------------------------------
   /** `'true'` traces every turn (explicit tracer — Workers has no env auto-attach). */
@@ -376,7 +405,14 @@ export interface TurnRequest {
     /** A provider id (`/^[a-z][a-z0-9_-]{0,31}$/`), e.g. `whatsapp`. */
     provider: string;
     bindingId: string;
+    bindingRevision?: number;
     remoteMessageRef: string;
+    replyContext?: ChannelReplyContext;
+    replyTo?: ChannelReplyReference;
+    /** Host-generated direct reply: no agent or tools run for an ambiguous destination. */
+    routingClarification?: string;
+    /** Files the person sent with this message, as the gateway serves them. */
+    attachments?: ChannelAttachment[];
   };
   executionProfile?: TaskExecutionProfile;
   identity: TurnIdentity;
@@ -414,7 +450,6 @@ export interface TurnRequest {
   taskRunId?: string;
 }
 
-/** A run as the shell reports it (`GET /sessions/:id/run`, `GET /debug/runs`). */
 /** `GET /debug/context` — the context budget a model gets on this object. */
 /**
  * Per-session context counters (`GET /debug/context?session=`): what the
@@ -509,6 +544,10 @@ export interface DomainContextRouterUpdate {
   domainContext: DomainContextProvenance[];
 }
 
+/**
+ * A run as the shell reports it (`GET /sessions/:id/run`, `GET /runs/active`,
+ * `activeRun` on `GET /sessions` rows, `GET /debug/runs`).
+ */
 export interface RunSummary {
   runId: string;
   sessionId: string;
@@ -522,13 +561,27 @@ export interface RunSummary {
     | 'aborted'
     | 'interrupted'
     | 'failed';
+  /**
+   * When the run's row was created (`RunStore.create`), unchanged when a
+   * queued run starts: a dequeued run's elapsed time includes its wait.
+   */
   startedAt: string;
   updatedAt: string;
-  /** Highest frame sequence a re-join can ask `after`. */
+  /**
+   * Highest frame sequence packed when the row was last written; written
+   * when the run ends, so not a live cursor for an active run.
+   */
   lastSeq: number;
   messageId?: string;
   /** The reply so far, for a run that ended without a committed reply. */
   partialText?: string;
+  /**
+   * The browser tool / AG-UI action the run is waiting on, parked because no
+   * browser of the session that can run it is connected: opening the chat
+   * sends it. Live state of this object only, never persisted; absent when
+   * the run waits on nothing.
+   */
+  waitingFor?: FrontendWaitingFor;
 }
 
 /** `GET /debug/runs`: the durable-run configuration, live runs and recent rows. */
@@ -538,6 +591,7 @@ export interface RunsStatus {
     segmentFlushMs: number;
     segmentBytes: number;
     recoveryAttempts: number;
+    recoveryTotalAttempts: number;
     recoveryDelaysMs: readonly number[];
     multitaskDefault: 'interrupt' | 'enqueue';
   };
@@ -582,6 +636,12 @@ export interface RunsStatus {
     startedAt: string;
     state: 'pending' | 'warned';
   }>;
+  /**
+   * Tool lanes of the object right now (tool-scheduler.ts): the user-wide
+   * `read` / `write` lanes, the per-session `frontend` and `subagent` lanes
+   * summed, and each busy per-session lane by key (`sessionLanes`).
+   */
+  tools: ToolSchedulerSnapshot;
 }
 
 /** Non-streaming turn result. */
@@ -620,6 +680,12 @@ export interface SessionSummary {
   createdAt: string;
   lastUpdatedAt: string;
   roomId?: string;
+  /**
+   * The run the session is busy with (queued / running / recovering), as
+   * `GET /runs/active` reports it: without `partialText`. Absent, never
+   * null, when the session has none.
+   */
+  activeRun?: RunSummary;
 }
 
 /** `search_memory_engine`'s raw upstream schema + whether it converts to Zod. */
@@ -720,11 +786,17 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
     id?: string,
     references?: boolean,
   ): Promise<InteractionOutcome<string>>;
+  recordHubActionOutcome(outcome: ActionOutcomeV1): Promise<void>;
   topicDeliverable(
     identity: TurnIdentity,
     operationId: string,
     command: TopicDeliverableCommand,
   ): Promise<TopicDeliverableResult>;
+  channelControl(
+    identity: TurnIdentity,
+    input: ChannelControlInput,
+    requestHash: string,
+  ): Promise<ChannelControlOutcome>;
   channelTurn(
     identity: TurnIdentity,
     input: ChannelTurnInput,
@@ -758,6 +830,18 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
     opts?: { limit?: number; offset?: number },
   ): Promise<{ sessions: SessionSummary[]; total: number }>;
   deleteSession(identity: TurnIdentity, sessionId: string): Promise<boolean>;
+  actionProposal(
+    identity: TurnIdentity,
+    id: string,
+    command?:
+      | ProposalCommand
+      | { kind: 'topic-reconcile'; input: TopicReceiptReferences },
+  ): Promise<JsonString | null>;
+  beginTopicStep(
+    identity: TurnIdentity,
+    id: string,
+    input: BeginTopicStep,
+  ): Promise<JsonString | null>;
   /** `GET /artifacts/:id` — the owner's canonical copy, or null. */
   artifact(
     identity: TurnIdentity,
@@ -793,12 +877,23 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
     target: FeedbackTarget,
     outcome: FeedbackSettlement,
   ): Promise<void>;
-  abortTurn(sessionId: string): Promise<boolean>;
+  /**
+   * Stop the session's current message. With `identity` (the HTTP route)
+   * the object boots first and the answer waits until the stopped runs
+   * have ended (at most the supersede grace).
+   */
+  abortTurn(sessionId: string, identity?: TurnIdentity): Promise<boolean>;
   /** The session's active (queued/running/recovering) run, if any. */
   sessionRun(
     identity: TurnIdentity,
     sessionId: string,
   ): Promise<RunSummary | null>;
+  /**
+   * `GET /runs/active` — every active run of the chats `GET /sessions`
+   * lists (same main-room rule, task runs excluded), oldest first, without
+   * `partialText`.
+   */
+  activeRuns(identity: TurnIdentity): Promise<RunSummary[]>;
   /** Diagnostics: recent runs with their tool marks and live state. */
   runsStatus(): Promise<RunsStatus>;
   /** `GET /debug/context` — the context budget a model gets on this object. */
@@ -1054,6 +1149,17 @@ export interface MatrixGatewayObject extends Rpc.DurableObjectBranded {
   ): Promise<string>;
   /** Full room state as a JSON-encoded array of `{ type, state_key, content, sender, event_id }`. */
   getRoomState(roomId: string): Promise<JsonString>;
+  getTopicRoomState(roomId: string): Promise<JsonString>;
+  getTopicEvent(
+    roomId: string,
+    eventId: string,
+    opts?: { deadlineAt?: number },
+  ): Promise<JsonString | null>;
+  getTopicHistory(
+    roomId: string,
+    root: string,
+    opts?: { deadlineAt?: number; sender?: string },
+  ): Promise<JsonString>;
   /** One timeline event (decrypted when E2EE) as JSON `{ event_id, type, content, sender, origin_server_ts }`, or null. */
   getEvent(roomId: string, eventId: string): Promise<JsonString | null>;
   /**

@@ -1,13 +1,18 @@
 import { DurableObject } from 'cloudflare:workers';
 import { DoSqliteDatabase, type SqlRow } from '../sqlite/database';
-import { RunStore, type RunRecord } from '../do/run-store';
+import { runDurabilityConfig, RunStore, type RunRecord } from '../do/run-store';
+import { RunCoordinator, type RunOutcome } from '../do/run-coordinator';
 import type { ReplyPlan } from '../delivery/types';
-import { ChannelTurns } from './turns';
+import { ChannelTurns, type ChannelSessionInfo } from './turns';
+import { DecisionRuntime } from '@ixo/common/ai/decisions';
+import type { ChannelRoutingMode } from './routing';
 import {
   channelRequestHash,
   requireChannelDelegation,
   type ChannelDelegation,
   type ChannelTurnInput,
+  type ChannelControlInput,
+  type ChannelControlOutcome,
   type ChannelTurnOutcome,
   ChannelError,
   StaleSessionError,
@@ -22,12 +27,30 @@ export class ChannelTurnsTestDO extends DurableObject {
   private turns?: ChannelTurns;
   private nowMs = Date.now();
   /** Host calls made since the object loaded. */
-  private calls = { assertSession: 0, changed: 0, createSession: 0 };
+  private calls = {
+    assertSession: 0,
+    changed: 0,
+    createSession: 0,
+    stopRuns: 0,
+  };
+  /** Batched session reads made since the object loaded. */
+  private describeCalls = 0;
   private mirrorMode: MirrorMode = 'ok';
+  private holdSessionCreation = false;
+  private pendingSessions: (() => void)[] = [];
   /** Mirrors held by `hang`, released by `setMirror` with another mode. */
   private held: (() => void)[] = [];
   /** Wake-ups the turns asked for (`scheduleRetry`), epoch ms. */
   private retries: number[] = [];
+  private routingMode: ChannelRoutingMode = 'off';
+  private routingBindings: string[] = [];
+  private routeChoice = 'thread_0';
+  private routeProbability = 0.99;
+  private routeHeld: (() => void)[] = [];
+  private holdRouting = false;
+  private failNextBegin = false;
+  private failNextAssertSession = false;
+  private refuseNextRename = false;
 
   private async ready(): Promise<ChannelTurns> {
     if (this.turns) return this.turns;
@@ -39,13 +62,32 @@ export class ChannelTurnsTestDO extends DurableObject {
     this.turns = new ChannelTurns(db, {
       createSession: async (_identity, marker) => {
         this.calls.createSession += 1;
-        return `$${marker}`;
+        if (this.holdSessionCreation)
+          await new Promise<void>((resolve) =>
+            this.pendingSessions.push(resolve),
+          );
+        const sessionId = `$${marker}`;
+        await this.putSessionInfo(sessionId, {
+          title: null,
+          createdAt: this.nowMs,
+          updatedAt: this.nowMs,
+        });
+        return sessionId;
       },
       assertSession: async (_identity, sessionId) => {
         this.calls.assertSession += 1;
+        if (this.failNextAssertSession) {
+          this.failNextAssertSession = false;
+          throw new ChannelError(503, 'Homeserver unavailable', 'unavailable');
+        }
         if ((await this.deletedSessions()).includes(sessionId))
           throw new StaleSessionError('Session deleted');
-        if (!sessionId.startsWith('$channel-session-'))
+        if (
+          !sessionId.startsWith('$channel-session-') &&
+          !sessionId.startsWith('$channel-reset-') &&
+          !sessionId.startsWith('$channel-route-new-') &&
+          !sessionId.startsWith('$portal-')
+        )
           throw new ChannelError(404, 'Session not owned', 'session_not_found');
       },
       requireDelegation: async () =>
@@ -53,10 +95,51 @@ export class ChannelTurnsTestDO extends DurableObject {
           await this.delegation(),
           Math.floor(this.nowMs / 1000),
         ),
+      // Like the coordinator: only runs that have not ended are stopped.
+      stopRuns: async (runIds) => {
+        this.calls.stopRuns += 1;
+        for (const runId of runIds) {
+          const run = await runs.get(runId);
+          if (
+            run &&
+            !['finished', 'aborted', 'interrupted', 'failed'].includes(
+              run.status,
+            )
+          )
+            await runs.close(runId, { status: 'aborted' });
+        }
+      },
+      describeSessions: async (sessionIds) => {
+        this.describeCalls += 1;
+        const found = new Map<string, ChannelSessionInfo>();
+        for (const sessionId of sessionIds) {
+          const info = await this.sessionInfo(sessionId);
+          if (info) found.set(sessionId, info);
+        }
+        return found;
+      },
+      renameSession: async (sessionId, title) => {
+        if (this.refuseNextRename) {
+          this.refuseNextRename = false;
+          return false;
+        }
+        const info = await this.sessionInfo(sessionId);
+        if (!info) return false;
+        await this.putSessionInfo(sessionId, { ...info, title });
+        return true;
+      },
       getRun: (runId) => runs.get(runId),
       getPlan: (runId) => runs.getPlan(runId),
       wasPruned: (runId) => runs.wasChannelRunPruned(runId),
       begin: async (runId, request) => {
+        if (this.failNextBegin) {
+          this.failNextBegin = false;
+          throw new ChannelError(
+            503,
+            'Simulated restart before begin',
+            'unavailable',
+          );
+        }
         await runs.create({
           runId,
           sessionId: request.sessionId,
@@ -108,6 +191,52 @@ export class ChannelTurnsTestDO extends DurableObject {
       pruneTombstones: (before, limit) =>
         runs.pruneChannelTombstones(before, limit),
       now: () => this.nowMs,
+      routing: {
+        mode: this.routingMode,
+        bindings: this.routingBindings,
+        minProbability: 0.9,
+        ownsSession: async (sessionId) =>
+          sessionId.startsWith('$channel-') &&
+          !(await this.deletedSessions()).includes(sessionId),
+        observe: () => undefined,
+        evaluator: new DecisionRuntime(undefined, {
+          provider: 'test',
+          model: 'scripted-routing',
+          evaluate: async (request) => {
+            await this.ctx.storage.put('routing-inputs', [
+              ...((await this.ctx.storage.get<string[]>('routing-inputs')) ??
+                []),
+              JSON.stringify(request.state),
+            ]);
+            if (this.holdRouting)
+              await new Promise<void>((resolve) =>
+                this.routeHeld.push(resolve),
+              );
+            if (this.routeChoice === 'error')
+              throw new Error('Provider unavailable');
+            const question = request.questions.destination;
+            if (question?.kind !== 'choice') throw new Error('Expected choice');
+            const keys = Object.keys(question.options);
+            return {
+              answers: {
+                destination: {
+                  kind: 'choice',
+                  value: this.routeChoice,
+                  confidence: this.routeProbability,
+                  probabilities: Object.fromEntries(
+                    keys.map((key) => [
+                      key,
+                      key === this.routeChoice
+                        ? this.routeProbability
+                        : (1 - this.routeProbability) / (keys.length - 1),
+                    ]),
+                  ),
+                },
+              },
+            };
+          },
+        }),
+      },
     });
     return this.turns;
   }
@@ -124,7 +253,9 @@ export class ChannelTurnsTestDO extends DurableObject {
     return result ? { ok: true, result } : null;
   }
 
-  private identity(input: ChannelTurnInput) {
+  private identity(
+    input: Pick<ChannelTurnInput, 'provider' | 'bindingId' | 'bindingRevision'>,
+  ) {
     return {
       userDid: 'did:ixo:user',
       channel: {
@@ -186,6 +317,30 @@ export class ChannelTurnsTestDO extends DurableObject {
     this.nowMs += ms;
   }
 
+  async control(input: ChannelControlInput): Promise<ChannelControlOutcome> {
+    try {
+      return {
+        ok: true,
+        result: await (
+          await this.ready()
+        ).control(
+          this.identity(input),
+          input,
+          await channelRequestHash(JSON.stringify(input)),
+        ),
+      };
+    } catch (error) {
+      if (error instanceof ChannelError)
+        return {
+          ok: false,
+          status: error.status,
+          code: error.code,
+          message: error.message,
+        };
+      throw error;
+    }
+  }
+
   async submit(input: ChannelTurnInput): Promise<ChannelTurnOutcome> {
     try {
       const result = await (
@@ -239,6 +394,47 @@ export class ChannelTurnsTestDO extends DurableObject {
     await this.runs!.update(runId, { status: 'failed', partialText: null });
   }
 
+  /**
+   * The user object restarting `restarts` times while the run executes, as
+   * a turn that resets the isolate after every step does: each boot is a
+   * new `RunCoordinator` over the stored rows (default durable-run config)
+   * that recovers the orphan and starts its attempt; the attempt takes one
+   * step (the checkpoint moves) and never ends, because the isolate is
+   * reset under it. `onRunEnded` is what the user object does for a
+   * channel run. Returns the outcomes the coordinators ended runs with.
+   */
+  async resetDuringRun(restarts: number): Promise<RunOutcome['status'][]> {
+    const turns = await this.ready();
+    const runs = this.runs!;
+    const ended: RunOutcome['status'][] = [];
+    for (let boot = 1; boot <= restarts; boot += 1) {
+      this.nowMs += 55_000;
+      const now = this.nowMs;
+      const coordinator = new RunCoordinator({
+        store: runs,
+        config: runDurabilityConfig({}),
+        instanceId: `boot-${boot}`,
+        log: {
+          log: () => undefined,
+          warn: () => undefined,
+          error: () => undefined,
+        },
+        now: () => now,
+        requestAlarm: () => undefined,
+        runAttempt: () => new Promise<RunOutcome>(() => undefined),
+        checkpointIdOf: async () => `cp-${boot}`,
+        onRunEnded: async (_record, outcome) => {
+          ended.push(outcome.status);
+          turns.deliverReply();
+        },
+      });
+      await coordinator.recoverOrphans();
+      await coordinator.resumeDue(now + 60_000);
+    }
+    await turns.whenIdle();
+    return ended;
+  }
+
   async run(runId: string): Promise<RunRecord | undefined> {
     await this.ready();
     return this.runs!.get(runId);
@@ -282,6 +478,50 @@ export class ChannelTurnsTestDO extends DurableObject {
        VALUES ('chb_one', ?, 'hash', ?, ?)`,
       [requestId, `channel_orphan_${requestId}`, this.nowMs],
     );
+  }
+
+  /** As the sessions store: a session exists once created (or given details) and until deleted. */
+  private async sessionInfo(
+    sessionId: string,
+  ): Promise<ChannelSessionInfo | undefined> {
+    if ((await this.deletedSessions()).includes(sessionId)) return undefined;
+    return this.ctx.storage.get<ChannelSessionInfo>(`session:${sessionId}`);
+  }
+
+  private async putSessionInfo(
+    sessionId: string,
+    info: ChannelSessionInfo,
+  ): Promise<void> {
+    await this.ctx.storage.put(`session:${sessionId}`, info);
+  }
+
+  /** What the sessions store holds about a session (title, created, last activity). */
+  async setSessionInfo(
+    sessionId: string,
+    info: Partial<ChannelSessionInfo>,
+  ): Promise<void> {
+    const current = (await this.sessionInfo(sessionId)) ?? {
+      title: null,
+      createdAt: this.nowMs,
+      updatedAt: this.nowMs,
+    };
+    await this.putSessionInfo(sessionId, { ...current, ...info });
+  }
+
+  /** The title the sessions store holds for a session. */
+  async titleOf(sessionId: string): Promise<string | null> {
+    return (await this.sessionInfo(sessionId))?.title ?? null;
+  }
+
+  /** Ids of the binding rows `topics` keeps for a binding (any revision). */
+  async bindingRows(bindingId: string): Promise<string[]> {
+    await this.ready();
+    return (
+      await this.db!.exec<{ session_id: string }>(
+        'SELECT session_id FROM channel_session_bindings WHERE binding_id=? ORDER BY rowid',
+        [bindingId],
+      )
+    ).map((row) => row.session_id);
   }
 
   private async deletedSessions(): Promise<string[]> {
@@ -335,16 +575,137 @@ export class ChannelTurnsTestDO extends DurableObject {
     return counts;
   }
 
+  async blockSessionCreation(blocked: boolean): Promise<void> {
+    this.holdSessionCreation = blocked;
+    if (!blocked)
+      for (const release of this.pendingSessions.splice(0)) release();
+  }
+
+  /** How many times the sessions store was read for session details. */
+  async sessionReads(): Promise<number> {
+    return this.describeCalls;
+  }
+
   async hostCalls(): Promise<{
     assertSession: number;
     changed: number;
     createSession: number;
+    stopRuns: number;
   }> {
     return { ...this.calls };
   }
 
   async count(): Promise<number> {
     return (await this.ctx.storage.get<number>('executions')) ?? 0;
+  }
+
+  async configureRouting(
+    mode: ChannelRoutingMode,
+    bindings: string[] = [],
+  ): Promise<void> {
+    if (this.turns) await this.turns.whenIdle();
+    this.routingMode = mode;
+    this.routingBindings = bindings;
+    await this.reopen();
+  }
+
+  async routeAs(choice: string, probability = 0.99): Promise<void> {
+    this.routeChoice = choice;
+    this.routeProbability = probability;
+  }
+
+  async routingInputs(): Promise<string[]> {
+    return (await this.ctx.storage.get<string[]>('routing-inputs')) ?? [];
+  }
+
+  async blockRouting(blocked: boolean): Promise<void> {
+    this.holdRouting = blocked;
+    if (!blocked) for (const release of this.routeHeld.splice(0)) release();
+  }
+
+  async failBeginOnce(): Promise<void> {
+    this.failNextBegin = true;
+  }
+
+  async failAssertSessionOnce(): Promise<void> {
+    this.failNextAssertSession = true;
+  }
+
+  /** The next rename finds no session, as when it is deleted after the checks passed. */
+  async refuseRenameOnce(): Promise<void> {
+    this.refuseNextRename = true;
+  }
+
+  /** Replace a control's stored result, as an older version might have written it. */
+  async storeControlResult(
+    bindingId: string,
+    requestId: string,
+    result: string,
+  ): Promise<void> {
+    await this.ready();
+    await this.db!.run(
+      'UPDATE channel_controls SET result=? WHERE binding_id=? AND request_id=?',
+      [result, bindingId, requestId],
+    );
+  }
+
+  /** The ids of the controls a binding has a receipt for. */
+  async controlReceipts(bindingId: string): Promise<string[]> {
+    await this.ready();
+    return (
+      await this.db!.exec<{ request_id: string }>(
+        'SELECT request_id FROM channel_controls WHERE binding_id=? ORDER BY rowid',
+        [bindingId],
+      )
+    ).map((row) => row.request_id);
+  }
+
+  async indexedSessions(): Promise<string[]> {
+    await this.ready();
+    return (
+      await this.db!.exec<{ session_id: string }>(
+        'SELECT session_id FROM channel_thread_index',
+      )
+    ).map((row) => row.session_id);
+  }
+
+  /** Sessions as a binding knew them before `channel_session_bindings` existed. */
+  async forgetSessionBindings(): Promise<void> {
+    await this.ready();
+    await this.db!.run('DELETE FROM channel_session_bindings');
+  }
+
+  /** A stored JSON column as another version might have left it. */
+  async corruptStored(
+    table: 'channel_requests' | 'channel_controls',
+    requestId: string,
+  ): Promise<void> {
+    await this.ready();
+    await this.db!.run(
+      table === 'channel_requests'
+        ? 'UPDATE channel_requests SET routing_json=\'{"v":9\' WHERE request_id=?'
+        : 'UPDATE channel_controls SET result=\'{"v":9}\' WHERE request_id=?',
+      [requestId],
+    );
+  }
+
+  /** A run's stored request as a broken write would leave it. */
+  async corruptRunRequest(runId: string): Promise<void> {
+    await this.ready();
+    await this.db!.run("UPDATE turn_runs SET request='{' WHERE run_id=?", [
+      runId,
+    ]);
+  }
+
+  /** Ids of the binding rows of a binding (any revision), most recently bound first. */
+  async bindingRowsNewestFirst(bindingId: string): Promise<string[]> {
+    await this.ready();
+    return (
+      await this.db!.exec<{ session_id: string }>(
+        'SELECT session_id FROM channel_session_bindings WHERE binding_id=? ORDER BY created_at DESC, rowid DESC',
+        [bindingId],
+      )
+    ).map((row) => row.session_id);
   }
 
   async reset(): Promise<void> {

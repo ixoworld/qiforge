@@ -1,0 +1,19 @@
+{
+  "pageInfo": {
+    "hasNextPage": false
+  },
+  "nodes": [
+    {
+      "id": "2",
+      "subjectId": "bafkreibqh2o3cx2bhnvxhoknbashrse3lhxh5rjohyqgy5yoqqc5jhqgpm",
+      "type": 1,
+      "targetRole": 1,
+      "status": 0,
+      "disputerAddress": "ixo1nawclxlpwk5ftgqka2nkhup2kxnulc4nkhnk7m",
+      "disputerDid": "did:ixo:entity:02dacb4357a852a3bf29e749f3e0f374",
+      "disputeDeposit": [],
+      "submittedAt": "2026-10-29T13:22:38.723",
+      "resolution": null
+    }
+  ]
+}

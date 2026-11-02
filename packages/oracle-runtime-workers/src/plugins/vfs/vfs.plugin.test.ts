@@ -6,7 +6,7 @@ import {
 import { makeRuntimeContext } from '../../core/test-fixtures';
 import type { RuntimeContext } from '../../plugin-api/types';
 import { createVfsTools } from './vfs-tools';
-import { VfsPlugin, type VfsConfig } from './vfs.plugin';
+import { resolveVfsConfig, VfsPlugin, type VfsConfig } from './vfs.plugin';
 
 const VFS_TOOL_NAMES = [
   'vfs_search',
@@ -248,6 +248,37 @@ describe('VfsPlugin (Workers port)', () => {
       expect(result).toContain("I don't have access to your files yet");
       expect(result).toContain('My agent DID: did:ixo:oracle1');
       expect(calls).toHaveLength(0);
+    });
+  });
+});
+
+describe('resolveVfsConfig', () => {
+  it('defaults to mainnet and the stock tuning', () => {
+    expect(resolveVfsConfig({})).toEqual({
+      VFS_BASE_URL: 'https://vfs.ixo.earth',
+      UCAN_STORE_URL: 'https://store.ucan.ixo.earth',
+      VFS_MAX_READ_LINES: 2000,
+      VFS_REQUEST_TIMEOUT_MS: 20000,
+    });
+  });
+
+  it('derives the worker URLs from NETWORK, with explicit URLs and tuning winning', () => {
+    expect(resolveVfsConfig({ NETWORK: 'devnet' }).VFS_BASE_URL).toBe(
+      'https://devnet.vfs.ixo.earth',
+    );
+    expect(
+      resolveVfsConfig({
+        NETWORK: 'devnet',
+        VFS_BASE_URL: 'https://vfs.example',
+        UCAN_STORE_URL: 'https://store.example',
+        VFS_MAX_READ_LINES: '50',
+        VFS_REQUEST_TIMEOUT_MS: '1000',
+      }),
+    ).toEqual({
+      VFS_BASE_URL: 'https://vfs.example',
+      UCAN_STORE_URL: 'https://store.example',
+      VFS_MAX_READ_LINES: 50,
+      VFS_REQUEST_TIMEOUT_MS: 1000,
     });
   });
 });
