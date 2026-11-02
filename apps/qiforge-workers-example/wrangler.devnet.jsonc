@@ -16,6 +16,10 @@
   "compatibility_date": "2026-07-15",
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
+  // Minify the bundle to keep the isolate heap well under 128 MB; keep_names
+  // stays on for LangChain's class-name serialisation (see wrangler.jsonc).
+  "minify": true,
+  "keep_names": true,
   // Long user-object work (imports, VACUUM of a large file) can exceed the
   // default 30 s DO CPU cap; give it headroom.
   "limits": { "cpu_ms": 300000 },

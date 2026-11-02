@@ -8,6 +8,13 @@
   "compatibility_date": "2026-07-15",
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
+  // Minify the bundle: unminified, the isolate's heap is already near
+  // 96 MB of its 128 MB before the first turn, about 65 MB minified (see
+  // packages/oracle-runtime-workers/docs/operations.md, "Isolate memory").
+  // keep_names (already wrangler's default) keeps class and function `.name`
+  // values, which LangChain's serialisation reads; it stays explicit here.
+  "minify": true,
+  "keep_names": true,
   // @matrix-org/matrix-sdk-crypto-wasm's stock entrypoints can't load on
   // workerd (runtime wasm compilation is disallowed; the node entry reads from
   // disk). The bot SDK ships a loader that imports the .wasm as a build-time
