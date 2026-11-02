@@ -55,6 +55,9 @@ export default defineConfig({
       'src/memory/**/*.test.ts',
       // Spawns a Node child process; runs in vitest.core.config.ts.
       'src/core/topic-protocol-runtime.test.ts',
+      // Reads the source tree with node:fs and the TypeScript compiler;
+      // runs in vitest.core.config.ts.
+      'src/core/latin1-literals.test.ts',
       '**/node_modules/**',
     ],
     testTimeout: 60_000,
