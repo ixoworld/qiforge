@@ -193,8 +193,12 @@ function pause(baseUrl: string, retryAfterMs: number | undefined): number {
 
 /* ── one POST ─────────────────────────────────────────────────────────── */
 
-/** A POST's own signal: no caller's abort reaches it. */
-const NEVER_ABORTED = new AbortController().signal;
+/**
+ * A POST's own signal: no caller's abort reaches it. Made on first use:
+ * workerd refuses `new AbortController()` in global scope, so a module-level
+ * one stopped `wrangler dev` from loading the Worker.
+ */
+let neverAborted: AbortSignal | undefined;
 
 /**
  * Asks the worker for `ids` (at most {@link MAX_BATCH_IDS}); the answers it
@@ -214,7 +218,7 @@ async function post(
     blocksyncUrl: '',
     user: `names|${target.baseUrl}|${target.clientId}`,
     deadline: Date.now() + POST_TIMEOUT_MS,
-    signal: NEVER_ABORTED,
+    signal: (neverAborted ??= new AbortController().signal),
     fetch: fetcher,
   };
   try {

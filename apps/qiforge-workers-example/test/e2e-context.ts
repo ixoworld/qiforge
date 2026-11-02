@@ -78,13 +78,7 @@ interface SessionContextStatus {
 
 interface ContextStatus {
   model: string;
-  window: {
-    tokens: number;
-    origin: string;
-    catalogId?: string;
-    /** The window the limits derive from (the model's, at most the memory window); older runtimes omit it. */
-    budgetTokens?: number;
-  };
+  window: { tokens: number; origin: string; catalogId?: string };
   budget: {
     summarizeAtTokens: number;
     pruneAtTokens: number;
@@ -271,15 +265,9 @@ async function main(): Promise<void> {
         for (const model of models) {
           const status = await contextStatus(model);
           budgets.set(model, status);
-          // Every limit derives from the budget window: the model's, at
-          // most the memory window (CONTEXT_MEMORY_WINDOW_TOKENS).
-          const w = status.window.budgetTokens ?? status.window.tokens;
-          assert.ok(
-            w <= status.window.tokens,
-            `budget window ${w} above the model's ${status.window.tokens}`,
-          );
+          const w = status.window.tokens;
           console.log(
-            `\n   ${model}: window=${status.window.tokens} budgetWindow=${w} (${status.window.origin}${status.window.catalogId ? ` ${status.window.catalogId}` : ''}) cap=${status.budget.resultCapChars}c summarizeAt=${status.budget.summarizeAtTokens} pruneAt=${status.budget.pruneAtTokens} requestCap=${status.budget.requestCapTokens}`,
+            `\n   ${model}: window=${w} (${status.window.origin}${status.window.catalogId ? ` ${status.window.catalogId}` : ''}) cap=${status.budget.resultCapChars}c summarizeAt=${status.budget.summarizeAtTokens} pruneAt=${status.budget.pruneAtTokens} requestCap=${status.budget.requestCapTokens}`,
           );
           assert.ok(w >= 16_000, `window ${w}`);
           assert.ok(

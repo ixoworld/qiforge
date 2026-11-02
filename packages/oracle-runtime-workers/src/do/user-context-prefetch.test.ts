@@ -858,8 +858,9 @@ describe('user-context prefetch in a user-object turn', () => {
         expect(second.outcome.status).toBe('finished');
         expect(second.system).toContain(factLine(FAVOURITE_SEA));
         expect(second.steps).not.toContain(PROGRESS_STEP);
-        // One background refresh.
-        expect(o.engine.batches).toHaveLength(2);
+        // One background refresh. The turn does not wait for it, so its
+        // request may reach the engine after the turn has returned.
+        await vi.waitFor(() => expect(o.engine.batches).toHaveLength(2));
         expect(await o.status('s1')).toMatchObject({
           cached: false,
           inFlight: true,
@@ -1241,7 +1242,9 @@ describe('user-context prefetch in a user-object turn', () => {
         expect(cold.system).not.toContain(LEARNING);
         expect(cold.steps).not.toContain(PROGRESS_STEP);
         expect(cold.elapsedMs).toBeLessThan(2500);
-        expect(o.engine.batches).toHaveLength(2);
+        // The background refresh: the turn does not wait for it, so its
+        // request may reach the engine after the turn has returned.
+        await vi.waitFor(() => expect(o.engine.batches).toHaveLength(2));
 
         // The refresh lands; the next turn (inside r4's quiet period, so no
         // upload invalidates it first) takes the newer answer.

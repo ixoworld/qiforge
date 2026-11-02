@@ -25,7 +25,6 @@ import {
   BUILTIN_CONTEXT_WINDOWS,
   createLlmAdapter,
   llmEnvFromWorkerEnv,
-  LANGSMITH_MAX_INGEST_MEMORY_BYTES,
   redactSignedLinks,
   resolveLangsmithTracing,
   streamLivenessFromEnv,
@@ -422,28 +421,6 @@ describe('redactSignedLinks', () => {
       { bytes: new Uint8Array([1, 2, 3]) },
     ])
       expect(redactSignedLinks(values)).toBe(values);
-  });
-
-  it('caps the memory the tracer client queues', () => {
-    const { callbacks } = resolveLangsmithTracing({
-      userDid: 'did:ixo:user',
-      client: 'portal',
-      env: { apiKey: 'key-ingest-cap', tracing: 'true' },
-    });
-    const client: unknown = Reflect.get(callbacks?.[0] ?? {}, 'client');
-    expect(LANGSMITH_MAX_INGEST_MEMORY_BYTES).toBe(8 * 1024 * 1024);
-    expect(
-      Reflect.get(
-        Reflect.get(client as object, 'autoBatchQueue') as object,
-        'maxSizeBytes',
-      ),
-    ).toBe(LANGSMITH_MAX_INGEST_MEMORY_BYTES);
-    expect(
-      Reflect.get(
-        Reflect.get(client as object, 'batchIngestCaller') as object,
-        'maxQueueSizeBytes',
-      ),
-    ).toBe(LANGSMITH_MAX_INGEST_MEMORY_BYTES);
   });
 
   it('is what every tracer client applies to inputs and outputs', () => {

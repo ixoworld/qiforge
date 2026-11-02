@@ -387,7 +387,11 @@ it; the runtime never touches it).
   only when it holds no turns. The exact rules are in
   [operations → user objects](operations.md#user-objects-and-the-owner-copy).
 - Blobs are gzipped per row (`sqlite/blob-codec.ts`; gzip magic detected on
-  read, so uncompressed legacy rows coexist) and a background compactor
+  read, so uncompressed legacy rows coexist) with node:zlib's one-shot
+  `gzipSync` / `gunzipSync`, never a `CompressionStream` per row: a stream
+  keeps its zlib state outside the JS heap until it is collected, and a
+  turn opens one per message row, which cost a few-hundred-message thread
+  tens of MiB of the isolate's 128 MB. A background compactor
   rewrites and `VACUUM`s files imported from the Node runtime, one
   transaction per step of at most 300 rows and 8 MiB of blobs
   (`COMPACT_STEP_MAX_BYTES`; a step always takes at least one row). A step

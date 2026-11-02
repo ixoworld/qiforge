@@ -18,6 +18,8 @@
  * compress(decompress(x)) round-trips bit-exact at the value level.
  */
 
+import { gunzipSync, gzipSync } from 'node:zlib';
+
 /** Blobs below this size gain nothing from gzip (header ≈ 20 bytes). */
 export const MIN_COMPRESS_BYTES = 256;
 
@@ -28,41 +30,24 @@ export function isGzip(bytes: Uint8Array): boolean {
   return bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
 }
 
-async function pipeThrough(
-  bytes: Uint8Array,
-  transform: TransformStream<Uint8Array, Uint8Array>,
-): Promise<Uint8Array> {
-  const source = new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(bytes);
-      controller.close();
-    },
-  });
-  const stream = source.pipeThrough(transform);
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  const reader = stream.getReader();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    total += value.length;
-  }
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return out;
-}
-
+/**
+ * One gzip/gunzip of a whole value, through node:zlib's one-shot calls, so
+ * the zlib state lives for the call only. A `CompressionStream` /
+ * `DecompressionStream` keeps its zlib state (zlib's defaults: about
+ * 256 KiB to deflate, about 40 KiB to inflate) outside the JS heap until
+ * the stream is collected, and the saver gzips or gunzips every message
+ * row of a thread on each checkpoint read and write. On a deployed oracle a
+ * turn on a 200-message, 410 KB thread left 6 MiB of the Durable Object's
+ * 128 MB with streams and 50 MiB with one-shot calls (an empty thread: 58).
+ * Same gzip format either way, so existing rows read back unchanged.
+ */
 export function gzipBytes(bytes: Uint8Array): Promise<Uint8Array> {
-  return pipeThrough(bytes, new CompressionStream('gzip'));
+  // A copy: an exact-size `Uint8Array`, not a `Buffer` view.
+  return Promise.resolve(new Uint8Array(gzipSync(bytes)));
 }
 
 export function gunzipBytes(bytes: Uint8Array): Promise<Uint8Array> {
-  return pipeThrough(bytes, new DecompressionStream('gzip'));
+  return Promise.resolve(new Uint8Array(gunzipSync(bytes)));
 }
 
 /**
