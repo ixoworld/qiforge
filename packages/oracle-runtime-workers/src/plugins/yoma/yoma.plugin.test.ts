@@ -25,7 +25,7 @@ import {
 } from './catalog';
 import { FORM_MAX_BYTES, getJson } from './reads';
 import type { ClefRequest, ClefResponse, ClefRunner } from './clef';
-import { allDrafts, draftKey, updateDraft, type Kv } from './drafts';
+import { allDrafts, draftKey, getDraft, updateDraft, type Kv } from './drafts';
 import milestoneApplication from './fixtures/form-9787-bco.json';
 import milestoneClaim from './fixtures/form-9787-vct.json';
 import treePlanting from './fixtures/form-8724-vct.json';
@@ -2351,6 +2351,27 @@ describe('upstream answers the plugin refuses', () => {
     const [big] = (await setup().lookup({ kind: 'job', collectionId: '8724' }))
       .results;
     expect(big.logWork).toMatchObject({ ok: false, reason: 'too_large' });
+  });
+});
+
+describe('skip all optional', () => {
+  it('keeps "skip the optional ones" on the draft with no field named', async () => {
+    const kv = memoryKv();
+    const { form } = setup({ kv });
+    const ref = { form: 'application', collectionId: '9787' };
+    await form({ action: 'next', ...ref });
+    const skipped = await form({ action: 'skip', ...ref, allOptional: true });
+    expect(skipped).toMatchObject({
+      ok: true,
+      skipped: 'every optional question still to come',
+    });
+    const lookup = await getDraft(kv, 'application', '9787');
+    expect(lookup.ok && lookup.draft?.skipOptional).toBe(true);
+    // A skip naming nothing, without allOptional, is still refused.
+    expect(await form({ action: 'skip', ...ref })).toMatchObject({
+      ok: false,
+      reason: 'invalid_input',
+    });
   });
 });
 
