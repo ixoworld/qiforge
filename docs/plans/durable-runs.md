@@ -54,14 +54,15 @@ turn ≈ $0.0075 per user per month at $1 per million rows written or deleted.
 
 ## Env knobs
 
-| Var                      | Default                | Meaning                                             |
-| ------------------------ | ---------------------- | --------------------------------------------------- |
-| `RUN_KEEPALIVE_MS`       | 20000                  | keep-alive alarm horizon while a run is active      |
-| `RUN_SEGMENT_FLUSH_MS`   | 2000                   | max age of unflushed output before it is packed     |
-| `RUN_SEGMENT_BYTES`      | 16384                  | max unflushed bytes before it is packed             |
-| `RUN_RECOVERY_ATTEMPTS`  | 4                      | consecutive no-progress attempts before interrupted |
-| `RUN_RECOVERY_DELAYS_MS` | 5000,15000,30000,60000 | delay before each attempt                           |
-| `TURN_MULTITASK_DEFAULT` | interrupt              | `interrupt` or `enqueue`                            |
+| Var                           | Default                | Meaning                                                |
+| ----------------------------- | ---------------------- | ------------------------------------------------------ |
+| `RUN_KEEPALIVE_MS`            | 20000                  | keep-alive alarm horizon while a run is active         |
+| `RUN_SEGMENT_FLUSH_MS`        | 2000                   | max age of unflushed output before it is packed        |
+| `RUN_SEGMENT_BYTES`           | 16384                  | max unflushed bytes before it is packed                |
+| `RUN_RECOVERY_ATTEMPTS`       | 4                      | consecutive no-progress attempts before interrupted    |
+| `RUN_RECOVERY_TOTAL_ATTEMPTS` | 8                      | recoveries in all, progress or not, before interrupted |
+| `RUN_RECOVERY_DELAYS_MS`      | 5000,15000,30000,60000 | delay before each attempt                              |
+| `TURN_MULTITASK_DEFAULT`      | interrupt              | `interrupt` or `enqueue`                               |
 
 ## Wire
 

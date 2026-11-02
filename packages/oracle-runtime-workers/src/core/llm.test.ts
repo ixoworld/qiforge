@@ -25,6 +25,7 @@ import {
   BUILTIN_CONTEXT_WINDOWS,
   createLlmAdapter,
   llmEnvFromWorkerEnv,
+  LANGSMITH_MAX_INGEST_MEMORY_BYTES,
   redactSignedLinks,
   resolveLangsmithTracing,
   streamLivenessFromEnv,
@@ -366,6 +367,83 @@ describe('redactSignedLinks', () => {
 
   it('sends nothing it cannot read', () => {
     expect(redactSignedLinks({ big: 1n })).toEqual({});
+    expect(
+      redactSignedLinks({
+        nested: [
+          {
+            broken: {
+              toJSON: () => {
+                throw new Error('no');
+              },
+            },
+          },
+        ],
+      }),
+    ).toEqual({});
+  });
+
+  it('serializes nothing when no signature can be present', () => {
+    let serialized = 0;
+    const history = {
+      toJSON() {
+        serialized += 1;
+        return { messages: ['x'.repeat(10_000)] };
+      },
+    };
+    const values = { inputs: [history, history] };
+    expect(redactSignedLinks(values)).toBe(values);
+    // The walk read it once (a shared object once); no stringify read it again.
+    expect(serialized).toBe(1);
+  });
+
+  it('finds a signature wherever the JSON would carry one, as the full pass does', () => {
+    const cyclic: Record<string, unknown> = { text: `see ${SIGNED}` };
+    cyclic.self = cyclic;
+    const cases: Array<Record<string, unknown>> = [
+      // in a message, through its toJSON
+      { messages: [[new HumanMessage(`open ${SIGNED}`)]] },
+      // in a key
+      { [SIGNED]: 1 },
+      // any case, deep in an array
+      { a: [[[{ b: SIGNED.replace('X-Amz-Signature', 'x-amz-signature') }]]] },
+      // in a cycle
+      { cyclic },
+    ];
+    for (const values of cases) {
+      const out = redactSignedLinks(values);
+      expect(out).not.toBe(values);
+      expect(JSON.stringify(out)).not.toContain('deadbeef0123');
+    }
+    // The marker without a signature, a Map (no JSON keys) and a typed
+    // array are left alone, as the full pass leaves them.
+    for (const values of [
+      { text: 'X-Amz-Signature=&x' },
+      { map: new Map([['k', SIGNED]]) },
+      { bytes: new Uint8Array([1, 2, 3]) },
+    ])
+      expect(redactSignedLinks(values)).toBe(values);
+  });
+
+  it('caps the memory the tracer client queues', () => {
+    const { callbacks } = resolveLangsmithTracing({
+      userDid: 'did:ixo:user',
+      client: 'portal',
+      env: { apiKey: 'key-ingest-cap', tracing: 'true' },
+    });
+    const client: unknown = Reflect.get(callbacks?.[0] ?? {}, 'client');
+    expect(LANGSMITH_MAX_INGEST_MEMORY_BYTES).toBe(8 * 1024 * 1024);
+    expect(
+      Reflect.get(
+        Reflect.get(client as object, 'autoBatchQueue') as object,
+        'maxSizeBytes',
+      ),
+    ).toBe(LANGSMITH_MAX_INGEST_MEMORY_BYTES);
+    expect(
+      Reflect.get(
+        Reflect.get(client as object, 'batchIngestCaller') as object,
+        'maxQueueSizeBytes',
+      ),
+    ).toBe(LANGSMITH_MAX_INGEST_MEMORY_BYTES);
   });
 
   it('is what every tracer client applies to inputs and outputs', () => {

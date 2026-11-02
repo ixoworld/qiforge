@@ -310,12 +310,14 @@ export const baseEnvSchema = z.object({
 
   // --- durable runs (docs/plans/durable-runs.md) ---------------------------
   // Parsed by `runDurabilityConfig` (src/do/run-store.ts) with defaults:
-  // keep-alive 20 s, segment pack every 2 s / 16 KiB, 4 recovery attempts at
-  // 5/15/30/60 s, `interrupt` as the multitask rule.
+  // keep-alive 20 s, segment pack every 2 s / 16 KiB, 4 recovery attempts
+  // without progress at 5/15/30/60 s, 8 recoveries in all, `interrupt` as
+  // the multitask rule.
   RUN_KEEPALIVE_MS: z.string().optional(),
   RUN_SEGMENT_FLUSH_MS: z.string().optional(),
   RUN_SEGMENT_BYTES: z.string().optional(),
   RUN_RECOVERY_ATTEMPTS: z.string().optional(),
+  RUN_RECOVERY_TOTAL_ATTEMPTS: z.string().optional(),
   RUN_RECOVERY_DELAYS_MS: z.string().optional(),
   TURN_MULTITASK_DEFAULT: z.enum(['interrupt', 'enqueue']).optional(),
 
@@ -323,9 +325,11 @@ export const baseEnvSchema = z.object({
   // Parsed by `contextWindowConfig` / `contextKnobs` / `resultStoreKnobs`.
   // The model's context window is resolved per model (override → OpenRouter
   // catalog → MODEL_CONTEXT_TOKENS default, lowered by provider errors); the
-  // fractions derive every limit from it.
+  // fractions derive every limit from it, capped at CONTEXT_MEMORY_WINDOW_TOKENS
+  // (default 100000: what the 128 MB isolate can carry).
   MODEL_CONTEXT_TOKENS: z.string().optional(),
   MODEL_CONTEXT_OVERRIDES: z.string().optional(),
+  CONTEXT_MEMORY_WINDOW_TOKENS: z.string().optional(),
   CONTEXT_SUMMARIZE_FRACTION: z.string().optional(),
   CONTEXT_PRUNE_FRACTION: z.string().optional(),
   CONTEXT_RESULT_CAP_FRACTION: z.string().optional(),

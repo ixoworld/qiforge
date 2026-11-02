@@ -19,6 +19,7 @@ import {
 } from './run-buffer';
 import {
   attemptSeqBase,
+  decideOrphanRecovery,
   decideRecovery,
   patchRunRecord,
   runHasCheckpointed,
@@ -813,7 +814,9 @@ export class RunCoordinator {
    * boot is a new instance, so anything active that this coordinator does
    * not hold is an orphan: queued runs are re-opened (and started when
    * their session is idle); running ones get a recovery attempt scheduled
-   * with the backoff, or are closed as interrupted after the cap.
+   * with the backoff, or are closed as interrupted after either cap
+   * (`decideOrphanRecovery`: consecutive attempts without progress, or
+   * recoveries in all).
    */
   async recoverOrphans(): Promise<void> {
     const active = await this.host.store.listActive();
@@ -826,7 +829,12 @@ export class RunCoordinator {
         continue;
       }
       const current = await this.host.checkpointIdOf(record.sessionId);
-      const decision = decideRecovery(record, current, now, this.host.config);
+      const decision = decideOrphanRecovery(
+        record,
+        current,
+        now,
+        this.host.config,
+      );
       // Everything packed so far: the cursor continues after it (the row's
       // `lastSeq` is only written when a run ends) and the continuation note
       // shows the model what the user already read.
@@ -844,7 +852,9 @@ export class RunCoordinator {
       const startSeq = Math.max(lastPacked, attemptSeqBase(generation));
       if (decision.action === 'interrupt') {
         this.host.log.warn(
-          `[runs] ${record.runId}: ${decision.attempts} recovery attempt(s) without progress; closing as interrupted`,
+          decision.reason === 'total'
+            ? `[runs] ${record.runId}: recovered ${record.generation} time(s) in all (cap ${this.host.config.recoveryTotalAttempts}); closing as interrupted`
+            : `[runs] ${record.runId}: ${decision.attempts} recovery attempt(s) without progress; closing as interrupted`,
         );
         const updatedAt = await this.host.store.update(record.runId, {
           generation,

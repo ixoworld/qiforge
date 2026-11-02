@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { DoSqliteDatabase, type SqlRow } from '../sqlite/database';
-import { RunStore, type RunRecord } from '../do/run-store';
+import { runDurabilityConfig, RunStore, type RunRecord } from '../do/run-store';
+import { RunCoordinator, type RunOutcome } from '../do/run-coordinator';
 import type { ReplyPlan } from '../delivery/types';
 import { ChannelTurns, type ChannelSessionInfo } from './turns';
 import { DecisionRuntime } from '@ixo/common/ai/decisions';
@@ -391,6 +392,47 @@ export class ChannelTurnsTestDO extends DurableObject {
   async fail(runId: string): Promise<void> {
     await this.ready();
     await this.runs!.update(runId, { status: 'failed', partialText: null });
+  }
+
+  /**
+   * The user object restarting `restarts` times while the run executes, as
+   * a turn that resets the isolate after every step does: each boot is a
+   * new `RunCoordinator` over the stored rows (default durable-run config)
+   * that recovers the orphan and starts its attempt; the attempt takes one
+   * step (the checkpoint moves) and never ends, because the isolate is
+   * reset under it. `onRunEnded` is what the user object does for a
+   * channel run. Returns the outcomes the coordinators ended runs with.
+   */
+  async resetDuringRun(restarts: number): Promise<RunOutcome['status'][]> {
+    const turns = await this.ready();
+    const runs = this.runs!;
+    const ended: RunOutcome['status'][] = [];
+    for (let boot = 1; boot <= restarts; boot += 1) {
+      this.nowMs += 55_000;
+      const now = this.nowMs;
+      const coordinator = new RunCoordinator({
+        store: runs,
+        config: runDurabilityConfig({}),
+        instanceId: `boot-${boot}`,
+        log: {
+          log: () => undefined,
+          warn: () => undefined,
+          error: () => undefined,
+        },
+        now: () => now,
+        requestAlarm: () => undefined,
+        runAttempt: () => new Promise<RunOutcome>(() => undefined),
+        checkpointIdOf: async () => `cp-${boot}`,
+        onRunEnded: async (_record, outcome) => {
+          ended.push(outcome.status);
+          turns.deliverReply();
+        },
+      });
+      await coordinator.recoverOrphans();
+      await coordinator.resumeDue(now + 60_000);
+    }
+    await turns.whenIdle();
+    return ended;
   }
 
   async run(runId: string): Promise<RunRecord | undefined> {
