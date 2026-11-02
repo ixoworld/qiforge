@@ -93,7 +93,7 @@ export interface ReplyFile {
   url: string;
   /** Sanitised, from the artefact path, with its extension. */
   filename: string;
-  /** From the extension's allow-list; `application/octet-stream` when unknown. */
+  /** From the extension's allow-list: `send_file` refuses any other type. */
   mimetype: string;
   /** Size, when the store reported it. */
   bytes?: number;

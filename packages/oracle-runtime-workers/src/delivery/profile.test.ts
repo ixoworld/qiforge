@@ -255,7 +255,20 @@ describe('renderSurfaceSection', () => {
       .split('\n')
       .find((text) => text.includes('send_file'));
     expect(line).toContain('every file meant for the user');
+    expect(line).toContain(
+      '(PDF, Word (.docx), Excel (.xlsx), PowerPoint (.pptx), text, CSV, Markdown, PNG or JPEG only)',
+    );
+    expect(line).toContain(
+      'Do not send a file you downloaded from the internet unless the user asked for that exact file.',
+    );
     expect(line).toContain('as an attachment');
+    // The list of types is there only when send_file is.
+    expect(renderSurfaceSection(profile, true, false)).not.toContain(
+      'PowerPoint (.pptx)',
+    );
+    expect(renderSurfaceSection(profile, false, false)).not.toContain(
+      'PowerPoint (.pptx)',
+    );
     expect(line).toContain('Never paste a download link');
     // The bullet comes first, and leaves create_artifact the formatless document.
     const lines = renderSurfaceSection(profile, true, true).split('\n');
