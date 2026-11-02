@@ -443,7 +443,9 @@ export async function prepareAttachments(
   }> = [];
   for (const attachment of params.attachments) {
     const kind = classifyAttachment(attachment);
-    const strategy = routeAttachment(kind, params.caps);
+    const strategy = routeAttachment(kind, params.caps, {
+      channelFile: Boolean(attachment.channelRef),
+    });
     deps.logger.log(
       `[attachments] "${attachment.filename}" (${attachment.mimetype}) kind=${kind} model=${params.model} → ${strategy}`,
     );

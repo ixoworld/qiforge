@@ -129,7 +129,11 @@ export async function viewAttachment(
 ): Promise<AttachmentView> {
   const attachment = toInput(meta);
   const kind = classifyAttachment(attachment);
-  const strategy = routeAttachment(kind, deps.caps);
+  // A channel file comes back as text too: re-attaching its bytes would put
+  // them in the history again (see `routeAttachment`).
+  const strategy = routeAttachment(kind, deps.caps, {
+    channelFile: Boolean(attachment.channelRef),
+  });
   if (strategy === 'send-native') {
     const { bytes, mimetype, sniffed } = await loadAttachmentBytes(
       attachment,
