@@ -1079,6 +1079,50 @@ export function redactSignedLinks(
   return json.startsWith('{') ? values : {};
 }
 
+/** Newest messages a traced graph/middleware/tool run keeps of the thread state. */
+export const TRACE_STATE_TAIL_MESSAGES = 4;
+
+/**
+ * Collapse the thread state a traced graph, node or middleware run carries
+ * (`{ messages: [...whole thread], ...}`) to its newest
+ * `TRACE_STATE_TAIL_MESSAGES` messages plus a count of what was left out.
+ * Every such run of a turn carries the whole history, and the client
+ * serializes each one for upload: on a long thread a tool turn shipped tens
+ * of full copies of it from the user object's isolate. A chat model's run is
+ * left whole — its inputs are `{ messages: [[...]] }` (one list per prompt),
+ * the prompt the model really read, which is what a trace is for.
+ */
+export function collapseTracedState(
+  values: Record<string, unknown>,
+): Record<string, unknown> {
+  const messages = values.messages;
+  if (
+    !Array.isArray(messages) ||
+    messages.length <= TRACE_STATE_TAIL_MESSAGES ||
+    messages.some((entry) => Array.isArray(entry))
+  )
+    return values;
+  return {
+    ...values,
+    messages: messages.slice(-TRACE_STATE_TAIL_MESSAGES),
+    messagesOmitted: messages.length - TRACE_STATE_TAIL_MESSAGES,
+  };
+}
+
+/** What a trace keeps of a run's inputs or outputs: collapsed state, signed links redacted. */
+function traceValues(values: Record<string, unknown>): Record<string, unknown> {
+  return redactSignedLinks(collapseTracedState(values));
+}
+
+/**
+ * Upload batch size of the tracing client. The library default (24 MiB)
+ * assumes a server process; a user object shares a 128 MB isolate with the
+ * turn it traces, and a batch is serialized as a whole before it is sent,
+ * so its size is the transient cost of an upload. Smaller batches drop
+ * nothing: the queue is left at the library default, so no run is dropped.
+ */
+const TRACE_BATCH_BYTES = 4 * 1024 * 1024;
+
 /**
  * One `langsmith` Client per (apiKey, endpoint) per isolate. Tracer instances
  * are per-turn and cheap; the client owns the batched upload queue, so
@@ -1093,7 +1137,9 @@ function langsmithClientFor(apiKey: string, endpoint?: string): Client {
     client = new Client({
       apiKey,
       ...(endpoint && { apiUrl: endpoint }),
-      anonymizer: redactSignedLinks,
+      hideInputs: traceValues,
+      hideOutputs: traceValues,
+      batchSizeBytesLimit: TRACE_BATCH_BYTES,
     });
     langsmithClients.set(key, client);
   }

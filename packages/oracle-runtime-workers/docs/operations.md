@@ -561,6 +561,47 @@ Object classes keep their binding names either way (ES module exports are
 never renamed). Turning `keep_names` off would save 417 KiB of upload and
 about 2.5 MB of heap (62.4–62.8 MB): not worth the risk.
 
+V8 keeps the bundle's source text in the isolate for as long as it runs,
+and stores it with two bytes per character as soon as one character is
+above U+00FF. The runtime's comments use such characters (`—`, `→`, `×`),
+so an unminified bundle (27.3M characters, 2,966 of them wide) costs about
+52 MiB of heap for its source alone, a minified one (13.3M characters) about
+25 MiB. The runtime keeps its string and regex literals Latin-1 (an escape
+such as `☐` instead of the character), so a minified bundle's source is
+stored with one byte per character (about 13 MiB). Check a build with
+`wrangler deploy --dry-run --outdir dist` and count the characters above
+U+00FF in `dist/index.js`: with `minify` there should be none.
+
+### Isolate memory: long threads and tool turns
+
+What a turn holds grows with its thread. Three things used to make a turn
+with tool calls cost several times what a plain reply costs, and on a
+thread of about 480–540k tokens they reset a Companion user object
+(`Durable Object's isolate exceeded its memory limit and was reset`, always
+in the checkpoint write after the turn's last model call):
+
+- **One task per tool call.** `createAgent` used to send each tool call to
+  the tools node as its own graph task carrying a copy of the whole state,
+  serialized into the checkpoint writes and into every traced tools-node
+  run. The main agent now runs every call of a message in one tools node
+  (`version: 'v1'` in `src/core/main-agent.ts`), in parallel through the
+  tool scheduler's lanes as before; tool side effects are guarded by
+  `turn_tool_marks`, not by per-call checkpoints.
+- **Traces.** Every traced graph, node and middleware run carried the whole
+  thread, and the LangSmith client serialized each one for upload, in
+  batches of up to 24 MiB from a queue of up to 1 GiB. A trace now keeps the
+  newest `TRACE_STATE_TAIL_MESSAGES` (4) messages of such a run's state and
+  a `messagesOmitted` count; a chat model's run keeps its whole prompt.
+  Upload batches are at most 4 MiB; the queue keeps the library default, so
+  no run is dropped (`src/core/llm.ts`).
+- **Message rows.** Every checkpoint `put` serialized every message of the
+  thread again to prove it unchanged, and kept that JSON for each message
+  (a second copy of the thread). The saver now compares a fingerprint (the
+  identity of each large field and the JSON of the normalized
+  `additional_kwargs`), seeded when a checkpoint's messages are loaded, and
+  re-keys unchanged rows to the new checkpoint in one statement
+  (`src/sqlite/sqlite-saver.ts`).
+
 ### Turns: context budgets
 
 Every context limit of a turn is a fraction of the model's own context

@@ -210,6 +210,56 @@ describe('SqliteSaver message rows', () => {
     });
   });
 
+  it('a thread loaded back from its rows is re-keyed to the next checkpoint without re-encoding a message', async () => {
+    await runInDurableObject(stub('saver-loaded'), async (_i, state) => {
+      const db = await DoSqliteDatabase.open(state, 'loaded.db');
+      const writer = new SqliteSaver(db);
+      await writer.setup();
+      const thread: BaseMessage[] = [];
+      for (let i = 0; i < 40; i++) {
+        const body = `turn ${i}: ${'reply text '.repeat(80)}`;
+        thread.push(i % 2 ? ai(`a-${i}`, body) : human(`h-${i}`, body));
+      }
+      await put(writer, 'thread', thread, 0);
+      const before = await rowids(db, 'thread');
+
+      // A fresh saver (a new turn's object) loads the checkpoint the next
+      // put extends, as LangGraph does.
+      const reader = new SqliteSaver(db);
+      const tuple = await reader.getTuple(config('thread'));
+      const value = tuple?.checkpoint.channel_values['messages'];
+      const loaded: BaseMessage[] = Array.isArray(value) ? value : [];
+      expect(loaded).toHaveLength(thread.length);
+
+      const baseline = await countGzips(async () => {
+        await put(reader, 'control-loaded', [], 0);
+      });
+      let nextId = '';
+      const gzips = await countGzips(async () => {
+        nextId = await put(
+          reader,
+          'thread',
+          [...loaded, human('h-new', 'one more message')],
+          1,
+        );
+      });
+      // Only the new message is serialized and compressed.
+      expect(gzips - baseline).toBe(1);
+      const keys = await db.exec<{ checkpoint_id: string; n: number }>(
+        "SELECT checkpoint_id, COUNT(*) AS n FROM messages WHERE thread_id = 'thread' GROUP BY checkpoint_id",
+      );
+      expect(keys).toEqual([{ checkpoint_id: nextId, n: thread.length + 1 }]);
+      const after = await rowids(db, 'thread');
+      for (const [id, rowid] of Object.entries(before))
+        expect(after[id]).toBe(rowid);
+      expect(
+        (await stateMessages(reader, 'thread')).map((m) => m.content),
+      ).toEqual([...thread.map((m) => m.content), 'one more message']);
+      expect(await integrityOk(db)).toBe(true);
+      await db.close();
+    });
+  });
+
   it('persists a changed message object again (in-place edits are never served from the cache)', async () => {
     await runInDurableObject(stub('saver-mutated'), async (_i, state) => {
       const db = await DoSqliteDatabase.open(state, 'mut.db');

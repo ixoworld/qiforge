@@ -28,6 +28,7 @@ import {
   redactSignedLinks,
   resolveLangsmithTracing,
   streamLivenessFromEnv,
+  TRACE_STATE_TAIL_MESSAGES,
   DEFAULT_MODEL_ID,
   getModelCapabilities,
   listModelCatalog,
@@ -423,17 +424,39 @@ describe('redactSignedLinks', () => {
       expect(redactSignedLinks(values)).toBe(values);
   });
 
-  it('is what every tracer client applies to inputs and outputs', () => {
+  it('is what every tracer client applies to inputs and outputs, after collapsing thread state', () => {
     const { callbacks } = resolveLangsmithTracing({
       userDid: 'did:ixo:user',
       client: 'channel',
       env: { apiKey: 'key', tracing: 'true' },
     });
-    const client: unknown = Reflect.get(callbacks?.[0] ?? {}, 'client');
-    expect(Reflect.get(client as object, 'hideInputs')).toBe(redactSignedLinks);
-    expect(Reflect.get(client as object, 'hideOutputs')).toBe(
-      redactSignedLinks,
+    const client = Object(Reflect.get(callbacks?.[0] ?? {}, 'client'));
+    const thread = Array.from(
+      { length: 10 },
+      (_, i) => new HumanMessage({ id: `m${i}`, content: `turn ${i}` }),
     );
+    for (const key of ['hideInputs', 'hideOutputs']) {
+      const hide: unknown = Reflect.get(client, key);
+      expect(typeof hide).toBe('function');
+      const apply = (values: Record<string, unknown>): unknown =>
+        Reflect.apply(Function.prototype.call, hide, [undefined, values]);
+      // A node's thread state keeps its newest messages and a count.
+      const collapsed = Object(apply({ messages: thread, step: 3 }));
+      expect(collapsed.messages).toEqual(
+        thread.slice(-TRACE_STATE_TAIL_MESSAGES),
+      );
+      expect(collapsed.messagesOmitted).toBe(
+        thread.length - TRACE_STATE_TAIL_MESSAGES,
+      );
+      expect(collapsed.step).toBe(3);
+      // A chat model's prompt (one list per prompt) is traced whole.
+      const prompt = { messages: [thread] };
+      expect(apply(prompt)).toBe(prompt);
+      // Signed links are still redacted.
+      expect(JSON.stringify(apply({ text: SIGNED }))).not.toContain(
+        SIGNED.slice(SIGNED.indexOf('X-Amz-Signature=')),
+      );
+    }
   });
 
   it('keeps the signature out of everything a traced turn uploads', async () => {

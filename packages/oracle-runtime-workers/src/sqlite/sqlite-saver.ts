@@ -83,6 +83,74 @@ const DEFAULT_ORACLE_NAME = 'IXO Oracle';
 /** Position of `message_id` in the parameter rows `toMessageRow` returns. */
 const MESSAGE_ID_COLUMN = 3;
 
+/**
+ * What a message's stored row is encoded from, compared without
+ * serializing the message: the identity of each field that can be large
+ * (state updates replace a changed message with a new object or new field
+ * values; nothing edits a stored message's content in place) and the JSON
+ * of the small normalized `additional_kwargs`.
+ */
+interface MessageFingerprint {
+  id: unknown;
+  type: string;
+  content: unknown;
+  toolCalls: unknown;
+  invalidToolCalls: unknown;
+  artifact: unknown;
+  responseMetadata: unknown;
+  usageMetadata: unknown;
+  name: unknown;
+  toolCallId: unknown;
+  status: unknown;
+  kwargs: string;
+}
+
+function fingerprintOf(
+  message: BaseMessage,
+  kwargs: CleanAdditionalKwargs,
+): MessageFingerprint {
+  return {
+    id: message.id,
+    type: message.getType(),
+    content: message.content,
+    toolCalls: Reflect.get(message, 'tool_calls'),
+    invalidToolCalls: Reflect.get(message, 'invalid_tool_calls'),
+    artifact: Reflect.get(message, 'artifact'),
+    responseMetadata: message.response_metadata,
+    usageMetadata: Reflect.get(message, 'usage_metadata'),
+    name: message.name,
+    toolCallId: Reflect.get(message, 'tool_call_id'),
+    status: Reflect.get(message, 'status'),
+    kwargs: stringify(kwargs, (_key, value) => _default(value)),
+  };
+}
+
+function sameFingerprint(
+  a: MessageFingerprint,
+  b: MessageFingerprint,
+): boolean {
+  return (
+    a.id === b.id &&
+    a.type === b.type &&
+    a.content === b.content &&
+    a.toolCalls === b.toolCalls &&
+    a.invalidToolCalls === b.invalidToolCalls &&
+    a.artifact === b.artifact &&
+    a.responseMetadata === b.responseMetadata &&
+    a.usageMetadata === b.usageMetadata &&
+    a.name === b.name &&
+    a.toolCallId === b.toolCallId &&
+    a.status === b.status &&
+    a.kwargs === b.kwargs
+  );
+}
+
+/** A message's row parameters, and whether its stored row already holds them. */
+interface EncodedMessageRow {
+  row: SqlParam[];
+  unchanged: boolean;
+}
+
 type CheckpointRow = {
   thread_id: string;
   checkpoint_ns: string;
@@ -255,15 +323,20 @@ export class SqliteSaver extends BaseCheckpointSaver {
   protected readonly oracleName: string;
   private setupPromise: Promise<void> | undefined;
   /**
-   * The stored blob of each message object last encoded, with the JSON it
-   * was compressed from. LangGraph hands the same message objects to every
-   * `put` of a run; one whose JSON is unchanged reuses its blob instead of
-   * running a gzip pipeline again. The JSON itself is always recomputed —
-   * it is what proves the object did not change.
+   * The stored blob of each message object last encoded or loaded, with the
+   * fingerprint of what it was encoded from. LangGraph hands the same
+   * message objects to every `put` of a run, and the checkpoint a turn
+   * starts from is loaded from these rows: a message whose fingerprint is
+   * unchanged reuses its blob and is neither serialized nor compressed
+   * again, and its row is only re-keyed to the new checkpoint
+   * (`writeMessageRows`). Re-serializing every message on every `put` held
+   * a second copy of the whole thread (the cached JSON) and allocated a
+   * third one per step — on a long thread, the peak that reset a 128 MB
+   * isolate at the end of a tool turn.
    */
   private readonly encoded = new WeakMap<
     BaseMessage,
-    { json: string; blob: Uint8Array }
+    { fingerprint: MessageFingerprint; blob: Uint8Array }
   >();
 
   constructor(
@@ -674,7 +747,13 @@ export class SqliteSaver extends BaseCheckpointSaver {
       'SELECT message FROM messages WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ? ORDER BY rowid',
       [threadId, checkpointNs, checkpointId],
     );
-    return Promise.all(rows.map((row) => this.loadMessage(row.message)));
+    return Promise.all(
+      rows.map(async (row) => {
+        const message = await this.loadMessage(row.message);
+        this.rememberLoaded(message, row.message);
+        return message;
+      }),
+    );
   }
 
   async *list(
@@ -793,29 +872,36 @@ export class SqliteSaver extends BaseCheckpointSaver {
 
     const messageRows = await Promise.all(
       messages?.map((message) =>
-        this.toMessageRow(message, threadId, checkpointNs, checkpoint.id),
+        this.encodeMessageRow(message, threadId, checkpointNs, checkpoint.id),
       ) ?? [],
     );
     // Metadata stays uncompressed: `list()` filters it SQL-side via
     // `json(CAST(metadata AS TEXT))`. It is small (source/step/parents).
     const storedCheckpoint = await compressForStorage(serializedCheckpoint);
 
-    await this.db.transaction(async () => {
-      await this.db.run(
-        `INSERT OR REPLACE INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [
-          threadId,
-          checkpointNs,
-          checkpoint.id,
-          typeof parentCheckpointId === 'string' ? parentCheckpointId : null,
-          type1,
-          storedCheckpoint,
-          serializedMetadata,
-        ],
-      );
-      await this.writeMessageRows(messageRows);
-    });
+    try {
+      await this.db.transaction(async () => {
+        await this.db.run(
+          `INSERT OR REPLACE INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            threadId,
+            checkpointNs,
+            checkpoint.id,
+            typeof parentCheckpointId === 'string' ? parentCheckpointId : null,
+            type1,
+            storedCheckpoint,
+            serializedMetadata,
+          ],
+        );
+        await this.writeMessageRows(messageRows);
+      });
+    } catch (err) {
+      // Nothing of this write landed: a blob remembered for it must not let
+      // a later `put` treat its message as already stored.
+      for (const message of messages ?? []) this.encoded.delete(message);
+      throw err;
+    }
 
     await this.pruneThread(threadId, checkpointNs);
 
@@ -837,11 +923,13 @@ export class SqliteSaver extends BaseCheckpointSaver {
    * is new or would break the order (a summary placed before the history
    * it kept) on, every row is written with `INSERT OR REPLACE`, which
    * gives it a new rowid after all others, exactly as every row used to be.
-   * Inside the caller's transaction.
+   * A kept row whose message is unchanged since it was stored is only
+   * re-keyed to this checkpoint, all of them in one statement: its content
+   * and blob are not bound again. Inside the caller's transaction.
    */
-  private async writeMessageRows(rows: SqlParam[][]): Promise<void> {
-    if (rows.length === 0) return;
-    const ids = rows.map((row) => row[MESSAGE_ID_COLUMN]);
+  private async writeMessageRows(encoded: EncodedMessageRow[]): Promise<void> {
+    if (encoded.length === 0) return;
+    const ids = encoded.map(({ row }) => row[MESSAGE_ID_COLUMN]);
     const existing = new Map<string, number>();
     for (const row of await this.db.exec<{
       message_id: string;
@@ -853,10 +941,18 @@ export class SqliteSaver extends BaseCheckpointSaver {
       existing.set(row.message_id, row.rowid);
     let lastRowid = -1;
     let appending = false;
-    for (const row of rows) {
+    const rekey: string[] = [];
+    let rekeyTo: SqlParam[] | undefined;
+    for (const { row, unchanged } of encoded) {
       const id = row[MESSAGE_ID_COLUMN];
       const rowid = typeof id === 'string' ? existing.get(id) : undefined;
       if (!appending && rowid !== undefined && rowid > lastRowid) {
+        lastRowid = rowid;
+        if (unchanged && typeof id === 'string') {
+          rekey.push(id);
+          rekeyTo = row;
+          continue;
+        }
         await this.db.run(
           `INSERT INTO messages (thread_id, checkpoint_ns, checkpoint_id, message_id, message_type, message_content, message, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -870,7 +966,6 @@ export class SqliteSaver extends BaseCheckpointSaver {
              created_at = excluded.created_at`,
           row,
         );
-        lastRowid = rowid;
         continue;
       }
       appending = true;
@@ -878,6 +973,15 @@ export class SqliteSaver extends BaseCheckpointSaver {
         `INSERT OR REPLACE INTO messages (thread_id, checkpoint_ns, checkpoint_id, message_id, message_type, message_content, message, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         row,
+      );
+    }
+    if (rekeyTo !== undefined && rekey.length > 0) {
+      // Every row of one put shares the checkpoint columns.
+      const [threadId, checkpointNs, checkpointId] = rekeyTo;
+      await this.db.run(
+        `UPDATE messages SET thread_id = ?, checkpoint_ns = ?, checkpoint_id = ?
+         WHERE message_id IN (SELECT value FROM json_each(?))`,
+        [threadId, checkpointNs, checkpointId, JSON.stringify(rekey)],
       );
     }
   }
@@ -889,6 +993,16 @@ export class SqliteSaver extends BaseCheckpointSaver {
     checkpointNs: string,
     checkpointId: string,
   ): Promise<SqlParam[]> {
+    return (
+      await this.encodeMessageRow(message, threadId, checkpointNs, checkpointId)
+    ).row;
+  }
+
+  /**
+   * Normalize a message's `additional_kwargs` (assigned back onto it, the
+   * shape every stored row has) and return them.
+   */
+  private normalizeKwargs(message: BaseMessage): CleanAdditionalKwargs {
     const original = message.additional_kwargs;
     const msgFromMatrixRoom = original.msgFromMatrixRoom === true;
     const cleaned = cleanAdditionalKwargs(
@@ -911,15 +1025,48 @@ export class SqliteSaver extends BaseCheckpointSaver {
       delete merged.reasoningDetails;
     }
     message.additional_kwargs = merged;
+    return merged;
+  }
 
-    const json = stringify(message, (_key, value) => _default(value));
+  /**
+   * Remember the blob a message was just loaded from, so a `put` that finds
+   * it unchanged neither serializes nor compresses it again.
+   */
+  private rememberLoaded(message: BaseMessage, raw: Uint8Array | string): void {
+    if (!(raw instanceof Uint8Array)) return;
+    this.encoded.set(message, {
+      fingerprint: fingerprintOf(message, this.normalizeKwargs(message)),
+      blob: raw,
+    });
+  }
+
+  /**
+   * A message's row parameters. A message whose fingerprint matches the
+   * blob last encoded or loaded for it reuses that blob without
+   * serializing it (`unchanged`); any other is serialized and compressed.
+   */
+  private async encodeMessageRow(
+    message: BaseMessage,
+    threadId: string,
+    checkpointNs: string,
+    checkpointId: string,
+  ): Promise<EncodedMessageRow> {
+    const merged = this.normalizeKwargs(message);
+    const fingerprint = fingerprintOf(message, merged);
     const cached = this.encoded.get(message);
     let serialized: Uint8Array;
-    if (cached !== undefined && cached.json === json) {
+    let unchanged = false;
+    if (
+      cached !== undefined &&
+      sameFingerprint(cached.fingerprint, fingerprint)
+    ) {
       serialized = cached.blob;
+      unchanged = true;
     } else {
-      serialized = await compressForStorage(json);
-      this.encoded.set(message, { json, blob: serialized });
+      serialized = await compressForStorage(
+        stringify(message, (_key, value) => _default(value)),
+      );
+      this.encoded.set(message, { fingerprint, blob: serialized });
     }
     const messageId =
       message.id ??
@@ -927,18 +1074,21 @@ export class SqliteSaver extends BaseCheckpointSaver {
         ? message.lc_kwargs.id
         : undefined);
     if (messageId === undefined) throw new Error('message is missing an id');
-    return [
-      threadId,
-      checkpointNs,
-      checkpointId,
-      messageId,
-      message.getType(),
-      typeof message.content === 'string'
-        ? message.content
-        : JSON.stringify(message.content),
-      serialized,
-      merged.timestamp,
-    ];
+    return {
+      row: [
+        threadId,
+        checkpointNs,
+        checkpointId,
+        messageId,
+        message.getType(),
+        typeof message.content === 'string'
+          ? message.content
+          : JSON.stringify(message.content),
+        serialized,
+        merged.timestamp,
+      ],
+      unchanged,
+    };
   }
 
   /**

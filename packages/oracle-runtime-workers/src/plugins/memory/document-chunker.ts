@@ -196,7 +196,7 @@ const LEVELS: readonly Level[] = [
     sep: ' ',
     split: (t) =>
       t
-        .split(/(?<=[.!?。！？])\s+/u)
+        .split(/(?<=[.!?\u3002\uFF01\uFF1F])\s+/u)
         .map((s) => s.trim())
         .filter(Boolean),
   },
