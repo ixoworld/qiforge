@@ -4,7 +4,7 @@ import type { DoSqliteDatabase } from '../sqlite/database';
 import { UNTITLED_SESSION } from '../sqlite/sessions-store';
 import type { RunRecord } from '../do/run-store';
 import type { TurnIdentity, TurnRequest } from '../do/contracts';
-import { parseReplyPlan, planText } from '../delivery/schema';
+import { parseReplyPlan, planText, planTextForModel } from '../delivery/schema';
 import type { ReplyPlan } from '../delivery/types';
 import {
   ChannelError,
@@ -941,7 +941,10 @@ export class ChannelTurns {
               : undefined))
           : undefined;
       if (reference.partId && reply.plan && !matched) return unknown;
-      text = matched ? planText({ parts: [matched] }) : reply.rendered;
+      // The model reads this: a file part is named, never linked.
+      text = matched
+        ? planTextForModel({ parts: [matched] })
+        : reply.withFileNames;
     }
     return {
       kind: 'resolved',
@@ -1100,11 +1103,20 @@ export class ChannelTurns {
     while (this.draining) await this.draining;
   }
 
-  /** A finished run's Reply Plan, and the reply as the channel user sees it. */
+  /**
+   * A finished run's Reply Plan, the reply as a gateway that predates plans
+   * sends it, and the reply with each file named instead of linked: what the
+   * model reads when the user quotes it, and what the room mirror keeps,
+   * since a signed link expires.
+   */
   private async reply(
     runId: string,
     text: string,
-  ): Promise<{ plan: ReplyPlan | null; rendered: string }> {
+  ): Promise<{
+    plan: ReplyPlan | null;
+    rendered: string;
+    withFileNames: string;
+  }> {
     const plan = parseReplyPlan(await this.host.getPlan(runId));
     const row = await this.db.get<{ routing_json: string | null }>(
       'SELECT routing_json FROM channel_requests WHERE run_id=?',
@@ -1127,7 +1139,12 @@ export class ChannelTurns {
       const to = await this.boldTitle(route.destination.sessionId);
       notice = `Back to ${to ? `*${to}*` : 'an earlier topic'}. Send /resume to pick another topic.`;
     }
-    if (!notice) return { plan, rendered: plan ? planText(plan) : text };
+    if (!notice)
+      return {
+        plan,
+        rendered: plan ? planText(plan) : text,
+        withFileNames: plan ? planTextForModel(plan) : text,
+      };
     const decorated =
       plan && plan.parts.length < 999
         ? {
@@ -1142,11 +1159,12 @@ export class ChannelTurns {
             ],
           }
         : null;
+    const withNotice = (show: (plan: ReplyPlan) => string): string =>
+      decorated ? show(decorated) : `${notice}\n\n${plan ? show(plan) : text}`;
     return {
       plan: decorated,
-      rendered: decorated
-        ? planText(decorated)
-        : `${notice}\n\n${plan ? planText(plan) : text}`,
+      rendered: withNotice(planText),
+      withFileNames: withNotice(planTextForModel),
     };
   }
 
@@ -2021,7 +2039,7 @@ export class ChannelTurns {
               record.runId,
               record.partialText ?? '',
             );
-            await this.host.mirror(request, reply.rendered, 'oracle');
+            await this.host.mirror(request, reply.withFileNames, 'oracle');
             await this.settleMirror(
               row.run_id,
               'reply_mirrored = 1, mirror_pending = 0',

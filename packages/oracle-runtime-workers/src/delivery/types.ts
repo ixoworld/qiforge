@@ -85,6 +85,25 @@ export interface ArtifactRef {
 }
 
 /**
+ * A file an oracle made, delivered as an attachment by a gateway (or as a link
+ * line where attachments do not exist). `url` is a signed, bearer download
+ * link: it never reaches the model, and never a log, metric or error string.
+ */
+export interface ReplyFile {
+  url: string;
+  /** Sanitised, from the artefact path, with its extension. */
+  filename: string;
+  /** From the extension's allow-list; `application/octet-stream` when unknown. */
+  mimetype: string;
+  /** Size, when the store reported it. */
+  bytes?: number;
+  /** Shown with the file, at most 1,024 characters. */
+  caption?: string;
+  /** When `url` stops working, ISO 8601. */
+  expiresAt?: string;
+}
+
+/**
  * One delivery unit. `text` carries chat Markdown: bold, italic, strike,
  * inline code, fenced code, `-` and `1.` lists, `>` quotes and links. No
  * headings, tables or raw HTML reach a text part.
@@ -92,6 +111,7 @@ export interface ArtifactRef {
 export type ReplyPart =
   | { partId: string; kind: 'text'; text: string }
   | { partId: string; kind: 'artifact'; artifact: ArtifactRef }
+  | { partId: string; kind: 'file'; file: ReplyFile }
   | { partId: string; kind: 'action'; action: ActionReference }
   | {
       partId: string;
@@ -104,6 +124,7 @@ export type ReplyPart =
 export type ReplyContent =
   | { kind: 'text'; text: string }
   | { kind: 'artifact'; artifact: ArtifactRef }
+  | { kind: 'file'; file: ReplyFile }
   | { kind: 'action'; action: ActionReference }
   | { kind: 'hub-action'; actionReference: ActionReferenceV1; summary: string };
 

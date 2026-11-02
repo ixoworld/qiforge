@@ -25,6 +25,7 @@ export {
   createSandboxWriteBlobTool,
   type CreateSandboxWriteBlobToolParams,
 } from './sandbox-write-blob';
+export { buildSendFileTool, SEND_FILE_TOOL } from './send-file';
 export {
   SandboxPlugin,
   type SandboxMcpClientFactory,

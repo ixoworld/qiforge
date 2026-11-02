@@ -1,6 +1,10 @@
-import { HumanMessage } from '@langchain/core/messages';
+import { HumanMessage, ToolMessage } from '@langchain/core/messages';
+import { LangChainTracer } from '@langchain/core/tracers/tracer_langchain';
 import { ChatOpenAI } from '@langchain/openai';
+import { createAgent, FakeToolCallingModel, tool } from 'langchain';
+import { Client } from 'langsmith';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import {
   BYO_PROVIDER_MODELS,
   BYO_PROVIDERS,
@@ -21,6 +25,8 @@ import {
   BUILTIN_CONTEXT_WINDOWS,
   createLlmAdapter,
   llmEnvFromWorkerEnv,
+  redactSignedLinks,
+  resolveLangsmithTracing,
   streamLivenessFromEnv,
   DEFAULT_MODEL_ID,
   getModelCapabilities,
@@ -333,3 +339,106 @@ describe('a stall before the first byte through the OpenAI SDK', () => {
     expect(calls).toBe(1);
   });
 });
+
+describe('redactSignedLinks', () => {
+  const SIGNED =
+    'https://r2.example/o/a.docx?X-Amz-Expires=10800&X-Amz-Signature=deadbeef0123&x-id=GetObject';
+
+  it('removes the signature from a signed link, wherever it sits', () => {
+    const redacted = JSON.stringify(
+      redactSignedLinks({
+        output: new ToolMessage({
+          tool_call_id: 'f1',
+          content: '{"ok":true}',
+          artifact: { url: SIGNED },
+        }),
+        text: `[a.docx](${SIGNED})`,
+      }),
+    );
+    expect(redacted).not.toContain('deadbeef0123');
+    expect(redacted).toContain('X-Amz-Signature=[redacted]&x-id=GetObject');
+  });
+
+  it('hands back a payload with no signed link untouched', () => {
+    const values = { messages: [new HumanMessage('hello')] };
+    expect(redactSignedLinks(values)).toBe(values);
+  });
+
+  it('sends nothing it cannot read', () => {
+    expect(redactSignedLinks({ big: 1n })).toEqual({});
+  });
+
+  it('is what every tracer client applies to inputs and outputs', () => {
+    const { callbacks } = resolveLangsmithTracing({
+      userDid: 'did:ixo:user',
+      client: 'channel',
+      env: { apiKey: 'key', tracing: 'true' },
+    });
+    const client: unknown = Reflect.get(callbacks?.[0] ?? {}, 'client');
+    expect(Reflect.get(client as object, 'hideInputs')).toBe(redactSignedLinks);
+    expect(Reflect.get(client as object, 'hideOutputs')).toBe(
+      redactSignedLinks,
+    );
+  });
+
+  it('keeps the signature out of everything a traced turn uploads', async () => {
+    const trace = async (
+      anonymizer: typeof redactSignedLinks | undefined,
+    ): Promise<string[]> => {
+      const bodies: string[] = [];
+      vi.stubGlobal(
+        'fetch',
+        async (_url: unknown, init?: { body?: unknown }) => {
+          bodies.push(new TextDecoder().decode(toBytes(init?.body)));
+          return new Response('{}', { status: 200 });
+        },
+      );
+      try {
+        const client = new Client({
+          apiKey: 'key',
+          apiUrl: 'https://langsmith.example',
+          autoBatchTracing: false,
+          ...(anonymizer ? { anonymizer } : {}),
+        });
+        const sendFile = tool(
+          async (_args, config: { toolCall?: { id?: string } }) =>
+            new ToolMessage({
+              tool_call_id: config.toolCall?.id ?? '',
+              name: 'send_file',
+              content: '{"ok":true}',
+              artifact: { url: SIGNED },
+            }),
+          { name: 'send_file', description: 'Send.', schema: z.object({}) },
+        );
+        await createAgent({
+          model: new FakeToolCallingModel({
+            toolCalls: [[{ name: 'send_file', args: {}, id: 'f1' }], []],
+          }) as never,
+          tools: [sendFile],
+        }).invoke(
+          { messages: [new HumanMessage('go')] },
+          { callbacks: [new LangChainTracer({ client, projectName: 'p' })] },
+        );
+        await vi.waitFor(() => {
+          expect(bodies.length).toBeGreaterThan(0);
+        });
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return bodies;
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    };
+
+    const unprotected = await trace(undefined);
+    expect(unprotected.join('\n')).toContain('deadbeef0123');
+    const protectedBodies = await trace(redactSignedLinks);
+    expect(protectedBodies.length).toBeGreaterThan(0);
+    expect(protectedBodies.join('\n')).toContain('[redacted]');
+    expect(protectedBodies.join('\n')).not.toContain('deadbeef0123');
+  });
+});
+
+function toBytes(body: unknown): Uint8Array {
+  if (body instanceof Uint8Array) return body;
+  return new TextEncoder().encode(typeof body === 'string' ? body : '');
+}

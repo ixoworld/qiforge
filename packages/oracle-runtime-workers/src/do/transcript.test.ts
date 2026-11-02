@@ -259,6 +259,50 @@ describe('transcript of a chat reply', () => {
     );
     expect(messages[1]?.content).toBe('Putting it in a document.');
   });
+
+  const fileTurn = (text: string): BaseMessage[] => {
+    const sent = (id: string, filename: string, caption?: string) =>
+      new ToolMessage({
+        tool_call_id: id,
+        name: 'send_file',
+        content: JSON.stringify({ ok: true, filename }),
+        artifact: {
+          url: 'https://r2.example/o?X-Amz-Signature=deadbeef',
+          filename,
+          mimetype: 'application/pdf',
+          path: `/output/${filename}`,
+          ...(caption ? { caption } : {}),
+        },
+      });
+    const call = (id: string, path: string) => ({
+      id,
+      name: 'send_file',
+      args: { path },
+    });
+    return [
+      new HumanMessage({ id: 'h1', content: 'send them' }),
+      new AIMessage({
+        id: 'a1',
+        content: text,
+        tool_calls: [call('f1', '/output/a.pdf'), call('f2', '/output/b.pdf')],
+      }),
+      sent('f1', 'a.pdf', 'The first'),
+      sent('f2', 'b.pdf'),
+    ];
+  };
+
+  it('lists a reply of files alone by name, never by link', async () => {
+    const { messages } = await transformTranscript(fileTurn(''));
+    expect(messages[1]?.content).toBe(
+      'The first\n\n[File sent: a.pdf]\n\n[File sent: b.pdf]',
+    );
+    expect(JSON.stringify(messages)).not.toContain('X-Amz-Signature');
+  });
+
+  it('keeps the text of a step that sent a file and wrote its own', async () => {
+    const { messages } = await transformTranscript(fileTurn('Here they are.'));
+    expect(messages[1]?.content).toBe('Here they are.');
+  });
 });
 
 describe('parseTranscriptPageQuery', () => {

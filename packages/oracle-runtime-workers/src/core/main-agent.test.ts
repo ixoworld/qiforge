@@ -20,7 +20,7 @@ import {
   toolEffectOf,
   type ToolMarkStore,
 } from './middlewares/tool-marks';
-import { createMainAgent } from './main-agent';
+import { createMainAgent, type MainAgentBuildResult } from './main-agent';
 import type { ContextGuardEvent } from './middlewares/context-guard';
 import { isSummarizationMessage } from './middlewares/summarization';
 import { SkillsPlugin } from './plugins/skills';
@@ -40,7 +40,11 @@ import {
 import { createToolExecutionMiddleware } from './middlewares/tool-execution';
 import { ToolScheduler } from './tool-scheduler';
 import { tool as pluginTool } from '../plugin-api/tool-helper';
+import { draftReplyPlan, failedRunFiles, turnSteps } from '../delivery/plan';
 import { resolveDeliveryProfile } from '../delivery/profile';
+import type { DeliveryProfile } from '../delivery/types';
+import { SANDBOX_CAPABILITY } from '../plugins/delegated-capabilities';
+import { SandboxPlugin } from '../plugins/sandbox';
 import { harnessLimitOf, TurnBudget } from './turn-budget';
 import { z } from 'zod';
 
@@ -1385,6 +1389,8 @@ describe('createMainAgent — chat delivery', () => {
       remoteMessageRef: 'hmac:x',
     },
   });
+  if (whatsapp.kind !== 'chat') throw new Error('expected a chat profile');
+  const chatLimits = whatsapp.limits;
 
   it('binds the turn tool, tells the model it is in a chat and ends the run on a return-direct call', async () => {
     const core = bootCore();
@@ -1497,6 +1503,188 @@ describe('createMainAgent — chat delivery', () => {
       { configurable: { thread_id: 'sess-file' }, context },
     );
     expect(seen).toEqual([[photo]]);
+  });
+
+  describe('send_file', () => {
+    const SIGNED = 'https://r2.example/o/report.docx?X-Amz-Signature=deadbeef';
+    const sandboxPlugin = (): SandboxPlugin =>
+      new SandboxPlugin({
+        authBuilder: async () => ({ Authorization: 'Bearer ucan' }),
+        mcpClientFactory: () => ({
+          getTools: async () => [
+            {
+              name: 'artifact_get_presigned_url',
+              description: 'Sign a link.',
+              schema: z.object({ path: z.string() }),
+              invoke: async (input) =>
+                JSON.stringify({
+                  downloadUrl: SIGNED,
+                  path: (input as { path: string }).path,
+                  expiresIn: 10_800,
+                }),
+            },
+          ],
+          close: async () => undefined,
+        }),
+      });
+    const build = async (
+      delivery: DeliveryProfile,
+      script: Script,
+    ): Promise<MainAgentBuildResult> => {
+      const core = createRuntimeCore({
+        config: { name: 'TestOracle', org: 'Acme', description: 'a test' },
+        plugins: [sandboxPlugin()],
+        env: makeEnv({ SANDBOX_MCP_URL: 'https://sandbox.example/mcp' }),
+      });
+      return createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(core, scriptedLlm({ main: script })),
+        requestCtx: {
+          ...requestCtx,
+          user: {
+            ...requestCtx.user,
+            ucanDelegation: {
+              raw: 'ucan',
+              capabilities: [SANDBOX_CAPABILITY],
+            },
+          },
+          session: { ...requestCtx.session, client: 'channel' },
+        },
+        state: {},
+        delivery,
+      });
+    };
+
+    it('runs on a chat turn: the plan gets the link, the model and its prompt never do', async () => {
+      const { agent, systemPrompt, boundToolNames, toolEffects, context } =
+        await build(whatsapp, [
+          [
+            {
+              name: 'send_file',
+              args: { path: '/output/report.docx', caption: 'Q3' },
+              id: 'f1',
+            },
+          ],
+          [],
+        ]);
+      expect(boundToolNames).toContain('send_file');
+      expect(boundToolNames).not.toContain('artifact_get_presigned_url');
+      expect(toolEffects.get('send_file')).toBe('read');
+      expect(systemPrompt).toContain('`send_file`');
+
+      const { messages } = (await agent.invoke(
+        { messages: [new HumanMessage('Send me the report')] },
+        { configurable: { thread_id: 'sess-send-file' }, context },
+      )) as { messages: BaseMessage[] };
+
+      const [result] = toolMessages(messages);
+      expect(result?.tool_call_id).toBe('f1');
+      expect(result?.name).toBe('send_file');
+      expect(JSON.stringify(result?.content)).not.toContain('r2.example');
+      expect(JSON.parse(String(result?.content))).toMatchObject({ ok: true });
+      // The fake model writes back everything it was sent.
+      const echoed = String(messages.at(-1)?.content);
+      expect(echoed).toContain('"filename":"report.docx"');
+      expect(echoed).not.toContain('r2.example');
+
+      const { steps, toolResults, toolArtifacts } = turnSteps(messages);
+      expect(
+        draftReplyPlan({
+          steps,
+          toolResults,
+          toolArtifacts,
+          limits: chatLimits,
+          canSpill: false,
+        }),
+      ).toContainEqual({
+        kind: 'file',
+        file: expect.objectContaining({
+          url: SIGNED,
+          filename: 'report.docx',
+          caption: 'Q3',
+        }),
+      });
+    });
+
+    it('keeps the files of a run whose closing model call fails, in the checkpoint', async () => {
+      // A model whose third call fails: the first two send a file each.
+      let calls = 0;
+      class FailingModel extends FakeToolCallingModel {
+        override async _generate(
+          ...args: Parameters<FakeToolCallingModel['_generate']>
+        ): ReturnType<FakeToolCallingModel['_generate']> {
+          calls += 1;
+          if (calls === 3) throw new Error('provider down');
+          return super._generate(...args);
+        }
+        override bindTools(): this {
+          return this;
+        }
+      }
+      const core = createRuntimeCore({
+        config: { name: 'TestOracle', org: 'Acme', description: 'a test' },
+        plugins: [sandboxPlugin()],
+        env: makeEnv({ SANDBOX_MCP_URL: 'https://sandbox.example/mcp' }),
+      });
+      const model = new FailingModel({
+        toolCalls: [
+          [{ name: 'send_file', args: { path: '/output/a.pdf' }, id: 'f1' }],
+          [{ name: 'send_file', args: { path: '/output/b.pdf' }, id: 'f2' }],
+          [],
+        ],
+      });
+      const checkpointer = new MemorySaver();
+      const { agent, context } = await createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(core, {
+          get: () => model as unknown as BaseChatModel,
+        }),
+        requestCtx: {
+          ...requestCtx,
+          user: {
+            ...requestCtx.user,
+            ucanDelegation: { raw: 'ucan', capabilities: [SANDBOX_CAPABILITY] },
+          },
+          session: { ...requestCtx.session, client: 'channel' },
+        },
+        state: {},
+        delivery: whatsapp,
+        checkpointer,
+      });
+      const config = { configurable: { thread_id: 'sess-failed' }, context };
+
+      await expect(
+        agent.invoke({ messages: [new HumanMessage('Send both')] }, config),
+      ).rejects.toThrow('provider down');
+
+      const tuple = await checkpointer.getTuple(config);
+      const plan = await failedRunFiles(
+        tuple?.checkpoint.channel_values.messages as BaseMessage[],
+        new Set(['f1', 'f2']),
+        chatLimits,
+      );
+      expect(plan?.parts.map((part) => part.kind)).toEqual([
+        'file',
+        'file',
+        'text',
+      ]);
+    });
+
+    it('is not bound on a Portal turn, which keeps the upstream tool', async () => {
+      const { systemPrompt, boundToolNames } = await build(
+        { kind: 'stream' },
+        [],
+      );
+      expect(boundToolNames).not.toContain('send_file');
+      expect(boundToolNames).toContain('artifact_get_presigned_url');
+      expect(systemPrompt).not.toContain('send_file');
+    });
   });
 
   it('adds nothing to a Portal turn', async () => {

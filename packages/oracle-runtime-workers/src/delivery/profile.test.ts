@@ -196,17 +196,17 @@ describe('resolveDeliveryProfile', () => {
 
 describe('renderSurfaceSection', () => {
   it('renders nothing on the Portal', () => {
-    expect(renderSurfaceSection({ kind: 'stream' }, true)).toBe('');
-    expect(renderSurfaceSection(undefined, true)).toBe('');
+    expect(renderSurfaceSection({ kind: 'stream' }, true, true)).toBe('');
+    expect(renderSurfaceSection(undefined, true, true)).toBe('');
   });
 
   it('names the surface and mentions create_artifact only when it is bound', () => {
     const profile = resolveDeliveryProfile(whatsapp);
-    const withArtifacts = renderSurfaceSection(profile, true);
+    const withArtifacts = renderSurfaceSection(profile, true, false);
     expect(withArtifacts).toContain('You are replying in WhatsApp.');
     expect(withArtifacts).toContain('create_artifact');
     expect(withArtifacts).toContain('under about 600 characters');
-    const without = renderSurfaceSection(profile, false);
+    const without = renderSurfaceSection(profile, false, false);
     expect(without).not.toContain('create_artifact');
     expect(without).toContain(
       'Everything you write is delivered as messages; when something is genuinely long, put the essential part first.',
@@ -216,7 +216,7 @@ describe('renderSurfaceSection', () => {
 
   it('keeps ordinary answers in chat and reserves create_artifact for documents', () => {
     const profile = resolveDeliveryProfile(whatsapp);
-    const section = renderSurfaceSection(profile, true);
+    const section = renderSurfaceSection(profile, true, false);
     expect(section).toContain('no browser');
     expect(section).toContain('Prefer two or three messages.');
     expect(section).toContain('A blank line marks where a message may break');
@@ -241,7 +241,61 @@ describe('renderSurfaceSection', () => {
           { matrixChat: true },
         ),
         true,
+        false,
       ),
     ).toContain('Prefer one or two messages.');
+  });
+
+  it('tells the model to deliver a made file with send_file, only when it is bound', () => {
+    const profile = resolveDeliveryProfile(whatsapp);
+    expect(renderSurfaceSection(profile, true, false)).not.toContain(
+      'send_file',
+    );
+    const line = renderSurfaceSection(profile, true, true)
+      .split('\n')
+      .find((text) => text.includes('send_file'));
+    expect(line).toContain('every file meant for the user');
+    expect(line).toContain('as an attachment');
+    expect(line).toContain('Never paste a download link');
+    // The bullet comes first, and leaves create_artifact the formatless document.
+    const lines = renderSurfaceSection(profile, true, true).split('\n');
+    const artifact = lines.findIndex((text) =>
+      text.includes('Use `create_artifact`'),
+    );
+    expect(lines.findIndex((text) => text.includes('send_file'))).toBe(
+      artifact - 1,
+    );
+    expect(lines[artifact]).toContain(
+      '- Use `create_artifact` for a document with no particular file format, or when the output is genuinely document-length',
+    );
+    expect(lines[artifact]).toContain(
+      'conclusions, decisions and next actions',
+    );
+    expect(renderSurfaceSection(profile, false, true)).toContain(
+      'Everything you write is delivered as messages',
+    );
+    expect(renderSurfaceSection(profile, false, true)).toContain('send_file');
+    expect(renderSurfaceSection(profile, false, true)).not.toContain(
+      'create_artifact',
+    );
+    // Without send_file the WhatsApp-first wording stands as it was.
+    expect(renderSurfaceSection(profile, true, false)).toContain(
+      '- Use `create_artifact` only when the user asks for a document or file, or when',
+    );
+  });
+
+  it('promises no attachment in a Matrix room, which gets a link line', () => {
+    const line = renderSurfaceSection(
+      resolveDeliveryProfile(
+        { client: 'matrix', roomKind: 'direct' },
+        { matrixChat: true },
+      ),
+      false,
+      true,
+    )
+      .split('\n')
+      .find((text) => text.includes('send_file'));
+    expect(line).toContain('a link to the file is posted here for you');
+    expect(line).not.toContain('attachment');
   });
 });

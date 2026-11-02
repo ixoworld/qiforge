@@ -9,6 +9,7 @@
 import {
   AIMessage,
   HumanMessage,
+  ToolMessage,
   type BaseMessage,
 } from '@langchain/core/messages';
 import {
@@ -768,6 +769,42 @@ describe('the turn carry of a mid-turn summary', () => {
 
   it('is stored under the key the summarizer writes', () => {
     expect(Object.keys(turnCarryKwargs([]))).toEqual([TURN_CARRY_KWARG]);
+  });
+
+  it('keeps a sent file through put → getTuple, carried or on its tool message', async () => {
+    await runInDurableObject(stub('saver-send-file'), async (_i, state) => {
+      const db = await DoSqliteDatabase.open(state, 'send-file.db');
+      const saver = new SqliteSaver(db);
+      const file = { url: 'https://r2.example/o', filename: 'a.pdf' };
+      const carried: CarriedToolCall = {
+        name: 'send_file',
+        args: { path: '/output/a.pdf' },
+        status: 'success',
+        result: '{"ok":true}',
+        artifact: file,
+      };
+      await put(saver, 'f', [
+        summaryCarrying('s', [carried]),
+        new ToolMessage({
+          id: 't',
+          tool_call_id: 'f1',
+          name: 'send_file',
+          content: '{"ok":true}',
+          artifact: file,
+        }),
+      ]);
+      const tuple = await saver.getTuple(config('f'));
+      const value = tuple?.checkpoint.channel_values['messages'];
+      const messages = Array.isArray(value) ? value : [];
+      const summary = messages.find(
+        (m): m is HumanMessage => m instanceof HumanMessage && m.id === 's',
+      );
+      expect(summary && turnCarryOf(summary)).toEqual([carried]);
+      const tool = messages.find(
+        (m): m is ToolMessage => m instanceof ToolMessage,
+      );
+      expect(tool?.artifact).toEqual(file);
+    });
   });
 
   it('survives put → getTuple and the transcript read', async () => {
