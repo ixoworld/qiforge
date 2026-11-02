@@ -713,6 +713,15 @@ export class ActionInteractionStore {
       if (command.kind === 'prepare') {
         const input = command.input;
         if (
+          input.owner.kind === 'owner-reference' &&
+          Object.keys(input.values).length !== 0
+        )
+          throw new ActionInteractionError(
+            400,
+            'reference_values_forbidden',
+            'Owner references contain locators only',
+          );
+        if (
           'accountDid' in input.owner &&
           input.owner.accountDid !== this.context.userDid
         )
@@ -835,6 +844,12 @@ export class ActionInteractionStore {
         });
       } else {
         record = await this.readFrom(tx, command.id, command.input.sessionId);
+        if (record.owner.kind === 'owner-reference')
+          throw new ActionInteractionError(
+            409,
+            'reference_read_only',
+            'Native owners retain draft, decision and execution authority',
+          );
         // A host may report the outcome of a reservation made just before
         // expiry; every other mutation of an expired draft is refused.
         if (command.kind !== 'observe' && record.expiresAt <= this.now())

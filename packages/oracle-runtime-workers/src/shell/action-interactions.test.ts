@@ -88,6 +88,7 @@ describe('interaction HTTP authority and structural boundary', () => {
           'flow-claim',
           'flow-claim-block',
           'flow-bid',
+          'owner-reference',
           'approval',
           'task',
           'question',
