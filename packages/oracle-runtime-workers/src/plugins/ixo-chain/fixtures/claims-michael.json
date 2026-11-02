@@ -1,0 +1,72 @@
+{
+  "totalCount": 5,
+  "pageInfo": {
+    "hasNextPage": true,
+    "endCursor": "WyIzZDk4NmYxM2NjIiwiMjAyNi0wOS0yMFQwNzozODoyNi44OTEwMDAiLCJiYWZrcmVpZHZoenVlMmF2ZmhuZWYzM2ZxaGprNzR3dGJsaWlucWozZTZyaTQ3Y280cTQzMnZ0c3BraSJd"
+  },
+  "nodes": [
+    {
+      "claimId": "bafkreido4unh2l34n5zy5sy3nhyc3nhih65eysmal5dlq6j56m3eecntfm",
+      "collectionId": "8253",
+      "agentDid": "did:ixo:ixo1cra6p0jefu8f907gqngkfzxur26k7f73an4v95",
+      "agentAddress": "ixo1cra6p0jefu8f907gqngkfzxur26k7f73an4v95",
+      "submissionDate": "2026-09-20T09:36:41.485",
+      "paymentsStatus": {
+        "approval": "NO_PAYMENT",
+        "rejection": "NO_PAYMENT",
+        "evaluation": "NO_PAYMENT",
+        "submission": "NO_PAYMENT"
+      },
+      "schemaType": null,
+      "useIntent": false,
+      "amount": null,
+      "currentEvaluationId": "327834",
+      "evaluation": {
+        "status": 2,
+        "evaluationDate": "2026-09-20T09:38:05.794"
+      }
+    },
+    {
+      "claimId": "bafkreif6jrw5a7ur2wfomhcn533h5wwf7xvnmrbi3ubeizcu3wamjs3dde",
+      "collectionId": "8253",
+      "agentDid": "did:ixo:ixo1cra6p0jefu8f907gqngkfzxur26k7f73an4v95",
+      "agentAddress": "ixo1cra6p0jefu8f907gqngkfzxur26k7f73an4v95",
+      "submissionDate": "2026-09-20T08:44:08.14",
+      "paymentsStatus": {
+        "approval": "NO_PAYMENT",
+        "rejection": "NO_PAYMENT",
+        "evaluation": "NO_PAYMENT",
+        "submission": "NO_PAYMENT"
+      },
+      "schemaType": null,
+      "useIntent": false,
+      "amount": null,
+      "currentEvaluationId": "327824",
+      "evaluation": {
+        "status": 2,
+        "evaluationDate": "2026-09-20T08:44:30.698"
+      }
+    },
+    {
+      "claimId": "bafkreidvhzue2avfhnef33fqhjk74wtbliinqj3e6ri47co4q432vtspki",
+      "collectionId": "8253",
+      "agentDid": "did:ixo:ixo1cra6p0jefu8f907gqngkfzxur26k7f73an4v95",
+      "agentAddress": "ixo1cra6p0jefu8f907gqngkfzxur26k7f73an4v95",
+      "submissionDate": "2026-09-20T07:38:26.891",
+      "paymentsStatus": {
+        "approval": "NO_PAYMENT",
+        "rejection": "NO_PAYMENT",
+        "evaluation": "PAID",
+        "submission": "NO_PAYMENT"
+      },
+      "schemaType": null,
+      "useIntent": false,
+      "amount": null,
+      "currentEvaluationId": "327324",
+      "evaluation": {
+        "status": 2,
+        "evaluationDate": "2026-09-20T07:38:49.415"
+      }
+    }
+  ]
+}

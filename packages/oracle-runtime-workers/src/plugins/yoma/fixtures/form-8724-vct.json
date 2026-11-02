@@ -1,0 +1,104 @@
+{
+  "@context": {
+    "ixo": "https://w3id.org/ixo/ns/protocol/",
+    "@id": "@type",
+    "type": "@type",
+    "@protected": true
+  },
+  "type": "ixo:entity#surveyTemplate",
+  "question": {
+    "title": "K2C Tree Planting Submission",
+    "description": "Capture field details and verification evidence for a planted tree.",
+    "pages": [
+      {
+        "name": "page1",
+        "elements": [
+          {
+            "type": "text",
+            "name": "schema:addressLocality",
+            "title": "Village Name",
+            "description": "Name of the village where the planting is taking place.",
+            "isRequired": true
+          },
+          {
+            "type": "text",
+            "name": "schema:recipient",
+            "title": "Household Owner Name",
+            "description": "Full name and surname of the person receiving or owning the household.",
+            "isRequired": true
+          },
+          {
+            "type": "text",
+            "name": "ixo:treeSpecies",
+            "title": "Tree Species Name",
+            "description": "Enter the common or scientific name (for example: Mango or Mangifera indica).",
+            "isRequired": true
+          },
+          {
+            "type": "map-grid-selector",
+            "name": "geo:location",
+            "title": "Geolocation of the Planted Tree",
+            "description": "Capture the GPS coordinates for the site.",
+            "gridPrecision": 10
+          },
+          {
+            "type": "file",
+            "name": "ixo:photoBefore",
+            "title": "Picture BEFORE Planting",
+            "description": "Photo of the prepared hole or planting site.",
+            "isRequired": true,
+            "acceptedTypes": "image/*",
+            "maxSize": 5242880,
+            "sourceType": "file-camera"
+          },
+          {
+            "type": "file",
+            "name": "ixo:photoBefore2",
+            "title": "Picture of the tree BEFORE Planting",
+            "description": "Photo of the tree before planting.",
+            "isRequired": true,
+            "acceptedTypes": "image/*",
+            "maxSize": 5242880,
+            "sourceType": "file-camera"
+          },
+          {
+            "type": "file",
+            "name": "ixo:photoAfter",
+            "title": "Picture AFTER Planting",
+            "description": "Photo of the planted tree in the ground.",
+            "isRequired": true,
+            "acceptedTypes": "image/*",
+            "maxSize": 5242880,
+            "sourceType": "file-camera"
+          },
+          {
+            "type": "file",
+            "name": "ixo:recipientPhoto",
+            "title": "Picture of the Household Owner",
+            "description": "Photo of the recipient or household owner.",
+            "isRequired": true,
+            "acceptedTypes": "image/*",
+            "maxSize": 5242880,
+            "sourceType": "file-camera"
+          },
+          {
+            "type": "signaturepad",
+            "name": "ixo:recipientSignature",
+            "title": "Signature of the Household Owner",
+            "description": "Signature confirming receipt and verification.",
+            "isRequired": true
+          }
+        ],
+        "title": "Submit a Claim",
+        "description": "Submit a claim for planting a tree. Required questions are marked with a red star (*)."
+      }
+    ],
+    "showQuestionNumbers": "on",
+    "questionErrorLocation": "bottom",
+    "showProgressBar": true,
+    "progressBarLocation": "top",
+    "pagePrevText": "Back",
+    "pageNextText": "Next",
+    "completeText": "Submit Claim"
+  }
+}

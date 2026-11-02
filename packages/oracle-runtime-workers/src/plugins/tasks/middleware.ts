@@ -23,10 +23,7 @@ import type { BaseMessage } from '@langchain/core/messages';
 import { createMiddleware, type AgentMiddleware } from 'langchain';
 import type { Logger, OracleTasksSurface } from '../../plugin-api/types';
 import { pendingApprovalOf } from '../../tasks/store';
-import {
-  stripTurnTimeNote,
-  TURN_TIME_NOTE_KWARG,
-} from '../../core/turn-time-note';
+import { userContent } from '../../channels/replies';
 
 const APPROVE = new Set([
   'yes',
@@ -151,17 +148,15 @@ export function userDidFromContext(context: unknown): string | undefined {
 
 /**
  * Text of the latest HumanMessage — string content or joined text parts —
- * as the user sent it: without the turn time note the runtime puts in front.
+ * as the user sent it: without the turn time note the runtime puts in front,
+ * and without a quoted WhatsApp message (a quoted "yes" is not an approval).
  */
 export function lastHumanText(messages: BaseMessage[]): string | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
     if (!message || message.type !== 'human') continue;
     return textOfContent(
-      stripTurnTimeNote(
-        message.content,
-        message.additional_kwargs?.[TURN_TIME_NOTE_KWARG],
-      ),
+      userContent(message.content, message.additional_kwargs),
     );
   }
   return null;

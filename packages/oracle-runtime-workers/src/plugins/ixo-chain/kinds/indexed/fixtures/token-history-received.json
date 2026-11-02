@@ -1,0 +1,26 @@
+{
+  "received": {
+    "pageInfo": {
+      "hasNextPage": false
+    },
+    "nodes": [
+      {
+        "aid": 492435,
+        "from": "",
+        "to": "ixo1476xwgx5zs0fz57ck33cg7n8vghzfp6ggnt334",
+        "amount": "41000",
+        "tokenId": "8d664229b4e894b2e9f22f72f4f16280",
+        "token": {
+          "name": "SUPA-ZMW",
+          "collection": "did:ixo:entity:28cfd354b648a10205fd4ad0d137f2aa"
+        }
+      }
+    ]
+  },
+  "sent": {
+    "pageInfo": {
+      "hasNextPage": false
+    },
+    "nodes": []
+  }
+}

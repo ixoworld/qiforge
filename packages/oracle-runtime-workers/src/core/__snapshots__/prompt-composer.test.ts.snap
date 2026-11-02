@@ -52,6 +52,10 @@ _Facts:_
 
 **Current entity:** did:ixo:entity:current
 
+## Who you are talking to
+
+- User DID: \`did:ixo:ixo1user\`
+
 ## User preferences
 
 - **Preferred agent name:** Q

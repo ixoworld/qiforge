@@ -20,7 +20,7 @@ import {
   toolEffectOf,
   type ToolMarkStore,
 } from './middlewares/tool-marks';
-import { createMainAgent } from './main-agent';
+import { createMainAgent, type MainAgentBuildResult } from './main-agent';
 import type { ContextGuardEvent } from './middlewares/context-guard';
 import { isSummarizationMessage } from './middlewares/summarization';
 import { SkillsPlugin } from './plugins/skills';
@@ -40,7 +40,11 @@ import {
 import { createToolExecutionMiddleware } from './middlewares/tool-execution';
 import { ToolScheduler } from './tool-scheduler';
 import { tool as pluginTool } from '../plugin-api/tool-helper';
+import { draftReplyPlan, failedRunFiles, turnSteps } from '../delivery/plan';
 import { resolveDeliveryProfile } from '../delivery/profile';
+import type { DeliveryProfile } from '../delivery/types';
+import { SANDBOX_CAPABILITY } from '../plugins/delegated-capabilities';
+import { SandboxPlugin } from '../plugins/sandbox';
 import { harnessLimitOf, TurnBudget } from './turn-budget';
 import { z } from 'zod';
 
@@ -1073,7 +1077,7 @@ describe('createMainAgent', () => {
     expect(boundToolNames).toContain('read_result');
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining(
-        '[context] model=m window=32000 (override) summarizeAt=18400 pruneAt=11200 resultCap=15360c',
+        '[context] model=m window=32000 (override) budgetWindow=32000 summarizeAt=18400 pruneAt=11200 resultCap=15360c',
       ),
     );
 
@@ -1216,7 +1220,10 @@ describe('createMainAgent tool execution', () => {
           laneOf: (name) =>
             built.subAgentToolNames.has(name)
               ? 'subagent'
-              : (built.toolEffects.get(name) ?? 'write'),
+              : built.toolSurfaces.has(name)
+                ? 'frontend'
+                : (built.toolEffects.get(name) ?? 'write'),
+          effectOf: (name) => built.toolEffects.get(name) ?? 'write',
           runId: 'run-1',
           sessionId: 'sess-1',
           claims: claims.store,
@@ -1272,6 +1279,103 @@ describe('createMainAgent tool execution', () => {
     );
     expect(calls.read).toBe(1);
   }, 15_000);
+
+  it('hands a plugin tool’s frontend surface to the execution middleware’s lane choice', async () => {
+    const scheduler = new ToolScheduler();
+    const lanesSeen: Record<string, string[]> = {};
+    const busyLanes = (name: string) => async () => {
+      const snapshot = scheduler.snapshot();
+      lanesSeen[name] = [
+        ...Object.keys(snapshot.sessionLanes),
+        ...(snapshot.write.inFlight > 0 ? ['write'] : []),
+      ];
+      return 'done';
+    };
+    const plugin = makePlugin({
+      name: 'surfaced',
+      getTools: () => [
+        makeTool('stage_card', {
+          effect: 'write',
+          surface: 'frontend',
+          handler: busyLanes('stage_card'),
+        }),
+        makeTool('save_note', {
+          effect: 'write',
+          handler: busyLanes('save_note'),
+        }),
+      ],
+      getSubAgents: () => [
+        makeSubAgent('Card Agent', {
+          tools: [
+            makeTool('render_card', { effect: 'write', surface: 'frontend' }),
+            // Shares a name with the main tool above but declares the
+            // browser: the two disagree, so it stays a server-side tool.
+            makeTool('save_note', { effect: 'write', surface: 'frontend' }),
+          ],
+        }),
+      ],
+    });
+    const core = bootCore([plugin]);
+    await core.warm();
+    const claims = makeClaimStore();
+    const built = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(
+        core,
+        scriptedLlm({
+          main: [
+            [{ name: 'stage_card', args: {}, id: 'w1' }],
+            [{ name: 'save_note', args: {}, id: 'w2' }],
+            [],
+          ],
+        }),
+      ),
+      requestCtx,
+      state: {},
+      checkpointer: new MemorySaver(),
+      hooks: {
+        toolExecution: createToolExecutionMiddleware({
+          budget: new TurnBudget({ tools: 20, durationMs: 60_000 }),
+          scheduler,
+          laneOf: (name) =>
+            built.subAgentToolNames.has(name)
+              ? 'subagent'
+              : built.toolSurfaces.has(name)
+                ? 'frontend'
+                : (built.toolEffects.get(name) ?? 'write'),
+          effectOf: (name) => built.toolEffects.get(name) ?? 'write',
+          runId: 'run-1',
+          sessionId: 'sess-1',
+          claims: claims.store,
+        }),
+      },
+    });
+    expect(built.toolSurfaces.get('stage_card')).toBe('frontend');
+    expect(built.toolSurfaces.has('save_note')).toBe(false);
+    // A sub-agent's inner tools are scheduled by the same middleware.
+    expect(built.toolSurfaces.get('render_card')).toBe('frontend');
+
+    await built.agent.invoke(
+      { messages: [new HumanMessage('go')] },
+      { configurable: { thread_id: 'sess-1' } },
+    );
+    expect(lanesSeen).toEqual({
+      stage_card: ['frontend:sess-1'],
+      save_note: ['write'],
+    });
+    // Both writes were claimed by their effect, whatever their lane.
+    expect(claims.log).toEqual([
+      'claim:stage_card',
+      'release:stage_card',
+      'claim:save_note',
+      'release:save_note',
+    ]);
+    // The session lane was dropped once idle.
+    expect(scheduler.snapshot().sessionLanes).toEqual({});
+  }, 15_000);
 });
 
 // ── Chat delivery ─────────────────────────────────────────────────────────────
@@ -1285,6 +1389,8 @@ describe('createMainAgent — chat delivery', () => {
       remoteMessageRef: 'hmac:x',
     },
   });
+  if (whatsapp.kind !== 'chat') throw new Error('expected a chat profile');
+  const chatLimits = whatsapp.limits;
 
   it('binds the turn tool, tells the model it is in a chat and ends the run on a return-direct call', async () => {
     const core = bootCore();
@@ -1339,6 +1445,246 @@ describe('createMainAgent — chat delivery', () => {
     expect(surfaces).toEqual([
       { kind: 'chat', surface: 'whatsapp', label: 'WhatsApp' },
     ]);
+  });
+
+  it('gives tools the files the person sent with the channel message', async () => {
+    const core = bootCore();
+    const seen: unknown[] = [];
+    const keepFile = pluginTool(
+      async (_args, ctx) => {
+        seen.push(ctx.session.channel?.attachments);
+        return { ok: true };
+      },
+      {
+        name: 'keep_file',
+        description: 'Keep the file the person sent.',
+        schema: z.object({}),
+        effect: 'read',
+      },
+    );
+    const photo = {
+      url: 'https://channels.example/media/chb_x/1f0e?exp=1893456000&sig=abc',
+      filename: 'shop.jpg',
+      mimetype: 'image/jpeg',
+      size: 120_000,
+      sha256: 'c'.repeat(64),
+      kind: 'image' as const,
+    };
+    const { agent, context } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(
+        core,
+        scriptedLlm({
+          main: [[{ name: 'keep_file', args: {}, id: 'k1' }], []],
+        }),
+      ),
+      requestCtx: {
+        ...requestCtx,
+        session: {
+          ...requestCtx.session,
+          client: 'channel',
+          channel: {
+            provider: 'whatsapp',
+            bindingId: 'chb_x',
+            bindingRevision: 1,
+            attachments: [photo],
+          },
+        },
+      },
+      state: {},
+      delivery: whatsapp,
+      hooks: { turnTools: [{ tool: keepFile, returnDirect: true }] },
+    });
+    await agent.invoke(
+      { messages: [new HumanMessage('[photo]')] },
+      { configurable: { thread_id: 'sess-file' }, context },
+    );
+    expect(seen).toEqual([[photo]]);
+  });
+
+  describe('send_file', () => {
+    const SIGNED = 'https://r2.example/o/report.docx?X-Amz-Signature=deadbeef';
+    const sandboxPlugin = (): SandboxPlugin =>
+      new SandboxPlugin({
+        authBuilder: async () => ({ Authorization: 'Bearer ucan' }),
+        mcpClientFactory: () => ({
+          getTools: async () => [
+            {
+              name: 'artifact_get_presigned_url',
+              description: 'Sign a link.',
+              schema: z.object({ path: z.string() }),
+              invoke: async (input) =>
+                JSON.stringify({
+                  downloadUrl: SIGNED,
+                  path: (input as { path: string }).path,
+                  expiresIn: 10_800,
+                }),
+            },
+          ],
+          close: async () => undefined,
+        }),
+      });
+    const build = async (
+      delivery: DeliveryProfile,
+      script: Script,
+    ): Promise<MainAgentBuildResult> => {
+      const core = createRuntimeCore({
+        config: { name: 'TestOracle', org: 'Acme', description: 'a test' },
+        plugins: [sandboxPlugin()],
+        env: makeEnv({ SANDBOX_MCP_URL: 'https://sandbox.example/mcp' }),
+      });
+      return createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(core, scriptedLlm({ main: script })),
+        requestCtx: {
+          ...requestCtx,
+          user: {
+            ...requestCtx.user,
+            ucanDelegation: {
+              raw: 'ucan',
+              capabilities: [SANDBOX_CAPABILITY],
+            },
+          },
+          session: { ...requestCtx.session, client: 'channel' },
+        },
+        state: {},
+        delivery,
+      });
+    };
+
+    it('runs on a chat turn: the plan gets the link, the model and its prompt never do', async () => {
+      const { agent, systemPrompt, boundToolNames, toolEffects, context } =
+        await build(whatsapp, [
+          [
+            {
+              name: 'send_file',
+              args: { path: '/output/report.docx', caption: 'Q3' },
+              id: 'f1',
+            },
+          ],
+          [],
+        ]);
+      expect(boundToolNames).toContain('send_file');
+      expect(boundToolNames).not.toContain('artifact_get_presigned_url');
+      expect(toolEffects.get('send_file')).toBe('read');
+      expect(systemPrompt).toContain('`send_file`');
+
+      const { messages } = (await agent.invoke(
+        { messages: [new HumanMessage('Send me the report')] },
+        { configurable: { thread_id: 'sess-send-file' }, context },
+      )) as { messages: BaseMessage[] };
+
+      const [result] = toolMessages(messages);
+      expect(result?.tool_call_id).toBe('f1');
+      expect(result?.name).toBe('send_file');
+      expect(JSON.stringify(result?.content)).not.toContain('r2.example');
+      expect(JSON.parse(String(result?.content))).toMatchObject({ ok: true });
+      // The fake model writes back everything it was sent.
+      const echoed = String(messages.at(-1)?.content);
+      expect(echoed).toContain('"filename":"report.docx"');
+      expect(echoed).not.toContain('r2.example');
+
+      const { steps, toolResults, toolArtifacts } = turnSteps(messages);
+      expect(
+        draftReplyPlan({
+          steps,
+          toolResults,
+          toolArtifacts,
+          limits: chatLimits,
+          canSpill: false,
+        }),
+      ).toContainEqual({
+        kind: 'file',
+        file: expect.objectContaining({
+          url: SIGNED,
+          filename: 'report.docx',
+          caption: 'Q3',
+        }),
+      });
+    });
+
+    it('keeps the files of a run whose closing model call fails, in the checkpoint', async () => {
+      // A model whose third call fails: the first two send a file each.
+      let calls = 0;
+      class FailingModel extends FakeToolCallingModel {
+        override async _generate(
+          ...args: Parameters<FakeToolCallingModel['_generate']>
+        ): ReturnType<FakeToolCallingModel['_generate']> {
+          calls += 1;
+          if (calls === 3) throw new Error('provider down');
+          return super._generate(...args);
+        }
+        override bindTools(): this {
+          return this;
+        }
+      }
+      const core = createRuntimeCore({
+        config: { name: 'TestOracle', org: 'Acme', description: 'a test' },
+        plugins: [sandboxPlugin()],
+        env: makeEnv({ SANDBOX_MCP_URL: 'https://sandbox.example/mcp' }),
+      });
+      const model = new FailingModel({
+        toolCalls: [
+          [{ name: 'send_file', args: { path: '/output/a.pdf' }, id: 'f1' }],
+          [{ name: 'send_file', args: { path: '/output/b.pdf' }, id: 'f2' }],
+          [],
+        ],
+      });
+      const checkpointer = new MemorySaver();
+      const { agent, context } = await createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(core, {
+          get: () => model as unknown as BaseChatModel,
+        }),
+        requestCtx: {
+          ...requestCtx,
+          user: {
+            ...requestCtx.user,
+            ucanDelegation: { raw: 'ucan', capabilities: [SANDBOX_CAPABILITY] },
+          },
+          session: { ...requestCtx.session, client: 'channel' },
+        },
+        state: {},
+        delivery: whatsapp,
+        checkpointer,
+      });
+      const config = { configurable: { thread_id: 'sess-failed' }, context };
+
+      await expect(
+        agent.invoke({ messages: [new HumanMessage('Send both')] }, config),
+      ).rejects.toThrow('provider down');
+
+      const tuple = await checkpointer.getTuple(config);
+      const plan = await failedRunFiles(
+        tuple?.checkpoint.channel_values.messages as BaseMessage[],
+        new Set(['f1', 'f2']),
+        chatLimits,
+      );
+      expect(plan?.parts.map((part) => part.kind)).toEqual([
+        'file',
+        'file',
+        'text',
+      ]);
+    });
+
+    it('is not bound on a Portal turn, which keeps the upstream tool', async () => {
+      const { systemPrompt, boundToolNames } = await build(
+        { kind: 'stream' },
+        [],
+      );
+      expect(boundToolNames).not.toContain('send_file');
+      expect(boundToolNames).toContain('artifact_get_presigned_url');
+      expect(systemPrompt).not.toContain('send_file');
+    });
   });
 
   it('adds nothing to a Portal turn', async () => {
@@ -2088,10 +2434,12 @@ describe('createMainAgent — sub-agent dispatches', () => {
           doneAt: null,
           outcome: null,
           attempts: 1,
+          sentAt: null,
         });
         return undefined;
       },
       async bumpMark() {},
+      async markSent() {},
       async finishMark(runId, toolCallId, outcome) {
         const mark = marks.get(`${runId}:${toolCallId}`);
         if (mark) Object.assign(mark, { doneAt: 'now', outcome });
@@ -2234,6 +2582,136 @@ describe('createMainAgent — per-turn isolation and a stable prompt', () => {
     const first = await promptAt('2026-08-25T08:00:00.000Z', 'req-1');
     const second = await promptAt('2026-08-25T08:00:07.412Z', 'req-2');
     expect(second).toBe(first);
+  });
+});
+
+/** A message's text, whether a string or text blocks. */
+function textOf(content: BaseMessage['content']): string {
+  if (typeof content === 'string') return content;
+  return content
+    .map((block) =>
+      block.type === 'text' && typeof block.text === 'string' ? block.text : '',
+    )
+    .join('');
+}
+
+/** A scripted model that records the system prompt of every call it answers. */
+class SystemRecordingModel extends FakeToolCallingModel {
+  constructor(
+    private readonly script: Script,
+    readonly systems: string[],
+    private readonly position: { current: number } = { current: 0 },
+  ) {
+    super({ toolCalls: script, indexRef: position });
+  }
+
+  override bindTools(): SystemRecordingModel {
+    return new SystemRecordingModel(this.script, this.systems, this.position);
+  }
+
+  override async _generate(
+    ...args: Parameters<FakeToolCallingModel['_generate']>
+  ): ReturnType<FakeToolCallingModel['_generate']> {
+    const system = args[0].find((m) => m.type === 'system');
+    this.systems.push(system ? textOf(system.content) : '');
+    return super._generate(...args);
+  }
+}
+
+describe('createMainAgent — who the user is', () => {
+  const ADDRESS = 'ixo1qypqxpq9qcrsszg2pvxq6rs0zqg3yyc5lzv7xu';
+  const ORACLE_LINE =
+    "- You are the oracle `did:ixo:oracle1` (entity `did:ixo:entity:oracle1`); the domain context describes you, never the user. Never give these as the user's.";
+
+  it("names the user's DID and IXO address on the configured network, and the oracle's own DIDs", async () => {
+    const core = bootCore();
+    await core.warm();
+    const { systemPrompt } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(core, scriptedLlm({})),
+      requestCtx: {
+        ...requestCtx,
+        user: { ...requestCtx.user, did: `did:ixo:${ADDRESS}` },
+      },
+      state: { currentEntityDid: 'did:ixo:entity:viewed' },
+    });
+    expect(systemPrompt).toContain(
+      [
+        '**Current entity:** did:ixo:entity:viewed',
+        '',
+        '## Who you are talking to',
+        '',
+        `- User DID: \`did:ixo:${ADDRESS}\``,
+        `- User's IXO account (wallet) address on devnet: \`${ADDRESS}\` — the DID's suffix. Use it for their balances, claims and transfers unless they name another; it overrides anything recalled about their address.`,
+        ORACLE_LINE,
+      ].join('\n'),
+    );
+  });
+
+  it('says a DID that is not an IXO account has no address', async () => {
+    const did = 'did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK';
+    const core = bootCore();
+    await core.warm();
+    const { systemPrompt } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(core, scriptedLlm({})),
+      requestCtx: { ...requestCtx, user: { ...requestCtx.user, did } },
+      state: {},
+    });
+    expect(systemPrompt).toContain(
+      `- User DID: \`${did}\`\n- User's IXO account address: none — their DID is not an IXO account; ask for one before reading balances or claims.\n${ORACLE_LINE}`,
+    );
+  });
+
+  it('gives a dispatched sub-agent the same identity section', async () => {
+    const helper = makePlugin({
+      name: 'helper',
+      manifest: makeManifest({ title: 'Helper', visibility: 'always' }),
+      getSubAgents: () => [makeSubAgent('Help Agent')],
+    });
+    const core = bootCore([helper]);
+    await core.warm();
+    const subSystems: string[] = [];
+    const scripted = scriptedLlm({
+      main: [
+        [{ name: 'call_help_agent', args: { task: 'Help.' }, id: 'h1' }],
+        [],
+      ],
+    });
+    const built = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(core, {
+        get: (role, params) =>
+          role === 'subagent'
+            ? new SystemRecordingModel([[]], subSystems)
+            : scripted.get(role, params),
+      }),
+      requestCtx: {
+        ...requestCtx,
+        user: { ...requestCtx.user, did: `did:ixo:${ADDRESS}` },
+      },
+      state: {},
+      checkpointer: new MemorySaver(),
+    });
+    await built.agent.invoke(
+      { messages: [new HumanMessage('Help me.')] },
+      { configurable: { thread_id: 'identity-subagent' } },
+    );
+    const [sub] = subSystems;
+    if (sub === undefined) throw new Error('the sub-agent was not dispatched');
+    expect(sub).toContain(
+      `you are a test sub-agent\n\n## Who you are talking to\n\n- User DID: \`did:ixo:${ADDRESS}\``,
+    );
+    expect(sub).toContain(ORACLE_LINE);
   });
 });
 

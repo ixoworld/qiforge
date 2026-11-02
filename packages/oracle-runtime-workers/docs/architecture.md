@@ -87,13 +87,38 @@ transcripts), session titles and memory indexing read the message through
 note off again. A supplied-context task's input gets no note, so it stays
 exactly as supplied.
 
+**Who the user is.** Right after the date (and the current entity, when
+one is selected) the system prompt carries a `## Who you are talking to`
+section (`renderUserIdentity`, `src/core/user-identity.ts`): the DID the
+user's delegation proved, the IXO account address that DID names
+(`ixoAddressOf`: the suffix of a `did:ixo:ixo1…` DID, validated with
+`IxoAddressSchema`) as their wallet on the `NETWORK`, to use for their
+balances, claims and transfers unless they name another and over anything
+recalled about their address. A `did:key:` or `did:web:` user is told they
+have no IXO account address and that the model asks for one before reading
+balances or claims. The last bullet names the oracle itself (`ORACLE_DID`,
+plus `ORACLE_ENTITY_DID` when it is set and differs), says the domain context
+describes the oracle, never the user, and that these DIDs are never given as
+the user's; the domain-context guidance opens with the same rule. A DID is
+printed only when it matches `did:<method>:<id>` (lower-case method, at most
+200 URL-safe characters in the id); anything else, such as a value with a
+backtick or a line break, is printed as `unrecognised DID`. Every value is
+fixed for the user's object, so the section stays inside the prompt cache;
+nothing per-turn (balances, chain state) is ever put in it. Sub-agents get
+the same section appended to their own prompt, ahead of the domain-context
+block.
+
 **First-turn user context.** When the memory engine is configured, a
 conversation's first turn is pre-loaded with the user's memory: the object
 starts one `POST /search-enhanced-batch` as soon as the turn's room is known
 (`UserContextFetcher`, `src/memory/user-context-fetcher.ts`), so it overlaps
 the preferences read, the attachments and the capability router (request
 admission runs before the build and is not part of that overlap), and awaits
-it for at most `USER_CONTEXT_PREFETCH_CAP_MS`. The result is written to the
+it for at most `USER_CONTEXT_PREFETCH_CAP_MS`. Like every memory-engine
+request it names the oracle's domain entity (`x-oracle-entity-did`, and the
+queries' `oracle_dids`), which the engine keys every memory space by
+([memory engine contract](configuration.md#memory-engine-contract)); without
+`ORACLE_ENTITY_DID` nothing is fetched. The result is written to the
 thread's `userContext` channel once, on first contact, and rendered by the
 prompt composer. A thread's context is stable for the thread's life: later
 turns never wait and never adopt a cached or refreshed answer, they only
@@ -156,7 +181,8 @@ Without the grant each already contributed no tools, as its mint failed; now
 the model is told why. The rest declare nothing: the vfs plugin proves
 through its own `ixo:filesystem` delegation from the UCAN store, skills
 fall back to public capsules without `ixo:skills`, and the others call no
-UCAN-guarded service.
+UCAN-guarded service — ixo-chain, for one, reads only public chain data
+(the chain REST gateway and Blocksync; [chain-tools](chain-tools.md)).
 
 **Admin-plane tools.** A tool is on the `orchestration` plane unless its
 author marks it `plane: 'admin'` (`tool(handler, { …, plane: 'admin' })`).
@@ -319,7 +345,11 @@ migrate a deployment between layouts is in
 
 The Durable Object only ever holds a **working copy**. The durable file the
 user owns is `/.oracles/<oracleDid>/state.db.gz` in the user's IXO VFS — the
-system of record.
+system of record. qiforge's own state stays under the agent account's folder
+(`/.oracles/<ORACLE_DID>/`). The Memory Engine keeps its own owner copy of the
+user's memory beside it, keyed by the oracle's domain entity:
+`/.oracles/<ORACLE_ENTITY_DID>/memory.tar.gz` (the engine writes and restores
+it; the runtime never touches it).
 
 - **One delegation, no other grant channel.** Every VFS request is a
   single-use invocation minted from the delegation the user deposited for

@@ -1,6 +1,12 @@
 /**
- * Every context-related limit of a turn, derived from the model's window
- * (`context-window.ts`) so that they scale with the model:
+ * Every context-related limit of a turn, derived from the turn's budget
+ * window: the model's window (`context-window.ts`), but never more than
+ * the memory window (`CONTEXT_MEMORY_WINDOW_TOKENS`, default 100,000). A
+ * turn runs in a Durable Object isolate of 128 MB, and every model call
+ * holds several copies of its request (the provider body, the trace, the
+ * checkpoint), so the isolate, not a million-token model window, bounds
+ * how large a request may grow. Below the memory window the limits scale
+ * with the model:
  *
  *   - `summarizeAtTokens`  — the history is condensed once it is this large
  *                            (default 60% of the window, whatever its size;
@@ -18,6 +24,7 @@
  *                            pruning is refused instead of sent to fail;
  *   - `outputReserveTokens`— the room left for the reply.
  *
+ *
  * Token counts are chars/4 estimates (`estimateTokensApprox`), never billing.
  */
 import type { Logger } from '../plugin-api/types';
@@ -27,7 +34,23 @@ import { NOOP_LOGGER } from './utils';
 
 export const CHARS_PER_TOKEN = 4;
 
+/**
+ * The largest window a turn is budgeted for, whatever the model's: with
+ * the default fractions the history is summarized at 60,000 tokens, old
+ * tool results are pruned above 35,000, one result is capped at 48,000
+ * chars and a request above 87,000 is refused. Traced turns on a
+ * 1,050,000-token model reset the isolate at about 92,000 prompt tokens.
+ */
+export const DEFAULT_MEMORY_WINDOW_TOKENS = 100_000;
+/** The smallest memory window accepted (the smallest model window, `MIN_CONTEXT_TOKENS`). */
+export const MIN_MEMORY_WINDOW_TOKENS = 16_000;
+
 export interface ContextKnobs {
+  /**
+   * Ceiling on the window every limit is derived from (default 100,000):
+   * a larger model window is budgeted as this one.
+   */
+  memoryWindowTokens: number;
   /** Fraction of the window at which the history is summarized (default 0.6). */
   summarizeFraction: number;
   /** Fraction of the window above which old tool results are pruned per request (default 0.35). */
@@ -51,6 +74,7 @@ export interface ContextKnobs {
 }
 
 export const DEFAULT_CONTEXT_KNOBS: ContextKnobs = {
+  memoryWindowTokens: DEFAULT_MEMORY_WINDOW_TOKENS,
   summarizeFraction: 0.6,
   pruneFraction: 0.35,
   resultCapFraction: 0.12,
@@ -62,8 +86,14 @@ export const DEFAULT_CONTEXT_KNOBS: ContextKnobs = {
 
 export interface ContextBudget {
   model: string;
+  /** The model's own window, as resolved. */
   windowTokens: number;
   origin: ContextWindowResolution['origin'];
+  /**
+   * The window every limit below is derived from: the model's, at most the
+   * memory window (`ContextKnobs.memoryWindowTokens`).
+   */
+  budgetWindowTokens: number;
   summarizeAtTokens: number;
   pruneAtTokens: number;
   resultCapChars: number;
@@ -114,6 +144,12 @@ export function contextKnobs(
     4,
   );
   return {
+    memoryWindowTokens:
+      int(
+        'CONTEXT_MEMORY_WINDOW_TOKENS',
+        DEFAULT_CONTEXT_KNOBS.memoryWindowTokens,
+        MIN_MEMORY_WINDOW_TOKENS,
+      ) ?? DEFAULT_CONTEXT_KNOBS.memoryWindowTokens,
     summarizeFraction: fraction(
       'CONTEXT_SUMMARIZE_FRACTION',
       DEFAULT_CONTEXT_KNOBS.summarizeFraction,
@@ -173,14 +209,14 @@ function requestCapFor(
 
 /**
  * The budget for a turn on `resolution.model`, from that model's window
- * alone: the summary is written by the same model (the `summarizer` role),
- * so no other window bounds what it reads.
+ * capped at the memory window: the summary is written by the same model
+ * (the `summarizer` role), so no other window bounds what it reads.
  */
 export function contextBudgetFor(
   resolution: ContextWindowResolution,
   knobs: ContextKnobs = DEFAULT_CONTEXT_KNOBS,
 ): ContextBudget {
-  const window = resolution.tokens;
+  const window = Math.min(resolution.tokens, knobs.memoryWindowTokens);
   const { requestCapTokens, outputReserveTokens } = requestCapFor(
     window,
     knobs,
@@ -192,7 +228,11 @@ export function contextBudgetFor(
   // that limit, so the thread's memory is never lost unread. With the
   // default knobs this only binds below a window of ~34.3k tokens (60% of
   // the window exceeds 95% less the reply reserve and the prompt margin);
-  // above it the trigger is the plain fraction.
+  // above it the trigger is the plain fraction. Being derived from the
+  // capped window, this is also what bounds the summary's own request: a
+  // thread that grew far past the trigger (before the memory window
+  // existed) is condensed from its newest `summaryInputTokens`, never sent
+  // whole a second time; what lies before them is dropped unread.
   const summaryInputTokens = Math.max(
     1_000,
     requestCapTokens - SUMMARY_PROMPT_MARGIN_TOKENS,
@@ -208,8 +248,9 @@ export function contextBudgetFor(
   );
   return {
     model: resolution.model,
-    windowTokens: window,
+    windowTokens: resolution.tokens,
     origin: resolution.origin,
+    budgetWindowTokens: window,
     summarizeAtTokens,
     pruneAtTokens,
     resultCapChars: Math.min(
@@ -282,5 +323,5 @@ export function messageToolCallTokens(
 }
 
 export function describeBudget(b: ContextBudget): string {
-  return `model=${b.model} window=${b.windowTokens} (${b.origin}) summarizeAt=${b.summarizeAtTokens} pruneAt=${b.pruneAtTokens} resultCap=${b.resultCapChars}c requestCap=${b.requestCapTokens} reserve=${b.outputReserveTokens} summaryInput=${b.summaryInputTokens}`;
+  return `model=${b.model} window=${b.windowTokens} (${b.origin}) budgetWindow=${b.budgetWindowTokens} summarizeAt=${b.summarizeAtTokens} pruneAt=${b.pruneAtTokens} resultCap=${b.resultCapChars}c requestCap=${b.requestCapTokens} reserve=${b.outputReserveTokens} summaryInput=${b.summaryInputTokens}`;
 }

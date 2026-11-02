@@ -1,0 +1,114 @@
+{
+  "network": "mainnet",
+  "results": {
+    "ixo1cra6p0jefu8f907gqngkfzxur26k7f73an4v95": {
+      "id": "ixo1cra6p0jefu8f907gqngkfzxur26k7f73an4v95",
+      "kind": "account",
+      "normalized": "ixo1cra6p0jefu8f907gqngkfzxur26k7f73an4v95",
+      "display": "Michael",
+      "status": "resolved",
+      "complete": true,
+      "name": "Michael",
+      "source": "matrix",
+      "selfChosen": true,
+      "cache": {
+        "hit": "d1",
+        "freshUntil": 1793475032
+      }
+    },
+    "ixo1vafr2dqhgz8frc7gf22njz8y2u0fue4kuetey6": {
+      "id": "ixo1vafr2dqhgz8frc7gf22njz8y2u0fue4kuetey6",
+      "kind": "account",
+      "normalized": "ixo1vafr2dqhgz8frc7gf22njz8y2u0fue4kuetey6",
+      "display": "IXO fee-grant service (feegrant.ixo.world)",
+      "status": "resolved",
+      "complete": true,
+      "name": "IXO fee-grant service (feegrant.ixo.world)",
+      "source": "table",
+      "selfChosen": false,
+      "cache": {
+        "hit": "none",
+        "freshUntil": null
+      }
+    },
+    "ixo1sd7r80y445fp5e7ycru8w6zl2p34l2wnp05hqm": {
+      "id": "ixo1sd7r80y445fp5e7ycru8w6zl2p34l2wnp05hqm",
+      "kind": "account",
+      "normalized": "ixo1sd7r80y445fp5e7ycru8w6zl2p34l2wnp05hqm",
+      "display": "Admin account of Subscription Deed Protocol",
+      "status": "resolved",
+      "complete": true,
+      "name": "Admin account of Subscription Deed Protocol",
+      "source": "entity-account",
+      "selfChosen": true,
+      "cache": {
+        "hit": "d1",
+        "freshUntil": 1793475343
+      }
+    },
+    "did:ixo:entity:f22eda1f500a2ce90a16c835e1099b6a": {
+      "id": "did:ixo:entity:f22eda1f500a2ce90a16c835e1099b6a",
+      "kind": "entity",
+      "normalized": "did:ixo:entity:f22eda1f500a2ce90a16c835e1099b6a",
+      "display": "Companion",
+      "status": "resolved",
+      "complete": true,
+      "name": "Companion",
+      "source": "entity",
+      "selfChosen": true,
+      "cache": {
+        "hit": "d1",
+        "freshUntil": 1793475021
+      }
+    },
+    "collection:340": {
+      "id": "collection:340",
+      "kind": "collection",
+      "normalized": "340",
+      "display": "Oracle Service Claim #340",
+      "status": "resolved",
+      "complete": true,
+      "name": "Oracle Service Claim #340",
+      "source": "collection",
+      "selfChosen": true,
+      "cache": {
+        "hit": "d1",
+        "freshUntil": 1793475233
+      }
+    },
+    "not-an-id": {
+      "id": "not-an-id",
+      "kind": "unknown",
+      "normalized": null,
+      "display": "not-an-id",
+      "status": "unresolved",
+      "complete": true,
+      "name": null,
+      "source": null,
+      "selfChosen": false,
+      "cache": {
+        "hit": "none",
+        "freshUntil": null
+      },
+      "error": {
+        "code": "unsupported_identifier",
+        "message": "unsupported identifier"
+      }
+    }
+  },
+  "meta": {
+    "durationMs": 170,
+    "counts": {
+      "resolved": 5,
+      "unresolved": 0,
+      "partial": 0,
+      "unknown": 1
+    },
+    "cache": {
+      "memory": 0,
+      "d1": 4,
+      "stale": 0,
+      "origin": 0
+    }
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "proposals": [
+    {
+      "id": "506",
+      "messages": [],
+      "status": "PROPOSAL_STATUS_VOTING_PERIOD",
+      "final_tally_result": {
+        "yes_count": "0",
+        "abstain_count": "0",
+        "no_count": "0",
+        "no_with_veto_count": "0"
+      },
+      "submit_time": "2026-10-26T16:36:01.734241053Z",
+      "deposit_end_time": "2026-10-28T16:36:01.734241053Z",
+      "total_deposit": [
+        {
+          "denom": "uixo",
+          "amount": "10000000000"
+        }
+      ],
+      "voting_start_time": "2026-10-26T16:36:01.734241053Z",
+      "voting_end_time": "2026-10-31T16:36:01.734241053Z",
+      "metadata": "https://github.com/disperze/usdc-migration/blob/master/docs/proposals/signaling/impacthub.md",
+      "title": "Signal support for x/usdcmigration in a future ixo (Impacthub) software upgrade (Noble USDC wind-down)",
+      "summary": "This is a signaling (text) proposal. It executes no code and moves no funds. Proposed by the [Disperze validator](https://x.com/Disperze_).\n\n## Background\n\nCircle is ending USDC support on Noble:\n\n- Minting stopped on 2026-10-13.\n- CCTP V1 burn limits start shrinking on 2026-10-31.\n- USDC on Noble is fully paused on **2027-01-12**.\n\nAfter the pause Noble rejects every incoming `uusdc` packet, so the Noble USDC voucher on ixo (Impacthub) (`ibc/6BBE9BD4246F8E04948D5A4EEE7164B2630263B9EBB5E7DC5F0A46C62A2FF97B`, received over `channel-26`) can no longer be redeemed. About **54,302.02 USDC** of thi",
+      "proposer": "ixo1xzjquld63pc7xkpuuhepuqga5yf6vhrlwy0vnf",
+      "expedited": false,
+      "failed_reason": ""
+    }
+  ],
+  "pagination": {
+    "next_key": null,
+    "total": "0"
+  }
+}

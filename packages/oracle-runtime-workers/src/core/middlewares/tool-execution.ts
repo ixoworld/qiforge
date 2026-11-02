@@ -3,9 +3,11 @@
  * run: charged to the turn's budget, scheduled in its lane, and — for a
  * write — claimed in the run ledger for as long as its outcome is unknown.
  *
- * The claim is a fingerprint of the tool name and its canonical arguments,
- * recorded before the write starts. A returned result (success or a
- * reported failure) releases it; a failure that says nothing about whether
+ * The claim is a fingerprint of the tool name and its canonical arguments
+ * (and, for a frontend write, its session), recorded before the write
+ * starts; a write is claimed by its effect, whichever lane it runs in. A
+ * returned result (success or a reported failure) releases it, and so does
+ * a frontend call that was never sent; a failure that says nothing about whether
  * the write happened — abort, deadline, a dropped connection, a 5xx —
  * leaves it in place, whether the tool threw it or caught it and returned
  * it as an error result (many plugin tools and adapters never throw to the
@@ -30,6 +32,7 @@ import { type AgentMiddleware, createMiddleware } from 'langchain';
 import type { Logger } from '../../plugin-api/types';
 import type { ToolLane, ToolScheduler } from '../tool-scheduler';
 import { findProviderStall } from '../../llm/stream-liveness';
+import { isFrontendCallNotSent } from '../../realtime/frontend-call-registry';
 import { isHarnessLimitError, type TurnBudget } from '../turn-budget';
 import { NOOP_LOGGER } from '../utils';
 
@@ -51,8 +54,18 @@ export interface WriteClaimStore {
 export interface ToolExecutionOptions {
   budget: TurnBudget;
   scheduler: ToolScheduler;
-  /** Lane of a tool by name (`read`, `write`, or `subagent` for a dispatch). */
+  /**
+   * Lane of a tool by name: `read` / `write` (user-wide, by effect),
+   * `frontend` for a tool acting in the user's browser
+   * (`PluginTool.surface`), `subagent` for a dispatch. The two per-session
+   * lanes are keyed by `sessionId` below.
+   */
   laneOf: (toolName: string) => ToolLane;
+  /**
+   * Effect of a tool by name. A `write` is claimed in the ledger whatever
+   * its lane (a frontend write too); a sub-agent dispatch never is.
+   */
+  effectOf: (toolName: string) => 'read' | 'write';
   runId: string;
   sessionId: string;
   /** Omitted → writes are scheduled and charged but not claimed (stateless builds, tests). */
@@ -77,12 +90,21 @@ export function canonicalArguments(value: unknown): string {
   return JSON.stringify(value) ?? 'null';
 }
 
-/** SHA-256 of `name:args`, hex — the write's fingerprint in the ledger. */
+/**
+ * SHA-256 of `name:args`, hex — the write's fingerprint in the ledger. With
+ * `sessionId` (a frontend write: it acts in that session's own browser, so
+ * the same call in another chat is a different action) the session is part
+ * of it: `name@<sessionId>:args`.
+ */
 export async function operationKey(
   name: string,
   args: unknown,
+  sessionId?: string,
 ): Promise<string> {
-  const bytes = new TextEncoder().encode(`${name}:${canonicalArguments(args)}`);
+  const scope = sessionId === undefined ? '' : `@${sessionId}`;
+  const bytes = new TextEncoder().encode(
+    `${name}${scope}:${canonicalArguments(args)}`,
+  );
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(digest), (b) =>
     b.toString(16).padStart(2, '0'),
@@ -141,12 +163,16 @@ const isServerStatus = (status: unknown): boolean =>
 /**
  * `true` when a thrown error says nothing about whether the tool's side
  * effect happened: the turn was aborted or hit its deadline, the transport
- * failed, or the service answered with a server error.
+ * failed, or the service answered with a server error. A frontend call that
+ * was never sent (`FrontendCallNotSentError`: parked until the turn aborted
+ * or its park deadline passed) is a known outcome even on an aborted turn:
+ * no browser saw it.
  */
 export function isUncertainOutcome(
   error: unknown,
   signal?: AbortSignal,
 ): boolean {
+  if (isFrontendCallNotSent(error)) return false;
   if (signal?.aborted) return true;
   if (isHarnessLimitError(error)) return true;
   // A tool whose own model call stalled (stream-liveness.ts) stopped at an
@@ -267,6 +293,10 @@ export function createToolExecutionMiddleware(
       const { toolCall } = request;
       const toolName = toolCall.name;
       const lane = options.laneOf(toolName);
+      // Claimed by effect, whatever the lane: a frontend write too. A
+      // dispatch is never fingerprinted (its inner writes are, by name).
+      const claimed =
+        lane !== 'subagent' && options.effectOf(toolName) === 'write';
       const callId = toolCall.id ?? '';
       const attempt = (attempts.get(callId) ?? 0) + 1;
       attempts.set(callId, attempt);
@@ -290,51 +320,62 @@ export function createToolExecutionMiddleware(
         );
         return output;
       };
-      return scheduler.run(lane, options.signal, async () => {
-        budget.reserveTool(options.signal);
-        if (lane !== 'write' || !claims) return run();
-        const fingerprint = await operationKey(toolName, toolCall.args);
-        const claim = await claims.claimWrite({
-          fingerprint,
-          toolName,
-          runId: options.runId,
-          sessionId: options.sessionId,
-        });
-        if (claim.status === 'blocked') {
-          logger.warn(
-            `[tool-execution] ${toolName}: an identical write since ${claim.since} has no known outcome; not run again`,
+      return scheduler.run(
+        lane,
+        options.signal,
+        async () => {
+          budget.reserveTool(options.signal);
+          if (!claimed || !claims) return run();
+          // The ledger is user-wide; a frontend write's fingerprint names its
+          // session, so the same browser action in two chats never collides.
+          const fingerprint = await operationKey(
+            toolName,
+            toolCall.args,
+            lane === 'frontend' ? options.sessionId : undefined,
           );
-          return new ToolMessage({
-            tool_call_id: toolCall.id ?? '',
-            name: toolName,
-            content: uncertainWriteToolResult(toolName),
-            status: 'error',
+          const claim = await claims.claimWrite({
+            fingerprint,
+            toolName,
+            runId: options.runId,
+            sessionId: options.sessionId,
           });
-        }
-        try {
-          const output = await run();
-          const uncertain = uncertainResultReason(output);
-          if (uncertain !== null) {
+          if (claim.status === 'blocked') {
             logger.warn(
-              `[tool-execution] ${toolName}: returned a failure that leaves its outcome unknown (${uncertain}); its claim stays in the ledger`,
+              `[tool-execution] ${toolName}: an identical write since ${claim.since} has no known outcome; not run again`,
             );
-          } else {
-            await claims.releaseWrite(fingerprint, options.runId);
+            return new ToolMessage({
+              tool_call_id: toolCall.id ?? '',
+              name: toolName,
+              content: uncertainWriteToolResult(toolName),
+              status: 'error',
+            });
           }
-          return output;
-        } catch (error) {
-          if (isUncertainOutcome(error, options.signal)) {
-            logger.warn(
-              `[tool-execution] ${toolName}: outcome unknown (${error instanceof Error ? error.message.split('\n')[0] : String(error)}); its claim stays in the ledger`,
-            );
-          } else {
-            await claims
-              .releaseWrite(fingerprint, options.runId)
-              .catch(() => undefined);
+          try {
+            const output = await run();
+            const uncertain = uncertainResultReason(output);
+            if (uncertain !== null) {
+              logger.warn(
+                `[tool-execution] ${toolName}: returned a failure that leaves its outcome unknown (${uncertain}); its claim stays in the ledger`,
+              );
+            } else {
+              await claims.releaseWrite(fingerprint, options.runId);
+            }
+            return output;
+          } catch (error) {
+            if (isUncertainOutcome(error, options.signal)) {
+              logger.warn(
+                `[tool-execution] ${toolName}: outcome unknown (${error instanceof Error ? error.message.split('\n')[0] : String(error)}); its claim stays in the ledger`,
+              );
+            } else {
+              await claims
+                .releaseWrite(fingerprint, options.runId)
+                .catch(() => undefined);
+            }
+            throw error;
           }
-          throw error;
-        }
-      });
+        },
+        options.sessionId,
+      );
     },
   });
 }

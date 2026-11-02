@@ -1,3 +1,5 @@
+import { ActionReferenceSchema } from '@ixo/ixo-transaction/action-proposals';
+import { parseReference } from '@ixo/action-protocol';
 /**
  * A finished run → its Reply Plan. Built once, when the run finishes, from
  * the turn's own messages (the model's checkpointed history is never
@@ -9,7 +11,9 @@
  *    the typing indicator already says so — a step whose short text is the
  *    whole answer ("Your flight is 9:40." + a memory save) keeps it;
  *  - each step goes through the shaper, which may spill it to an artefact;
- *  - a `create_artifact` call becomes its message, the link, its question.
+ *  - a `create_artifact` call becomes its message, the link, its question;
+ *  - a `send_file` call becomes a file part, where the call stands in the
+ *    turn; a file sent twice is delivered once.
  */
 import {
   AIMessage,
@@ -18,6 +22,8 @@ import {
 } from '@langchain/core/messages';
 import { contentToText } from '../do/transcript';
 import { CREATE_ARTIFACT_TOOL, createArtifactParts } from '../artifacts/tool';
+import { turnCarryOf, turnStart } from '../core/middlewares/turn-boundary';
+import { SEND_FILE_TOOL, sentFile } from '../plugins/sandbox/send-file';
 import { isBlank, shapeStep, type SpillShape } from './shaper';
 import type {
   ArtifactRef,
@@ -38,23 +44,38 @@ export type DraftPart =
 
 const NARRATION_MAX_CHARS = 200;
 
-/** The model steps of the turn that ended the thread, with its tool results. */
+/**
+ * The model steps of the turn that ended the thread, with its tool results.
+ * `toolArtifacts` holds each `ToolMessage.artifact`: what a tool hands the
+ * plan without the model seeing it.
+ */
 export function turnSteps(messages: readonly BaseMessage[]): {
   steps: TurnStep[];
   toolResults: Map<string, string>;
+  toolArtifacts: Map<string, unknown>;
 } {
-  let start = 0;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]?.type === 'human') {
-      start = i + 1;
-      break;
-    }
-  }
+  const opening = turnStart(messages);
+  const start = messages[opening]?.type === 'human' ? opening + 1 : 0;
   const steps: TurnStep[] = [];
   const toolResults = new Map<string, string>();
+  const toolArtifacts = new Map<string, unknown>();
+  // A mid-turn summary condensed the turn's earlier steps away. It carries
+  // their calls; a file already sent among them is still delivered, first.
+  const carried = start > 0 ? turnCarryOf(messages[opening]!) : undefined;
+  for (const [i, call] of (carried ?? []).entries()) {
+    if (call.name !== SEND_FILE_TOOL || call.artifact === undefined) continue;
+    const id = call.id ?? `carried-${i}`;
+    steps.push({
+      text: '',
+      toolCalls: [{ id, name: call.name, args: call.args }],
+    });
+    toolArtifacts.set(id, call.artifact);
+  }
   for (const message of messages.slice(start)) {
     if (ToolMessage.isInstance(message)) {
       toolResults.set(message.tool_call_id, contentToText(message.content));
+      if (message.artifact !== undefined)
+        toolArtifacts.set(message.tool_call_id, message.artifact);
       continue;
     }
     // Extraction-lane attachment text rides as hidden AI messages.
@@ -69,7 +90,7 @@ export function turnSteps(messages: readonly BaseMessage[]): {
       })),
     });
   }
-  return { steps, toolResults };
+  return { steps, toolResults, toolArtifacts };
 }
 
 /** One short paragraph of prose: what a model says before it calls a tool. */
@@ -114,11 +135,13 @@ function pendingContinuation(
 export function draftReplyPlan(input: {
   steps: TurnStep[];
   toolResults: ReadonlyMap<string, string>;
+  toolArtifacts?: ReadonlyMap<string, unknown>;
   continuation?: string | null;
   limits: ChatLimits;
   canSpill: boolean;
 }): DraftPart[] {
   const parts: DraftPart[] = [];
+  const sentPaths = new Set<string>();
   const steps =
     input.steps.length > 0 || !input.continuation
       ? input.steps
@@ -160,11 +183,54 @@ export function draftReplyPlan(input: {
         );
       else parts.push({ kind: 'spill', key: `step-${i}`, spill: shape.spill });
     }
-    for (const call of step.toolCalls)
+    for (const call of step.toolCalls) {
+      if (
+        call.name === 'request_hub_action' ||
+        call.name === 'request_chain_transaction' ||
+        // The Yoma plugin's application and claim cards.
+        call.name === 'yoma_form'
+      ) {
+        try {
+          const result = JSON.parse(input.toolResults.get(call.id) ?? 'null');
+          if (result?.status === 'prepared') {
+            const actionReference = parseReference(result.actionReference);
+            if (
+              typeof result.summary === 'string' &&
+              result.summary === actionReference.title
+            )
+              parts.push({
+                kind: 'hub-action',
+                actionReference,
+                summary: result.summary,
+              });
+          }
+        } catch {
+          // Only a parsed tool result becomes a structured Hub reference.
+        }
+      }
+      if (call.name === 'prepare_action') {
+        try {
+          const result = JSON.parse(input.toolResults.get(call.id) ?? 'null');
+          if (result?.status === 'prepared') {
+            const ref = ActionReferenceSchema.safeParse(result.action);
+            if (ref.success) parts.push({ kind: 'action', action: ref.data });
+          }
+        } catch {
+          /* A malformed result is not an action reference. */
+        }
+      }
       if (call.name === CREATE_ARTIFACT_TOOL)
         parts.push(
           ...createArtifactParts(call.args, input.toolResults.get(call.id)),
         );
+      if (call.name === SEND_FILE_TOOL) {
+        const sent = sentFile(input.toolArtifacts?.get(call.id));
+        if (sent && !sentPaths.has(sent.path)) {
+          sentPaths.add(sent.path);
+          parts.push({ kind: 'file', file: sent.file });
+        }
+      }
+    }
   });
   return parts;
 }
@@ -178,9 +244,10 @@ type PlanPart = ReplyContent & { framing?: boolean };
 /**
  * Over the run's cap: merge the shortest neighbouring messages while the
  * result stays within `bubbleMax`, then drop spill framing, keeping the
- * reply's last part for as long as possible. Order is kept, and text that
- * exists nowhere else is never dropped: a reply with several documents, or a
- * long one without artefact storage, can stay over the cap.
+ * reply's last part for as long as possible. Order is kept, and neither a
+ * file nor text that exists nowhere else is ever dropped: a reply with
+ * several documents or files, or a long one without artefact storage, can
+ * stay over the cap.
  */
 function capParts(parts: PlanPart[], limits: ChatLimits): ReplyContent[] {
   const out = [...parts];
@@ -221,7 +288,55 @@ function capParts(parts: PlanPart[], limits: ChatLimits): ReplyContent[] {
     (part): ReplyContent =>
       part.kind === 'text'
         ? { kind: 'text', text: part.text }
-        : { kind: 'artifact', artifact: part.artifact },
+        : part.kind === 'artifact'
+          ? { kind: 'artifact', artifact: part.artifact }
+          : part.kind === 'file'
+            ? { kind: 'file', file: part.file }
+            : part.kind === 'action'
+              ? { kind: 'action', action: part.action }
+              : {
+                  kind: 'hub-action',
+                  actionReference: part.actionReference,
+                  summary: part.summary,
+                },
+  );
+}
+
+/** Follows the files of a run that failed after sending them. */
+export const FAILED_RUN_NOTICE =
+  'What I attached above is complete, but something went wrong before I could finish this reply. Send your message again if you need more.';
+
+/**
+ * The reply of a chat run that failed after it sent files: those files, then
+ * a line saying the rest is missing. `calls` are this run's tool call ids,
+ * because the messages come from the checkpoint and may end in an earlier
+ * turn when the run failed before it wrote anything. Null when it sent none.
+ */
+export async function failedRunFiles(
+  messages: readonly BaseMessage[],
+  calls: ReadonlySet<string>,
+  limits: ChatLimits,
+): Promise<ReplyPlan | null> {
+  const { steps, toolResults, toolArtifacts } = turnSteps(messages);
+  const files = draftReplyPlan({
+    steps: steps.map((step) => ({
+      text: '',
+      toolCalls: step.toolCalls.filter(
+        (call) => call.name === SEND_FILE_TOOL && calls.has(call.id),
+      ),
+    })),
+    toolResults,
+    toolArtifacts,
+    limits,
+    canSpill: false,
+  });
+  if (files.length === 0) return null;
+  return materializeReplyPlan(
+    [...files, { kind: 'text', text: FAILED_RUN_NOTICE }],
+    {
+      limits,
+      createSpill: () => Promise.reject(new Error('nothing here spills')),
+    },
   );
 }
 

@@ -1,0 +1,23 @@
+{
+  "metadata": {
+    "description": "Liquid staking token for pool \"zero\"",
+    "denom_units": [
+      {
+        "denom": "uzero",
+        "exponent": 0,
+        "aliases": []
+      },
+      {
+        "denom": "zero",
+        "exponent": 6,
+        "aliases": []
+      }
+    ],
+    "base": "uzero",
+    "display": "zero",
+    "name": "liquidstake LST (zero)",
+    "symbol": "ZERO",
+    "uri": "",
+    "uri_hash": ""
+  }
+}

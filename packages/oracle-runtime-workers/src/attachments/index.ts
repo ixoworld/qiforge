@@ -1,3 +1,22 @@
+export {
+  CHANNEL_MAX_FILE_BYTES,
+  CHANNEL_REF_PREFIX,
+  channelArchiveName,
+  channelAttachmentRef,
+  ChannelFileUnavailableError,
+  channelMediaOrigins,
+  createChannelMediaSource,
+  downloadChannelFile,
+  isChannelAttachmentRef,
+  isGatewayMediaUrl,
+  type ChannelMediaLink,
+  type ChannelMediaSource,
+} from './channel';
+export {
+  CHANNEL_LINK_DEFAULT_TTL_MS,
+  ChannelAttachmentLinkStore,
+  channelLinkExpiry,
+} from './channel-links';
 export { classifyAttachment, type AttachmentKind } from './classify';
 export {
   buildUserMessageContent,
@@ -20,6 +39,7 @@ export {
 export {
   aiProcess,
   aiProcessFromUrl,
+  capText,
   extractText,
   formatContent,
   getAudioFormat,
@@ -39,6 +59,8 @@ export {
   type FileCategory,
 } from './magic';
 export {
+  attachmentMetaFor,
+  nativeAttachmentNote,
   prepareAttachments,
   SANDBOX_TRUNCATE_LIMIT,
   type AttachmentPipelineDeps,
@@ -46,6 +68,11 @@ export {
   type PrepareAttachmentsParams,
   type PreparedAttachments,
 } from './pipeline';
+export {
+  extractPdfText,
+  MIN_CHARS_PER_PAGE,
+  type PdfTextResult,
+} from './pdf-text';
 export { routeAttachment, type AttachmentStrategy } from './route';
 export {
   buildAnalysisMarkdown,
@@ -54,8 +81,11 @@ export {
   type SandboxUploadResult,
 } from './sandbox-archive';
 export {
+  NOTE_FILENAME_MAX,
+  NOTE_MIMETYPE_MAX,
   SANDBOX_OUTPUT_PREFIX,
   sanitizeAttachmentFilename,
+  sanitizeNoteField,
   sanitizeSandboxPath,
 } from './sanitize';
 export {
@@ -81,14 +111,22 @@ export {
   type AttachmentRetentionResult,
 } from './retention';
 export {
+  createAttachmentViewSurface,
+  extractAttachmentText,
+  findPersistedAttachmentMeta,
   viewAttachment,
+  type AttachmentMessageStore,
+  type AttachmentTextExtraction,
   type AttachmentView,
   type AttachmentViewSurface,
   type ViewAttachmentDeps,
 } from './view';
 export {
   AttachmentTextCacheStore,
+  IngestTextLru,
   LOCAL_TEXT_EXTRACTION,
   VIEW_CACHE_MAX_CHARS,
   type AttachmentTextCache,
+  type IngestedText,
+  type IngestTextScope,
 } from './view-cache';

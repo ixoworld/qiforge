@@ -10,7 +10,12 @@ import {
   FRONTEND_OUTCOME_UNKNOWN_MESSAGE,
 } from '@ixo/common/ai/frontend-bridge';
 import { describe, expect, it } from 'vitest';
-import { HANDSHAKE_DEADLINE_MS, MAX_PAYLOAD_BYTES } from './realtime-endpoint';
+import {
+  HANDSHAKE_DEADLINE_MS,
+  MAX_BACKGROUND_EXECUTOR_TOOLS,
+  MAX_PAYLOAD_BYTES,
+  SOCKET_ATTACHMENT_BUDGET_BYTES,
+} from './realtime-endpoint';
 import {
   TEST_BARE_DELEGATION,
   TEST_BROKEN_SESSION,
@@ -156,12 +161,17 @@ async function roundTrip(c: Client): Promise<void> {
 
 async function connect(
   s: DurableObjectStub<RealtimeTestDO>,
-  opts: Parameters<typeof open>[1] = {},
+  opts: Parameters<typeof open>[1] & {
+    /** Extra CONNECT auth fields (the executor kind and its tools). */
+    auth?: Record<string, unknown>;
+  } = {},
 ): Promise<Client> {
   const { client } = await open(s, opts);
   if (!client) throw new Error('upgrade refused');
   await client.next((f) => f.startsWith('0{'), 'OPEN');
-  client.ws.send(`40${JSON.stringify({ invocation: TEST_GOOD_TOKEN })}`);
+  client.ws.send(
+    `40${JSON.stringify({ invocation: TEST_GOOD_TOKEN, ...opts.auth })}`,
+  );
   await client.next((f) => f.startsWith('40'), 'CONNECT ack');
   await client.next(isEvent('connected'), 'connected');
   return client;
@@ -193,6 +203,8 @@ describe('RealtimeEndpoint over real WebSockets', () => {
     expect(connected.payload).toMatchObject({
       message: 'Connected successfully',
       sessionId: 's1',
+      // The executor kind the runtime accepted (no declaration: a tab).
+      executor: 'foreground',
     });
 
     c.ws.send('42["ping"]');
@@ -635,22 +647,109 @@ describe('frontend bridge: one invocation, one socket, one result', () => {
     c.ws.close(1000, 'bye');
   });
 
-  it('refuses a call no socket can execute instead of waiting for a deadline', async () => {
+  it('parks a call no socket can execute, and fails it as never sent at the park deadline', async () => {
     const s = stub('no-executor');
-    expect(
-      await s.callAgAction({
-        sessionId: 'nobody-here',
-        toolCallId: 'ag_x',
+    await s.configure({ parkTimeoutMs: 1500 });
+    const parked = s.callAgAction({
+      sessionId: 'nobody-here',
+      toolCallId: 'ag_x',
+      toolName: 'render_table',
+      args: { secret: 'PRIVATE-ARG' },
+      timeoutMs: 5000,
+    });
+    // Waiting, not failed: the call is pending and reported as parked.
+    const before = Date.now();
+    let status = await s.status();
+    for (let i = 0; i < 20 && status.pendingCalls.length === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 10));
+      status = await s.status();
+    }
+    expect(status.parkedCalls).toBe(1);
+    expect(status.pendingCalls).toMatchObject([
+      {
+        kind: 'agui',
         toolName: 'render_table',
+        sessionId: 'nobody-here',
+        parked: true,
+      },
+    ]);
+    expect(status.pendingCalls[0]).not.toHaveProperty('executorSid');
+    const waiting = await s.parkedFor('nobody-here');
+    expect(waiting).toEqual({
+      kind: 'agui',
+      toolName: 'render_table',
+      since: expect.stringMatching(/^\d{4}-\d\d-\d\dT/),
+    });
+    expect(Date.parse(waiting!.since)).toBeLessThanOrEqual(Date.now());
+    expect(await s.parkedFor('elsewhere')).toBeNull();
+    // The park deadline passes: a definite failure, never an unknown
+    // outcome, that tells the model to ask the user rather than retry.
+    expect(await parked).toEqual({
+      ok: false,
+      errorName: 'FrontendCallNotSentError',
+      error:
+        'AG-UI action render_table was not sent: no browser joined session nobody-here within 1.5 s. Ask the user to open this chat; do not retry on your own.',
+    });
+    expect(Date.now() - before).toBeGreaterThanOrEqual(1000);
+    const after = await s.status();
+    expect(after.pendingCalls).toEqual([]);
+    expect(after.parkedCalls).toBe(0);
+    expect(await s.parkedFor('nobody-here')).toBeNull();
+    expect((await s.loggedWarnings()).join('\n')).not.toContain('PRIVATE');
+
+    // Until a socket of the session passes CONNECT, its next calls fail at
+    // once instead of waiting another park deadline; other sessions park.
+    const started = Date.now();
+    expect(
+      await s.callBrowserTool({
+        sessionId: 'nobody-here',
+        toolCallId: 'tc-fast',
+        toolName: 'read_topic',
         args: {},
         timeoutMs: 5000,
       }),
     ).toEqual({
       ok: false,
+      errorName: 'FrontendCallNotSentError',
       error:
-        'AG-UI action render_table was not sent: no browser is connected to session nobody-here',
+        'Browser tool read_topic was not sent: no browser has joined session nobody-here since an earlier call waited 1.5 s for one. Ask the user to open this chat; do not retry on your own.',
     });
+    expect(Date.now() - started).toBeLessThan(1000);
     expect((await s.status()).pendingCalls).toEqual([]);
+    const elsewhere = s.callBrowserTool({
+      sessionId: 'elsewhere',
+      toolCallId: 'tc-elsewhere',
+      toolName: 'read_topic',
+      args: {},
+      timeoutMs: 5000,
+    });
+    let pendingElsewhere = (await s.status()).pendingCalls;
+    for (let i = 0; i < 20 && pendingElsewhere.length === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 10));
+      pendingElsewhere = (await s.status()).pendingCalls;
+    }
+    expect(pendingElsewhere).toMatchObject([
+      { sessionId: 'elsewhere', parked: true },
+    ]);
+    // A tab of the session connects: its calls are sent again.
+    const tab = await connect(s, { sessionId: 'nobody-here' });
+    const again = s.callBrowserTool({
+      sessionId: 'nobody-here',
+      toolCallId: 'tc-again',
+      toolName: 'read_topic',
+      args: {},
+      timeoutMs: 5000,
+    });
+    const againId = invocationOf(
+      event(await tab.next(isEvent('browser_tool_call'))).payload,
+    );
+    answer(tab, 'tool_result', { toolCallId: againId, result: 'read' });
+    expect(await again).toEqual({ ok: true, value: 'read' });
+    expect(await elsewhere).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('no browser joined session elsewhere'),
+    });
+    tab.ws.close(1000, 'bye');
   });
 
   it('accepts a result only from the executing socket, without a session override, and only once', async () => {
@@ -810,6 +909,7 @@ describe('frontend bridge: one invocation, one socket, one result', () => {
       ),
     ).toEqual({
       ok: false,
+      errorName: 'FrontendCallNotSentError',
       error: 'Browser tool mutate_topic was not sent: the turn was aborted',
     });
     const after = await s.callBrowserToolAborted(
@@ -1070,5 +1170,380 @@ describe('RealtimeEndpoint heartbeat (alarm-driven, hibernation-safe)', () => {
       { sessionId: 's-drain', userDid: TEST_USER_DID },
       { sessionId: 's-other', userDid: TEST_USER_DID },
     ]);
+  });
+});
+
+describe('frontend bridge: parked calls and executor kinds', () => {
+  const browserCall = (
+    sessionId: string,
+    toolCallId: string,
+    toolName: string,
+  ) => ({
+    sessionId,
+    toolCallId,
+    toolName,
+    args: {},
+    timeoutMs: 5000,
+  });
+
+  /** The status once `n` calls are pending (an RPC call is registered asynchronously). */
+  async function pendingCount(s: DurableObjectStub<RealtimeTestDO>, n: number) {
+    for (let i = 0; i < 50; i += 1) {
+      const status = await s.status();
+      if (status.pendingCalls.length >= n) return status;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error(`fewer than ${n} pending calls`);
+  }
+
+  it('sends parked calls to a foreground tab that connects, in order, after connected; the SSE stream sees a browser call once it is sent', async () => {
+    const s = stub('park-fifo');
+    await s.watchSse('fifo');
+    const first = s.callBrowserTool(browserCall('fifo', 'tc-1', 'read_topic'));
+    await pendingCount(s, 1);
+    const second = s.callAgAction({
+      ...browserCall('fifo', 'ag_2', 'render_table'),
+    });
+    await pendingCount(s, 2);
+    const third = s.callBrowserTool(browserCall('fifo', 'tc-3', 'open_url'));
+    const parked = await pendingCount(s, 3);
+    expect(parked.parkedCalls).toBe(3);
+    // Parked, nothing went out, not even the SSE mirror.
+    expect(await s.sseEvents()).toEqual([]);
+    expect(await s.parkedFor('fifo')).toMatchObject({
+      kind: 'browser',
+      toolName: 'read_topic',
+    });
+
+    const tab = await connect(s, { sessionId: 'fifo' });
+    await tab.next(
+      () =>
+        tab.frames.filter(
+          (f) => isEvent('browser_tool_call')(f) || isEvent('action_call')(f),
+        ).length === 3,
+      'three dispatched calls',
+    );
+    const connectedAt = tab.frames.findIndex(isEvent('connected'));
+    const calls = tab.frames
+      .map((f, i) => ({ f, i }))
+      .filter(
+        ({ f }) => isEvent('browser_tool_call')(f) || isEvent('action_call')(f),
+      );
+    expect(calls.every(({ i }) => i > connectedAt)).toBe(true);
+    const ids = calls.map(({ f }) => invocationOf(event(f).payload));
+    expect(ids.map((id) => id.split(':')[0])).toEqual(['tc-1', 'ag_2', 'tc-3']);
+    expect(await s.parkedFor('fifo')).toBeNull();
+    expect((await s.status()).parkedCalls).toBe(0);
+    expect(await s.sseEvents()).toEqual([
+      { eventName: 'browser_tool_call', toolCallId: ids[0] },
+      { eventName: 'browser_tool_call', toolCallId: ids[2] },
+    ]);
+
+    answer(tab, 'tool_result', { toolCallId: ids[0], result: 'one' });
+    answer(tab, 'action_call_result', {
+      toolCallId: ids[1],
+      result: { success: true },
+    });
+    answer(tab, 'tool_result', { toolCallId: ids[2], result: 'three' });
+    expect(await first).toEqual({ ok: true, value: 'one' });
+    expect(await second).toEqual({ ok: true, value: { success: true } });
+    expect(await third).toEqual({ ok: true, value: 'three' });
+    tab.ws.close(1000, 'bye');
+  });
+
+  it('reports a call dispatched when it is sent, once: at once to a connected tab, later for a parked one', async () => {
+    const s = stub('park-report');
+    const parked = s.callBrowserToolReporting(
+      browserCall('report', 'tc-parked', 'getEntityProfileDomain'),
+    );
+    await pendingCount(s, 1);
+    // Parked: not sent, so not reported.
+    expect(await s.dispatched()).toEqual([]);
+    const tab = await connect(s, { sessionId: 'report' });
+    await tab.next(isEvent('browser_tool_call'), 'the parked call');
+    expect(await s.dispatched()).toEqual(['tc-parked']);
+    const sentAtOnce = s.callBrowserToolReporting(
+      browserCall('report', 'tc-direct', 'getResources'),
+    );
+    await tab.next(
+      () => tab.frames.filter(isEvent('browser_tool_call')).length === 2,
+      'the direct call',
+    );
+    expect(await s.dispatched()).toEqual(['tc-parked', 'tc-direct']);
+    const ids = tab.frames
+      .filter(isEvent('browser_tool_call'))
+      .map((f) => invocationOf(event(f).payload));
+    answer(tab, 'tool_result', { toolCallId: ids[0], result: 'one' });
+    answer(tab, 'tool_result', { toolCallId: ids[1], result: 'two' });
+    expect(await parked).toEqual({ ok: true, value: 'one' });
+    expect(await sentAtOnce).toEqual({ ok: true, value: 'two' });
+    expect(await s.dispatched()).toEqual(['tc-parked', 'tc-direct']);
+    tab.ws.close(1000, 'bye');
+  });
+
+  it('a background executor takes only the browser tools it declared, gets no fan-out, and leaves the rest parked for a tab', async () => {
+    const s = stub('park-background');
+    const read = s.callBrowserTool(browserCall('bg', 'tc-read', 'read_vault'));
+    await pendingCount(s, 1);
+    const write = s.callBrowserTool(
+      browserCall('bg', 'tc-write', 'mutate_topic'),
+    );
+    await pendingCount(s, 2);
+    // An AG-UI action of a declared name is still not a background call.
+    const action = s.callAgAction(browserCall('bg', 'ag_bg', 'find_entity'));
+    await pendingCount(s, 3);
+
+    const background = await connect(s, {
+      sessionId: 'bg',
+      auth: { executor: 'background', tools: ['read_vault', 'find_entity'] },
+    });
+    // The runtime echoes the executor kind it accepted.
+    expect(
+      event(background.frames.find(isEvent('connected'))!).payload,
+    ).toMatchObject({ sessionId: 'bg', executor: 'background' });
+    // What can be sent right now: the declared browser tools only. Wallet
+    // signing (an AG-UI action) checks this and refuses instead of parking.
+    expect(await s.hasClient('bg')).toBe(true);
+    expect(await s.canDispatch('bg', 'browser', 'read_vault')).toBe(true);
+    expect(await s.canDispatch('bg', 'browser', 'mutate_topic')).toBe(false);
+    expect(await s.canDispatch('bg', 'agui', 'sign_transaction')).toBe(false);
+    expect(await s.canDispatch('bg', 'agui', 'find_entity')).toBe(false);
+    const readId = invocationOf(
+      event(await background.next(isEvent('browser_tool_call'))).payload,
+    );
+    expect(readId).toMatch(/^tc-read:/);
+    expect(await s.parkedFor('bg')).toMatchObject({ toolName: 'mutate_topic' });
+    // It executes calls; it does not render the chat.
+    await s.emitForSession('bg', 'tool_call', {
+      requestId: 'r',
+      toolName: 'x',
+    });
+    await roundTrip(background);
+    expect(background.frames.some(isEnvelope('tool_call'))).toBe(false);
+    expect(background.frames.some(isEvent('action_call'))).toBe(false);
+    expect((await s.status()).parkedCalls).toBe(2);
+    expect(
+      (await s.status()).socketDetails.find((d) => d.sessionId === 'bg'),
+    ).toMatchObject({ executor: 'background', tools: 2 });
+    answer(background, 'tool_result', { toolCallId: readId, result: 'vault' });
+    expect(await read).toEqual({ ok: true, value: 'vault' });
+
+    const tab = await connect(s, { sessionId: 'bg' });
+    const writeId = invocationOf(
+      event(await tab.next(isEvent('browser_tool_call'))).payload,
+    );
+    expect(writeId).toMatch(/^tc-write:/);
+    expect(await s.canDispatch('bg', 'agui', 'sign_transaction')).toBe(true);
+    expect(await s.canDispatch('bg', 'browser', 'mutate_topic')).toBe(true);
+    expect(await s.canDispatch('other', 'browser', 'read_vault')).toBe(false);
+    const actionId = invocationOf(
+      event(await tab.next(isEvent('action_call'))).payload,
+    );
+    answer(tab, 'action_call_result', {
+      toolCallId: actionId,
+      result: { success: true },
+    });
+    expect(await action).toEqual({ ok: true, value: { success: true } });
+    // With a tab connected, the tab runs every tool, declared ones too.
+    const again = s.callBrowserTool(
+      browserCall('bg', 'tc-again', 'read_vault'),
+    );
+    await tab.next(
+      () => tab.frames.filter(isEvent('browser_tool_call')).length === 2,
+      'second call on the tab',
+    );
+    await roundTrip(background);
+    expect(background.frames.filter(isEvent('browser_tool_call'))).toHaveLength(
+      1,
+    );
+    const againId = invocationOf(
+      event(tab.frames.filter(isEvent('browser_tool_call'))[1]!).payload,
+    );
+    answer(tab, 'tool_result', { toolCallId: writeId, result: 'written' });
+    answer(tab, 'tool_result', { toolCallId: againId, result: 'tab' });
+    expect(await write).toEqual({ ok: true, value: 'written' });
+    expect(await again).toEqual({ ok: true, value: 'tab' });
+    background.ws.close(1000, 'bye');
+    tab.ws.close(1000, 'bye');
+  });
+
+  it('ends a parked call whose turn aborts as not sent, and never sends it afterwards', async () => {
+    const s = stub('park-abort');
+    expect(
+      await s.callBrowserToolAborted(
+        browserCall('pa', 'tc-parked-abort', 'mutate_topic'),
+        { afterMs: 50 },
+      ),
+    ).toEqual({
+      ok: false,
+      errorName: 'FrontendCallNotSentError',
+      error: 'Browser tool mutate_topic was not sent: the turn was aborted',
+    });
+    expect(await s.parkedFor('pa')).toBeNull();
+    const tab = await connect(s, { sessionId: 'pa' });
+    await roundTrip(tab);
+    expect(tab.frames.some(isEvent('browser_tool_call'))).toBe(false);
+    expect((await s.status()).pendingCalls).toEqual([]);
+    tab.ws.close(1000, 'bye');
+  });
+
+  it('counts only an exact background declaration, and keeps valid, distinct, bounded tool names', async () => {
+    const s = stub('executor-validation');
+    // Anything but exactly "background" is a foreground tab; tools are ignored.
+    const loose = await connect(s, {
+      sessionId: 'v1',
+      auth: { executor: 'Background', tools: ['read_vault'] },
+    });
+    const noKind = await connect(s, {
+      sessionId: 'v2',
+      auth: { tools: ['read_vault'] },
+    });
+    const many = Array.from({ length: 30 }, (_, i) => `tool_${i}`);
+    const declared = await connect(s, {
+      sessionId: 'v3',
+      auth: {
+        executor: 'background',
+        tools: [
+          'read_vault',
+          'read_vault',
+          'bad name',
+          'x'.repeat(65),
+          42,
+          ...many,
+        ],
+      },
+    });
+    const details = (await s.status()).socketDetails;
+    const bySession = (id: string) => details.find((d) => d.sessionId === id);
+    expect(bySession('v1')).toMatchObject({ executor: 'foreground' });
+    expect(bySession('v1')).not.toHaveProperty('tools');
+    expect(bySession('v2')).toMatchObject({ executor: 'foreground' });
+    expect(bySession('v3')).toMatchObject({
+      executor: 'background',
+      tools: MAX_BACKGROUND_EXECUTOR_TOOLS,
+    });
+    expect(
+      (await s.loggedWarnings()).filter((w) =>
+        w.includes('background executor'),
+      ),
+    ).toEqual([
+      expect.stringContaining(
+        `kept ${MAX_BACKGROUND_EXECUTOR_TOOLS} tool name(s), dropped 3 invalid, 7 over the cap of ${MAX_BACKGROUND_EXECUTOR_TOOLS}, 0 over the attachment budget`,
+      ),
+    ]);
+    // The first valid names are the ones kept.
+    const kept = s.callBrowserTool(browserCall('v3', 'tc-kept', 'tool_22'));
+    const keptId = invocationOf(
+      event(await declared.next(isEvent('browser_tool_call'))).payload,
+    );
+    answer(declared, 'tool_result', { toolCallId: keptId, result: 'ok' });
+    expect(await kept).toEqual({ ok: true, value: 'ok' });
+    for (const c of [loose, noKind, declared]) c.ws.close(1000, 'bye');
+  });
+
+  it('reads at most four times the cap of declared tool names, counting the rest as over the cap unread', async () => {
+    const s = stub('executor-tools-bound');
+    const valid = ['read_vault', 'find_entity', 'get_ontology', 'a', 'b'];
+    const c = await connect(s, {
+      sessionId: 'bound-tools',
+      auth: {
+        executor: 'background',
+        tools: [...valid, ...Array.from({ length: 995 }, () => 'bad name')],
+      },
+    });
+    expect(
+      (await s.status()).socketDetails.find(
+        (d) => d.sessionId === 'bound-tools',
+      ),
+    ).toMatchObject({ executor: 'background', tools: valid.length });
+    const examined = MAX_BACKGROUND_EXECUTOR_TOOLS * 4;
+    expect(
+      (await s.loggedWarnings()).filter((w) =>
+        w.includes('background executor'),
+      ),
+    ).toEqual([
+      expect.stringContaining(
+        `kept ${valid.length} tool name(s), dropped ${examined - valid.length} invalid, ${1000 - examined} over the cap of ${MAX_BACKGROUND_EXECUTOR_TOOLS}, 0 over the attachment budget`,
+      ),
+    ]);
+    c.ws.close(1000, 'bye');
+  });
+
+  it('keeps a worst-case background attachment within the Workers 2 KiB limit, trimming tools only when the identifiers leave no room', async () => {
+    const s = stub('attachment-budget');
+    const names = Array.from(
+      { length: MAX_BACKGROUND_EXECUTOR_TOOLS },
+      (_, i) => `${String(i).padStart(2, '0')}${'n'.repeat(62)}`,
+    );
+    // The local runtime does not enforce the 2,048-byte limit (only the
+    // deployed one does), so the attachments are measured: their JSON
+    // bounds the structured clone the limit applies to.
+    expect(SOCKET_ATTACHMENT_BUDGET_BYTES).toBeLessThanOrEqual(2_048 - 48);
+    const full = await connect(s, {
+      sessionId: crypto.randomUUID(),
+      auth: { executor: 'background', tools: names },
+    });
+    // The longest a session id can be: the socket's `session:<id>` tag is
+    // capped at 256 characters by `acceptWebSocket`.
+    const longSession = 's'.repeat(248);
+    const trimmed = await connect(s, {
+      sessionId: longSession,
+      auth: { executor: 'background', tools: names },
+    });
+    // Activity and a heartbeat round write the widest fields too.
+    await roundTrip(full);
+    await roundTrip(trimmed);
+    expect(await s.pingTick()).not.toBeNull();
+    await full.next((f) => f === '2', 'engine ping');
+    await trimmed.next((f) => f === '2', 'engine ping');
+    const sizes = await s.attachmentSizes();
+    expect(sizes).toHaveLength(2);
+    for (const size of sizes)
+      expect(size).toBeLessThanOrEqual(SOCKET_ATTACHMENT_BUDGET_BYTES);
+    const details = (await s.status()).socketDetails;
+    expect(details).toHaveLength(2);
+    const fullTools = details.find((d) => d.sessionId !== longSession)?.tools;
+    const trimmedTools = details.find(
+      (d) => d.sessionId === longSession,
+    )?.tools;
+    expect(fullTools).toBe(MAX_BACKGROUND_EXECUTOR_TOOLS);
+    expect(trimmedTools).toBeGreaterThan(0);
+    expect(trimmedTools).toBeLessThan(MAX_BACKGROUND_EXECUTOR_TOOLS);
+    expect(
+      (await s.loggedWarnings()).filter((w) => w.includes('attachment budget')),
+    ).toEqual([
+      expect.stringContaining(
+        `${MAX_BACKGROUND_EXECUTOR_TOOLS - (trimmedTools ?? 0)} over the attachment budget`,
+      ),
+    ]);
+    full.ws.close(1000, 'bye');
+    trimmed.ws.close(1000, 'bye');
+  });
+
+  it('drains a session when its last foreground tab goes, whatever background executors remain', async () => {
+    const s = stub('drain-background');
+    const background = await connect(s, {
+      sessionId: 'dbg',
+      auth: { executor: 'background', tools: ['read_vault'] },
+    });
+    const tab = await connect(s, { sessionId: 'dbg' });
+    background.ws.send('41');
+    await background.closed;
+    await roundTrip(tab);
+    expect(await s.drainedSessions()).toEqual([]);
+    const second = await connect(s, {
+      sessionId: 'dbg',
+      auth: { executor: 'background', tools: ['read_vault'] },
+    });
+    tab.ws.send('41');
+    await tab.closed;
+    await roundTrip(second);
+    expect(await s.drainedSessions()).toEqual([
+      { sessionId: 'dbg', userDid: TEST_USER_DID },
+    ]);
+    expect(await s.hasClient('dbg')).toBe(true);
+    second.ws.send('41');
+    await second.closed;
+    expect(await s.drainedSessions()).toHaveLength(1);
   });
 });

@@ -65,7 +65,13 @@ const PORTAL_TAB: FrontendExecutor = {
  * socket, and the test answers it the way a socket's `action_call_result`
  * does.
  */
-function fakeBridge(opts: { connected?: boolean } = {}) {
+function fakeBridge(
+  opts: {
+    connected?: boolean;
+    /** Only a background executor is connected: it never runs an AG-UI action. */
+    backgroundOnly?: boolean;
+  } = {},
+) {
   const registry = new FrontendCallRegistry();
   const calls: FrontendCallParams[] = [];
   const surface: FrontendCallSurface = {
@@ -89,6 +95,11 @@ function fakeBridge(opts: { connected?: boolean } = {}) {
       return pending;
     },
     hasClient: (sessionId) => (opts.connected ?? true) && sessionId === SESSION,
+    canDispatch: (sessionId, kind) =>
+      (opts.connected ?? true) &&
+      sessionId === SESSION &&
+      (kind === 'browser' || !opts.backgroundOnly),
+    parkedFor: () => null,
   };
   /** Deliver `action_call_result` for the latest call from the socket `from`. */
   const answer = (
@@ -352,6 +363,19 @@ describe('sign_ixo_transaction: refused before dispatch', () => {
       error: expect.stringMatching(/No Portal browser is connected/),
     });
     expect(offline.calls).toEqual([]);
+  });
+
+  it('is unavailable at once when only a background executor of the session is connected: nothing is sent, nothing parks', async () => {
+    const sign = toolNamed(toolsFor(), 'sign_ixo_transaction');
+    const background = fakeBridge({ backgroundOnly: true });
+    expect(background.surface.hasClient(SESSION)).toBe(true);
+    await expect(
+      sign.handler(retireDraft(), contextWith(background.surface)),
+    ).resolves.toEqual({
+      status: 'unavailable',
+      error: expect.stringMatching(/No Portal browser is connected/),
+    });
+    expect(background.calls).toEqual([]);
   });
 });
 

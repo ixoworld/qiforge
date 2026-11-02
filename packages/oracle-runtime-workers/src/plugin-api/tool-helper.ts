@@ -31,6 +31,8 @@ export interface ToolHelperOptions {
   effect?: PluginTool['effect'];
   /** Same arguments again is a new action (a UI step); see `PluginTool.repeatable`. */
   repeatable?: PluginTool['repeatable'];
+  /** `'frontend'` for a tool that acts in the user's browser; see `PluginTool.surface`. */
+  surface?: PluginTool['surface'];
   /**
    * Billing gate marker, kept for source compatibility with the Node
    * runtime's plugin contract. The Workers runtime has no commerce lane, so
@@ -72,6 +74,7 @@ export function tool(
     billing,
     effect,
     repeatable,
+    surface,
   } = options;
   if (!name || typeof name !== 'string') {
     throw new TypeError(
@@ -109,6 +112,9 @@ export function tool(
   }
   if (repeatable !== undefined) {
     pluginTool.repeatable = repeatable;
+  }
+  if (surface !== undefined) {
+    pluginTool.surface = surface;
   }
   return pluginTool;
 }

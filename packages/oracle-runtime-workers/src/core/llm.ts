@@ -18,6 +18,7 @@ import {
 } from './env';
 import { fetchOpenRouterPrices } from './openrouter-pricing';
 import type { LlmAdapter } from './runtime-context';
+import { stringify } from '../sqlite/serialization';
 import { NOOP_LOGGER } from './utils';
 
 // ── Catalog ─────────────────────────────────────────────────────────────────
@@ -1014,6 +1015,80 @@ export interface LangsmithTracingDecision {
   callbacks?: [LangChainTracer];
 }
 
+/** The signature of a signed storage link, whatever carries the link. */
+const SIGNED_LINK_SIGNATURE = /(X-Amz-Signature=)[0-9a-f]+/gi;
+
+/** What `SIGNED_LINK_SIGNATURE` needs to match somewhere: the marker and one hex digit. */
+const SIGNED_LINK_MARKER = /X-Amz-Signature=[0-9a-f]/i;
+
+/**
+ * Whether `values` needs the full pass of `redactSignedLinks`: some string
+ * its JSON would carry (a value or a key, through `toJSON` like
+ * `JSON.stringify`) holds a signature, or the walk cannot tell (a BigInt, a
+ * getter or `toJSON` that throws: the full pass decides what is sent).
+ * JSON escaping never touches the marker's characters, so the marker is in
+ * the JSON exactly when it is in one of those strings. Walks without
+ * serializing: every run of a traced turn carries the whole history, and a
+ * stringify per run was a copy of it per run.
+ */
+function needsSignedLinkPass(values: unknown): boolean {
+  const pending: unknown[] = [values];
+  const seen = new Set<object>();
+  try {
+    while (pending.length > 0) {
+      const value = pending.pop();
+      if (typeof value === 'string') {
+        if (SIGNED_LINK_MARKER.test(value)) return true;
+        continue;
+      }
+      if (typeof value === 'bigint') return true;
+      if (value === null || typeof value !== 'object') continue;
+      // A shared object adds no string a first visit did not; a cycle none.
+      if (seen.has(value)) continue;
+      seen.add(value);
+      const toJSON: unknown = Reflect.get(value, 'toJSON');
+      if (typeof toJSON === 'function') {
+        pending.push(toJSON.call(value, ''));
+        continue;
+      }
+      for (const key of Object.keys(value)) {
+        if (SIGNED_LINK_MARKER.test(key)) return true;
+        pending.push(Reflect.get(value, key));
+      }
+    }
+  } catch {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * What a trace may keep of a run's inputs and outputs. A signed link is a
+ * bearer credential, and a trace holds every `ToolMessage.artifact`, so its
+ * signature goes. A value that cannot be read is not sent. A payload with
+ * no signature anywhere is handed back as it is, without serializing it.
+ */
+export function redactSignedLinks(
+  values: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!needsSignedLinkPass(values)) return values;
+  const json = stringify(values);
+  const redacted = json.replace(SIGNED_LINK_SIGNATURE, '$1[redacted]');
+  if (redacted !== json) return JSON.parse(redacted) as Record<string, unknown>;
+  // `stringify` answers with a bare string when it cannot serialize.
+  return json.startsWith('{') ? values : {};
+}
+
+/**
+ * Most memory the client's upload queues may hold (`maxIngestMemoryBytes`,
+ * for the run queue and the batches in flight alike). The default is 1 GB,
+ * in an isolate of 128 MB whose model calls already hold several copies of
+ * their request: past this, LangSmith drops runs (a warning per run) rather
+ * than holding them. A run larger than the cap is still sent when the queue
+ * is empty.
+ */
+export const LANGSMITH_MAX_INGEST_MEMORY_BYTES = 8 * 1024 * 1024;
+
 /**
  * One `langsmith` Client per (apiKey, endpoint) per isolate. Tracer instances
  * are per-turn and cheap; the client owns the batched upload queue, so
@@ -1025,7 +1100,12 @@ function langsmithClientFor(apiKey: string, endpoint?: string): Client {
   const key = `${apiKey}\n${endpoint ?? ''}`;
   let client = langsmithClients.get(key);
   if (!client) {
-    client = new Client({ apiKey, ...(endpoint && { apiUrl: endpoint }) });
+    client = new Client({
+      apiKey,
+      ...(endpoint && { apiUrl: endpoint }),
+      anonymizer: redactSignedLinks,
+      maxIngestMemoryBytes: LANGSMITH_MAX_INGEST_MEMORY_BYTES,
+    });
     langsmithClients.set(key, client);
   }
   return client;

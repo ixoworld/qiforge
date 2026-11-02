@@ -1,0 +1,35 @@
+{
+  "validator": {
+    "operator_address": "ixovaloper1qeex565vg4uu7zwudh9ff2dauxptqf72nf2l44",
+    "consensus_pubkey": {
+      "@type": "/cosmos.crypto.ed25519.PubKey",
+      "key": "1zPvxOdTwNdE5YbpJJlgWMb3X6umRYLIpdbaWG3aaQs="
+    },
+    "jailed": false,
+    "status": "BOND_STATUS_BONDED",
+    "tokens": "820213446500",
+    "delegator_shares": "820213446500.000000000000000000",
+    "description": {
+      "moniker": "Alex (Bambarello) Validator",
+      "identity": "A713F5C07C453731",
+      "website": "https://keybase.io/bambarello",
+      "security_contact": "https://keybase.io/bambarello",
+      "details": "Experienced and Reliable Proof-of-Stake Validator, Dedicated and Diversed Hostin"
+    },
+    "unbonding_height": "0",
+    "unbonding_time": "1970-01-01T00:00:00Z",
+    "commission": {
+      "commission_rates": {
+        "rate": "0.050000000000000000",
+        "max_rate": "0.500000000000000000",
+        "max_change_rate": "0.100000000000000000"
+      },
+      "update_time": "2022-12-08T22:05:13.936436136Z"
+    },
+    "min_self_delegation": "1",
+    "unbonding_on_hold_ref_count": "0",
+    "unbonding_ids": [],
+    "validator_bond_shares": "0.000000000000000000",
+    "liquid_shares": "1031396704.000000000000000000"
+  }
+}

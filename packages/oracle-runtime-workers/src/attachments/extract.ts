@@ -9,7 +9,8 @@
  * Reduced vs Node: there is no local PDF/office parser on workerd
  * (`loadFileFromBuffer` is Node-only), so every non-plain-text document goes
  * straight to the helper model's `file` lane instead of "local parse, then
- * model on failure".
+ * model on failure". (Document ingestion parses PDFs locally first:
+ * `pdf-text.ts`.)
  */
 import { bytesToBase64 } from '../plugins/base64';
 import { validateUrlTarget } from './download';
@@ -36,15 +37,36 @@ export interface ExtractionUsage {
 export interface ExtractionResult {
   content: string;
   usage?: ExtractionUsage;
+  /** True when the provider stopped the reply at its output-token limit. */
+  truncated?: boolean;
 }
 
 export interface ExtractOptions {
   fetchImpl?: typeof fetch;
   signal?: AbortSignal;
   timeoutMs?: number;
+  /**
+   * Raw mode (document ingestion): `extractText` returns the text itself —
+   * no `[Content of …]` header, no `[...truncated]` marker — cut at
+   * `maxChars` with `truncated` reporting whether anything was cut. Unset
+   * keeps the chat-attachment behaviour.
+   */
+  raw?: { maxChars: number };
+  /**
+   * `max_tokens` for the completion, sent when the provider accepts it (a
+   * 400 that names it is retried once without). Set by raw mode.
+   */
+  maxTokens?: number;
 }
 
 export const MAX_TEXT_LENGTH = 50_000;
+/**
+ * Largest scanned or binary file handed to the helper model (inline base64
+ * in the request body); also the Files plugin's `MAX_VISION_BYTES`.
+ */
+export const MAX_MODEL_LANE_BYTES = 10 * 1024 * 1024;
+/** Upper bound on the `max_tokens` raw mode asks for. */
+export const MAX_RAW_COMPLETION_TOKENS = 32_768;
 const AI_PROCESS_TIMEOUT_MS = 120_000;
 const MAX_ERROR_BODY_LENGTH = 1024;
 
@@ -70,6 +92,18 @@ export function truncateText(text: string): string {
   return `${text.slice(0, MAX_TEXT_LENGTH)}\n\n[...truncated]`;
 }
 
+/** Cut `text` to at most `maxChars` UTF-16 units without splitting a surrogate pair. */
+export function capText(
+  text: string,
+  maxChars: number,
+): { text: string; truncated: boolean } {
+  if (text.length <= maxChars) return { text, truncated: false };
+  let end = maxChars;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return { text: text.slice(0, end), truncated: true };
+}
+
 export function getAudioFormat(
   mimetype: string,
 ): 'mp3' | 'wav' | 'ogg' | 'flac' | 'webm' | 'mp4' | 'aac' {
@@ -84,7 +118,10 @@ export function getAudioFormat(
 }
 
 interface ChatCompletion {
-  choices?: Array<{ message?: { content?: string | null } }>;
+  choices?: Array<{
+    message?: { content?: unknown };
+    finish_reason?: string | null;
+  }>;
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;
@@ -92,6 +129,27 @@ interface ChatCompletion {
     cost?: number;
   };
   model?: string;
+}
+
+/** The text of a reply: a string as is, a block array reduced to its text blocks. */
+export function replyText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  const parts: string[] = [];
+  for (const block of content) {
+    if (typeof block === 'string') parts.push(block);
+    else if (
+      typeof block === 'object' &&
+      block !== null &&
+      'type' in block &&
+      block.type === 'text' &&
+      'text' in block &&
+      typeof block.text === 'string'
+    ) {
+      parts.push(block.text);
+    }
+  }
+  return parts.join('');
 }
 
 async function chatCompletion(
@@ -106,9 +164,8 @@ async function chatCompletion(
   if (opts.signal?.aborted) controller.abort();
   const timer = setTimeout(onAbort, opts.timeoutMs ?? AI_PROCESS_TIMEOUT_MS);
   try {
-    const response = await fetchImpl(
-      `${provider.baseURL.replace(/\/+$/, '')}/chat/completions`,
-      {
+    const send = (withMaxTokens: boolean): Promise<Response> =>
+      fetchImpl(`${provider.baseURL.replace(/\/+$/, '')}/chat/completions`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${provider.apiKey}`,
@@ -118,20 +175,34 @@ async function chatCompletion(
         body: JSON.stringify({
           model: provider.model,
           messages: [{ role: 'user', content: contentParts }],
+          ...(withMaxTokens && opts.maxTokens !== undefined
+            ? { max_tokens: opts.maxTokens }
+            : {}),
         }),
         signal: controller.signal,
-      },
-    );
+      });
+    let response = await send(true);
     if (!response.ok) {
       const errorText = await response.text().catch(() => '');
-      throw new Error(
-        `AI processing failed (${response.status}): ${errorText.slice(0, MAX_ERROR_BODY_LENGTH)}`,
-      );
+      // A provider that rejects `max_tokens` gets the request without it.
+      if (
+        opts.maxTokens !== undefined &&
+        response.status === 400 &&
+        /max_(completion_)?tokens/i.test(errorText)
+      ) {
+        response = await send(false);
+      } else {
+        throw new Error(
+          `AI processing failed (${response.status}): ${errorText.slice(0, MAX_ERROR_BODY_LENGTH)}`,
+        );
+      }
     }
     const raw: unknown = await response.json();
     const result = raw as ChatCompletion;
+    const choice = result.choices?.[0];
     return {
-      content: result.choices?.[0]?.message?.content ?? '',
+      content: replyText(choice?.message?.content),
+      ...(choice?.finish_reason === 'length' ? { truncated: true } : {}),
       ...(result.usage
         ? {
             usage: {
@@ -198,6 +269,14 @@ export async function aiProcess(
 }
 
 /**
+ * The `max_tokens` that matches a character cap: about three characters per
+ * token, bounded by what providers commonly accept.
+ */
+export function rawMaxTokens(maxChars: number): number {
+  return Math.min(Math.ceil(maxChars / 3), MAX_RAW_COMPLETION_TOKENS);
+}
+
+/**
  * Text for one downloaded attachment by category — the Node
  * `processDocument` / `processImage` / `processAudio` / `processVideo`
  * dispatch. Plain text never touches the model.
@@ -208,9 +287,14 @@ export async function extractText(
   category: Exclude<FileCategory, 'unsupported'>,
   provider: ExtractionProvider | null,
   opts: ExtractOptions = {},
-): Promise<{ text: string; usage?: ExtractionUsage }> {
+): Promise<{ text: string; usage?: ExtractionUsage; truncated?: boolean }> {
   const safeName = sanitizeAttachmentFilename(attachment.filename);
   if (category === 'document' && isPlainTextType(attachment.mimetype)) {
+    if (opts.raw) {
+      // At most 3 UTF-8 bytes per UTF-16 unit: decoding past this adds nothing.
+      const head = bytes.subarray(0, opts.raw.maxChars * 3 + 4);
+      return capText(new TextDecoder().decode(head), opts.raw.maxChars);
+    }
     const text = new TextDecoder().decode(bytes);
     return { text: formatContent('Content', safeName, truncateText(text)) };
   }
@@ -225,14 +309,24 @@ export async function extractText(
       : category === 'audio'
         ? 'Transcription'
         : 'Description';
-  const { content, usage } = await aiProcess(
+  const { content, usage, truncated } = await aiProcess(
     bytes,
     attachment.mimetype,
     category,
     attachment.filename,
     provider,
-    opts,
+    opts.raw && opts.maxTokens === undefined
+      ? { ...opts, maxTokens: rawMaxTokens(opts.raw.maxChars) }
+      : opts,
   );
+  if (opts.raw) {
+    const capped = capText(content, opts.raw.maxChars);
+    return {
+      text: capped.text,
+      truncated: capped.truncated || truncated === true,
+      ...(usage ? { usage } : {}),
+    };
+  }
   const body = category === 'document' ? truncateText(content) : content;
   return {
     text: formatContent(label, safeName, body),

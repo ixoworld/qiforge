@@ -1,0 +1,26 @@
+{
+  "allowances": [
+    {
+      "granter": "ixo1vafr2dqhgz8frc7gf22njz8y2u0fue4kuetey6",
+      "grantee": "ixo1qqpzcyz8yeyxwjddelakj2qawxy4m0ugfnzr26",
+      "allowance": {
+        "@type": "/cosmos.feegrant.v1beta1.BasicAllowance",
+        "spend_limit": [],
+        "expiration": "2027-09-13T17:05:41.619Z"
+      }
+    },
+    {
+      "granter": "ixo1vafr2dqhgz8frc7gf22njz8y2u0fue4kuetey6",
+      "grantee": "ixo1qqz897jf8dam0evyjxeayv8lgt43xdm3c25s8n",
+      "allowance": {
+        "@type": "/cosmos.feegrant.v1beta1.BasicAllowance",
+        "spend_limit": [],
+        "expiration": "2027-10-21T19:51:56.988Z"
+      }
+    }
+  ],
+  "pagination": {
+    "next_key": "FAALva15H2/FM/OHIY2tdcqP/ffhFGdSNTQXQI6R48hKlTkI5Fcenma2",
+    "total": "15573"
+  }
+}

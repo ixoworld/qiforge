@@ -2,6 +2,7 @@
 import { act, renderHook } from '@testing-library/react';
 import { type PropsWithChildren } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { BACKGROUND_INVOCATION_UNAVAILABLE } from '../../utils/auth-renewal.js';
 import { OraclesProvider, useOraclesContext } from './oracles-context.js';
 import type {
   CreateDelegationFn,
@@ -158,6 +159,49 @@ describe('OraclesProvider credential minting', () => {
     expect(await result.current.getDelegation(ORACLE)).toBe('del-2');
     expect(createDelegation).toHaveBeenCalledTimes(2);
   });
+
+  it('`background` returns the cached delegation only and never mints one', async () => {
+    const createDelegation = vi.fn<CreateDelegationFn>(async () => ({
+      serialized: 'del-1',
+      expiresAt: inAnHour(),
+    }));
+    const { result } = render(createDelegation);
+
+    // Nothing cached: null, no mint (a mint can open the wallet prompt).
+    expect(
+      await result.current.getDelegation(ORACLE, { background: true }),
+    ).toBeNull();
+    expect(createDelegation).not.toHaveBeenCalled();
+
+    expect(await result.current.getDelegation(ORACLE)).toBe('del-1');
+    expect(
+      await result.current.getDelegation(ORACLE, { background: true }),
+    ).toBe('del-1');
+    // `fresh` would need a mint: null, and the cached one stays.
+    expect(
+      await result.current.getDelegation(ORACLE, {
+        background: true,
+        fresh: true,
+      }),
+    ).toBeNull();
+    expect(await result.current.getDelegation(ORACLE)).toBe('del-1');
+    expect(createDelegation).toHaveBeenCalledTimes(1);
+  });
+
+  it('`background` does not return a cached delegation inside the expiry margin', async () => {
+    const createDelegation = vi.fn<CreateDelegationFn>(async () => ({
+      serialized: 'del-1',
+      // Within the cache's 5 min margin: not served from cache.
+      expiresAt: Date.now() + 60 * 1000,
+    }));
+    const { result } = render(createDelegation);
+
+    expect(await result.current.getDelegation(ORACLE)).toBe('del-1');
+    expect(
+      await result.current.getDelegation(ORACLE, { background: true }),
+    ).toBeNull();
+    expect(createDelegation).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('OraclesProvider credential renewal', () => {
@@ -262,6 +306,93 @@ describe('OraclesProvider credential renewal', () => {
     expect(requests).toHaveLength(3);
     expect(createDelegation).toHaveBeenCalledTimes(2);
     expect(createInvocation).toHaveBeenCalledTimes(3);
+  });
+
+  it('a background request renews the invocation only, and never mints a delegation', async () => {
+    const createDelegation = counter('del');
+    const createInvocation = counter('inv');
+    const { result } = render(createDelegation, createInvocation);
+
+    await expect(
+      result.current.authedRequest('https://o/x', 'GET', {}, ORACLE, {
+        background: true,
+      }),
+    ).rejects.toMatchObject({ status: 401 });
+
+    // Sent without a delegation (none was cached), repeated once after a
+    // fresh invocation, then given up: no stage 2.
+    expect(requests).toEqual([
+      { authorization: 'Bearer inv-1', delegation: null },
+      { authorization: 'Bearer inv-2', delegation: null },
+    ]);
+    expect(createDelegation).not.toHaveBeenCalled();
+    // Both mints — on the cold cache and the stage-1 renewal — are asked
+    // without user interaction.
+    expect(createInvocation.mock.calls).toEqual([
+      [ORACLE, { background: true }],
+      [ORACLE, { background: true }],
+    ]);
+  });
+
+  it('a background request whose host cannot mint without the user fails as refused, sends nothing and never asks interactively', async () => {
+    const createDelegation = counter('del');
+    const createInvocation = vi.fn<CreateInvocationFn>(
+      async (_oracleDid, options) =>
+        options?.background
+          ? null
+          : { serialized: 'inv-prompted', expiresAt: inAnHour() },
+    );
+    const { result } = render(createDelegation, createInvocation);
+
+    await expect(
+      result.current.authedRequest('https://o/x', 'GET', {}, ORACLE, {
+        background: true,
+      }),
+    ).rejects.toMatchObject({
+      status: 401,
+      code: BACKGROUND_INVOCATION_UNAVAILABLE,
+    });
+    expect(requests).toEqual([]);
+    expect(createInvocation.mock.calls).toEqual([
+      [ORACLE, { background: true }],
+    ]);
+    expect(createDelegation).not.toHaveBeenCalled();
+
+    // An interactive request does not take the background "could not" for
+    // an answer: it mints (and may prompt) as before.
+    expect(await result.current.getInvocation(ORACLE)).toBe('inv-prompted');
+    expect(createInvocation.mock.calls.at(-1)).toEqual([ORACLE]);
+  });
+
+  it('a background mint goes into the shared cache, and a foreground request uses it', async () => {
+    const createInvocation = counter('inv');
+    const { result } = render(counter('del'), createInvocation);
+    accepted.add('inv-1');
+    await result.current.authedRequest('https://o/x', 'GET', {}, ORACLE, {
+      background: true,
+    });
+    await result.current.authedRequest('https://o/x', 'GET', {}, ORACLE);
+    expect(requests.map((r) => r.authorization)).toEqual([
+      'Bearer inv-1',
+      'Bearer inv-1',
+    ]);
+    expect(createInvocation).toHaveBeenCalledTimes(1);
+  });
+
+  it('a background request sends the cached delegation and succeeds after a fresh invocation', async () => {
+    const createDelegation = counter('del');
+    const createInvocation = counter('inv');
+    const { result } = render(createDelegation, createInvocation);
+    await result.current.getDelegation(ORACLE);
+    accepted.add('inv-2');
+
+    await expect(
+      result.current.authedRequest('https://o/x', 'GET', {}, ORACLE, {
+        background: true,
+      }),
+    ).resolves.toEqual({ ok: true });
+    expect(requests.map((r) => r.delegation)).toEqual(['del-1', 'del-1']);
+    expect(createDelegation).toHaveBeenCalledTimes(1);
   });
 
   it('requests refused at the same moment share one renewal', async () => {

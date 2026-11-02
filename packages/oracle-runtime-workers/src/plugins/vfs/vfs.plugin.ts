@@ -42,6 +42,33 @@ export interface VfsConfig {
   VFS_REQUEST_TIMEOUT_MS: number;
 }
 
+/**
+ * Assemble the {@link VfsConfig} from a runtime config: worker URLs derived
+ * from `NETWORK` (or the per-deployment overrides), tuning knobs defaulted
+ * when absent or invalid. Shared by the plugin and by code that talks to the
+ * VFS on its own (the memory plugin's document ingestion).
+ */
+export function resolveVfsConfig(config: unknown): VfsConfig {
+  const tuning = configSchema.safeParse(config);
+  const siblings = siblingEnvSchema.safeParse(config);
+  const network = (siblings.success && siblings.data.NETWORK) || 'mainnet';
+  return {
+    VFS_BASE_URL:
+      (siblings.success && siblings.data.VFS_BASE_URL) ||
+      VFS_DEFAULT_BASE_URLS[network] ||
+      // Unreachable: `network` is one of the three keys the map declares.
+      'https://vfs.ixo.earth',
+    UCAN_STORE_URL:
+      (siblings.success && siblings.data.UCAN_STORE_URL) ||
+      UCAN_STORE_DEFAULT_URLS[network] ||
+      'https://store.ucan.ixo.earth',
+    VFS_MAX_READ_LINES: tuning.success ? tuning.data.VFS_MAX_READ_LINES : 2000,
+    VFS_REQUEST_TIMEOUT_MS: tuning.success
+      ? tuning.data.VFS_REQUEST_TIMEOUT_MS
+      : 20000,
+  };
+}
+
 const manifest: PluginManifest = {
   title: 'Files',
   summary:
@@ -149,26 +176,8 @@ export class VfsPlugin extends OraclePlugin {
       return [];
     }
 
-    const tuning = configSchema.safeParse(rtCtx.config);
+    const cfg = resolveVfsConfig(rtCtx.config);
     const siblings = siblingEnvSchema.safeParse(rtCtx.config);
-    const network = (siblings.success && siblings.data.NETWORK) || 'mainnet';
-    const cfg: VfsConfig = {
-      VFS_BASE_URL:
-        (siblings.success && siblings.data.VFS_BASE_URL) ||
-        VFS_DEFAULT_BASE_URLS[network] ||
-        // Unreachable: `network` is one of the three keys the map declares.
-        'https://vfs.ixo.earth',
-      UCAN_STORE_URL:
-        (siblings.success && siblings.data.UCAN_STORE_URL) ||
-        UCAN_STORE_DEFAULT_URLS[network] ||
-        'https://store.ucan.ixo.earth',
-      VFS_MAX_READ_LINES: tuning.success
-        ? tuning.data.VFS_MAX_READ_LINES
-        : 2000,
-      VFS_REQUEST_TIMEOUT_MS: tuning.success
-        ? tuning.data.VFS_REQUEST_TIMEOUT_MS
-        : 20000,
-    };
 
     const tools = createVfsTools({
       cfg,

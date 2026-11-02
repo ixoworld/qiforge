@@ -19,6 +19,7 @@ import {
 } from './run-buffer';
 import {
   attemptSeqBase,
+  decideOrphanRecovery,
   decideRecovery,
   patchRunRecord,
   runHasCheckpointed,
@@ -108,6 +109,8 @@ export interface RunCoordinatorHost {
   checkpointIdOf: (sessionId: string) => Promise<string | null>;
   /** After a run reached a terminal state and its row was closed. */
   onRunEnded?: (record: RunRecord, outcome: RunOutcome) => Promise<void>;
+  /** Before a run's row is created (the host marks that runs may be active). */
+  beforeCreate?: () => Promise<void>;
   /** How long a superseded or aborted attempt gets to wind down (default 5 s). */
   supersedeGraceMs?: number;
 }
@@ -213,6 +216,11 @@ export class RunCoordinator {
       if (run.record.status === 'queued' && !candidate) candidate = run;
     }
     return candidate;
+  }
+
+  /** The record of every run this coordinator holds (not ended yet). */
+  records(): RunRecord[] {
+    return [...this.live.values()].map((run) => run.record);
   }
 
   byRequestId(requestId: string): LiveRun | undefined {
@@ -367,6 +375,7 @@ export class RunCoordinator {
       }
     }
     const checkpointId = await this.host.checkpointIdOf(sessionId);
+    await this.host.beforeCreate?.();
     const record = await this.host.store.create({
       runId: input.runId,
       sessionId,
@@ -421,6 +430,55 @@ export class RunCoordinator {
     }
     this.abortRun(active, 'aborted');
     return true;
+  }
+
+  /**
+   * `abortSession`, resolving once every run it stopped has ended — out of
+   * the live map, its row closed — or after the supersede grace, whichever
+   * comes first. Runs enqueued behind the active one are not stopped and
+   * not waited for.
+   */
+  async abortSessionSettled(sessionId: string): Promise<boolean> {
+    const before = [...this.live.values()].filter(
+      (run) => run.sessionId === sessionId,
+    );
+    const stopped = this.abortSession(sessionId);
+    const ending = before.filter(
+      (run) => this.live.get(run.runId) !== run || run.abort.signal.aborted,
+    );
+    if (ending.length > 0)
+      await withinGrace(
+        this.graceMs,
+        Promise.all(ending.map((run) => run.done)),
+      );
+    return stopped;
+  }
+
+  /** Stop exactly the run a channel control names; never a later turn. */
+  abortById(runId: string): Promise<void> {
+    return this.abortByIds([runId]);
+  }
+
+  /**
+   * Stop exactly the runs a channel control names, never a later turn.
+   * Every run is signalled before any is waited for, and the wait is one
+   * shared supersede grace: a control naming many runs must answer well
+   * inside the caller's timeout. A run may still be winding down when this
+   * resolves. Runs that are not live here (ended, never begun) are skipped.
+   */
+  async abortByIds(runIds: readonly string[]): Promise<void> {
+    const runs = [...new Set(runIds)].flatMap((runId) => {
+      const run = this.live.get(runId);
+      return run ? [run] : [];
+    });
+    if (runs.length === 0) return;
+    // Queued runs first, so an attempt that ends below dequeues none of them.
+    for (const run of runs)
+      if (run.record.status === 'queued')
+        void this.cancelQueued(run, 'aborted');
+    for (const run of runs)
+      if (run.record.status !== 'queued') this.abortRun(run, 'aborted');
+    await withinGrace(this.graceMs, Promise.all(runs.map((run) => run.done)));
   }
 
   /**
@@ -756,7 +814,9 @@ export class RunCoordinator {
    * boot is a new instance, so anything active that this coordinator does
    * not hold is an orphan: queued runs are re-opened (and started when
    * their session is idle); running ones get a recovery attempt scheduled
-   * with the backoff, or are closed as interrupted after the cap.
+   * with the backoff, or are closed as interrupted after either cap
+   * (`decideOrphanRecovery`: consecutive attempts without progress, or
+   * recoveries in all).
    */
   async recoverOrphans(): Promise<void> {
     const active = await this.host.store.listActive();
@@ -769,7 +829,12 @@ export class RunCoordinator {
         continue;
       }
       const current = await this.host.checkpointIdOf(record.sessionId);
-      const decision = decideRecovery(record, current, now, this.host.config);
+      const decision = decideOrphanRecovery(
+        record,
+        current,
+        now,
+        this.host.config,
+      );
       // Everything packed so far: the cursor continues after it (the row's
       // `lastSeq` is only written when a run ends) and the continuation note
       // shows the model what the user already read.
@@ -787,7 +852,9 @@ export class RunCoordinator {
       const startSeq = Math.max(lastPacked, attemptSeqBase(generation));
       if (decision.action === 'interrupt') {
         this.host.log.warn(
-          `[runs] ${record.runId}: ${decision.attempts} recovery attempt(s) without progress; closing as interrupted`,
+          decision.reason === 'total'
+            ? `[runs] ${record.runId}: recovered ${record.generation} time(s) in all (cap ${this.host.config.recoveryTotalAttempts}); closing as interrupted`
+            : `[runs] ${record.runId}: ${decision.attempts} recovery attempt(s) without progress; closing as interrupted`,
         );
         const updatedAt = await this.host.store.update(record.runId, {
           generation,

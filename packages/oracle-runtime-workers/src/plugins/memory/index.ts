@@ -12,6 +12,10 @@ export {
   type MemoryMcpFactory,
   type UpstreamMcpTool,
 } from './memory-tools';
+export {
+  MEMORY_ENTITY_HEADER,
+  ORACLE_ENTITY_DID_PATTERN,
+} from './memory-entity';
 export { buildMemoryHeaders } from './memory-ucan';
 export { MemoryPlugin, type MemoryPluginOptions } from './memory.plugin';
 export type * from './types';

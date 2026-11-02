@@ -1,0 +1,654 @@
+{
+  "@context": {
+    "ixo": "https://w3id.org/ixo/ns/protocol/",
+    "@id": "@type",
+    "type": "@type",
+    "@protected": true
+  },
+  "type": "ixo:entity#surveyTemplate",
+  "question": {
+    "title": "YoWallet Survey",
+    "description": "Tell us how you find work and get paid. Your answers help shape YoWallet.",
+    "pages": [
+      {
+        "name": "welcome_consent",
+        "elements": [
+          {
+            "type": "html",
+            "name": "custom:welcomeIntroText",
+            "html": "<h2>Welcome</h2><p>YoWallet is a new phone app. It helps young people find work, get paid and keep their money safe.</p><p>The YoWallet team wants to learn how you find work and get paid. This survey takes about 8 minutes. It is not a job application.</p><p>There are no right or wrong answers. You do not need to use AI or a money app. You can skip a question or stop at any time.</p><p>Only the YoWallet team sees your answers. We will never ask for your PIN, password or money.</p><p>A star * means you must answer.</p>"
+          },
+          {
+            "type": "radiogroup",
+            "name": "custom:canStartSurvey",
+            "title": "Do you want to take part?",
+            "showNumber": false,
+            "isRequired": true,
+            "validators": [
+              {
+                "type": "expression",
+                "text": "That's fine. You can close this page now. Nothing will be sent.",
+                "expression": "{custom:canStartSurvey} = 'yes'"
+              }
+            ],
+            "choices": [
+              {
+                "value": "yes",
+                "text": "Yes, let's start"
+              },
+              {
+                "value": "no",
+                "text": "No"
+              }
+            ]
+          }
+        ],
+        "navigationTitle": "Welcome"
+      },
+      {
+        "name": "activities_and_aspirations",
+        "elements": [
+          {
+            "type": "checkbox",
+            "name": "custom:currentActivities",
+            "title": "In the last month, what did you do?",
+            "description": "Select all that apply.",
+            "isRequired": true,
+            "choices": [
+              {
+                "value": "employed",
+                "text": "I have a paid job"
+              },
+              {
+                "value": "own_business",
+                "text": "I run my own business or sell things"
+              },
+              {
+                "value": "casual_work",
+                "text": "Short jobs paid by the day or task (piece jobs, casual or online work)"
+              },
+              {
+                "value": "studying",
+                "text": "I study or do training"
+              },
+              {
+                "value": "looking_for_work",
+                "text": "I am looking for paid work"
+              },
+              {
+                "value": "unpaid_work",
+                "text": "Unpaid work (caring, housework or volunteering)"
+              }
+            ],
+            "showNoneItem": true,
+            "showRefuseItem": true,
+            "noneText": "None of these",
+            "refuseText": "Prefer not to say"
+          },
+          {
+            "type": "radiogroup",
+            "name": "custom:primaryAspiration",
+            "title": "In the next 12 months, what ONE change would help you most?",
+            "isRequired": true,
+            "choices": [
+              {
+                "value": "first_paid_work",
+                "text": "Get my first proper job or first customer (not only piece jobs)"
+              },
+              {
+                "value": "steady_income",
+                "text": "Get paid more often, so money comes in every month"
+              },
+              {
+                "value": "earn_more",
+                "text": "Earn more from the work I already do"
+              },
+              {
+                "value": "start_business",
+                "text": "Start my own business"
+              },
+              {
+                "value": "grow_business",
+                "text": "Grow the business I already have"
+              },
+              {
+                "value": "build_skills",
+                "text": "Learn skills for better work"
+              },
+              {
+                "value": "control_time",
+                "text": "Choose when and how I work"
+              },
+              {
+                "value": "other",
+                "text": "Something else"
+              },
+              {
+                "value": "not_sure",
+                "text": "Not sure"
+              }
+            ]
+          }
+        ],
+        "visibleIf": "{custom:canStartSurvey} = 'yes'",
+        "navigationTitle": "What you do"
+      },
+      {
+        "name": "earning_journey",
+        "elements": [
+          {
+            "type": "checkbox",
+            "name": "custom:earningJourney3Months",
+            "title": "In the last 3 months, which of these happened to you?",
+            "description": "Select all that apply.",
+            "isRequired": true,
+            "choices": [
+              {
+                "value": "looked",
+                "text": "I looked for work or customers"
+              },
+              {
+                "value": "offered",
+                "text": "Someone offered me paid work, or a customer ordered or booked from me"
+              },
+              {
+                "value": "did_work",
+                "text": "I did paid work, or sold something"
+              },
+              {
+                "value": "got_paid",
+                "text": "I got paid for work or sales"
+              }
+            ],
+            "showNoneItem": true,
+            "showRefuseItem": true,
+            "showDontKnowItem": true,
+            "noneText": "None of these",
+            "refuseText": "Prefer not to say",
+            "dontKnowText": "Not sure"
+          },
+          {
+            "type": "checkbox",
+            "name": "custom:paymentProblems",
+            "title": "In the last 3 months, did you have any of these problems getting paid?",
+            "description": "Select all that apply.",
+            "isRequired": true,
+            "choices": [
+              {
+                "value": "paid_late",
+                "text": "Someone paid me late"
+              },
+              {
+                "value": "still_owed",
+                "text": "Someone still owes me money"
+              },
+              {
+                "value": "method_unusable",
+                "text": "They wanted to pay in a way I could not use"
+              },
+              {
+                "value": "account_blocked",
+                "text": "The bank or app wanted papers before I could get my money"
+              },
+              {
+                "value": "fees_too_high",
+                "text": "Bank or app fees were too high"
+              },
+              {
+                "value": "no_access",
+                "text": "The money came, but I could not get it when I needed it"
+              },
+              {
+                "value": "other",
+                "text": "Another problem"
+              }
+            ],
+            "showNoneItem": true,
+            "showRefuseItem": true,
+            "showDontKnowItem": true,
+            "noneText": "No problems",
+            "refuseText": "Prefer not to say",
+            "dontKnowText": "Not sure"
+          },
+          {
+            "type": "radiogroup",
+            "name": "custom:lostOpportunity",
+            "visibleIf": "{custom:earningJourney3Months} anyof ['offered', 'did_work']",
+            "title": "Did you lose work because you could not take their kind of payment?",
+            "description": "For example EFT, card or an app. Think about the last 3 months.",
+            "isRequired": true,
+            "choices": [
+              {
+                "value": "yes_once",
+                "text": "Yes, once"
+              },
+              {
+                "value": "yes_more",
+                "text": "Yes, two or more times"
+              },
+              {
+                "value": "no",
+                "text": "No"
+              },
+              {
+                "value": "not_sure",
+                "text": "Not sure"
+              },
+              {
+                "value": "prefer_not",
+                "text": "Prefer not to say"
+              }
+            ]
+          }
+        ],
+        "visibleIf": "{custom:canStartSurvey} = 'yes'",
+        "navigationTitle": "Work and pay"
+      },
+      {
+        "name": "ai_and_earning",
+        "elements": [
+          {
+            "type": "radiogroup",
+            "name": "custom:usedAi3Months",
+            "title": "In the last 3 months, did you chat with an AI helper?",
+            "description": "For example Meta AI in WhatsApp, ChatGPT or Gemini.",
+            "isRequired": true,
+            "choices": [
+              {
+                "value": "yes",
+                "text": "Yes"
+              },
+              {
+                "value": "no",
+                "text": "No"
+              },
+              {
+                "value": "not_sure",
+                "text": "Not sure"
+              },
+              {
+                "value": "prefer_not",
+                "text": "Prefer not to say"
+              }
+            ]
+          },
+          {
+            "type": "checkbox",
+            "name": "custom:aiPurposes",
+            "visibleIf": "{custom:usedAi3Months} = 'yes'",
+            "title": "What did you use it for?",
+            "description": "Select all that apply.",
+            "isRequired": true,
+            "choices": [
+              {
+                "value": "find_work",
+                "text": "To find work or customers"
+              },
+              {
+                "value": "learn_skill",
+                "text": "To learn a skill for work"
+              },
+              {
+                "value": "do_work",
+                "text": "To do work for a boss or customer"
+              },
+              {
+                "value": "sell_promote",
+                "text": "To sell or advertise my business"
+              },
+              {
+                "value": "payments",
+                "text": "To ask someone to pay me (for example a bill)"
+              },
+              {
+                "value": "other_earning",
+                "text": "Something else to help me earn"
+              },
+              {
+                "value": "personal_only",
+                "text": "Only personal use, chatting or school work"
+              }
+            ],
+            "showRefuseItem": true,
+            "showDontKnowItem": true,
+            "refuseText": "Prefer not to say",
+            "dontKnowText": "Not sure"
+          },
+          {
+            "type": "radiogroup",
+            "name": "custom:aiAttemptStage",
+            "visibleIf": "{custom:aiPurposes} anyof ['find_work', 'learn_skill', 'do_work', 'sell_promote', 'payments', 'other_earning']",
+            "title": "Think of the last time AI helped you try to earn money. How far did it go?",
+            "isRequired": true,
+            "choices": [
+              {
+                "value": "prepared",
+                "text": "I only got ready. I did not apply or offer yet."
+              },
+              {
+                "value": "not_secured",
+                "text": "I applied or offered, but did not get the work"
+              },
+              {
+                "value": "secured",
+                "text": "I got the work, but have not finished it yet"
+              },
+              {
+                "value": "completed",
+                "text": "I finished the work or delivered the order"
+              },
+              {
+                "value": "other",
+                "text": "Something else"
+              },
+              {
+                "value": "not_sure",
+                "text": "Not sure"
+              },
+              {
+                "value": "prefer_not",
+                "text": "Prefer not to say"
+              }
+            ]
+          },
+          {
+            "type": "radiogroup",
+            "name": "custom:aiAttemptPaid",
+            "visibleIf": "{custom:aiAttemptStage} anyof ['secured', 'completed']",
+            "title": "For that same work, how much money has reached you so far?",
+            "isRequired": true,
+            "choices": [
+              {
+                "value": "all",
+                "text": "All of it"
+              },
+              {
+                "value": "part",
+                "text": "Only part of it (for example a deposit)"
+              },
+              {
+                "value": "none_not_due",
+                "text": "Nothing yet, it is not due"
+              },
+              {
+                "value": "none_overdue",
+                "text": "Nothing yet, and it is late"
+              },
+              {
+                "value": "no_payment_agreed",
+                "text": "We did not agree on any payment"
+              },
+              {
+                "value": "not_sure",
+                "text": "Not sure"
+              },
+              {
+                "value": "prefer_not",
+                "text": "Prefer not to say"
+              }
+            ]
+          },
+          {
+            "type": "radiogroup",
+            "name": "custom:mainAiBarrier",
+            "title": "What stops you using AI more to find work or earn money?",
+            "description": "Choose the biggest reason.",
+            "isRequired": true,
+            "choices": [
+              {
+                "value": "enough",
+                "text": "Nothing. I use it as much as I want."
+              },
+              {
+                "value": "no_use",
+                "text": "I don't see how it helps my work"
+              },
+              {
+                "value": "need_help",
+                "text": "I need help to learn how to use it"
+              },
+              {
+                "value": "data_device",
+                "text": "Data, phone or signal problems"
+              },
+              {
+                "value": "cost",
+                "text": "AI apps cost too much"
+              },
+              {
+                "value": "unreliable",
+                "text": "The answers are often wrong"
+              },
+              {
+                "value": "trust",
+                "text": "I worry about scams or my privacy"
+              },
+              {
+                "value": "few_jobs",
+                "text": "There are not enough jobs or customers anyway"
+              },
+              {
+                "value": "language",
+                "text": "It doesn't speak my language or know my area"
+              },
+              {
+                "value": "not_allowed",
+                "text": "My boss or customers don't allow it"
+              },
+              {
+                "value": "other",
+                "text": "Something else"
+              },
+              {
+                "value": "not_sure",
+                "text": "Not sure"
+              }
+            ]
+          }
+        ],
+        "visibleIf": "{custom:canStartSurvey} = 'yes'",
+        "navigationTitle": "AI and work"
+      },
+      {
+        "name": "money_helper",
+        "elements": [
+          {
+            "type": "html",
+            "name": "custom:helperIntroText",
+            "html": "<p><strong>Imagine a free job helper in an app.</strong></p><p>It can never accept a job, agree a price or touch your money.</p><p>You tell it your skills, when you are free and where you live. It finds jobs and writes applications for you. It can make mistakes. You can see everything it does and stop it at any time.</p><p>You can give it rules, like 'only jobs near me' or 'only weekend work'.</p>"
+          },
+          {
+            "type": "radiogroup",
+            "name": "custom:helperPermission",
+            "title": "What is the most you would let this helper do?",
+            "isRequired": true,
+            "choices": [
+              {
+                "value": "would_not_use",
+                "text": "I would not use it"
+              },
+              {
+                "value": "show_only",
+                "text": "Only show me jobs"
+              },
+              {
+                "value": "draft_only",
+                "text": "Write applications, and I send them myself"
+              },
+              {
+                "value": "send_after_ok",
+                "text": "Send each application after I say OK"
+              },
+              {
+                "value": "send_within_rules",
+                "text": "Send up to 3 applications a week for me, following my rules, without asking each time"
+              },
+              {
+                "value": "not_sure",
+                "text": "Not sure"
+              }
+            ]
+          },
+          {
+            "type": "radiogroup",
+            "name": "custom:convenienceVsControl",
+            "title": "Both versions are free and find the same jobs. Which would you choose?",
+            "isRequired": true,
+            "choices": [
+              {
+                "value": "review_each",
+                "text": "I check each one before it is sent (about 10 minutes a week)"
+              },
+              {
+                "value": "auto_within_rules",
+                "text": "It sends up to 3 a week by my rules, without asking me (about 2 minutes a week)"
+              },
+              {
+                "value": "neither",
+                "text": "Neither"
+              },
+              {
+                "value": "not_sure",
+                "text": "Not sure"
+              }
+            ]
+          },
+          {
+            "type": "checkbox",
+            "name": "custom:controlPriorities",
+            "title": "Before the helper contacts anyone for you, what matters most?",
+            "description": "Choose up to two.",
+            "isRequired": true,
+            "choices": [
+              {
+                "value": "approve_each",
+                "text": "I say yes before it sends anything"
+              },
+              {
+                "value": "stop_anytime",
+                "text": "I can stop it at any time"
+              },
+              {
+                "value": "choose_info",
+                "text": "I choose what information it shares about me"
+              },
+              {
+                "value": "see_record",
+                "text": "I can see everything it did"
+              },
+              {
+                "value": "human_help",
+                "text": "A real person helps if something goes wrong"
+              },
+              {
+                "value": "know_who",
+                "text": "I know which company runs it"
+              }
+            ],
+            "showNoneItem": true,
+            "showDontKnowItem": true,
+            "noneText": "Nothing would make me comfortable",
+            "dontKnowText": "Not sure",
+            "maxSelectedChoices": 2
+          },
+          {
+            "type": "radiogroup",
+            "name": "custom:firstProductOutcome",
+            "title": "If an app could do only ONE thing first, what should it be?",
+            "isRequired": true,
+            "choices": [
+              {
+                "value": "find_work",
+                "text": "Help me find work or customers"
+              },
+              {
+                "value": "work_better",
+                "text": "Help me do my work better or faster"
+              },
+              {
+                "value": "get_paid",
+                "text": "Let me get paid in a way that works for me"
+              },
+              {
+                "value": "lower_fees",
+                "text": "Lower the fees when I get paid or take out money"
+              },
+              {
+                "value": "chase_payment",
+                "text": "Help me get money people owe me"
+              },
+              {
+                "value": "show_skills",
+                "text": "Show proof of my skills and past work"
+              },
+              {
+                "value": "spot_scams",
+                "text": "Warn me about fake jobs and scams"
+              },
+              {
+                "value": "not_sure",
+                "text": "Not sure"
+              }
+            ]
+          }
+        ],
+        "visibleIf": "{custom:canStartSurvey} = 'yes'",
+        "navigationTitle": "Job helper"
+      },
+      {
+        "name": "wrap_up",
+        "elements": [
+          {
+            "type": "comment",
+            "name": "schema:text",
+            "title": "What would help you most to get better work? (optional)",
+            "description": "You can write in any language. Please don't write names, phone numbers or bank details."
+          },
+          {
+            "type": "radiogroup",
+            "name": "custom:whatsappOptIn",
+            "title": "Can we send you WhatsApp messages about YoWallet later?",
+            "description": "Only news about YoWallet. We will never ask for your PIN or money. You can reply STOP at any time.",
+            "isRequired": true,
+            "choices": [
+              {
+                "value": "yes",
+                "text": "Yes"
+              },
+              {
+                "value": "no",
+                "text": "No"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "name": "schema:telephone",
+            "visibleIf": "{custom:whatsappOptIn} = 'yes'",
+            "title": "What is your WhatsApp number?",
+            "description": "Start with your country code, for example +27 71 000 0000 (South Africa), +234 801 000 0000 (Nigeria) or +254 711 000 000 (Kenya).",
+            "isRequired": true,
+            "validators": [
+              {
+                "type": "regex",
+                "text": "Please start with your country code, like +27 71 000 0000.",
+                "regex": "^\\s*\\+?(20|27|21[12368]|2[2-6][0-9]|29[01])[\\s-]?[1-9]([\\s-]?[0-9]){5,9}\\s*$"
+              }
+            ],
+            "inputType": "tel",
+            "autocomplete": "tel"
+          }
+        ],
+        "visibleIf": "{custom:canStartSurvey} = 'yes'",
+        "navigationTitle": "Wrap up"
+      }
+    ],
+    "showQuestionNumbers": "on",
+    "questionErrorLocation": "bottom",
+    "showProgressBar": true,
+    "progressBarLocation": "top",
+    "pagePrevText": "Back",
+    "pageNextText": "Next",
+    "completeText": "Send my answers"
+  }
+}

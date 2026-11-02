@@ -113,6 +113,8 @@ describe('composePrompt', () => {
         },
         timeContext: formatDateContext('Europe/Berlin', '2026-08-25T10:00:00Z'),
         currentEntityDid: 'did:ixo:entity:current',
+        userIdentityBlock:
+          '## Who you are talking to\n\n- User DID: `did:ixo:ixo1user`',
         degradedServicesBlock: 'Memory is offline.',
       }),
     );
@@ -140,6 +142,7 @@ describe('composePrompt', () => {
     expect(prompt).not.toContain('## Custom Instructions');
     expect(prompt).not.toContain('## What you know about the user');
     expect(prompt).not.toContain('**Current entity:**');
+    expect(prompt).not.toContain('## Who you are talking to');
     expect(prompt).not.toContain('## User preferences');
     expect(prompt).not.toContain('## Degraded services');
     expect(prompt).not.toContain('{{');
@@ -282,6 +285,41 @@ describe('composePrompt — chat surface', () => {
     expect(surface).toBeGreaterThan(style);
     expect(surface).toBeLessThan(chat.indexOf('## Operational mode'));
     expect(chat).not.toContain('{{');
+  });
+});
+
+describe('composePrompt — user identity', () => {
+  const IDENTITY_BLOCK =
+    '## Who you are talking to\n\n- User DID: `did:ixo:ixo1user`';
+
+  it('renders the block after the date and current entity, before the user preferences', async () => {
+    const prompt = await composePrompt(
+      baseInput({
+        timeContext: 'Tuesday, 2026-08-25 (UTC)',
+        currentEntityDid: 'did:ixo:entity:current',
+        userIdentityBlock: IDENTITY_BLOCK,
+        userPreferencesContext: '- **Tone:** warm',
+      }),
+    );
+    expect(prompt).toContain(
+      `**Current entity:** did:ixo:entity:current\n\n${IDENTITY_BLOCK}\n\n## User preferences`,
+    );
+    expect(count(prompt, '## Who you are talking to')).toBe(1);
+  });
+
+  it('follows the date directly when there is no current entity or preferences', async () => {
+    const prompt = await composePrompt(
+      baseInput({ timeContext: 'today', userIdentityBlock: IDENTITY_BLOCK }),
+    );
+    expect(prompt).toContain(
+      `**Current date:** today\n\n${IDENTITY_BLOCK}\n\n## Operational mode`,
+    );
+  });
+
+  it('renders nothing for an empty block', async () => {
+    expect(await composePrompt(baseInput({ userIdentityBlock: '' }))).toBe(
+      await composePrompt(baseInput()),
+    );
   });
 });
 

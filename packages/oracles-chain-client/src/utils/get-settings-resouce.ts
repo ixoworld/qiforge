@@ -45,6 +45,24 @@ function rewriteMatrixMediaUrl(url: string, matrixHomeServer: string): string {
 }
 
 /**
+ * `resource.serviceEndpoint` is whatever the entity's owner wrote on chain, so
+ * the caller's token may follow it only to media on the caller's own homeserver.
+ * The check runs on the parsed URL, after any `..` in the path has been resolved.
+ */
+function isOwnHomeServerMedia(url: string, matrixHomeServer?: string): boolean {
+  if (!matrixHomeServer) return false;
+  try {
+    const { origin, pathname } = new URL(url);
+    return (
+      origin === new URL(`https://${matrixHomeServer}`).origin &&
+      pathname.startsWith('/_matrix/client/v1/media/download/')
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Find one `linkedResource` on a protocol/entity document, or `undefined` when
  * the entity has no matching entry. Callers that treat a missing resource as an
  * error (the settings lane) raise it themselves; callers for which "not
@@ -70,22 +88,27 @@ export async function findLinkedResource(
  * Fetch a linked resource's document from its `serviceEndpoint`. Matrix-hosted
  * documents are rewritten onto the caller's homeserver and sent with its access
  * token — newer Synapse releases refuse anonymous reads on the legacy
- * `/_matrix/media/…/download` path.
+ * `/_matrix/media/…/download` path. Every other URL is fetched with no credential,
+ * and a request carrying the token does not follow redirects.
  */
 export async function fetchLinkedResourceDoc<T>(
   resource: LinkedResource,
   matrixAccessToken?: string,
   matrixHomeServer?: string,
 ): Promise<T> {
-  const url = matrixHomeServer
-    ? rewriteMatrixMediaUrl(resource.serviceEndpoint, matrixHomeServer)
+  const homeServerHost = matrixHomeServer
+    ?.replace(/^https?:\/\//, '')
+    .replace(/\/+$/, '');
+  const url = homeServerHost
+    ? rewriteMatrixMediaUrl(resource.serviceEndpoint, homeServerHost)
     : resource.serviceEndpoint;
+  const withToken =
+    !!matrixAccessToken && isOwnHomeServerMedia(url, homeServerHost);
   const response = await fetch(url, {
+    redirect: withToken ? 'error' : 'follow',
     headers: {
       'Content-Type': 'application/json',
-      ...(matrixAccessToken
-        ? { Authorization: `Bearer ${matrixAccessToken}` }
-        : {}),
+      ...(withToken ? { Authorization: `Bearer ${matrixAccessToken}` } : {}),
     },
   });
   const data = await response.json();

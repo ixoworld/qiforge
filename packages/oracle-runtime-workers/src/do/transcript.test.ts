@@ -1,3 +1,7 @@
+import {
+  channelReplyNote,
+  CHANNEL_REPLY_NOTE_KWARG,
+} from '../channels/replies';
 /**
  * Transcript rendering around attachment payload retention: an offloaded
  * message still lists its attachment metadata with its original text, and
@@ -255,6 +259,50 @@ describe('transcript of a chat reply', () => {
     );
     expect(messages[1]?.content).toBe('Putting it in a document.');
   });
+
+  const fileTurn = (text: string): BaseMessage[] => {
+    const sent = (id: string, filename: string, caption?: string) =>
+      new ToolMessage({
+        tool_call_id: id,
+        name: 'send_file',
+        content: JSON.stringify({ ok: true, filename }),
+        artifact: {
+          url: 'https://r2.example/o?X-Amz-Signature=deadbeef',
+          filename,
+          mimetype: 'application/pdf',
+          path: `/output/${filename}`,
+          ...(caption ? { caption } : {}),
+        },
+      });
+    const call = (id: string, path: string) => ({
+      id,
+      name: 'send_file',
+      args: { path },
+    });
+    return [
+      new HumanMessage({ id: 'h1', content: 'send them' }),
+      new AIMessage({
+        id: 'a1',
+        content: text,
+        tool_calls: [call('f1', '/output/a.pdf'), call('f2', '/output/b.pdf')],
+      }),
+      sent('f1', 'a.pdf', 'The first'),
+      sent('f2', 'b.pdf'),
+    ];
+  };
+
+  it('lists a reply of files alone by name, never by link', async () => {
+    const { messages } = await transformTranscript(fileTurn(''));
+    expect(messages[1]?.content).toBe(
+      'The first\n\n[File sent: a.pdf]\n\n[File sent: b.pdf]',
+    );
+    expect(JSON.stringify(messages)).not.toContain('X-Amz-Signature');
+  });
+
+  it('keeps the text of a step that sent a file and wrote its own', async () => {
+    const { messages } = await transformTranscript(fileTurn('Here they are.'));
+    expect(messages[1]?.content).toBe('Here they are.');
+  });
 });
 
 describe('parseTranscriptPageQuery', () => {
@@ -477,6 +525,52 @@ describe('pageThreadTranscript', () => {
       pageThreadTranscript(source, 'thread', { limit: 5, after: 'nope' }),
     ).rejects.toBeInstanceOf(TranscriptCursorError);
   });
+});
+
+it('retains a typed quote reference while hiding model-only quoted context from the transcript', async () => {
+  const reply = {
+    kind: 'known',
+    requestId: 'wa:prior',
+    author: 'oracle',
+    partId: 'p2',
+  } as const;
+  const note = channelReplyNote({
+    kind: 'resolved',
+    requestId: 'wa:prior',
+    author: 'oracle',
+    text: 'Should I draft it?',
+  });
+  if (!note) throw new Error('No reply note');
+  const origin = {
+    v: 1,
+    transport: 'whatsapp',
+    binding_id: 'chb_one',
+    remote_ref: `hmac:${'a'.repeat(64)}`,
+  };
+  const result = await transformTranscript([
+    new HumanMessage({
+      id: 'quoted-human',
+      content: `${note}\n\nYes`,
+      additional_kwargs: {
+        [CHANNEL_REPLY_NOTE_KWARG]: note,
+        'org.ixo.qi.origin': origin,
+        'org.ixo.qi.reply': reply,
+      },
+    }),
+  ]);
+  expect(result.messages[0]?.content).toBe('Yes');
+  expect(result.messages[0]?.metadata).toEqual({
+    'org.ixo.qi.origin': origin,
+    'org.ixo.qi.reply': reply,
+  });
+  expect(note).not.toContain('wa:prior');
+  expect(note).toContain('"yourMessage":"Should I draft it?"');
+  expect(channelReplyNote({ kind: 'unavailable' })).toContain(
+    'cannot be shown to you',
+  );
+  expect(
+    channelReplyNote({ kind: 'unavailable', reason: 'other_conversation' }),
+  ).toContain('/resume');
 });
 
 it('preserves only validated channel provenance on human messages in session history', async () => {

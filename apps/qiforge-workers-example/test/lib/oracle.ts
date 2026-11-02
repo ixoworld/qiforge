@@ -7,6 +7,7 @@
  *   - waits for `/health` and for the Matrix gateway to report `running`.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -68,8 +69,32 @@ export interface ProvisionOptions {
    * UCAN minting against other services (e.g. the MCP e2e). Implied by `vfs`.
    */
   signing?: boolean;
+  /**
+   * Give the oracle a domain entity DISTINCT from its account DID, as every
+   * production oracle has: `ORACLE_ENTITY_DID` becomes
+   * {@link harnessEntityDid} of the account. Required by the memory plugin
+   * (the Memory Engine keys every space by the entity and refuses an
+   * account DID), and lets a drill tell the two apart on the wire. The
+   * gateway then names user↔oracle rooms after the entity, so a drill that
+   * sets this builds its rooms from {@link ORACLE_ENTITY_DID}. Off by
+   * default: the other drills alias their rooms on the account DID.
+   */
+  distinctEntity?: boolean;
   /** Extra `.dev.vars` entries, applied last (e.g. `MEMORY_MCP_URL`). */
   extra?: Record<string, string>;
+}
+
+/**
+ * A stable fake domain entity DID (`did:ixo:entity:<32 hex>`) for an oracle
+ * account: the same account always gets the same entity, so a drill's
+ * user↔oracle room alias survives across runs. Not registered on chain.
+ */
+export function harnessEntityDid(accountDid: string): string {
+  const hex = createHash('sha256')
+    .update(`qiforge-harness-entity:${accountDid}`)
+    .digest('hex')
+    .slice(0, 32);
+  return `did:ixo:entity:${hex}`;
 }
 
 export async function provisionDevVars(
@@ -91,7 +116,9 @@ export async function provisionDevVars(
   const account = await ensureOracleAccount();
   oracleAccount = account;
   ORACLE_DID = account.did;
-  ORACLE_ENTITY_DID = account.did;
+  ORACLE_ENTITY_DID = opts.distinctEntity
+    ? harnessEntityDid(account.did)
+    : account.did;
   BOT_USER_ID = account.matrixUserId;
 
   const devVars: Record<string, string> = {

@@ -22,7 +22,11 @@ export function didToAliasPart(did: string): string {
 export async function ensureUserOracleRoom(opts: {
   session: MatrixSession;
   userDid: string;
-  /** The DID the alias is built from (`ORACLE_ENTITY_DID`; the oracle DID on the harness). */
+  /**
+   * The DID the alias is built from: `ORACLE_ENTITY_DID` (the oracle's
+   * account DID on the harness unless the drill provisioned a distinct
+   * entity).
+   */
   oracleDid: string;
   botUserId: string;
   roomName?: string;

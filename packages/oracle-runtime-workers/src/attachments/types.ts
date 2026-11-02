@@ -11,6 +11,13 @@ export interface AttachmentInput {
   mxcUri?: string;
   /** Matrix event id (`$…`) — encrypted media is fetched and decrypted via the event. */
   eventId?: string;
+  /**
+   * A file the person sent on a channel (`channel:<16 hex>`, see
+   * `channel.ts`): private, read only through the owner object's channel
+   * source, never by URL. Set by the runtime for channel turns, never taken
+   * from a request body.
+   */
+  channelRef?: string;
   filename: string;
   mimetype: string;
   size?: number;

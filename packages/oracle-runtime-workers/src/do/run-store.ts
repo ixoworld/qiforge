@@ -7,13 +7,16 @@
  *     closed when the run ends. It carries what a later incarnation of the
  *     object needs to resume the run after a reset (the request), how many
  *     recovery attempts were spent without progress, and the checkpoint id
- *     seen at the last attempt (progress resets the counter).
+ *     seen at the last attempt (progress resets the counter), and how many
+ *     recoveries it got in all (`generation`, never reset).
  *   - `turn_run_segments`: the run's output, packed by `RunBuffer` into one
  *     row per flush, so a client can re-join after any cursor and a recovery
  *     can restore exactly what the user had already seen. Deleted at cutover.
  *   - `turn_tool_marks`: one row per tool call, written BEFORE the tool runs
  *     (`started`) and updated when it returns (`done`). This is what makes a
  *     resume safe: a started-but-unfinished write call is never re-executed.
+ *     A frontend call also records when it reached a browser (`sent_at`):
+ *     one still parked at the restart never left the object and runs again.
  *   - `turn_write_claims`: one row per write whose outcome is not known yet
  *     (tool-execution.ts), keyed by the fingerprint of the tool name and
  *     arguments. Released by a returned outcome; kept by an abort, a deadline
@@ -22,7 +25,8 @@
  *
  * Cost shape (SQLite-backed DO storage bills rows written or deleted): a run
  * costs 1 insert + ~2 updates, a segment 1 insert + 1 delete, a tool call
- * 1 insert + 1 update, a write 1 insert + 1 delete more.
+ * 1 insert + 1 update (a frontend call 1 update more, when it is sent), a
+ * write 1 insert + 1 delete more.
  */
 import type { DoSqliteDatabase } from '../sqlite/database';
 import type { PackedSegment } from './run-buffer';
@@ -114,6 +118,7 @@ export interface RunRecord {
    * are numbered from `attemptSeqBase(g)`, so a client's cursor from an
    * earlier attempt — even one pointing at frames that were never packed
    * before the reset — is below every frame a later attempt produces.
+   * Also the count `decideOrphanRecovery` caps (`recoveryTotalAttempts`).
    */
   generation: number;
   /** When the next recovery attempt is due (ms since epoch), while `recovering`. */
@@ -169,6 +174,14 @@ export interface ToolMark {
   outcome: string | null;
   /** Executions started for this call id (a read re-run bumps it). */
   attempts: number;
+  /**
+   * When the call was handed to its executor, for tools that run outside
+   * the object (frontend tools: the moment a browser socket received it).
+   * `null` while a frontend call is parked waiting for a socket, so a
+   * restart knows the call never left the object. Always `null` for tools
+   * that run in the object.
+   */
+  sentAt: string | null;
 }
 
 /** Rows of ended runs are kept a week (a re-join that late gets 404). */
@@ -193,6 +206,14 @@ export const DEFAULT_RECOVERY_DELAYS_MS: readonly number[] = [
   5_000, 15_000, 30_000, 60_000,
 ];
 export const DEFAULT_RECOVERY_ATTEMPTS = 4;
+/**
+ * Recoveries a run gets in all, progress or not (`generation` is never
+ * reset). Each one is a restart of the object while the run was active; a
+ * turn that resets the isolate every time it makes a step (one checkpoint,
+ * then the next model call exceeds the memory limit) would otherwise be
+ * resumed for as long as each attempt checkpoints once.
+ */
+export const DEFAULT_RECOVERY_TOTAL_ATTEMPTS = 8;
 export const DEFAULT_KEEPALIVE_MS = 20_000;
 export const DEFAULT_SEGMENT_FLUSH_MS = 2_000;
 export const DEFAULT_SEGMENT_BYTES = 16 * 1024;
@@ -202,6 +223,8 @@ export interface RunDurabilityConfig {
   segmentFlushMs: number;
   segmentBytes: number;
   recoveryAttempts: number;
+  /** Recoveries in all, progress or not (`DEFAULT_RECOVERY_TOTAL_ATTEMPTS`). */
+  recoveryTotalAttempts: number;
   recoveryDelaysMs: readonly number[];
   multitaskDefault: 'interrupt' | 'enqueue';
 }
@@ -231,6 +254,11 @@ export function runDurabilityConfig(
     recoveryAttempts: int(
       'RUN_RECOVERY_ATTEMPTS',
       DEFAULT_RECOVERY_ATTEMPTS,
+      0,
+    ),
+    recoveryTotalAttempts: int(
+      'RUN_RECOVERY_TOTAL_ATTEMPTS',
+      DEFAULT_RECOVERY_TOTAL_ATTEMPTS,
       0,
     ),
     recoveryDelaysMs: delays.length > 0 ? delays : DEFAULT_RECOVERY_DELAYS_MS,
@@ -266,7 +294,16 @@ export function runHasCheckpointed(
 
 export type RecoveryDecision =
   | { action: 'schedule'; at: number; attempts: number }
-  | { action: 'interrupt'; attempts: number };
+  | {
+      action: 'interrupt';
+      attempts: number;
+      /**
+       * `no-progress`: `recoveryAttempts` consecutive attempts left the
+       * checkpoint where it was. `total`: the run was recovered
+       * `recoveryTotalAttempts` times in all (`decideOrphanRecovery`).
+       */
+      reason: 'no-progress' | 'total';
+    };
 
 /**
  * What to do with an orphaned run found at boot (or an attempt that just
@@ -283,10 +320,34 @@ export function decideRecovery(
   const progressed = checkpointAdvanced(run.checkpointId, currentCheckpointId);
   const spent = progressed ? 0 : run.attempts;
   if (spent >= config.recoveryAttempts)
-    return { action: 'interrupt', attempts: spent };
+    return { action: 'interrupt', attempts: spent, reason: 'no-progress' };
   const delays = config.recoveryDelaysMs;
   const delay = delays[Math.min(spent, delays.length - 1)] ?? 0;
   return { action: 'schedule', at: now + delay, attempts: spent + 1 };
+}
+
+/**
+ * What to do with a run a previous incarnation left running or recovering:
+ * `decideRecovery`, once the run is still within its recoveries in all.
+ * `generation` counts every recovery the run got and is never reset, so a
+ * run that checkpoints once per attempt and then resets the object again
+ * (progress each time, so `attempts` stays at 1) is closed after
+ * `recoveryTotalAttempts` recoveries instead of being resumed until its
+ * client gives up. A deferral (`RunAttemptDeferred`) is not a restart and
+ * is bounded by `decideRecovery` alone.
+ */
+export function decideOrphanRecovery(
+  run: Pick<RunRecord, 'attempts' | 'checkpointId' | 'generation'>,
+  currentCheckpointId: string | null,
+  now: number,
+  config: Pick<
+    RunDurabilityConfig,
+    'recoveryAttempts' | 'recoveryTotalAttempts' | 'recoveryDelaysMs'
+  >,
+): RecoveryDecision {
+  if (run.generation >= config.recoveryTotalAttempts)
+    return { action: 'interrupt', attempts: run.attempts, reason: 'total' };
+  return decideRecovery(run, currentCheckpointId, now, config);
 }
 
 type RunRow = {
@@ -331,6 +392,7 @@ type MarkRow = {
   done_at: string | null;
   outcome: string | null;
   attempts: number;
+  sent_at: string | null;
 } & Record<string, string | number | null>;
 
 type SegmentRow = {
@@ -393,6 +455,7 @@ function toMark(row: MarkRow): ToolMark {
     doneAt: row.done_at,
     outcome: row.outcome,
     attempts: Number(row.attempts),
+    sentAt: row.sent_at,
   };
 }
 
@@ -474,8 +537,21 @@ export class RunStore {
         done_at TEXT,
         outcome TEXT,
         attempts INTEGER NOT NULL DEFAULT 1,
+        sent_at TEXT,
         PRIMARY KEY (run_id, tool_call_id)
       ) WITHOUT ROWID`);
+    // When a call left the object (frontend calls; see `markSent`). Marks
+    // from before the column cannot tell, so they count as sent: a resume
+    // keeps treating them as it did when they were written.
+    const markColumns = await this.db.exec<{ name: string }>(
+      'PRAGMA table_info(turn_tool_marks)',
+    );
+    if (!markColumns.some((c) => c.name === 'sent_at')) {
+      await this.db.run('ALTER TABLE turn_tool_marks ADD COLUMN sent_at TEXT');
+      await this.db.run(
+        'UPDATE turn_tool_marks SET sent_at = started_at WHERE sent_at IS NULL',
+      );
+    }
     await this.db.run(`
       CREATE TABLE IF NOT EXISTS turn_write_claims (
         fingerprint TEXT PRIMARY KEY,
@@ -705,12 +781,12 @@ export class RunStore {
     return row ? toRecord(row) : undefined;
   }
 
-  /** Every run that is not over, oldest first. */
+  /** Every run that is not over, oldest first (run id breaks a tie). */
   async listActive(): Promise<RunRecord[]> {
     await this.setup();
     const rows = await this.db.exec<RunRow>(
       `SELECT ${RUN_COLUMNS} FROM turn_runs
-       WHERE status IN ('running','recovering','queued') ORDER BY started_at ASC`,
+       WHERE status IN ('running','recovering','queued') ORDER BY started_at ASC, run_id ASC`,
     );
     return rows.map(toRecord);
   }
@@ -853,12 +929,28 @@ export class RunStore {
     return undefined;
   }
 
-  /** A read-only call re-executed on resume: count the execution, keep the row open. */
+  /**
+   * A call re-executed on resume: count the execution, keep the row open.
+   * The new execution has not been handed to an executor yet, so `sent_at`
+   * is cleared with it.
+   */
   async bumpMark(runId: string, toolCallId: string): Promise<void> {
     await this.setup();
     await this.db.run(
-      `UPDATE turn_tool_marks SET attempts = attempts + 1, started_at = ?, done_at = NULL, outcome = NULL
+      `UPDATE turn_tool_marks SET attempts = attempts + 1, started_at = ?, done_at = NULL, outcome = NULL, sent_at = NULL
        WHERE run_id = ? AND tool_call_id = ?`,
+      [this.iso(), runId, toolCallId],
+    );
+  }
+
+  /**
+   * The call left the object: its executor (a browser socket for a frontend
+   * tool) received it. From here on a restart cannot tell whether it ran.
+   */
+  async markSent(runId: string, toolCallId: string): Promise<void> {
+    await this.setup();
+    await this.db.run(
+      `UPDATE turn_tool_marks SET sent_at = ? WHERE run_id = ? AND tool_call_id = ?`,
       [this.iso(), runId, toolCallId],
     );
   }
@@ -881,7 +973,7 @@ export class RunStore {
   ): Promise<ToolMark | undefined> {
     await this.setup();
     const row = await this.db.get<MarkRow>(
-      `SELECT run_id, tool_call_id, tool_name, effect, started_at, done_at, outcome, attempts
+      `SELECT run_id, tool_call_id, tool_name, effect, started_at, done_at, outcome, attempts, sent_at
        FROM turn_tool_marks WHERE run_id = ? AND tool_call_id = ?`,
       [runId, toolCallId],
     );
@@ -891,7 +983,7 @@ export class RunStore {
   async listMarks(runId: string): Promise<ToolMark[]> {
     await this.setup();
     const rows = await this.db.exec<MarkRow>(
-      `SELECT run_id, tool_call_id, tool_name, effect, started_at, done_at, outcome, attempts
+      `SELECT run_id, tool_call_id, tool_name, effect, started_at, done_at, outcome, attempts, sent_at
        FROM turn_tool_marks WHERE run_id = ? ORDER BY started_at ASC`,
       [runId],
     );
@@ -902,10 +994,14 @@ export class RunStore {
 
   /**
    * Claim a write before it runs. `claimed` when no identical write is
-   * outstanding. `blocked` when one is: a `pending` claim becomes `warned`
-   * (owned by this run, so the same turn stays blocked); a claim already
-   * `warned` by an earlier run is released to this run — the user was told
-   * and asked again.
+   * outstanding. `blocked` when one is: a `pending` claim of this run, or of
+   * a run that is over, becomes `warned` (owned by this run, so the same
+   * turn stays blocked); a `pending` claim of ANOTHER run that is still
+   * active (queued / running / recovering) is left exactly as it is — its
+   * owner may still release it when its write returns, and a takeover would
+   * make that release delete nothing; a claim already `warned` by an
+   * earlier run is released to this run — the user was told and asked
+   * again.
    */
   async claimWrite(input: {
     fingerprint: string;
@@ -939,9 +1035,16 @@ export class RunStore {
       return { status: 'claimed' };
     }
     if (existing.state === 'pending')
+      // One statement: the owner's liveness is read where the row is
+      // written, so no release or run end can slip in between.
       await this.db.run(
-        `UPDATE turn_write_claims SET state = 'warned', run_id = ? WHERE fingerprint = ? AND state = 'pending'`,
-        [input.runId, input.fingerprint],
+        `UPDATE turn_write_claims SET state = 'warned', run_id = ?
+         WHERE fingerprint = ? AND state = 'pending'
+           AND (run_id = ? OR NOT EXISTS (
+             SELECT 1 FROM turn_runs r WHERE r.run_id = turn_write_claims.run_id
+               AND r.status IN ('running','recovering','queued')
+           ))`,
+        [input.runId, input.fingerprint, input.runId],
       );
     return {
       status: 'blocked',

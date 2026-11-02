@@ -6,6 +6,7 @@ import {
   type AgentMiddleware,
   type StructuredTool,
 } from 'langchain';
+import { NetworkSchema } from '@ixo/ixo-transaction';
 import { z } from 'zod';
 import type {
   PluginContext,
@@ -79,10 +80,12 @@ import { wrapPluginTool } from './wrap-plugin-tool';
 import { renderSurfaceSection } from '../delivery/prompt';
 import { createReturnDirectFirstMiddleware } from './middlewares/return-direct-first';
 import { CREATE_ARTIFACT_TOOL } from '../artifacts/tool';
+import { SEND_FILE_TOOL } from '../plugins/sandbox/send-file';
 import type { SessionSurface } from '../plugin-api/types';
 
 import { taskExecutionProfile } from './execution-profile';
 import { prepareDomainContext } from './domain-context';
+import { ixoAddressOf, renderUserIdentity } from './user-identity';
 
 const PLUGIN_LOGGER_COMPONENT = 'main-agent';
 
@@ -93,6 +96,13 @@ const DEFAULT_OPERATIONAL_MODE = [
 ].join('\n');
 
 type CollectedTool = { pluginName: string; tool: PluginTool };
+
+/** The validated env values the user-identity section names. */
+const identityConfigSchema = z.object({
+  NETWORK: NetworkSchema,
+  ORACLE_DID: z.string().min(1),
+  ORACLE_ENTITY_DID: z.string().min(1).optional(),
+});
 
 /** Map plugin name → effective `manifest.visibility` (default `on-demand`). */
 function visibilityIndex(
@@ -235,6 +245,7 @@ export async function createMainAgent(
       systemPrompt,
       boundToolNames: [],
       toolEffects: new Map(),
+      toolSurfaces: new Map(),
       subAgentToolNames: new Set(),
       context: { user: requestCtx.user, session: requestCtx.session },
     };
@@ -299,6 +310,8 @@ export async function createMainAgent(
         id: requestCtx.session.id,
         client: requestCtx.session.client,
         requestId: requestCtx.session.requestId,
+        runId: requestCtx.session.runId,
+        channel: requestCtx.session.channel,
         wsId: requestCtx.session.wsId,
         roomId: requestCtx.session.roomId,
         ...(surface ? { surface } : {}),
@@ -525,6 +538,20 @@ export async function createMainAgent(
       ? [scopeToolCallIds(hooks.toolExecution, dispatch)]
       : []),
   ];
+  // Who the user is, from the DID their delegation proved: fixed for the
+  // user's object, so it sits in the cached part of the prompt.
+  const identityConfig = identityConfigSchema.parse(config);
+  const userIdentityBlock = renderUserIdentity({
+    user: {
+      did: requestCtx.user.did,
+      address: ixoAddressOf(requestCtx.user.did),
+    },
+    network: identityConfig.NETWORK,
+    oracleDid: identityConfig.ORACLE_DID,
+    ...(identityConfig.ORACLE_ENTITY_DID
+      ? { oracleEntityDid: identityConfig.ORACLE_ENTITY_DID }
+      : {}),
+  });
   const subAgentTools = await collectSubAgentsWithFallback({
     registry: registries.subAgents,
     buildCtx,
@@ -538,11 +565,13 @@ export async function createMainAgent(
     subAgents: subAgentEntries,
     dispatchMiddleware,
     ...(resultCap ? { resultCap } : {}),
-    // Sub-agents see the same domain context: its block on their prompt,
-    // its tools beside their own.
-    ...(domain
-      ? { passthroughTools: domainTools, contextPrompt: domain.prompt }
-      : {}),
+    // Sub-agents know who the user is and see the same domain context: the
+    // identity section and the domain block on their prompt, the domain
+    // tools beside their own.
+    contextPrompt: domain?.prompt
+      ? `${userIdentityBlock}\n\n${domain.prompt}`
+      : userIdentityBlock,
+    ...(domain ? { passthroughTools: domainTools } : {}),
   });
 
   // Effect of every tool the model can call (durable runs: what may run
@@ -556,6 +585,28 @@ export async function createMainAgent(
   for (const { tool } of allTools)
     toolEffects.set(tool.name, toolEffectOf(tool));
   for (const t of subAgentTools) toolEffects.set(t.name, 'write');
+  // The plugin tools that act in the user's browser (`PluginTool.surface`),
+  // a sub-agent's inner tools included (the execution middleware schedules
+  // them too, by name): scheduled in their session's frontend lane. A name
+  // is listed only when every tool of that name declares it; meta, domain
+  // and dispatch tools never are.
+  const surfaceOf = new Map<string, PluginTool['surface']>();
+  const declareSurface = (tool: PluginTool): void => {
+    const known = surfaceOf.get(tool.name);
+    surfaceOf.set(
+      tool.name,
+      surfaceOf.has(tool.name) && known !== tool.surface
+        ? undefined
+        : tool.surface,
+    );
+  };
+  for (const { tool } of [...turnTools, ...allTools]) declareSurface(tool);
+  for (const { subAgent } of subAgentEntries)
+    for (const tool of Array.isArray(subAgent.tools) ? subAgent.tools : [])
+      declareSurface(tool);
+  const toolSurfaces = new Map<string, 'frontend'>();
+  for (const [name, surface] of surfaceOf)
+    if (surface === 'frontend') toolSurfaces.set(name, surface);
   // Tools whose identical call is a new action (a browser step), which the
   // repetition guard caps like a read whatever their effect.
   const repeatableToolNames = new Set(
@@ -871,11 +922,16 @@ export async function createMainAgent(
       requestCtx.user.currentTime,
     ),
     currentEntityDid: state.currentEntityDid ?? '',
+    userIdentityBlock,
     oracleNameOverride: state.userPreferences?.agentName,
     degradedServicesBlock: hooks?.degradedServicesBlock,
     surfaceBlock: renderSurfaceSection(
       delivery,
       turnTools.some(({ tool }) => tool.name === CREATE_ARTIFACT_TOOL),
+      allTools.some(
+        ({ pluginName, tool }) =>
+          tool.name === SEND_FILE_TOOL && !unmetRequirements.has(pluginName),
+      ),
     ),
     operatingGuides,
   });
@@ -909,6 +965,7 @@ export async function createMainAgent(
     systemPrompt,
     boundToolNames: tools.map((t) => t.name),
     toolEffects,
+    toolSurfaces,
     subAgentToolNames: new Set(subAgentTools.map((t) => t.name)),
     context: runConfig.context,
     ...(domain

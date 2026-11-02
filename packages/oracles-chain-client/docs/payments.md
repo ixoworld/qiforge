@@ -89,7 +89,7 @@ const claimIds = await payments.getOutstandingPayments({
 
 ## Static Methods
 
-### `getOraclePricingList(oracleDid, matrixAccessToken?)`
+### `getOraclePricingList(oracleDid, matrixAccessToken?, matrixHomeServer?)`
 
 Retrieves oracle pricing information from settings.
 
@@ -97,6 +97,7 @@ Retrieves oracle pricing information from settings.
 const pricing = await Payments.getOraclePricingList(
   'did:ixo:entity:oracle123',
   'matrix-token',
+  'mx.ixo.earth',
 );
 ```
 
