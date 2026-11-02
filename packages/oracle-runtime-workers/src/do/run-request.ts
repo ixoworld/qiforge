@@ -78,7 +78,20 @@ export function clientSurfaceFor(
   };
 }
 
-export function runSummaryOf(record: RunRecord): RunSummary {
+export interface RunSummaryOptions {
+  /**
+   * Carry the run's kept reply text (default true). The user-wide listings
+   * (`GET /runs/active`, `activeRun` on session rows) pass false: the text
+   * can be large and a client polling every chat does not need it; the
+   * session's own `GET /sessions/:id/run` still has it.
+   */
+  withPartialText?: boolean;
+}
+
+export function runSummaryOf(
+  record: RunRecord,
+  { withPartialText = true }: RunSummaryOptions = {},
+): RunSummary {
   return {
     runId: record.runId,
     sessionId: record.sessionId,
@@ -89,7 +102,7 @@ export function runSummaryOf(record: RunRecord): RunSummary {
     updatedAt: record.updatedAt,
     lastSeq: record.lastSeq,
     ...(record.messageId ? { messageId: record.messageId } : {}),
-    ...(record.partialText && record.status !== 'finished'
+    ...(withPartialText && record.partialText && record.status !== 'finished'
       ? { partialText: record.partialText }
       : {}),
   };

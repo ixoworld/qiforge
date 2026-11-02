@@ -215,6 +215,9 @@ importers:
       '@ixo/impactxclient-sdk':
         specifier: ^3.0.0
         version: 3.0.0
+      '@ixo/ixo-transaction':
+        specifier: workspace:*
+        version: link:../ixo-transaction
       '@ixo/logger':
         specifier: workspace:*
         version: link:../logger
@@ -391,6 +394,15 @@ importers:
 
   packages/ixo-transaction:
     dependencies:
+      '@ixo/topic-protocol':
+        specifier: 1.0.0-rc.8
+        version: 1.0.0-rc.8(ajv@8.20.0)
+      '@scure/base':
+        specifier: 2.2.0
+        version: 2.2.0
+      protobufjs:
+        specifier: ^7.6.5
+        version: 7.6.5
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -677,6 +689,9 @@ importers:
       '@ixo/action-interactions':
         specifier: workspace:*
         version: link:../action-interactions
+      '@ixo/action-protocol':
+        specifier: 0.9.1
+        version: 0.9.1
       '@ixo/common':
         specifier: workspace:*
         version: link:../common
@@ -686,6 +701,9 @@ importers:
       '@ixo/editor':
         specifier: 6.0.1
         version: 6.0.1(@cosmjs/crypto@0.39.0)(@cosmjs/encoding@0.39.0)(@ixo/matrix-crdt@1.3.2(lib0@0.2.117)(matrix-js-sdk@42.2.0)(y-protocols@1.0.7(yjs@13.6.32))(yjs@13.6.32))(@ixo/surveys@0.1.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/dates@7.17.8(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(dayjs@1.11.21)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(@tiptap/pm@2.27.2)(@types/hast@3.0.4)(@types/react@18.3.31)(matrix-js-sdk@42.2.0)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(typescript@5.9.3)(use-sync-external-store@1.6.0(react@18.3.1))
+      '@ixo/impactxclient-sdk':
+        specifier: ^3.0.0
+        version: 3.0.0
       '@ixo/ixo-transaction':
         specifier: workspace:*
         version: link:../ixo-transaction
@@ -695,6 +713,9 @@ importers:
       '@ixo/matrix-crdt':
         specifier: ^1.2.5
         version: 1.3.2(lib0@0.2.117)(matrix-js-sdk@42.2.0)(y-protocols@1.0.7(yjs@13.6.32))(yjs@13.6.32)
+      '@ixo/topic-protocol':
+        specifier: 1.0.0-rc.8
+        version: 1.0.0-rc.8(ajv@8.20.0)
       '@ixo/ucan':
         specifier: workspace:*
         version: link:../ucan
@@ -746,9 +767,18 @@ importers:
       multiformats:
         specifier: 14.0.4
         version: 14.0.4
+      protobufjs:
+        specifier: ^7.6.5
+        version: 7.6.5
       superjson:
         specifier: 1.13.3
         version: 1.13.3
+      survey-core:
+        specifier: 2.3.11
+        version: 2.3.11
+      unpdf:
+        specifier: 1.8.1
+        version: 1.8.1(@napi-rs/canvas@0.1.100)
       wa-sqlite:
         specifier: 1.0.0
         version: 1.0.0
@@ -765,6 +795,9 @@ importers:
       '@cloudflare/workers-types':
         specifier: ^5.20260825.1
         version: 5.20260825.1
+      '@ixo/action-protocol-041':
+        specifier: npm:@ixo/action-protocol@0.4.1
+        version: '@ixo/action-protocol@0.4.1'
       '@ixo/typescript-config':
         specifier: workspace:*
         version: link:../typescript-config
@@ -1705,6 +1738,7 @@ packages:
 
   '@browserbasehq/stagehand@1.14.0':
     resolution: {integrity: sha512-Hi/EzgMFWz+FKyepxHTrqfTPjpsuBS4zRy3e9sbMpBgLPv+9c0R+YZEvS7Bw4mTS66QtvvURRT6zgDGFotthVQ==}
+    deprecated: This version is no longer maintained. Please upgrade to the latest version of @browserbasehq/stagehand.
     peerDependencies:
       '@playwright/test': ^1.42.1
       deepmerge: ^4.3.1
@@ -3401,6 +3435,14 @@ packages:
     resolution: {integrity: sha512-+Sg6GCR/wy1oSmQDFq4LQDAhm3ETKnorxN+y5nbLULOR3P0c14f2Wurzj3/xqPXtasLFfHd5iRFQ7AJt4KH2cw==}
     engines: {node: '>=8'}
 
+  '@ixo/action-protocol@0.4.1':
+    resolution: {integrity: sha512-XrZyu+jJs+qsWFdjEKkdKXHidxXDZJviW6zNwuNbzn7hf9apMRb3NGmv1XDkYgop+4cgWAuBnb7ZWuFxUJyZ1w==}
+    engines: {node: '>=20'}
+
+  '@ixo/action-protocol@0.9.1':
+    resolution: {integrity: sha512-wXk0DhDkqE2PmSL9omvlf0wIHNcDIs5ObxTLmm+GZIqgd/6RRemCWtgKEN5oQwIjt5HkaZ5CuG4P6KJyEi4Gyg==}
+    engines: {node: '>=20'}
+
   '@ixo/did-provider-x@0.1.1':
     resolution: {integrity: sha512-7Xs0iZ7AdNF+mIESFp2o/gzoeiIl9iT6GkG1YV5j5MhlKqBDwVZTY7rE7nsFhy14B3pkleq1iFmRBdjdJmMO6w==}
 
@@ -3481,6 +3523,10 @@ packages:
     peerDependencies:
       react: ^18.0.0 || ^19.0.0
       react-dom: ^18.0.0 || ^19.0.0
+
+  '@ixo/topic-protocol@1.0.0-rc.8':
+    resolution: {integrity: sha512-9GTYibIV68pUTvvLAuoo/ad1rl3R5NBDgybGRbt5H+S8F6AWc7H6ERPhb8QhkK10sGT7H5Ai3OBiIkexpQl0bQ==}
+    engines: {node: '>=22'}
 
   '@ixo/typescript-config@1.0.0':
     resolution: {integrity: sha512-reavFCnQlEY3efgDMBJoUbHJUIhlpFgf/LS0Q1Vqz+y/mbXymItF82unAzcmRFjb5fE+ANgYpj0k22njWs/tzg==}
@@ -4412,6 +4458,10 @@ packages:
     resolution: {integrity: sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg==}
     engines: {node: '>= 20.19.0'}
 
+  '@noble/hashes@2.4.0':
+    resolution: {integrity: sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA==}
+    engines: {node: '>= 20.19.0'}
+
   '@nodelib/fs.scandir@2.1.5':
     resolution: {integrity: sha512-vq24Bq3ym5HEQm2NKCr3yXDwjc7vTsEThRDnkp2DK9p1uqLR+DHurm/NOTo0KG7HYHU7eppKZj3MyqYuMBf62g==}
     engines: {node: '>= 8'}
@@ -4477,6 +4527,7 @@ packages:
   '@opentelemetry/sdk-trace-base@2.7.0':
     resolution: {integrity: sha512-Yg9zEXJB50DLVLpsKPk7NmNqlPlS+OvqhJGh0A8oawIOTPOwlm4eXs9BMJV7L79lvEwI+dWtAj+YjTyddV336A==}
     engines: {node: ^18.19.0 || >=20.6.0}
+    deprecated: Use @opentelemetry/sdk-trace package
     peerDependencies:
       '@opentelemetry/api': '>=1.3.0 <1.10.0'
 
@@ -10328,10 +10379,6 @@ packages:
   prosemirror-view@1.41.9:
     resolution: {integrity: sha512-clTunTX+eaLbr87L1V1QPheRlEQJyTlL3gXe9x3jQIk3rL0RVWxviDGz8tFaydwIVm+hKhYCyr+R/zBtWr9s6A==}
 
-  protobufjs@7.6.4:
-    resolution: {integrity: sha512-RJJPTTpvFfHcWLkIa2JFWK4XvtSzS0yEWDmunqHXli1h3JlkbcQZXDZdcWxv+JK3Xsl5/UFDPZ0iGm7DAengYw==}
-    engines: {node: '>=12.0.0'}
-
   protobufjs@7.6.5:
     resolution: {integrity: sha512-/FPD0nUc9jH6rfFjji9IBqOz4pcSE3CsT1m7Ep6Mdb0LxSUMj8hgl6GomOvZzpNpAqqGaXA0P3VSrZLFzIhQrw==}
     engines: {node: '>=12.0.0'}
@@ -11262,6 +11309,9 @@ packages:
     resolution: {integrity: sha512-ot0WnXS9fgdkgIcePe6RHNk1WA8+muPa6cSjeR3V8K27q9BB1rTE3R1p7Hv0z1ZyAc8s6Vvv8DIyWf681MAt0w==}
     engines: {node: '>= 0.4'}
 
+  survey-core@2.3.11:
+    resolution: {integrity: sha512-Wymt5zZl4BXqIPRuvMc6whoYBTC1tRgv0GcPTYDeOZgUoKP/aD3Q6LCd2m1uU26iIT+EGBY1lfhM1HAFjoa4Vw==}
+
   survey-core@2.5.38:
     resolution: {integrity: sha512-uI/5ocM08K3LKCa6M1njs8YbRuuF/4vxfAFwyo0RaImoAVdGKkayxt2gNqapTOb0qwYX6OFdDTkEqSMgjYsW8g==}
 
@@ -11849,6 +11899,15 @@ packages:
 
   unl-map-js@0.1.7:
     resolution: {integrity: sha512-8OyfQbD1yk02RkIsTlBpbf8PTSbnOdsl8dPJembiDlR/kiD3WA8/thws6oZp8bjJ6oW4eZsFMxYTN6nw1on2Fg==}
+
+  unpdf@1.8.1:
+    resolution: {integrity: sha512-xkURhy2SoGpOIH0a1gLHNkASPIQYonadDJs2AQwPEfUakafeD9EA1WTWWsaR++gfTCXJpV27W7tU1nXuk82UKQ==}
+    engines: {node: '>=22'}
+    peerDependencies:
+      '@napi-rs/canvas': ^0.1.69 || ^1.0.0
+    peerDependenciesMeta:
+      '@napi-rs/canvas':
+        optional: true
 
   unpipe@1.0.0:
     resolution: {integrity: sha512-pjy2bYhSsufwWlKwPc+l3cN7+wuJlK6uz0YdJEOlQDbl6jo/YlPi4mb8agUkVC8BF7V8NuzeyPNqRksA3hztKQ==}
@@ -13675,7 +13734,7 @@ snapshots:
       '@cosmjs/utils': 0.39.0
       '@noble/ciphers': 2.2.0
       '@noble/curves': 2.2.0
-      '@noble/hashes': 2.2.0
+      '@noble/hashes': 2.4.0
       '@scure/bip39': 2.2.0
 
   '@cosmjs/encoding@0.39.0':
@@ -15538,6 +15597,10 @@ snapshots:
 
   '@istanbuljs/schema@0.1.6': {}
 
+  '@ixo/action-protocol@0.4.1': {}
+
+  '@ixo/action-protocol@0.9.1': {}
+
   '@ixo/did-provider-x@0.1.1':
     dependencies:
       '@babel/runtime': 7.29.7
@@ -15791,6 +15854,15 @@ snapshots:
     transitivePeerDependencies:
       - ace-builds
       - encoding
+
+  '@ixo/topic-protocol@1.0.0-rc.8(ajv@8.20.0)':
+    dependencies:
+      '@noble/hashes': 2.4.0
+      ajv-formats: 3.0.1(ajv@8.20.0)
+      fast-deep-equal: 3.1.3
+      uuid: 11.1.1
+    transitivePeerDependencies:
+      - ajv
 
   '@ixo/typescript-config@1.0.0': {}
 
@@ -16472,6 +16544,8 @@ snapshots:
   '@noble/hashes@1.8.0': {}
 
   '@noble/hashes@2.2.0': {}
+
+  '@noble/hashes@2.4.0': {}
 
   '@nodelib/fs.scandir@2.1.5':
     dependencies:
@@ -19881,7 +19955,7 @@ snapshots:
       '@grpc/grpc-js': 1.14.4
       '@grpc/proto-loader': 0.7.15
       docker-modem: 5.0.7
-      protobufjs: 7.6.4
+      protobufjs: 7.6.5
       tar-fs: 2.1.4
       uuid: 10.0.0
     transitivePeerDependencies:
@@ -24013,20 +24087,6 @@ snapshots:
       prosemirror-state: 1.4.4
       prosemirror-transform: 1.12.0
 
-  protobufjs@7.6.4:
-    dependencies:
-      '@protobufjs/aspromise': 1.1.2
-      '@protobufjs/base64': 1.1.2
-      '@protobufjs/codegen': 2.0.5
-      '@protobufjs/eventemitter': 1.1.1
-      '@protobufjs/fetch': 1.1.1
-      '@protobufjs/float': 1.0.2
-      '@protobufjs/path': 1.1.2
-      '@protobufjs/pool': 1.1.0
-      '@protobufjs/utf8': 1.1.1
-      '@types/node': 22.20.1
-      long: 5.3.2
-
   protobufjs@7.6.5:
     dependencies:
       '@protobufjs/aspromise': 1.1.2
@@ -25276,6 +25336,8 @@ snapshots:
   supports-preserve-symlinks-flag@1.0.0:
     optional: true
 
+  survey-core@2.3.11: {}
+
   survey-core@2.5.38: {}
 
   survey-creator-core@2.5.38(survey-core@2.5.38):
@@ -25932,6 +25994,10 @@ snapshots:
       url-join: 4.0.1
     transitivePeerDependencies:
       - encoding
+
+  unpdf@1.8.1(@napi-rs/canvas@0.1.100):
+    optionalDependencies:
+      '@napi-rs/canvas': 0.1.100
 
   unpipe@1.0.0: {}
 

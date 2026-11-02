@@ -158,6 +158,8 @@ export function createResultCapMiddleware(
         name: toolName,
         status: output.status,
         content: capped.text,
+        // What the model never sees is not part of what was capped.
+        ...(output.artifact !== undefined ? { artifact: output.artifact } : {}),
         additional_kwargs: {
           ...output.additional_kwargs,
           [CAPPED_META_KEY]: capped.meta,

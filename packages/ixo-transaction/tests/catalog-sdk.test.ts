@@ -207,7 +207,10 @@ describe('the SDK the catalog is verified against', () => {
 describe.each(MESSAGE_CATALOG.map((spec) => [spec.typeUrl, spec] as const))(
   'catalog entry %s',
   (typeUrl, spec) => {
-    const codec = codecAt(ixo, typeUrl.replace(/^\/ixo\./, ''));
+    const codec = codecAt(
+      typeUrl.startsWith('/cosmos.') ? cosmos : ixo,
+      typeUrl.replace(/^\/(?:ixo|cosmos)\./, ''),
+    );
 
     it('lists exactly the SDK message fields', () => {
       expect(spec.fields.map((field) => field.name).sort()).toEqual(

@@ -188,6 +188,7 @@ const RUN_CONFIG: RunDurabilityConfig = {
   segmentFlushMs: 60_000,
   segmentBytes: 100_000,
   recoveryAttempts: 4,
+  recoveryTotalAttempts: 8,
   recoveryDelaysMs: [5_000, 15_000, 30_000, 60_000],
   multitaskDefault: 'interrupt',
 };

@@ -5,6 +5,7 @@ import {
   MAX_DECLARED_DESCRIPTION_CHARS,
   MAX_DECLARED_SCHEMA_CHARS,
   MAX_DECLARED_TOOLS,
+  declaredToolEffect,
   sanitizeDeclaredTools,
 } from './declared-tools';
 import { PortalPlugin } from './portal.plugin';
@@ -57,7 +58,44 @@ describe('sanitizeDeclaredTools', () => {
   });
 });
 
+describe('declaredToolEffect', () => {
+  it("accepts exactly 'read' and 'write'", () => {
+    expect(declaredToolEffect('read')).toBe('read');
+    expect(declaredToolEffect('write')).toBe('write');
+    for (const value of ['Read', 'readonly', '', 1, true, null, undefined, {}])
+      expect(declaredToolEffect(value)).toBeUndefined();
+  });
+});
+
 describe('declared tools per request', () => {
+  it('the Portal keeps a declared effect and ignores an invalid one without dropping the tool', async () => {
+    const ctx = makeRuntimeContext(
+      {},
+      {
+        state: {
+          browserTools: [
+            { ...declared('getEntityProfileDomain'), effect: 'read' },
+            { ...declared('mutate_topic'), effect: 'write' },
+            { ...declared('open_url'), effect: 'sometimes' },
+            { ...declared('get_page'), effect: 'write' },
+            // A question to the person stays a write whatever is declared.
+            { ...declared('ask_user_question'), effect: 'read' },
+            declared('click'),
+          ],
+        },
+      },
+    );
+    const tools = await new PortalPlugin().getRequestTools(ctx);
+    expect(tools.map((t) => [t.name, t.effect])).toEqual([
+      ['getEntityProfileDomain', 'read'],
+      ['mutate_topic', 'write'],
+      ['open_url', undefined],
+      ['get_page', 'write'],
+      ['ask_user_question', 'write'],
+      ['click', undefined],
+    ]);
+  });
+
   it('the Portal contributes one tool per valid, distinct browser tool', async () => {
     const ctx = makeRuntimeContext(
       {},

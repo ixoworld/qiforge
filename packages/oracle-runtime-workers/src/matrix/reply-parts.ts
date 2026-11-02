@@ -4,7 +4,8 @@
  * plain `m.text`, exactly as before chat delivery existed. With a plan it is
  * one `m.text` per part, in the thread, rendered to HTML with raw HTML from
  * the model escaped. Each part has its own transaction id, so a replayed
- * turn is deduplicated part by part.
+ * turn is deduplicated part by part. A file is a link line: rooms have no
+ * gateway to fetch it into an attachment, so it works until the link expires.
  */
 import { Marked } from 'marked';
 import type { TurnResult } from '../do/contracts';
@@ -60,10 +61,23 @@ export function replyPartContent(part: ReplyPart): {
       body: part.text,
       formattedBody: renderRoomMarkdown(part.text),
     };
-  const { title, url } = part.artifact;
+  if (part.kind === 'file') {
+    const { filename, url, caption } = part.file;
+    return {
+      body: [caption, filename, url].filter(Boolean).join('\n'),
+      formattedBody: `<p><strong>${escapeHtml(filename)}</strong>${caption ? `<br>${escapeHtml(caption)}` : ''}<br><a href="${escapeHtml(url)}">Open file</a></p>`,
+    };
+  }
+  const { title, url } =
+    part.kind === 'action'
+      ? part.action
+      : part.kind === 'hub-action'
+        ? { title: part.summary, url: part.actionReference.url }
+        : part.artifact;
+  const label = part.kind === 'artifact' ? 'Open document' : 'Review action';
   return {
     body: `${title}\n${url}`,
-    formattedBody: `<p><strong>${escapeHtml(title)}</strong><br><a href="${escapeHtml(url)}">Open document</a></p>`,
+    formattedBody: `<p><strong>${escapeHtml(title)}</strong><br><a href="${escapeHtml(url)}">${label}</a></p>`,
   };
 }
 

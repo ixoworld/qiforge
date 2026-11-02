@@ -1,3 +1,4 @@
+import type { ChannelAttachment } from '../channels/contract';
 import {
   UNAVAILABLE_DECISION_EVALUATOR,
   type DecisionEvaluateOptions,
@@ -189,6 +190,8 @@ export interface AmbientServices {
    * `DecisionProviderUnavailableError`.
    */
   decisions?: DecisionEvaluator;
+  actionProposals?: RuntimeContext['actionProposals'];
+  hubActions?: RuntimeContext['hubActions'];
   /** Host task scheduler for the current user, when the host provides one. */
   tasks?: import('../plugin-api/types').OracleTasksSurface;
   /** Host user-preferences store for the current user, when provided. */
@@ -202,6 +205,12 @@ export interface AmbientServices {
   onTurnEnd?: (dispose: () => void | Promise<void>) => void;
   /** Host keep-alive for un-awaited work (`ctx.waitUntil` on Workers). */
   background?: (work: Promise<unknown>) => void;
+  /**
+   * Records that the tool call `toolCallId` of this turn left the object
+   * (`ctx.markDispatched`). Set per turn by a host that keeps write-ahead
+   * tool marks.
+   */
+  markDispatched?: (toolCallId: string) => void;
 }
 
 // ── Scoped emitter ──────────────────────────────────────────────────────────
@@ -317,6 +326,14 @@ export interface RuntimeSessionContext {
   client: 'portal' | 'matrix' | 'slack' | 'channel';
   wsId?: string;
   requestId: string;
+  runId?: string;
+  channel?: {
+    provider: string;
+    bindingId: string;
+    bindingRevision: number;
+    /** Files sent with this message (see `RuntimeContext.session.channel`). */
+    attachments?: readonly ChannelAttachment[];
+  };
   roomId?: string;
   surface?: SessionSurface;
 }
@@ -434,6 +451,8 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
   };
 
   const delegation = user.ucanDelegation;
+  const toolCallId = runConfig.toolCall?.id;
+  const { markDispatched } = ambient;
 
   const ctx: RuntimeContext<TConfig> = {
     user,
@@ -520,6 +539,10 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
     logger: ambient.logger,
     abortSignal,
     ...(ambient.tasks ? { tasks: ambient.tasks } : {}),
+    ...(ambient.actionProposals
+      ? { actionProposals: ambient.actionProposals }
+      : {}),
+    ...(ambient.hubActions ? { hubActions: ambient.hubActions } : {}),
     ...(ambient.preferences ? { preferences: ambient.preferences } : {}),
     ...(ambient.kv ? { kv: ambient.kv } : {}),
     ...(ambient.frontend ? { frontend: ambient.frontend } : {}),
@@ -527,7 +550,10 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
     ...(ambient.onTurnEnd ? { onTurnEnd: ambient.onTurnEnd } : {}),
     ...(ambient.background ? { background: ambient.background } : {}),
     shared: EMPTY_SHARED,
-    ...(runConfig.toolCall?.id ? { toolCallId: runConfig.toolCall.id } : {}),
+    ...(toolCallId ? { toolCallId } : {}),
+    ...(toolCallId && markDispatched
+      ? { markDispatched: () => markDispatched(toolCallId) }
+      : {}),
   };
   if (sharedFactory) {
     ctx.shared = sharedFactory(ctx);
@@ -730,5 +756,8 @@ export function createNoopAmbient(
     logger: overrides.logger ?? NOOP_LOGGER,
     ...(overrides.decisions ? { decisions: overrides.decisions } : {}),
     ...(overrides.kv ? { kv: overrides.kv } : {}),
+    ...(overrides.markDispatched
+      ? { markDispatched: overrides.markDispatched }
+      : {}),
   };
 }

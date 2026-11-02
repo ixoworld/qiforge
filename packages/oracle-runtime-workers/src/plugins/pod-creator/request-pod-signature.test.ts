@@ -88,6 +88,9 @@ function fakeBridge(opts: { connected?: boolean } = {}) {
       return pending;
     },
     hasClient: (sessionId) => (opts.connected ?? true) && sessionId === THREAD,
+    canDispatch: (sessionId) =>
+      (opts.connected ?? true) && sessionId === THREAD,
+    parkedFor: () => null,
   };
   /** Deliver `action_call_result` for the latest call from the Portal tab. */
   const answer = (payload: { result?: unknown; error?: string }): boolean => {

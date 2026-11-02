@@ -86,6 +86,55 @@ describe('composeEnvSchema', () => {
 });
 
 describe('validateEnv', () => {
+  it('refuses action proposals switched on without their Portal origin and RPC, and unsafe URLs', () => {
+    const { schema, pluginOwnership } = composeEnvSchema([], baseEnvSchema);
+    const on = validateEnv(
+      schema,
+      makeEnv({ ACTION_PROPOSALS_ENABLED: 'true' }),
+      pluginOwnership,
+    );
+    expect(on.valid).toBe(false);
+    expect(on.errors.map((e) => [e.plugin, e.field])).toEqual([
+      ['core', 'ACTION_PROPOSALS_PORTAL_ORIGIN'],
+      ['core', 'ACTION_PROPOSALS_RPC_TESTNET'],
+    ]);
+    expect(
+      validateEnv(
+        schema,
+        makeEnv({
+          ACTION_PROPOSALS_ENABLED: 'true',
+          ACTION_PROPOSALS_PORTAL_ORIGIN: 'https://portal.test',
+          ACTION_PROPOSALS_RPC_TESTNET: 'https://rpc.test/rpc/',
+        }),
+        pluginOwnership,
+      ).valid,
+    ).toBe(true);
+    for (const bad of [
+      { ACTION_PROPOSALS_RPC_TESTNET: 'http://rpc.test' },
+      { ACTION_PROPOSALS_RPC_TESTNET: 'https://user:pw@rpc.test' },
+      { ACTION_PROPOSALS_RPC_DEVNET: 'https://rpc.test/?x=1' },
+      { ACTION_PROPOSALS_PORTAL_ORIGIN: 'https://portal.test/a' },
+      { ACTION_PROPOSALS_PORTAL_ORIGIN: 'http://portal.test' },
+    ]) {
+      const result = validateEnv(schema, makeEnv(bad), pluginOwnership);
+      expect(result.valid).toBe(false);
+      expect(result.errors[0]?.plugin).toBe('core');
+      expect(result.errors[0]?.field).toBe(Object.keys(bad)[0]);
+    }
+    // Off by default: none of it is required.
+    expect(validateEnv(schema, makeEnv(), pluginOwnership).valid).toBe(true);
+    // The topic switch rides on the base switch.
+    const topicOnly = validateEnv(
+      schema,
+      makeEnv({ ACTION_TOPIC_PROPOSALS_ENABLED: 'true' }),
+      pluginOwnership,
+    );
+    expect(topicOnly.valid).toBe(false);
+    expect(topicOnly.errors.map((e) => e.field)).toEqual([
+      'ACTION_TOPIC_PROPOSALS_ENABLED',
+    ]);
+  });
+
   it('parses the Worker env object, applies defaults and strips bindings', () => {
     const { schema, pluginOwnership } = composeEnvSchema([], baseEnvSchema);
     const result = validateEnv(schema, makeEnv(), pluginOwnership);

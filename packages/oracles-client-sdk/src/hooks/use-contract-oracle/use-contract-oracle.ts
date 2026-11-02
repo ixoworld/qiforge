@@ -32,13 +32,15 @@ interface IUseContractOracleProps {
 const ORACLE_CONFIG_STALE_TIME_MS = 5 * 60 * 1000;
 
 const useContractOracle = ({ params }: IUseContractOracleProps) => {
-  const { wallet, transactSignX } = useOraclesContext();
+  const { wallet, transactSignX, getRoomsBotAuth } = useOraclesContext();
   const matrixClientRef = useMemo(
     () =>
       new MatrixClient({
         userAccessToken: wallet?.matrix.accessToken ?? '',
+        homeserverUrl: wallet?.matrix.homeServer,
+        getRoomsBotAuth,
       }),
-    [wallet?.matrix.accessToken],
+    [wallet?.matrix.accessToken, wallet?.matrix.homeServer, getRoomsBotAuth],
   );
 
   const { data: authzConfig, isLoading: isLoadingAuthzConfig } = useQuery(
@@ -138,6 +140,11 @@ const useContractOracle = ({ params }: IUseContractOracleProps) => {
 
         if (!wallet?.did || !wallet.matrix.accessToken) {
           throw new Error('Wallet or matrix access token not found');
+        }
+        if (!getRoomsBotAuth) {
+          throw new Error(
+            'Contracting an oracle needs the getRoomsBotAuth prop on OraclesProvider',
+          );
         }
 
         // Use DID-based resolution for decoupled Matrix infrastructure

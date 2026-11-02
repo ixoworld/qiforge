@@ -1,3 +1,12 @@
+import type {
+  TopicActionProposal,
+  TopicProposalSubject,
+} from '@ixo/ixo-transaction/topic-proposals';
+import type { TopicCandidate } from '../action-proposals/topic-prepare';
+import type {
+  ActionProposal,
+  ActionProposalSubject,
+} from '@ixo/ixo-transaction/action-proposals';
 import type { TaskExecutionProfile } from '../core/execution-profile';
 import type {
   DecisionDefinition,
@@ -9,7 +18,108 @@ import type { BaseMessage } from '@langchain/core/messages';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { UserPreferences } from '../core/state';
 import type { AttachmentViewSurface } from '../attachments/view';
+import type { ChannelAttachment } from '../channels/contract';
 import type { DeliveryConfig } from '../delivery/profile';
+import type {
+  HubOperationStatus,
+  HubReviewStatus,
+} from '../hub-actions/client';
+import type {
+  ActionOperationV1,
+  ActionReferenceV1,
+  ActionOutcomeV1,
+  ActionCapabilitiesV1,
+  ChainTxGroupAction,
+  ChainTxMessage,
+} from '@ixo/action-protocol';
+
+/** `Omit` applied to each member of a union (plain `Omit` merges them). */
+export type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
+  ? Omit<T, K>
+  : never;
+
+/**
+ * The owner's own identity in chain-transaction messages, which the host
+ * fills and the model never names: the filer's or disputer's `agentDid`
+ * (claims, reservations, disputes), an evaluation's `agentDid` and
+ * `agentAddress`, a claim permission's `creatorDid`, an entity update's
+ * `controllerDid` and a new entity's `ownerDid`: always `did:ixo:<signer>`,
+ * or the signer for an address.
+ */
+export type ChainTxOwnerField =
+  | 'agentDid'
+  | 'agentAddress'
+  | 'creatorDid'
+  | 'controllerDid'
+  | 'ownerDid';
+
+/** The stake steps: their amount is IXO, written in display units. */
+export type ChainTxStakeType =
+  | 'cosmos.staking.delegate'
+  | 'cosmos.staking.undelegate'
+  | 'cosmos.staking.redelegate';
+
+/** A bank step as the model writes it: a display amount of a listed token. */
+export type ChainTxBankInput = {
+  type: 'cosmos.bank.send';
+  toAddress: string;
+  /** A plain decimal in the token's display units ("1.5"). */
+  amount: string;
+  denom?: string;
+};
+
+/** A stake step as the model writes it: a display amount of IXO. */
+export type ChainTxStakeInput = DistributiveOmit<
+  Extract<ChainTxMessage, { type: ChainTxStakeType }>,
+  'amountBaseUnits'
+> & {
+  /** A plain decimal in IXO ("100" or "0.5"). */
+  amount: string;
+};
+
+/**
+ * One action of a new group proposal (`daodao.proposal.create` `actions`)
+ * as the model writes it: the protocol's action, with a bank or stake
+ * action's amount in display units as at top level. The group's own
+ * account is its actor, so none of them names the owner.
+ */
+export type ChainTxGroupActionInput =
+  | ChainTxBankInput
+  | ChainTxStakeInput
+  | Exclude<
+      ChainTxGroupAction,
+      { type: 'cosmos.bank.send' | ChainTxStakeType }
+    >;
+
+/**
+ * A chain-transaction message as the model writes it: the protocol's
+ * message without the owner's identity (`ChainTxOwnerField`), which the
+ * host fills. A bank step names a display `amount` of a token from the
+ * owner's list (`denom`, absent = uixo); a stake step a display `amount` of
+ * IXO. The host converts both to the protocol's `amountBaseUnits` (the
+ * listed decimals; 6 for IXO), at top level and inside a new group
+ * proposal's actions. Every other amount (impact tokens, a collection's
+ * payments) is already in the protocol's units.
+ */
+export type ChainTxMessageInput =
+  | ChainTxBankInput
+  | ChainTxStakeInput
+  | (Omit<
+      Extract<ChainTxMessage, { type: 'daodao.proposal.create' }>,
+      'actions'
+    > & { actions: ChainTxGroupActionInput[] })
+  | DistributiveOmit<
+      Exclude<
+        ChainTxMessage,
+        {
+          type:
+            | 'cosmos.bank.send'
+            | ChainTxStakeType
+            | 'daodao.proposal.create';
+        }
+      >,
+      ChainTxOwnerField
+    >;
 
 /**
  * Route shape returned by `OraclePlugin.getAuthExcludedRoutes()`. Paths are
@@ -512,6 +622,25 @@ export type SessionSurface =
   | { kind: 'stream' }
   | { kind: 'chat'; surface: string; label: string };
 
+/** What `ctx.hubActions.status` reads. */
+export interface HubActionStatusRead {
+  /** False when this owner object holds no action with this id (Auth Hub was not asked). */
+  held: boolean;
+  /**
+   * Auth Hub's review status (`prepared`, `authorized`, `declined`,
+   * `expired`, …) and operation status, each one the protocol lists or
+   * `unknown` for anything else Auth Hub answered; null when not held.
+   * With no outcome yet they tell an action still waiting from one whose
+   * review lapsed.
+   */
+  reviewStatus: HubReviewStatus | null;
+  operationStatus: HubOperationStatus | null;
+  /** The latest authenticated outcome; null when there is none (yet). */
+  outcome: ActionOutcomeV1 | null;
+  /** For a bank-send receipt, the owner-facing line. */
+  summary: string | null;
+}
+
 export interface RuntimeContext<TConfig = MergedConfig> {
   /** Authenticated user identity (validated by core auth middleware). */
   user: {
@@ -530,6 +659,21 @@ export interface RuntimeContext<TConfig = MergedConfig> {
     client: 'portal' | 'matrix' | 'slack' | 'channel';
     wsId?: string;
     requestId: string;
+    runId?: string;
+    /** Authenticated channel identity captured by the runtime for this turn. */
+    channel?: {
+      provider: string;
+      bindingId: string;
+      bindingRevision: number;
+      /**
+       * Files the person sent with this turn's message (a WhatsApp photo,
+       * video, document or audio file), as the channel gateway serves them:
+       * a capability `url` plus the `sha256` of its bytes. Absent when the
+       * message carried none. The model also sees them through the
+       * attachment pipeline; this is the raw list for tools that keep them.
+       */
+      attachments?: readonly ChannelAttachment[];
+    };
     roomId?: string;
     /**
      * Where the reply lands. `stream` is the Portal; `chat` is a chat app
@@ -723,6 +867,86 @@ export interface RuntimeContext<TConfig = MergedConfig> {
    * Bounded semantic decisions. A decision only returns structured judgment;
    * policy, authority checks, and side effects remain outside this primitive.
    */
+  actionProposals?: {
+    create(subject: ActionProposalSubject): Promise<ActionProposal>;
+    prepareTopic?(input: {
+      candidate: TopicCandidate;
+      origin: TopicProposalSubject['origin'];
+      evidenceRefs: string[];
+    }): Promise<TopicActionProposal>;
+  };
+
+  /** Host-owned action coordinator. It accepts only runtime-derived channel context. */
+  hubActions?: {
+    /**
+     * The Hub's capabilities for this oracle account (cached 60 s).
+     * `turn`: a read on a turn's critical path (a tool list): a short
+     * timeout, no new read within 30 s of a failed one, and the last
+     * capabilities read while reads fail.
+     */
+    capabilities(opts?: { turn?: boolean }): Promise<ActionCapabilitiesV1>;
+    options(input: {
+      ownerDid: string;
+      provider: string;
+      bindingId: string;
+      bindingRevision: number;
+    }): Promise<import('@ixo/action-protocol').HubActionOptionsV3>;
+    /**
+     * One chain transaction (`ixo.chain.tx.v1`) of 1–8 messages: the host
+     * adds the chain id and network (the account's), the signer (the
+     * owner's address) and the owner's identity (`ChainTxOwnerField`:
+     * `did:ixo:<signer>`, an evaluation's `agentAddress` = the signer) and
+     * prepares it like any operation (no fee: the Hub simulates gas and
+     * sets it). A bank step's display `amount` is converted to base units
+     * from the owner's token list (one options read per call, only when
+     * there is a bank or stake step), refused for a token not listed, more
+     * digits than its decimals, zero or more than the listed balance. A
+     * stake step's IXO `amount` is converted with 6 decimals; what a stake
+     * takes from the wallet counts against the listed IXO balance with the
+     * IXO bank steps, when the list has IXO. A new group proposal's bank and
+     * stake actions are converted the same way but never checked against
+     * the owner's balance: the group's own account pays them when the group
+     * carries the proposal out.
+     */
+    chainTransaction(input: {
+      ownerDid: string;
+      sessionId: string;
+      runId: string;
+      requestId: string;
+      provider: string;
+      bindingId: string;
+      bindingRevision: number;
+      requestKey: string;
+      messages: ChainTxMessageInput[];
+      memo: string;
+    }): Promise<ActionReferenceV1>;
+    request(input: {
+      ownerDid: string;
+      sessionId: string;
+      runId: string;
+      requestId: string;
+      provider: string;
+      bindingId: string;
+      bindingRevision: number;
+      requestKey: string;
+      operation: ActionOperationV1;
+    }): Promise<ActionReferenceV1>;
+    /**
+     * A fresh, authenticated read of one of this owner's actions: Auth
+     * Hub's review and operation status, the latest outcome (null: none
+     * yet) and, for a transfer, its owner-facing line. An action this
+     * owner object never prepared is `held: false` and Auth Hub is not
+     * asked. `timeoutMs` bounds the Hub read (default 10 s). Rejects with
+     * `HubActionRefused` (with `httpStatus`) when Auth Hub refuses the read,
+     * for example when it must be updated first.
+     */
+    status(
+      ownerDid: string,
+      actionId: string,
+      opts?: { timeoutMs?: number },
+    ): Promise<HubActionStatusRead>;
+  };
+
   decisions: {
     evaluate<TSchema extends z.ZodType>(
       definition: DecisionDefinition<TSchema>,
@@ -833,6 +1057,18 @@ export interface RuntimeContext<TConfig = MergedConfig> {
    * to the state update.
    */
   toolCallId?: string;
+
+  /**
+   * Record that THIS tool call has left the object: the executor that runs
+   * it outside the runtime received it (for a frontend tool, a browser
+   * socket). Present when the host keeps write-ahead marks for the turn's
+   * tool calls (durable runs on Workers) and the call has an id. A call
+   * restarted before this was recorded is known not to have run and is
+   * issued again on resume; after it, a write's outcome is unknown. A tool
+   * that may wait before sending (a parked frontend call) passes it as
+   * `FrontendCallParams.onDispatched`.
+   */
+  markDispatched?: () => void;
 }
 
 /** Lifecycle of a scheduled task. */
@@ -891,18 +1127,46 @@ export interface OracleTaskInput {
 /**
  * Bridge to the user's browser over the realtime channel. Each call is one
  * invocation with its own id, sent (`browser_tool_call` / `action_call`) to
- * ONE authenticated socket of `sessionId`; only that socket's answer settles
- * it. It resolves with the browser's answer and rejects on the browser's
- * `error`, an AG-UI `success: false`, or when no socket could take it. When
- * the answer cannot arrive — the deadline passed or the socket went — it
- * resolves with `FRONTEND_OUTCOME_UNKNOWN` (`@ixo/common/ai/frontend-bridge`):
- * the browser may have performed the action, and it is never sent again.
+ * ONE authenticated socket of `sessionId` that can run it; only that socket's
+ * answer settles it. With no such socket the call is parked: it waits,
+ * unsent, for one to join the session (the turn's abort and the park
+ * deadline end the wait, rejecting the call as never sent). It resolves with
+ * the browser's answer and rejects on the browser's `error` or an AG-UI
+ * `success: false`. When the answer of a sent call cannot arrive — the
+ * deadline passed or the socket went — it resolves with
+ * `FRONTEND_OUTCOME_UNKNOWN` (`@ixo/common/ai/frontend-bridge`): the browser
+ * may have performed the action, and it is never sent again.
  */
 export interface FrontendCallSurface {
   callBrowserTool(params: FrontendCallParams): Promise<unknown>;
   callAgAction(params: FrontendCallParams): Promise<unknown>;
-  /** Whether at least one authenticated realtime client is attached to the session. */
+  /**
+   * Whether at least one authenticated realtime client is attached to the
+   * session, background executors included (see `canDispatch`).
+   */
   hasClient(sessionId: string): boolean;
+  /**
+   * Whether a call of `kind` to `toolName` would be sent right now rather
+   * than parked: an authenticated socket of the session can run it (any
+   * foreground socket; a background executor only for a browser tool it
+   * declared). A caller that must not park — wallet signing refuses at once
+   * — checks this first.
+   */
+  canDispatch(
+    sessionId: string,
+    kind: 'browser' | 'agui',
+    toolName: string,
+  ): boolean;
+  /** The session's oldest parked call (waiting unsent for a browser), if any. */
+  parkedFor(sessionId: string): FrontendWaitingFor | null;
+}
+
+/** A frontend call waiting, unsent, for a browser of its session to join. */
+export interface FrontendWaitingFor {
+  kind: 'browser' | 'agui';
+  toolName: string;
+  /** When the call was parked (ISO 8601). */
+  since: string;
 }
 
 export interface FrontendCallParams {
@@ -921,6 +1185,12 @@ export interface FrontendCallParams {
    * `FRONTEND_OUTCOME_UNKNOWN` at once — the browser may already have run it.
    */
   signal?: AbortSignal;
+  /**
+   * Called once, when the call is sent to a socket (at once, or later when
+   * a parked call is dispatched); never for a call that ends unsent. A tool
+   * passes `ctx.markDispatched` here.
+   */
+  onDispatched?: () => void;
 }
 
 /**
@@ -984,6 +1254,16 @@ export interface PluginTool {
    * `effect` still governs retries, write claims and resume.
    */
   repeatable?: boolean;
+  /**
+   * `'frontend'`: the tool acts in the user's browser through the frontend
+   * bridge (`ctx.frontend`). It is scheduled in the session's own
+   * `frontend` lane, one call at a time per session, never in the user-wide
+   * read/write lanes, so a call parked while the chat has no tab holds no
+   * server slot another chat needs. The identical-write ledger still
+   * applies when its `effect` is `write` (its fingerprint then includes the
+   * session). Omitted: a server-side tool, scheduled by its effect.
+   */
+  surface?: 'frontend';
   /**
    * Billing gate. `'contracted'` marks a tool that performs paid contracted
    * work: the runtime binds it only while the turn runs inside an active work

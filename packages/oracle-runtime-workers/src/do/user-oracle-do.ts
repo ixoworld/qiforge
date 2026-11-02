@@ -9,8 +9,84 @@ import {
   interactionOutcome,
   type InteractionCommand,
 } from '../action-interactions/store';
+import {
+  channelReplyNote,
+  CHANNEL_REPLY_NOTE_KWARG,
+} from '../channels/replies';
+import { channelRoutingConfig } from '../channels/routing';
+import { digestTopicProposalEffect } from '../action-proposals/topic-store';
+import {
+  chainIdsFromConfig,
+  chainIdConfigSchema,
+} from '../plugins/ixo-transaction/chain-ids';
+import { TopicProposalStore } from '../action-proposals/topic-store';
+import {
+  prepareTopicSubject,
+  type TopicCandidate,
+} from '../action-proposals/topic-prepare';
+import {
+  assertTopicDependencies,
+  reconcileTopicReferences,
+  type TopicVerificationContext,
+} from '../action-proposals/topic-verify';
+import { topicExpectedEffect } from '../action-proposals/topic-effects';
+import {
+  topicActionOutcome,
+  type ActionProposalWire,
+  type TopicActionProposal,
+  type TopicProposalSubject,
+  type BeginTopicStep,
+  type TopicReceiptReferences,
+} from '@ixo/ixo-transaction/topic-proposals';
+import type {
+  ChannelControlInput,
+  ChannelControlOutcome,
+  ChannelTurnResponse,
+} from '../channels/contract';
+import { refreshActionProposal } from '../action-proposals/reconcile';
+import { assertActionProposalPolicy } from '../action-proposals/policy';
+import { TopicReadUnavailable } from '../action-proposals/topic-errors';
+import { actionOutcome } from '@ixo/ixo-transaction/action-proposals';
+import {
+  ActionProposalConflict,
+  ActionProposalStore,
+  type ProposalCommand,
+} from '../action-proposals/store';
+import type {
+  ActionProposal,
+  ActionProposalSubject,
+} from '@ixo/ixo-transaction/action-proposals';
 import { ChannelTurns } from '../channels/turns';
-import { assertChannelAttemptAllowed } from '../channels/auth';
+import {
+  HubActionClient,
+  type HubOperationStatus,
+  type HubReviewStatus,
+} from '../hub-actions/client';
+import { chainTxOperation, prepareHubAction } from '../hub-actions/request';
+import {
+  bankReceiptSummary,
+  chainTxAmountsInBaseUnits,
+  chainTxNeedsTokenList,
+} from '../hub-actions/transfer';
+import {
+  HUB_CHECK_AFTER_EXPIRY_MS,
+  HubActionRefused,
+  HubActionStore,
+  TERMINAL_HUB_STATUSES,
+} from '../hub-actions/store';
+import {
+  canonicalJson,
+  type ActionCapabilitiesV1,
+  type HubActionOptionsV2,
+  type HubActionOptionsV3,
+  v1Receipt,
+  type ActionOperationV1,
+  type ActionOutcomeV1,
+} from '@ixo/action-protocol';
+import {
+  assertActiveChannelBinding,
+  assertChannelAttemptAllowed,
+} from '../channels/auth';
 import {
   CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
   ChannelError,
@@ -58,22 +134,30 @@ import {
   applyAttachmentRetention,
   ATTACHMENT_PAYLOAD_TURNS,
   ATTACHMENT_PLACEHOLDER_PREFIX,
-  attachmentMetas,
-  attachmentRef,
+  createAttachmentViewSurface,
+  findPersistedAttachmentMeta,
+  IngestTextLru,
   INLINE_PAYLOAD_NEEDLE,
   isAttachmentViewMessage,
   offloadInlinePayloads,
   parseAttachmentInputs,
   prepareAttachments,
-  viewAttachment,
+  ChannelAttachmentLinkStore,
   type AttachmentViewSurface,
   type MatrixMediaSource,
+  type ViewAttachmentDeps,
   type SandboxUploadConfig,
   DOWNLOAD_TIMEOUT_MS,
   MAX_FILE_SIZE,
   readBytesCapped,
   AttachmentTextCacheStore,
 } from '../attachments';
+import {
+  channelTurnLinks,
+  prepareTurnAttachments,
+  turnAttachmentInputs,
+  turnChannelMediaSource,
+} from './turn-attachments';
 import type { RuntimeCore } from '../core';
 import {
   createLlmAdapter,
@@ -129,6 +213,7 @@ import {
   priorMetadataState,
 } from './turn-metadata';
 import {
+  frontendParkTimeoutMs,
   RealtimeEndpoint,
   type RealtimeStatus,
 } from '../realtime/realtime-endpoint';
@@ -145,6 +230,7 @@ import {
 } from '../sqlite/cache-config';
 import { DoSqliteDatabase, type DoSqliteOpenOptions } from '../sqlite/database';
 import type { TierFlushResult } from '../sqlite/do-vfs';
+import type { AttachmentMeta } from '../sqlite/serialization';
 import {
   DEFAULT_TIER_HOT_BUDGET_BYTES,
   type PageTierOptions,
@@ -218,6 +304,7 @@ import { decideBootDirty } from './boot-dirty';
 import { decideFlush } from './flush-schedule';
 import { mirrorTxnId, mirrorEventContent, RoomMirror } from './room-mirror';
 import { prefixSpeaker } from './speaker-prefix';
+import { assembleTurnMessages } from './turn-messages';
 import {
   type ObservedMessage,
   summarizeObservedMessages,
@@ -237,8 +324,12 @@ import { createWorkStatusMiddleware } from '../core/middlewares/work-status';
 import { UserPreferencesStore } from '../plugins/user-preferences/user-preferences-store';
 import { SqliteUserKv } from '../sqlite/user-kv-store';
 import {
+  channelHistoryIndexDebounceMs,
+  pageOfMessages,
   SessionHistoryIndexer,
+  type HistoryEntry,
   type HistoryMessage,
+  type HistoryPage,
   type IndexableSession,
 } from '../memory/session-history-indexer';
 import {
@@ -272,6 +363,13 @@ import {
   storedRunRequest,
   type StoredRunRequest,
 } from './run-request';
+import {
+  activeChatRuns,
+  activeRunSummaryOf,
+  listedChatRuns,
+  withActiveRuns,
+  withWaitingFor,
+} from './active-runs';
 import {
   createToolMarksMiddleware,
   toolEffectOf,
@@ -317,6 +415,7 @@ import { buildCreateArtifactTool } from '../artifacts/tool';
 import { resolveDeliveryProfile } from '../delivery/profile';
 import {
   draftReplyPlan,
+  failedRunFiles,
   materializeReplyPlan,
   turnSteps,
 } from '../delivery/plan';
@@ -328,6 +427,10 @@ import {
   fetchMemorySchemaDump,
   getMemorySchemaDump,
 } from '../plugins/memory/memory-tools';
+import {
+  MEMORY_ENTITY_HEADER,
+  memoryEntityDid,
+} from '../plugins/memory/memory-entity';
 import {
   contentToText,
   isSummarizationMessage,
@@ -349,7 +452,65 @@ import {
   resolveTurnDelegation,
   WorkersUcanService,
 } from './ucan-service';
-import type { UcanDelegation, UserContextData } from '../plugin-api/types';
+import type {
+  ChainTxMessageInput,
+  HubActionStatusRead,
+  UcanDelegation,
+  UserContextData,
+} from '../plugin-api/types';
+
+/**
+ * The gateway's topic read errors that describe what the homeserver
+ * returned rather than a read that failed (`MatrixGatewayDO.getTopicEvent`
+ * / `getTopicHistory`).
+ */
+const GATEWAY_TOPIC_FACTS = new Set([
+  'Topic event room binding mismatch',
+  'Topic history event room binding mismatch',
+  'Topic history event has no ID',
+]);
+
+/**
+ * The transfer card store failed to open for this owner: every transfer
+ * route is told to retry later, with the reason in the log.
+ */
+function storeUnavailable(id: string): {
+  ok: false;
+  kind: 'unavailable';
+  error: string;
+} {
+  console.warn(`[action-proposals] ${id} refused: card store unavailable`);
+  return {
+    ok: false,
+    kind: 'unavailable',
+    error: 'Action cards are unavailable',
+  };
+}
+
+/**
+ * A topic command's refusal, for the shell: a `conflict` is the card or an
+ * authority it was sealed on having changed (the Portal re-reads and
+ * retries), `unavailable` is a room, DID or chain read that failed and may
+ * succeed later. Anything else is a bug and surfaces as one.
+ */
+function topicRefusal(
+  error: unknown,
+  id: string,
+): { ok: false; kind: 'conflict' | 'unavailable'; error: string } {
+  if (error instanceof ActionProposalConflict)
+    return { ok: false, kind: 'conflict', error: error.message };
+  if (error instanceof TopicReadUnavailable) {
+    console.warn(
+      `[topic-actions] ${id} authority unavailable: ${error.message}`,
+    );
+    return {
+      ok: false,
+      kind: 'unavailable',
+      error: 'Topic authority is unavailable',
+    };
+  }
+  throw error;
+}
 
 /** What one attempt's agent build reads from the request body. */
 type TurnBuildBody = Pick<
@@ -428,6 +589,7 @@ function hasUserContext(value: unknown): boolean {
 function admissionApplies(req: TurnRequest): boolean {
   return (
     !req.attachments?.length &&
+    !req.channel?.attachments?.length &&
     !req.taskRunId &&
     !req.sessionId.startsWith(TASK_SESSION_PREFIX) &&
     req.roomKind !== 'group'
@@ -479,6 +641,49 @@ const ACCESS_PERSIST_INTERVAL_MS = 60 * 60_000;
 const TITLE_TIMEOUT_MS = 15_000;
 /** A new sweep of expired ambient blobs starts at most this often per instance. */
 const BLOB_SWEEP_INTERVAL_MS = 60 * 60_000;
+/**
+ * Wall time the alarm's action-card tick may spend on chain lookups (two at
+ * most, run together); an abort counts as an RPC outage (the card stays
+ * `unknown`, its attempt spent).
+ */
+const ACTION_TICK_BUDGET_MS = 15_000;
+/** The card retention sweep runs at most this often per instance. */
+const ACTION_PRUNE_INTERVAL_MS = 60 * 60_000;
+/** How long the Hub's capabilities answer is reused per object. */
+const HUB_CAPABILITIES_CACHE_MS = 60_000;
+/**
+ * A capabilities read on a turn's critical path (the chain transaction
+ * tool's types): a short timeout, and after a failed read none for this
+ * long, so a slow or failing Hub costs a turn at most this timeout once per
+ * window instead of the full Hub timeout on every turn.
+ */
+const HUB_TURN_CAPABILITIES_TIMEOUT_MS = 3_000;
+const HUB_CAPABILITIES_FAILURE_CACHE_MS = 30_000;
+/** A Hub network name as the chain-id config key it is configured under. */
+/**
+ * Whether two Hub outcomes are the same event. Receipts are compared in the
+ * 0.4.1 shape: an action prepared at protocol version 2 (runtime 0.23.0) gets
+ * its callback without the 0.5.0 bank fields (`denom`, `amountBaseUnits`),
+ * while the confirming status read (version 3) carries them.
+ */
+function sameHubOutcome(a: ActionOutcomeV1, b: ActionOutcomeV1): boolean {
+  return (
+    canonicalJson({ ...a, receipt: v1Receipt(a.receipt) }) ===
+    canonicalJson({ ...b, receipt: v1Receipt(b.receipt) })
+  );
+}
+
+const HUB_NETWORK_CHAIN = {
+  'ixo mainnet': 'mainnet',
+  'ixo testnet': 'testnet',
+  'ixo devnet': 'devnet',
+} as const;
+/** How long a `hub_action_options` answer vouches for a Gmail connection. */
+const HUB_OPTIONS_REUSE_MS = 10 * 60_000;
+/** A channel poll waits this long for Auth Hub, once per poll at most. */
+const HUB_POLL_TIMEOUT_MS = 3_000;
+/** How long a passed topic authority read is reused for the same card. */
+const TOPIC_AUTHORITY_MEMO_MS = 30_000;
 /** The Blocksync lookup of the user's homeserver is abandoned after this long (the fallback applies). */
 const HOMESERVER_LOOKUP_TIMEOUT_MS = 3_000;
 /** Set once the legacy Matrix copy has been removed (or found absent): no more lookups. */
@@ -490,6 +695,11 @@ const META_LEGACY_CLEARED = 'meta:legacyCleared';
  */
 const META_LEGACY_UNUSABLE = 'meta:legacyUnusable';
 const META_USER_DID = 'meta:userDid';
+/**
+ * Set when an evicted object keeps an alarm only for action-card draft
+ * retention; a boot clears it. The alarm then prunes on the bare object.
+ */
+const META_RETENTION_WAKE = 'meta:interactionRetentionWake';
 
 /** KV key of a session's context-guard counters (`GET /debug/context?session=`). */
 const contextStatsKey = (sessionId: string): string => `ctxstats:${sessionId}`;
@@ -569,6 +779,14 @@ const META_LAST_ACCESS = 'meta:lastAccessAt';
  * `POST /delegation` — the same place the Node runtime reads it from.
  */
 const META_DELEGATION = 'meta:delegation';
+/**
+ * `false` only when no run can be active: written at a boot that found
+ * none, turned `true` before the first run row an instance creates (once
+ * per instance, not per turn). A cold object whose flag is `false` answers
+ * `GET /runs/active` without booting; absent or `true`, it boots and asks
+ * the coordinator.
+ */
+const META_RUNS_MAYBE_ACTIVE = 'meta:runsMaybeActive';
 /** How long a "no deposited delegation" verdict is trusted before re-checking the room. */
 const DELEGATION_MISS_TTL_MS = 60_000;
 /** Storage key prefix: a room this object found end-to-end encrypted. */
@@ -829,8 +1047,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private runStore: RunStore | null = null;
     /**
      * Tool concurrency of this user object (tool-scheduler.ts): writes one
-     * at a time across every session and turn, reads and sub-agents in
-     * bounded lanes. Lives as long as the object.
+     * at a time across every session and turn, reads in a bounded lane,
+     * browser tools and sub-agents in bounded lanes per session. Lives as
+     * long as the object; `GET /debug/runs` reports its occupancy.
      */
     private readonly toolScheduler = new ToolScheduler();
     /**
@@ -843,6 +1062,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     /** Per-turn domain-context provenance (`domain_context_runs`). */
     private domainContextStore: DomainContextStore | null = null;
     private runs: RunCoordinator | null = null;
+    /**
+     * The boot's scan for runs a previous incarnation left failed: rows may
+     * be active that the coordinator does not hold, so the user-wide run
+     * listings read the store as well.
+     */
+    private runRecoveryFailed = false;
+    /** Whether this instance has written `META_RUNS_MAYBE_ACTIVE` true. */
+    private runsMarkedActive = false;
     private readonly runConfig: RunDurabilityConfig = runDurabilityConfig(
       this.env,
     );
@@ -850,8 +1077,36 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private resultStore: ResultStore | null = null;
     /** Chat delivery's artefacts; null when no bucket is bound (see `canShare` for new ones). */
     private artifacts: ArtifactStore | null = null;
+    private actionProposals: ActionProposalStore | null = null;
+    private hubActionStore: HubActionStore | null = null;
+    private hubActionClient: HubActionClient | null = null;
+    /** The Hub's capabilities for this oracle account, reused for `HUB_CAPABILITIES_CACHE_MS` (and on a turn, while a read fails). */
+    private hubCapabilities: {
+      value: ActionCapabilitiesV1;
+      at: number;
+    } | null = null;
+    /** The last failed capabilities read: a turn does not read again within `HUB_CAPABILITIES_FAILURE_CACHE_MS`. */
+    private hubCapabilitiesFailure: { error: unknown; at: number } | null =
+      null;
+    /** A turn's capabilities read in flight, shared by concurrent turns. */
+    private hubTurnCapabilitiesRead: Promise<ActionCapabilitiesV1> | null =
+      null;
+    /** The last `hub_action_options` answer for this owner (Gmail connection checks). */
+    private lastHubOptions: {
+      value: HubActionOptionsV2 | HubActionOptionsV3;
+      at: number;
+    } | null = null;
+    private topicProposals: TopicProposalStore | null = null;
+    /** `assertTopicDependenciesMemo`: card id and digest -> when it passed. */
+    private topicAuthorityMemo: Map<string, number> | undefined;
+    /** When this instance last ran the card retention sweep (at most hourly). */
+    private lastActionPruneAt: number | null = null;
     /** Text `view_attachment` extracted, per session (`attachments/view-cache.ts`). */
     private attachmentTextCache: AttachmentTextCacheStore | null = null;
+    /** The links behind the `channel:` references of each session's files. */
+    private channelAttachmentLinks: ChannelAttachmentLinkStore | null = null;
+    /** Large texts of document ingestion, in memory (a few, minutes). */
+    private readonly ingestTextLru = new IngestTextLru();
     /**
      * Per-model context windows; learned limits persist in this object's KV
      * storage (`ctxwin:<model>`), so a provider's rejection is remembered
@@ -1361,6 +1616,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         throw new Error(`Object bound to ${stored}, not ${userDid}`);
       if (!stored) await this.ctx.storage.put(META_USER_DID, userDid);
       this.userDid = userDid;
+      await this.ctx.storage.delete(META_RETENTION_WAKE);
 
       const env = this.env;
       // The gateway lazily starts on first use; make sure it is up before the
@@ -1753,6 +2009,48 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         oracleName: this.core.identity.name,
       });
       await this.saver.setup();
+      if (this.env.HUB_ACTIONS_ENABLED === 'true') {
+        try {
+          if (!this.env.AUTH_HUB_URL || !this.env.AUTH_HUB_CHANNEL_SERVICE_KEY)
+            throw new Error('Hub URL and oracle service key are required');
+          const store = new HubActionStore(liveDb);
+          await store.setup();
+          this.hubActionStore = store;
+          this.hubActionClient = new HubActionClient({
+            origin: this.env.AUTH_HUB_URL,
+            key: this.env.AUTH_HUB_CHANNEL_SERVICE_KEY,
+            fetcher: this.env.AUTH_HUB,
+          });
+        } catch (error) {
+          this.hubActionStore = null;
+          this.hubActionClient = null;
+          console.error(
+            `[hub-actions] unavailable: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      // A card store this build cannot open must not take the user's whole
+      // object down: the feature is unavailable for this user, the rest works.
+      try {
+        const actionProposals = new ActionProposalStore(liveDb);
+        await actionProposals.setup();
+        this.actionProposals = actionProposals;
+      } catch (err) {
+        this.actionProposals = null;
+        console.error(
+          `[action-proposals] store unavailable for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      try {
+        const topicProposals = new TopicProposalStore(liveDb);
+        await topicProposals.setup();
+        this.topicProposals = topicProposals;
+      } catch (err) {
+        this.topicProposals = null;
+        console.error(
+          `[topic-actions] store unavailable for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
       this.sessions = new SessionsStore(liveDb);
       await this.sessions.setup();
       this.matrixLedger = new MatrixTurnLedger(liveDb);
@@ -1769,6 +2067,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       });
       await this.resultStore.setup();
       this.attachmentTextCache = new AttachmentTextCacheStore(liveDb, console);
+      this.channelAttachmentLinks = new ChannelAttachmentLinkStore(
+        liveDb,
+        console,
+      );
       // Constructing it touches no SQL. Only an observe turn records (and so
       // creates `domain_context_runs`); a session delete never creates it but
       // still removes rows an earlier observe deployment left behind.
@@ -1799,8 +2101,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         runAttempt: (live, resumed) => this.runAttempt(live, resumed),
         checkpointIdOf: (sessionId) => this.checkpointIdOf(sessionId),
         onRunEnded: (record, outcome) => this.onRunEnded(record, outcome),
+        beforeCreate: () => this.markRunsMaybeActive(),
       });
 
+      const channelRouting = channelRoutingConfig.parse(this.core.validatedEnv);
       this.channelTurns = new ChannelTurns(liveDb, {
         createSession: async (identity, markerTxnId) => {
           const roomId = await this.resolveMainRoomId(identity.userDid);
@@ -1855,6 +2159,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             );
           }
         },
+        stopRuns: (runIds) => this.runs!.abortByIds(runIds),
+        describeSessions: async (sessionIds) => {
+          const found = await this.sessions!.summaries(sessionIds);
+          return new Map(
+            [...found].map(([sessionId, session]) => [
+              sessionId,
+              {
+                title: session.title,
+                createdAt: Date.parse(session.createdAt) || 0,
+                updatedAt: Date.parse(session.lastUpdatedAt) || 0,
+              },
+            ]),
+          );
+        },
+        renameSession: (sessionId, title) =>
+          this.sessions!.setTitle(sessionId, title),
         getRun: (runId) => this.runStore!.get(runId),
         getPlan: (runId) => this.runStore!.getPlan(runId),
         wasPruned: (runId) => this.runStore!.wasChannelRunPruned(runId),
@@ -1887,6 +2207,24 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         keepAlive: (work) => this.ctx.waitUntil(work),
         pruneTombstones: (before, limit) =>
           this.runStore!.pruneChannelTombstones(before, limit),
+        routing: {
+          mode: channelRouting.CHANNEL_SEMANTIC_ROUTING,
+          bindings: channelRouting.CHANNEL_SEMANTIC_ROUTING_BINDINGS.split(',')
+            .map((binding) => binding.trim())
+            .filter(Boolean),
+          minProbability:
+            channelRouting.CHANNEL_SEMANTIC_ROUTING_MIN_PROBABILITY,
+          evaluator: this.core.decisions,
+          ownsSession: async (sessionId) => {
+            const session = await this.sessions!.getSession(sessionId);
+            const roomId = await this.resolveMainRoomId(userDid);
+            return Boolean(
+              sessionId.startsWith('$') && roomId && session?.roomId === roomId,
+            );
+          },
+          observe: (observation) =>
+            console.log(`[channel-routing] ${JSON.stringify(observation)}`),
+        },
       });
 
       const core = this.core;
@@ -1920,10 +2258,24 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // (attempts run from the alarm, never inside this boot).
       try {
         await this.runs.recoverOrphans();
+        this.runRecoveryFailed = false;
       } catch (err) {
+        this.runRecoveryFailed = true;
         console.error(
           `[user-do] run recovery scan failed for ${userDid}: ${err instanceof Error ? err.message : String(err)}`,
         );
+      }
+      // Nothing left in flight: a cold poll of `GET /runs/active` may skip
+      // the boot until this or a later instance creates a run.
+      const runsMarked = await this.ctx.storage.get<boolean>(
+        META_RUNS_MAYBE_ACTIVE,
+      );
+      if (!this.runRecoveryFailed && this.runs.size === 0) {
+        if (runsMarked !== false)
+          await this.ctx.storage.put(META_RUNS_MAYBE_ACTIVE, false);
+        this.runsMarkedActive = false;
+      } else {
+        this.runsMarkedActive = runsMarked === true;
       }
 
       // Resume (or start) legacy-blob compaction in the background: files
@@ -1955,6 +2307,39 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         logger: console,
       });
       this.ambient = createAmbientServices({
+        ...(this.hubActionStore && this.hubActionClient
+          ? {
+              hubActions: {
+                capabilities: (opts) =>
+                  opts?.turn
+                    ? this.turnHubCapabilities()
+                    : this.cachedHubCapabilities(),
+                options: (input) => this.hubActionOptions(input),
+                request: (input: {
+                  ownerDid: string;
+                  sessionId: string;
+                  runId: string;
+                  requestId: string;
+                  provider: string;
+                  bindingId: string;
+                  bindingRevision: number;
+                  requestKey: string;
+                  operation: ActionOperationV1;
+                }) => this.requestHubAction(input),
+                chainTransaction: (input) =>
+                  this.chainTransactionHubAction(input),
+                status: (
+                  ownerDid: string,
+                  actionId: string,
+                  opts?: { timeoutMs?: number },
+                ) => this.hubActionStatusForTool(ownerDid, actionId, opts),
+              },
+            }
+          : {}),
+        actionProposals: {
+          create: (subject) => this.prepareActionProposal(subject),
+          prepareTopic: (input) => this.prepareTopicProposal(input),
+        },
         ...(this.taskScheduler ? { tasks: this.taskScheduler.surface } : {}),
         preferences: this.preferences,
         kv: new SqliteUserKv(liveDb),
@@ -2032,7 +2417,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.runs = null;
       this.resultStore = null;
       this.artifacts = null;
+      this.actionProposals = null;
+      this.hubActionStore = null;
+      this.hubActionClient = null;
+      this.hubCapabilities = null;
+      this.hubCapabilitiesFailure = null;
+      this.hubTurnCapabilitiesRead = null;
+      this.lastHubOptions = null;
+      this.topicProposals = null;
       this.attachmentTextCache = null;
+      this.channelAttachmentLinks = null;
       this.domainContextStore = null;
       // Its store is bound to the database just dropped: a caller that sees
       // no scheduler boots again instead of reading a closed connection.
@@ -2301,6 +2695,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // exists once the object booted).
       const keepAliveAt = this.runs?.keepAliveDeadline(wakeAt) ?? null;
       const recoveryAt = this.runs?.nextRecoveryAt() ?? null;
+      // An evicted object (no working copy, no housekeeping deadline) with
+      // no socket is only woken for action-card draft retention: prune on
+      // the bare object instead of importing the owner copy, and re-arm.
+      if (
+        !this.db &&
+        nextPingAt === null &&
+        keepAliveAt === null &&
+        recoveryAt === null &&
+        (await this.ctx.storage.get<boolean>(META_RETENTION_WAKE)) === true
+      ) {
+        const next = await this.bareInteractionRetention();
+        if (next !== null) await this.requestAlarm(next);
+        else await this.ctx.storage.delete(META_RETENTION_WAKE);
+        return;
+      }
       if (this.runs && recoveryAt !== null && recoveryAt <= wakeAt + 1000) {
         // A store error here must not reject the alarm: the tick below (or
         // the re-arm) still has to run.
@@ -2439,6 +2848,24 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         }
       }
 
+      // Action cards: look up recorded transactions the chain has not
+      // confirmed yet, close cards claimed and never executed, post the
+      // receipts that are due, drop old cards. It runs after the flush and
+      // the task scheduler (a slow chain RPC must not delay a user's task)
+      // under one wall budget, and before the eviction check (its deadline
+      // keeps the copy). One bad row must not stop what follows, so the tick
+      // is guarded like its neighbours.
+      try {
+        const actionAt = await this.tickActionProposals();
+        if (actionAt !== undefined)
+          deadlines.push(Math.max(actionAt, now + 1000));
+      } catch (err) {
+        console.error(
+          `[user-do] action proposal tick failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        deadlines.push(now + 60_000);
+      }
+
       // Legacy-blob compaction: one bounded batch per tick until the whole
       // file is codec-compressed (see sqlite/blob-compactor.ts). A flush in
       // flight holds a snapshot of the file, which the compactor's swap-in
@@ -2491,6 +2918,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         }
       }
 
+      // Action-card drafts past retention: one bounded batch per tick, so a
+      // user who stopped preparing cards still loses expired draft values.
+      // Its follow-up is no reason to keep an idle copy either.
+      if (this.userDid) {
+        try {
+          await new ActionInteractionStore(this.ctx.storage, {
+            oracleDid: this.env.ORACLE_DID,
+            userDid: this.userDid,
+          }).prune();
+        } catch (err) {
+          console.warn(
+            `[action-interactions] retention tick failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+
       // Idle housekeeping: a user silent for five days loses the cached
       // pages — their file is safe upstream, and we stop paying to store a
       // copy. Never evict while tasks are scheduled: their runs ARE
@@ -2522,12 +2965,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         });
         if (outcome === 'evicted') {
           await this.ctx.storage.delete(META_HOUSEKEEPING_AT);
+          // Action-card drafts outlive the working copy: their retention
+          // still needs a wake (handled on the bare object, see alarm()).
+          const retentionAt = await this.interactionRetentionAt();
           // An attached (idle) socket still needs its heartbeat rounds.
-          if (nextPingAt !== null) await this.requestAlarm(nextPingAt);
+          if (nextPingAt !== null)
+            await this.requestAlarm(
+              Math.min(nextPingAt, retentionAt ?? Infinity),
+            );
           // A request that waited on the wipe has booted the object afresh
           // and armed its own deadlines (a task Start's run): keep them.
-          else if (this.initPromise === null)
-            await this.ctx.storage.deleteAlarm();
+          else if (this.initPromise === null) {
+            if (retentionAt !== null) {
+              await this.ctx.storage.put(META_RETENTION_WAKE, true);
+              await this.requestAlarm(retentionAt);
+            } else await this.ctx.storage.deleteAlarm();
+          }
           return;
         }
         if (outcome === 'not-current') {
@@ -2722,17 +3175,26 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       });
     }
 
+    /**
+     * The draft store without a boot: the object is addressed by the
+     * caller's DID, and the stored binding is checked against it.
+     */
+    private async bareInteractionStore(identity: TurnIdentity) {
+      const bound =
+        this.userDid ?? (await this.ctx.storage.get<string>(META_USER_DID));
+      if (bound && bound !== identity.userDid)
+        throw new ActionInteractionError(404, 'not_found', 'Owner not found');
+      return new ActionInteractionStore(this.ctx.storage, {
+        oracleDid: this.env.ORACLE_DID,
+        userDid: identity.userDid,
+      });
+    }
+
     async checkDispatch(identity: TurnIdentity, input: CheckDispatch) {
       return interactionOutcome(async () => {
-        await this.ready(identity);
-        if (this.userDid !== identity.userDid)
-          throw new ActionInteractionError(404, 'not_found', 'Owner not found');
-        return JSON.stringify(
-          await new ActionInteractionStore(this.ctx.storage, {
-            userDid: identity.userDid,
-            oracleDid: this.env.ORACLE_DID,
-          }).checkDispatch(input),
-        );
+        // Runs before every bid, claim-block and approval effect: no boot, as in checkClaimDispatch.
+        const store = await this.bareInteractionStore(identity);
+        return JSON.stringify(await store.checkDispatch(input));
       });
     }
 
@@ -2741,15 +3203,56 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       input: CheckClaimDispatch,
     ) {
       return interactionOutcome(async () => {
-        await this.ready(identity);
-        if (this.userDid !== identity.userDid)
-          throw new ActionInteractionError(404, 'not_found', 'Owner not found');
-        const store = new ActionInteractionStore(this.ctx.storage, {
-          userDid: identity.userDid,
-          oracleDid: this.env.ORACLE_DID,
-        });
+        // Every Portal claim calls this, Companion user or not, so it must
+        // not boot the object (gateway, signer, SQLite, owner-copy import):
+        // it only reads and writes a few keys. The object is addressed by
+        // the caller's DID; the stored binding is checked without a boot.
+        const store = await this.bareInteractionStore(identity);
         return JSON.stringify(await store.checkClaimDispatch(input));
       });
+    }
+
+    /** When stored action-card drafts next need retention, if any are kept. */
+    private async interactionRetentionAt(): Promise<number | null> {
+      const userDid =
+        this.userDid ?? (await this.ctx.storage.get<string>(META_USER_DID));
+      if (!userDid) return null;
+      return new ActionInteractionStore(this.ctx.storage, {
+        oracleDid: this.env.ORACLE_DID,
+        userDid,
+      })
+        .nextRetentionAt()
+        .catch(() => null);
+    }
+
+    /** One retention pass on an un-booted object; returns the next due time. */
+    private async bareInteractionRetention(): Promise<number | null> {
+      const userDid = await this.ctx.storage.get<string>(META_USER_DID);
+      if (!userDid) return null;
+      const store = new ActionInteractionStore(this.ctx.storage, {
+        oracleDid: this.env.ORACLE_DID,
+        userDid,
+      });
+      try {
+        await store.prune();
+      } catch (err) {
+        console.warn(
+          `[action-interactions] retention on an evicted object failed for ${userDid}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return Date.now() + 60 * 60 * 1000;
+      }
+      const next = await store.nextRetentionAt().catch(() => null);
+      // A backlog larger than one pass resumes a minute later.
+      return next === null ? null : Math.max(next, Date.now() + 60_000);
+    }
+
+    /** Drafts of a deleted chat, in bounded batches. */
+    private async forgetInteractions(userDid: string, sessionId: string) {
+      const store = new ActionInteractionStore(this.ctx.storage, {
+        oracleDid: this.env.ORACLE_DID,
+        userDid,
+      });
+      while ((await store.forgetSession(sessionId)) > 0);
     }
 
     async actionInteraction(
@@ -2778,7 +3281,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       references = false,
     ) {
       return interactionOutcome(async () => {
-        const store = await this.interactionStore(identity, sessionId);
+        // Card polls never boot the object or count as activity: they read a
+        // few keys, so an open card neither imports an evicted owner copy nor
+        // keeps an idle object alive. A deleted chat's drafts are deleted
+        // with it, so no session lookup is needed to hide them.
+        const store = await this.bareInteractionStore(identity);
         return JSON.stringify(
           await (id
             ? store.read(id, sessionId)
@@ -2867,57 +3374,93 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return toSummary(row);
     }
 
+    private async readyChannel(identity: TurnIdentity): Promise<void> {
+      if (identity.ucanDelegation)
+        throw new ChannelError(
+          403,
+          'Channel grants cannot become tool authority',
+          'channel_grant_not_tool_authority',
+        );
+      // The shell (the only caller) checked the binding just before.
+      // The 900 s margin is checked by admission, for a NEW request only
+      // (and again as its run starts): a poll of a run that exists
+      // answers its status whatever the delegation's state. Before a
+      // COLD object boots, though, a delegation must be live (present,
+      // unexpired): the boot may load the owner copy under it, and a user
+      // without one must get `delegation_required`, not a boot failure.
+      // Hydration reads the stored copy, then the deposited room state
+      // (re-read when the stored copy is inside the margin).
+      if (!this.db) {
+        const live = (): boolean => {
+          const held = this.delegations.get(identity.userDid);
+          return (
+            Boolean(held?.raw) &&
+            (typeof held?.expiration !== 'number' ||
+              held.expiration > Math.floor(Date.now() / 1000))
+          );
+        };
+        if (!live())
+          await this.hydrateDelegation(identity.userDid, {
+            minRemainingSeconds: CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
+          });
+        if (!live()) throw delegationRequiredError();
+      }
+      try {
+        await this.ready(identity);
+      } catch (error) {
+        // A delegation that lacks the file-storage grant over
+        // `/.oracles` cannot load the owner copy: the user must
+        // authorize again, exactly as without a delegation. (Boot throws
+        // the failure as its RPC envelope, so it is parsed, not matched
+        // by class.)
+        if (parseOwnerCopyFailure(error)?.code === 'NO_VFS_DELEGATION')
+          throw delegationRequiredError();
+        throw error;
+      }
+    }
+
+    async channelControl(
+      identity: TurnIdentity,
+      input: ChannelControlInput,
+      requestHash: string,
+    ): Promise<ChannelControlOutcome> {
+      try {
+        await this.readyChannel(identity);
+        return {
+          ok: true,
+          result: await this.channelTurns!.control(
+            identity,
+            input,
+            requestHash,
+          ),
+        };
+      } catch (error) {
+        const refusal =
+          error instanceof ChannelError ? error : classifyChannelFailure(error);
+        if (refusal)
+          return {
+            ok: false,
+            status: refusal.status,
+            code: refusal.code,
+            message: refusal.message,
+          };
+        throw error;
+      }
+    }
+
     async channelTurn(
       identity: TurnIdentity,
       input: ChannelTurnInput,
       requestHash: string,
     ): Promise<ChannelTurnOutcome> {
       try {
-        if (identity.ucanDelegation)
-          throw new ChannelError(
-            403,
-            'Channel grants cannot become tool authority',
-            'channel_grant_not_tool_authority',
-          );
-        // The shell (the only caller) checked the binding just before.
-        // The 900 s margin is checked by admission, for a NEW request only
-        // (and again as its run starts): a poll of a run that exists
-        // answers its status whatever the delegation's state. Before a
-        // COLD object boots, though, a delegation must be live (present,
-        // unexpired): the boot may load the owner copy under it, and a user
-        // without one must get `delegation_required`, not a boot failure.
-        // Hydration reads the stored copy, then the deposited room state
-        // (re-read when the stored copy is inside the margin).
-        if (!this.db) {
-          const live = (): boolean => {
-            const held = this.delegations.get(identity.userDid);
-            return (
-              Boolean(held?.raw) &&
-              (typeof held?.expiration !== 'number' ||
-                held.expiration > Math.floor(Date.now() / 1000))
-            );
-          };
-          if (!live())
-            await this.hydrateDelegation(identity.userDid, {
-              minRemainingSeconds: CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
-            });
-          if (!live()) throw delegationRequiredError();
-        }
-        try {
-          await this.ready(identity);
-        } catch (error) {
-          // A delegation that lacks the file-storage grant over
-          // `/.oracles` cannot load the owner copy: the user must
-          // authorize again, exactly as without a delegation. (Boot throws
-          // the failure as its RPC envelope, so it is parsed, not matched
-          // by class.)
-          if (parseOwnerCopyFailure(error)?.code === 'NO_VFS_DELEGATION')
-            throw delegationRequiredError();
-          throw error;
-        }
+        await this.readyChannel(identity);
         return {
           ok: true,
-          result: await this.channelTurns!.submit(identity, input, requestHash),
+          result: await this.withActionOutcomes(
+            identity.userDid,
+            await this.channelTurns!.submit(identity, input, requestHash),
+          ),
         };
       } catch (error) {
         // A failure retrying cannot fix (the room refused the oracle, the
@@ -2959,7 +3502,578 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const result = await this.channelTurns.poll(identity, input, requestHash);
       if (!result) return null;
       await this.recordAccess();
-      return { ok: true, result };
+      return {
+        ok: true,
+        result: await this.withActionOutcomes(identity.userDid, result),
+      };
+    }
+
+    private async withActionOutcomes(
+      ownerDid: string,
+      result: ChannelTurnResponse,
+    ): Promise<ChannelTurnResponse> {
+      if (result.status !== 'finished') return result;
+      const actionOutcomes = [];
+      let attempted = false;
+      // Each store on its own: the other one failing to open must not hide
+      // this one's cards from the poll.
+      const store = this.actionProposals;
+      if (store)
+        for (const proposal of await store.forRun(
+          ownerDid,
+          result.sessionId,
+          result.runId,
+        )) {
+          const refreshed: Awaited<ReturnType<typeof refreshActionProposal>> =
+            attempted
+              ? { proposal, attempted: false }
+              : await refreshActionProposal(
+                  store,
+                  proposal,
+                  this.actionProposalRpc(proposal),
+                );
+          attempted ||= refreshed.attempted;
+          actionOutcomes.push(actionOutcome(refreshed.proposal));
+        }
+      const topics = this.topicProposals;
+      if (topics) {
+        let cards: TopicActionProposal[] = [];
+        try {
+          cards = await topics.forRun(ownerDid, result.sessionId, result.runId);
+        } catch (error) {
+          console.error(
+            `[topic-actions] cards of run ${result.runId} unreadable: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        for (const proposal of cards) {
+          let refreshed = proposal;
+          // A card whose reference row this build cannot read is reported as
+          // it stands and taken off the verification schedule; the turn
+          // result is not failed over it.
+          try {
+            const refs = await topics.references(ownerDid, proposal.id);
+            if (
+              !attempted &&
+              refs.length &&
+              (await topics.claimVerification(ownerDid, proposal.id))
+            ) {
+              attempted = true;
+              refreshed = await reconcileTopicReferences(
+                topics,
+                proposal,
+                { v: 2, references: refs },
+                this.topicVerificationContext(proposal),
+                true,
+              );
+            }
+          } catch (error) {
+            await topics.quarantineVerification(ownerDid, proposal.id, error);
+          }
+          actionOutcomes.push(topicActionOutcome(refreshed));
+        }
+      }
+      if (attempted) {
+        this.markDirty();
+        await this.requestHousekeeping(Date.now() + 1000);
+      }
+      // The gateway parses with @ixo/action-protocol 0.4.1, whose bank
+      // receipt is exact: the 0.5.0 `denom`/`amountBaseUnits` fields are
+      // dropped here (the owner-facing amount line comes from
+      // hub_action_status instead), so the emitted shape stays 0.4.1. Every
+      // other receipt goes as Auth Hub signed it, a failure's `detail`
+      // included: the gateway confirms an outcome by comparing the whole
+      // receipt with Auth Hub's copy. Only what the model sees drops it.
+      const hubActionOutcomes = (
+        await this.hubOutcomesForRun(ownerDid, result.sessionId, result.runId)
+      ).map((outcome) => ({ ...outcome, receipt: v1Receipt(outcome.receipt) }));
+      return {
+        ...result,
+        ...(actionOutcomes.length ? { actionOutcomes } : {}),
+        ...(hubActionOutcomes.length ? { hubActionOutcomes } : {}),
+      };
+    }
+
+    /** `hub_action_options` and a chain transaction's bank steps: version 3, with the owner's tokens. */
+    private async hubActionOptions(
+      input: {
+        ownerDid: string;
+        provider: string;
+        bindingId: string;
+        bindingRevision: number;
+      },
+      bindingChecked = false,
+    ): Promise<HubActionOptionsV3> {
+      const client = this.hubActionClient;
+      if (!client || input.ownerDid !== this.userDid)
+        throw new Error('Hub action options are unavailable for this owner');
+      return this.readHubOptions(input, bindingChecked, (binding) =>
+        client.options(binding),
+      );
+    }
+
+    /**
+     * Read the owner's options for the trusted binding (validated here
+     * unless the caller already validated it in this same call) and keep
+     * the read for the Gmail connection check.
+     */
+    private async readHubOptions<
+      T extends HubActionOptionsV2 | HubActionOptionsV3,
+    >(
+      input: {
+        ownerDid: string;
+        provider: string;
+        bindingId: string;
+        bindingRevision: number;
+      },
+      bindingChecked: boolean,
+      read: (binding: {
+        bindingId: string;
+        bindingRevision: number;
+      }) => Promise<T>,
+    ): Promise<T> {
+      if (!bindingChecked) await this.assertHubBinding(input);
+      const options = await read(input);
+      if (
+        options.ownerDid !== input.ownerDid ||
+        options.bindingId !== input.bindingId ||
+        options.bindingRevision !== input.bindingRevision
+      )
+        throw new Error(
+          'Hub action options do not match this owner and binding',
+        );
+      this.lastHubOptions = { value: options, at: Date.now() };
+      return options;
+    }
+
+    private async assertHubBinding(input: {
+      ownerDid: string;
+      provider: string;
+      bindingId: string;
+      bindingRevision: number;
+    }): Promise<void> {
+      await assertActiveChannelBinding(
+        {
+          userDid: input.ownerDid,
+          channel: {
+            provider: input.provider,
+            bindingId: input.bindingId,
+            bindingRevision: input.bindingRevision,
+          },
+        },
+        this.env,
+      );
+    }
+
+    /**
+     * Only a run an inbound channel message started may prepare a review:
+     * a scheduled or background run has no user asking for it. Checked
+     * before any Hub read.
+     */
+    private async assertHubTurnOrigin(input: {
+      ownerDid: string;
+      sessionId: string;
+      runId: string;
+    }): Promise<void> {
+      const record = await this.runStore?.get(input.runId);
+      const turn = record
+        ? (JSON.parse(record.request) as StoredRunRequest).turn
+        : null;
+      if (
+        !turn ||
+        turn.client !== 'channel' ||
+        !turn.channel?.remoteMessageRef ||
+        turn.identity.userDid !== input.ownerDid ||
+        turn.sessionId !== input.sessionId ||
+        turn.sessionId.startsWith(SYNTHETIC_SESSION_PREFIX)
+      )
+        throw new HubActionRefused(
+          'limit',
+          'Reviews are prepared only in reply to a message from the user.',
+        );
+    }
+
+    /**
+     * A Gmail operation that names a connection must name one the owner's
+     * options list (service, id and label), from the last
+     * `hub_action_options` read when it is recent, else a fresh one. One
+     * Gmail send in flight per mailbox: while an earlier send to the same
+     * connection or account label is authorized, submitted or unknown, a
+     * new one is refused with that action's id.
+     */
+    private async assertGmailOperationAllowed(input: {
+      ownerDid: string;
+      provider: string;
+      bindingId: string;
+      bindingRevision: number;
+      operation: ActionOperationV1;
+    }): Promise<void> {
+      const operation = input.operation;
+      if (
+        operation.kind !== 'gmail.message.send.v1' &&
+        operation.kind !== 'gmail.disconnect.v1'
+      )
+        return;
+      const cached = this.lastHubOptions ?? null;
+      const options =
+        cached &&
+        Date.now() - cached.at < HUB_OPTIONS_REUSE_MS &&
+        cached.value.ownerDid === input.ownerDid &&
+        cached.value.bindingId === input.bindingId &&
+        cached.value.bindingRevision === input.bindingRevision
+          ? cached.value
+          : await this.readHubOptions(input, true, (binding) =>
+              this.hubActionClient!.connectionOptions(binding),
+            );
+      if (
+        !options.connections.some(
+          (c) =>
+            c.service === 'gmail' &&
+            c.id === operation.connectionId &&
+            c.label === operation.accountLabel,
+        )
+      )
+        throw new HubActionRefused(
+          'refused',
+          "That Gmail connection is not one of this owner's; read hub_action_options and use a listed connection.",
+        );
+      if (operation.kind !== 'gmail.message.send.v1') return;
+      const prior = await this.hubActionStore?.gmailSendInFlight(
+        input.ownerDid,
+        operation.connectionId,
+        operation.accountLabel,
+      );
+      if (prior)
+        throw new HubActionRefused(
+          'refused',
+          `An earlier email from this mailbox (action ${prior}) is still in flight or unconfirmed; wait for its outcome, or ask the owner to check Gmail's Sent folder, before preparing another.`,
+          prior,
+        );
+    }
+
+    /** The Hub's capabilities, cached per object for `HUB_CAPABILITIES_CACHE_MS`. */
+    private async cachedHubCapabilities(
+      timeoutMs?: number,
+    ): Promise<ActionCapabilitiesV1> {
+      const client = this.hubActionClient;
+      if (!client) throw new Error('Hub actions are unavailable');
+      const now = Date.now();
+      const cached = this.hubCapabilities ?? null;
+      if (cached && now - cached.at < HUB_CAPABILITIES_CACHE_MS)
+        return cached.value;
+      try {
+        const value = await client.capabilities(timeoutMs);
+        this.hubCapabilities = { value, at: Date.now() };
+        this.hubCapabilitiesFailure = null;
+        return value;
+      } catch (error) {
+        this.hubCapabilitiesFailure = { error, at: Date.now() };
+        throw error;
+      }
+    }
+
+    /**
+     * The capabilities for a turn's tool list: the cached ones while fresh;
+     * else one read with `HUB_TURN_CAPABILITIES_TIMEOUT_MS`, shared by
+     * concurrent turns and not repeated within
+     * `HUB_CAPABILITIES_FAILURE_CACHE_MS` of a failed read. While reads
+     * fail, the last capabilities read are answered (the Hub enforces its
+     * own on every prepare); with none, the failure.
+     */
+    private async turnHubCapabilities(): Promise<ActionCapabilitiesV1> {
+      const cached = this.hubCapabilities;
+      if (cached && Date.now() - cached.at < HUB_CAPABILITIES_CACHE_MS)
+        return cached.value;
+      const failure = this.hubCapabilitiesFailure;
+      if (
+        failure &&
+        Date.now() - failure.at < HUB_CAPABILITIES_FAILURE_CACHE_MS
+      ) {
+        if (cached) return cached.value;
+        throw failure.error;
+      }
+      this.hubTurnCapabilitiesRead ??= this.cachedHubCapabilities(
+        HUB_TURN_CAPABILITIES_TIMEOUT_MS,
+      ).finally(() => {
+        this.hubTurnCapabilitiesRead = null;
+      });
+      try {
+        return await this.hubTurnCapabilitiesRead;
+      } catch (error) {
+        if (cached) return cached.value;
+        throw error;
+      }
+    }
+
+    /**
+     * `checked`: the chain-transaction path already ran the turn-origin refusal and
+     * validated the binding in this same call.
+     */
+    private async requestHubAction(
+      input: {
+        ownerDid: string;
+        sessionId: string;
+        runId: string;
+        requestId: string;
+        provider: string;
+        bindingId: string;
+        bindingRevision: number;
+        requestKey: string;
+        operation: ActionOperationV1;
+      },
+      checked = false,
+    ) {
+      const store = this.hubActionStore;
+      const client = this.hubActionClient;
+      if (!store || !client || input.ownerDid !== this.userDid)
+        throw new Error('Hub actions are unavailable for this channel');
+      if (!checked) {
+        await this.assertHubTurnOrigin(input);
+        await this.assertHubBinding(input);
+      }
+      await this.assertGmailOperationAllowed(input);
+      const reference = await prepareHubAction(
+        {
+          capabilities: () => this.cachedHubCapabilities(),
+          request: (body) => client.request(body),
+        },
+        {
+          reserve: async (origin, operation, expiresAt) => {
+            const reserved = await store.reserve(origin, operation, expiresAt);
+            this.markDirty();
+            return reserved;
+          },
+          record: (origin, reference) => store.record(origin, reference),
+          byRequestKey: (key) => store.byRequestKey(key),
+        },
+        input,
+      );
+      this.markDirty();
+      return reference;
+    }
+
+    /**
+     * One chain transaction of the model's messages. The network is the
+     * account's capability, the chain id this Worker's own for that
+     * network; the signer and the owner's identity in the messages come
+     * from the owner's DID (`chainTxOperation`). The model names none of
+     * them. Bank steps name a listed token and a display amount, stake
+     * steps an amount of IXO: with at least one of either, the owner's
+     * options are read once, fresh (the balances must be current), and each
+     * amount is converted to base units and checked against the listed
+     * balance (`chainTxAmountsInBaseUnits`). A new group proposal's coin
+     * send of another token than IXO reads them too, for the token's
+     * decimals only. No fee is sent: the Hub simulates gas and sets it.
+     */
+    private async chainTransactionHubAction(input: {
+      ownerDid: string;
+      sessionId: string;
+      runId: string;
+      requestId: string;
+      provider: string;
+      bindingId: string;
+      bindingRevision: number;
+      requestKey: string;
+      messages: ChainTxMessageInput[];
+      memo: string;
+    }) {
+      if (!this.hubActionStore || input.ownerDid !== this.userDid)
+        throw new Error('Hub actions are unavailable for this channel');
+      await this.assertHubTurnOrigin(input);
+      await this.assertHubBinding(input);
+      const capabilities = await this.cachedHubCapabilities();
+      if (
+        !capabilities.network ||
+        !capabilities.chainTx ||
+        !capabilities.operations.includes('ixo.chain.tx.v1')
+      )
+        throw new HubActionRefused(
+          'refused',
+          'Chain transactions are not enabled for this oracle account; retrying or changing the fields will not help.',
+        );
+      const chainId = chainIdsFromConfig(chainIdConfigSchema.parse(this.env))[
+        HUB_NETWORK_CHAIN[capabilities.network]
+      ];
+      const tokens = chainTxNeedsTokenList(input.messages)
+        ? ((await this.hubActionOptions(input, true)).transfer?.tokens ?? null)
+        : null;
+      const operation = chainTxOperation({
+        ownerDid: input.ownerDid,
+        chainId,
+        network: capabilities.network,
+        memo: input.memo,
+        messages: chainTxAmountsInBaseUnits(input.messages, tokens),
+      });
+      return this.requestHubAction({ ...input, operation }, true);
+    }
+
+    /**
+     * `ctx.hubActions.status` (and `hub_action_status`): Auth Hub's review
+     * and operation status, the outcome and, for a bank send, the
+     * owner-facing line (amount from the token stored at preparation). An
+     * action this object never prepared is `held: false`, without a Hub
+     * read.
+     */
+    private async hubActionStatusForTool(
+      ownerDid: string,
+      actionId: string,
+      opts: { timeoutMs?: number } = {},
+    ): Promise<HubActionStatusRead> {
+      const read = await this.statusHubAction(
+        ownerDid,
+        actionId,
+        opts.timeoutMs,
+      );
+      if (!read)
+        return {
+          held: false,
+          reviewStatus: null,
+          operationStatus: null,
+          outcome: null,
+          summary: null,
+        };
+      const token = read.outcome
+        ? await this.hubActionStore!.token(ownerDid, actionId)
+        : null;
+      return {
+        held: true,
+        reviewStatus: read.reviewStatus,
+        operationStatus: read.operationStatus,
+        outcome: read.outcome,
+        summary: read.outcome
+          ? bankReceiptSummary(read.outcome.receipt, token)
+          : null,
+      };
+    }
+
+    /**
+     * One authenticated status read of a held action (null: not held), its
+     * outcome recorded when new. An outcome for another revision than the
+     * one Auth Hub reports is not taken (`outcome: null`).
+     */
+    private async statusHubAction(
+      ownerDid: string,
+      actionId: string,
+      timeoutMs?: number,
+    ): Promise<{
+      reviewStatus: HubReviewStatus;
+      operationStatus: HubOperationStatus;
+      outcome: ActionOutcomeV1 | null;
+    } | null> {
+      const held = await this.hubActionStore?.get(ownerDid, actionId);
+      if (!held || !this.hubActionClient) return null;
+      const status = await this.hubActionClient.status(actionId, timeoutMs);
+      if (
+        status.ownerDid !== ownerDid ||
+        canonicalJson(status.reference) !== canonicalJson(held.reference)
+      )
+        throw new Error('Hub status does not match the prepared action');
+      const read = {
+        reviewStatus: status.reviewStatus,
+        operationStatus: status.operationStatus,
+      };
+      if (status.outcome) {
+        if (
+          status.revision !== status.outcome.authorizedRevision ||
+          status.digest !== status.outcome.authorizedDigest
+        )
+          return { ...read, outcome: null };
+        if (await this.hubActionStore!.recordOutcome(status.outcome))
+          this.markDirty();
+      }
+      return { ...read, outcome: status.outcome };
+    }
+
+    /**
+     * The run's Hub outcomes for a channel poll: stored outcomes first
+     * (callback-delivered ones included, so a Hub outage hides nothing
+     * already known), then at most ONE status refresh per poll, only for an
+     * action with no terminal outcome whose backoff (15 s doubling to
+     * 10 min) has passed, with a 3 s timeout. The newer outcome by
+     * sequence wins.
+     */
+    private async hubOutcomesForRun(
+      ownerDid: string,
+      sessionId: string,
+      runId: string,
+    ): Promise<ActionOutcomeV1[]> {
+      const store = this.hubActionStore;
+      if (!store) return [];
+      const now = Date.now();
+      let refreshed = false;
+      const current: ActionOutcomeV1[] = [];
+      for (const row of await store.runState(ownerDid, sessionId, runId)) {
+        let latest = row.latest;
+        if (
+          !refreshed &&
+          this.hubActionClient &&
+          !(latest && TERMINAL_HUB_STATUSES.has(latest.status)) &&
+          row.nextCheckAt <= now &&
+          row.reference.expiresAt * 1000 + HUB_CHECK_AFTER_EXPIRY_MS > now
+        ) {
+          refreshed = true;
+          // The attempt is spent before the read: a Hub that hangs is
+          // asked again only after the backoff.
+          await store.scheduleCheck(row.reference.id, row.checkAttempts);
+          // The schedule is SQLite state the owner copy must carry (else a
+          // restored copy asks the Hub again at once). Only a poll that
+          // refreshed writes it, at most one per poll.
+          this.markDirty();
+          try {
+            const fresh = (
+              await this.statusHubAction(
+                ownerDid,
+                row.reference.id,
+                HUB_POLL_TIMEOUT_MS,
+              )
+            )?.outcome;
+            if (fresh && (!latest || fresh.sequence > latest.sequence))
+              latest = fresh;
+          } catch (error) {
+            console.warn(
+              `[hub-actions] status recovery unavailable for ${row.reference.id}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+        if (latest) current.push(latest);
+      }
+      return current;
+    }
+
+    async recordHubActionOutcome(input: ActionOutcomeV1): Promise<void> {
+      if (this.env.HUB_ACTIONS_ENABLED !== 'true')
+        throw new Error('Hub actions disabled');
+      // A Hub callback is not the user: it must not count as access (that
+      // would delay idle eviction).
+      await this.ready({ userDid: input.ownerDid }, { recordAccess: false });
+      const held = await this.hubActionStore?.get(
+        input.ownerDid,
+        input.reference.id,
+      );
+      if (!held || !this.hubActionClient) throw new Error('Unknown Hub action');
+      if (canonicalJson(input.reference) !== canonicalJson(held.reference))
+        throw new Error('Hub outcome does not match the prepared action');
+      // A replay of an outcome already confirmed and stored (a Hub retry,
+      // a callback delivered twice) is acknowledged without a Hub read.
+      const stored = await this.hubActionStore!.outcomeAt(
+        input.ownerDid,
+        input.reference.id,
+        input.sequence,
+      );
+      if (stored && sameHubOutcome(stored, input)) return;
+      const remote = await this.hubActionClient.status(input.reference.id);
+      if (
+        !remote.outcome ||
+        remote.ownerDid !== input.ownerDid ||
+        canonicalJson(remote.reference) !== canonicalJson(held.reference) ||
+        remote.outcome.sequence < input.sequence ||
+        (remote.outcome.sequence === input.sequence &&
+          !sameHubOutcome(remote.outcome, input))
+      )
+        throw new Error(
+          'Hub outcome was not confirmed by authenticated status',
+        );
+      if (await this.hubActionStore!.recordOutcome(remote.outcome))
+        this.markDirty();
     }
 
     async listSessions(
@@ -2980,7 +4094,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         o.offset ?? 0,
         TASK_SESSION_PREFIX,
       );
-      return { sessions: sessions.map(toSummary), total };
+      // One read of the active runs for the whole page, never one per row.
+      return {
+        sessions: withActiveRuns(
+          sessions.map(toSummary),
+          await this.activeChatRunRecords(),
+          this.parkedFrontendCall,
+        ),
+        total,
+      };
     }
 
     /**
@@ -3060,6 +4182,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               `[user-do] could not delete the cached attachment text of ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
             );
           });
+        await this.channelAttachmentLinks
+          ?.forgetSession(sessionId)
+          .catch((err: unknown) => {
+            console.warn(
+              `[user-do] could not delete the channel file links of ${sessionId}; they expire with the links: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          });
         await this.resultStore
           ?.deleteForSession(sessionId)
           .catch((err: unknown) => {
@@ -3083,6 +4212,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           });
         await this.ctx.storage.delete(contextStatsKey(sessionId));
         await this.feedbackMarkers!.forgetSession(sessionId);
+        // The chat's action-card drafts go with it; a dispatched claim keeps
+        // only the tombstones that stop a duplicate.
+        await this.forgetInteractions(identity.userDid, sessionId).catch(
+          (err: unknown) => {
+            console.warn(
+              `[action-interactions] could not delete the drafts of ${sessionId}; retention removes them later: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          },
+        );
         this.markDirty();
       }
       // A channel binding that pointed at the session opens a new one on
@@ -3092,9 +4230,645 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /**
-     * `GET /artifacts/:id` — the canonical copy, for its owner. `url` is
-     * present only while the share link still works.
+     * `assertTopicDependencies`, remembered per card (id and digest) for
+     * `TOPIC_AUTHORITY_MEMO_MS` after it passed (or after preparation read
+     * the same facts): prepare, claim and begin within seconds of each other
+     * read the room, history and chain once, not three times. Only a pass
+     * is remembered; a refusal re-reads.
      */
+    private async assertTopicDependenciesMemo(
+      proposal: TopicActionProposal,
+    ): Promise<void> {
+      const key = `${proposal.id}:${proposal.digest}`;
+      const now = Date.now();
+      const passed = this.topicAuthorityMemo?.get(key);
+      if (passed !== undefined && now - passed < TOPIC_AUTHORITY_MEMO_MS)
+        return;
+      await assertTopicDependencies(
+        proposal,
+        this.topicVerificationContext(proposal),
+      );
+      this.rememberTopicAuthority(key, Date.now());
+    }
+    private rememberTopicAuthority(key: string, at: number): void {
+      const memo = (this.topicAuthorityMemo ??= new Map());
+      for (const [k, t] of memo)
+        if (at - t >= TOPIC_AUTHORITY_MEMO_MS) memo.delete(k);
+      memo.set(key, at);
+    }
+
+    private topicVerificationContext(
+      proposal: TopicActionProposal,
+    ): TopicVerificationContext {
+      // The gateway's errors arrive as plain errors over the stub. Most are
+      // reads that failed (oversized state, timed-out history, a room it
+      // cannot read, an event it cannot decrypt yet); the few that describe
+      // what the homeserver returned (an event bound to another room, an
+      // event without an id) are facts about the reference.
+      const read = async <T>(run: () => Promise<T>): Promise<T> => {
+        try {
+          return await run();
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          throw GATEWAY_TOPIC_FACTS.has(message)
+            ? new ActionProposalConflict(message)
+            : new TopicReadUnavailable(message);
+        }
+      };
+      // Room state and history are lists of events; anything else from the
+      // gateway is a read that failed, not content for the contract to judge.
+      const readList = (raw: string): unknown[] => {
+        const value: unknown = JSON.parse(raw);
+        if (!Array.isArray(value))
+          throw new TopicReadUnavailable('Topic read is not a list of events');
+        return value;
+      };
+      return {
+        reader: {
+          state: async (room) =>
+            readList(await read(() => this.gateway.getTopicRoomState(room))),
+          event: async (room, id, opts) => {
+            const raw = await read(() =>
+              this.gateway.getTopicEvent(room, id, opts),
+            );
+            return raw ? JSON.parse(raw) : null;
+          },
+          history: async (room, root, opts) =>
+            readList(
+              await read(() => this.gateway.getTopicHistory(room, root, opts)),
+            ),
+        },
+        blocksync: this.env.BLOCKSYNC_GRAPHQL_URL,
+        rpc: this.actionProposalRpc(proposal),
+      };
+    }
+    private async prepareTopicProposal(input: {
+      candidate: TopicCandidate;
+      origin: TopicProposalSubject['origin'];
+      evidenceRefs: string[];
+    }): Promise<TopicActionProposal> {
+      const topics = this.topicProposals;
+      if (
+        this.env.ACTION_PROPOSALS_ENABLED !== 'true' ||
+        this.env.ACTION_TOPIC_PROPOSALS_ENABLED !== 'true' ||
+        !this.userDid ||
+        !topics
+      )
+        throw new Error('Topic preparation unavailable');
+      const record = await this.runStore!.get(input.origin.runId);
+      if (!record) throw new Error('Originating run unavailable');
+      const request = (JSON.parse(record.request) as StoredRunRequest).turn;
+      if (
+        request.identity.userDid !== this.userDid ||
+        request.sessionId !== input.origin.sessionId
+      )
+        throw new Error('Topic origin mismatch');
+      const candidateDigest = await digestTopicProposalEffect(input.candidate);
+      const prior = await topics.replayPreparation(
+        this.userDid,
+        input.origin,
+        input.candidate,
+        input.evidenceRefs,
+      );
+      if (prior) return prior;
+      const rpc = {
+        devnet: this.env.ACTION_PROPOSALS_RPC_DEVNET,
+        testnet: this.env.ACTION_PROPOSALS_RPC_TESTNET,
+        mainnet: this.env.ACTION_PROPOSALS_RPC_MAINNET,
+      }[input.candidate.network];
+      const chainId = chainIdsFromConfig(chainIdConfigSchema.parse(this.env))[
+        input.candidate.network
+      ];
+      const subject = await prepareTopicSubject(
+        input.candidate,
+        [...input.evidenceRefs, `candidate:${candidateDigest}`],
+        {
+          ownerDid: this.userDid,
+          ...input.origin,
+          blocksync: this.env.BLOCKSYNC_GRAPHQL_URL,
+          rpc,
+          chainId,
+          reader: {
+            state: async (room) =>
+              JSON.parse(await this.gateway.getTopicRoomState(room)),
+            event: async (room, id, opts) => {
+              const raw = await this.gateway.getTopicEvent(room, id, opts);
+              return raw ? JSON.parse(raw) : null;
+            },
+            history: async (room, root, opts) =>
+              JSON.parse(await this.gateway.getTopicHistory(room, root, opts)),
+          },
+        },
+      );
+      const roomId =
+        request.roomId ??
+        (await this.sessions!.getSession(request.sessionId))?.roomId;
+      const origin =
+        request.sessionId.startsWith('$') && roomId
+          ? {
+              sessionId: request.sessionId,
+              roomId,
+              client: request.client,
+              ...(request.channel ? { channel: request.channel } : {}),
+            }
+          : null;
+      const p = await topics.create(subject, origin);
+      this.markDirty();
+      // Preparation just read and sealed every fact the claim re-checks.
+      this.rememberTopicAuthority(`${p.id}:${p.digest}`, Date.now());
+      return p;
+    }
+    /** Both switches: topic cards may be claimed and their steps permitted. */
+    private topicExecutionEnabled(): boolean {
+      return (
+        this.env.ACTION_PROPOSALS_ENABLED === 'true' &&
+        this.env.ACTION_TOPIC_PROPOSALS_ENABLED === 'true'
+      );
+    }
+    async beginTopicStep(
+      identity: TurnIdentity,
+      id: string,
+      input: BeginTopicStep,
+    ): Promise<string | null> {
+      await this.ready(identity);
+      const store = this.topicProposals;
+      if (!store)
+        return JSON.stringify(
+          topicRefusal(new TopicReadUnavailable('topic store unavailable'), id),
+        );
+      try {
+        const proposal = await store.get(identity.userDid, id);
+        if (!proposal) return null;
+        // Switching the feature off stops new permits; reads, reconciliation
+        // and receipts of cards already in flight keep working.
+        if (!this.topicExecutionEnabled())
+          throw new ActionProposalConflict(
+            'Topic action execution is disabled',
+          );
+        // The local refusals first (not claimed, expired, out of order,
+        // another executor); the ten second authority read only for a step
+        // that could actually start.
+        await store.assertBeginnable(identity.userDid, id, input);
+        // A step whose reference is recorded is spoken for: no new permit,
+        // and no authority read to find that out.
+        if (await store.hasReference(identity.userDid, id, input.step))
+          return JSON.stringify({
+            ok: true,
+            result: { status: 'already_started', proposal },
+          });
+        await this.assertTopicDependenciesMemo(proposal);
+        const effect = await topicExpectedEffect(proposal, input.step);
+        const result = await store.begin(identity.userDid, id, input, effect);
+        this.markDirty();
+        return result ? JSON.stringify({ ok: true, result }) : null;
+      } catch (error) {
+        return JSON.stringify(topicRefusal(error, id));
+      }
+    }
+
+    private async prepareActionProposal(
+      subject: ActionProposalSubject,
+    ): Promise<ActionProposal> {
+      const userDid = this.userDid;
+      if (this.env.ACTION_PROPOSALS_ENABLED !== 'true' || !userDid)
+        throw new Error('Action proposal preparation unavailable');
+      const store = this.requireActionProposals();
+      // The owner object's own policy, whichever plugin prepared the card:
+      // this owner signs from their own account, off mainnet, on a chain the
+      // Worker is configured for and can verify against, stamped now, within
+      // the expiry window.
+      assertActionProposalPolicy(subject, {
+        ownerDid: userDid,
+        chainIds: chainIdsFromConfig(chainIdConfigSchema.parse(this.env)),
+        rpc: this.actionProposalRpcs(),
+        now: store.now(),
+      });
+      const record = await this.runStore!.get(subject.origin.runId);
+      if (!record) throw new Error('Action proposal origin unavailable');
+      const request = (JSON.parse(record.request) as StoredRunRequest).turn;
+      if (
+        request.identity.userDid !== subject.ownerDid ||
+        request.sessionId !== subject.origin.sessionId
+      )
+        throw new Error('Action proposal origin mismatch');
+      // A card names one person's wallet; a group room would show its link
+      // and its receipt to everyone in the room. The gateway marks every
+      // Matrix turn, so an unmarked one is refused rather than trusted.
+      if (request.client === 'matrix' && request.roomKind !== 'direct')
+        throw new ActionProposalConflict(
+          'Action cards are prepared in direct chats only',
+        );
+      let origin = null;
+      if (request.sessionId.startsWith('$')) {
+        const roomId =
+          request.roomId ??
+          this.sessionRooms.get(request.sessionId) ??
+          (await this.sessions!.getSession(request.sessionId))?.roomId ??
+          (
+            await retryGateway(() =>
+              this.gateway.resolveUserRoom(subject.ownerDid),
+            )
+          )?.roomId;
+        if (!roomId) throw new Error('Action proposal room unavailable');
+        origin = {
+          sessionId: request.sessionId,
+          roomId,
+          client: request.client,
+          ...(request.channel ? { channel: request.channel } : {}),
+        };
+      }
+      const proposal = await store.create(subject, origin);
+      this.markDirty();
+      return proposal;
+    }
+
+    /** The card store, or the one error every card route answers when boot could not open it. */
+    private requireActionProposals(): ActionProposalStore {
+      if (!this.actionProposals)
+        throw new Error('Action proposals are unavailable for this user');
+      return this.actionProposals;
+    }
+
+    /** The chain RPC per network, as configured. */
+    private actionProposalRpcs(): Record<
+      'devnet' | 'testnet' | 'mainnet',
+      string | undefined
+    > {
+      return {
+        devnet: this.env.ACTION_PROPOSALS_RPC_DEVNET,
+        testnet: this.env.ACTION_PROPOSALS_RPC_TESTNET,
+        mainnet: this.env.ACTION_PROPOSALS_RPC_MAINNET,
+      };
+    }
+
+    /**
+     * The alarm's share of action cards: at most two chain lookups (run
+     * together) for cards whose transaction is recorded but unconfirmed (so
+     * a card the user signed and walked away from still gets its receipt
+     * once the chain has indexed it), closing claimed cards whose execution
+     * window passed with no transaction, the receipts due now (posted in the
+     * background: their schedule already moved forward, so a crash cannot
+     * post one sooner), and the retention sweep, at most hourly. All of it
+     * shares `ACTION_TICK_BUDGET_MS` of wall time. Returns the earliest
+     * moment any of it is due again.
+     */
+    private async tickActionProposals(): Promise<number | undefined> {
+      if (!this.userDid) return undefined;
+      const userDid = this.userDid;
+      // Each store on its own: the other one failing to open must not stop
+      // this one's verifications, receipts or retention.
+      const store = this.actionProposals;
+      const topics = this.topicProposals;
+      const budget = new AbortController();
+      const timer = setTimeout(() => budget.abort(), ACTION_TICK_BUDGET_MS);
+      const settle = (
+        label: string,
+        results: PromiseSettledResult<unknown>[],
+      ) => {
+        for (const result of results)
+          if (result.status === 'rejected')
+            console.warn(
+              `[${label}] verification failed for ${userDid}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
+            );
+      };
+      try {
+        await Promise.all([
+          (async () => {
+            if (!store) return;
+            const due = await store.dueVerifications(userDid);
+            const settled = await Promise.allSettled(
+              due.map(async (proposal) => {
+                const refreshed = await refreshActionProposal(
+                  store,
+                  proposal,
+                  this.actionProposalRpc(proposal),
+                  fetch,
+                  budget.signal,
+                );
+                if (refreshed.attempted) this.markDirty();
+              }),
+            );
+            settle('action-proposals', settled);
+          })(),
+          // Topic cards with started steps the room or chain has not
+          // confirmed yet: reconcile their recorded references on the same
+          // cooldown, under the same budget. Guarded on its own: a topic
+          // card's trouble must not hold up the transfer receipts below.
+          (async () => {
+            if (!topics) return;
+            try {
+              const due = await topics.dueVerifications(userDid);
+              const settled = await Promise.allSettled(
+                due.map(async (proposal) => {
+                  // The attempt is spent before the references are read: a
+                  // reference row this build cannot parse is quarantined,
+                  // not retried every second.
+                  if (!(await topics.claimVerification(userDid, proposal.id)))
+                    return;
+                  this.markDirty();
+                  try {
+                    const refs = await topics.references(userDid, proposal.id);
+                    if (refs.length)
+                      await reconcileTopicReferences(
+                        topics,
+                        proposal,
+                        { v: 2, references: refs },
+                        {
+                          ...this.topicVerificationContext(proposal),
+                          signal: budget.signal,
+                        },
+                        true,
+                      );
+                  } catch (error) {
+                    await topics.quarantineVerification(
+                      userDid,
+                      proposal.id,
+                      error,
+                    );
+                  }
+                }),
+              );
+              settle('topic-actions', settled);
+            } catch (err) {
+              console.error(
+                `[topic-actions] tick failed for ${userDid}: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          })(),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+      if (store && (await store.closeUnexecuted(userDid)) > 0) this.markDirty();
+      const now = store?.now() ?? Date.now();
+      const lastPruneAt = this.lastActionPruneAt ?? null;
+      if (
+        lastPruneAt === null ||
+        now - lastPruneAt >= ACTION_PRUNE_INTERVAL_MS
+      ) {
+        this.lastActionPruneAt = now;
+        if (store && (await store.prune(userDid)) > 0) this.markDirty();
+        try {
+          if (topics && (await topics.prune(userDid)) > 0) this.markDirty();
+        } catch (err) {
+          console.error(
+            `[topic-actions] prune failed for ${userDid}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        // Hub action rows (requests, references, outcomes) 30 days after
+        // their review expired.
+        try {
+          if (this.hubActionStore && (await this.hubActionStore.prune()) > 0)
+            this.markDirty();
+        } catch (err) {
+          console.error(
+            `[hub-actions] prune failed for ${userDid}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      const receiptAt = await this.mirrorActionReceipts(true);
+      const next = [
+        receiptAt,
+        store ? await store.nextVerificationAt(userDid) : undefined,
+        store ? await store.nextUnexecutedCloseAt(userDid) : undefined,
+        topics ? await topics.nextVerificationAt(userDid) : undefined,
+      ].filter((at): at is number => at !== undefined);
+      return next.length ? Math.min(...next) : undefined;
+    }
+
+    /**
+     * Take the receipts due now (both card stores) and post them. `detach`
+     * hands the posts to `ctx.waitUntil` (the alarm does not wait on a slow
+     * room); otherwise they are awaited.
+     */
+    private async mirrorActionReceipts(
+      detach = false,
+    ): Promise<number | undefined> {
+      if (!this.userDid) return undefined;
+      const store = this.actionProposals;
+      const topics = this.topicProposals;
+      const receipts = store ? await store.takeReceipts(this.userDid) : [];
+      const topicReceipts = topics
+        ? await topics.takeReceipts(this.userDid)
+        : [];
+      if (receipts.length || topicReceipts.length) this.markDirty();
+      const posting = Promise.all([
+        store ? this.postActionReceipts(store, receipts) : undefined,
+        topics ? this.postTopicReceipts(topics, topicReceipts) : undefined,
+      ]).then(() => undefined);
+      if (detach) this.ctx.waitUntil(posting);
+      else await posting;
+      const due = store
+        ? await store.nextReceiptAttempt(this.userDid)
+        : undefined;
+      const topicDue = topics
+        ? await topics.nextReceiptAttempt(this.userDid)
+        : undefined;
+      return due === undefined
+        ? topicDue
+        : topicDue === undefined
+          ? due
+          : Math.min(due, topicDue);
+    }
+
+    private async postActionReceipts(
+      store: ActionProposalStore,
+      receipts: Awaited<ReturnType<ActionProposalStore['takeReceipts']>>,
+    ): Promise<void> {
+      for (const { proposal, origin } of receipts) {
+        try {
+          if (
+            proposal.lifecycle.status !== 'succeeded' &&
+            proposal.lifecycle.status !== 'failed'
+          )
+            continue;
+          const status =
+            proposal.lifecycle.status === 'succeeded'
+              ? 'confirmed on chain'
+              : 'failed on chain';
+          const text = `${proposal.title} ${status}. Transaction ${proposal.lifecycle.transactionHash}. Block ${proposal.lifecycle.height}. Code ${proposal.lifecycle.code}.`;
+          await this.replayToRoom(
+            {
+              ...origin,
+              identity: { userDid: proposal.ownerDid },
+              message: '',
+              requestId: `action-receipt:${proposal.id}:${proposal.digest}`,
+            },
+            text,
+            'oracle',
+            true,
+          );
+          await store.receiptMirrored(proposal.ownerDid, proposal.id);
+          this.markDirty();
+        } catch (error) {
+          console.warn(
+            '[action-proposals] receipt mirror pending',
+            error instanceof Error ? error.message : 'mirror failed',
+          );
+        }
+      }
+    }
+
+    private async postTopicReceipts(
+      topics: TopicProposalStore,
+      receipts: Awaited<ReturnType<TopicProposalStore['takeReceipts']>>,
+    ): Promise<void> {
+      for (const { proposal, origin } of receipts) {
+        try {
+          const receipt = proposal.lifecycle.receipt;
+          if (!receipt) continue;
+          const text =
+            receipt.kind === 'topic-created'
+              ? `${proposal.title} created. Room ${receipt.roomId}. Topic ${receipt.topicId}. Root ${receipt.rootEventId}.`
+              : `${proposal.title} ${receipt.kind === 'topic-access-granted' ? 'confirmed' : 'failed'} on chain. Transaction ${receipt.transactionHash}. Block ${receipt.height}. Code ${receipt.code}.`;
+          await this.replayToRoom(
+            {
+              ...origin,
+              identity: { userDid: proposal.ownerDid },
+              message: '',
+              requestId: `action-receipt:${proposal.id}:${proposal.digest}`,
+            },
+            text,
+            'oracle',
+            true,
+          );
+          await topics.receiptMirrored(proposal.ownerDid, proposal.id);
+          this.markDirty();
+        } catch (error) {
+          console.warn(
+            '[topic-actions] receipt mirror pending',
+            error instanceof Error ? error.message : 'mirror failed',
+          );
+        }
+      }
+    }
+
+    private actionProposalRpc(
+      proposal: ActionProposalWire,
+    ): string | undefined {
+      return this.actionProposalRpcs()[proposal.action.network];
+    }
+    async actionProposal(
+      identity: TurnIdentity,
+      id: string,
+      command?:
+        | ProposalCommand
+        | { kind: 'topic-reconcile'; input: TopicReceiptReferences },
+    ): Promise<string | null> {
+      await this.ready(identity);
+      const topics = this.topicProposals;
+      const topic = topics ? await topics.get(identity.userDid, id) : null;
+      if (topics && topic) {
+        try {
+          let result = topic;
+          let topicAttempted = false;
+          const verification = {
+            ...this.topicVerificationContext(topic),
+            onAttempt: () => {
+              topicAttempted = true;
+            },
+          };
+          if (command?.kind === 'topic-reconcile')
+            result = await reconcileTopicReferences(
+              topics,
+              topic,
+              command.input,
+              verification,
+            );
+          else if (command) {
+            if (command.kind === 'reconcile')
+              throw new ActionProposalConflict(
+                'Topic reconciliation requires references',
+              );
+            if (command.kind === 'claim') {
+              if (!this.topicExecutionEnabled())
+                throw new ActionProposalConflict(
+                  'Topic action execution is disabled',
+                );
+              // The local refusals first (already consumed, changed,
+              // expired): the remote authority read only for a claim that
+              // could succeed.
+              await topics.assertClaimable(
+                identity.userDid,
+                id,
+                command.digest,
+              );
+              await this.assertTopicDependenciesMemo(topic);
+            }
+            const next = await topics.transition(
+              identity.userDid,
+              id,
+              command.kind,
+              command.digest,
+            );
+            if (!next) return null;
+            result = next;
+          } else {
+            const refs = await topics.references(identity.userDid, id);
+            if (refs.length)
+              result = await reconcileTopicReferences(
+                topics,
+                topic,
+                { v: 2, references: refs },
+                verification,
+              );
+          }
+          if (command || topicAttempted) {
+            this.markDirty();
+            await this.requestHousekeeping(Date.now() + 1000);
+          }
+          return JSON.stringify({ ok: true, proposal: result });
+        } catch (error) {
+          return JSON.stringify(topicRefusal(error, id));
+        }
+      }
+      // Without the topic store an id the transfer store does not know may
+      // be a topic card: the Portal is told to retry, not that the card is
+      // gone. Without the transfer store, the same for the other side.
+      const unknownCard = () =>
+        topics
+          ? null
+          : JSON.stringify(
+              topicRefusal(
+                new TopicReadUnavailable('topic store unavailable'),
+                id,
+              ),
+            );
+      if (command?.kind === 'topic-reconcile') return unknownCard();
+      const store = this.actionProposals;
+      if (!store) return JSON.stringify(storeUnavailable(id));
+      try {
+        let result = command
+          ? await store.transition(identity.userDid, id, command)
+          : await store.get(identity.userDid, id);
+        if (command && result) this.markDirty();
+        if (command?.kind === 'reconcile' && result) {
+          const refreshed = await refreshActionProposal(
+            store,
+            result,
+            this.actionProposalRpc(result),
+          );
+          result = refreshed.proposal;
+          if (refreshed.attempted) {
+            this.markDirty();
+            await this.requestHousekeeping(Date.now() + 1000);
+          }
+        }
+        return result
+          ? JSON.stringify({ ok: true, proposal: result })
+          : unknownCard();
+      } catch (error) {
+        if (error instanceof ActionProposalConflict)
+          return JSON.stringify({
+            ok: false,
+            kind: 'conflict',
+            error: error.message,
+          });
+        throw error;
+      }
+    }
+
     async artifact(
       identity: TurnIdentity,
       artifactId: string,
@@ -3141,18 +4915,63 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /**
+     * The indexer's tail read: transcript rows after the message `after`
+     * names (its id, re-resolved per read because rowids move when a
+     * checkpoint rewrites the thread), paged so only the unindexed tail is
+     * deserialized. The same messages as `historyMessages`, in its order;
+     * null when `after` is no longer in the thread.
+     */
+    private async historyPage(
+      sessionId: string,
+      after: string | null,
+      limit: number,
+    ): Promise<HistoryPage | null> {
+      const saver = this.saver!;
+      let anchor = null;
+      if (after !== null) {
+        anchor = await saver.findThreadMessageAnchor(sessionId, after);
+        if (!anchor) return null;
+      }
+      const pageRows = Math.max(1, limit);
+      const entries: HistoryEntry[] = [];
+      for (;;) {
+        const rows = await saver.listThreadMessageRows(sessionId, {
+          direction: 'newer',
+          anchor,
+          limit: pageRows,
+        });
+        for (const row of rows) {
+          anchor = row.anchor;
+          const m = row.message;
+          if (isSummarizationMessage(m) || isAttachmentViewMessage(m)) continue;
+          entries.push({
+            message: { type: m.type, content: visibleText(m) },
+            cursor: row.messageId,
+          });
+        }
+        if (rows.length < pageRows) return { entries, more: false };
+        if (entries.length >= limit) return { entries, more: true };
+      }
+    }
+
+    /**
      * Fire-and-forget session-history indexing (`SessionHistoryIndexer`).
-     * The watermark lives in this object's storage (`history:processed:<id>`),
-     * seeded from the row's `lastProcessedCount` for files migrated from Node;
-     * `touchSession` is not used because it bumps `last_updated_at` and
-     * would reorder the session list.
+     * The watermark is the session row's `last_processed_count` (the column
+     * the Node runtime keeps, so a migrated file continues where it left
+     * off); `touchSession` is not used because it bumps `last_updated_at`
+     * and would reorder the session list. `afterQuietMs` defers the pass
+     * until the session has been quiet that long (a finished channel run);
+     * every other trigger indexes at once.
      *
      * Task-run sessions (`task:<id>`) are never indexed: a run's transcript
      * is the task's instructions and its result, not something the user
      * said, and a supplied-context task's source text must not become
      * long-term memory that ordinary, tool-enabled turns can retrieve.
      */
-    private scheduleHistoryIndexing(sessionId: string): void {
+    private scheduleHistoryIndexing(
+      sessionId: string,
+      opts: { afterQuietMs?: number } = {},
+    ): void {
       if (sessionId.startsWith(TASK_SESSION_PREFIX)) return;
       const ambient = this.ambient;
       const userDid = this.userDid;
@@ -3164,6 +4983,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           const v = this.core.validatedEnv['MEMORY_ENGINE_URL'];
           return typeof v === 'string' && v.length > 0 ? v : undefined;
         })(),
+        // The configured entity only: `identity.entityDid` falls back to
+        // `ORACLE_DID`, which the engine refuses as a space key.
+        entityDid: memoryEntityDid(this.core.validatedEnv['ORACLE_ENTITY_DID']),
         getSession: async (id) => {
           const snapshot = this.historySnapshots.get(id);
           const row =
@@ -3177,9 +4999,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             lastProcessedCount: row.lastProcessedCount ?? 0,
           };
         },
-        listMessages: async (id) =>
-          this.historySnapshots.get(id)?.messages ??
-          (await this.historyMessages(id)),
+        readMessages: async (id, after, limit) => {
+          const snapshot = this.historySnapshots.get(id);
+          return snapshot
+            ? pageOfMessages(snapshot.messages, after, limit)
+            : this.historyPage(id, after, limit);
+        },
         setProcessedCount: async (id, count) => {
           if (this.historySnapshots.has(id)) return; // deleted: nothing to advance
           await this.sessions?.setLastProcessedCount(id, count);
@@ -3211,9 +5036,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         logger: console,
       });
       const indexer = this.historyIndexer;
+      // A deleted session's snapshot is its transcript's last chance: it is
+      // indexed even while the session backs off after a failure.
+      const work =
+        opts.afterQuietMs !== undefined
+          ? indexer.processAfterQuiet(sessionId, opts.afterQuietMs)
+          : this.historySnapshots.has(sessionId)
+            ? indexer.process(sessionId, { ignoreBackoff: true })
+            : indexer.process(sessionId);
       this.ctx.waitUntil(
-        indexer
-          .process(sessionId)
+        work
           .catch((err: unknown) => {
             console.error(
               `[user-do] session-history indexing failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
@@ -3252,7 +5084,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.userContextFetcher ??= new UserContextFetcher(
         {
           memoryEngineUrl: settings.engineUrl,
-          oracleDid: this.env.ORACLE_DID,
+          // The configured entity only: `identity.entityDid` falls back to
+          // `ORACLE_DID`, which the engine refuses as a space key.
+          entityDid: memoryEntityDid(
+            this.core.validatedEnv['ORACLE_ENTITY_DID'],
+          ),
           // Looked up per call, not captured: a working-copy reset replaces
           // the ambient services while a gather may still be running.
           ucan: {
@@ -3283,11 +5119,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
     /**
      * Start a turn's user-context prefetch — stale-while-revalidate, as the
-     * Node AgentBuilder does it. A thread's context is fixed on first
-     * contact: a thread whose checkpoint already holds a gathered context
-     * never waits and never takes a newer answer; it only refreshes the
-     * room's cache in the background (a no-op while the cache is fresh), so
-     * the NEXT session in the room starts from it. First contact — including
+     * Node AgentBuilder does it. A thread whose checkpoint already holds a
+     * gathered context never waits; it refreshes the room's cache in the
+     * background (a no-op while the cache is fresh), so the NEXT session in
+     * the room starts from it. A channel thread also takes the cached answer
+     * when the cache is warm (indexed channel history invalidates it, so a
+     * later turn picks up the refresh); other clients never take a newer
+     * answer (first-contact policy). First contact — including
      * a thread whose earlier first turn got nothing (timeout, failure, skip)
      * — waits for the gather, at most the cap. Returns the step the build
      * awaits right before the agent is built, or null where this turn
@@ -3352,8 +5190,19 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           }),
         );
       if (hasUserContext(input.prior)) {
+        // A channel session is one long conversation, so it takes a newer
+        // room answer — but only one already in the cache: an upload that
+        // just invalidated the room must not make the next message wait for
+        // a gather. On a miss the thread keeps its context and the
+        // (single-flight) refresh warms the cache for a later turn.
+        const warm =
+          input.client === 'channel'
+            ? fetcher.readCached(input.roomId)
+            : undefined;
         keepGathering();
-        return null;
+        if (!warm) return null;
+        const context = withEverySlot(warm.context);
+        return async () => context;
       }
       const pending = fetcher
         .fetch(params)
@@ -3667,8 +5516,23 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * a queued run is dropped. (A client that merely disconnects does NOT
      * reach here — runs outlive their connections.)
      */
-    async abortTurn(sessionId: string): Promise<boolean> {
-      if (this.runs?.abortSession(sessionId)) return true;
+    /**
+     * Stop the session's current message. From `POST /messages/abort`
+     * (`identity` given) the object is booted first — the boot recovers the
+     * runs a previous incarnation left, so a run only the store still knows
+     * (`recovering` after a reset) is live and stopped like any other — and
+     * the answer waits until the runs it stopped have ended (at most the
+     * supersede grace), so the client's next look sees the chat idle. The
+     * scheduler calls it on a booted object without `identity`.
+     */
+    async abortTurn(
+      sessionId: string,
+      identity?: TurnIdentity,
+    ): Promise<boolean> {
+      if (identity) {
+        await this.ready(identity);
+        if (await this.runs?.abortSessionSettled(sessionId)) return true;
+      } else if (this.runs?.abortSession(sessionId)) return true;
       const controller = this.aborts.get(sessionId);
       if (!controller) return false;
       controller.abort();
@@ -4191,6 +6055,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       if (!ambient || typeof url !== 'string' || url.length === 0) {
         return { error: 'MEMORY_MCP_URL is not configured' };
       }
+      const entityDid = memoryEntityDid(
+        this.core.validatedEnv['ORACLE_ENTITY_DID'],
+      );
+      if (!entityDid) {
+        return {
+          error:
+            'ORACLE_ENTITY_DID is not a domain entity DID (did:ixo:entity:<32 hex>)',
+        };
+      }
       const memoryDid = await ambient.ucan.resolveServiceDid(url);
       if (!memoryDid)
         return { error: 'memory engine DID could not be resolved' };
@@ -4208,6 +6081,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         Authorization: `Bearer ${invocation}`,
         'X-Auth-Type': 'ucan',
         'User-Agent': 'LangChain-MCP-Client/1.0',
+        [MEMORY_ENTITY_HEADER]: entityDid,
         ...(room?.roomId ? { 'x-room-id': room.roomId } : {}),
       };
       try {
@@ -4416,9 +6290,17 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         // disconnects (`WsService.removeClientConnection`); same trigger here.
         onSessionDrained: (sessionId) =>
           this.scheduleHistoryIndexing(sessionId),
+        parkTimeoutMs: frontendParkTimeoutMs(this.env),
       });
       return this.realtimeEndpoint;
     }
+
+    /**
+     * The session's parked frontend call, for `waitingFor` on run
+     * summaries. Never builds the endpoint: without one nothing is parked.
+     */
+    private readonly parkedFrontendCall = (sessionId: string) =>
+      this.realtimeEndpoint?.frontend.parkedFor(sessionId) ?? null;
 
     async realtimeStatus(): Promise<RealtimeStatus> {
       return {
@@ -4688,6 +6570,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * input whatever its disposition.
      */
     private runRequestJson(req: TurnRequest, stored: StoredRunRequest): string {
+      if (req.client === 'channel' && req.channel?.routingClarification)
+        return JSON.stringify({
+          ...stored,
+          disposition: {
+            kind: 'direct-read',
+            text: req.channel.routingClarification,
+            title: 'Conversation clarification',
+            messageId: `direct:${req.sessionId}:${req.requestId}:ai`,
+          },
+        });
       const admissible =
         admissionApplies(req) &&
         this.core.plugins.some((plugin) => plugin.getRequestAdmission);
@@ -4710,6 +6602,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const stored = JSON.parse(live.record.request) as StoredRunRequest;
       const req = stored.turn;
       if (req.client === 'channel') {
+        if (
+          req.channel &&
+          (await this.channelTurns!.isCancelled({
+            bindingId: req.channel.bindingId,
+            requestId: req.requestId,
+          }))
+        )
+          return { status: 'aborted', text: '' };
         await this.ctx.storage.sync();
         // The binding was checked as the request was admitted; a queued or
         // recovered attempt starts later and checks it again.
@@ -4939,18 +6839,26 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           completed && delivery.kind === 'chat'
             ? await this.replyPlanOf(live, req, capture, delivery)
             : undefined;
+        // `send_file` always needs another model step, which can fail. A
+        // gateway reads a plan only off a `finished` run, so a run that failed
+        // after sending files finishes with them; the row keeps the error.
+        const filesPlan =
+          outcome.status === 'failed' && delivery.kind === 'chat'
+            ? await this.filesOfFailedRun(live, sessionId, delivery)
+            : null;
         const text =
           (live.continuation ?? '') +
           (completed ? lastAiText(capture) : outcome.fullText);
         return {
           status:
-            outcome.status === 'completed'
+            outcome.status === 'completed' || filesPlan
               ? 'finished'
               : outcome.status === 'aborted'
                 ? 'aborted'
                 : 'failed',
           text,
           ...(plan ? { plan } : {}),
+          ...(filesPlan ? { plan: filesPlan } : {}),
           ...(messageId ? { messageId } : {}),
           toolCalls,
           ...(outcome.status === 'failed' ? { error: outcome.error } : {}),
@@ -4978,10 +6886,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       delivery: Extract<DeliveryProfile, { kind: 'chat' }>,
     ): Promise<ReplyPlan> {
       const artifacts = this.artifacts?.canShare ? this.artifacts : null;
-      const { steps, toolResults } = turnSteps(capture);
+      const { steps, toolResults, toolArtifacts } = turnSteps(capture);
       const draft = draftReplyPlan({
         steps,
         toolResults,
+        toolArtifacts,
         continuation: live.continuation,
         limits: delivery.limits,
         canSpill: artifacts !== null,
@@ -5006,9 +6915,47 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       });
       await this.runStore!.setPlan(live.runId, JSON.stringify(plan));
       console.log(
-        `[delivery] run ${live.runId}: ${delivery.surface} reply in ${plan.parts.length} parts (${plan.parts.filter((p) => p.kind === 'artifact').length} artefacts)`,
+        `[delivery] run ${live.runId}: ${delivery.surface} reply in ${plan.parts.length} parts (${plan.parts.filter((p) => p.kind === 'artifact').length} artefacts, ${plan.parts.filter((p) => p.kind === 'file').length} files)`,
       );
       return plan;
+    }
+
+    /**
+     * The plan of a chat run that failed after sending files, or null. It
+     * reads the checkpoint, not `capture`: without the graph's own end,
+     * `capture` is whatever node ended last with messages, and nothing when
+     * an attempt failed early, which would lose an earlier attempt's files.
+     * A read failure leaves the run failed, as it was.
+     */
+    private async filesOfFailedRun(
+      live: LiveRun,
+      sessionId: string,
+      delivery: Extract<DeliveryProfile, { kind: 'chat' }>,
+    ): Promise<ReplyPlan | null> {
+      try {
+        const tuple = await this.saver!.getTuple({
+          configurable: { thread_id: sessionId },
+        });
+        const channel: unknown = tuple?.checkpoint.channel_values.messages;
+        const marks = await this.runStore!.listMarks(live.runId);
+        const plan = await failedRunFiles(
+          Array.isArray(channel) ? channel.filter(isBaseMessage) : [],
+          new Set(marks.map((mark) => mark.toolCallId)),
+          delivery.limits,
+        );
+        if (plan) {
+          await this.runStore!.setPlan(live.runId, JSON.stringify(plan));
+          console.warn(
+            `[delivery] run ${live.runId}: failed after sending ${plan.parts.filter((p) => p.kind === 'file').length} files; delivering them`,
+          );
+        }
+        return plan;
+      } catch (error) {
+        console.warn(
+          `[delivery] run ${live.runId}: could not read the files of a failed run: ${error instanceof Error ? error.name : 'unknown'}`,
+        );
+        return null;
+      }
     }
 
     private async runDirectRead(
@@ -5036,6 +6983,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         timestamp: new Date().toISOString(),
         oracleName: this.core.identity.name,
         msgFromMatrixRoom: req.client === 'matrix',
+        ...(req.client === 'channel' && req.channel
+          ? {
+              'org.ixo.qi.origin': channelOrigin(req.channel),
+              ...(req.channel.replyTo
+                ? { 'org.ixo.qi.reply': req.channel.replyTo }
+                : {}),
+            }
+          : {}),
         ...(req.client === 'matrix'
           ? {
               senderDid: req.identity.userDid,
@@ -5158,7 +7113,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // into the user's oracle room in the background: never awaited here, so
       // the session's next queued run starts at once. Without the handle (a
       // reset dropped it mid-run) the next poll or alarm mirrors it.
-      if (record.client === 'channel') this.channelTurns?.deliverReply();
+      if (record.client === 'channel') {
+        this.channelTurns?.deliverReply();
+        // Indexed once the session has been quiet for a while, not per turn:
+        // each upload invalidates the room's prefetch cache.
+        if (outcome.status === 'finished')
+          this.scheduleHistoryIndexing(record.sessionId, {
+            afterQuietMs: channelHistoryIndexDebounceMs(this.core.validatedEnv),
+          });
+      }
       if (!record.taskRunId || !this.taskScheduler) return;
       if (this.taskScheduler.isRunActive(record.taskRunId)) return;
       if (outcome.status === 'finished')
@@ -5184,7 +7147,60 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const live = this.runs?.activeForSession(sessionId);
       const record =
         live?.record ?? (await this.runStore?.activeForSession(sessionId));
-      return record ? runSummaryOf(record) : null;
+      return record
+        ? withWaitingFor(runSummaryOf(record), this.parkedFrontendCall)
+        : null;
+    }
+
+    /**
+     * `GET /runs/active` — the active runs of the chats `GET /sessions`
+     * lists (same room rule, task runs out), oldest first. A cold object
+     * that has run nothing since a boot found none answers without booting
+     * (`META_RUNS_MAYBE_ACTIVE`): an idle user's polls never pay a boot,
+     * and do not count as access for the idle eviction.
+     */
+    async activeRuns(identity: TurnIdentity): Promise<RunSummary[]> {
+      if (
+        !this.initPromise &&
+        (await this.ctx.storage.get<boolean>(META_RUNS_MAYBE_ACTIVE)) === false
+      )
+        return [];
+      await this.ready(identity);
+      const runs = await this.activeChatRunRecords();
+      if (runs.length === 0) return [];
+      const mainRoomId = await this.resolveMainRoomId(identity.userDid);
+      const sessionRooms =
+        mainRoomId === null
+          ? new Map<string, string | null>()
+          : await this.sessions!.roomsOf([
+              ...new Set(runs.map((run) => run.sessionId)),
+            ]);
+      return listedChatRuns(runs, { mainRoomId, sessionRooms }).map((run) =>
+        activeRunSummaryOf(run, this.parkedFrontendCall),
+      );
+    }
+
+    /**
+     * The active chat runs (task runs excluded). After a boot whose
+     * recovery scan succeeded every active row is live, and the live record
+     * is the truth (a run leaves the map before its row is closed): no SQL.
+     * Without a coordinator, or after a failed scan, the stored rows count
+     * too, live records winning.
+     */
+    private async activeChatRunRecords(): Promise<RunRecord[]> {
+      if (this.runs && !this.runRecoveryFailed)
+        return activeChatRuns(this.runs.records(), []);
+      return activeChatRuns(
+        this.runs?.records() ?? [],
+        (await this.runStore?.listActive()) ?? [],
+      );
+    }
+
+    /** Before a run row is created: from now on a cold poll must boot. */
+    private async markRunsMaybeActive(): Promise<void> {
+      if (this.runsMarkedActive) return;
+      await this.ctx.storage.put(META_RUNS_MAYBE_ACTIVE, true);
+      this.runsMarkedActive = true;
     }
 
     /** `GET /debug/context?model=` — the context budget a model gets here. */
@@ -5351,6 +7367,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         live: this.runs?.snapshot() ?? [],
         runs,
         claims: store ? await store.listClaims() : [],
+        tools: this.toolScheduler.snapshot(),
       };
     }
 
@@ -5416,54 +7433,42 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       ambientLlm: LlmAdapter;
       platform: OpenRouterLlmAdapter;
       signal: AbortSignal;
+      /** Attachments of the turn now running (not necessarily persisted yet). */
+      turnMetas: readonly AttachmentMeta[];
+      /** The links of this turn's channel files (earlier ones come from the store). */
+      channelLinks: ReturnType<typeof channelTurnLinks>;
     }): Promise<AttachmentViewSurface> {
       const saver = this.saver!;
       const offloaded = await saver.hasThreadMessageMatching(input.sessionId, {
         messageType: 'human',
         contentContains: ATTACHMENT_PLACEHOLDER_PREFIX,
       });
-      const findMeta = async (ref: string) => {
-        // The placeholder quotes the ref, so a cheap pre-filter usually
-        // finds the message; a still-inline attachment needs the full scan.
-        const candidates = await saver.listThreadMessagesMatching(
-          input.sessionId,
-          { messageType: 'human', contentContains: ref },
-        );
-        const scan =
-          candidates.length > 0
-            ? candidates
-            : await saver.listThreadMessages(input.sessionId);
-        return scan
-          .filter((m) => m.type === 'human')
-          .flatMap((m) => attachmentMetas(m))
-          .find((meta) => attachmentRef(meta) === ref);
-      };
-      return {
+      const findMeta = (ref: string) =>
+        findPersistedAttachmentMeta(saver, input.sessionId, ref);
+      const viewDeps = (): ViewAttachmentDeps => ({
+        source: this.matrixMediaSource(),
+        channel: turnChannelMediaSource({
+          sessionId: input.sessionId,
+          turnLinks: input.channelLinks,
+          store: this.channelAttachmentLinks,
+          channelServiceDid: this.env.CHANNEL_SERVICE_DID,
+        }),
+        extraction: this.extractionProvider(input.ambientLlm, input.platform),
+        caps: getModelCapabilities(input.model),
+        roomId: input.roomId,
+        signal: input.signal,
+        logger: console,
+        ...(this.attachmentTextCache
+          ? { cache: this.attachmentTextCache.forSession(input.sessionId) }
+          : {}),
+        ingestCache: this.ingestTextLru.forSession(input.sessionId),
+      });
+      return createAttachmentViewSurface({
         offloaded,
-        view: async (ref) => {
-          const meta = await findMeta(ref);
-          if (!meta) {
-            throw new Error(
-              `no attachment with ref "${ref}" in this conversation`,
-            );
-          }
-          const view = await viewAttachment(meta, {
-            source: this.matrixMediaSource(),
-            extraction: this.extractionProvider(
-              input.ambientLlm,
-              input.platform,
-            ),
-            caps: getModelCapabilities(input.model),
-            roomId: input.roomId,
-            signal: input.signal,
-            logger: console,
-            ...(this.attachmentTextCache
-              ? { cache: this.attachmentTextCache.forSession(input.sessionId) }
-              : {}),
-          });
-          return { meta, view };
-        },
-      };
+        turnMetas: input.turnMetas,
+        findPersisted: findMeta,
+        deps: viewDeps,
+      });
     }
 
     /**
@@ -5790,32 +7795,47 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // native capabilities, send images/files inline when it reads them,
       // otherwise the `vision` role turns them into text on the platform key;
       // originals are archived to the user's sandbox when one is reachable.
-      const attachmentInputs = parseAttachmentInputs(
-        body.attachments ?? req.attachments,
-      );
+      // A channel turn's files are read by their `channel:` reference; their
+      // links stay on the server (the run request and the session's link
+      // store), out of every message and note.
+      const attachmentInputs = turnAttachmentInputs(req, body.attachments);
       const attachmentModel =
         effectiveModel && isAllowedModel(effectiveModel)
           ? effectiveModel
           : getDefaultModelId(core.validatedEnv);
-      const prepared =
-        attachmentInputs.length > 0
-          ? await prepareAttachments(
-              {
-                text: body.message,
-                attachments: attachmentInputs,
-                roomId: sessionRoomId,
-                model: attachmentModel,
-                caps: getModelCapabilities(attachmentModel),
-              },
-              {
-                source: this.matrixMediaSource(),
-                extraction: this.extractionProvider(baseAmbient.llm, core.llm),
-                sandbox: await this.sandboxArchiveConfig(req.identity.userDid),
-                signal: abortController.signal,
-                logger: console,
-              },
-            )
-          : null;
+      const turnLinks = channelTurnLinks(req);
+      const channelMedia = turnLinks.length
+        ? turnChannelMediaSource({
+            sessionId: req.sessionId,
+            turnLinks,
+            store: this.channelAttachmentLinks,
+            channelServiceDid: this.env.CHANNEL_SERVICE_DID,
+          })
+        : undefined;
+      if (turnLinks.length && !run.resumed)
+        await this.channelAttachmentLinks?.put(req.sessionId, turnLinks);
+      const { prepared, metas: turnMetas } = await prepareTurnAttachments({
+        inputs: attachmentInputs,
+        resumed: run.resumed,
+        prepare: async () =>
+          prepareAttachments(
+            {
+              text: body.message,
+              attachments: attachmentInputs,
+              roomId: sessionRoomId,
+              model: attachmentModel,
+              caps: getModelCapabilities(attachmentModel),
+            },
+            {
+              source: this.matrixMediaSource(),
+              ...(channelMedia ? { channel: channelMedia } : {}),
+              extraction: this.extractionProvider(baseAmbient.llm, core.llm),
+              sandbox: await this.sandboxArchiveConfig(req.identity.userDid),
+              signal: abortController.signal,
+              logger: console,
+            },
+          ),
+      });
       if (prepared) {
         console.log(
           `[user-do] attachments: ${attachmentInputs.length} attached, ${prepared.extracted.length} extracted, ${Array.isArray(prepared.content) ? prepared.content.length - 1 : 0} native`,
@@ -5839,6 +7859,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             ambientLlm: baseAmbient.llm,
             platform: core.llm,
             signal: abortController.signal,
+            turnMetas,
+            channelLinks: turnLinks,
           });
 
       // Request metadata (editor room, space, session run, entity) → state,
@@ -5930,19 +7952,40 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         : clientSurfaceFor(body, priorState);
 
       // Write-ahead tool marks + the resume policy (tool-marks.ts). The
-      // effect map is filled from the build below; the closure reads it at
-      // call time, so the middleware can be created before the agent.
+      // effect and surface maps are filled from the build below; the
+      // closures read them at call time, so the middleware can be created
+      // before the agent.
       const toolEffects = new Map<string, ToolEffect>();
+      const toolSurfaces = new Map<string, 'frontend'>();
       const subAgentToolNames = new Set<string>();
       const effectOf = (name: string): ToolEffect =>
         toolEffects.get(name) ?? toolEffectOf({ name });
+      const runStore = this.runStore!;
       const marksMiddleware = createToolMarksMiddleware({
         runId: run.runId,
-        store: this.runStore!,
+        store: runStore,
         effectOf,
+        surfaceOf: (name) => toolSurfaces.get(name),
         continuation: run.continuation,
         logger: console,
       });
+      // `ctx.markDispatched`: a frontend call reached a browser socket, so a
+      // restart from here on cannot tell whether it ran. A tool's context
+      // carries its own LangChain call id, which is its mark's id on the
+      // main agent. A sub-agent's inner marks are scoped to the dispatch
+      // (`<dispatch>/<id>`), so an inner call's report names no mark and
+      // they stay unsent; that never decides a resume, since a dispatch is a
+      // write and is not run again. (An inner id equal to a main-agent call
+      // id would mark that call sent early: the conservative side.)
+      const markDispatched = (toolCallId: string): void => {
+        void runStore
+          .markSent(run.runId, toolCallId)
+          .catch((error: unknown) =>
+            console.warn(
+              `[runs] ${run.runId}: could not record that ${toolCallId} was sent: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          );
+      };
       // The turn's budget (turn-budget.ts): model tokens are accounted (for
       // the usage line below, never limited) by the metered adapter every
       // model of this turn comes from, tool calls are charged by
@@ -5979,12 +8022,20 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           `[harness] turn ${req.requestId} usage: ~${usage.tokens} tokens (${usage.reportedTokens} reported over ${usage.modelCalls} model calls), ${usage.toolAttempts} tool attempts, ${usage.elapsedMs} ms`,
         );
       });
+      // A dispatch waits in its session's sub-agent lane, a browser tool
+      // (`surface: 'frontend'`) in its session's frontend lane whatever its
+      // effect, every other tool in the user-wide lane of its effect.
       const laneOf = (name: string): ToolLane =>
-        subAgentToolNames.has(name) ? 'subagent' : effectOf(name);
+        subAgentToolNames.has(name)
+          ? 'subagent'
+          : toolSurfaces.has(name)
+            ? 'frontend'
+            : effectOf(name);
       const executionMiddleware = createToolExecutionMiddleware({
         budget,
         scheduler: this.toolScheduler,
         laneOf,
+        effectOf,
         runId: run.runId,
         sessionId: req.sessionId,
         claims: this.runStore!,
@@ -6081,6 +8132,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           llm: meteredLlm,
           attachments: attachmentAccess,
           onTurnEnd: (dispose) => turnDisposables.add(dispose),
+          markDispatched,
         },
         hooks: {
           // Drives the Matrix `work_status` card (one step per model/tool
@@ -6135,6 +8187,19 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             id: req.sessionId,
             client: req.client,
             requestId: req.requestId,
+            runId: run.runId,
+            ...(req.channel?.bindingRevision
+              ? {
+                  channel: {
+                    provider: req.channel.provider,
+                    bindingId: req.channel.bindingId,
+                    bindingRevision: req.channel.bindingRevision,
+                    ...(req.channel.attachments?.length
+                      ? { attachments: req.channel.attachments }
+                      : {}),
+                  },
+                }
+              : {}),
             roomId: sessionRoomId,
           },
           model: effectiveModel,
@@ -6156,6 +8221,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const { agent, context } = built;
       for (const [name, effect] of built.toolEffects)
         toolEffects.set(name, effect);
+      for (const [name, surface] of built.toolSurfaces)
+        toolSurfaces.set(name, surface);
       for (const name of built.subAgentToolNames) subAgentToolNames.add(name);
 
       const attachmentKwargs =
@@ -6193,37 +8260,43 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const timeNote = suppliedContextOnly
         ? undefined
         : renderTurnTimeNote(turnAt, req.identity.timezone);
-      const content = timeNote ? withTurnTimeNote(spoken, timeNote) : spoken;
+      const replyNote = channelReplyNote(req.channel?.replyContext);
+      const referenced = replyNote
+        ? withTurnTimeNote(spoken, replyNote)
+        : spoken;
+      const content = timeNote
+        ? withTurnTimeNote(referenced, timeNote)
+        : referenced;
+      const human = new HumanMessage({
+        content,
+        additional_kwargs: {
+          timestamp: turnAt.toISOString(),
+          ...(timeNote ? { [TURN_TIME_NOTE_KWARG]: timeNote } : {}),
+          ...(replyNote ? { [CHANNEL_REPLY_NOTE_KWARG]: replyNote } : {}),
+          oracleName: core.identity.name,
+          msgFromMatrixRoom: req.client === 'matrix',
+          ...speakerKwargs,
+          ...(req.channel
+            ? {
+                'org.ixo.qi.origin': channelOrigin(req.channel),
+                ...(req.channel.replyTo
+                  ? { 'org.ixo.qi.reply': req.channel.replyTo }
+                  : {}),
+              }
+            : {}),
+          ...attachmentKwargs,
+        },
+      });
       const stateInput = {
-        messages: [
-          new HumanMessage({
-            content,
-            additional_kwargs: {
-              timestamp: turnAt.toISOString(),
-              ...(timeNote ? { [TURN_TIME_NOTE_KWARG]: timeNote } : {}),
-              oracleName: core.identity.name,
-              msgFromMatrixRoom: req.client === 'matrix',
-              ...speakerKwargs,
-              ...(req.channel
-                ? { 'org.ixo.qi.origin': channelOrigin(req.channel) }
-                : {}),
-              ...attachmentKwargs,
-            },
-          }),
-          // Extraction-lane text rides as hidden context messages (the
-          // transcript hides AI messages that carry an `attachment`), as on Node.
-          ...(prepared?.extracted ?? []).map(
-            (item) =>
-              new AIMessage({
-                content: item.text,
-                additional_kwargs: {
-                  msgFromMatrixRoom: req.client === 'matrix',
-                  timestamp: new Date().toISOString(),
-                  attachment: item.meta,
-                },
-              }),
-          ),
-        ],
+        // Hidden attachment context (the transcript hides AI messages that
+        // carry an `attachment`): native-lane notes precede the person's
+        // message, extraction-lane text follows it, as on Node.
+        messages: assembleTurnMessages({
+          human,
+          extracted: prepared?.extracted ?? [],
+          nativeNotes: prepared?.nativeNotes ?? [],
+          matrixRoom: req.client === 'matrix',
+        }),
         config: { did: req.identity.userDid },
         client: req.client,
         // First contact's gathered context is checkpointed with the turn,
@@ -6290,8 +8363,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       req: TurnRequest,
       text: string,
       who: 'user' | 'oracle',
+      receipt = false,
     ): Promise<void> {
-      if (req.client === 'matrix') return Promise.resolve();
+      if (req.client === 'matrix' && !receipt) return Promise.resolve();
       if (req.sessionId.startsWith(SYNTHETIC_SESSION_PREFIX))
         return Promise.resolve();
       // A local session id has no marker event to thread on: the user had
@@ -6306,6 +8380,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         req.sessionId,
         async () => {
           const roomId =
+            (receipt ? req.roomId : undefined) ??
             this.sessionRooms.get(req.sessionId) ??
             req.roomId ??
             (await this.sessions?.getSession(req.sessionId))?.roomId ??
@@ -6329,11 +8404,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             txnId: req.channel
               ? `channel-${await channelRequestHash(JSON.stringify([req.identity.userDid, req.channel.bindingId, req.requestId, who]))}`
               : mirrorTxnId(req.sessionId, req.requestId, who),
-            ...(req.channel ? { origin: req.channel } : {}),
+            ...(req.channel
+              ? {
+                  origin: {
+                    provider: req.channel.provider,
+                    bindingId: req.channel.bindingId,
+                    remoteMessageRef: req.channel.remoteMessageRef,
+                    ...(who === 'user' && req.channel.replyTo
+                      ? { replyTo: req.channel.replyTo }
+                      : {}),
+                  },
+                }
+              : {}),
           };
         },
         label,
-        req.client === 'channel',
+        req.client === 'channel' || receipt,
       );
     }
 

@@ -59,16 +59,35 @@ export default [
     },
   },
 
+  // Yoma plugin: survey-core is loaded on the first Yoma tool call
+  // (`loadSurveyCore` in engine.ts). A value import would evaluate it at
+  // Worker startup again, which is what pushed oracles over the startup limit.
+  {
+    files: ['packages/oracle-runtime-workers/src/plugins/yoma/**/*.ts'],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: 'survey-core',
+              allowTypeImports: true,
+              message:
+                'Import survey-core types only; values come from surveyCore() after loadSurveyCore() (engine.ts).',
+            },
+          ],
+        },
+      ],
+    },
+  },
+
   // Test files — disable type-aware linting. Tests live outside each
   // package's tsconfig `include`, so projectService would spin up a fresh
   // TypeScript program per file and exhaust the heap on `eslint .`.
   // Type-checking still happens via vitest + tsc; ESLint only needs
   // syntactic + vitest-plugin rules here.
   {
-    files: [
-      '**/__tests__/**/*.[jt]s?(x)',
-      '**/?(*.)+(spec|test).[jt]s?(x)',
-    ],
+    files: ['**/__tests__/**/*.[jt]s?(x)', '**/?(*.)+(spec|test).[jt]s?(x)'],
     ...tseslint.configs.disableTypeChecked,
     plugins: { vitest },
     languageOptions: {

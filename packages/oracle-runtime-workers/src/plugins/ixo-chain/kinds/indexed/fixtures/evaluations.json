@@ -1,0 +1,46 @@
+{
+  "pageInfo": {
+    "hasNextPage": true
+  },
+  "nodes": [
+    {
+      "claimId": "bafkreibl6puxqkuhz5d5j355kkb5gcsw3ud62cujo7nhyimhk4j6j5pye4",
+      "collectionId": "751",
+      "oracle": "did:ixo:ixo1n280ly8a7amr062jw3g9ct8e5hgvx559wa7ynu",
+      "agentDid": "did:ixo:ixo1n280ly8a7amr062jw3g9ct8e5hgvx559wa7ynu",
+      "agentAddress": "ixo1n280ly8a7amr062jw3g9ct8e5hgvx559wa7ynu",
+      "status": 1,
+      "reason": "1",
+      "verificationProof": "bafkreibl6puxqkuhz5d5j355kkb5gcsw3ud62cujo7nhyimhk4j6j5pye4",
+      "amount": [],
+      "cw20Payment": [],
+      "evaluationDate": "2026-10-29T14:55:29.676"
+    },
+    {
+      "claimId": "bafkreibtp27a4svbm33dgmybf3c3d6qcwnj5yzv5kodr4tljgzadbm7f2u",
+      "collectionId": "751",
+      "oracle": "did:ixo:ixo1n280ly8a7amr062jw3g9ct8e5hgvx559wa7ynu",
+      "agentDid": "did:ixo:ixo1n280ly8a7amr062jw3g9ct8e5hgvx559wa7ynu",
+      "agentAddress": "ixo1n280ly8a7amr062jw3g9ct8e5hgvx559wa7ynu",
+      "status": 1,
+      "reason": "1",
+      "verificationProof": "bafkreibtp27a4svbm33dgmybf3c3d6qcwnj5yzv5kodr4tljgzadbm7f2u",
+      "amount": [],
+      "cw20Payment": [],
+      "evaluationDate": "2026-10-29T14:53:19.751"
+    },
+    {
+      "claimId": "bafkreibvnd5idwvdi3xukf5f77iro7uxfsl3anyjsszyu4dm4snsskie6y",
+      "collectionId": "751",
+      "oracle": "did:ixo:ixo1n280ly8a7amr062jw3g9ct8e5hgvx559wa7ynu",
+      "agentDid": "did:ixo:ixo1n280ly8a7amr062jw3g9ct8e5hgvx559wa7ynu",
+      "agentAddress": "ixo1n280ly8a7amr062jw3g9ct8e5hgvx559wa7ynu",
+      "status": 1,
+      "reason": "1",
+      "verificationProof": "bafkreibvnd5idwvdi3xukf5f77iro7uxfsl3anyjsszyu4dm4snsskie6y",
+      "amount": [],
+      "cw20Payment": [],
+      "evaluationDate": "2026-10-29T14:50:47.645"
+    }
+  ]
+}

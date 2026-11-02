@@ -76,6 +76,8 @@ function frontend(
     },
     callAgAction: callAgActionMock,
     hasClient: () => true,
+    canDispatch: () => true,
+    parkedFor: () => null,
     ...over,
   };
 }
@@ -249,10 +251,31 @@ describe('create-path tools', () => {
     await expect(
       prepareWith([
         entity,
-        { typeUrl: '/cosmos.bank.v1beta1.MsgSend', value: {} },
+        { typeUrl: '/ixo.test.v1.MsgUnsupported', value: {} },
       ]),
     ).rejects.toThrow(
-      /^The chain gateway built a batch the wallet would refuse: Unsupported message typeUrl \/cosmos\.bank\.v1beta1\.MsgSend/,
+      /^The chain gateway built a batch the wallet would refuse: Unsupported message typeUrl \/ixo\.test\.v1\.MsgUnsupported/,
+    );
+    await expect(
+      prepareWith([
+        entity,
+        { typeUrl: '/cosmos.bank.v1beta1.MsgSend', value: {} },
+      ]),
+    ).rejects.toThrow(/batch the wallet would refuse:.*fromAddress/);
+    await expect(
+      prepareWith([
+        entity,
+        {
+          typeUrl: '/cosmos.bank.v1beta1.MsgSend',
+          value: {
+            fromAddress: 'ixo1qyqszqgpqyqszqgpqyqszqgpqyqszqgpdxlvf0',
+            toAddress: 'ixo1qyqszqgpqyqszqgpqyqszqgpqyqszqgpdxlvf0',
+            amount: [{ denom: 'uixo', amount: '1' }],
+          },
+        },
+      ]),
+    ).rejects.toThrow(
+      /wrong batch:.*carries only .*; it had \/cosmos\.bank\.v1beta1\.MsgSend$/,
     );
     await expect(prepareWith([collection, entity])).rejects.toThrow(
       /^The chain gateway built a wrong batch: A POD creation batch creates exactly one entity, with \/ixo\.entity\.v1beta1\.MsgCreateEntity as its first message$/,
@@ -431,7 +454,10 @@ describe('create-path tools', () => {
     const { tools, sessions } = await makeTools();
     await sessions.prepared(USER, THREAD, BLOB, PREP);
     const ctx = ctxWithStoredBlob({
-      frontend: frontend({ hasClient: () => false }),
+      frontend: frontend({
+        hasClient: () => false,
+        canDispatch: () => false,
+      }),
     });
 
     await byName(tools, 'approve_pod_transaction').handler(approval(BLOB), ctx);

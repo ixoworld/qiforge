@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { activeChatRuns } from './active-runs';
 import { createSseSubscriberStream } from './sse-stream';
 import type { Logger } from '../plugin-api/types';
 import type { PackedSegment, RunFrame } from './run-buffer';
@@ -25,6 +26,7 @@ const CONFIG: RunDurabilityConfig = {
   segmentFlushMs: 20,
   segmentBytes: 16 * 1024,
   recoveryAttempts: 4,
+  recoveryTotalAttempts: 8,
   recoveryDelaysMs: [5_000, 15_000, 30_000, 60_000],
   multitaskDefault: 'interrupt',
 };
@@ -1227,6 +1229,114 @@ describe('recovery accounting at the cap', () => {
   });
 });
 
+describe('recoveries in all', () => {
+  /**
+   * One restart of the object while `r1` is executing: a new coordinator
+   * (a new instance) over the same rows, as the boot builds it, recovers
+   * the orphan and starts its attempt when it is due. The attempt either
+   * resets the isolate again after one checkpoint (`progress`), or ends.
+   */
+  async function restart(
+    store: MemoryRunStore,
+    checkpoint: string,
+    now: number,
+  ) {
+    const h = harness();
+    // The harness's own store is replaced by the shared one.
+    h.host.store = store;
+    h.setCheckpoint(checkpoint);
+    const runs = new RunCoordinator({ ...h.host, now: () => now });
+    await runs.recoverOrphans();
+    await runs.resumeDue(now + 60_000);
+    return { runs, attempts: h.attempts, ended: h.ended };
+  }
+
+  it('closes a run that checkpoints once per attempt and resets again, after 8 recoveries, with its error and done frames', async () => {
+    let now = T0;
+    const store = new MemoryRunStore(() => now);
+    store.seed({ runId: 'r1', client: 'channel', checkpointId: 'cp0' });
+    const generations: number[] = [];
+    let last: Awaited<ReturnType<typeof restart>> | undefined;
+    for (let boot = 1; boot <= 12; boot += 1) {
+      now += 55_000;
+      // The previous attempt took one step before the isolate was reset:
+      // the checkpoint moved, so `attempts` never climbs past 1.
+      last = await restart(store, `cp${boot}`, now);
+      const row = (await store.get('r1'))!;
+      generations.push(row.generation);
+      if (row.status === 'interrupted') break;
+      expect(row.attempts).toBe(1);
+      expect(last.attempts).toHaveLength(1);
+      expect(last.attempts[0]!.resumed).toBe(true);
+    }
+    // Eight resumed attempts, then the ninth boot closes the run.
+    expect(generations).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(await store.get('r1')).toMatchObject({
+      status: 'interrupted',
+      generation: 9,
+      nextAttemptAt: null,
+      // error + done, numbered above every earlier attempt
+      lastSeq: attemptSeqBase(9) + 2,
+    });
+    expect(last!.attempts).toHaveLength(0);
+    expect(last!.ended.map((e) => e.outcome.status)).toEqual(['interrupted']);
+    expect(last!.ended[0]!.record.client).toBe('channel');
+  });
+
+  it('lets a run that resumes a few times finish', async () => {
+    let now = T0;
+    const store = new MemoryRunStore(() => now);
+    store.seed({ runId: 'r1', checkpointId: 'cp0' });
+    let last: Awaited<ReturnType<typeof restart>> | undefined;
+    for (let boot = 1; boot <= 3; boot += 1) {
+      now += 55_000;
+      last = await restart(store, `cp${boot}`, now);
+    }
+    expect(await store.get('r1')).toMatchObject({
+      status: 'running',
+      generation: 3,
+    });
+    const attempt = last!.attempts[0]!;
+    expect(attempt.resumed).toBe(true);
+    attempt.finish({ status: 'finished', text: 'Done at last' });
+    await attempt.live.done;
+    await settled();
+    expect(await store.get('r1')).toMatchObject({
+      status: 'finished',
+      generation: 3,
+    });
+    expect(last!.ended.map((e) => e.outcome.status)).toEqual(['finished']);
+  });
+
+  it('honours RUN_RECOVERY_TOTAL_ATTEMPTS: the last allowed recovery is scheduled, the next restart closes the run', async () => {
+    const h = harness({ recoveryTotalAttempts: 2 });
+    h.store.seed({
+      runId: 'r1',
+      attempts: 1,
+      generation: 1,
+      checkpointId: 'cp1',
+    });
+    h.setCheckpoint('cp2');
+    await h.runs.recoverOrphans();
+    expect(await h.store.get('r1')).toMatchObject({
+      status: 'recovering',
+      attempts: 1,
+      generation: 2,
+    });
+    const restarted = harness({ recoveryTotalAttempts: 2 });
+    restarted.store.seed({ ...(await h.store.get('r1'))!, status: 'running' });
+    restarted.setCheckpoint('cp3');
+    await restarted.runs.recoverOrphans();
+    expect(await restarted.store.get('r1')).toMatchObject({
+      status: 'interrupted',
+      generation: 3,
+    });
+    expect(restarted.ended.map((e) => e.outcome.status)).toEqual([
+      'interrupted',
+    ]);
+  });
+});
+
 describe('attempt source', () => {
   it('tells the attempt whether it was admitted just now, dequeued, or a recovery', async () => {
     const h = harness();
@@ -1347,5 +1457,135 @@ describe('re-join racing the end of a run', () => {
       partialText: 'Hello',
     });
     expect(joined?.replay.map((f) => f.event)).not.toContain('done');
+  });
+});
+
+describe('user-wide active runs over the live records and the stored rows', () => {
+  it('lists a dequeued run once, running, while its row still says queued, and drops runs as they end', async () => {
+    const h = harness();
+    const a = await h.begin('a');
+    const b = await h.begin('b', 'enqueue');
+    const t = await h.begin('t', 'interrupt', 'task:t1');
+    expect(h.runs.records().map((r) => [r.runId, r.status])).toEqual([
+      ['a', 'running'],
+      ['b', 'queued'],
+      ['t', 'running'],
+    ]);
+    let duringDequeue: RunRecord[] | undefined;
+    h.store.onUpdate = (runId) => {
+      if (runId !== 'b' || duringDequeue) return;
+      // Called before the row update lands: memory is ahead of the row.
+      expect(h.store.rows.get('b')?.status).toBe('queued');
+      duringDequeue = activeChatRuns(h.runs.records(), [
+        ...h.store.rows.values(),
+      ]);
+    };
+    h.attempts[0]!.finish({ status: 'finished', text: 'A' });
+    await a.live.done;
+    await settled();
+    expect(duringDequeue?.map((r) => [r.runId, r.status])).toEqual([
+      ['b', 'running'],
+    ]);
+    h.store.onUpdate = null;
+    const attemptOf = (runId: string) =>
+      h.attempts.find((x) => x.live.runId === runId)!;
+    attemptOf('b').finish({ status: 'finished', text: 'B' });
+    await b.live.done;
+    await settled();
+    attemptOf('t').finish({ status: 'finished', text: 'T' });
+    await t.live.done;
+    await settled();
+    expect(h.runs.records()).toEqual([]);
+    expect(
+      activeChatRuns(h.runs.records(), await h.store.listActive()),
+    ).toEqual([]);
+  });
+});
+
+describe('a run ending, as the user-wide listing sees it', () => {
+  it('is gone from the live records while its row is being closed, though the row still says running', async () => {
+    const h = harness();
+    const a = await h.begin('a');
+    let duringClose:
+      | { listed: RunRecord[]; rowStatus: string | undefined }
+      | undefined;
+    const close = h.store.close.bind(h.store);
+    h.store.close = async (runId, patch) => {
+      duringClose = {
+        listed: activeChatRuns(h.runs.records(), []),
+        rowStatus: h.store.rows.get(runId)?.status,
+      };
+      return close(runId, patch);
+    };
+    h.attempts[0]!.finish({ status: 'finished', text: 'A' });
+    await a.live.done;
+    expect(duringClose).toEqual({ listed: [], rowStatus: 'running' });
+  });
+
+  it('a channel cancellation stops exactly its run and leaves a later turn running on replay', async () => {
+    const h = harness();
+    const first = await h.begin('channel-first');
+    const next = await h.begin('channel-next', 'enqueue');
+    await h.runs.abortById(first.live.runId);
+    expect((await h.store.get(first.live.runId))?.status).toBe('aborted');
+    await h.runs.abortById(first.live.runId);
+    expect(next.live.abort.signal.aborted).toBe(false);
+    h.attempts.at(-1)!.finish({ status: 'finished', text: 'corrected' });
+    await next.live.done;
+  });
+
+  it('abortByIds signals every named run, then waits one shared grace even when runs ignore the abort', async () => {
+    const h = harness({}, { graceMs: 100 });
+    // Two attempts never notice their abort signal (a tool call in flight).
+    h.stubborn.add('slow-1');
+    h.stubborn.add('slow-2');
+    const quick = await h.begin('quick', 'interrupt', 's-quick');
+    const slow1 = await h.begin('slow-1', 'interrupt', 's-slow-1');
+    const slow2 = await h.begin('slow-2', 'interrupt', 's-slow-2');
+    const started = Date.now();
+    await h.runs.abortByIds(['slow-1', 'quick', 'slow-2', 'slow-1', 'unknown']);
+    // One grace for all of them, not one per run.
+    expect(Date.now() - started).toBeLessThan(190);
+    for (const run of [quick, slow1, slow2])
+      expect(run.live.abort.signal.aborted).toBe(true);
+    expect((await h.store.get('quick'))?.status).toBe('aborted');
+    expect(h.runs.records().map((r) => r.runId)).toEqual(['slow-1', 'slow-2']);
+    h.attempts[1]!.finish({ status: 'aborted', text: '' });
+    h.attempts[2]!.finish({ status: 'aborted', text: '' });
+    await Promise.all([slow1.live.done, slow2.live.done]);
+  });
+
+  it('abortSessionSettled answers once the stopped run has ended and left the live records', async () => {
+    const h = harness();
+    // The attempt winds down 30 ms after its abort signal, not at once.
+    h.stubborn.add('a');
+    const a = await h.begin('a');
+    a.live.abort.signal.addEventListener('abort', () => {
+      setTimeout(
+        () => h.attempts[0]!.finish({ status: 'aborted', text: '' }),
+        30,
+      );
+    });
+    let settled = false;
+    const answer = h.runs.abortSessionSettled(SESSION).then((stopped) => {
+      settled = true;
+      return stopped;
+    });
+    await pause(10);
+    expect(settled).toBe(false);
+    expect(await answer).toBe(true);
+    expect(h.runs.records()).toEqual([]);
+    expect((await h.store.get('a'))?.status).toBe('aborted');
+  });
+
+  it('abortSessionSettled stops a recovering run that no attempt is executing', async () => {
+    const h = harness();
+    h.store.seed({ runId: 'orphan', status: 'running' });
+    await h.runs.recoverOrphans();
+    expect(h.runs.records().map((r) => r.status)).toEqual(['recovering']);
+    expect(await h.runs.abortSessionSettled(SESSION)).toBe(true);
+    expect(h.runs.records()).toEqual([]);
+    expect((await h.store.get('orphan'))?.status).toBe('aborted');
+    expect(h.attempts).toEqual([]);
   });
 });

@@ -81,6 +81,29 @@ export class ActionInteractionsTestDO extends DurableObject {
   async references(userDid: string, sessionId: string) {
     return JSON.stringify(await this.store(userDid).listReferences(sessionId));
   }
+  async list(userDid: string, sessionId: string) {
+    return JSON.stringify(await this.store(userDid).list(sessionId));
+  }
+  async forget(userDid: string, sessionId: string) {
+    let total = 0;
+    for (let n = 1; n > 0; total += n)
+      n = await this.store(userDid).forgetSession(sessionId);
+    return total;
+  }
+  async prune(userDid: string) {
+    return this.store(userDid).prune();
+  }
+  async nextRetentionAt(userDid: string) {
+    return this.store(userDid).nextRetentionAt();
+  }
+  /** Overwrites a record with something this version cannot read. */
+  async corrupt(id: string) {
+    await this.ctx.storage.put(`interaction:${id}`, { version: 99 });
+  }
+  /** Every key the store wrote, so retention tests can prove what is gone. */
+  async keys() {
+    return Array.from((await this.ctx.storage.list()).keys());
+  }
   async advance(ms: number) {
     this.now += ms;
   }

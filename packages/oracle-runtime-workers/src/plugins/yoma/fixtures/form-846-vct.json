@@ -1,0 +1,326 @@
+{
+  "@context": {
+    "ixo": "https://w3id.org/ixo/ns/protocol/",
+    "@id": "@type",
+    "type": "@type",
+    "@protected": true
+  },
+  "type": "ixo:entity#surveyTemplate",
+  "question": {
+    "_namespaces": {
+      "schema": "https://schema.org/",
+      "org": "http://www.w3.org/ns/org#",
+      "ixo": "https://w3id.org/ixo/vocab/"
+    },
+    "title": "Climate Action Plan",
+    "description": "Tell us who finished the courses and what climate action your group will do. A red star * means you must answer.",
+    "pages": [
+      {
+        "name": "page_course_completion",
+        "title": "Completion of Course (Min 20 people group)",
+        "description": "List everyone who finished both courses on the HOT Learning Centre and uploaded their certificates to YOMA.",
+        "elements": [
+          {
+            "type": "paneldynamic",
+            "name": "org:hasMember",
+            "title": "List of participants who completed the two courses",
+            "description": "Add one participant at a time. Each person must have finished both HOT Learning Centre courses and uploaded their certificates to YOMA. Your group needs at least 20 people. You must fill in at least 10 participants before you can go to the next section.",
+            "templateTitle": "Participant {panelIndex}",
+            "templateElements": [
+              {
+                "type": "text",
+                "name": "schema:name",
+                "title": "Full name",
+                "isRequired": true
+              },
+              {
+                "type": "text",
+                "name": "schema:email",
+                "title": "Email",
+                "inputType": "email",
+                "validators": [
+                  {
+                    "type": "email",
+                    "text": "Please write a working email address, like jane@example.com"
+                  }
+                ],
+                "isRequired": true
+              }
+            ],
+            "panelCount": 10,
+            "minPanelCount": 10,
+            "maxPanelCount": 100,
+            "panelAddText": "Add another participant",
+            "panelRemoveText": "Remove",
+            "confirmDelete": true,
+            "confirmDeleteText": "Remove this participant?",
+            "showQuestionNumbers": "off",
+            "isRequired": true
+          }
+        ]
+      },
+      {
+        "name": "page_group_details",
+        "title": "Climate Action Plan",
+        "description": "Who leads the group, and which group is this?",
+        "elements": [
+          {
+            "type": "panel",
+            "name": "schema:Person",
+            "title": "Group Lead",
+            "elements": [
+              {
+                "type": "text",
+                "name": "schema:email",
+                "title": "Email",
+                "description": "We use this to reply to you. For example: jane@example.com",
+                "inputType": "email",
+                "validators": [
+                  {
+                    "type": "email",
+                    "text": "Please write a working email address, like jane@example.com"
+                  }
+                ],
+                "isRequired": true
+              },
+              {
+                "type": "text",
+                "name": "schema:name",
+                "title": "Group Lead's Name",
+                "description": "The full name of the person who leads the group.",
+                "isRequired": true
+              },
+              {
+                "type": "text",
+                "name": "schema:telephone",
+                "title": "Group Lead's WhatsApp Number",
+                "description": "Start with your country code. For example: +27 82 123 4567",
+                "validators": [
+                  {
+                    "type": "regex",
+                    "text": "Please write the number with the country code, like +27 82 123 4567",
+                    "regex": "^\\+?[0-9][0-9 ()\\-]{6,19}$"
+                  }
+                ],
+                "isRequired": true
+              }
+            ]
+          },
+          {
+            "type": "panel",
+            "name": "schema:Organization",
+            "title": "Your Group",
+            "elements": [
+              {
+                "type": "text",
+                "name": "schema:legalName",
+                "title": "Group Name",
+                "description": "The name your group is known by.",
+                "isRequired": true
+              },
+              {
+                "type": "dropdown",
+                "name": "schema:addressCountry",
+                "title": "Country",
+                "description": "The country your group works in. Pick Other if your country is not on the list.",
+                "choices": [
+                  "Lesotho",
+                  "South Africa",
+                  "eSwatini",
+                  "Botswana",
+                  "Namibia",
+                  "Zimbabwe"
+                ],
+                "showOtherItem": true,
+                "otherText": "Other",
+                "otherPlaceholder": "Please tell us your country",
+                "isRequired": true
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "page_activity",
+        "title": "Your Climate Action Activity",
+        "description": "What your group plans to do, where, and what the money will pay for.",
+        "elements": [
+          {
+            "type": "panel",
+            "name": "ixo:ClimateAction",
+            "title": "The Activity",
+            "elements": [
+              {
+                "type": "radiogroup",
+                "name": "ixo:serviceType",
+                "title": "What Climate Action Approach do you intend to do",
+                "description": "Pick the one that fits your plan best.",
+                "choices": [
+                  {
+                    "value": "mapAndClean",
+                    "text": "Map and Clean campaign — before and after pictures on maps, with data on how much waste you collected and where it went."
+                  },
+                  {
+                    "value": "plantAndMapTree",
+                    "text": "Plant and map a tree — plant trees, map them, and track how they grow. This can become a blockchain-backed Verifiable Credential for carbon financing."
+                  },
+                  {
+                    "value": "waterAccessMapping",
+                    "text": "Mapping water access to communities — map which water points work and which do not."
+                  },
+                  {
+                    "value": "illegalDumpMapping",
+                    "text": "Illegal Waste Dumps mapping — youth-led mapping of illegal dumping sites, to give city authorities real evidence."
+                  },
+                  {
+                    "value": "wetlandEncroachmentMapping",
+                    "text": "Wetland Encroachment mapping — map where farming is pushing into protected ecosystems."
+                  }
+                ],
+                "showOtherItem": true,
+                "otherText": "Other (Specify)",
+                "otherPlaceholder": "Tell us what your group plans to do",
+                "isRequired": true
+              },
+              {
+                "type": "comment",
+                "name": "schema:description",
+                "title": "Describe the activity you are going to do in more detail",
+                "description": "What will your group do, step by step? Who will do what?",
+                "rows": 6,
+                "isRequired": true
+              },
+              {
+                "type": "text",
+                "name": "schema:addressLocality",
+                "title": "In which town or city will you conduct the activity?",
+                "isRequired": true
+              },
+              {
+                "type": "comment",
+                "name": "ixo:budgetBreakdown",
+                "title": "How do you intend to spend the $400 funds?",
+                "description": "Share a small breakdown of your budget. For example: transport $150, mobile data $100, refreshments $80, printing $70.",
+                "rows": 6,
+                "isRequired": true
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "page_participants_leaders",
+        "title": "Participants and Local Leaders",
+        "description": "Who will take part, and who you have spoken to on the ground.",
+        "elements": [
+          {
+            "type": "panel",
+            "name": "ixo:ActivityParticipation",
+            "title": "Participants",
+            "elements": [
+              {
+                "type": "text",
+                "name": "schema:numberOfItems",
+                "title": "How many people will participate in your climate action activity?",
+                "inputType": "number",
+                "min": 1,
+                "isRequired": true
+              },
+              {
+                "type": "file",
+                "name": "schema:associatedMedia",
+                "title": "Share the list of participants",
+                "description": "Upload a file listing each person's name, email address, phone number, age and country. Choose the file from your device — a spreadsheet, a document or a clear picture of the list all work. You can add more than one file.",
+                "allowMultiple": true,
+                "maxSize": 0,
+                "storeDataAsText": false,
+                "waitForUpload": true,
+                "sourceType": "file",
+                "isRequired": true
+              }
+            ]
+          },
+          {
+            "type": "panel",
+            "name": "ixo:CommunityEngagement",
+            "title": "Local Leaders",
+            "elements": [
+              {
+                "type": "radiogroup",
+                "name": "ixo:localLeaderContacted",
+                "title": "Have you contacted the local leaders in the area where the climate action will take place",
+                "choices": [
+                  {
+                    "value": "yes",
+                    "text": "Yes"
+                  },
+                  {
+                    "value": "no",
+                    "text": "No"
+                  }
+                ],
+                "isRequired": true
+              },
+              {
+                "type": "panel",
+                "name": "schema:Person_localLeader",
+                "title": "Name and contact of the local leader",
+                "visibleIf": "{ixo:localLeaderContacted} = 'yes'",
+                "elements": [
+                  {
+                    "type": "text",
+                    "name": "schema:name_localLeader",
+                    "title": "Local leader's name",
+                    "isRequired": true
+                  },
+                  {
+                    "type": "text",
+                    "name": "schema:telephone_localLeader",
+                    "title": "Local leader's phone number",
+                    "description": "Start with the country code. For example: +27 82 123 4567",
+                    "validators": [
+                      {
+                        "type": "regex",
+                        "text": "Please write the number with the country code, like +27 82 123 4567",
+                        "regex": "^\\+?[0-9][0-9 ()\\-]{6,19}$"
+                      }
+                    ],
+                    "isRequired": true
+                  },
+                  {
+                    "type": "text",
+                    "name": "schema:email_localLeader",
+                    "title": "Local leader's email",
+                    "inputType": "email",
+                    "validators": [
+                      {
+                        "type": "email",
+                        "text": "Please write a working email address, like jane@example.com"
+                      }
+                    ],
+                    "isRequired": true
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "comment",
+            "name": "schema:comment",
+            "title": "Do you have any questions or comments for us?",
+            "rows": 4,
+            "isRequired": true
+          }
+        ]
+      }
+    ],
+    "showQuestionNumbers": "on",
+    "questionErrorLocation": "bottom",
+    "showProgressBar": true,
+    "progressBarLocation": "top",
+    "pagePrevText": "Back",
+    "pageNextText": "Next Section",
+    "completeText": "Submit Climate Action Plan",
+    "requiredText": "*"
+  }
+}

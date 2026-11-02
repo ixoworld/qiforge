@@ -3,7 +3,10 @@
 
 # --- identity ---------------------------------------------------------------
 ORACLE_DID=did:ixo:ixo1oracleexample
-ORACLE_ENTITY_DID=did:ixo:entity:oracleexample
+# The oracle's real domain entity (did:ixo:entity: followed by 32 lower-case
+# hex characters). The memory plugin refuses to boot without a well-formed one;
+# this placeholder only has the right shape.
+ORACLE_ENTITY_DID=did:ixo:entity:00000000000000000000000000000000
 # Ed25519 mnemonic the oracle signs downstream UCAN invocations with (optional:
 # when unset it is read from the Matrix account room the way the Node runtime
 # stores it — needs MATRIX_ACCOUNT_ROOM_ID + MATRIX_VALUE_PIN below)

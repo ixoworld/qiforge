@@ -5,6 +5,8 @@
  * missing `message` are all 400s, never a failed turn or a 500.
  */
 
+import { declaredToolEffect } from '../plugins/portal/declared-tools';
+
 /** Top-level fields of Node's `SendMessageDto`; anything else is rejected. */
 export const TURN_BODY_KEYS: ReadonlySet<string> = new Set([
   'message',
@@ -45,6 +47,8 @@ export interface TurnBody {
     name: string;
     description: string;
     schema: Record<string, unknown>;
+    /** Declared effect; any value but `'read'` / `'write'` is dropped. */
+    effect?: 'read' | 'write';
   }>;
   agActions?: Array<{
     name: string;
@@ -85,6 +89,14 @@ function toolDeclaration(value: unknown): ToolDeclaration | null {
     description: value.description,
     schema: value.schema,
   };
+}
+
+/** A browser tool declaration: a tool declaration plus its optional `effect`. */
+function browserToolDeclaration(value: unknown): ToolDeclaration | null {
+  const declaration = toolDeclaration(value);
+  if (!declaration || !isRecord(value)) return declaration;
+  const effect = declaredToolEffect(value.effect);
+  return effect ? { ...declaration, effect } : declaration;
 }
 
 /**
@@ -147,7 +159,7 @@ export function parseTurnBody(raw: string): ParsedTurnBody {
     if (!Array.isArray(record.tools)) return reject('tools must be an array');
     tools = [];
     for (const item of record.tools) {
-      const tool = toolDeclaration(item);
+      const tool = browserToolDeclaration(item);
       if (!tool)
         return reject(
           'each tool needs a string name, description and an object schema',

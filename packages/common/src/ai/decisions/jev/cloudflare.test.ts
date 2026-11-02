@@ -194,6 +194,35 @@ describe('CloudflareJevDecisionAdapter', () => {
     });
   });
 
+  it('normalizes the completed inference envelope returned by the live REST API', async () => {
+    const adapter = new CloudflareJevDecisionAdapter({
+      accountId: 'account-1',
+      apiToken: 'token',
+      fetch: vi.fn<typeof fetch>(async () =>
+        successResponse({
+          success: true,
+          errors: [],
+          messages: [],
+          result: {
+            state: 'Completed',
+            result: {
+              model: 'jev-1.13.0',
+              answers: { work: { type: 'noul', noul: 0.99 } },
+              usage: { input_tokens: 302, output_tokens: 23 },
+            },
+          },
+        }),
+      ),
+    });
+
+    expect(await adapter.evaluate(booleanRequest)).toMatchObject({
+      modelVersion: 'jev-1.13.0',
+      answers: { work: { kind: 'boolean', probabilityTrue: 0.99 } },
+      usage: { inputTokens: 302, outputTokens: 23 },
+      provenance: { returnedModel: 'jev-1.13.0' },
+    });
+  });
+
   it('forwards the AbortSignal and honours model and baseUrl overrides', async () => {
     const controller = new AbortController();
     const fetchMock = vi.fn<typeof fetch>(async () =>

@@ -9,6 +9,7 @@ import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import type { ReactAgent } from 'langchain';
 import { z } from 'zod';
+import { ChannelAttachment } from '../channels/contract';
 import type {
   ChatOpenAIFields,
   MergedConfig,
@@ -42,6 +43,15 @@ export const mainAgentRequestContextSchema = z.object({
     id: z.string(),
     client: z.enum(['portal', 'matrix', 'slack', 'channel']),
     requestId: z.string(),
+    runId: z.string().optional(),
+    channel: z
+      .object({
+        provider: z.string(),
+        bindingId: z.string(),
+        bindingRevision: z.number().int().positive(),
+        attachments: z.array(ChannelAttachment).optional(),
+      })
+      .optional(),
     wsId: z.string().optional(),
     roomId: z.string().optional(),
   }),
@@ -218,6 +228,14 @@ export interface MainAgentBuildResult {
    * turn, `write` never does). Declared by the plugin, else by name.
    */
   toolEffects: Map<string, 'read' | 'write'>;
+  /**
+   * The plugin tools the turn can run that act in the user's browser
+   * (`PluginTool.surface`), a sub-agent's inner tools included: scheduled
+   * in their session's `frontend` lane. A tool absent from the map (meta,
+   * domain and dispatch tools, every server-side tool, and a name two tools
+   * disagree on) is scheduled by its effect.
+   */
+  toolSurfaces: Map<string, 'frontend'>;
   /** Names of the sub-agent dispatch tools (`call_*_agent`): scheduled in their own lane. */
   subAgentToolNames: ReadonlySet<string>;
   /**

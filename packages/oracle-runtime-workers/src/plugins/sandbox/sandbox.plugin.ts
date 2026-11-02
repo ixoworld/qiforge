@@ -1,6 +1,7 @@
 import { type ClientConfig } from '@langchain/mcp-adapters';
 import { withCallTimeout } from '../mcp-call-timeout';
 import { z } from 'zod';
+import { deliversAttachments } from '../../delivery/prompt';
 import { OraclePlugin, type PluginEnv } from '../../plugin-api/oracle-plugin';
 import type {
   PluginManifest,
@@ -17,6 +18,13 @@ import {
   type SandboxAuthBuilder,
 } from './sandbox-mcp';
 import { createSandboxWriteBlobTool } from './sandbox-write-blob';
+import {
+  buildSendFileTool,
+  CHAT_URL_NOTE,
+  PRESIGNED_URL_TOOL,
+  stripArtifactUrls,
+  URL_RESULT_TOOLS,
+} from './send-file';
 import { SANDBOX_CAPABILITY } from '../delegated-capabilities';
 
 /**
@@ -225,6 +233,11 @@ const SANDBOX_TOOL_DEFS_TTL_MS = 5 * 60 * 1000;
  *
  * Tools are discovered per request via {@link getRequestTools} because the
  * MCP client has to be authenticated as the in-flight user.
+ *
+ * On a chat surface the model cannot hold a signed link: the upstream
+ * `artifact_get_presigned_url` is replaced by `send_file`, and the URL fields
+ * of the other `artifact_*` lookups are removed. Portal and every other
+ * surface get the upstream tools unchanged.
  */
 export class SandboxPlugin extends OraclePlugin {
   /**
@@ -554,8 +567,8 @@ export class SandboxPlugin extends OraclePlugin {
   }
 
   /**
-   * Shared tail of both paths: visibility filter, PluginTool mapping, and
-   * the synthetic `sandbox_write_blob` companion.
+   * Shared tail of both paths: visibility filter, chat-surface file delivery,
+   * PluginTool mapping, and the synthetic `sandbox_write_blob` companion.
    */
   private toPluginTools(
     upstream: SandboxMcpTool[],
@@ -567,12 +580,32 @@ export class SandboxPlugin extends OraclePlugin {
           (t) => !t.name.startsWith(ORACLE_MANAGEMENT_TOOL_PREFIX),
         );
 
-    const upstreamTools: PluginTool[] = filtered.map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      schema: tool.schema,
-      handler: async (args) => tool.invoke(args),
-    }));
+    const surface = rtCtx.session.surface;
+    const chat = surface?.kind === 'chat';
+    const upstreamTools: PluginTool[] = filtered
+      .filter((tool) => !chat || tool.name !== PRESIGNED_URL_TOOL)
+      .map((tool) =>
+        chat && URL_RESULT_TOOLS.has(tool.name)
+          ? {
+              name: tool.name,
+              description: `${tool.description} ${CHAT_URL_NOTE}`,
+              schema: tool.schema,
+              handler: async (args) =>
+                stripArtifactUrls(await tool.invoke(args)),
+            }
+          : {
+              name: tool.name,
+              description: tool.description,
+              schema: tool.schema,
+              handler: async (args) => tool.invoke(args),
+            },
+      );
+
+    const presignTool = filtered.find((t) => t.name === PRESIGNED_URL_TOOL);
+    if (chat && presignTool)
+      upstreamTools.push(
+        buildSendFileTool(presignTool, deliversAttachments(surface.surface)),
+      );
 
     // sandbox_write_blob — companion to mint_invocation. Synthetic wrapper
     // that takes a server-stored blobId + a sandbox path, looks the value up

@@ -8,11 +8,14 @@
  *     → the shell routes the upgrade to this user's object (`?userDid`);
  *       the object accepts the socket (Hibernatable WebSockets API) and
  *       answers the engine.io OPEN handshake.
- *   40{"invocation":"…","ucanDelegation":"…"}
+ *   40{"invocation":"…","ucanDelegation":"…"[,"executor":"background","tools":[…]]}
  *     → the CONNECT packet carries the same UCAN material the HTTP routes
  *       take in headers; it is validated with the shell's `authenticate`
  *       and the validated DID must be the routed one. Success: `40{sid}` +
  *       a `connected` event. Failure: `44{message}` and the socket closes.
+ *       `executor: "background"` declares a socket that only runs the
+ *       browser tools it names and renders nothing (no fan-out); any other
+ *       socket is a foreground executor.
  *   42["ping"] / 42["status"] / 42["list-events"]
  *     → Node's diagnostic events, same payloads.
  *   42["tool_result",{toolCallId,result,error?}] / 42["action_call_result",…]
@@ -21,15 +24,16 @@
  *
  * Outbound, every event the runtime emits for a session (`ctx.emit.*`,
  * `tool_call`, `render_component`, …) is fanned out to the session's
- * authenticated sockets — the router's tap.
+ * authenticated foreground sockets — the router's tap.
  *
  * Frontend calls (`ctx.frontend.callBrowserTool` / `callAgAction`) are not
  * fanned out: each invocation gets its own id, is sent to ONE socket of its
- * session (the one most recently active), and only that socket's answer
- * settles it. When the
- * answer cannot come — deadline, or that socket went — the call resolves
- * with `FRONTEND_OUTCOME_UNKNOWN` and is never re-sent. See
- * docs/frontend-bridge.md.
+ * session that can run it (`SessionSocketHub.executorFor`), and only that
+ * socket's answer settles it. With no such socket the call is parked until
+ * one passes CONNECT (or the park deadline / the turn's abort ends it as
+ * never sent). When the answer of a sent call cannot come — deadline, or
+ * that socket went — the call resolves with `FRONTEND_OUTCOME_UNKNOWN` and
+ * is never re-sent. See docs/frontend-bridge.md.
  *
  * Heartbeat: engine.io's server-initiated ping, driven by the OBJECT'S
  * ALARM rather than a timer. A timer would keep the object resident (and
@@ -47,17 +51,31 @@ import type { EventSink, SessionEventRouter } from '../do/ambient';
 import type {
   FrontendCallParams,
   FrontendCallSurface,
+  FrontendWaitingFor,
 } from '../plugin-api/types';
 import type { RawEventPayload } from '../core/runtime-context';
 import { frontendInvocationId } from '@ixo/common/ai/frontend-bridge';
 import {
+  baseEnvSchema,
+  FRONTEND_PARK_TIMEOUT_MS_DEFAULT,
+  MAX_TIMER_MS,
+} from '../core/env';
+import { DECLARED_TOOL_NAME_PATTERN } from '../plugins/portal/declared-tools';
+import {
   FRONTEND_CALL_LABEL,
+  FrontendCallNotSentError,
   FrontendCallRegistry,
+  OPEN_CHAT_HINT,
+  seconds,
   type FrontendCallKind,
   type FrontendResultRejection,
   type PendingFrontendCall,
 } from './frontend-call-registry';
-import { SessionSocketHub, type SocketAttachment } from './session-socket-hub';
+import {
+  canRunTool,
+  SessionSocketHub,
+  type SocketAttachment,
+} from './session-socket-hub';
 import {
   decodeClientFrame,
   encodeAck,
@@ -82,6 +100,20 @@ export const MAX_PAYLOAD_BYTES = 1_000_000;
 export const HANDSHAKE_DEADLINE_MS = 10_000;
 export const BROWSER_TOOL_DEFAULT_TIMEOUT_MS = 15_000;
 export const AG_ACTION_DEFAULT_TIMEOUT_MS = 10_000;
+/** Tool names a background executor's CONNECT may declare; further names are dropped. */
+export const MAX_BACKGROUND_EXECUTOR_TOOLS = 24;
+/**
+ * Workers refuses a WebSocket attachment over 2,048 bytes serialized
+ * (structured clone). A background executor's tool list is cut until the
+ * attachment's UTF-8 JSON, with the heartbeat fields at their widest, fits
+ * this budget: for these fields JSON is never smaller than the structured
+ * clone (quotes and separators against tags and lengths, 16 digits against
+ * 9 bytes per number, at least as many bytes per character), and the
+ * margin covers the clone's header. With 51-character DIDs and a 36- or
+ * 44-character session id, 24 names of 64 characters fit (about 1,990 JSON
+ * bytes, 1,930 cloned); longer identifiers cost names, never the CONNECT.
+ */
+export const SOCKET_ATTACHMENT_BUDGET_BYTES = 2_000;
 
 /** Header the shell sets on the forwarded upgrade: the DID it routed for. */
 export const ROUTED_USER_HEADER = 'x-routed-user-did';
@@ -173,13 +205,53 @@ export interface RealtimeEndpointDeps {
    * accepted or re-adopted. The object calls `pingTick` from its alarm.
    */
   requestAlarm?: (at: number) => void;
+  /**
+   * How long a frontend call may wait unsent for a socket that can run it
+   * (`FRONTEND_PARK_TIMEOUT_MS`, default 300 s).
+   */
+  parkTimeoutMs?: number;
   now?: () => number;
+}
+
+/**
+ * `FRONTEND_PARK_TIMEOUT_MS` through the base env schema's own field (the
+ * rule the boot validates: a whole number of ms, 1 to the 2^31−1 a timer
+ * takes), so the endpoint never sees anything else; a malformed var keeps
+ * the default, with a warning.
+ */
+export function frontendParkTimeoutMs(
+  env: { FRONTEND_PARK_TIMEOUT_MS?: string | number },
+  log: Pick<Console, 'warn'> = console,
+): number {
+  const parsed = baseEnvSchema.shape.FRONTEND_PARK_TIMEOUT_MS.safeParse(
+    env.FRONTEND_PARK_TIMEOUT_MS,
+  );
+  if (parsed.success) return parsed.data;
+  log.warn(
+    `[realtime] FRONTEND_PARK_TIMEOUT_MS=${JSON.stringify(env.FRONTEND_PARK_TIMEOUT_MS)} is not a whole number of ms between 1 and ${MAX_TIMER_MS}; using ${FRONTEND_PARK_TIMEOUT_MS_DEFAULT}`,
+  );
+  return FRONTEND_PARK_TIMEOUT_MS_DEFAULT;
+}
+
+/** A frontend call to send; parked while no socket of its session can run it. */
+interface OutgoingFrontendCall {
+  toolCallId: string;
+  kind: FrontendCallKind;
+  eventName: 'browser_tool_call' | 'action_call';
+  payload: RawEventPayload;
+  sessionId: string;
+  toolName: string;
+  parkedAt: number;
 }
 
 export interface RealtimeSocketStatus {
   sid: string;
   sessionId: string;
   authenticated: boolean;
+  /** `background` for a socket that declared itself a background executor. */
+  executor: 'foreground' | 'background';
+  /** How many tool names a background executor kept (absent in the foreground). */
+  tools?: number;
   openedAt: number;
   lastPingAt: number | null;
   lastPongAt: number;
@@ -190,6 +262,8 @@ export interface RealtimeStatus {
   authenticated: number;
   sessions: number;
   pendingCalls: PendingFrontendCall[];
+  /** Of `pendingCalls`, the ones parked (not sent yet). */
+  parkedCalls: number;
   /** Finished invocations remembered to reject replays (bounded). */
   completedCalls: number;
   pingIntervalMs: number;
@@ -222,6 +296,52 @@ function readString(
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
+/**
+ * The executor kind a CONNECT declares. Only `executor: "background"` makes
+ * a background executor, and only then do `tools` count: each a valid tool
+ * name, de-duplicated, at most `MAX_BACKGROUND_EXECUTOR_TOOLS` kept. Only
+ * the first `MAX_BACKGROUND_EXECUTOR_TOOLS * 4` entries are looked at (a
+ * frame may carry up to `MAX_PAYLOAD_BYTES` of names); the rest count as
+ * over the cap unread.
+ */
+function readExecutor(record: Record<string, unknown>): {
+  patch: Pick<SocketAttachment, 'executor' | 'tools'>;
+  invalid: number;
+  overCap: number;
+} {
+  if (record.executor !== 'background')
+    return { patch: {}, invalid: 0, overCap: 0 };
+  const all: unknown[] = Array.isArray(record.tools) ? record.tools : [];
+  const declared = all.slice(0, MAX_BACKGROUND_EXECUTOR_TOOLS * 4);
+  const tools: string[] = [];
+  let invalid = 0;
+  let overCap = all.length - declared.length;
+  for (const name of declared) {
+    if (typeof name !== 'string' || !DECLARED_TOOL_NAME_PATTERN.test(name))
+      invalid += 1;
+    else if (tools.includes(name)) continue;
+    else if (tools.length >= MAX_BACKGROUND_EXECUTOR_TOOLS) overCap += 1;
+    else tools.push(name);
+  }
+  return { patch: { executor: 'background', tools }, invalid, overCap };
+}
+
+/**
+ * UTF-8 bytes of the attachment's JSON with its heartbeat fields at their
+ * widest: the measure `SOCKET_ATTACHMENT_BUDGET_BYTES` bounds.
+ */
+export function socketAttachmentBytes(attachment: SocketAttachment): number {
+  const widest = Number.MAX_SAFE_INTEGER;
+  return new TextEncoder().encode(
+    JSON.stringify({
+      ...attachment,
+      lastPongAt: widest,
+      lastPingAt: widest,
+      lastActiveAt: widest,
+    }),
+  ).byteLength;
+}
+
 export class RealtimeEndpoint {
   readonly hub: SessionSocketHub<WebSocket>;
 
@@ -239,8 +359,22 @@ export class RealtimeEndpoint {
 
   private readonly now: () => number;
 
+  private readonly parkTimeoutMs: number;
+
+  /** Parked calls by session, oldest first (see `call`). */
+  private readonly parked = new Map<string, OutgoingFrontendCall[]>();
+
+  /**
+   * Sessions whose last parked call reached its park deadline, until a
+   * socket of the session passes CONNECT: their calls fail fast instead of
+   * waiting again. In memory only (lost when the object hibernates, after
+   * which a call simply parks again).
+   */
+  private readonly parkExpired = new Set<string>();
+
   constructor(private readonly deps: RealtimeEndpointDeps) {
     this.now = deps.now ?? (() => Date.now());
+    this.parkTimeoutMs = deps.parkTimeoutMs ?? FRONTEND_PARK_TIMEOUT_MS_DEFAULT;
     this.calls = new FrontendCallRegistry({ now: this.now });
     this.hub = new SessionSocketHub<WebSocket>({
       now: this.now,
@@ -261,6 +395,9 @@ export class RealtimeEndpoint {
       callAgAction: (params) =>
         this.call('agui', 'action_call', params, AG_ACTION_DEFAULT_TIMEOUT_MS),
       hasClient: (sessionId) => this.hub.hasSession(sessionId),
+      canDispatch: (sessionId, kind, toolName) =>
+        this.hub.executorFor(sessionId, kind, toolName) !== undefined,
+      parkedFor: (sessionId) => this.parkedFor(sessionId),
     };
     // Sockets that survived hibernation or a restart.
     const restored = this.hub.restore(deps.ctx.getWebSockets());
@@ -415,11 +552,13 @@ export class RealtimeEndpoint {
   }
 
   status(): RealtimeStatus {
+    const pendingCalls = this.calls.list();
     return {
       sockets: this.hub.size,
       authenticated: this.hub.connectionCount(),
       sessions: this.hub.sessionCount(),
-      pendingCalls: this.calls.list(),
+      pendingCalls,
+      parkedCalls: pendingCalls.filter((c) => c.parked).length,
       completedCalls: this.calls.completedCount,
       pingIntervalMs: PING_INTERVAL_MS,
       pingTimeoutMs: PING_TIMEOUT_MS,
@@ -428,6 +567,8 @@ export class RealtimeEndpoint {
         sid: attachment.sid,
         sessionId: attachment.sessionId,
         authenticated: Boolean(attachment.userDid),
+        executor: attachment.executor ?? 'foreground',
+        ...(attachment.tools ? { tools: attachment.tools.length } : {}),
         openedAt: attachment.openedAt,
         lastPingAt: attachment.lastPingAt ?? null,
         lastPongAt: attachment.lastPongAt,
@@ -551,21 +692,57 @@ export class RealtimeEndpoint {
       clearTimeout(timer);
       this.handshakeTimers.delete(ws);
     }
-    this.hub.update(ws, { userDid: outcome.auth.userDid });
+    const executor = this.executorPatch(meta, record, outcome.auth.userDid);
+    this.hub.update(ws, { userDid: outcome.auth.userDid, ...executor });
     this.hub.send(ws, encodeConnectAck(meta.sid));
     this.hub.send(
       ws,
       encodeEvent('connected', {
         message: 'Connected successfully',
         sessionId: meta.sessionId,
+        // The executor kind this runtime accepted: a client that asked for
+        // `background` and does not read it back is on a runtime that
+        // ignores the field (and treats the socket as a foreground tab).
+        executor: executor.executor ?? 'foreground',
         timestamp: new Date(this.now()).toISOString(),
       }),
     );
     this.deps.logger.log(
-      `[realtime] ${outcome.auth.userDid} connected to session ${meta.sessionId} (${meta.sid})`,
+      `[realtime] ${outcome.auth.userDid} connected to session ${meta.sessionId} (${meta.sid}${executor.executor ? `, background executor of ${executor.tools?.length ?? 0} tool(s)` : ''})`,
     );
     // From here the heartbeat (the object's alarm) keeps the socket honest.
     this.scheduleHeartbeat();
+    this.dispatchParked(ws);
+  }
+
+  /**
+   * The executor fields a CONNECT sets on the attachment: none for a
+   * foreground socket; for a background one its tools, cut further when the
+   * attachment would not fit `SOCKET_ATTACHMENT_BUDGET_BYTES`. One warning
+   * names how many names were dropped and why (never the names).
+   */
+  private executorPatch(
+    meta: SocketAttachment,
+    record: Record<string, unknown>,
+    userDid: string,
+  ): Pick<SocketAttachment, 'executor' | 'tools'> {
+    const { patch, invalid, overCap } = readExecutor(record);
+    const tools = patch.tools;
+    if (!tools) return patch;
+    let overBudget = 0;
+    while (
+      tools.length > 0 &&
+      socketAttachmentBytes({ ...meta, userDid, ...patch }) >
+        SOCKET_ATTACHMENT_BUDGET_BYTES
+    ) {
+      tools.pop();
+      overBudget += 1;
+    }
+    if (invalid + overCap + overBudget > 0)
+      this.deps.logger.warn(
+        `[realtime] background executor ${meta.sid} of session ${meta.sessionId}: kept ${tools.length} tool name(s), dropped ${invalid} invalid, ${overCap} over the cap of ${MAX_BACKGROUND_EXECUTOR_TOOLS}, ${overBudget} over the attachment budget`,
+      );
+    return patch;
   }
 
   private refuse(ws: WebSocket, message: string): void {
@@ -694,10 +871,11 @@ export class RealtimeEndpoint {
 
   /**
    * One frontend invocation: a fresh id, registered before it is sent (an
-   * immediate answer cannot be missed), sent to the most recently active
-   * authenticated socket of the session (`executorForSession`) and bound to
-   * it. A call that reaches no socket is
-   * a definite failure; one whose answer never comes is an unknown outcome.
+   * immediate answer cannot be missed), sent to the socket of the session
+   * that runs it (`executorFor`) and bound to it. With no such socket it is
+   * parked, FIFO per session, until one passes CONNECT; a parked call that
+   * reaches its park deadline (or whose turn aborts) is a definite failure,
+   * a sent one whose answer never comes is an unknown outcome.
    */
   private call(
     kind: FrontendCallKind,
@@ -707,6 +885,18 @@ export class RealtimeEndpoint {
   ): Promise<unknown> {
     const toolCallId = frontendInvocationId(params.toolCallId);
     const label = FRONTEND_CALL_LABEL[kind];
+    // An earlier call of this session waited its whole park deadline and no
+    // socket has joined since: fail at once instead of waiting again.
+    if (
+      this.parkExpired.has(params.sessionId) &&
+      !this.hub.executorFor(params.sessionId, kind, params.toolName)
+    )
+      return Promise.reject(
+        new FrontendCallNotSentError(
+          'no-browser',
+          `${label} ${params.toolName} was not sent: no browser has joined session ${params.sessionId} since an earlier call waited ${seconds(this.parkTimeoutMs)} s for one. ${OPEN_CHAT_HINT}`,
+        ),
+      );
     let pending: Promise<unknown>;
     try {
       pending = this.calls.open(
@@ -718,7 +908,9 @@ export class RealtimeEndpoint {
         },
         {
           timeoutMs: params.timeoutMs ?? defaultTimeoutMs,
+          parkTimeoutMs: this.parkTimeoutMs,
           ...(params.signal ? { signal: params.signal } : {}),
+          ...(params.onDispatched ? { onDispatched: params.onDispatched } : {}),
         },
       );
     } catch (err) {
@@ -737,34 +929,131 @@ export class RealtimeEndpoint {
       args: params.args,
       ...(kind === 'agui' ? { status: 'isRunning' } : {}),
     };
-    const target = this.hub.executorForSession(params.sessionId);
-    const userDid = target?.attachment.userDid;
-    if (
-      !target ||
-      !userDid ||
-      !this.hub.send(target.socket, encodeEvent(eventName, payload))
-    ) {
-      this.calls.fail(
-        toolCallId,
-        new Error(
-          `${label} ${params.toolName} was not sent: no browser is connected to session ${params.sessionId}`,
-        ),
-      );
-      return pending;
-    }
-    this.calls.dispatched(toolCallId, {
-      sid: target.attachment.sid,
+    const call: OutgoingFrontendCall = {
+      toolCallId,
+      kind,
+      eventName,
+      payload,
       sessionId: params.sessionId,
+      toolName: params.toolName,
+      parkedAt: this.now(),
+    };
+    if (this.dispatch(call)) return pending;
+    const queue = this.parked.get(call.sessionId) ?? [];
+    queue.push(call);
+    this.parked.set(call.sessionId, queue);
+    // However it ends (dispatched, park deadline, abort), it leaves the
+    // queue. A park deadline marks the session: later calls fail fast until
+    // a socket of it passes CONNECT (`dispatchParked`).
+    pending.then(
+      () => this.unpark(call),
+      (error: unknown) => {
+        this.unpark(call);
+        if (
+          error instanceof FrontendCallNotSentError &&
+          error.reason === 'park-deadline'
+        )
+          this.parkExpired.add(call.sessionId);
+      },
+    );
+    this.deps.logger.log(
+      `[realtime] ${label} ${call.toolName} (${toolCallId}) parked: no socket of session ${call.sessionId} can run it`,
+    );
+    return pending;
+  }
+
+  /**
+   * Send `call` to the socket of its session that runs it and bind it there.
+   * A socket whose send throws is dropped by the hub, and the next eligible
+   * one is tried. False when none is left (the call stays parked).
+   */
+  private dispatch(call: OutgoingFrontendCall): boolean {
+    const frame = encodeEvent(call.eventName, call.payload);
+    for (;;) {
+      const target = this.hub.executorFor(
+        call.sessionId,
+        call.kind,
+        call.toolName,
+      );
+      const userDid = target?.attachment.userDid;
+      if (!target || !userDid) return false;
+      if (!this.hub.send(target.socket, frame)) continue;
+      this.bind(call, target.attachment, userDid);
+      return true;
+    }
+  }
+
+  /** Record `call` as sent to the socket of `attachment`. */
+  private bind(
+    call: OutgoingFrontendCall,
+    attachment: SocketAttachment,
+    userDid: string,
+  ): void {
+    this.calls.dispatched(call.toolCallId, {
+      sid: attachment.sid,
+      sessionId: call.sessionId,
       userDid,
     });
     // A browser tool call is shown on the session's SSE stream too (session
-    // sinks; the socket tap skips frontend calls, see `fanOut`). An AG-UI
-    // invocation is not: the SSE stream already reports the action as an
-    // `action_call` under the model's call id and closes it when the tool
-    // ends, and a second frame under the invocation id would never be
-    // closed — the client would show a card spinning forever.
-    if (kind === 'browser') this.deps.router.emit(eventName, payload);
-    return pending;
+    // sinks; the socket tap skips frontend calls, see `fanOut`), when it is
+    // actually sent. An AG-UI invocation is not: the SSE stream already
+    // reports the action as an `action_call` under the model's call id and
+    // closes it when the tool ends, and a second frame under the invocation
+    // id would never be closed — the client would show a card spinning
+    // forever.
+    if (call.kind === 'browser')
+      this.deps.router.emit(call.eventName, call.payload);
+  }
+
+  /**
+   * A socket of the session just passed CONNECT: every parked call it can
+   * run is sent to it, oldest first (a foreground socket takes them all, a
+   * background executor the tools it declared). A send that fails stops
+   * the round; the rest stay parked.
+   */
+  private dispatchParked(ws: WebSocket): void {
+    const attachment = this.hub.get(ws);
+    const userDid = attachment?.userDid;
+    if (!attachment || !userDid) return;
+    // A browser of the session is back: its calls may park again.
+    this.parkExpired.delete(attachment.sessionId);
+    const queue = this.parked.get(attachment.sessionId);
+    if (!queue) return;
+    for (const call of [...queue]) {
+      if (!this.calls.isParked(call.toolCallId)) {
+        this.unpark(call);
+        continue;
+      }
+      if (!canRunTool(attachment, call.kind, call.toolName)) continue;
+      if (!this.hub.send(ws, encodeEvent(call.eventName, call.payload))) return;
+      this.bind(call, attachment, userDid);
+      this.unpark(call);
+      this.deps.logger.log(
+        `[realtime] parked ${FRONTEND_CALL_LABEL[call.kind]} ${call.toolName} (${call.toolCallId}) sent to ${attachment.sid} of session ${attachment.sessionId}`,
+      );
+    }
+  }
+
+  private unpark(call: OutgoingFrontendCall): void {
+    const queue = this.parked.get(call.sessionId);
+    if (!queue) return;
+    const index = queue.indexOf(call);
+    if (index >= 0) queue.splice(index, 1);
+    if (queue.length === 0) this.parked.delete(call.sessionId);
+  }
+
+  /** The session's oldest call still parked, if any. */
+  private parkedFor(sessionId: string): FrontendWaitingFor | null {
+    const call = this.parked
+      .get(sessionId)
+      ?.find((c) => this.calls.isParked(c.toolCallId));
+    return call
+      ? {
+          kind: call.kind,
+          toolName: call.toolName,
+          since: new Date(call.parkedAt).toISOString(),
+        }
+      : null;
   }
 
   /** The socket `sid` is gone: its invocations end as unknown, never re-sent. */
@@ -797,9 +1086,14 @@ export class RealtimeEndpoint {
     const attachment = this.hub.get(ws);
     this.hub.remove(ws);
     if (attachment) this.executorGone(attachment.sid);
-    // Only an authenticated socket ever counted for its session; a socket
-    // that never passed CONNECT leaves nothing to drain.
-    if (attachment?.userDid && !this.hub.hasSession(attachment.sessionId)) {
+    // Only an authenticated foreground socket (a tab showing the chat) ever
+    // counted for its session's drain; a socket that never passed CONNECT,
+    // or a background executor, leaves nothing to drain.
+    if (
+      attachment?.userDid &&
+      attachment.executor !== 'background' &&
+      !this.hub.hasForegroundSession(attachment.sessionId)
+    ) {
       this.deps.onSessionDrained?.(attachment.sessionId, attachment.userDid);
     }
   }

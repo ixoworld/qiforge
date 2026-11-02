@@ -69,6 +69,35 @@ describe('parseTurnBody', () => {
     });
   });
 
+  it("keeps a browser tool's declared effect and ignores any other value", () => {
+    const tool = { name: 't', description: 'd', schema: { type: 'object' } };
+    const parsed = parseTurnBody(
+      JSON.stringify({
+        message: 'hi',
+        tools: [
+          { ...tool, name: 'r', effect: 'read' },
+          { ...tool, name: 'w', effect: 'write' },
+          { ...tool, name: 'x', effect: 'READ' },
+          { ...tool, name: 'y', effect: 7 },
+          tool,
+        ],
+      }),
+    );
+    expect(parsed).toEqual({
+      ok: true,
+      body: {
+        message: 'hi',
+        tools: [
+          { ...tool, name: 'r', effect: 'read' },
+          { ...tool, name: 'w', effect: 'write' },
+          { ...tool, name: 'x' },
+          { ...tool, name: 'y' },
+          tool,
+        ],
+      },
+    });
+  });
+
   it.each([
     [{ stream: 'false' }, 'stream must be a boolean'],
     [{ returnAllMessages: 1 }, 'returnAllMessages must be a boolean'],

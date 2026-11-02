@@ -3,6 +3,7 @@ import {
   decisionProviderEnvShape,
 } from '@ixo/common/ai/decisions';
 import { z } from 'zod';
+import { channelRoutingEnvShape } from '../channels/routing';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin';
 import type { Logger } from '../plugin-api/types';
 import { NOOP_LOGGER } from './utils';
@@ -16,6 +17,7 @@ import {
   USER_CONTEXT_BLOCKING_CAP_MS_DEFAULT,
   USER_CONTEXT_CACHE_TTL_MS_DEFAULT,
 } from '../memory/user-context-fetcher';
+import { CHANNEL_HISTORY_INDEX_DEBOUNCE_MS_DEFAULT } from '../memory/session-history-indexer';
 
 /**
  * Tier-0 (core) environment for the Workers runtime. Mirrors
@@ -63,20 +65,77 @@ export const LLM_STREAM_RETRIES_DEFAULT = 1;
 export const LLM_STREAM_RETRIES_MAX = 5;
 /** The turn's wall-clock deadline when `TURN_TIMEOUT_MS` is unset. */
 export const TURN_TIMEOUT_MS_DEFAULT = 600_000;
+/** How long a frontend call waits unsent for a browser when `FRONTEND_PARK_TIMEOUT_MS` is unset. */
+export const FRONTEND_PARK_TIMEOUT_MS_DEFAULT = 300_000;
+/** The longest delay `setTimeout` honours (2^31 − 1 ms); a larger one fires at once. */
+export const MAX_TIMER_MS = 2_147_483_647;
 
 /** An https URL, or http on localhost / 127.0.0.1 (local harness). */
 const secureUrlSchema = z.string().refine((raw) => isSecureUrl(raw), {
   message: 'must be an https URL (http only on localhost)',
 });
 
+/**
+ * An https base URL for a chain RPC or REST gateway (a path such as `/rpc/`
+ * or `/rest` is fine): no credentials, query or fragment, which the
+ * verifier would refuse at the first lookup otherwise. The ixo-chain
+ * plugin's `CHAIN_REST_URL` uses the same rule.
+ */
+export const rpcOriginSchema = z.string().refine(
+  (raw) => {
+    try {
+      const url = new URL(raw);
+      return (
+        url.protocol === 'https:' &&
+        !url.username &&
+        !url.password &&
+        !url.search &&
+        !url.hash
+      );
+    } catch {
+      return false;
+    }
+  },
+  { message: 'must be an https URL without credentials, query or fragment' },
+);
+/** The Portal origin action links point at: https, host only. */
+const portalOriginSchema = z.string().refine(
+  (raw) => {
+    try {
+      const url = new URL(raw);
+      return (
+        url.protocol === 'https:' &&
+        url.pathname === '/' &&
+        !url.username &&
+        !url.password &&
+        !url.search &&
+        !url.hash
+      );
+    } catch {
+      return false;
+    }
+  },
+  { message: 'must be an https origin with no path, query or fragment' },
+);
+
 export const baseEnvSchema = z.object({
+  // --- action proposals (src/action-proposals, docs/action-proposals.md) ---
+  ACTION_PROPOSALS_RPC_TESTNET: rpcOriginSchema.optional(),
+  ACTION_PROPOSALS_RPC_DEVNET: rpcOriginSchema.optional(),
+  ACTION_PROPOSALS_RPC_MAINNET: rpcOriginSchema.optional(),
+  ACTION_PROPOSALS_ENABLED: z.enum(['true', 'false']).default('false'),
+  ACTION_TOPIC_PROPOSALS_ENABLED: z.enum(['true', 'false']).default('false'),
+  ACTION_PROPOSALS_PORTAL_ORIGIN: portalOriginSchema.optional(),
   // --- identity -----------------------------------------------------------
   ORACLE_NAME: z.string().min(1),
   /** UCAN audience — the DID users address invocations/delegations to. */
   ORACLE_DID: z.string().min(1),
   /**
    * On-chain entity DID surfaced to the agent as `identity.entityDid`. Falls
-   * back to `ORACLE_DID` when unset (see `createRuntimeCore`).
+   * back to `ORACLE_DID` when unset (see `createRuntimeCore`) for rooms and
+   * feedback. The memory plugin redeclares it as required
+   * (`did:ixo:entity:<32 hex>`): the Memory Engine keys every space by it and
+   * never receives the fallback.
    */
   ORACLE_ENTITY_DID: z.string().min(1).optional(),
   NETWORK: z.enum(['mainnet', 'testnet', 'devnet']).default('mainnet'),
@@ -220,6 +279,20 @@ export const baseEnvSchema = z.object({
     .int()
     .positive()
     .default(2_000),
+  /**
+   * How long a browser tool / AG-UI call waits, unsent, for a socket of its
+   * session that can run it (ms) before it fails as never sent. The turn's
+   * own deadline (`TURN_TIMEOUT_MS`) still ends it first when sooner. At
+   * most `MAX_TIMER_MS` (a timer holds it). The user object reads it
+   * through this field (`frontendParkTimeoutMs`,
+   * src/realtime/realtime-endpoint.ts).
+   */
+  FRONTEND_PARK_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(MAX_TIMER_MS)
+    .default(FRONTEND_PARK_TIMEOUT_MS_DEFAULT),
 
   // --- decisions ----------------------------------------------------------
   // Bounded semantic Decision provider (`DECISION_PROVIDER`, `DECISION_MODEL`,
@@ -233,15 +306,18 @@ export const baseEnvSchema = z.object({
   // runtime consumer of Decisions. It predicts the on-demand plugin a message
   // needs and preloads it for the turn; it needs a `DECISION_PROVIDER`.
   ...capabilityRouterEnvShape,
+  ...channelRoutingEnvShape,
 
   // --- durable runs (docs/plans/durable-runs.md) ---------------------------
   // Parsed by `runDurabilityConfig` (src/do/run-store.ts) with defaults:
-  // keep-alive 20 s, segment pack every 2 s / 16 KiB, 4 recovery attempts at
-  // 5/15/30/60 s, `interrupt` as the multitask rule.
+  // keep-alive 20 s, segment pack every 2 s / 16 KiB, 4 recovery attempts
+  // without progress at 5/15/30/60 s, 8 recoveries in all, `interrupt` as
+  // the multitask rule.
   RUN_KEEPALIVE_MS: z.string().optional(),
   RUN_SEGMENT_FLUSH_MS: z.string().optional(),
   RUN_SEGMENT_BYTES: z.string().optional(),
   RUN_RECOVERY_ATTEMPTS: z.string().optional(),
+  RUN_RECOVERY_TOTAL_ATTEMPTS: z.string().optional(),
   RUN_RECOVERY_DELAYS_MS: z.string().optional(),
   TURN_MULTITASK_DEFAULT: z.enum(['interrupt', 'enqueue']).optional(),
 
@@ -323,6 +399,20 @@ export const baseEnvSchema = z.object({
     .min(1_000)
     .max(3_600_000)
     .default(USER_CONTEXT_CACHE_TTL_MS_DEFAULT),
+  /**
+   * How long a channel session must be quiet after its last finished run
+   * before its new history is indexed into the memory engine (ms): a burst
+   * of messages is one upload, and one prefetch-cache invalidation. `0`
+   * indexes after every finished run. At most 10 min: the wait is an
+   * in-memory timer that keeps the user object resident, and a Durable
+   * Object keeps pending work alive for 15 min at most.
+   */
+  CHANNEL_HISTORY_INDEX_DEBOUNCE_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(600_000)
+    .default(CHANNEL_HISTORY_INDEX_DEBOUNCE_MS_DEFAULT),
 
   // --- misc ---------------------------------------------------------------
   LOG_LEVEL: z.string().default('info'),
@@ -436,11 +526,10 @@ export function validateEnv(
 ): ValidateEnvResult {
   const result = schema.safeParse(env);
   if (result.success) {
-    return {
-      valid: true,
-      config: result.data,
-      errors: [],
-    };
+    const errors = actionProposalEnvErrors(result.data);
+    return errors.length
+      ? { valid: false, config: {}, errors }
+      : { valid: true, config: result.data, errors: [] };
   }
 
   const errors: ValidateEnvError[] = result.error.issues.map((issue) => {
@@ -451,4 +540,40 @@ export function validateEnv(
   });
 
   return { valid: false, config: {}, errors };
+}
+
+/**
+ * Switching action proposals on without the settings they run on is a
+ * configuration error, not a runtime clarification: a card could be
+ * prepared with no link to review it at, or signed and never verified.
+ */
+function actionProposalEnvErrors(
+  config: Record<string, unknown>,
+): ValidateEnvError[] {
+  const errors: ValidateEnvError[] = [];
+  const enabled = config['ACTION_PROPOSALS_ENABLED'] === 'true';
+  if (enabled && !config['ACTION_PROPOSALS_PORTAL_ORIGIN'])
+    errors.push({
+      plugin: 'core',
+      field: 'ACTION_PROPOSALS_PORTAL_ORIGIN',
+      message: 'required when ACTION_PROPOSALS_ENABLED is true',
+    });
+  if (
+    enabled &&
+    !config['ACTION_PROPOSALS_RPC_DEVNET'] &&
+    !config['ACTION_PROPOSALS_RPC_TESTNET']
+  )
+    errors.push({
+      plugin: 'core',
+      field: 'ACTION_PROPOSALS_RPC_TESTNET',
+      message:
+        'ACTION_PROPOSALS_RPC_DEVNET or ACTION_PROPOSALS_RPC_TESTNET is required when ACTION_PROPOSALS_ENABLED is true',
+    });
+  if (config['ACTION_TOPIC_PROPOSALS_ENABLED'] === 'true' && !enabled)
+    errors.push({
+      plugin: 'core',
+      field: 'ACTION_TOPIC_PROPOSALS_ENABLED',
+      message: 'requires ACTION_PROPOSALS_ENABLED=true',
+    });
+  return errors;
 }

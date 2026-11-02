@@ -1,0 +1,19 @@
+{
+  "delegation_responses": [
+    {
+      "delegation": {
+        "delegator_address": "ixo1qeex565vg4uu7zwudh9ff2dauxptqf72eg6wds",
+        "validator_address": "ixovaloper1qeex565vg4uu7zwudh9ff2dauxptqf72nf2l44",
+        "shares": "1000000.000000000000000000"
+      },
+      "balance": {
+        "denom": "uixo",
+        "amount": "1000000"
+      }
+    }
+  ],
+  "pagination": {
+    "next_key": null,
+    "total": "0"
+  }
+}

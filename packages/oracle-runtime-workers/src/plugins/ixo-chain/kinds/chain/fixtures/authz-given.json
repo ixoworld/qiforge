@@ -1,0 +1,95 @@
+{
+  "grants": [
+    {
+      "granter": "ixo1sd7r80y445fp5e7ycru8w6zl2p34l2wnp05hqm",
+      "grantee": "ixo1rtjje8u0ctwwcdk8x07f4zgmexnjcmk8w6dgvq",
+      "authorization": {
+        "@type": "/ixo.claims.v1beta1.EvaluateClaimAuthorization",
+        "admin": "ixo1sd7r80y445fp5e7ycru8w6zl2p34l2wnp05hqm",
+        "constraints": [
+          {
+            "collection_id": "340",
+            "claim_ids": [],
+            "agent_quota": "1000000000",
+            "before_date": "2126-06-29T09:58:26.176Z",
+            "max_custom_amount": [
+              {
+                "denom": "upay",
+                "amount": "1000000000000"
+              }
+            ],
+            "max_custom_cw20_payment": [],
+            "max_custom_cw1155_payment": []
+          },
+          {
+            "collection_id": "339",
+            "claim_ids": [],
+            "agent_quota": "1000000000",
+            "before_date": null,
+            "max_custom_amount": [
+              {
+                "denom": "upay",
+                "amount": "1000000000000"
+              }
+            ],
+            "max_custom_cw20_payment": [],
+            "max_custom_cw1155_payment": []
+          }
+        ]
+      },
+      "expiration": "2126-06-29T09:58:26.176Z"
+    },
+    {
+      "granter": "ixo1sd7r80y445fp5e7ycru8w6zl2p34l2wnp05hqm",
+      "grantee": "ixo1rtjje8u0ctwwcdk8x07f4zgmexnjcmk8w6dgvq",
+      "authorization": {
+        "@type": "/ixo.claims.v1beta1.SubmitClaimAuthorization",
+        "admin": "ixo1sd7r80y445fp5e7ycru8w6zl2p34l2wnp05hqm",
+        "constraints": [
+          {
+            "collection_id": "340",
+            "agent_quota": "1000000000",
+            "max_amount": [
+              {
+                "denom": "upay",
+                "amount": "1000000000000"
+              }
+            ],
+            "max_cw20_payment": [],
+            "intent_duration_ns": "2592000s",
+            "max_cw1155_payment": [],
+            "member_address": ""
+          },
+          {
+            "collection_id": "339",
+            "agent_quota": "1000000000",
+            "max_amount": [
+              {
+                "denom": "upay",
+                "amount": "1000000000000"
+              }
+            ],
+            "max_cw20_payment": [],
+            "intent_duration_ns": "0s",
+            "max_cw1155_payment": [],
+            "member_address": ""
+          }
+        ]
+      },
+      "expiration": null
+    },
+    {
+      "granter": "ixo1sd7r80y445fp5e7ycru8w6zl2p34l2wnp05hqm",
+      "grantee": "ixo1rtjje8u0ctwwcdk8x07f4zgmexnjcmk8w6dgvq",
+      "authorization": {
+        "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
+        "msg": "/ixo.claims.v1beta1.MsgUpdateCollectionState"
+      },
+      "expiration": null
+    }
+  ],
+  "pagination": {
+    "next_key": "FMD7oL5ZTw6Sv8gE0WSI3Bq1byfRL2l4by5jbGFpbXMudjFiZXRhMS5Nc2dDcmVhdGVDbGFpbUF1dGhvcml6YXRpb24=",
+    "total": "7"
+  }
+}

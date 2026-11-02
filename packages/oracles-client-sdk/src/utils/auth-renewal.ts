@@ -22,6 +22,32 @@
 export type AuthRenewalStage = 1 | 2;
 
 /**
+ * The code of the 401 a background request fails with, without being sent,
+ * when the host could not mint an invocation without the user (see
+ * `CreateInvocationOptions`). A credential refusal like any other: a status
+ * poll pauses until the window is focused again.
+ */
+export const BACKGROUND_INVOCATION_UNAVAILABLE =
+  'BACKGROUND_INVOCATION_UNAVAILABLE';
+
+/**
+ * The code of the error a background socket (`useWebSocketEvents` with
+ * `executor: 'background'`) reports, without opening anything, when no
+ * delegation to the oracle is cached: a background socket never mints one.
+ */
+export const BACKGROUND_SOCKET_UNAVAILABLE = 'BACKGROUND_SOCKET_UNAVAILABLE';
+
+/**
+ * The code of the error a background socket reports after closing itself
+ * on a runtime that does not support background executors: its `connected`
+ * event did not echo `executor: 'background'`, so the runtime would treat
+ * the socket as a foreground one (session events, AG-UI action calls, any
+ * browser tool). The socket is not reconnected.
+ */
+export const BACKGROUND_EXECUTOR_UNSUPPORTED =
+  'BACKGROUND_EXECUTOR_UNSUPPORTED';
+
+/**
  * Renew the credentials before the next attempt. Resolving `false` means
  * nothing new could be minted: repeating the request would send the refused
  * credentials again, so the caller gives up instead.
