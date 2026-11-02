@@ -4,7 +4,6 @@ import {
   contextBudgetFor,
   contextKnobs,
   DEFAULT_CONTEXT_KNOBS,
-  DEFAULT_MEMORY_WINDOW_TOKENS,
   describeBudget,
   estimateContentTokens,
   messageContentTokens,
@@ -67,11 +66,8 @@ describe('contextKnobs bounds', () => {
 });
 
 describe('contextBudgetFor', () => {
-  // The derivation from a window, without the memory window's ceiling (it
-  // has its own tests below): the limits as a fraction of any window.
-  const UNCAPPED = { ...DEFAULT_CONTEXT_KNOBS, memoryWindowTokens: 20_000_000 };
   const at = (tokens: number) =>
-    contextBudgetFor({ model: 'm', tokens, origin: 'catalog' }, UNCAPPED);
+    contextBudgetFor({ model: 'm', tokens, origin: 'catalog' });
 
   it('scales every limit with the window', () => {
     const small = at(32_000);
@@ -104,7 +100,7 @@ describe('contextBudgetFor', () => {
     expect(
       contextBudgetFor(
         { model: 'm', tokens: 1_000_000, origin: 'catalog' },
-        { ...UNCAPPED, resultCapMaxChars: 1_000_000 },
+        { ...DEFAULT_CONTEXT_KNOBS, resultCapMaxChars: 1_000_000 },
       ).resultCapChars,
     ).toBe(480_000);
     expect(
@@ -151,7 +147,7 @@ describe('contextBudgetFor', () => {
       summaryInputTokens: 985_500,
     });
     expect(describeBudget(large)).toBe(
-      'model=m window=1050000 (catalog) budgetWindow=1050000 summarizeAt=630000 pruneAt=367500 resultCap=200000c requestCap=989500 reserve=8000 summaryInput=985500',
+      'model=m window=1050000 (catalog) summarizeAt=630000 pruneAt=367500 resultCap=200000c requestCap=989500 reserve=8000 summaryInput=985500',
     );
     const small = at(64_000);
     expect(small).toMatchObject({
@@ -179,7 +175,7 @@ describe('contextBudgetFor', () => {
     for (const window of windows) {
       const b = contextBudgetFor(
         { model: 'm', tokens: window, origin: 'catalog' },
-        { ...UNCAPPED, summarizeFraction: 1 },
+        { ...DEFAULT_CONTEXT_KNOBS, summarizeFraction: 1 },
       );
       expect(b.summarizeAtTokens).toBe(b.summaryInputTokens);
     }
@@ -205,97 +201,6 @@ describe('contextBudgetFor', () => {
       expect(at(window).summarizeAtTokens).toBe(Math.floor(window * 0.6));
     // The summarizer's input floor holds for the smallest windows.
     expect(at(4_000).summaryInputTokens).toBe(1_000);
-  });
-});
-
-describe('the memory window', () => {
-  const at = (tokens: number, knobs = DEFAULT_CONTEXT_KNOBS) =>
-    contextBudgetFor({ model: 'm', tokens, origin: 'catalog' }, knobs);
-
-  it('is 100,000 tokens unless CONTEXT_MEMORY_WINDOW_TOKENS says otherwise', () => {
-    expect(DEFAULT_MEMORY_WINDOW_TOKENS).toBe(100_000);
-    expect(contextKnobs({}).memoryWindowTokens).toBe(100_000);
-    expect(
-      contextKnobs({ CONTEXT_MEMORY_WINDOW_TOKENS: '80000' })
-        .memoryWindowTokens,
-    ).toBe(80_000);
-    const warn = vi.fn();
-    const logger = { log: () => undefined, warn, error: () => undefined };
-    // Below the smallest model window, or not an integer: the default.
-    expect(
-      contextKnobs({ CONTEXT_MEMORY_WINDOW_TOKENS: '15999' }, logger)
-        .memoryWindowTokens,
-    ).toBe(100_000);
-    expect(
-      contextKnobs({ CONTEXT_MEMORY_WINDOW_TOKENS: '6e4.5' }, logger)
-        .memoryWindowTokens,
-    ).toBe(100_000);
-    expect(warn).toHaveBeenCalledTimes(2);
-  });
-
-  it('bounds every threshold whatever the model window, and leaves smaller windows as they were', () => {
-    // At or above the memory window: the limits of a 100k window.
-    const capped = {
-      budgetWindowTokens: 100_000,
-      outputReserveTokens: 8_000,
-      requestCapTokens: 87_000,
-      summarizeAtTokens: 60_000,
-      pruneAtTokens: 35_000,
-      resultCapChars: 48_000,
-      summaryInputTokens: 83_000,
-    };
-    for (const window of [100_000, 128_000, 200_000, 400_000, 1_050_000])
-      expect(at(window)).toMatchObject({ windowTokens: window, ...capped });
-    // The mainnet default model: the thresholds of the incident, and now.
-    expect(describeBudget(at(1_050_000))).toBe(
-      'model=m window=1050000 (catalog) budgetWindow=100000 summarizeAt=60000 pruneAt=35000 resultCap=48000c requestCap=87000 reserve=8000 summaryInput=83000',
-    );
-    // Below it: the model's own window, unchanged.
-    expect(at(64_000)).toMatchObject({
-      windowTokens: 64_000,
-      budgetWindowTokens: 64_000,
-      requestCapTokens: 52_800,
-      summarizeAtTokens: 38_400,
-      pruneAtTokens: 22_400,
-      resultCapChars: 30_720,
-      summaryInputTokens: 48_800,
-    });
-    expect(at(32_000)).toMatchObject({
-      budgetWindowTokens: 32_000,
-      requestCapTokens: 22_400,
-      summarizeAtTokens: 18_400,
-      pruneAtTokens: 11_200,
-      resultCapChars: 15_360,
-    });
-    // A window learned small from a provider error is below it too.
-    expect(
-      contextBudgetFor({ model: 'm', tokens: 50_000, origin: 'learned' }),
-    ).toMatchObject({ budgetWindowTokens: 50_000, summarizeAtTokens: 30_000 });
-  });
-
-  it('keeps every invariant of the derivation, and the fractions apply to the capped window', () => {
-    for (const window of [16_000, 32_000, 99_999, 100_001, 1_050_000]) {
-      const b = at(window);
-      expect(b.budgetWindowTokens).toBe(Math.min(window, 100_000));
-      expect(b.summarizeAtTokens).toBeLessThanOrEqual(b.summaryInputTokens);
-      expect(b.summaryInputTokens).toBeLessThan(b.requestCapTokens);
-      expect(b.pruneAtTokens).toBeLessThanOrEqual(b.summarizeAtTokens);
-      expect(b.requestCapTokens + b.outputReserveTokens).toBeLessThanOrEqual(
-        b.budgetWindowTokens,
-      );
-    }
-    // An operator's raised fraction or larger memory window still apply.
-    expect(
-      at(1_050_000, { ...DEFAULT_CONTEXT_KNOBS, summarizeFraction: 0.7 })
-        .summarizeAtTokens,
-    ).toBe(70_000);
-    expect(
-      at(1_050_000, contextKnobs({ CONTEXT_MEMORY_WINDOW_TOKENS: '200000' })),
-    ).toMatchObject({
-      budgetWindowTokens: 200_000,
-      summarizeAtTokens: 120_000,
-      requestCapTokens: 182_000,
-    });
   });
 });
 
