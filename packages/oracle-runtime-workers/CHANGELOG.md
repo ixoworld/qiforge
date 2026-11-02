@@ -1,5 +1,16 @@
 # @ixo/oracle-runtime-workers
 
+## 0.36.1
+
+### Patch Changes
+
+- [#453](https://github.com/ixoworld/qiforge/pull/453) [`b7dd124`](https://github.com/ixoworld/qiforge/commit/b7dd124e3bc4f5522713a7de4e76f3c651e8ba98) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Reverts [#449](https://github.com/ixoworld/qiforge/issues/449) (chat-channel files sent to the model as text instead of raw bytes), which went out in 0.36.0 before review. Channel attachments behave as in 0.35.1 again. The change is reopened as its own PR for review.
+
+- [#451](https://github.com/ixoworld/qiforge/pull/451) [`93be63d`](https://github.com/ixoworld/qiforge/commit/93be63db8043fae1d7797b400e488dabe83f235c) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - `send_file` sends only the types the channel gateway delivers: PDF, Word (`.docx`), Excel (`.xlsx`), PowerPoint (`.pptx`), text, CSV, Markdown, PNG and JPEG.
+
+  - Any other extension, the legacy `.doc`, `.xls` and `.ppt` included, fails the call before the file is signed, with an error that names the types and tells the model to convert the file or describe its contents.
+  - The tool description and the chat surface bullet for `send_file` name the same types, and tell the model to build the file in the sandbox rather than send a file downloaded from the internet, unless the user asked for that exact file. The Portal and non-chat surfaces are unchanged.
+
 ## 0.36.0
 
 ### Minor Changes
