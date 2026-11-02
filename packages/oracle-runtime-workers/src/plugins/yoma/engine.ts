@@ -910,7 +910,9 @@ export function parsePin(
   text: string,
 ): { latitude: number; longitude: number; placeName?: string } | undefined {
   const match =
-    /📍\s*(-?\d{1,2}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)(?:\s*—\s*(.+))?/u.exec(
+    // U+1F4CD (round pushpin) and U+2014 (em dash) as escapes: the bundler
+    // keeps a regex literal verbatim (see `src/core/latin1-literals.test.ts`).
+    /\u{1F4CD}\s*(-?\d{1,2}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)(?:\s*\u2014\s*(.+))?/u.exec(
       text,
     );
   if (!match) return undefined;
