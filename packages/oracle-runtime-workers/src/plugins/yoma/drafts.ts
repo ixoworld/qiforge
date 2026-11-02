@@ -98,6 +98,17 @@ const draftSchema = z.object({
     .optional(),
   /** Set once the card's outcome came back as done. */
   submittedAt: z.string().optional(),
+  /**
+   * A sent application's acceptance as the plugin last saw it: when the chain
+   * was last asked (`checkedAt`), and when the person was told they were
+   * accepted, or found out by logging work (`announcedAt`, then never again).
+   */
+  acceptance: z
+    .object({
+      checkedAt: z.string().optional(),
+      announcedAt: z.string().optional(),
+    })
+    .optional(),
   /** A claim's id (its CID) from the claim card's receipt. */
   claimId: z.string().max(200).optional(),
   /** Why the last card stopped before it finished, from its receipt: the step and the Hub's words. */
