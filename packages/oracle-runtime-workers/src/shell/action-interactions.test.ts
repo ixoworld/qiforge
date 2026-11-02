@@ -253,16 +253,23 @@ describe('interaction HTTP authority and structural boundary', () => {
       await status(`/action-interactions?sessionId=${'x'.repeat(513)}`),
     ).toBe(400);
     expect(f.get).not.toHaveBeenCalled();
-    const tooLarge = await f.app.request(
-      '/action-interactions',
-      { method: 'POST', headers, body: 'x'.repeat(97 * 1024) },
-      f.bindings,
-    );
-    expect(tooLarge.status).toBe(413);
-    expect(await tooLarge.json()).toEqual({
-      code: 'too_large',
-      message: 'Request is too large',
-    });
+    // Edits, reservations and outcomes stay small; only a prepare may carry
+    // a domain-write approval of up to 2 MiB.
+    for (const [path, method, size] of [
+      [`/action-interactions/${id}`, 'PATCH', 97 * 1024],
+      ['/action-interactions', 'POST', 2 * 1024 * 1024 + 1],
+    ] as const) {
+      const tooLarge = await f.app.request(
+        path,
+        { method, headers, body: 'x'.repeat(size) },
+        f.bindings,
+      );
+      expect(tooLarge.status).toBe(413);
+      expect(await tooLarge.json()).toEqual({
+        code: 'too_large',
+        message: 'Request is too large',
+      });
+    }
   });
 
   it('meters card reads in their own bucket, separate from turns and submissions', async () => {

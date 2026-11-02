@@ -16,7 +16,8 @@ that the session still exists in that object. No body can select another user
 or oracle. The oracle DID comes from runtime configuration. Requests are parsed
 before a user object is addressed: only the shapes below exist, path ids must
 be UUIDs and `sessionId` is at most 512 characters; anything else is 404 or 400,
-and every refusal of these routes (including a body over 2 MiB) is JSON
+and every refusal of these routes (including a body over 96 KiB, or over
+2 MiB for a prepare) is JSON
 `{code, message}`. The shell's shared authentication (401) and rate limit (429)
 answer `{statusCode, message}`; the client turns those into the codes
 `unauthorized` and `rate_limited`.
@@ -167,7 +168,7 @@ same authenticated user; ownership names are not execution permissions.
 | Kind               | Immutable binding                                                                 | Execution owner                 |
 | ------------------ | --------------------------------------------------------------------------------- | ------------------------------- |
 | `flow-claim-block` | Claim fields, with collection included in the uniqueness key                      | Existing claim-block executor   |
-| `flow-bid`         | Claim fields plus `roleId` and optional `groupId`                                 | Existing Flow bid executor      |
+| `flow-bid`         | Claim fields plus `roleId` and optional `groupId`, both in the uniqueness key     | Existing Flow bid executor      |
 | `approval`         | `family` (`plugin`, `domain-write`, `recipe-release`), `requestKey`, `accountDid` | Existing host approval handlers |
 | `task`             | Existing owner `taskId`                                                           | Scheduler; card is read-only    |
 
@@ -200,7 +201,8 @@ stored as private DO chunks of 24K UTF-16 units, each below the 128 KiB storage
 value ceiling, with the metadata and chunks committed in one transaction. They
 are never placed in public VFS files. Reads and authenticated session listings
 rehydrate the same immutable values; isolate recreation does not lose checkpoints.
-The HTTP JSON body limit is 2 MiB. JSON escaping and overhead count toward it.
+The HTTP JSON body limit is 2 MiB for a prepare and 96 KiB for every other
+interaction request. JSON escaping and overhead count toward it.
 
 `client.readTask(taskId, sessionId)` calls authenticated
 `GET /action-interactions/tasks/:taskId?sessionId=...`. It reads the existing

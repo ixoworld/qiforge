@@ -162,6 +162,15 @@ async function ownerStorageKey(
           ...(owner.kind === 'flow-claim-block'
             ? { collectionId: owner.collectionId }
             : {}),
+          // A bid for another role or group of the same step is a separate operation.
+          ...(owner.kind === 'flow-bid'
+            ? {
+                roleId: owner.roleId,
+                ...(owner.groupId === undefined
+                  ? {}
+                  : { groupId: owner.groupId }),
+              }
+            : {}),
           kind: owner.kind,
           flowId: owner.flowId,
           runId: owner.runId,

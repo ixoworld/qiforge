@@ -1146,6 +1146,44 @@ describe('additional action card owners', () => {
     ).interaction;
     expect(first.id).not.toEqual(second.id);
   });
+  it('keeps bids for different roles and groups of one step apart', async () => {
+    const stub = env.ACTION_INTERACTIONS_TEST.getByName('bid-identity');
+    const claim = prepare().owner;
+    if (claim.kind !== 'flow-claim') throw new Error('Claim fixture');
+    const bid = (roleId: string, groupId?: string) => ({
+      ...claim,
+      kind: 'flow-bid' as const,
+      roleId,
+      ...(groupId === undefined ? {} : { groupId }),
+    });
+    const drafts: { id: string; sessionId: string }[] = [];
+    for (const owner of [
+      bid('service_agent'),
+      bid('evaluator'),
+      bid('evaluator', 'second-group'),
+    ])
+      drafts.push(
+        unwrap(
+          await command(stub, alice, {
+            kind: 'prepare',
+            input: { ...prepare(), owner },
+          }),
+        ).interaction,
+      );
+    expect(new Set(drafts.map((draft) => draft.id)).size).toBe(3);
+    expect(
+      JSON.parse(
+        await stub.dispatch(
+          alice,
+          JSON.stringify({ version: 1, owner: bid('auditor') }),
+        ),
+      ),
+    ).toMatchObject({ ok: true, result: { managed: false } });
+    for (const draft of drafts)
+      expect(
+        unwrap(await read(stub, alice, draft.id, draft.sessionId)).status,
+      ).toBe('draft');
+  });
   it('stores a 1MiB UTF8 domain-write request in private chunks and enforces byte limits for other owners', async () => {
     const stub = env.ACTION_INTERACTIONS_TEST.getByName('large-domain-write');
     const request = {

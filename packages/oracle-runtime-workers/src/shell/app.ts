@@ -776,14 +776,19 @@ export function createShell(
       );
     return next();
   });
-  // Domain-write approvals need 2 MiB; the store bounds every other owner far lower.
-  app.use(
-    '/action-interactions*',
+  const interactionBodyLimit = (maxSize: number) =>
     bodyLimit({
-      maxSize: 2 * 1024 * 1024,
+      maxSize,
       onError: (c) =>
         c.json({ code: 'too_large', message: 'Request is too large' }, 413),
-    }),
+    });
+  const smallInteractionBody = interactionBodyLimit(96 * 1024);
+  // Only a prepare can carry a domain-write approval (up to 2 MiB).
+  const preparedInteractionBody = interactionBodyLimit(2 * 1024 * 1024);
+  app.use('/action-interactions*', (c, next) =>
+    c.req.method === 'POST' && c.req.path === '/action-interactions'
+      ? preparedInteractionBody(c, next)
+      : smallInteractionBody(c, next),
   );
   app.get('/action-interactions/tasks/:taskId', async (c) => {
     const sessionId = c.req.query('sessionId');
