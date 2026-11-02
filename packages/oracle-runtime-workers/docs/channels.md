@@ -183,7 +183,7 @@ A finished turn also carries `plan`, the reply as the ordered parts to deliver. 
 - **Text is chat Markdown:** `**bold**`, `_italic_`, `~~strike~~`, inline code, fenced code, `-` and `1.` lists, `>` quotes and links. It has no headings, tables or HTML. The gateway maps it to provider syntax. A part fits the profile's `bubbleMax` (1,500 characters on WhatsApp); the gateway still splits at the provider's hard limit and never truncates.
 - **An artefact is a link to a document** the user opens in a browser. Send it as a button or a link with previews off. The title can be up to 120 characters; shorten it where a provider needs less (a WhatsApp CTA header takes 60).
 - **Nothing to send.** An empty `parts`, like an empty `text`, completes delivery without a provider message. `plan` is absent when a run finished without one (a run from before plans); fall back to `text`.
-- **At most `maxPartsPerRun` parts** (6 on WhatsApp). A gateway may still merge adjacent text parts to respect a provider's pacing.
+- **At most `maxPartsPerRun` parts** (8 on WhatsApp). An ordinary answer arrives as text parts, without an artefact; an artefact part comes only with document-length output or a file the user asked for, between text parts that keep the substance in chat (the `create_artifact` message and question, or a spilled step's first and last paragraphs). A gateway may still merge adjacent text parts to respect a provider's pacing.
 
 The runtime picks the WhatsApp, Telegram or Slack profile from `provider`, and a generic chat profile for any provider without a profile of its own (a provider id equal to another profile's name, `matrix` or `generic`, gets that profile). See [chat delivery](chat-delivery.md).
 

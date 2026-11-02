@@ -21,9 +21,12 @@ export const CreateArtifactArgs = z.object({
     .string()
     .trim()
     .min(1)
-    .max(600)
+    // Room for the conclusions, decisions and next actions. It is delivered
+    // as its own text part before the link (a gateway splits a text part at
+    // its provider's limit, 4,096 on WhatsApp), never inside the link card.
+    .max(1000)
     .describe(
-      'One or two short sentences sent as the chat message before the link: the answer or the gist, not "here is the document".',
+      'The chat message sent before the link: the conclusions, decisions and next actions, so the user has them without opening the document. Not "here is the document".',
     ),
   followUp: z
     .string()
@@ -95,7 +98,7 @@ export function buildCreateArtifactTool(
     {
       name: CREATE_ARTIFACT_TOOL,
       description:
-        'Send the user a document they open in their browser, together with a short chat message. Use it for anything too long or too structured for chat: a plan, report, comparison, table, draft, list of more than a few items, or code. Put the full Markdown in `content`, the answer or gist in `message`, and at most one question in `followUp`. Call it last and on its own: the reply ends after it, and the user receives the message, the link, then the question.',
+        'Send the user a document, with a short chat message, ONLY when they asked for a file or document, or when the output is genuinely document-length (a long report, long code, several screens of text). Ordinary answers, comparisons, short plans and lists stay in chat as messages: many users read chat on a data plan with no browser. Put the full Markdown in `content`; put the conclusions, decisions and next actions in `message`, so the user has them without opening the document; at most one question in `followUp`. Call it last and on its own: the reply ends after it, and the user receives the message, the link, then the question.',
       schema: CreateArtifactArgs,
       effect: 'read',
     },
