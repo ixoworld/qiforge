@@ -958,6 +958,15 @@ export async function createMainAgent(
     systemPrompt,
     ...(checkpointer ? { checkpointer } : {}),
     name: identity.name,
+    // One tools node runs every call of the model's message (in parallel,
+    // through the tool scheduler's lanes). The default ("v2") sends each call
+    // as its own graph task carrying a copy of the whole state, so a turn
+    // with three tool calls serializes the full thread three more times into
+    // the checkpoint writes (and into every traced tools-node run) — the
+    // peak that resets a 128 MB isolate on long threads. The runtime needs
+    // neither per-call checkpoints nor `interrupt()` inside a tool: tool
+    // side effects are guarded by its own `turn_tool_marks`.
+    version: 'v1',
   });
 
   return {

@@ -24,8 +24,8 @@ interface ViewerParsing {
  * browser receives (nothing else in scope).
  */
 function pageParsing(): ViewerParsing {
-  const begin = VIEWER_SCRIPT.indexOf('// ── Inline and block parsing');
-  const end = VIEWER_SCRIPT.indexOf('// ── End of parsing ──');
+  const begin = VIEWER_SCRIPT.indexOf('// -- Inline and block parsing');
+  const end = VIEWER_SCRIPT.indexOf('// -- End of parsing --');
   expect(begin).toBeGreaterThan(-1);
   expect(end).toBeGreaterThan(begin);
   const build = new Function(
