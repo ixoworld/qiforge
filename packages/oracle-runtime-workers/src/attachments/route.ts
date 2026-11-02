@@ -18,22 +18,11 @@ export type AttachmentStrategy =
 /**
  * Decide, for one attachment, how to get it to the selected model — the single
  * cost-aware, capability-aware routing rule. Pure and total.
- *
- * `channelFile`: a file from a chat channel (WhatsApp) never goes as raw
- * bytes. Its message is replayed to the model on every later turn and kept in
- * the user's checkpoint, so a native PDF or photo there is base64 the size of
- * the file, counted as tokens at chars/4 and held several times over in the
- * object's 128 MB isolate (a 600 KB PDF reset the isolate on every attempt).
- * The helper model turns it into text instead; tools still read the file
- * itself through `ctx.session.channel.attachments`.
  */
 export function routeAttachment(
   kind: AttachmentKind,
   caps: ModelInputCapabilities,
-  options: { channelFile?: boolean } = {},
 ): AttachmentStrategy {
-  if (options.channelFile)
-    return kind === 'text' ? 'parse-local' : 'model-extract';
   switch (kind) {
     case 'text':
       return 'parse-local';
