@@ -68,6 +68,16 @@ const FILE_MIME: ReadonlyMap<string, string> = new Map([
 export const SENDABLE_FILE_TYPES =
   'PDF, Word (.docx), Excel (.xlsx), PowerPoint (.pptx), text, CSV, Markdown, PNG or JPEG';
 
+/**
+ * What the model is told where a gateway delivers the file: the gateway
+ * checks every file after the reply and blocks one with the listed content,
+ * which the model never sees happen in the same reply. Shared by the tool
+ * description and the chat surface bullet; kept short, it rides on every
+ * chat turn's prompt.
+ */
+export const FILE_SAFETY_NOTE =
+  'The gateway scans every file and blocks macros, embedded objects, active PDF content, external references, non-http links and content that does not match the type: build files without them. Say you are sending the file; do not state that it is attached or delivered.';
+
 /** The MIME type of a filename `send_file` may send; `undefined` for any other. */
 export function fileMimetype(filename: string): string | undefined {
   const dot = filename.lastIndexOf('.');
@@ -299,15 +309,16 @@ export function buildSendFileTool(
           ok: true,
           filename,
           mimetype,
-          delivery:
-            'Attached to your reply: it goes out when the reply does. Do not paste a link.',
+          delivery: attachments
+            ? 'Goes out with your reply, after the gateway has checked the file. Do not paste a link, and do not state that it is attached or delivered.'
+            : 'Attached to your reply: it goes out when the reply does. Do not paste a link.',
         }),
         artifact,
       });
     },
     {
       name: SEND_FILE_TOOL,
-      description: `Send the user a file ${attachments ? 'as an attachment in this chat' : 'as a link posted in this room'}. Use it for every file meant for the user; it sends ${SENDABLE_FILE_TYPES} files only. Build the file yourself in the sandbox: do not send a file you downloaded from the internet unless the user asked for that exact file. Not for helper scripts or intermediate files. \`path\` is the stored path, for example \`/output/report.docx\`: save the file under \`/workspace/data/output/\` and let that sandbox call finish first. \`caption\` is an optional short line shown with the file. ${attachments ? 'The user receives the file itself' : 'The link is posted for you'}, so never paste a download link and do not explain how to open it. For several files, call it once per file, in the order they should arrive. If it returns an error, follow it, or tell the user the file could not be sent.`,
+      description: `Send the user a file ${attachments ? 'as an attachment in this chat' : 'as a link posted in this room'}. Use it for every file meant for the user; it sends ${SENDABLE_FILE_TYPES} files only. Build the file yourself in the sandbox: do not send a file you downloaded from the internet unless the user asked for that exact file. Not for helper scripts or intermediate files. \`path\` is the stored path, for example \`/output/report.docx\`: save the file under \`/workspace/data/output/\` and let that sandbox call finish first. \`caption\` is an optional short line shown with the file. ${attachments ? 'The user receives the file itself' : 'The link is posted for you'}, so never paste a download link and do not explain how to open it. For several files, call it once per file, in the order they should arrive. If it returns an error, follow it, or tell the user the file could not be sent.${attachments ? ` ${FILE_SAFETY_NOTE}` : ''}`,
       schema: SendFileArgs,
       effect: 'read',
     },

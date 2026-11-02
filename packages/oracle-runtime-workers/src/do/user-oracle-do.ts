@@ -1,6 +1,9 @@
 import {
+  CHANNEL_DELIVERY_NOTICE_KWARG,
+  channelDeliveryNote,
   channelReplyNote,
   CHANNEL_REPLY_NOTE_KWARG,
+  isDeliveryNoticeMessage,
 } from '../channels/replies';
 import { channelRoutingConfig } from '../channels/routing';
 import { digestTopicProposalEffect } from '../action-proposals/topic-store';
@@ -571,14 +574,16 @@ function hasUserContext(value: unknown): boolean {
 
 /**
  * Whether a turn is offered to the plugins' admission handlers. Not for a
- * turn with attachments, a scheduled task run, or a Matrix group room: a
- * direct read is posted into the room, so one user's authorized read would
- * be shown to every member.
+ * turn with attachments, a gateway's delivery notice (no request of the
+ * person to read), a scheduled task run, or a Matrix group room: a direct
+ * read is posted into the room, so one user's authorized read would be
+ * shown to every member.
  */
 function admissionApplies(req: TurnRequest): boolean {
   return (
     !req.attachments?.length &&
     !req.channel?.attachments?.length &&
+    !req.channel?.notice &&
     !req.taskRunId &&
     !req.sessionId.startsWith(TASK_SESSION_PREFIX) &&
     req.roomKind !== 'group'
@@ -4694,7 +4699,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const messages = await this.saver!.listThreadMessages(sessionId);
       return messages
         .filter(
-          (m) => !isSummarizationMessage(m) && !isAttachmentViewMessage(m),
+          (m) =>
+            !isSummarizationMessage(m) &&
+            !isAttachmentViewMessage(m) &&
+            !isDeliveryNoticeMessage(m),
         )
         .map((m) => ({ type: m.type, content: visibleText(m) }));
     }
@@ -4728,7 +4736,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         for (const row of rows) {
           anchor = row.anchor;
           const m = row.message;
-          if (isSummarizationMessage(m) || isAttachmentViewMessage(m)) continue;
+          if (
+            isSummarizationMessage(m) ||
+            isAttachmentViewMessage(m) ||
+            isDeliveryNoticeMessage(m)
+          )
+            continue;
           entries.push({
             message: { type: m.type, content: visibleText(m) },
             cursor: row.messageId,
@@ -8045,10 +8058,17 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const timeNote = suppliedContextOnly
         ? undefined
         : renderTurnTimeNote(turnAt, req.identity.timezone);
+      // A delivery notice stands where the person's words would be (the
+      // message is empty): readers take it off with `userContent` and hide
+      // the message (`isDeliveryNoticeMessage`).
+      const noticeNote = channelDeliveryNote(req.channel?.notice);
+      const noticed = noticeNote
+        ? withTurnTimeNote(spoken, noticeNote)
+        : spoken;
       const replyNote = channelReplyNote(req.channel?.replyContext);
       const referenced = replyNote
-        ? withTurnTimeNote(spoken, replyNote)
-        : spoken;
+        ? withTurnTimeNote(noticed, replyNote)
+        : noticed;
       const content = timeNote
         ? withTurnTimeNote(referenced, timeNote)
         : referenced;
@@ -8058,6 +8078,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           timestamp: turnAt.toISOString(),
           ...(timeNote ? { [TURN_TIME_NOTE_KWARG]: timeNote } : {}),
           ...(replyNote ? { [CHANNEL_REPLY_NOTE_KWARG]: replyNote } : {}),
+          ...(noticeNote
+            ? { [CHANNEL_DELIVERY_NOTICE_KWARG]: noticeNote }
+            : {}),
           oracleName: core.identity.name,
           msgFromMatrixRoom: req.client === 'matrix',
           ...speakerKwargs,
@@ -8389,7 +8412,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     ): Promise<string | null> {
       const human = messages.find((m) => m.type === 'human');
       const ai = [...messages].reverse().find((m) => m.type === 'ai');
-      if (!human) return null;
+      // A delivery notice is the gateway's text, not an exchange to name
+      // the session after: it stays untitled until the person's next turn.
+      if (!human || isDeliveryNoticeMessage(human)) return null;
       // The ambient adapter honours LLM_PROVIDER; fall back to the core's
       // OpenRouter adapter if boot has not built the ambient bag yet.
       const model = (this.ambient?.llm ?? this.core.llm).get('session-title');

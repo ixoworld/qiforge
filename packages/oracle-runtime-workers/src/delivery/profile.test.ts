@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { FILE_SAFETY_NOTE } from '../plugins/sandbox/send-file';
 import { deliveryConfigWithEnv, resolveDeliveryProfile } from './profile';
 import { renderSurfaceSection } from './prompt';
 
@@ -310,5 +311,44 @@ describe('renderSurfaceSection', () => {
       .find((text) => text.includes('send_file'));
     expect(line).toContain('a link to the file is posted here for you');
     expect(line).not.toContain('attachment');
+  });
+
+  it('warns of the gateway file check on the send_file line only, where a gateway delivers the file', () => {
+    const profile = resolveDeliveryProfile(whatsapp);
+    const line = renderSurfaceSection(profile, true, true)
+      .split('\n')
+      .find((text) => text.includes('send_file'));
+    expect(line).toContain(FILE_SAFETY_NOTE);
+    expect(line).toContain('Say you are sending the file');
+    // Still one bullet: the note rides on the send_file line.
+    expect(
+      renderSurfaceSection(profile, true, true)
+        .split('\n')
+        .filter((text) => text.includes('attached or delivered')),
+    ).toHaveLength(1);
+    // Without send_file the section is as it was.
+    const before = renderSurfaceSection(profile, true, false);
+    expect(before).not.toContain('scans');
+    expect(before).not.toContain('attached or delivered');
+    // A Matrix room posts a link: no gateway checks the file there.
+    const matrix = renderSurfaceSection(
+      resolveDeliveryProfile(
+        { client: 'matrix', roomKind: 'direct' },
+        { matrixChat: true },
+      ),
+      false,
+      true,
+    );
+    expect(matrix).not.toContain('scans');
+    expect(matrix).not.toContain('attached or delivered');
+    // The Portal and every non-chat surface get no section at all.
+    expect(renderSurfaceSection({ kind: 'stream' }, true, true)).toBe('');
+    expect(
+      renderSurfaceSection(
+        resolveDeliveryProfile({ client: 'portal' }),
+        true,
+        true,
+      ),
+    ).toBe('');
   });
 });

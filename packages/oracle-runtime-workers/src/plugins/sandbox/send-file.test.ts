@@ -8,6 +8,7 @@ import type { Logger, RuntimeContext } from '../../plugin-api/types';
 import {
   buildSendFileTool,
   deliveredFilename,
+  FILE_SAFETY_NOTE,
   fileMimetype,
   SEND_FILE_TOOL,
   sentFile,
@@ -208,7 +209,7 @@ describe('send_file', () => {
       mimetype:
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       delivery:
-        'Attached to your reply: it goes out when the reply does. Do not paste a link.',
+        'Goes out with your reply, after the gateway has checked the file. Do not paste a link, and do not state that it is attached or delivered.',
     });
     const file = {
       url: SIGNED,
@@ -461,6 +462,27 @@ describe('send_file', () => {
     expect(room).not.toContain('attachment');
     expect(room).toContain('as a link posted in this room');
     expect(room).toContain('never paste a download link');
+  });
+
+  it('warns of the gateway file check only where a gateway delivers the file', async () => {
+    const invoke = async (): Promise<string> => PRESIGNED;
+    const chat = buildSendFileTool({ invoke }, true).description;
+    expect(chat).toContain(FILE_SAFETY_NOTE);
+    expect(FILE_SAFETY_NOTE).toContain('blocks macros, embedded objects');
+    expect(FILE_SAFETY_NOTE).toContain(
+      'do not state that it is attached or delivered',
+    );
+    // A Matrix room posts a link; nothing checks the file, so nothing changes there.
+    const room = buildSendFileTool({ invoke }, false);
+    expect(room.description).not.toContain('scans');
+    expect(room.description).not.toContain('attached or delivered');
+    const posted = (await room.handler(
+      { path: '/output/report.docx' },
+      contextWith(recordingLogger()),
+    )) as ToolMessage;
+    expect(JSON.parse(posted.content as string).delivery).toBe(
+      'Attached to your reply: it goes out when the reply does. Do not paste a link.',
+    );
   });
 
   it('is read-only, so a resumed run may run it again', () => {

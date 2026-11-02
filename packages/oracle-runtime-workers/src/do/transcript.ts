@@ -1,4 +1,4 @@
-import { userContent } from '../channels/replies';
+import { isDeliveryNoticeMessage, userContent } from '../channels/replies';
 /**
  * Transcript → client DTO. Port of `@ixo/common`'s
  * `transformGraphStateMessageToListMessageResponse` so `GET /messages/:id`
@@ -179,7 +179,9 @@ export async function transformTranscript(
       !kw.isError &&
       !isExtractionContext &&
       // `view_attachment` re-attaching an offloaded payload — model-facing.
-      !isAttachmentViewMessage(message)
+      !isAttachmentViewMessage(message) &&
+      // A chat gateway's delivery notice — the model's, never a user message.
+      !isDeliveryNoticeMessage(message)
     ) {
       const reasoning = reasoningToText(kw.reasoning);
       const attachments =
@@ -333,9 +335,17 @@ export class TranscriptCursorError extends Error {
   }
 }
 
-/** A turn starts at a user message; the summarizer's bookkeeping row is not one. */
+/**
+ * A turn starts at a user message; the summarizer's bookkeeping row is not
+ * one, nor is a delivery notice (hidden, so its reply pages with the turn
+ * before it, where the Portal shows it).
+ */
 function startsTurn(row: ThreadMessageRow): boolean {
-  return row.message.type === 'human' && !isSummarizationMessage(row.message);
+  return (
+    row.message.type === 'human' &&
+    !isSummarizationMessage(row.message) &&
+    !isDeliveryNoticeMessage(row.message)
+  );
 }
 
 /** `GET /sessions/:id/messages` query → options, or the 400 to answer with. */
