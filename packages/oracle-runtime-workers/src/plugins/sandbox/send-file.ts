@@ -39,17 +39,18 @@ export const SendFileArgs = z.object({
     .describe('A short line shown with the file, at most 1,024 characters.'),
 });
 
-/** The types a gateway treats specially; anything else is opaque to it. */
+/**
+ * What `send_file` sends, by extension, with its MIME type: the types a chat
+ * gateway delivers. A gateway refuses any other (the legacy `.doc`, `.xls`
+ * and `.ppt` included), so the tool refuses it before signing anything.
+ */
 const FILE_MIME: ReadonlyMap<string, string> = new Map([
   ['pdf', 'application/pdf'],
-  ['doc', 'application/msword'],
   [
     'docx',
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   ],
-  ['xls', 'application/vnd.ms-excel'],
   ['xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
-  ['ppt', 'application/vnd.ms-powerpoint'],
   [
     'pptx',
     'application/vnd.openxmlformats-officedocument.presentationml.presentation',
@@ -63,11 +64,15 @@ const FILE_MIME: ReadonlyMap<string, string> = new Map([
   ['csv', 'text/csv'],
 ]);
 
-/** The MIME type of a filename, from the allow-list of extensions. */
-export function fileMimetype(filename: string): string {
+/** The types in `FILE_MIME`, as the tool description and the prompt name them. */
+export const SENDABLE_FILE_TYPES =
+  'PDF, Word (.docx), Excel (.xlsx), PowerPoint (.pptx), text, CSV, Markdown, PNG or JPEG';
+
+/** The MIME type of a filename `send_file` may send; `undefined` for any other. */
+export function fileMimetype(filename: string): string | undefined {
   const dot = filename.lastIndexOf('.');
   const extension = dot >= 0 ? filename.slice(dot + 1).toLowerCase() : '';
-  return FILE_MIME.get(extension) ?? 'application/octet-stream';
+  return FILE_MIME.get(extension);
 }
 
 /**
@@ -191,6 +196,10 @@ function notFoundError(path: string): string {
   return `No stored file at \`${path}\`. A file is stored once the sandbox call that wrote it under \`/workspace/data/output/\` has finished. Check the path with \`artifact_list\`, or write the file first, then call \`send_file\` again.`;
 }
 
+function unsupportedTypeError(path: string): string {
+  return `Cannot send \`${path}\`. This chat can only receive ${SENDABLE_FILE_TYPES} files. Convert the file, or describe its contents instead.`;
+}
+
 function failedError(path: string): string {
   return `Could not prepare \`${path}\` for sending. Try once more; if it fails again, tell the user the file could not be sent. Do not offer a link.`;
 }
@@ -209,6 +218,11 @@ async function signFile(
     logger.warn(`[send_file] ${args.path}: ${kind}`);
     return { error };
   };
+  // Checked before signing: a file of another type is never signed.
+  const filename = deliveredFilename(args.path);
+  const mimetype = fileMimetype(filename);
+  if (!mimetype)
+    return failed('unsupported type', unsupportedTypeError(args.path));
   let signed: Record<string, unknown> | undefined;
   try {
     signed = resultObject(await presign.invoke({ path: args.path }));
@@ -227,14 +241,13 @@ async function signFile(
   const url = httpsUrl(signed?.downloadUrl) ?? httpsUrl(signed?.url);
   if (!url) return failed('no usable link returned', failedError(args.path));
 
-  const filename = deliveredFilename(args.path);
   const { expiresIn, path, size } = signed ?? {};
   return {
     path: typeof path === 'string' && path ? path : args.path,
     file: {
       url,
       filename,
-      mimetype: fileMimetype(filename),
+      mimetype,
       ...(typeof size === 'number' ? { bytes: size } : {}),
       ...(args.caption ? { caption: args.caption } : {}),
       ...(typeof expiresIn === 'number'
@@ -294,7 +307,7 @@ export function buildSendFileTool(
     },
     {
       name: SEND_FILE_TOOL,
-      description: `Send the user a file ${attachments ? 'as an attachment in this chat' : 'as a link posted in this room'}. Use it for every file meant for the user: a Word document, PDF, spreadsheet, slide deck, image, CSV or anything else. Not for helper scripts or intermediate files. \`path\` is the stored path, for example \`/output/report.docx\`: save the file under \`/workspace/data/output/\` and let that sandbox call finish first. \`caption\` is an optional short line shown with the file. ${attachments ? 'The user receives the file itself' : 'The link is posted for you'}, so never paste a download link and do not explain how to open it. For several files, call it once per file, in the order they should arrive. If it returns an error, follow it, or tell the user the file could not be sent.`,
+      description: `Send the user a file ${attachments ? 'as an attachment in this chat' : 'as a link posted in this room'}. Use it for every file meant for the user; it sends ${SENDABLE_FILE_TYPES} files only. Build the file yourself in the sandbox: do not send a file you downloaded from the internet unless the user asked for that exact file. Not for helper scripts or intermediate files. \`path\` is the stored path, for example \`/output/report.docx\`: save the file under \`/workspace/data/output/\` and let that sandbox call finish first. \`caption\` is an optional short line shown with the file. ${attachments ? 'The user receives the file itself' : 'The link is posted for you'}, so never paste a download link and do not explain how to open it. For several files, call it once per file, in the order they should arrive. If it returns an error, follow it, or tell the user the file could not be sent.`,
       schema: SendFileArgs,
       effect: 'read',
     },

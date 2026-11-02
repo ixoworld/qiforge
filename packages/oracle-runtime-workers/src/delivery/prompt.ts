@@ -1,3 +1,4 @@
+import { SENDABLE_FILE_TYPES } from '../plugins/sandbox/send-file';
 import type { DeliveryProfile } from './types';
 
 /**
@@ -41,7 +42,7 @@ export function renderSurfaceSection(
     `- Ordinary answers stay in chat, including explanations, comparisons, short plans and step-by-step instructions. No headings or horizontal rules. Lists up to ${limits.maxListItems} items, code up to ${limits.maxCodeLines} lines and **bold** for the key fact are fine in chat. Write a small comparison as one short line per item, not a table.`,
     ...(files
       ? [
-          `- Deliver every file meant for the user (a Word document, PDF, spreadsheet, slide deck, image, CSV or anything else) with \`send_file\`: ${deliversAttachments(surface) ? 'the user receives the file itself here, as an attachment' : 'a link to the file is posted here for you'}. When the user asks for a file in a particular format, build it in the sandbox and send it this way. Never paste a download link, and do not describe how to open or download it. Do not send helper scripts or intermediate files. Call it once per file, after the sandbox call that saved the file has finished.`,
+          `- Deliver every file meant for the user with \`send_file\` (${SENDABLE_FILE_TYPES} only): ${deliversAttachments(surface) ? 'the user receives the file itself here, as an attachment' : 'a link to the file is posted here for you'}. When the user asks for a file in a particular format, build it yourself in the sandbox and send it this way. Do not send a file you downloaded from the internet unless the user asked for that exact file. Never paste a download link, and do not describe how to open or download it. Do not send helper scripts or intermediate files. Call it once per file, after the sandbox call that saved the file has finished.`,
         ]
       : []),
     artifacts

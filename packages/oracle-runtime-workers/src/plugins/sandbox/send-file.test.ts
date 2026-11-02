@@ -83,9 +83,6 @@ describe('fileMimetype', () => {
     expect(fileMimetype('r.pptx')).toBe(
       'application/vnd.openxmlformats-officedocument.presentationml.presentation',
     );
-    expect(fileMimetype('r.doc')).toBe('application/msword');
-    expect(fileMimetype('r.xls')).toBe('application/vnd.ms-excel');
-    expect(fileMimetype('r.ppt')).toBe('application/vnd.ms-powerpoint');
     expect(fileMimetype('r.txt')).toBe('text/plain');
     expect(fileMimetype('r.jpg')).toBe('image/jpeg');
     expect(fileMimetype('r.jpeg')).toBe('image/jpeg');
@@ -94,11 +91,22 @@ describe('fileMimetype', () => {
     expect(fileMimetype('r.csv')).toBe('text/csv');
   });
 
-  it('is opaque for anything else', () => {
-    for (const name of ['a.zip', 'a.html', 'a.json', 'a.mp4', 'noext', 'a.'])
-      expect(fileMimetype(name)).toBe('application/octet-stream');
+  it('has no type for anything else, the legacy Office formats included', () => {
+    for (const name of [
+      'a.doc',
+      'a.xls',
+      'a.ppt',
+      'a.exe',
+      'a.zip',
+      'a.html',
+      'a.json',
+      'a.mp4',
+      'noext',
+      'a.',
+    ])
+      expect(fileMimetype(name)).toBeUndefined();
     // Object.prototype keys are not extensions.
-    expect(fileMimetype('a.constructor')).toBe('application/octet-stream');
+    expect(fileMimetype('a.constructor')).toBeUndefined();
   });
 });
 
@@ -282,6 +290,57 @@ describe('send_file', () => {
     });
   });
 
+  it('sends every allowed type', async () => {
+    for (const [name, mimetype] of [
+      ['a.pdf', 'application/pdf'],
+      [
+        'a.docx',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      ],
+      [
+        'a.xlsx',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      ],
+      [
+        'a.pptx',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      ],
+      ['a.txt', 'text/plain'],
+      ['a.csv', 'text/csv'],
+      ['a.md', 'text/markdown'],
+      ['a.markdown', 'text/markdown'],
+      ['a.PNG', 'image/png'],
+      ['a.jpg', 'image/jpeg'],
+      ['a.jpeg', 'image/jpeg'],
+    ]) {
+      const message = await callTool(async () => PRESIGNED, {
+        path: `/output/${name}`,
+      });
+      expect(ToolMessage.isInstance(message)).toBe(true);
+      expect((message as ToolMessage).artifact).toMatchObject({
+        filename: name,
+        mimetype,
+      });
+    }
+  });
+
+  it('refuses any other type before signing, with an error the model can act on', async () => {
+    const invoke = vi.fn(async () => PRESIGNED);
+    const logger = recordingLogger();
+    for (const name of ['setup.exe', 'bundle.zip', 'page.html', 'old.doc']) {
+      expect(
+        await callTool(invoke, { path: `/output/${name}` }, logger),
+      ).toEqual({
+        ok: false,
+        error: `Cannot send \`/output/${name}\`. This chat can only receive PDF, Word (.docx), Excel (.xlsx), PowerPoint (.pptx), text, CSV, Markdown, PNG or JPEG files. Convert the file, or describe its contents instead.`,
+      });
+    }
+    expect(invoke).not.toHaveBeenCalled();
+    expect(logger.lines).toContain(
+      '[send_file] /output/setup.exe: unsupported type',
+    );
+  });
+
   it('gives the model a clear error when the file is not stored', async () => {
     const logger = recordingLogger();
     const thrown = await callTool(
@@ -392,6 +451,12 @@ describe('send_file', () => {
     expect(chat).toContain('as an attachment in this chat');
     expect(chat).toContain('every file meant for the user');
     expect(chat).toContain('Not for helper scripts or intermediate files.');
+    expect(chat).toContain(
+      'it sends PDF, Word (.docx), Excel (.xlsx), PowerPoint (.pptx), text, CSV, Markdown, PNG or JPEG files only.',
+    );
+    expect(chat).toContain(
+      'do not send a file you downloaded from the internet unless the user asked for that exact file',
+    );
     const room = buildSendFileTool({ invoke }, false).description;
     expect(room).not.toContain('attachment');
     expect(room).toContain('as a link posted in this room');

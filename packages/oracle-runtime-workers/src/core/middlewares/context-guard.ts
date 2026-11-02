@@ -1,12 +1,10 @@
 /**
- * Keeps every model request inside the turn's budget window (the model's
- * window, at most the memory window the isolate can carry).
+ * Keeps every model request inside the model's window.
  *
  * Three layers, all on the request only (graph state and the transcript are
  * never rewritten here):
  *
- *   1. **Pressure pruning.** Above `pruneAtTokens` (35% of the budget
- *      window: the model's, at most the memory window), tool
+ *   1. **Pressure pruning.** Above `pruneAtTokens` (35% of the window), tool
  *      results outside the kept tail are demoted to one-line placeholders
  *      (a capped result keeps its `read_result` handle) and results whose
  *      text is identical to a later one are replaced by a back-reference.
@@ -246,7 +244,7 @@ export function createContextGuardMiddleware(
         tokens = size(messages);
         if (result.pruned > 0) {
           logger.log(
-            `[context] ${why}: pruned ${result.pruned} tool result(s), ~${before} → ~${tokens} tokens (budget window ${budget.budgetWindowTokens})`,
+            `[context] ${why}: pruned ${result.pruned} tool result(s), ~${before} → ~${tokens} tokens (window ${budget.windowTokens})`,
           );
           emit({
             kind: 'prune',
@@ -264,7 +262,7 @@ export function createContextGuardMiddleware(
       if (tokens > budget.requestCapTokens) {
         emit({ kind: 'refused', tokens });
         throw new ContextOverflowError(
-          `The conversation no longer fits ${budget.budgetWindowTokens < budget.windowTokens ? 'what one turn can hold' : "the model's context window"} (about ${tokens} of ${budget.budgetWindowTokens} tokens even after trimming old tool results). Start a new session or ask for a shorter answer.`,
+          `The conversation no longer fits the model's context window (about ${tokens} of ${budget.windowTokens} tokens even after trimming old tool results). Start a new session or ask for a shorter answer.`,
         );
       }
       try {

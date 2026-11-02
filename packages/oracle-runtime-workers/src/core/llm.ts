@@ -1080,16 +1080,6 @@ export function redactSignedLinks(
 }
 
 /**
- * Most memory the client's upload queues may hold (`maxIngestMemoryBytes`,
- * for the run queue and the batches in flight alike). The default is 1 GB,
- * in an isolate of 128 MB whose model calls already hold several copies of
- * their request: past this, LangSmith drops runs (a warning per run) rather
- * than holding them. A run larger than the cap is still sent when the queue
- * is empty.
- */
-export const LANGSMITH_MAX_INGEST_MEMORY_BYTES = 8 * 1024 * 1024;
-
-/**
  * One `langsmith` Client per (apiKey, endpoint) per isolate. Tracer instances
  * are per-turn and cheap; the client owns the batched upload queue, so
  * sharing it is what keeps tracing off the hot path.
@@ -1104,7 +1094,6 @@ function langsmithClientFor(apiKey: string, endpoint?: string): Client {
       apiKey,
       ...(endpoint && { apiUrl: endpoint }),
       anonymizer: redactSignedLinks,
-      maxIngestMemoryBytes: LANGSMITH_MAX_INGEST_MEMORY_BYTES,
     });
     langsmithClients.set(key, client);
   }

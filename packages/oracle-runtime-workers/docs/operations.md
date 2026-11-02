@@ -523,30 +523,55 @@ thread's rows); an unknown cursor is a 400, an unknown session an empty page,
 client can fold the page in by message id. Cost: one indexed range read per
 80 rows plus one lookup per cursor; nothing is written.
 
+### Isolate memory: minify the bundle
+
+Every Durable Object of a script shares that script's isolate, and the
+isolate has 128 MB of heap. A large part of it is taken before any turn
+runs, and it grows with the bundle: the runtime ships TypeScript source and
+each oracle's own `wrangler deploy` bundles it, unminified unless the
+oracle's config says otherwise. Every oracle should
+set `"minify": true` in each of its wrangler configs (oracle and gateway
+script); the package cannot set it for them. The reference configs in
+`apps/qiforge-workers-example` do. Measured with wrangler 4.125.0:
+
+| Script                                    | Upload, unminified      | Upload, minified        |
+| ----------------------------------------- | ----------------------- | ----------------------- |
+| Oracle (`wrangler.devnet.jsonc`)          | 34,400 KiB (gzip 7,113) | 20,965 KiB (gzip 5,588) |
+| Gateway (`wrangler.gateway.devnet.jsonc`) | 11,633 KiB (gzip 2,821) | 9,429 KiB (gzip 2,519)  |
+
+The oracle script's JS heap after boot and one `GET /health` in local
+workerd (`wrangler dev`, read over the inspector with
+`Runtime.getHeapUsage`, two runs each) went from 92.5–95.8 MB unminified to
+64.8–64.9 MB minified. On the Companion oracle the same change took the
+upload from 35 to 21 MB and the boot heap from about 87 to about 54 MB; a
+WhatsApp thread of more than 90k tokens that had reset the isolate
+(`Durable Object's isolate exceeded its memory limit and was reset`) then
+compacted with no reset on devnet. The context budgets below bound what a
+turn adds on top; minifying is what leaves them room.
+
+Keep `"keep_names": true` (wrangler's default for `deploy` and `dev`; the
+example configs state it explicitly). Minifying renames classes and
+functions; `keep_names` restores their `.name`. LangChain's
+`Serializable.lc_name()` falls back to the class name for classes that do
+not override it, and the checkpoint serializer
+(`src/sqlite/serialization.ts`) stores an `Error` subclass by its
+`constructor.name`, so mangled names would end up in traces and in stored
+checkpoints, and change from one deploy to the next. The exported Durable
+Object classes keep their binding names either way (ES module exports are
+never renamed). Turning `keep_names` off would save 417 KiB of upload and
+about 2.5 MB of heap (62.4–62.8 MB): not worth the risk.
+
 ### Turns: context budgets
 
-Every context limit of a turn is a fraction of its budget window: the
-model's own context window, resolved per model
-(`docs/plans/context-budgets.md`), but never more than the memory window,
-`CONTEXT_MEMORY_WINDOW_TOKENS` (default 100,000). A turn runs in a Durable
-Object isolate of 128 MB, and each model call holds several copies of its
-request (the provider body, the trace, the checkpoint), so the isolate
-bounds how large a request may grow, not the model. Before the memory
-window, the thresholds of a 1,050,000-token model were 630,000 / 989,500,
-which no isolate could hold: traced turns reset the isolate
-(`Durable Object's isolate exceeded its memory limit and was reset`) at
-about 92,000 prompt tokens. What an operator sees:
+Every context limit of a turn is a fraction of the model's own context
+window, resolved per model (`docs/plans/context-budgets.md`). What an
+operator sees:
 
 - **The window.** On every turn:
 
   ```
-  [context] model=openai/gpt-5.6-luna window=1050000 (catalog) budgetWindow=100000 summarizeAt=60000 pruneAt=35000 resultCap=48000c requestCap=87000 reserve=8000 summaryInput=83000
+  [context] model=openai/gpt-5.6-luna window=1050000 (catalog) summarizeAt=630000 pruneAt=367500 resultCap=200000c requestCap=989500 reserve=8000 summaryInput=985500
   ```
-
-  `window` is the model's; `budgetWindow` is what every threshold derives
-  from (`GET /debug/context` shows it as `window.budgetTokens`). A model
-  whose window is at most the memory window (a 64k model, a pinned or
-  learned small window) is budgeted on its own window, as before.
 
   `origin` (in brackets) is the source that answered, first hit wins:
   `learned` (a provider's "too long" error named a smaller limit; kept in
@@ -566,8 +591,8 @@ about 92,000 prompt tokens. What an operator sees:
   OpenRouter spells differently). The window is still the model's own, so
   nothing needs doing; if it persists for an OpenRouter model, check the
   `[context] model catalog unavailable` warnings. `default` means nobody
-  knows the model: the window is then 100k, so add the id to the built-in
-  table (or pin it in `MODEL_CONTEXT_OVERRIDES`).
+  knows the model: every threshold is then a fraction of 100k, so add the
+  id to the built-in table (or pin it in `MODEL_CONTEXT_OVERRIDES`).
 - **New models.** A new selectable model goes into the runtime's
   allow-list, `MODEL_CATALOG` in `src/core/llm.ts`, with its
   `contextTokens` (required: the compiler refuses an entry without it; take
@@ -579,14 +604,12 @@ about 92,000 prompt tokens. What an operator sees:
   missing. Check `origin` on `/debug/context` afterwards. The live catalog
   still wins over the table, so a window OpenRouter changes is picked up at
   the next refresh (once per isolate-hour) without a release.
-- **Summarization** fires at 60% of the budget window (tokens of the
-  history, chars/4; never above the request cap nor above what the
+- **Summarization** fires at 60% of the main model's window whatever its
+  size (tokens, chars/4; never above the request cap nor above what the
   summarizer reads), keeps the last 10
   messages, and no longer counts messages (set `CONTEXT_SUMMARIZE_MESSAGES`
-  to add that trigger back). Every model with a window of 100k or more
-  summarizes at 60,000; a 64k one at 38,400. The system prompt and tool
-  schemas come on top of the history, so the request at the trigger is
-  60,000 plus their size. The summary is written by the turn's own
+  to add that trigger back). A 1,050,000-token window summarizes at
+  630,000, a 128k one at 76,800. The summary is written by the turn's own
   model (the `summarizer` role: the same model id and lane as `main` — the
   platform default, a per-request choice, or the BYO model on the user's
   own key; on OpenRouter at `medium` reasoning effort), so no second, smaller window
@@ -599,30 +622,15 @@ about 92,000 prompt tokens. What an operator sees:
   `MODEL_CONTEXT_TOKENS` or a window learned small from a provider error
   behaves the same) or with a raised `CONTEXT_SUMMARIZE_FRACTION`; every
   window in the built-in table (128k and up) gets the plain 60%.
-- **Threads that grew past the memory window.** A thread that grew beyond
-  the trigger before the memory window existed (a Companion thread at
-  90k+ tokens on a 1,050,000-token model) is condensed on its next turn,
-  before that turn's first model call: one summary call that reads the
-  newest `summaryInput` (83,000) tokens of what it condenses, never the
-  whole thread a second time, then the turn goes on with the summary and
-  the last 10 messages. Of a thread longer than that, the oldest part is
-  dropped unread: the model loses it, the transcript keeps it. While the
-  summary runs the object holds the thread (already loaded for the turn)
-  and the summary request, which is smaller than the model call it
-  replaces. If that summary fails, the turn goes on with the full history:
-  above the request cap (after a hard prune) its model call is refused
-  with the error below instead of resetting the isolate, and the next turn
-  tries the summary again.
-- **Spend envelope.** There is no per-turn token limit any more. With the
-  default memory window a single request reaches about 60,000 history
-  tokens (plus the system prompt and schemas) before the history is
-  summarized, and at most the request cap, 87,000, while one turn grows
-  past the trigger, whatever the model's window. The only per-turn
+- **Spend envelope.** There is no per-turn token limit any more. On a
+  1,050,000-token window a single request can reach about 630,000 input
+  tokens before the history is summarized (and up to the request cap,
+  989,500, while one turn grows past the trigger). The only per-turn
   bounds left are `TURN_MAX_TOOL_CALLS` (120 tool attempts) and
   `TURN_TIMEOUT_MS` (600 s), so the worst case is roughly 120 model calls
-  × ~87k input tokens in one turn. A summary runs on the main model
-  too: it reads at most 83,000 input tokens on the turn's model. A raised
-  `CONTEXT_MEMORY_WINDOW_TOKENS` raises all of this with it. BYO users pay all
+  × ~630k input tokens in one turn. A summary now runs on the main model
+  too: at the trigger it reads ~630k input tokens on the turn's model,
+  where it used to read ~112k on `openai/gpt-oss-120b`. BYO users pay all
   of this on their own key, and a long thread can hit their provider's
   per-minute input-token limits (a rate-limit error on their account).
   Watch the `[harness] turn … usage` line and `turn_runs.usage` for it.
@@ -635,9 +643,8 @@ full history for the rest of this turn`); it never replaces the
   turn — the next turn tries again. A summary written in the middle of a
   turn carries the turn's earlier tool calls, so the repetition guard still
   refuses an identical write after it.
-- **Capped tool results.** A result above 12% of the budget window (×4
-  chars: 48,000 chars at 100k; at most 200,000 chars —
-  `CONTEXT_RESULT_CAP_MAX_CHARS`) is stored whole and
+- **Capped tool results.** A result above 12% of the window (×4 chars, at
+  most 200,000 chars — `CONTEXT_RESULT_CAP_MAX_CHARS`) is stored whole and
   the model sees the first 40% and last 60% of the visible budget with a
   footer naming the saved id; `read_result` pages it back by
   byte range. `[result-cap] <tool>: N chars > cap …; saved as … (sqlite|r2)`.
@@ -656,17 +663,14 @@ full history for the rest of this turn`); it never replaces the
   end on UTF-8 character boundaries; `offset`, `length` and `next` say
   where a page really ended. Optionally add an R2 lifecycle rule on the
   `results/` prefix as a belt on top of the sweep.
-- **Pruning under pressure.** Above 35% of the budget window (35,000 at
-  100k, system prompt and schemas included), tool results outside
+- **Pruning under pressure.** Above 35% of the window, tool results outside
   the kept tail become one-line placeholders (a capped one keeps its
   handle) and results identical to a later one become back-references —
   on the request only, never in the checkpoint or the transcript.
   `[context] over the prune threshold: pruned N tool result(s), ~A → ~B tokens`.
-- **Refusal and recovery.** A request still above 95% of the budget window
-  (minus the reply reserve: 87,000 at 100k) after a hard prune fails with
-  "The conversation no longer fits what one turn can hold …" (or "… the
-  model's context window …" when the model's window is the smaller one).
-  Sub-agents share the budget and the guard. A provider overflow lowers the
+- **Refusal and recovery.** A request still above 95% of the window (minus
+  the reply reserve) after a hard prune fails with "The conversation no
+  longer fits the model's context window …". A provider overflow lowers the
   window when the error names a limit (`[context] <model>: window lowered
 A → B`), prunes hard and retries once.
 - **Per-session counters.** `GET /debug/context?session=<id>` adds a

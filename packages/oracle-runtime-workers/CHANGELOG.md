@@ -1,5 +1,53 @@
 # @ixo/oracle-runtime-workers
 
+## 0.36.1
+
+### Patch Changes
+
+- [#453](https://github.com/ixoworld/qiforge/pull/453) [`b7dd124`](https://github.com/ixoworld/qiforge/commit/b7dd124e3bc4f5522713a7de4e76f3c651e8ba98) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Reverts [#449](https://github.com/ixoworld/qiforge/issues/449) (chat-channel files sent to the model as text instead of raw bytes), which went out in 0.36.0 before review. Channel attachments behave as in 0.35.1 again. The change is reopened as its own PR for review.
+
+- [#451](https://github.com/ixoworld/qiforge/pull/451) [`93be63d`](https://github.com/ixoworld/qiforge/commit/93be63db8043fae1d7797b400e488dabe83f235c) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - `send_file` sends only the types the channel gateway delivers: PDF, Word (`.docx`), Excel (`.xlsx`), PowerPoint (`.pptx`), text, CSV, Markdown, PNG and JPEG.
+
+  - Any other extension, the legacy `.doc`, `.xls` and `.ppt` included, fails the call before the file is signed, with an error that names the types and tells the model to convert the file or describe its contents.
+  - The tool description and the chat surface bullet for `send_file` name the same types, and tell the model to build the file in the sandbox rather than send a file downloaded from the internet, unless the user asked for that exact file. The Portal and non-chat surfaces are unchanged.
+
+## 0.36.0
+
+### Minor Changes
+
+- [#446](https://github.com/ixoworld/qiforge/pull/446) [`8de7258`](https://github.com/ixoworld/qiforge/commit/8de7258904ffff532c0f807de4887e7460d3f2ce) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - An oracle on a chat surface now delivers a file it made as an attachment instead of pasting a signed download link.
+
+  - New `send_file` tool (`{ path, caption? }`), bound only on chat surfaces and only when the sandbox can sign links. It signs the stored file through the sandbox's `artifact_get_presigned_url` and returns a new Reply Plan part, `{ partId, kind: 'file', file: { url, filename, mimetype, bytes?, caption?, expiresAt? } }`, in the place of the call. It is `effect: 'read'`: a resumed run may run it again.
+  - The model never receives the link: it travels in `ToolMessage.artifact`, which the checkpoint keeps and no provider is sent. A quote of the reply, the room mirror and the transcript name the file instead, and traces lose the signature of any signed storage link.
+  - A file sent twice in one reply, even under another path alias, is delivered once. A link over 3,800 characters or with credentials fails the call, with an error for the model.
+  - On chat surfaces `artifact_get_presigned_url` is not offered, and URL fields are removed from `artifact_get_by_path`, `artifact_list` and `artifact_get_by_cid` results before the model sees them. The Portal and every non-chat surface keep the upstream tools unchanged.
+  - `capParts` never drops a file part, and several files stay in order. A file already sent survives a reset and a mid-turn summary. A chat run that fails after sending files ends as `finished`, with those files and a line saying the rest is missing; its row keeps the error.
+  - A gateway that cannot read a `file` part drops the plan and sends `text`, which carries the file as a Markdown link line with its caption. Matrix rooms post the file as its name and an "Open file" link, valid until the link expires, and the prompt says so instead of promising an attachment.
+  - `renderSurfaceSection` takes a third, required argument, `files`: whether `send_file` is bound this turn.
+  - A turn's steps now start at the turn's real opening message, so a human message the runtime writes itself (`view_attachment`) no longer cuts earlier steps out of the Reply Plan.
+
+- [#447](https://github.com/ixoworld/qiforge/pull/447) [`ea2c08d`](https://github.com/ixoworld/qiforge/commit/ea2c08df7417708a571f6a0bae8af07a141d0e10) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Long threads no longer reset the user object's isolate in a loop.
+
+  - **A run is recovered at most 8 times in all** (`RUN_RECOVERY_TOTAL_ATTEMPTS`, new; counted by the row's `generation`). Progress still resets the consecutive no-progress counter, but a turn that checkpoints once and resets the isolate again is no longer resumed until its client gives up: it ends `interrupted`, and the channel gateway, the Matrix room and the Portal stream each get their failure notice.
+  - **`redactSignedLinks`** walks a run's payload and serializes it only when a signed link can be in it.
+
+- [#444](https://github.com/ixoworld/qiforge/pull/444) [`0282be6`](https://github.com/ixoworld/qiforge/commit/0282be67bb192bf929d28bf7ce5f8b7f72bc88cc) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Chat delivery is WhatsApp-first: an ordinary answer stays in the conversation instead of becoming a link, because many users read on a WhatsApp-only data plan with no browser. The surface prompt, the `create_artifact` description and the shaper now state the same policy.
+
+  - The shaper spills a step to an artefact only when it is document-length: rendered text (blocks joined by blank lines) over `spillChars`, a list or table with more than `maxListItems` items or rows, or a code block over `maxCodeLines` lines. A small table stays in chat as one line per row, and the number of messages a step packs into no longer spills it.
+  - **`maxBubbles` changed meaning.** It is no longer a spill trigger: a per-oracle `delivery.limits.<surface>.maxBubbles` override now sets how many messages the prompt asks for and the shaper groups toward (paragraphs filled left to right up to `bubbleTarget`, then up to `bubbleMax`; a code block of at least `minBubble` characters keeps its own message). An oracle that lowered it to send fewer messages before an artefact now gets fewer, fuller messages and no artefact.
+  - No message, spill lead or closing is longer than `bubbleMax`: a heading or "…:" lead-in that would pass it with the next block is sent on its own, and a short fragment merges forward only when the result fits.
+  - A spill keeps more in chat: its first block whole when it fits `bubbleMax` (a longer paragraph cut at a sentence; a list or table previewed), and after the link its closing list or table previewed, or its last paragraph (with the paragraph before it when both fit), whether or not it is a question.
+  - A header-only table renders as its header line, an empty first cell no longer renders as `- ****`, the hard split never cuts an emoji, and sentence splitting uses a pinned `en` locale.
+  - New defaults: `spillChars` 4,500 (Slack 6,000, Matrix 8,000), `maxListItems` 15, `maxCodeLines` 40, `maxPartsPerRun` 8, `maxBubbles` 3 on every surface (WhatsApp and Telegram were 4). Matrix group rooms get `maxBubbles: 2, maxPartsPerRun: 3, spillChars: 2400`. Per-oracle `delivery.limits` overrides work as before.
+  - The prompt asks for two or three messages (a blank line marks where a message may break; short paragraphs are grouped), more when the answer needs them, states the list and code sizes that stay in chat, keeps comparisons and short plans in chat, and reserves `create_artifact` for a document or file the user asked for or genuinely document-length output, with the conclusions, decisions and next actions in its message.
+  - `create_artifact`'s `message` now takes up to 1,000 characters (was 600) to hold those conclusions. It is delivered as its own text part before the link, never inside the link card.
+
+### Patch Changes
+
+- [#449](https://github.com/ixoworld/qiforge/pull/449) [`3f988c5`](https://github.com/ixoworld/qiforge/commit/3f988c5fd4b29fe770233017998bc953cb3b10ec) Thanks [@Zach-ixo](https://github.com/Zach-ixo)! - Files from a chat channel (WhatsApp) are never sent to the model as raw bytes. Photos, documents and videos go through the helper model and the turn's model gets their text, whatever it can read natively; `view_attachment` returns them as text too. A native block kept the whole file as base64 in a message that is replayed on every later turn and stored in the checkpoint: a 600 KB PDF counted as about 200,000 tokens and reset the user object's 128 MB isolate on every attempt, leaving the chat stuck until `/new`. Tools still read the file itself through `ctx.session.channel.attachments`, so claim evidence is unchanged. Portal and Matrix files are routed as before.
+
+- [#450](https://github.com/ixoworld/qiforge/pull/450) [`8048724`](https://github.com/ixoworld/qiforge/commit/8048724b7460eb965559d39658ba91aca6eac8b3) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Long threads use far less of the user object's memory. The checkpointer gzipped and gunzipped every message row through its own `CompressionStream` / `DecompressionStream` on every checkpoint read and write, and each stream holds its zlib state outside the JS heap until it is garbage collected, so a turn on a few hundred messages held tens of MiB of zlib state (a devnet test oracle reset at about 120k tokens). Rows are now gzipped with node:zlib's one-shot `gzipSync` / `gunzipSync` (the same gzip format, so existing files read back unchanged). Measured on a deployed oracle: a turn on a 200-message thread kept 50 MiB of headroom instead of 6 MiB.
+
 ## 0.35.1
 
 ### Patch Changes
