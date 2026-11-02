@@ -325,11 +325,9 @@ export const baseEnvSchema = z.object({
   // Parsed by `contextWindowConfig` / `contextKnobs` / `resultStoreKnobs`.
   // The model's context window is resolved per model (override → OpenRouter
   // catalog → MODEL_CONTEXT_TOKENS default, lowered by provider errors); the
-  // fractions derive every limit from it, capped at CONTEXT_MEMORY_WINDOW_TOKENS
-  // (default 100000: what the 128 MB isolate can carry).
+  // fractions derive every limit from it.
   MODEL_CONTEXT_TOKENS: z.string().optional(),
   MODEL_CONTEXT_OVERRIDES: z.string().optional(),
-  CONTEXT_MEMORY_WINDOW_TOKENS: z.string().optional(),
   CONTEXT_SUMMARIZE_FRACTION: z.string().optional(),
   CONTEXT_PRUNE_FRACTION: z.string().optional(),
   CONTEXT_RESULT_CAP_FRACTION: z.string().optional(),
