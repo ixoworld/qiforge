@@ -26,14 +26,14 @@ export const CreateArtifactArgs = z.object({
     // its provider's limit, 4,096 on WhatsApp), never inside the link card.
     .max(1000)
     .describe(
-      'The chat message sent before the link: the conclusions, decisions and next actions, so the user has them without opening the document. Not "here is the document".',
+      'The chat message sent before the document: the conclusions, decisions and next actions, so the user has them without opening the document. Not "here is the document".',
     ),
   followUp: z
     .string()
     .trim()
     .max(300)
     .optional()
-    .describe('At most one short question, sent after the link.'),
+    .describe('At most one short question, sent after the document.'),
 });
 
 /** What the tool returns; the Reply Plan reads it back off the ToolMessage. */
@@ -98,7 +98,7 @@ export function buildCreateArtifactTool(
     {
       name: CREATE_ARTIFACT_TOOL,
       description:
-        'Send the user a document, with a short chat message, ONLY when they asked for a file or document, or when the output is genuinely document-length (a long report, long code, several screens of text). Ordinary answers, comparisons, short plans and lists stay in chat as messages: many users read chat on a data plan with no browser. Put the full Markdown in `content`; put the conclusions, decisions and next actions in `message`, so the user has them without opening the document; at most one question in `followUp`. Call it last and on its own: the reply ends after it, and the user receives the message, the link, then the question.',
+        'Send the user a document, with a short chat message, ONLY when they asked for a document with no particular file format (or for any file, when `send_file` is not available), or when the output is genuinely document-length (a long report, long code, several screens of text). Ordinary answers, comparisons, short plans and lists stay in chat as messages: many users read chat on a data plan with no browser. Put the full Markdown in `content`; put the conclusions, decisions and next actions in `message`, so the user has them without opening the document; at most one question in `followUp`. Call it last and on its own: the reply ends after it, and the user receives the message, the document, then the question. A file in a particular format (Word, PDF, a spreadsheet, an image) is built in the sandbox and goes through `send_file` when that tool is available.',
       schema: CreateArtifactArgs,
       effect: 'read',
     },

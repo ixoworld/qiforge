@@ -80,6 +80,7 @@ import { wrapPluginTool } from './wrap-plugin-tool';
 import { renderSurfaceSection } from '../delivery/prompt';
 import { createReturnDirectFirstMiddleware } from './middlewares/return-direct-first';
 import { CREATE_ARTIFACT_TOOL } from '../artifacts/tool';
+import { SEND_FILE_TOOL } from '../plugins/sandbox/send-file';
 import type { SessionSurface } from '../plugin-api/types';
 
 import { taskExecutionProfile } from './execution-profile';
@@ -927,6 +928,10 @@ export async function createMainAgent(
     surfaceBlock: renderSurfaceSection(
       delivery,
       turnTools.some(({ tool }) => tool.name === CREATE_ARTIFACT_TOOL),
+      allTools.some(
+        ({ pluginName, tool }) =>
+          tool.name === SEND_FILE_TOOL && !unmetRequirements.has(pluginName),
+      ),
     ),
     operatingGuides,
   });

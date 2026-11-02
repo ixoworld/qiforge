@@ -23,6 +23,7 @@ import {
 import { isAttachmentViewMessage } from '../../attachments/retention';
 import { isCapabilityGateRefusal } from './capability-gate';
 import { isToolNotRun } from '../tool-not-run';
+import { SEND_FILE_TOOL } from '../../plugins/sandbox/send-file';
 
 export const SUMMARY_PREFIX = 'Here is a summary of the conversation to date:';
 
@@ -45,6 +46,12 @@ export interface CarriedToolCall {
   status: 'success' | 'error';
   /** The start of its result, for the repetition guard to quote. */
   result: string;
+  /**
+   * A `send_file` call's `ToolMessage.artifact` and tool call id: the Reply
+   * Plan still owes the user that file after the summary removed the call.
+   */
+  artifact?: unknown;
+  id?: string;
 }
 
 /** `additional_kwargs` key of the calls a mid-turn summary carries. */
@@ -65,6 +72,8 @@ export function turnCarryOf(
     const name: unknown = Reflect.get(entry, 'name');
     const status: unknown = Reflect.get(entry, 'status');
     const result: unknown = Reflect.get(entry, 'result');
+    const artifact: unknown = Reflect.get(entry, 'artifact');
+    const id: unknown = Reflect.get(entry, 'id');
     if (typeof name !== 'string') return [];
     if (status !== 'success' && status !== 'error') return [];
     return [
@@ -73,6 +82,8 @@ export function turnCarryOf(
         args: Reflect.get(entry, 'args'),
         status,
         result: typeof result === 'string' ? result : '',
+        ...(artifact !== undefined ? { artifact } : {}),
+        ...(typeof id === 'string' ? { id } : {}),
       },
     ];
   });
@@ -154,6 +165,9 @@ export function carriedCallsOfTurn(
       args: call.args,
       status: message.status === 'error' ? 'error' : 'success',
       result: resultText(message),
+      ...(call.name === SEND_FILE_TOOL && message.artifact !== undefined
+        ? { artifact: message.artifact, id: message.tool_call_id }
+        : {}),
     });
   }
   return carried;

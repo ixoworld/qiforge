@@ -39,6 +39,46 @@ describe('Matrix reply parts', () => {
     );
   });
 
+  it('renders a file as its name, its caption and a link, escaped', () => {
+    const out = replyPartContent({
+      partId: 'p2',
+      kind: 'file',
+      file: {
+        url: 'https://r2.example/o/a.pdf?sig=1&x=2',
+        filename: 'Q3 <plan>.pdf',
+        mimetype: 'application/pdf',
+        caption: 'The <b>report</b>',
+      },
+    });
+    expect(out.body).toBe(
+      'The <b>report</b>\nQ3 <plan>.pdf\nhttps://r2.example/o/a.pdf?sig=1&x=2',
+    );
+    expect(out.formattedBody).toBe(
+      '<p><strong>Q3 &lt;plan&gt;.pdf</strong><br>The &lt;b&gt;report&lt;/b&gt;<br><a href="https://r2.example/o/a.pdf?sig=1&amp;x=2">Open file</a></p>',
+    );
+  });
+
+  it('posts a file part of a plan as its own message', () => {
+    const plan = JSON.stringify({
+      v: 1,
+      parts: [
+        { partId: 'p1', kind: 'text', text: 'Here.' },
+        {
+          partId: 'p2',
+          kind: 'file',
+          file: {
+            url: 'https://r2.example/o/a.pdf',
+            filename: 'a.pdf',
+            mimetype: 'application/pdf',
+          },
+        },
+      ],
+    });
+    const messages = roomReplyMessages({ text: 'Here.', plan });
+    expect(messages.map((m) => m.partId)).toEqual(['p1', 'p2']);
+    expect(messages[1]?.body).toBe('a.pdf\nhttps://r2.example/o/a.pdf');
+  });
+
   it('gives each part of a turn its own stable transaction id', () => {
     const first = replyPartTxnId('$ev/1+x', 'p1');
     expect(first).toBe('reply-$ev_1-x-p1');

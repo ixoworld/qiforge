@@ -404,6 +404,7 @@ import { buildCreateArtifactTool } from '../artifacts/tool';
 import { resolveDeliveryProfile } from '../delivery/profile';
 import {
   draftReplyPlan,
+  failedRunFiles,
   materializeReplyPlan,
   turnSteps,
 } from '../delivery/plan';
@@ -6623,18 +6624,26 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           completed && delivery.kind === 'chat'
             ? await this.replyPlanOf(live, req, capture, delivery)
             : undefined;
+        // `send_file` always needs another model step, which can fail. A
+        // gateway reads a plan only off a `finished` run, so a run that failed
+        // after sending files finishes with them; the row keeps the error.
+        const filesPlan =
+          outcome.status === 'failed' && delivery.kind === 'chat'
+            ? await this.filesOfFailedRun(live, sessionId, delivery)
+            : null;
         const text =
           (live.continuation ?? '') +
           (completed ? lastAiText(capture) : outcome.fullText);
         return {
           status:
-            outcome.status === 'completed'
+            outcome.status === 'completed' || filesPlan
               ? 'finished'
               : outcome.status === 'aborted'
                 ? 'aborted'
                 : 'failed',
           text,
           ...(plan ? { plan } : {}),
+          ...(filesPlan ? { plan: filesPlan } : {}),
           ...(messageId ? { messageId } : {}),
           toolCalls,
           ...(outcome.status === 'failed' ? { error: outcome.error } : {}),
@@ -6662,10 +6671,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       delivery: Extract<DeliveryProfile, { kind: 'chat' }>,
     ): Promise<ReplyPlan> {
       const artifacts = this.artifacts?.canShare ? this.artifacts : null;
-      const { steps, toolResults } = turnSteps(capture);
+      const { steps, toolResults, toolArtifacts } = turnSteps(capture);
       const draft = draftReplyPlan({
         steps,
         toolResults,
+        toolArtifacts,
         continuation: live.continuation,
         limits: delivery.limits,
         canSpill: artifacts !== null,
@@ -6690,9 +6700,47 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       });
       await this.runStore!.setPlan(live.runId, JSON.stringify(plan));
       console.log(
-        `[delivery] run ${live.runId}: ${delivery.surface} reply in ${plan.parts.length} parts (${plan.parts.filter((p) => p.kind === 'artifact').length} artefacts)`,
+        `[delivery] run ${live.runId}: ${delivery.surface} reply in ${plan.parts.length} parts (${plan.parts.filter((p) => p.kind === 'artifact').length} artefacts, ${plan.parts.filter((p) => p.kind === 'file').length} files)`,
       );
       return plan;
+    }
+
+    /**
+     * The plan of a chat run that failed after sending files, or null. It
+     * reads the checkpoint, not `capture`: without the graph's own end,
+     * `capture` is whatever node ended last with messages, and nothing when
+     * an attempt failed early, which would lose an earlier attempt's files.
+     * A read failure leaves the run failed, as it was.
+     */
+    private async filesOfFailedRun(
+      live: LiveRun,
+      sessionId: string,
+      delivery: Extract<DeliveryProfile, { kind: 'chat' }>,
+    ): Promise<ReplyPlan | null> {
+      try {
+        const tuple = await this.saver!.getTuple({
+          configurable: { thread_id: sessionId },
+        });
+        const channel: unknown = tuple?.checkpoint.channel_values.messages;
+        const marks = await this.runStore!.listMarks(live.runId);
+        const plan = await failedRunFiles(
+          Array.isArray(channel) ? channel.filter(isBaseMessage) : [],
+          new Set(marks.map((mark) => mark.toolCallId)),
+          delivery.limits,
+        );
+        if (plan) {
+          await this.runStore!.setPlan(live.runId, JSON.stringify(plan));
+          console.warn(
+            `[delivery] run ${live.runId}: failed after sending ${plan.parts.filter((p) => p.kind === 'file').length} files; delivering them`,
+          );
+        }
+        return plan;
+      } catch (error) {
+        console.warn(
+          `[delivery] run ${live.runId}: could not read the files of a failed run: ${error instanceof Error ? error.name : 'unknown'}`,
+        );
+        return null;
+      }
     }
 
     private async runDirectRead(

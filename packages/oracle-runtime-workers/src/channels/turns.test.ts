@@ -160,6 +160,75 @@ describe('durable channel requests', () => {
     });
   });
 
+  it('carries a file as a link line in the text, for a gateway that cannot read the part', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('reply-plan-file');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    const url = 'https://r2.example/o/report.docx?X-Amz-Signature=deadbeef';
+    const plan: ReplyPlan = {
+      v: 1,
+      parts: [
+        { partId: 'p1', kind: 'text', text: 'Here is the report.' },
+        {
+          partId: 'p2',
+          kind: 'file',
+          file: {
+            url,
+            filename: 'report.docx',
+            mimetype: 'application/msword',
+            caption: 'Q3',
+          },
+        },
+      ],
+    };
+    await stub.finish(first.result.runId, plan);
+    expect(await stub.submit(message)).toMatchObject({
+      ok: true,
+      result: {
+        status: 'finished',
+        text: `Here is the report.\n\nQ3\n\n[report.docx](${url})`,
+        plan,
+      },
+    });
+
+    // A quote of that reply reaches the model, so it names the file instead.
+    for (const [requestId, partId, text] of [
+      [
+        'wa:q-whole',
+        undefined,
+        'Here is the report.\n\nQ3\n\n[File sent: report.docx]',
+      ],
+      ['wa:q-part', 'p2', 'Q3\n\n[File sent: report.docx]'],
+    ] as const) {
+      const quoted = await stub.submit({
+        ...message,
+        requestId,
+        message: 'Thanks',
+        replyTo: {
+          kind: 'known',
+          requestId: message.requestId,
+          author: 'oracle',
+          ...(partId ? { partId } : {}),
+        },
+      });
+      if (!quoted.ok) throw new Error('Turn rejected');
+      const req = JSON.parse((await stub.run(quoted.result.runId))!.request);
+      expect(req.channel.replyContext).toEqual({
+        kind: 'resolved',
+        requestId: message.requestId,
+        author: 'oracle',
+        text,
+      });
+      expect(JSON.stringify(req)).not.toContain('X-Amz-Signature');
+    }
+
+    // The room keeps the file's name: a signed link expires.
+    await stub.settle();
+    expect(await stub.mirrorLog()).toContainEqual(
+      'oracle:Here is the report.\n\nQ3\n\n[File sent: report.docx]',
+    );
+  });
+
   it('erases expired response payloads without permitting a replay after reset', async () => {
     const stub = env.CHANNEL_TURNS_TEST.getByName('expired-response');
     const first = await stub.submit(message);

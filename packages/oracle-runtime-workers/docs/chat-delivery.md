@@ -17,6 +17,7 @@ graph LR
     Plan -->|plan in the poll response| Channels[IXO Channels gateway]
     Plan -->|one event per part| Matrix[Matrix room]
     Run -->|create_artifact or a long step| Art[(artefact: user DB + ciphertext in R2)]
+    Run -->|send_file| File[(a sandbox file, by signed link)]
 ```
 
 ## Delivery profiles
@@ -79,10 +80,11 @@ On a chat turn the prompt composer fills the `{{#SURFACE_BLOCK}}` slot, after th
 - lead with the answer, because the user may have a chat-only data plan and no browser;
 - prefer two or three messages (`maxBubbles` in words), and use more when the answer needs them rather than leave content out;
 - keep ordinary answers in chat, comparisons, short plans and lists included; no headings or tables, and a small comparison as one line per item;
-- use `create_artifact` only for a document or file the user asked for, or for genuinely document-length output, with the conclusions, decisions and next actions in its message;
+- use `create_artifact` only for a document or file the user asked for (with `send_file` bound: a document with no particular file format), or for genuinely document-length output, with the conclusions, decisions and next actions in its message;
+- when `send_file` is bound, deliver every file meant for the user with it (not helper scripts or intermediate files), never paste a download link, and keep `create_artifact` for a document with no particular file format; this bullet comes first. In a Matrix room it says a link is posted, not that an attachment arrives;
 - don't narrate steps, because the user sees a typing indicator.
 
-The section is empty on the Portal. When artefact storage is not configured, the section says instead that everything written is delivered, so a long answer should put the essential part first. The section, the `create_artifact` description and the shaper state the same policy; change them together.
+The section is empty on the Portal. When artefact storage is not configured, the section says instead that everything written is delivered, so a long answer should put the essential part first. The section, the `create_artifact` and `send_file` descriptions and the shaper state the same policy; change them together.
 
 ## Reply Plans
 
@@ -92,13 +94,14 @@ A chat turn's reply is a **Reply Plan**: an ordered list of parts.
 type ReplyPlan = { v: 1; parts: ReplyPart[] };
 type ReplyPart =
   | { partId: string; kind: 'text'; text: string }
-  | { partId: string; kind: 'artifact'; artifact: ArtifactRef };
+  | { partId: string; kind: 'artifact'; artifact: ArtifactRef }
+  | { partId: string; kind: 'file'; file: ReplyFile };
 ```
 
 The plan is built once, when the run finishes, from the turn's AI messages (`src/delivery/plan.ts`). The checkpoint keeps what the model wrote; only the delivery changes.
 
 1. **Narration is dropped.** Text of 200 characters or less written with a tool call ("Checking your calendar.") says nothing once the answer arrives, so it goes when a later step has text or a `create_artifact` call follows. When nothing follows it ("Your flight is 9:40, gate B12." with a `memory_save`), it is the answer and is kept. Longer text before a tool call is always content.
-2. **`create_artifact` becomes three parts:** its message, the artefact, and its optional follow-up question.
+2. **`create_artifact` becomes three parts:** its message, the artefact, and its optional follow-up question. **`send_file` becomes one file part**, where the call stands in the turn; a call that failed adds nothing, and a file sent twice (the same stored path after the upstream normalised it) is delivered once, at its first place.
 3. **Every other step goes through the shaper** (`src/delivery/shaper.ts`):
    - It splits the text into messages on paragraph, line and sentence boundaries, and keeps each message under `bubbleMax`.
    - It turns headings into bold lines and keeps a lead-in ending in `:` together with the list that follows it.
@@ -109,12 +112,37 @@ The plan is built once, when the run finishes, from the turn's AI messages (`src
    - It groups short messages toward `maxBubbles`. A step already within `maxBubbles` keeps the model's message breaks. Otherwise its messages are filled left to right up to `bubbleTarget`, and if that still leaves too many, filled again from the start up to `bubbleMax`. In this step a code block of at least `minBubble` characters keeps its own message; a shorter one merges forward like any fragment. A step that cannot fit stays at more messages, never dropped and never spilled on count.
    - Only a document-length step is **spilled**: rendered text (blocks joined by blank lines) over `spillChars`, a code block over `maxCodeLines` lines, or a list or table over `maxListItems` items or rows. The full text becomes an artefact. In chat the step keeps a lead (its first paragraph or quote whole when it fits `bubbleMax`, cut at a sentence when not, or a list or table preview; a leading code block is skipped, since the artefact holds it, and a lone paragraph after it is the closing instead), the link, and a closing: its last block when the lead did not use it (a closing list or table previewed with its lead-in, or the last paragraph, with the one before it when both fit, or its last sentences that fit). A preview that must shrink keeps fewer items, then cuts one, and always keeps "…and N more". Lead and closing are what `capParts` drops first over the run cap; the artefact holds both.
    - No message, lead or closing is longer than `bubbleMax`. A heading or lead-in starts the message holding the block after it: when both would pass `bubbleMax`, that block is split with the room left. Only a lead-in over half of `bubbleMax` goes ahead as a message of its own, never joined onto the message before it.
-4. **The plan is capped** at `maxPartsPerRun`. The shortest adjacent pair of text parts merges, as long as the result fits `bubbleMax`. If that is not enough, a spill's lead and closing go, since its artefact holds both; the reply's last part stays as long as possible. Text found nowhere else is never dropped, so a reply with several documents, or a long reply without artefact storage, can stay over the cap.
+4. **The plan is capped** at `maxPartsPerRun`. The shortest adjacent pair of text parts merges, as long as the result fits `bubbleMax`. If that is not enough, a spill's lead and closing go, since its artefact holds both; the reply's last part stays as long as possible. Neither a file nor text found nowhere else is ever dropped, so a reply with several documents or files, or a long reply without artefact storage, can stay over the cap.
 5. **A resumed run** puts back the text it had streamed before the reset, minus the steps the checkpoint kept, in front of the first step after them, or after the last step when the checkpoint kept every step. A resumed run with no step of its own delivers that text alone.
 
 Part ids are `p1`…`pn`. The plan is stored in `turn_run_plans` with the run, and pruned with it after the seven-day run retention. A re-poll, a replayed Matrix event or a recovered run therefore gets the same plan and the same artefact links. If an artefact can't be stored, its step is sent as plain messages and the run still finishes.
 
-The turn's `text` (the run record, `TurnResult.text`, the Matrix turn ledger's `reply_text`) is always the model's own text, on every surface; the plan sits next to it (`plan`, `reply_plan`). The plan rendered as one Markdown message, with artefacts as links (`planText`), is what the Companion room mirror of a channel turn shows (once per run, recorded in the channel receipt) and what a finished `/channels/turn` response carries as `text` for gateways that predate plans.
+The turn's `text` (the run record, `TurnResult.text`, the Matrix turn ledger's `reply_text`) is always the model's own text, on every surface; the plan sits next to it (`plan`, `reply_plan`). The plan rendered as one Markdown message, with artefacts and files as links (`planText`), is what a finished `/channels/turn` response carries as `text` for gateways that predate plans. `planTextForModel` names a file instead of linking it: the model reads it when a user quotes that reply, the Companion room mirror of a channel turn shows it (once per run, recorded in the channel receipt), and the transcript lists a reply of files alone with it.
+
+## Files
+
+A file the oracle made in the sandbox reaches the user as an attachment through **`send_file`** (`src/plugins/sandbox/send-file.ts`). `create_artifact` remains for Markdown documents.
+
+- **Binding.** The sandbox plugin binds it on chat turns only, and only when the upstream tools include `artifact_get_presigned_url`. On those turns the model cannot hold a link: `artifact_get_presigned_url` is not offered, and `artifact_get_by_path`, `artifact_list` and `artifact_get_by_cid` return their results without URL fields (a field whose name ends in `url`, and any string value that is a link), with a note in their descriptions. A result that is not JSON is replaced by an error, because links can only be removed from a structured result. The Portal, scheduled tasks and Matrix rooms in the plain style are not chat turns and keep the upstream tools unchanged.
+- **Input and result.** `{ path, caption? }`: `path` is the stored path, such as `/output/report.docx` (the upstream aliases under `/workspace/` work too), and `caption` is at most 1,024 characters. The tool signs the file server side with the upstream default lifetime of 3 hours.
+- **The link never reaches the model.** A signed link is a bearer credential, and a model that holds one pastes it. The model reads the `ToolMessage` content (`ok`, `filename`, `mimetype`, and a line that the file goes out with the reply, which promises nothing before the run ends). The `file` value of the part, link included, rides in `ToolMessage.artifact` with a runtime-only `path`; `@langchain/openai` does not send it to the provider and the Reply Plan reads it back. The link is never logged: failures are logged by kind only, and an upstream error is never repeated to the model, because it could quote a link.
+- **Failure.** A missing file, a failed lookup, or a link a gateway would refuse (over 3,800 characters, or carrying credentials) returns `{ ok: false, error }` to the model, which can fix the path or tell the user. The run goes on: `send_file` is not return-direct, and it adds no part.
+- **A run that fails after sending.** `send_file` always needs another model step, and a gateway reads a plan only off a `finished` run. A chat run that fails after sending files therefore ends as `finished`: the plan holds those files and a line saying the rest is missing, and its row keeps the error. Its text and cards are not delivered. The files come from the checkpoint, limited to this run's tool marks, so a run that failed before writing anything never repeats an earlier turn's file. An aborted run delivers nothing: the user stopped it.
+- **Name and type.** `filename` is the path's last segment without control, format (bidi, zero-width) and filesystem-reserved characters, cut to 200 code points with its extension kept. `mimetype` comes from an allow-list of extensions (`pdf`, `doc`, `docx`, `xls`, `xlsx`, `ppt`, `pptx`, `txt`, `jpg`, `jpeg`, `png`, `md`, `markdown`, `csv`), else `application/octet-stream`. `bytes` is set only if the upstream reports a size; it does not today.
+- **Durability.** `send_file` is `effect: 'read'`, so a call cut off by a reset runs again and gets a new signature. A finished call's `ToolMessage.artifact` is stored with the message in the checkpoint, so a resumed run still delivers it, and a mid-turn summary that condenses the call carries the file in its `turn_carry`. The stored plan keeps the link, so a re-poll after it expired returns a dead link.
+
+```ts
+interface ReplyFile {
+  url: string; // https, signed
+  filename: string;
+  mimetype: string;
+  bytes?: number;
+  caption?: string; // at most 1,024 characters
+  expiresAt?: string; // ISO 8601
+}
+```
+
+The link sits in fewer places than an artefact link: the checkpoint (`ToolMessage.artifact`, and a summary's carry) and the stored plan (`turn_run_plans`, `matrix_turns.reply_plan`, and `text` in the `/channels/turn` response). The room mirror and the transcript hold the name. A LangSmith trace would hold `ToolMessage.artifact` too, so the tracer's client removes the signature of a signed storage link from every run's inputs and outputs (`redactSignedLinks`).
 
 ## Artefacts
 
@@ -183,8 +211,8 @@ A link is **a bearer link: anyone who has it can open the document until it expi
 
 ## Delivery by surface
 
-- **IXO Channels.** A finished `/channels/turn` response carries `plan` next to `text` ([channels](channels.md#reply-plans)). The gateway renders each part in provider syntax, paces the parts, and delivers each one exactly once, keyed by `(userDid, bindingId, requestId, partId)`.
-- **Matrix rooms, chat style on.** The gateway posts one `m.text` event per part in the thread (`src/matrix/reply-parts.ts`). A text part's `formatted_body` is its Markdown rendered to HTML with any raw HTML from the model escaped, never passed through; a link or image whose URL is not `http(s)`, `mailto` or `mxc` renders as its text (an image as its escaped alt text). Room replays of HTTP turns use the same renderer (`renderRoomMarkdown`). An artefact is its title and an "Open document" link. Each part has its own transaction id (`reply-<eventId>-<partId>`), so a replay posts nothing twice. The typing indicator shows liveness while the run works.
+- **IXO Channels.** A finished `/channels/turn` response carries `plan` next to `text` ([channels](channels.md#reply-plans)). The gateway renders each part in provider syntax, paces the parts, and delivers each one exactly once, keyed by `(userDid, bindingId, requestId, partId)`. It sends a `file` part as an attachment. A gateway that cannot read a part drops the whole plan and sends `text`, where a file is a link line.
+- **Matrix rooms, chat style on.** The gateway posts one `m.text` event per part in the thread (`src/matrix/reply-parts.ts`). A text part's `formatted_body` is its Markdown rendered to HTML with any raw HTML from the model escaped, never passed through; a link or image whose URL is not `http(s)`, `mailto` or `mxc` renders as its text (an image as its escaped alt text). Room replays of HTTP turns use the same renderer (`renderRoomMarkdown`). An artefact is its title and an "Open document" link. A file is its name, its caption and an "Open file" link, which works until the link expires: a room has no gateway to fetch it into an attachment. Each part has its own transaction id (`reply-<eventId>-<partId>`), so a replay posts nothing twice. The typing indicator shows liveness while the run works.
 - **Matrix rooms, chat style off (the default).** One plain `m.text` with the reply text and no `formatted_body`, byte for byte what the runtime sent before chat delivery.
 - **Portal.** Unchanged: SSE frames, no plan.
 
@@ -195,3 +223,6 @@ All in `pnpm test` (workerd), listed with what they prove in
 (`src/delivery/*.test.ts`), the Matrix reply parts, the return-direct
 ordering hook, the artefact store, sweep and routes, and the channel turn
 that returns a finished run as its Reply Plan (`src/channels/turns.test.ts`).
+`send_file` and the chat-surface tool filtering are in `pnpm test:core`
+(`src/plugins/sandbox/send-file.test.ts`, `sandbox.plugin.test.ts`,
+`src/core/main-agent.test.ts`), which the workerd suite excludes.

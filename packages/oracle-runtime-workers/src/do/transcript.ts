@@ -16,7 +16,8 @@ import {
 import { SUMMARY_PREFIX } from '../core/middlewares/summarization';
 import { ChannelOrigin, ChannelReplyReference } from '../channels/contract';
 import { CREATE_ARTIFACT_TOOL, createArtifactParts } from '../artifacts/tool';
-import { planText } from '../delivery/schema';
+import { planText, planTextForModel } from '../delivery/schema';
+import { SEND_FILE_TOOL, sentFile } from '../plugins/sandbox/send-file';
 import type {
   ThreadMessageAnchor,
   ThreadMessageRow,
@@ -166,6 +167,7 @@ export async function transformTranscript(
   // The first listed reply that made each tool call: a tool result folds
   // into it (looked up, not searched, so long transcripts stay linear).
   const callers = new Map<string, MessageDto>();
+  const filesOnly = new Set<MessageDto>();
   for (const message of messages) {
     const toolMsg = message.type === 'tool' ? (message as ToolMessage) : null;
     const kw = (message.additional_kwargs ?? {}) as Record<string, unknown>;
@@ -248,6 +250,20 @@ export async function transformTranscript(
               contentToText(toolMsg.content),
             ),
           });
+        // A reply of files alone lists them by name: the link has expired.
+        if (
+          call?.name === SEND_FILE_TOOL &&
+          (filesOnly.has(el) || !el.content.trim())
+        ) {
+          const sent = sentFile(toolMsg.artifact);
+          if (sent) {
+            const named = planTextForModel({
+              parts: [{ kind: 'file', file: sent.file }],
+            });
+            el.content = el.content ? `${el.content}\n\n${named}` : named;
+            filesOnly.add(el);
+          }
+        }
         el.toolCalls = el.toolCalls?.map((t) =>
           t.id === toolCallId
             ? {

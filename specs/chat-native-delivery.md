@@ -85,7 +85,7 @@ A turn resolves a **delivery profile** from its surface. The profile feeds four 
 | Consumer         | What the profile changes                                                                                        |
 | ---------------- | --------------------------------------------------------------------------------------------------------------- |
 | Prompt composer  | Adds the `surface` section ([§5](#5-writing-for-the-surface))                                                   |
-| Tool surface     | Binds `create_artifact` on chat surfaces only ([§7](#7-artefacts))                                              |
+| Tool surface     | Binds `create_artifact` and `send_file` on chat surfaces only ([§7](#7-artefacts))                              |
 | Run completion   | Projects the run into a Reply Plan, running the shaper per model step ([§6](#6-reply-plans))                    |
 | Delivery drivers | The gateway renders and paces parts. The Matrix gateway posts one event per part ([§8](#8-delivery-by-surface)) |
 
@@ -154,12 +154,13 @@ You are replying in {label}. The user reads your reply as chat messages, often o
 - Lead with the answer. Write like a sharp person texting: short sentences, no preamble, no sign-off.
 - Prefer {two or three messages}. A blank line marks where a message may break; short paragraphs are grouped so the reply reads as {two or three messages}. Keep each paragraph under about {bubbleTarget} characters. Use more messages when the answer needs them; never leave content out to fit.
 - Ordinary answers stay in chat, including explanations, comparisons, short plans and step-by-step instructions. No headings or horizontal rules. Lists up to {maxListItems} items, code up to {maxCodeLines} lines and **bold** for the key fact are fine in chat. Write a small comparison as one short line per item, not a table.
-- Use `create_artifact` only when the user asks for a document or file, or when the output is genuinely document-length: several screens of text, long code, a long report. Even then, its message carries the conclusions, decisions and next actions, and the document holds the detail. Call it last: the user gets the message, a link to the document, then at most one follow-up question.
+- Deliver every file meant for the user (a Word document, PDF, spreadsheet, slide deck, image, CSV or anything else) with `send_file`: the user receives the file itself here, as an attachment. When the user asks for a file in a particular format, build it in the sandbox and send it this way. Never paste a download link, and do not describe how to open or download it. Do not send helper scripts or intermediate files. Call it once per file, after the sandbox call that saved the file has finished.
+- Use `create_artifact` for a document with no particular file format, or when the output is genuinely document-length: several screens of text, long code, a long report. Even then, its message carries the conclusions, decisions and next actions, and the document holds the detail. Call it last: the user gets the message, the document, then at most one follow-up question.
 - The user sees a typing indicator while you work. Do not narrate your steps or announce tool calls.
 - End with at most one question.
 ```
 
-`{two or three messages}` is `maxBubbles` in words: "one message", "one or two messages", "two or three messages", else "up to N messages". Without artefact storage, the `create_artifact` line reads instead: "Everything you write is delivered as messages; when something is genuinely long, put the essential part first." (Nothing is withheld there: the shaper never spills without storage.)
+The `send_file` line appears only when the tool is bound, and then comes first. In a Matrix room it says a link to the file is posted instead of promising an attachment. Without `send_file` the `create_artifact` line reads "only when the user asks for a document or file". `{two or three messages}` is `maxBubbles` in words: "one message", "one or two messages", "two or three messages", else "up to N messages". Without artefact storage, the `create_artifact` line reads instead: "Everything you write is delivered as messages; when something is genuinely long, put the essential part first." (Nothing is withheld there: the shaper never spills without storage.)
 
 Why a composer slot rather than a plugin middleware: the surface belongs to the framework, like Node's Slack slot, not to any plugin. The Companion's own `communicationStyle` ("Match energy: one-liners back when terse…") is consistent with the slot and needs no change.
 
@@ -173,7 +174,8 @@ Why a composer slot rather than a plugin middleware: the surface belongs to the 
 // Shared by the runtime, the channel contract and the gateway.
 export type ReplyPart =
   | { partId: string; kind: 'text'; text: string }
-  | { partId: string; kind: 'artifact'; artifact: ArtifactRef };
+  | { partId: string; kind: 'artifact'; artifact: ArtifactRef }
+  | { partId: string; kind: 'file'; file: ReplyFile };
 
 export interface ReplyPlan {
   v: 1;
@@ -201,7 +203,7 @@ The plan is built **once, when the run finishes** (`src/delivery/plan.ts`). Ther
 1. The turn's **model steps** are its AI messages after the last human message. Each step can write text and call tools.
 2. Text of 200 characters or less that precedes a tool call, in one paragraph with no list or code, is **narration** and is dropped. Once the answer arrives, "Checking your calendar" adds nothing.
 3. Any other step text is **content**. It goes through the shaper ([§6.3](#63-the-shaper)). This fixes finding 4: a plan the model writes before calling tools is no longer lost.
-4. A `create_artifact` call adds three parts in order: its `message` as a text part, its `artifact` part, then its optional `followUp` question. This is the same lead → artefact → closing shape as an automatic spill.
+4. A `create_artifact` call adds three parts in order: its `message` as a text part, its `artifact` part, then its optional `followUp` question. This is the same lead → artefact → closing shape as an automatic spill. A `send_file` call adds a `file` part in its place.
 5. The reply is capped at `maxPartsPerRun` by merging the shortest adjacent pair of text parts, as long as the result fits `bubbleMax`. If that is not enough, a spill's lead and closing go, because its artefact holds both; the reply's last part stays as long as possible. Text found nowhere else is never dropped, so a reply with several documents, or a long reply without artefact storage, can stay over the cap.
 6. A resumed run puts back the text it had streamed before the reset, minus the steps the checkpoint kept, in front of the first step after them.
 
@@ -282,6 +284,10 @@ The tool's description carries the same policy as the prompt: use it **only** wh
   - When the model calls it alongside other tools anyway, an `afterModel` hook in the core (`middlewares/return-direct-first.ts`) moves it to the front of that step's tool calls. The loop then continues, and the model sees every result.
 - **Read access.** A second tool, `read_artifact`, would let the model quote from or update an earlier artefact. Later.
 
+### 7.1.1 `send_file`
+
+A file the oracle built in the sandbox (Word, PDF, a spreadsheet, an image) is not a Markdown document. It goes through `send_file({ path, caption? })`, which the sandbox plugin binds on chat turns when the sandbox can sign links (`src/plugins/sandbox/send-file.ts`). The tool signs the stored file server side and the plan delivers a `file` part; the gateway fetches it and sends a native attachment. On chat turns `artifact_get_presigned_url` is not offered and the other `artifact_*` lookups lose their URL fields, so the model never holds a link to paste. The link rides in `ToolMessage.artifact`, not in the content the model reads. [Chat delivery](../packages/oracle-runtime-workers/docs/chat-delivery.md#files) has the details.
+
 ### 7.2 Storage
 
 | Copy          | Where                                                                                                                         | Why                                                                                                                                      |
@@ -360,7 +366,7 @@ sequenceDiagram
 
 | Area                          | Change                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/qiforge.ts`              | Parses `plan` next to `text`. A plan that does not parse is dropped (counted as `qiforge_plan_invalid_total`), and `text` is sent instead.                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `src/qiforge.ts`              | Parses `plan` next to `text`. A plan that does not parse (an older gateway meeting a new part kind included) is dropped (counted as `qiforge_plan_invalid_total`), and `text` is sent instead.                                                                                                                                                                                                                                                                                                                                                  |
 | `outbound_delivery`           | One row per part: `part_id`, `UNIQUE(request_id, part_id)`. The ID is `del_` + HMAC(`delivery \0 requestId \0 partId`): still 64 hex characters, so the receipt regex and `biz_opaque_callback_data` reconciliation still work. Existing objects rebuild the table in place.                                                                                                                                                                                                                                                                    |
 | Ordering and pacing           | Parts go out strictly in order, about a second apart. After an ambiguous (`unknown`) send, the rest of the reply waits ten seconds so the receipt can land first. Graph API pacing errors (pair rate limit 131056; throughput 4, 80007, 130429) are retried without spending the part's attempts.                                                                                                                                                                                                                                               |
 | Ambiguous sends               | A part in `unknown` is never resent. This keeps the gateway spec's rule: "prefer one missing response over multiple user-visible duplicate replies".                                                                                                                                                                                                                                                                                                                                                                                            |

@@ -246,8 +246,9 @@ export interface ChannelTurnResponse {
   text?: string;
   /**
    * A finished turn's Reply Plan: the parts to deliver in order (short
-   * messages and artefact links). `text` stays the whole reply as one
-   * message for gateways that predate plans.
+   * messages, artefact links and files). `text` stays the whole reply as one
+   * message for gateways that predate plans, or that cannot read one of its
+   * parts: a file is a link line there.
    */
   plan?: ReplyPlan;
   actionOutcomes?: ActionOutcomeWire[];

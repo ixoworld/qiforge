@@ -18,6 +18,7 @@ import {
 } from './env';
 import { fetchOpenRouterPrices } from './openrouter-pricing';
 import type { LlmAdapter } from './runtime-context';
+import { stringify } from '../sqlite/serialization';
 import { NOOP_LOGGER } from './utils';
 
 // ── Catalog ─────────────────────────────────────────────────────────────────
@@ -1014,6 +1015,24 @@ export interface LangsmithTracingDecision {
   callbacks?: [LangChainTracer];
 }
 
+/** The signature of a signed storage link, whatever carries the link. */
+const SIGNED_LINK_SIGNATURE = /(X-Amz-Signature=)[0-9a-f]+/gi;
+
+/**
+ * What a trace may keep of a run's inputs and outputs. A signed link is a
+ * bearer credential, and a trace holds every `ToolMessage.artifact`, so its
+ * signature goes. A value that cannot be read is not sent.
+ */
+export function redactSignedLinks(
+  values: Record<string, unknown>,
+): Record<string, unknown> {
+  const json = stringify(values);
+  const redacted = json.replace(SIGNED_LINK_SIGNATURE, '$1[redacted]');
+  if (redacted !== json) return JSON.parse(redacted) as Record<string, unknown>;
+  // `stringify` answers with a bare string when it cannot serialize.
+  return json.startsWith('{') ? values : {};
+}
+
 /**
  * One `langsmith` Client per (apiKey, endpoint) per isolate. Tracer instances
  * are per-turn and cheap; the client owns the batched upload queue, so
@@ -1025,7 +1044,11 @@ function langsmithClientFor(apiKey: string, endpoint?: string): Client {
   const key = `${apiKey}\n${endpoint ?? ''}`;
   let client = langsmithClients.get(key);
   if (!client) {
-    client = new Client({ apiKey, ...(endpoint && { apiUrl: endpoint }) });
+    client = new Client({
+      apiKey,
+      ...(endpoint && { apiUrl: endpoint }),
+      anonymizer: redactSignedLinks,
+    });
     langsmithClients.set(key, client);
   }
   return client;
