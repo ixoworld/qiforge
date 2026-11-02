@@ -19,7 +19,10 @@ import {
   uuid6,
 } from '@langchain/langgraph-checkpoint';
 import { env, runInDurableObject } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import type * as Zlib from 'node:zlib';
+import { gzipSync } from 'node:zlib';
+import { describe, expect, it, vi } from 'vitest';
+
 import {
   stripTurnTimeNote,
   TURN_TIME_NOTE_KWARG,
@@ -41,6 +44,12 @@ import {
 } from './serialization';
 import { PRUNE_SLACK, SqliteSaver } from './sqlite-saver';
 import type { SqliteTestDO } from './test-do';
+
+// Counts the gzips the codec makes (`countGzips`).
+vi.mock('node:zlib', async (importOriginal) => {
+  const zlib = await importOriginal<typeof Zlib>();
+  return { ...zlib, gzipSync: vi.fn(zlib.gzipSync) };
+});
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace -- augmenting the ambient `Cloudflare.Env` needs namespace syntax
@@ -128,21 +137,9 @@ async function integrityOk(db: DoSqliteDatabase): Promise<boolean> {
 
 /** Count gzip pipelines started while `fn` runs. */
 async function countGzips(fn: () => Promise<void>): Promise<number> {
-  const Original = CompressionStream;
-  let count = 0;
-  class Counting extends Original {
-    constructor(format: ConstructorParameters<typeof CompressionStream>[0]) {
-      count++;
-      super(format);
-    }
-  }
-  Reflect.set(globalThis, 'CompressionStream', Counting);
-  try {
-    await fn();
-  } finally {
-    Reflect.set(globalThis, 'CompressionStream', Original);
-  }
-  return count;
+  const before = vi.mocked(gzipSync).mock.calls.length;
+  await fn();
+  return vi.mocked(gzipSync).mock.calls.length - before;
 }
 
 describe('SqliteSaver message rows', () => {
