@@ -7,7 +7,7 @@ Portal turns stream Markdown into a rich view, unchanged. Turns that arrive from
 
 Scheduled task runs never get a chat reply, whichever room they report to: their result is stored and read later, so it keeps the model's whole text.
 
-A chat reply is a few short messages. Anything long becomes a document the user opens in a browser (an **artefact**), linked from the messages. The design and its reasoning are in [`specs/chat-native-delivery.md`](../../../specs/chat-native-delivery.md). This page covers what the runtime does.
+A chat reply is a few short messages, and an ordinary answer stays in them: many users read on WhatsApp alone, with no browser. Only document-length output, or a file the user asked for, becomes a document the user opens in a browser (an **artefact**), linked from the messages, and the messages still carry its conclusions, decisions and next actions. The design and its reasoning are in [`specs/chat-native-delivery.md`](../../../specs/chat-native-delivery.md). This page covers what the runtime does.
 
 ```mermaid
 graph LR
@@ -30,24 +30,26 @@ graph LR
 | `POST /channels/turn`                                      | `chat` for `channel.provider` (`whatsapp`, `telegram`, `slack`), else `generic` |
 | Matrix room (default)                                      | `stream`: the whole reply as one plain message, as before chat delivery         |
 | Matrix room, direct, chat style on                         | `chat` `matrix`                                                                 |
-| Matrix room, group, chat style on                          | `chat` `matrix`, at most 2 messages per step and 3 parts per reply              |
+| Matrix room, group, chat style on                          | `chat` `matrix`: 1–2 messages, 3 parts per reply, spill over 2,400 characters   |
 
 The chat style for Matrix rooms is off unless `MATRIX_CHAT_DELIVERY=true` (per deployment, on the script that runs `UserOracleDO`) or `delivery.matrixChat: true` (in code). The variable wins when it is set, so `MATRIX_CHAT_DELIVERY=false` turns it off again for one deployment.
 
 The limits are character counts, set well below each provider's hard limit. The gateways enforce the hard limits again:
 
-| Limit            | Meaning                                                            | generic, whatsapp | telegram | slack | matrix |
-| ---------------- | ------------------------------------------------------------------ | ----------------- | -------- | ----- | ------ |
-| `bubbleTarget`   | Preferred size of one message                                      | 600               | 800      | 1,200 | 1,200  |
-| `bubbleMax`      | Hard size of one message before a sentence split                   | 1,500             | 2,000    | 3,000 | 4,000  |
-| `minBubble`      | Shorter fragments merge into the next message                      | 60                | 60       | 60    | 60     |
-| `maxBubbles`     | Messages per model step before the step becomes an artefact        | 3 (WhatsApp 4)    | 4        | 3     | 3      |
-| `maxPartsPerRun` | Parts in the whole reply                                           | 5 (WhatsApp 6)    | 6        | 5     | 5      |
-| `spillChars`     | A step's text longer than this becomes an artefact                 | 1,800             | 2,400    | 3,500 | 4,000  |
-| `maxListItems`   | A longer list becomes an artefact with a preview                   | 7                 | 7        | 7     | 7      |
-| `previewItems`   | List items kept in the message that links to the artefact          | 3                 | 3        | 3     | 3      |
-| `maxCodeLines`   | A longer code block becomes an artefact                            | 12                | 12       | 12    | 12     |
-| `tables`         | Whether a table may stay inline (otherwise it becomes an artefact) | no                | no       | no    | no     |
+| Limit            | Meaning                                                                         | generic, whatsapp | telegram | slack | matrix |
+| ---------------- | ------------------------------------------------------------------------------- | ----------------- | -------- | ----- | ------ |
+| `bubbleTarget`   | Preferred size of one message (the prompt asks for it)                          | 600               | 800      | 1,200 | 1,200  |
+| `bubbleMax`      | Hard size of one message before a sentence split                                | 1,500             | 2,000    | 3,000 | 4,000  |
+| `minBubble`      | Shorter fragments merge into the next message                                   | 60                | 60       | 60    | 60     |
+| `maxBubbles`     | Preferred messages: the prompt asks for it, packing merges toward it            | 3                 | 3        | 3     | 3      |
+| `maxPartsPerRun` | Parts in the whole reply, met by merging messages                               | 8                 | 8        | 8     | 8      |
+| `spillChars`     | A step's rendered text longer than this becomes an artefact                     | 4,500             | 4,500    | 6,000 | 8,000  |
+| `maxListItems`   | A longer list, or a table with more rows, becomes an artefact with a preview    | 15                | 15       | 15    | 15     |
+| `previewItems`   | List items kept in the message that links to the artefact                       | 3                 | 3        | 3     | 3      |
+| `maxCodeLines`   | A longer code block becomes an artefact                                         | 40                | 40       | 40    | 40     |
+| `tables`         | Whether a table may stay inline as a table (otherwise one line per row in chat) | no                | no       | no    | no     |
+
+A table never makes a step an artefact, and neither does the number of messages a step packs into. A Matrix group room gets `maxBubbles: 2`, `maxPartsPerRun: 3` and `spillChars: 2400`, so a group never hears a long answer in chat.
 
 An oracle tunes delivery in its config:
 
@@ -60,7 +62,7 @@ createOracleWorker({
       // Matrix rooms reply in chat style too (off by default).
       matrixChat: true,
       // Per-surface overrides of the limits above.
-      limits: { whatsapp: { maxBubbles: 3 } },
+      limits: { whatsapp: { maxBubbles: 2 } },
     },
   },
 });
@@ -74,13 +76,13 @@ Plugins see the profile as `ctx.session.surface`: `{ kind: 'stream' }` or `{ kin
 
 On a chat turn the prompt composer fills the `{{#SURFACE_BLOCK}}` slot, after the communication style, with a section rendered by `renderSurfaceSection` (`src/delivery/prompt.ts`). It tells the model where it is replying and how to write there:
 
-- lead with the answer;
-- write one to three short messages;
-- use no headings or tables;
-- put anything long in `create_artifact`;
+- lead with the answer, because the user may have a chat-only data plan and no browser;
+- prefer two or three messages (`maxBubbles` in words), and use more when the answer needs them rather than leave content out;
+- keep ordinary answers in chat, comparisons, short plans and lists included; no headings or tables, and a small comparison as one line per item;
+- use `create_artifact` only for a document or file the user asked for, or for genuinely document-length output, with the conclusions, decisions and next actions in its message;
 - don't narrate steps, because the user sees a typing indicator.
 
-The section is empty on the Portal. When artefact storage is not configured, the section asks the model to send the short version and offer the rest instead.
+The section is empty on the Portal. When artefact storage is not configured, the section says instead that everything written is delivered, so a long answer should put the essential part first. The section, the `create_artifact` description and the shaper state the same policy; change them together.
 
 ## Reply Plans
 
@@ -103,8 +105,11 @@ The plan is built once, when the run finishes, from the turn's AI messages (`src
    - It reduces raw HTML the lexer found (HTML elements and comments; `<br>` becomes a line break) to its text. Inline code and code blocks stay verbatim, and angle brackets that are not HTML elements (`Promise<string>`) stay.
    - It writes reference links (`[guide][1]`) inline, because their definitions are not delivered.
    - A part that is only whitespace or zero-width characters is never sent.
-   - A step that is too long, holds a table, long code or a long list, or needs more than `maxBubbles` messages is **spilled**: the full text becomes an artefact. The step's messages become a lead (a list preview, or the first paragraph), the link, and the step's closing question, if it had one.
-4. **The plan is capped** at `maxPartsPerRun`. The shortest adjacent pair of text parts merges, as long as the result fits `bubbleMax`. If that is not enough, a spill's lead and closing question go, since its artefact holds both; the reply's last part stays as long as possible. Text found nowhere else is never dropped, so a reply with several documents, or a long reply without artefact storage, can stay over the cap.
+   - A table becomes one line per row (`- **first cell** · Header: value`), unless `tables` is set.
+   - It groups short messages toward `maxBubbles`. A step already within `maxBubbles` keeps the model's message breaks. Otherwise its messages are filled left to right up to `bubbleTarget`, and if that still leaves too many, filled again from the start up to `bubbleMax`. In this step a code block of at least `minBubble` characters keeps its own message; a shorter one merges forward like any fragment. A step that cannot fit stays at more messages, never dropped and never spilled on count.
+   - Only a document-length step is **spilled**: rendered text (blocks joined by blank lines) over `spillChars`, a code block over `maxCodeLines` lines, or a list or table over `maxListItems` items or rows. The full text becomes an artefact. In chat the step keeps a lead (its first paragraph or quote whole when it fits `bubbleMax`, cut at a sentence when not, or a list or table preview; a leading code block is skipped, since the artefact holds it, and a lone paragraph after it is the closing instead), the link, and a closing: its last block when the lead did not use it (a closing list or table previewed with its lead-in, or the last paragraph, with the one before it when both fit, or its last sentences that fit). A preview that must shrink keeps fewer items, then cuts one, and always keeps "…and N more". Lead and closing are what `capParts` drops first over the run cap; the artefact holds both.
+   - No message, lead or closing is longer than `bubbleMax`. A heading or lead-in starts the message holding the block after it: when both would pass `bubbleMax`, that block is split with the room left. Only a lead-in over half of `bubbleMax` goes ahead as a message of its own, never joined onto the message before it.
+4. **The plan is capped** at `maxPartsPerRun`. The shortest adjacent pair of text parts merges, as long as the result fits `bubbleMax`. If that is not enough, a spill's lead and closing go, since its artefact holds both; the reply's last part stays as long as possible. Text found nowhere else is never dropped, so a reply with several documents, or a long reply without artefact storage, can stay over the cap.
 5. **A resumed run** puts back the text it had streamed before the reset, minus the steps the checkpoint kept, in front of the first step after them, or after the last step when the checkpoint kept every step. A resumed run with no step of its own delivers that text alone.
 
 Part ids are `p1`…`pn`. The plan is stored in `turn_run_plans` with the run, and pruned with it after the seven-day run retention. A re-poll, a replayed Matrix event or a recovered run therefore gets the same plan and the same artefact links. If an artefact can't be stored, its step is sent as plain messages and the run still finishes.
@@ -115,10 +120,10 @@ The turn's `text` (the run record, `TurnResult.text`, the Matrix turn ledger's `
 
 ### Creation
 
-- **`create_artifact`** (`src/artifacts/tool.ts`) is bound only on chat turns, and only when storage and a public origin are configured. It takes `title`, `content` (Markdown, up to 200,000 characters), `message` and an optional `followUp`.
+- **`create_artifact`** (`src/artifacts/tool.ts`) is bound only on chat turns, and only when storage and a public origin are configured. It takes `title`, `content` (Markdown, up to 200,000 characters), `message` (up to 1,000 characters: the conclusions, decisions and next actions, so the user has them without opening the document) and an optional `followUp`. Its description reserves it for a document or file the user asked for, or genuinely document-length output.
   - It is a **return-direct** tool: the run ends after it, with no second model call.
   - LangChain ends a step only when the step's _last_ tool call is return-direct. When the model calls it together with other tools, an `afterModel` hook (`src/core/middlewares/return-direct-first.ts`) moves it first, so the run continues and the model sees every result.
-- **Spills** are artefacts the shaper creates from a long step.
+- **Spills** are artefacts the shaper creates from a document-length step.
 
 Ids are deterministic: the first 128 bits of `sha256("artifact\0" + runId + "\0" + source)`. The source is the tool call id, or the step key for a spill. Creation is idempotent per id, so a recovered run gets the same document and the same link.
 

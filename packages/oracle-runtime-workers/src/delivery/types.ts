@@ -9,30 +9,49 @@ import type { ActionReferenceV1 } from '@ixo/action-protocol';
  * agent core, and IXO Channels reads the same shapes off `/channels/turn`.
  */
 
-/** Size and shape limits the shaper enforces on one chat surface. */
+/**
+ * Size and shape limits of one chat surface. An ordinary answer stays in
+ * chat, as few messages as fit and none longer than `bubbleMax`; only a
+ * document-length step (`spillChars`, `maxListItems`, `maxCodeLines`)
+ * moves to an artefact.
+ */
 export interface ChatLimits {
-  /** Soft size of one message, in characters. */
+  /** Soft size of one message, in characters; the prompt asks for it. */
   bubbleTarget: number;
   /** Hard size of one message before it is split at a sentence boundary. */
   bubbleMax: number;
   /** Fragments shorter than this merge into the message that follows. */
   minBubble: number;
-  /** Messages one model step may become before it moves to an artefact. */
+  /**
+   * Preferred messages per answer: the prompt asks for it, and a step with
+   * more messages is filled left to right into messages of `bubbleTarget`,
+   * then of `bubbleMax` if needed (a code block of at least `minBubble`
+   * characters keeps its own message). A
+   * preference only: a step that cannot fit stays at more messages, and
+   * nothing is spilled or dropped to meet it.
+   */
   maxBubbles: number;
   /**
    * Parts one run delivers at most, met by merging text within `bubbleMax`
    * and dropping spill framing. Text found nowhere else is never dropped.
    */
   maxPartsPerRun: number;
-  /** A step longer than this moves to an artefact. */
+  /** A step whose rendered text is longer than this moves to an artefact. */
   spillChars: number;
-  /** A longer list moves to an artefact, previewed by its first items. */
+  /**
+   * A list with more items, or a table with more rows, moves to an
+   * artefact, previewed by its first items.
+   */
   maxListItems: number;
-  /** List items kept in the message when a list moves to an artefact. */
+  /** Items or rows kept in the message when a list or table moves to an artefact. */
   previewItems: number;
-  /** A longer code block moves to an artefact. */
+  /** A code block with more lines moves to an artefact. */
   maxCodeLines: number;
-  /** Whether a Markdown table may stay inside a message. */
+  /**
+   * Whether a Markdown table may stay inside a message as a table. Otherwise
+   * it is rewritten as one line per row. Only its row count can move it to
+   * an artefact (`maxListItems`).
+   */
   tables: boolean;
 }
 

@@ -533,6 +533,42 @@ describe('materializeReplyPlan', () => {
     ]);
   });
 
+  it('keeps a long chat answer and a card within the WhatsApp cap by merging messages', async () => {
+    const paragraphs = Array.from({ length: 10 }, (_, i) =>
+      `Paragraph ${i + 1} of a long answer that stays in chat. `
+        .repeat(5)
+        .trim(),
+    );
+    // As one step, the shaper already groups it: pairs fit `bubbleTarget`
+    // (five messages, over the preferred three), so it fills up to
+    // `bubbleMax`: six and four paragraphs.
+    expect(
+      draftReplyPlan({
+        steps: [{ text: paragraphs.join('\n\n'), toolCalls: [] }],
+        toolResults: new Map(),
+        limits: limits(),
+        canSpill: true,
+      }),
+    ).toHaveLength(2);
+    // Ten messages (from several steps) and a card meet the run's cap.
+    const draft: DraftPart[] = [
+      ...paragraphs.map((text): DraftPart => ({ kind: 'text', text })),
+      { kind: 'artifact', artifact: REF },
+    ];
+    const plan = await materializeReplyPlan(draft, {
+      limits: limits(),
+      createSpill: vi.fn(),
+    });
+    expect(limits().maxPartsPerRun).toBe(8);
+    expect(plan.parts).toHaveLength(8);
+    expect(plan.parts.at(-1)).toMatchObject({ kind: 'artifact' });
+    const texts = plan.parts.flatMap((p) =>
+      p.kind === 'text' ? [p.text] : [],
+    );
+    for (const text of texts) expect(text.length).toBeLessThanOrEqual(1500);
+    expect(texts.join('\n\n')).toBe(paragraphs.join('\n\n'));
+  });
+
   it('keeps text found nowhere else, even over the cap', async () => {
     const draft: DraftPart[] = [
       { kind: 'text', text: 'Here is the deck.' },

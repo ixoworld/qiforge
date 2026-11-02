@@ -19,46 +19,51 @@ const GENERIC: ChatLimits = {
   bubbleMax: 1500,
   minBubble: 60,
   maxBubbles: 3,
-  maxPartsPerRun: 5,
-  spillChars: 1800,
-  maxListItems: 7,
+  maxPartsPerRun: 8,
+  spillChars: 4500,
+  maxListItems: 15,
   previewItems: 3,
-  maxCodeLines: 12,
+  maxCodeLines: 40,
   tables: false,
 };
 
 /**
- * Well under each provider's hard limit (WhatsApp and Telegram 4,096
- * characters, Slack 12,000 per message, Matrix 64 KiB per event): the
- * gateway still enforces the hard limit, and never truncates.
+ * Chat first: many users read on WhatsApp alone, without a browser, so an
+ * ordinary answer (several paragraphs, a list, a small comparison) stays in
+ * the conversation and only a document-length step moves to an artefact.
+ * Message sizes stay well under each provider's hard limit (WhatsApp and
+ * Telegram 4,096 characters, Slack 12,000 per message, Matrix 64 KiB per
+ * event): the gateway still enforces the hard limit, and never truncates.
  */
 const DEFAULT_LIMITS: Readonly<Record<string, ChatLimits>> = {
   generic: GENERIC,
-  whatsapp: { ...GENERIC, maxBubbles: 4, maxPartsPerRun: 6 },
-  telegram: {
-    ...GENERIC,
-    bubbleTarget: 800,
-    bubbleMax: 2000,
-    maxBubbles: 4,
-    maxPartsPerRun: 6,
-    spillChars: 2400,
-  },
+  // The generic limits are WhatsApp's: each entry below lists only what differs.
+  whatsapp: { ...GENERIC },
+  telegram: { ...GENERIC, bubbleTarget: 800, bubbleMax: 2000 },
   slack: {
     ...GENERIC,
     bubbleTarget: 1200,
     bubbleMax: 3000,
-    spillChars: 3500,
+    spillChars: 6000,
   },
   matrix: {
     ...GENERIC,
     bubbleTarget: 1200,
     bubbleMax: 4000,
-    spillChars: 4000,
+    spillChars: 8000,
   },
 };
 
-/** A group room hears one short answer, not a series. */
-const GROUP_LIMITS: Partial<ChatLimits> = { maxBubbles: 2, maxPartsPerRun: 3 };
+/**
+ * A group room hears one short answer, not a series: one or two messages,
+ * the run capped at three parts, and a step over 2,400 characters moves to
+ * an artefact.
+ */
+const GROUP_LIMITS: Partial<ChatLimits> = {
+  maxBubbles: 2,
+  maxPartsPerRun: 3,
+  spillChars: 2400,
+};
 
 const COUNTS = [
   'bubbleTarget',
