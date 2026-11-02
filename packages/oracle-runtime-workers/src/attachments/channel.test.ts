@@ -12,6 +12,7 @@ import {
 import { MAX_FILE_SIZE, type MatrixMediaSource } from './download';
 import type { ExtractionProvider } from './extract';
 import { prepareAttachments } from './pipeline';
+import { viewAttachment } from './view';
 import type { AttachmentInput } from './types';
 
 const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4]);
@@ -176,9 +177,15 @@ describe('channel file links', () => {
 });
 
 describe('channel files in the attachment pipeline', () => {
-  it('sends a photo natively as its bytes and shows the model only its reference', async () => {
+  it('turns a photo into text even for a model that reads images, so no bytes ride in the message, and shows the model only its reference', async () => {
     const { input, link } = await channelFile(JPEG, 'photo.jpg', 'image/jpeg');
-    const fetchImpl = gatewayFetch(() => new Response(JPEG));
+    const fetchImpl = gatewayFetch((url) =>
+      url.endsWith('/chat/completions')
+        ? Response.json({
+            choices: [{ message: { content: 'A shop front.' } }],
+          })
+        : new Response(JPEG),
+    );
     const out = await prepareAttachments(
       { text: '[photo]', attachments: [input], model: 'm', caps: ALL_CAPS },
       {
@@ -190,9 +197,13 @@ describe('channel files in the attachment pipeline', () => {
         logger: LOGGER,
       },
     );
-    expect(Array.isArray(out.content)).toBe(true);
-    expect(out.nativeNotes.map((n) => n.text)).toEqual([
-      `[source: ref="${link.ref}"] "photo.jpg" (image/jpeg) is attached to this message.`,
+    // The message stays plain text: no base64 block in the checkpoint.
+    expect(out.content).toBe('[photo]');
+    expect(out.nativeNotes).toEqual([]);
+    expect(out.extracted.map((e) => e.text)).toEqual([
+      `[source: ref="${link.ref}"]
+[Description of photo.jpg]:
+A shop front.`,
     ]);
     expect(out.metas).toEqual([
       {
@@ -207,7 +218,37 @@ describe('channel files in the attachment pipeline', () => {
     const seen = JSON.stringify(out);
     expect(seen).not.toContain('channels.test');
     expect(seen).not.toContain('sig=');
-    expect(fetchImpl.urls).toEqual([link.url]);
+    expect(fetchImpl.urls[0]).toBe(link.url);
+  });
+
+  it('hands a channel photo back to view_attachment as text, never as bytes to re-attach', async () => {
+    const { input, link } = await channelFile(JPEG, 'photo.jpg', 'image/jpeg');
+    const fetchImpl = gatewayFetch((url) =>
+      url.endsWith('/chat/completions')
+        ? Response.json({
+            choices: [{ message: { content: 'A shop front.' } }],
+          })
+        : new Response(JPEG),
+    );
+    const view = await viewAttachment(
+      {
+        filename: input.filename,
+        mimetype: input.mimetype,
+        channelRef: link.ref,
+        category: 'image',
+      },
+      {
+        source: NO_MATRIX,
+        channel: sourceOf([link]),
+        extraction: PROVIDER,
+        caps: ALL_CAPS,
+        fetchImpl,
+        logger: LOGGER,
+      },
+    );
+    expect(view.kind).toBe('text');
+    if (view.kind !== 'text') throw new Error('unreachable');
+    expect(view.text).toContain('A shop front.');
   });
 
   it('describes a photo through the helper model from its bytes, never its URL, and archives it under a unique name', async () => {
@@ -318,7 +359,9 @@ describe('channel files in the attachment pipeline', () => {
         logger: LOGGER,
       },
     );
-    const note = out.nativeNotes[0]?.text ?? '';
+    // A channel PDF is extracted, never attached: the name is in its note.
+    expect(out.nativeNotes).toEqual([]);
+    const note = out.extracted[0]?.text ?? '';
     const quoted = /"([^"]*)" \(application\/pdf\)/.exec(note)?.[1] ?? '';
     expect(quoted.length).toBeLessThanOrEqual(255);
     // No lone surrogate: every code unit pairs up.
