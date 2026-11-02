@@ -1,5 +1,19 @@
 # @ixo/oracle-runtime-workers
 
+## 0.37.0
+
+### Minor Changes
+
+- [#457](https://github.com/ixoworld/qiforge/pull/457) [`290240a`](https://github.com/ixoworld/qiforge/commit/290240a43da72202891f6644f0c994588a3fb6cd) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Blocked files: the oracle learns why a chat gateway blocked a file it sent, and sends a corrected one.
+
+  - Every channel turn result (submit and every poll, whatever the status) carries `features: ["delivery_notice"]`.
+  - `ChannelTurnBody.notice` (`{ kind: "file_blocked", partId, filename, reason, detail, originalRequestId }`) is a turn the gateway sends in place of a message when it blocked a file for a content reason. It needs `sessionId` and `sessionPolicy: "continue"`, refuses `attachments` and `replyTo`, and is otherwise a turn: same admission, idempotent by `requestId`, same queue, recovery and Reply Plan. The model reads it as a note that is clearly not from the user, with the gateway's filename and detail quoted as data. The note is hidden wherever user messages are shown (Portal transcript and pages, history indexing, `topics` last lines, titles, quotes, routing, the oracle room mirror). The runtime downloads and checks no file.
+  - Where a gateway delivers the file, the `send_file` description, its result and the chat surface bullet say what the gateway blocks and tell the model to say it is sending the file, never that it is attached or delivered. The Portal, scheduled tasks and Matrix rooms are unchanged.
+
+### Patch Changes
+
+- [#459](https://github.com/ixoworld/qiforge/pull/459) [`d89e9f6`](https://github.com/ixoworld/qiforge/commit/d89e9f68fe121214c2853e4dbaadde85e37f832c) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Keep long threads from resetting the user object's 128 MB isolate on turns with tool calls: the main agent runs a message's tool calls in one tools node instead of one full-state graph task per call, LangSmith traces keep only the newest messages of a graph or middleware run's state (a model's prompt stays whole) and upload in batches of at most 4 MiB (no run is dropped), the checkpoint saver re-keys unchanged message rows without serializing them again, and the runtime's literals are Latin-1 so a minified bundle's source is stored at one byte per character.
+
 ## 0.36.1
 
 ### Patch Changes
