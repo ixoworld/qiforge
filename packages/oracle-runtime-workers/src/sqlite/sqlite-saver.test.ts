@@ -28,7 +28,10 @@ import {
   TURN_TIME_NOTE_KWARG,
   withTurnTimeNote,
 } from '../core/turn-time-note';
-import { CHANNEL_REPLY_NOTE_KWARG } from '../channels/replies';
+import {
+  CHANNEL_DELIVERY_NOTICE_KWARG,
+  CHANNEL_REPLY_NOTE_KWARG,
+} from '../channels/replies';
 import {
   type CarriedToolCall,
   SUMMARY_PREFIX,
@@ -689,6 +692,7 @@ describe('the turn time note kwarg', () => {
         {
           ...base,
           [CHANNEL_REPLY_NOTE_KWARG]: '[WhatsApp reply: …]',
+          [CHANNEL_DELIVERY_NOTICE_KWARG]: '[Delivery notice …]',
           'org.ixo.qi.origin': origin,
           'org.ixo.qi.reply': reply,
         },
@@ -700,6 +704,7 @@ describe('the turn time note kwarg', () => {
       oracleName: 'O',
       ...base,
       [CHANNEL_REPLY_NOTE_KWARG]: '[WhatsApp reply: …]',
+      [CHANNEL_DELIVERY_NOTICE_KWARG]: '[Delivery notice …]',
       'org.ixo.qi.origin': origin,
       'org.ixo.qi.reply': reply,
     });
@@ -708,6 +713,7 @@ describe('the turn time note kwarg', () => {
         {
           ...base,
           [CHANNEL_REPLY_NOTE_KWARG]: 7,
+          [CHANNEL_DELIVERY_NOTICE_KWARG]: { kind: 'file_blocked' },
           'org.ixo.qi.origin': 'whatsapp',
           'org.ixo.qi.reply': null,
         },

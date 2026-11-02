@@ -13,7 +13,10 @@
  * circular-safe variant, typed.
  */
 import { TURN_TIME_NOTE_KWARG } from '../core/turn-time-note';
-import { CHANNEL_REPLY_NOTE_KWARG } from '../channels/replies';
+import {
+  CHANNEL_DELIVERY_NOTICE_KWARG,
+  CHANNEL_REPLY_NOTE_KWARG,
+} from '../channels/replies';
 
 /**
  * `additional_kwargs` key of the tool calls a mid-turn summary carries for
@@ -375,6 +378,10 @@ export function cleanAdditionalKwargs(
   const replyNote = additionalKwargs[CHANNEL_REPLY_NOTE_KWARG];
   if (typeof replyNote === 'string')
     cleaned[CHANNEL_REPLY_NOTE_KWARG] = replyNote;
+  // Kept so the message stays hidden wherever user messages are shown.
+  const deliveryNotice = additionalKwargs[CHANNEL_DELIVERY_NOTICE_KWARG];
+  if (typeof deliveryNotice === 'string')
+    cleaned[CHANNEL_DELIVERY_NOTICE_KWARG] = deliveryNotice;
   // Channel provenance, read back typed by the transcript (ChannelOrigin,
   // ChannelReplyReference); anything malformed is dropped there.
   for (const key of ['org.ixo.qi.origin', 'org.ixo.qi.reply'] as const)

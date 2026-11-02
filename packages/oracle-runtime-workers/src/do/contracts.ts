@@ -2,6 +2,7 @@ import type {
   ChannelAttachment,
   ChannelControlInput,
   ChannelControlOutcome,
+  ChannelFileNotice,
   ChannelReplyContext,
   ChannelReplyReference,
 } from '../channels/contract';
@@ -404,6 +405,12 @@ export interface TurnRequest {
     routingClarification?: string;
     /** Files the person sent with this message, as the gateway serves them. */
     attachments?: ChannelAttachment[];
+    /**
+     * The gateway's delivery notice this turn carries instead of a message
+     * from the person (`message` is empty): the model reads it as a note
+     * that is not the user's, and nothing shows it as a user message.
+     */
+    notice?: ChannelFileNotice;
   };
   executionProfile?: TaskExecutionProfile;
   identity: TurnIdentity;

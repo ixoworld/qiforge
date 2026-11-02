@@ -1,6 +1,9 @@
 import {
+  CHANNEL_DELIVERY_NOTICE_KWARG,
+  channelDeliveryNote,
   channelReplyNote,
   CHANNEL_REPLY_NOTE_KWARG,
+  isDeliveryNoticeMessage,
 } from '../channels/replies';
 /**
  * Transcript rendering around attachment payload retention: an offloaded
@@ -835,6 +838,80 @@ describe('createdAt', () => {
       '2026-10-09T08:00:00.000Z',
       '2026-10-09T08:00:01.000Z',
       '2026-10-09T08:00:03.000Z',
+    ]);
+  });
+});
+
+describe('a chat gateway delivery notice', () => {
+  const NOTE = 'Current time: 2026-11-02 12:00 (Asia/Tbilisi)';
+  const noted = (content: BaseMessage['content'], id: string) =>
+    new HumanMessage({
+      id,
+      content,
+      additional_kwargs: { [TURN_TIME_NOTE_KWARG]: NOTE },
+    });
+  const note = channelDeliveryNote({
+    kind: 'file_blocked',
+    partId: 'p2',
+    filename: 'budget.xlsx',
+    reason: 'office_external',
+    detail: 'sheet1.xml cell B2: a reference to another workbook',
+    originalRequestId: 'wa:one',
+  });
+  if (!note) throw new Error('No delivery note');
+  /** The notice turn's message as the user object builds it: time note, delivery note, no words of the person. */
+  const noticeHuman = new HumanMessage({
+    id: 'notice-human',
+    content: withTurnTimeNote(withTurnTimeNote('', note), NOTE),
+    additional_kwargs: {
+      [TURN_TIME_NOTE_KWARG]: NOTE,
+      [CHANNEL_DELIVERY_NOTICE_KWARG]: note,
+      timestamp: '2026-11-02T10:00:02.000Z',
+    },
+  });
+  const thread = () => [
+    noted(withTurnTimeNote('Send me the budget', NOTE), 'h1'),
+    new AIMessage({ id: 'a1', content: 'Sending the budget.' }),
+    noticeHuman,
+    new AIMessage({
+      id: 'a2',
+      content: 'Removed the external reference; sending it again.',
+    }),
+  ];
+
+  it('is not a user message: the transcript lists the reply to it, never the notice', async () => {
+    const listed = await transformTranscript(thread());
+    expect(listed.messages.map((m) => [m.type, m.content])).toEqual([
+      ['human', 'Send me the budget'],
+      ['ai', 'Sending the budget.'],
+      ['ai', 'Removed the external reference; sending it again.'],
+    ]);
+    expect(JSON.stringify(listed)).not.toContain('budget.xlsx');
+    expect(JSON.stringify(listed)).not.toContain('Delivery notice');
+    expect(visibleText(noticeHuman)).toBe('');
+    expect(isDeliveryNoticeMessage(noticeHuman)).toBe(true);
+    expect(isDeliveryNoticeMessage(thread()[0]!)).toBe(false);
+  });
+
+  it('starts no turn of its own: the reply pages with the turn before it', async () => {
+    const source = rowSource(thread());
+    const page = await pageThreadTranscript(source, 'thread', { limit: 1 });
+    expect(page.messages.map((m) => m.content)).toEqual([
+      'Send me the budget',
+      'Sending the budget.',
+      'Removed the external reference; sending it again.',
+    ]);
+    expect(page.hasOlder).toBe(false);
+    // After the first reply, the turn is re-sent whole (the cursor split
+    // it), and the notice is still not in it.
+    const newer = await pageThreadTranscript(source, 'thread', {
+      limit: 5,
+      after: 'a1',
+    });
+    expect(newer.messages.map((m) => m.content)).toEqual([
+      'Send me the budget',
+      'Sending the budget.',
+      'Removed the external reference; sending it again.',
     ]);
   });
 });
