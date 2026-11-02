@@ -12,6 +12,14 @@ Both scripts need:
 
 - `compatibility_flags: ["nodejs_compat"]`, a `compatibility_date` of
   2026-07-15 or later, `observability.enabled`.
+- `"minify": true` and `"keep_names": true`. The runtime ships TypeScript
+  source and the oracle's own `wrangler deploy` bundles it, so only the
+  oracle's config can minify it. Unminified, the isolate's heap is already
+  at 92–96 MB of its 128 MB after boot, before the first turn (the
+  example's oracle script in local workerd; 65 MB minified), and long
+  threads reset the isolate. `keep_names` is wrangler's default; keep it, because LangChain
+  and the checkpoint serializer read class names. Numbers and details:
+  [operations.md, "Isolate memory"](./operations.md#isolate-memory-minify-the-bundle).
 - `alias`: `@matrix-org/matrix-sdk-crypto-wasm` →
   `@ixo/matrix-bot-workers-sdk/crypto-wasm-shim` (the crate's stock entry
   points cannot load on workerd; the shim imports the `.wasm` as a build-time
@@ -591,7 +599,9 @@ curl -X POST https://<oracle>/matrix/start && curl https://<oracle>/matrix/statu
 ```
 
 `wrangler deploy --dry-run --outdir <dir>` builds both bundles without
-uploading and is the fastest check that the aliases resolve.
+uploading and is the fastest check that the aliases resolve. Its
+`Total Upload` line also shows whether `minify` took effect: about
+21,000 KiB for the example's oracle script minified, 34,400 KiB without.
 
 ## Turn budgets and tool execution
 

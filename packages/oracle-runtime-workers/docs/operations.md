@@ -523,6 +523,44 @@ thread's rows); an unknown cursor is a 400, an unknown session an empty page,
 client can fold the page in by message id. Cost: one indexed range read per
 80 rows plus one lookup per cursor; nothing is written.
 
+### Isolate memory: minify the bundle
+
+Every Durable Object of a script shares that script's isolate, and the
+isolate has 128 MB of heap. A large part of it is taken before any turn
+runs, and it grows with the bundle: the runtime ships TypeScript source and
+each oracle's own `wrangler deploy` bundles it, unminified unless the
+oracle's config says otherwise. Every oracle should
+set `"minify": true` in each of its wrangler configs (oracle and gateway
+script); the package cannot set it for them. The reference configs in
+`apps/qiforge-workers-example` do. Measured with wrangler 4.125.0:
+
+| Script                                    | Upload, unminified      | Upload, minified        |
+| ----------------------------------------- | ----------------------- | ----------------------- |
+| Oracle (`wrangler.devnet.jsonc`)          | 34,400 KiB (gzip 7,113) | 20,965 KiB (gzip 5,588) |
+| Gateway (`wrangler.gateway.devnet.jsonc`) | 11,633 KiB (gzip 2,821) | 9,429 KiB (gzip 2,519)  |
+
+The oracle script's JS heap after boot and one `GET /health` in local
+workerd (`wrangler dev`, read over the inspector with
+`Runtime.getHeapUsage`, two runs each) went from 92.5–95.8 MB unminified to
+64.8–64.9 MB minified. On the Companion oracle the same change took the
+upload from 35 to 21 MB and the boot heap from about 87 to about 54 MB; a
+WhatsApp thread of more than 90k tokens that had reset the isolate
+(`Durable Object's isolate exceeded its memory limit and was reset`) then
+compacted with no reset on devnet. The context budgets below bound what a
+turn adds on top; minifying is what leaves them room.
+
+Keep `"keep_names": true` (wrangler's default for `deploy` and `dev`; the
+example configs state it explicitly). Minifying renames classes and
+functions; `keep_names` restores their `.name`. LangChain's
+`Serializable.lc_name()` falls back to the class name for classes that do
+not override it, and the checkpoint serializer
+(`src/sqlite/serialization.ts`) stores an `Error` subclass by its
+`constructor.name`, so mangled names would end up in traces and in stored
+checkpoints, and change from one deploy to the next. The exported Durable
+Object classes keep their binding names either way (ES module exports are
+never renamed). Turning `keep_names` off would save 417 KiB of upload and
+about 2.5 MB of heap (62.4–62.8 MB): not worth the risk.
+
 ### Turns: context budgets
 
 Every context limit of a turn is a fraction of its budget window: the
