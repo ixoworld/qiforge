@@ -1,6 +1,8 @@
+import { taskCardSummary } from '../plugins/tasks/tasks-tools';
 import {
   ActionInteractionError,
   type CheckClaimDispatch,
+  type CheckDispatch,
 } from '@ixo/action-interactions';
 import {
   ActionInteractionStore,
@@ -3159,6 +3161,20 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       });
     }
 
+    async readActionInteractionTask(
+      identity: TurnIdentity,
+      sessionId: string,
+      taskId: string,
+    ) {
+      return interactionOutcome(async () => {
+        await this.interactionStore(identity, sessionId);
+        const task = await this.taskScheduler?.surface.get(taskId);
+        if (!task)
+          throw new ActionInteractionError(404, 'not_found', 'Task not found');
+        return JSON.stringify({ task: taskCardSummary(task) });
+      });
+    }
+
     /**
      * The draft store without a boot: the object is addressed by the
      * caller's DID, and the stored binding is checked against it.
@@ -3171,6 +3187,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return new ActionInteractionStore(this.ctx.storage, {
         oracleDid: this.env.ORACLE_DID,
         userDid: identity.userDid,
+      });
+    }
+
+    async checkDispatch(identity: TurnIdentity, input: CheckDispatch) {
+      return interactionOutcome(async () => {
+        // Runs before every bid, claim-block and approval effect: no boot, as in checkClaimDispatch.
+        const store = await this.bareInteractionStore(identity);
+        return JSON.stringify(await store.checkDispatch(input));
       });
     }
 
@@ -3235,19 +3259,26 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       identity: TurnIdentity,
       command: InteractionCommand,
     ) {
-      return interactionOutcome(async () =>
-        JSON.stringify(
-          await (
-            await this.interactionStore(identity, command.input.sessionId)
-          ).command(command),
-        ),
-      );
+      return interactionOutcome(async () => {
+        const store = await this.interactionStore(
+          identity,
+          command.input.sessionId,
+        );
+        if (
+          command.kind === 'prepare' &&
+          command.input.owner.kind === 'task' &&
+          !(await this.taskScheduler?.surface.get(command.input.owner.taskId))
+        )
+          throw new ActionInteractionError(404, 'not_found', 'Task not found');
+        return JSON.stringify(await store.command(command));
+      });
     }
 
     async readActionInteraction(
       identity: TurnIdentity,
       sessionId: string,
       id?: string,
+      references = false,
     ) {
       return interactionOutcome(async () => {
         // Card polls never boot the object or count as activity: they read a
@@ -3256,7 +3287,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         // with it, so no session lookup is needed to hide them.
         const store = await this.bareInteractionStore(identity);
         return JSON.stringify(
-          await (id ? store.read(id, sessionId) : store.list(sessionId)),
+          await (id
+            ? store.read(id, sessionId)
+            : references
+              ? store.listReferences(sessionId)
+              : store.list(sessionId)),
         );
       });
     }

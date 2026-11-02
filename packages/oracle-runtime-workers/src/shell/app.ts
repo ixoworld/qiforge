@@ -1,6 +1,7 @@
 import {
   ActionInteractionError,
   CheckClaimDispatchSchema,
+  CheckDispatchSchema,
 } from '@ixo/action-interactions';
 import { ZodError } from 'zod';
 import {
@@ -437,8 +438,25 @@ export function createShell(
         ? {
             actionInteractions: {
               version: 1,
-              owners: ['flow-claim', 'question', 'artifact'],
-              operations: ['prepare', 'read', 'update', 'reserve', 'observe'],
+              owners: [
+                'flow-claim',
+                'flow-claim-block',
+                'flow-bid',
+                'owner-reference',
+                'approval',
+                'task',
+                'question',
+                'artifact',
+              ],
+              operations: [
+                'prepare',
+                'read',
+                'update',
+                'reserve',
+                'observe',
+                'dispatch',
+                'read-task',
+              ],
             },
           }
         : {}),
@@ -742,7 +760,8 @@ export function createShell(
   app.use('/action-interactions*', async (c, next) => {
     if (
       c.env.ACTION_INTERACTIONS_ENABLED !== 'true' &&
-      c.req.path !== '/action-interactions/claim-dispatch'
+      c.req.path !== '/action-interactions/claim-dispatch' &&
+      c.req.path !== '/action-interactions/dispatch'
     )
       return c.json(
         { code: 'unavailable', message: 'Action interactions are disabled' },
@@ -758,14 +777,67 @@ export function createShell(
       );
     return next();
   });
-  app.use(
-    '/action-interactions*',
+  const interactionBodyLimit = (maxSize: number) =>
     bodyLimit({
-      maxSize: 96 * 1024,
+      maxSize,
       onError: (c) =>
         c.json({ code: 'too_large', message: 'Request is too large' }, 413),
-    }),
+    });
+  const smallInteractionBody = interactionBodyLimit(96 * 1024);
+  // Only a prepare can carry a domain-write approval (up to 2 MiB).
+  const preparedInteractionBody = interactionBodyLimit(2 * 1024 * 1024);
+  app.use('/action-interactions*', (c, next) =>
+    c.req.method === 'POST' && c.req.path === '/action-interactions'
+      ? preparedInteractionBody(c, next)
+      : smallInteractionBody(c, next),
   );
+  app.get('/action-interactions/tasks/:taskId', async (c) => {
+    const sessionId = c.req.query('sessionId');
+    if (!sessionId)
+      return c.json(
+        { code: 'invalid_request', message: 'sessionId is required' },
+        400,
+      );
+    const identity = identityOf(c.get('auth'), c.req.raw.headers);
+    const result = await userStub(
+      c.env,
+      identity.userDid,
+    ).readActionInteractionTask(identity, sessionId, c.req.param('taskId'));
+    if (result.ok)
+      return new Response(result.value, {
+        headers: {
+          'content-type': 'application/json',
+          'cache-control': 'no-store',
+        },
+      });
+    return c.json({ code: result.code, message: result.message }, 404);
+  });
+  app.post('/action-interactions/dispatch', async (c) => {
+    const parsed = CheckDispatchSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success)
+      return c.json(
+        { code: 'invalid_request', message: 'Invalid dispatch binding' },
+        400,
+      );
+    const identity = identityOf(c.get('auth'), c.req.raw.headers);
+    const result = await userStub(c.env, identity.userDid).checkDispatch(
+      identity,
+      parsed.data,
+    );
+    if (result.ok)
+      return new Response(result.value, {
+        headers: {
+          'content-type': 'application/json',
+          'cache-control': 'no-store',
+        },
+      });
+    return c.json(
+      { code: result.code, message: result.message },
+      result.status === 403 ? 403 : 409,
+    );
+  });
   app.post('/action-interactions/claim-dispatch', async (c) => {
     const parsed = CheckClaimDispatchSchema.safeParse(
       await c.req.json().catch(() => null),
@@ -812,7 +884,12 @@ export function createShell(
           const result = await userStub(
             c.env,
             identity.userDid,
-          ).readActionInteraction(identity, read.sessionId, read.id);
+          ).readActionInteraction(
+            identity,
+            read.sessionId,
+            read.id,
+            c.req.query('view') === 'references',
+          );
           if (result.ok)
             return new Response(result.value, {
               headers: {

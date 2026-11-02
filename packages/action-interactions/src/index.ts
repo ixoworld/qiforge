@@ -20,14 +20,119 @@ const claimOwnerShape = {
   network: text,
   accountDid: text,
 };
+const claimBlockOwnerShape = {
+  ...claimOwnerShape,
+  kind: z.literal('flow-claim-block'),
+};
+const bidOwnerShape = {
+  ...claimOwnerShape,
+  kind: z.literal('flow-bid'),
+  roleId: text,
+  groupId: text.optional(),
+};
+const approvalOwnerShape = {
+  kind: z.literal('approval'),
+  family: z.enum(['plugin', 'domain-write', 'recipe-release']),
+  requestKey: text,
+  accountDid: text,
+};
 const claimOwner = z.strictObject(claimOwnerShape);
+const claimBlockOwner = z.strictObject(claimBlockOwnerShape);
+const bidOwner = z.strictObject(bidOwnerShape);
+const approvalOwner = z.strictObject(approvalOwnerShape);
+const matrixEventLocatorShape = {
+  family: z.enum([
+    'matrix-flow-input',
+    'matrix-evaluation-review',
+    'matrix-commerce',
+  ]),
+  roomId: text,
+  eventId: text,
+  revision: text,
+  threadRootEventId: text.optional(),
+};
+const topicLocatorShape = {
+  family: z.enum(['topic-proposal', 'topic-outcome', 'topic-review']),
+  roomId: text,
+  topicId: text,
+  threadRootEventId: text,
+  eventId: text,
+  revision: text,
+};
+const flowDetailLocatorShape = {
+  family: z.literal('flow-detail'),
+  roomId: text,
+  flowId: text,
+  runId: text,
+  stepId: text,
+  actionType: text,
+  revision: text,
+};
+const flowDetailSelectionShape = {
+  kind: z.literal('claim'),
+  claimId: text,
+  collectionId: text,
+  resultDigest: text.optional(),
+};
+const workbenchLocatorShape = {
+  family: z.literal('workbench-proposal'),
+  entityDid: text,
+  formId: text,
+  baseContentHash: text,
+  proposalDigest: text,
+};
+/** Locators only. The native owner revalidates access, revision and every human action. */
+export const OwnerReferenceLocatorSchema = z.discriminatedUnion('family', [
+  z.strictObject(matrixEventLocatorShape),
+  z.strictObject(topicLocatorShape),
+  z.strictObject({
+    ...flowDetailLocatorShape,
+    selection: z.strictObject(flowDetailSelectionShape).optional(),
+  }),
+  z.strictObject(workbenchLocatorShape),
+]);
+export type OwnerReferenceLocator = z.infer<typeof OwnerReferenceLocatorSchema>;
+const ownerReference = z.strictObject({
+  kind: z.literal('owner-reference'),
+  accountDid: text,
+  locator: OwnerReferenceLocatorSchema,
+});
+const storedOwnerReference = z.object({
+  kind: z.literal('owner-reference'),
+  accountDid: text,
+  locator: z.discriminatedUnion('family', [
+    z.object(matrixEventLocatorShape),
+    z.object(topicLocatorShape),
+    z.object({
+      ...flowDetailLocatorShape,
+      selection: z.object(flowDetailSelectionShape).optional(),
+    }),
+    z.object(workbenchLocatorShape),
+  ]),
+});
+export const DispatchOwnerSchema = z.discriminatedUnion('kind', [
+  claimOwner,
+  claimBlockOwner,
+  bidOwner,
+  approvalOwner,
+]);
 export const InteractionOwnerSchema = z.discriminatedUnion('kind', [
   claimOwner,
+  claimBlockOwner,
+  bidOwner,
+  approvalOwner,
+  ownerReference,
+  z.strictObject({ kind: z.literal('task'), taskId: text }),
   z.strictObject({ kind: z.literal('question'), requestId: text }),
   z.strictObject({ kind: z.literal('artifact'), artifactId: text }),
 ]);
 const storedOwner = z.discriminatedUnion('kind', [
   z.object(claimOwnerShape),
+  z.object(claimBlockOwnerShape),
+  z.object(bidOwnerShape),
+  z.object(approvalOwnerShape),
+  storedOwnerReference,
+  z.object({ kind: z.literal('task'), taskId: text }),
   z.object({ kind: z.literal('question'), requestId: text }),
   z.object({ kind: z.literal('artifact'), artifactId: text }),
 ]);
@@ -71,6 +176,7 @@ export const ObserveInteractionSchema = z.discriminatedUnion('outcome', [
     ...mutation,
     operationKey: requestId,
     outcome: z.literal('unknown'),
+    receipt: values.optional(),
   }),
   /**
    * The executor refused before anything was sent (a declined signature,
@@ -87,6 +193,14 @@ export const ObserveInteractionSchema = z.discriminatedUnion('outcome', [
     operationKey: requestId,
     outcome: z.literal('reported'),
     ownerExecutionRef: text,
+    receipt: values.optional(),
+  }),
+  z.strictObject({
+    ...mutation,
+    operationKey: requestId,
+    outcome: z.literal('partial'),
+    ownerExecutionRef: text,
+    receipt: values.optional(),
   }),
 ]);
 export const CheckClaimDispatchSchema = z
@@ -103,6 +217,21 @@ export const CheckClaimDispatchSchema = z
   .refine((input) => Boolean(input.cardRef) === Boolean(input.operationKey), {
     message: 'cardRef and operationKey must be supplied together',
   });
+export const CheckDispatchSchema = z
+  .strictObject({
+    version: z.literal(1),
+    owner: DispatchOwnerSchema,
+    cardRef: requestId.optional(),
+    operationKey: requestId.optional(),
+    valuesDigest: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+  })
+  .refine((input) => Boolean(input.cardRef) === Boolean(input.operationKey), {
+    message: 'cardRef and operationKey must be supplied together',
+  });
+export type CheckDispatch = z.infer<typeof CheckDispatchSchema>;
 export type CheckClaimDispatch = z.infer<typeof CheckClaimDispatchSchema>;
 export const ClaimDispatchResultSchema = z.object({
   allowed: z.literal(true),
@@ -122,6 +251,7 @@ export const InteractionSchema = z.object({
     'reserved',
     'outcome-unknown',
     'observed',
+    'partial',
     'cancelled',
   ]),
   createdAt: z.number().int(),
@@ -130,6 +260,7 @@ export const InteractionSchema = z.object({
     .object({ operationKey: requestId, valuesDigest: text })
     .optional(),
   ownerExecutionRef: text.optional(),
+  receipt: values.optional(),
   /**
    * Why a `cancelled` draft ended: `user` when a person or the agent
    * cancelled it; `superseded` when the same claim step was submitted from
@@ -140,6 +271,12 @@ export const InteractionSchema = z.object({
    */
   cancelReason: z.enum(['user', 'superseded', 'not-submitted']).optional(),
 });
+export const InteractionReferenceSchema = InteractionSchema.omit({
+  values: true,
+  updatedByUser: true,
+  receipt: true,
+}).strip();
+export type InteractionReference = z.infer<typeof InteractionReferenceSchema>;
 export const InteractionResultSchema = z.object({
   interaction: InteractionSchema,
   replayed: z.boolean(),
@@ -228,6 +365,18 @@ export function createActionInteractionsClient(options: {
     return body;
   }
   return {
+    readTask: async (taskId: string, sessionId: string) =>
+      z
+        .object({ task: values })
+        .parse(
+          await request(
+            `/tasks/${encodeURIComponent(taskId)}?sessionId=${encodeURIComponent(sessionId)}`,
+          ),
+        ),
+    checkDispatch: async (input: CheckDispatch) =>
+      ClaimDispatchResultSchema.parse(
+        await request('/dispatch', 'POST', CheckDispatchSchema.parse(input)),
+      ),
     checkClaimDispatch: async (input: CheckClaimDispatch) =>
       ClaimDispatchResultSchema.parse(
         await request(
@@ -236,6 +385,14 @@ export function createActionInteractionsClient(options: {
           CheckClaimDispatchSchema.parse(input),
         ),
       ),
+    listReferences: async (sessionId: string) =>
+      z
+        .array(InteractionReferenceSchema)
+        .parse(
+          await request(
+            `?sessionId=${encodeURIComponent(sessionId)}&view=references`,
+          ),
+        ),
     /** One unreadable record is left out instead of failing the whole list. */
     list: async (sessionId: string) =>
       z

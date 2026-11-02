@@ -3,13 +3,17 @@ import {
   canonicalJson,
   interactionValuesDigest,
   InteractionSchema,
+  InteractionReferenceSchema,
   type Interaction,
+  type InteractionReference,
   type InteractionResult,
   type PrepareInteraction,
   type UpdateInteraction,
   type ReserveInteraction,
   type ObserveInteraction,
   type CheckClaimDispatch,
+  type CheckDispatch,
+  type JsonValue,
 } from '@ixo/action-interactions';
 /* eslint-disable no-console -- console IS the logger on Workers (Logs/observability). */
 
@@ -27,6 +31,10 @@ const DISPATCH_PREFIX = 'interaction-dispatch:';
 const RECENT_PREFIX = 'interaction-recent:';
 /** `<owner key hash>` → when the ordinary form last passed the dispatch check for that claim step. */
 const MANUAL_PREFIX = 'interaction-manual:';
+/** `<id>` → how many chunks hold the values of a record too large for one storage value. */
+const CHUNK_COUNT_PREFIX = 'interaction-chunks:';
+/** `<id>:<index>` → one chunk of such a record's serialized values. */
+const CHUNK_PREFIX = 'interaction-value:';
 /**
  * Replays of edits only need the newest requests: an older retry fails the
  * revision compare-and-swap instead, which never applies an edit twice.
@@ -34,12 +42,18 @@ const MANUAL_PREFIX = 'interaction-manual:';
 const RECENT_LIMIT = 16;
 /** Values plus the user-edit list of one record, in UTF-8 bytes. */
 const MAX_RECORD_BYTES = 64 * 1024;
+/** A domain-write approval carries a file batch; 16 KiB stays free for the record's metadata. */
+const MAX_DOMAIN_WRITE_BYTES = 2 * 1024 * 1024 - 16 * 1024;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TTL_MS = 7 * DAY_MS;
 /** How long an expired record stays readable before retention removes its values. */
 const RETAIN_MS = 30 * DAY_MS;
 /** The newest records one session list returns. */
 const LIST_LIMIT = 50;
+/** One full session list, values included, in UTF-8 bytes. */
+const LIST_MAX_BYTES = 8 * 1024 * 1024;
+/** The newest records one reference list returns. */
+const REFERENCE_LIST_LIMIT = 1000;
 /**
  * Drafts one chat may hold before retention removes some. A question owner
  * is keyed by its request id, so without a cap a runaway agent could write
@@ -74,18 +88,35 @@ const utf8Bytes = (text: string) => new TextEncoder().encode(text).byteLength;
 function assertRecordSize(
   values: Interaction['values'],
   updatedByUser: string[],
+  owner: Interaction['owner'],
 ) {
+  const limit =
+    owner.kind === 'approval' && owner.family === 'domain-write'
+      ? MAX_DOMAIN_WRITE_BYTES
+      : MAX_RECORD_BYTES;
   if (
     utf8Bytes(canonicalJson(values)) +
       utf8Bytes(JSON.stringify(updatedByUser)) >
-    MAX_RECORD_BYTES
+    limit
   )
     throw new ActionInteractionError(
       413,
       'too_large',
-      'Draft values exceed 64 KiB',
+      'Draft values exceed the owner payload limit',
     );
 }
+/**
+ * A record this version cannot read (corrupt, a missing chunk, or a value a
+ * newer runtime added to a closed list). Refused as a conflict, never a 500:
+ * the Portal treats a 5xx from the dispatch check as "could not ask" and
+ * would let a claim through.
+ */
+const unreadableRecord = () =>
+  new ActionInteractionError(
+    409,
+    'record_unreadable',
+    'This Companion draft cannot be read; check the claims list before submitting',
+  );
 type RecentRequest = { requestId: string; fingerprint: string };
 const manualMarkerKey = (ownerKey: string) =>
   `${MANUAL_PREFIX}${ownerKey.slice(ownerKey.indexOf(':') + 1)}`;
@@ -124,8 +155,22 @@ async function ownerStorageKey(
   sessionId: string,
 ): Promise<string> {
   const binding =
-    owner.kind === 'flow-claim'
+    owner.kind === 'flow-claim' ||
+    owner.kind === 'flow-claim-block' ||
+    owner.kind === 'flow-bid'
       ? {
+          ...(owner.kind === 'flow-claim-block'
+            ? { collectionId: owner.collectionId }
+            : {}),
+          // A bid for another role or group of the same step is a separate operation.
+          ...(owner.kind === 'flow-bid'
+            ? {
+                roleId: owner.roleId,
+                ...(owner.groupId === undefined
+                  ? {}
+                  : { groupId: owner.groupId }),
+              }
+            : {}),
           kind: owner.kind,
           flowId: owner.flowId,
           runId: owner.runId,
@@ -136,11 +181,41 @@ async function ownerStorageKey(
       : owner;
   return `interaction-owner:${await sha256Hex(
     canonicalJson(
-      owner.kind === 'flow-claim'
+      owner.kind === 'flow-claim' ||
+        owner.kind === 'flow-claim-block' ||
+        owner.kind === 'flow-bid' ||
+        owner.kind === 'approval'
         ? { owner: binding }
         : { sessionId, owner: binding },
     ),
   )}`;
+}
+
+/** Receipt checkpoints may add facts, but cannot erase an acknowledged effect. */
+function extendsReceipt(
+  previous: JsonValue,
+  next: JsonValue | undefined,
+): boolean {
+  if (next === undefined) return false;
+  if (Array.isArray(previous))
+    return (
+      Array.isArray(next) &&
+      previous.every(
+        (value, index) =>
+          index < next.length && extendsReceipt(value, next[index]),
+      )
+    );
+  if (previous !== null && typeof previous === 'object')
+    return (
+      next !== null &&
+      typeof next === 'object' &&
+      !Array.isArray(next) &&
+      Object.entries(previous).every(
+        ([key, value]) =>
+          Object.hasOwn(next, key) && extendsReceipt(value, next[key]),
+      )
+    );
+  return previous === next;
 }
 
 /**
@@ -165,8 +240,12 @@ export class ActionInteractionStore {
   ) {}
 
   /** A dispatch precondition, never an authorization grant or an executor. */
-  async checkClaimDispatch(
-    input: CheckClaimDispatch,
+  async checkClaimDispatch(input: CheckClaimDispatch) {
+    return this.checkDispatch(input);
+  }
+
+  async checkDispatch(
+    input: CheckDispatch,
   ): Promise<{ allowed: true; managed: boolean }> {
     if (input.owner.accountDid !== this.context.userDid)
       throw new ActionInteractionError(
@@ -180,6 +259,12 @@ export class ActionInteractionStore {
       const id = await tx.get<string>(ownerKey);
       const record = id ? await this.recordFrom(tx, id) : undefined;
       if (!input.cardRef) {
+        if (input.owner.kind === 'approval')
+          throw new ActionInteractionError(
+            409,
+            'review_required',
+            'An approval dispatches only through its reviewed card',
+          );
         // The ordinary form. It only has to wait for a Companion operation
         // that may already have reached the executor; any other draft for
         // this step is superseded, so its own dispatch check can no longer
@@ -227,7 +312,7 @@ export class ActionInteractionStore {
         throw new ActionInteractionError(
           409,
           'review_required',
-          'This claim step has a managed draft; reopen and review its current operation',
+          'This action has a managed draft; reopen and review its current operation',
         );
       const consumedKey = `${DISPATCH_PREFIX}${input.operationKey}`;
       if ((await tx.get<true | 'released'>(consumedKey)) !== undefined)
@@ -247,26 +332,64 @@ export class ActionInteractionStore {
 
   /** The session's newest records, oldest first, read through its own index. */
   async list(sessionId: string): Promise<Interaction[]> {
-    const index = await this.storage.list<string>({
-      prefix: `${SESSION_PREFIX}${await sha256Hex(sessionId)}:`,
-      reverse: true,
-      limit: LIST_LIMIT,
-    });
-    const ids = Array.from(index.values()).reverse();
-    const records = new Map<string, unknown>();
-    for (let i = 0; i < ids.length; i += STORAGE_BATCH)
-      for (const [key, value] of await this.storage.get<unknown>(
-        ids.slice(i, i + STORAGE_BATCH).map((id) => `${PREFIX}${id}`),
-      ))
-        records.set(key, value);
-    return ids.flatMap((id) => {
-      const raw = records.get(`${PREFIX}${id}`);
+    const ids = await this.sessionIds(sessionId, LIST_LIMIT);
+    const stored = await this.getMany(
+      ids.flatMap((id) => [`${PREFIX}${id}`, `${CHUNK_COUNT_PREFIX}${id}`]),
+    );
+    const result: Interaction[] = [];
+    let bytes = 0;
+    for (const id of ids) {
       // One unreadable record is left out instead of failing the list.
-      const record = InteractionSchema.safeParse(raw);
+      const parsed = InteractionSchema.safeParse(stored.get(`${PREFIX}${id}`));
+      if (!parsed.success || parsed.data.sessionId !== sessionId) continue;
+      const record = stored.has(`${CHUNK_COUNT_PREFIX}${id}`)
+        ? await this.load(this.storage, id).catch(() => undefined)
+        : parsed.data;
+      if (!record) continue;
+      bytes += utf8Bytes(JSON.stringify(record));
+      if (bytes > LIST_MAX_BYTES)
+        throw new ActionInteractionError(
+          413,
+          'list_too_large',
+          'Use reference listing and read individual interactions',
+        );
+      result.push(record);
+    }
+    return result;
+  }
+
+  /** The session's records without values, so large histories list cheaply. */
+  async listReferences(sessionId: string): Promise<InteractionReference[]> {
+    const ids = await this.sessionIds(sessionId, REFERENCE_LIST_LIMIT);
+    const stored = await this.getMany(ids.map((id) => `${PREFIX}${id}`));
+    return ids.flatMap((id) => {
+      const record = InteractionReferenceSchema.safeParse(
+        stored.get(`${PREFIX}${id}`),
+      );
       return record.success && record.data.sessionId === sessionId
         ? [record.data]
         : [];
     });
+  }
+
+  /** The session's newest record ids, oldest first. */
+  private async sessionIds(sessionId: string, limit: number) {
+    const index = await this.storage.list<string>({
+      prefix: `${SESSION_PREFIX}${await sha256Hex(sessionId)}:`,
+      reverse: true,
+      limit,
+    });
+    return Array.from(index.values()).reverse();
+  }
+
+  private async getMany(keys: string[]) {
+    const found = new Map<string, unknown>();
+    for (let i = 0; i < keys.length; i += STORAGE_BATCH)
+      for (const [key, value] of await this.storage.get<unknown>(
+        keys.slice(i, i + STORAGE_BATCH),
+      ))
+        found.set(key, value);
+    return found;
   }
 
   /**
@@ -361,16 +484,22 @@ export class ActionInteractionStore {
       }
       throw error;
     }
+    const chunks = record ? await this.chunkKeys(tx, id) : [];
     if (record && (await this.ownerState(tx, record)) === 'blocked') {
-      if (Object.keys(record.values).length || record.updatedByUser.length)
+      if (
+        Object.keys(record.values).length ||
+        record.updatedByUser.length ||
+        chunks.length
+      )
         await tx.put(`${PREFIX}${id}`, {
           ...record,
           values: {},
           updatedByUser: [],
           revision: record.revision + 1,
         } satisfies Interaction);
+      doomed.push(...chunks);
     } else if (record) {
-      doomed.push(`${PREFIX}${id}`, await sessionIndexKey(record));
+      doomed.push(`${PREFIX}${id}`, await sessionIndexKey(record), ...chunks);
       const ownerKey = await ownerStorageKey(record.owner, record.sessionId);
       if ((await tx.get<string>(ownerKey)) === id) doomed.push(ownerKey);
     }
@@ -384,16 +513,7 @@ export class ActionInteractionStore {
     const raw = await storage.get<unknown>(`${PREFIX}${id}`);
     if (raw === undefined) return undefined;
     const record = InteractionSchema.safeParse(raw);
-    if (!record.success)
-      // A record this version cannot read (corrupt, or a value a newer
-      // runtime added to a closed list). Refused as a conflict, never a
-      // 500: the Portal treats a 5xx from the dispatch check as "could not
-      // ask" and would let a claim through.
-      throw new ActionInteractionError(
-        409,
-        'record_unreadable',
-        'This Companion draft cannot be read; check the claims list before submitting',
-      );
+    if (!record.success) throw unreadableRecord();
     return record.data;
   }
 
@@ -401,7 +521,8 @@ export class ActionInteractionStore {
     storage: Pick<DurableObjectStorage, 'get'>,
     record: Interaction,
   ): Promise<OwnerState> {
-    if (record.status === 'observed') return 'blocked';
+    if (record.status === 'observed' || record.status === 'partial')
+      return 'blocked';
     if (record.reservation && (await this.dispatched(storage, record)))
       return 'blocked';
     if (
@@ -438,12 +559,88 @@ export class ActionInteractionStore {
     return ended;
   }
 
+  /** The record with its values, reassembled when `save` split them into chunks. */
+  private async load(
+    storage: Pick<DurableObjectStorage, 'get'>,
+    id: string,
+  ): Promise<Interaction | undefined> {
+    const record = await this.recordFrom(storage, id);
+    if (!record) return undefined;
+    const keys = (await this.chunkKeys(storage, id)).slice(1);
+    if (keys.length === 0) return record;
+    const parts: string[] = [];
+    for (let i = 0; i < keys.length; i += STORAGE_BATCH) {
+      const batch = keys.slice(i, i + STORAGE_BATCH);
+      const found = await storage.get<string>(batch);
+      for (const key of batch) {
+        const part = found.get(key);
+        if (part === undefined) throw unreadableRecord();
+        parts.push(part);
+      }
+    }
+    let values: unknown;
+    try {
+      values = JSON.parse(parts.join(''));
+    } catch {
+      throw unreadableRecord();
+    }
+    const full = InteractionSchema.safeParse({ ...record, values });
+    if (!full.success) throw unreadableRecord();
+    return full.data;
+  }
+
+  /** The chunk count key, then each chunk key, of a record `save` split; empty otherwise. */
+  private async chunkKeys(
+    storage: Pick<DurableObjectStorage, 'get'>,
+    id: string,
+  ): Promise<string[]> {
+    const count = await storage.get<number>(`${CHUNK_COUNT_PREFIX}${id}`);
+    if (!count) return [];
+    return [
+      `${CHUNK_COUNT_PREFIX}${id}`,
+      ...Array.from(
+        { length: count },
+        (_, index) => `${CHUNK_PREFIX}${id}:${index}`,
+      ),
+    ];
+  }
+
+  private async save(
+    storage: Pick<DurableObjectStorage, 'put'>,
+    record: Interaction,
+  ): Promise<void> {
+    const totalLimit =
+      record.owner.kind === 'approval' && record.owner.family === 'domain-write'
+        ? 2 * 1024 * 1024
+        : 96 * 1024;
+    if (utf8Bytes(JSON.stringify(record)) > totalLimit)
+      throw new ActionInteractionError(
+        413,
+        'too_large',
+        'Interaction exceeds the owner record limit',
+      );
+    const payload = JSON.stringify(record.values);
+    if (utf8Bytes(JSON.stringify(record)) <= 96 * 1024) {
+      await storage.put(`${PREFIX}${record.id}`, record);
+      return;
+    }
+    // 24K UTF-16 units always encode below the 128KiB DO value ceiling.
+    const chunks = Math.ceil(payload.length / (24 * 1024));
+    for (let index = 0; index < chunks; index++)
+      await storage.put(
+        `${CHUNK_PREFIX}${record.id}:${index}`,
+        payload.slice(index * 24 * 1024, (index + 1) * 24 * 1024),
+      );
+    await storage.put(`${CHUNK_COUNT_PREFIX}${record.id}`, chunks);
+    await storage.put(`${PREFIX}${record.id}`, { ...record, values: {} });
+  }
+
   private async readFrom(
     storage: Pick<DurableObjectStorage, 'get'>,
     id: string,
     sessionId: string,
   ): Promise<Interaction> {
-    const record = await this.recordFrom(storage, id);
+    const record = await this.load(storage, id);
     if (!record || record.sessionId !== sessionId)
       throw new ActionInteractionError(
         404,
@@ -516,7 +713,16 @@ export class ActionInteractionStore {
       if (command.kind === 'prepare') {
         const input = command.input;
         if (
-          input.owner.kind === 'flow-claim' &&
+          input.owner.kind === 'owner-reference' &&
+          Object.keys(input.values).length !== 0
+        )
+          throw new ActionInteractionError(
+            400,
+            'reference_values_forbidden',
+            'Owner references contain locators only',
+          );
+        if (
+          'accountDid' in input.owner &&
           input.owner.accountDid !== this.context.userDid
         )
           throw new ActionInteractionError(
@@ -524,10 +730,24 @@ export class ActionInteractionStore {
             'account_mismatch',
             'Claim account differs from authenticated user',
           );
-        assertRecordSize(input.values, []);
+        assertRecordSize(input.values, [], input.owner);
+        if (
+          input.owner.kind === 'approval' &&
+          (!input.values.request ||
+            typeof input.values.request !== 'object' ||
+            Array.isArray(input.values.request) ||
+            Object.keys(input.values).length !== 1)
+        )
+          throw new ActionInteractionError(
+            400,
+            'invalid_request',
+            'Approval values must contain exactly one request object',
+          );
         const ownerKey = await ownerStorageKey(input.owner, input.sessionId);
         if (
-          input.owner.kind === 'flow-claim' &&
+          (input.owner.kind === 'flow-claim' ||
+            input.owner.kind === 'flow-claim-block' ||
+            input.owner.kind === 'flow-bid') &&
           (await tx.get<number>(manualMarkerKey(ownerKey))) !== undefined
         )
           // The ordinary form already passed its dispatch check for this
@@ -544,6 +764,17 @@ export class ActionInteractionStore {
         if (existing) {
           const sameOwner =
             canonicalJson(existing.owner) === canonicalJson(input.owner);
+          if (
+            input.owner.kind === 'approval' &&
+            sameOwner &&
+            canonicalJson((await this.load(tx, existing.id))?.values ?? {}) !==
+              canonicalJson(input.values)
+          )
+            throw new ActionInteractionError(
+              409,
+              'request_conflict',
+              'Approval request identity already binds different values',
+            );
           const sameSession = existing.sessionId === input.sessionId;
           const state = await this.ownerState(tx, existing);
           const inFlight = state === 'live' && existing.status === 'reserved';
@@ -613,6 +844,12 @@ export class ActionInteractionStore {
         });
       } else {
         record = await this.readFrom(tx, command.id, command.input.sessionId);
+        if (record.owner.kind === 'owner-reference')
+          throw new ActionInteractionError(
+            409,
+            'reference_read_only',
+            'Native owners retain draft, decision and execution authority',
+          );
         // A host may report the outcome of a reservation made just before
         // expiry; every other mutation of an expired draft is refused.
         if (command.kind !== 'observe' && record.expiresAt <= this.now())
@@ -647,6 +884,12 @@ export class ActionInteractionStore {
             if (command.input.kind === 'cancel')
               record = { ...record, status: 'cancelled', cancelReason: 'user' };
             else {
+              if (record.owner.kind === 'approval')
+                throw new ActionInteractionError(
+                  409,
+                  'immutable_request',
+                  'Approval requests cannot be changed after preparation',
+                );
               const input = command.input;
               const patch = Object.fromEntries(
                 Object.entries(input.patch).filter(
@@ -672,17 +915,25 @@ export class ActionInteractionStore {
                       ]),
                     )
                   : record.updatedByUser;
-              assertRecordSize(merged, updatedByUser);
+              assertRecordSize(merged, updatedByUser, record.owner);
               record = { ...record, values: merged, updatedByUser };
             }
             break;
           }
           case 'reserve': {
-            if (record.owner.kind !== 'flow-claim' || record.status !== 'draft')
+            if (
+              ![
+                'flow-claim',
+                'flow-claim-block',
+                'flow-bid',
+                'approval',
+              ].includes(record.owner.kind) ||
+              record.status !== 'draft'
+            )
               throw new ActionInteractionError(
                 409,
                 'not_dispatchable',
-                'Only an unreserved claim draft can be reserved',
+                'Only an unreserved executable draft can be reserved',
               );
             if (
               (await interactionValuesDigest(record.values)) !==
@@ -705,13 +956,32 @@ export class ActionInteractionStore {
           }
           case 'observe': {
             const outcome = command.input.outcome;
+            const receipt =
+              'receipt' in command.input ? command.input.receipt : undefined;
+            if (
+              record.receipt &&
+              receipt &&
+              !extendsReceipt(record.receipt, receipt)
+            )
+              throw new ActionInteractionError(
+                409,
+                'receipt_conflict',
+                'Receipt checkpoints cannot remove or change acknowledged effects',
+              );
+            if (receipt && utf8Bytes(canonicalJson(receipt)) > 64 * 1024)
+              throw new ActionInteractionError(
+                413,
+                'too_large',
+                'Receipt exceeds 64 KiB',
+              );
             if (
               !record.reservation ||
               record.reservation.operationKey !== command.input.operationKey ||
               !(outcome === 'not-submitted'
                 ? record.status === 'reserved'
                 : record.status === 'reserved' ||
-                  record.status === 'outcome-unknown')
+                  record.status === 'outcome-unknown' ||
+                  record.status === 'partial')
             )
               throw new ActionInteractionError(
                 409,
@@ -733,10 +1003,18 @@ export class ActionInteractionStore {
             } else
               record =
                 command.input.outcome === 'unknown'
-                  ? { ...record, status: 'outcome-unknown' }
+                  ? {
+                      ...record,
+                      status: 'outcome-unknown',
+                      ...(receipt ? { receipt } : {}),
+                    }
                   : {
                       ...record,
-                      status: 'observed',
+                      status:
+                        command.input.outcome === 'partial'
+                          ? 'partial'
+                          : 'observed',
+                      ...(receipt ? { receipt } : {}),
                       ownerExecutionRef: command.input.ownerExecutionRef,
                     };
             break;
@@ -748,7 +1026,7 @@ export class ActionInteractionStore {
         interaction: record,
         replayed: false,
       };
-      await tx.put(`${PREFIX}${record.id}`, record);
+      await this.save(tx, record);
       await remember(tx, record.id);
       return result;
     });

@@ -16,7 +16,8 @@ that the session still exists in that object. No body can select another user
 or oracle. The oracle DID comes from runtime configuration. Requests are parsed
 before a user object is addressed: only the shapes below exist, path ids must
 be UUIDs and `sessionId` is at most 512 characters; anything else is 404 or 400,
-and every refusal of these routes (including a body over 96 KiB) is JSON
+and every refusal of these routes (including a body over 96 KiB, or over
+2 MiB for a prepare) is JSON
 `{code, message}`. The shell's shared authentication (401) and rate limit (429)
 answer `{statusCode, message}`; the client turns those into the codes
 `unauthorized` and `rate_limited`.
@@ -158,3 +159,67 @@ Validate with the portable package tests, Workers package typecheck, and
 `vitest run src/action-interactions/store.test.ts`. The latter uses workerd and
 real Durable Object storage transactions. Live claim/signature execution
 remains an independent acceptance gate in Portal.
+
+## Additional owner families
+
+The version 1 contract also supports these owner bindings. All are private to the
+same authenticated user; ownership names are not execution permissions.
+
+| Kind               | Immutable binding                                                                 | Execution owner                 |
+| ------------------ | --------------------------------------------------------------------------------- | ------------------------------- |
+| `flow-claim-block` | Claim fields, with collection included in the uniqueness key                      | Existing claim-block executor   |
+| `flow-bid`         | Claim fields plus `roleId` and optional `groupId`, both in the uniqueness key     | Existing Flow bid executor      |
+| `approval`         | `family` (`plugin`, `domain-write`, `recipe-release`), `requestKey`, `accountDid` | Existing host approval handlers |
+| `task`             | Existing owner `taskId`                                                           | Scheduler; card is read-only    |
+
+`client.checkDispatch` calls authenticated `POST /action-interactions/dispatch`
+with the full owner plus `cardRef`, `operationKey` and `valuesDigest`. This is the
+same one-time dispatch precondition as the legacy claim route, which remains
+compatible. Unmanaged Flow claims and bids can continue through their existing
+manual handler. Approval dispatch always requires a matching managed request.
+Both dispatch routes remain active when preparation is disabled.
+
+Approval `values` must contain exactly `{request: <JSON object>}`. The entire
+request is immutable after preparation, including edits labelled as user edits.
+A request key reused with different executable bytes fails. Only draft approvals
+can be cancelled. Reservation does not grant consent, signing or authority.
+
+`observe` accepts an optional JSON `receipt`, bounded to 64 KiB, and a `partial`
+outcome in addition to `reported` and `unknown`. Partial effects are durable
+checkpoints of the same reserved operation. Use an append-only `receipt.events`
+array for file and release-phase effects. A later checkpoint must preserve every
+previously acknowledged fact; it cannot remove array entries or change scalar
+values. Checkpoints use CAS revisions; after an acknowledgment is lost, read the
+current record before reconciling. A final `reported` checkpoint may add a final
+summary. Partial and unknown records never release another dispatch reservation.
+None of these statuses verifies completion or proves external effects.
+
+Domain-write approval requests accept up to 2 MiB including record overhead
+(16 KiB reserved for metadata), enough for the existing 1 MiB UTF-8 write batch.
+Other draft values retain the 64 KiB UTF-8 byte limit. Large approval values are
+stored as private DO chunks of 24K UTF-16 units, each below the 128 KiB storage
+value ceiling, with the metadata and chunks committed in one transaction. They
+are never placed in public VFS files. Reads and authenticated session listings
+rehydrate the same immutable values; isolate recreation does not lose checkpoints.
+The HTTP JSON body limit is 2 MiB for a prepare and 96 KiB for every other
+interaction request. JSON escaping and overhead count toward it.
+
+`client.readTask(taskId, sessionId)` calls authenticated
+`GET /action-interactions/tasks/:taskId?sessionId=...`. It reads the existing
+scheduler record and returns `{task: <get_task summary>}` using the same redaction
+as `get_task`; restricted source text and result summaries are omitted. Preparing
+a task reference requires an existing task in that user's scheduler. Cards must
+read this owner state rather than treating proposal values as current task state.
+Pending approval is display-only here; this protocol does not approve an occurrence.
+
+The extension keeps the existing draft store and dispatch precondition rather
+than adding a parallel executor. This preserves signing and permissions in the
+existing Flow, plugin, domain and release owners. A separate card executor was
+rejected because it would duplicate those authority checks and lose their receipts.
+
+For large histories, `client.listReferences(sessionId)` uses
+`GET /action-interactions?sessionId=...&view=references` to return metadata
+without draft values, user-edit markers or receipts. Read selected references
+individually. Full listings fail with `list_too_large` above 8 MiB instead of
+materializing an unbounded response. Listings retain the existing 1,000-reference
+limit; paging a longer history remains follow-up work.
