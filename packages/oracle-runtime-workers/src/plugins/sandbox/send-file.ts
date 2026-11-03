@@ -76,7 +76,7 @@ export const SENDABLE_FILE_TYPES =
  * chat turn's prompt.
  */
 export const FILE_SAFETY_NOTE =
-  'The gateway scans every file and blocks macros, embedded objects, active PDF content, external references, non-http links and content that does not match the type: build files without them. Say you are sending the file; do not state that it is attached or delivered.';
+  'The gateway scans every file and blocks macros, embedded objects, active PDF content, external references, live-data formulas (STOCKHISTORY, WEBSERVICE, IMPORT…), non-http links and content that does not match the type: build files without them, and for live data fetch it and write the values in. Say you are sending the file; do not state that it is attached, ready or delivered.';
 
 /** The MIME type of a filename `send_file` may send; `undefined` for any other. */
 export function fileMimetype(filename: string): string | undefined {
@@ -310,7 +310,7 @@ export function buildSendFileTool(
           filename,
           mimetype,
           delivery: attachments
-            ? 'Goes out with your reply, after the gateway has checked the file. Do not paste a link, and do not state that it is attached or delivered.'
+            ? 'Goes out with your reply, after the gateway has checked the file. Do not paste a link, and do not state that it is attached, ready or delivered.'
             : 'Attached to your reply: it goes out when the reply does. Do not paste a link.',
         }),
         artifact,

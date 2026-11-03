@@ -187,6 +187,10 @@ describe('the delivery note the model reads', () => {
       ),
     ).toBe(true);
     expect(note).toContain('send_file');
+    expect(note).toContain('still gives the user what they asked for');
+    expect(note).toContain(
+      'fetch it now in the sandbox and write the values in',
+    );
     expect(note).toContain(
       "That file didn't pass our safety check. I'm making a safe version now.",
     );
