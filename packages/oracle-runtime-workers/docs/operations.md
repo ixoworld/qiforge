@@ -645,6 +645,13 @@ operator sees:
   missing. Check `origin` on `/debug/context` afterwards. The live catalog
   still wins over the table, so a window OpenRouter changes is picked up at
   the next refresh (once per isolate-hour) without a release.
+- **Token estimates** are chars/4 of a message's content everywhere the
+  runtime sizes a request (summarization, pruning, the request cap, the
+  budgeted adapter), except image blocks: each counts a flat
+  `IMAGE_BLOCK_TOKENS` (3,300, the most a 1568 px image costs on any
+  provider) instead of its base64, which made one resized photo look like
+  ~128k tokens (`src/core/context-budget.ts`). Native document blocks still
+  count by size.
 - **Summarization** fires at 60% of the main model's window whatever its
   size (tokens, chars/4; never above the request cap nor above what the
   summarizer reads), keeps the last 10

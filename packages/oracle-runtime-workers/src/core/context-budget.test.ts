@@ -6,6 +6,7 @@ import {
   DEFAULT_CONTEXT_KNOBS,
   describeBudget,
   estimateContentTokens,
+  IMAGE_BLOCK_TOKENS,
   messageContentTokens,
   messageToolCallTokens,
 } from './context-budget';
@@ -249,5 +250,68 @@ describe('estimateContentTokens', () => {
       estimateContentTokens([{ type: 'text', text: 'hi' }]),
     ).toBeGreaterThan(0);
     expect(estimateContentTokens(null)).toBe(0);
+  });
+});
+
+describe('image blocks', () => {
+  const photo = 'A'.repeat(512_508); // a resized 384 KB photo as base64
+
+  it('counts an image block at a flat cost, not by its base64', () => {
+    const text = { type: 'text', text: 'What colour is the car?' };
+    const content = [
+      text,
+      {
+        type: 'image',
+        source_type: 'base64',
+        mime_type: 'image/jpeg',
+        data: photo,
+      },
+    ];
+    expect(estimateContentTokens(content)).toBe(
+      IMAGE_BLOCK_TOKENS + estimateContentTokens([text]),
+    );
+    expect(estimateContentTokens(content)).toBeLessThan(4_000);
+  });
+
+  it('counts the OpenAI image_url shape the same way, one cost per image', () => {
+    const content = [
+      {
+        type: 'image_url',
+        image_url: { url: `data:image/png;base64,${photo}` },
+      },
+      {
+        type: 'image',
+        source_type: 'base64',
+        mime_type: 'image/png',
+        data: photo,
+      },
+    ];
+    expect(estimateContentTokens(content)).toBe(2 * IMAGE_BLOCK_TOKENS);
+  });
+
+  it('keeps counting a native document by its size', () => {
+    const doc = {
+      type: 'file',
+      source_type: 'base64',
+      mime_type: 'application/pdf',
+      data: 'A'.repeat(27_000),
+      filename: 'a.pdf',
+    };
+    expect(estimateContentTokens([doc])).toBeGreaterThan(6_000);
+  });
+
+  it('flows into the per-message estimate the context guard uses', () => {
+    const message = new HumanMessage({
+      content: [
+        { type: 'text', text: 'hi' },
+        {
+          type: 'image',
+          source_type: 'base64',
+          mime_type: 'image/jpeg',
+          data: photo,
+        },
+      ],
+    });
+    expect(messageContentTokens(message)).toBeLessThan(4_000);
   });
 });
