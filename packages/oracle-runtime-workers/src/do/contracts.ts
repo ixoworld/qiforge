@@ -724,6 +724,8 @@ export interface StorageStatus {
   uploadedGeneration?: number;
   lastChecksum?: string;
   flushFailures: number;
+  /** Set while the owner copy waits for a delegation instead of retrying (reason, since). */
+  flushWaitsForDelegation: { reason: string; since: number } | null;
   lastVacuumAt?: number;
   /** True once the user's legacy Matrix copy has been removed or found absent. */
   legacyCleared?: boolean;

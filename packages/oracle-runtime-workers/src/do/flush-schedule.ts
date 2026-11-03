@@ -9,7 +9,9 @@
  * dirty copy alone. Two exceptions upload right away: a copy about to be
  * evicted (the wipe must never drop unsaved turns) and a copy marked dirty
  * before the deadline existed (older objects; one upload, then the
- * debounce applies).
+ * debounce applies). A copy waiting for a delegation is not uploaded at
+ * all: without one the owner store refuses it, and the next delegation
+ * the object receives uploads it (`meta:flushWaitsForDelegation`).
  */
 export interface FlushScheduleInput {
   /** The object holds writes the owner store has not seen (and a database is open). */
@@ -19,10 +21,12 @@ export interface FlushScheduleInput {
   now: number;
   /** The idle-eviction path is about to wipe the working copy. */
   idle: boolean;
+  /** The last upload failed for want of a delegation; none has arrived since. */
+  waitingForDelegation?: boolean;
 }
 
 export type FlushScheduleDecision =
-  | { action: 'skip'; reason: 'clean' }
+  | { action: 'skip'; reason: 'clean' | 'waiting-for-delegation' }
   | { action: 'flush'; reason: 'due' | 'idle' | 'no-deadline' }
   | { action: 'wait'; at: number };
 
@@ -31,6 +35,8 @@ export const FLUSH_DUE_SLACK_MS = 1000;
 
 export function decideFlush(input: FlushScheduleInput): FlushScheduleDecision {
   if (!input.dirty) return { action: 'skip', reason: 'clean' };
+  if (input.waitingForDelegation)
+    return { action: 'skip', reason: 'waiting-for-delegation' };
   if (input.idle) return { action: 'flush', reason: 'idle' };
   if (typeof input.flushAt !== 'number' || !Number.isFinite(input.flushAt))
     return { action: 'flush', reason: 'no-deadline' };

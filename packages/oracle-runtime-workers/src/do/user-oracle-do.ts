@@ -264,6 +264,7 @@ import {
 import {
   IxoVfsOwnerStore,
   VFS_DEFAULT_BASE_URLS,
+  VfsNoDelegationError,
 } from '../owner-store/ixo-vfs-store';
 import type { OwnerStore } from '../owner-store/types';
 import {
@@ -731,6 +732,14 @@ interface MatrixUserIdCache {
 }
 /** Consecutive flush failures (cleared on success). */
 const META_FLUSH_FAILURES = 'meta:flushFailures';
+/**
+ * Set when an upload failed because the user has no delegation to this
+ * oracle that reaches the owner copy (`VfsNoDelegationError`): the copy then
+ * waits for one instead of retrying every `FLUSH_RETRY_DELAY_MS`, and the
+ * next delegation (`POST /delegation`, a request's header, the room state)
+ * uploads it. Holds the reason and when the wait began.
+ */
+const META_FLUSH_WAITS_FOR_DELEGATION = 'meta:flushWaitsForDelegation';
 const META_LAST_VACUUM = 'meta:lastVacuumAt';
 /** When the last R2 page-tier eviction pass ran (see `tierTick`). */
 const META_LAST_TIER_PASS = 'meta:lastTierPassAt';
@@ -1473,9 +1482,24 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private async onDelegationReplaced(): Promise<void> {
       const failures =
         (await this.ctx.storage.get<number>(META_FLUSH_FAILURES)) ?? 0;
-      if (failures === 0) return;
-      await this.ctx.storage.delete(META_FLUSH_FAILURES);
-      if (!this.db) return;
+      const waiting = await this.ctx.storage.get<unknown>(
+        META_FLUSH_WAITS_FOR_DELEGATION,
+      );
+      if (failures === 0 && waiting === undefined) return;
+      await this.ctx.storage.delete([
+        META_FLUSH_FAILURES,
+        META_FLUSH_WAITS_FOR_DELEGATION,
+      ]);
+      if (waiting !== undefined)
+        console.log(
+          `[user-do] ${this.userDid ?? 'user'} has a delegation again — uploading the owner copy that waited for it`,
+        );
+      // Not booted yet (a delegation adopted before boot): the alarm boots
+      // the object and serves the upload at once.
+      if (!this.db) {
+        if (waiting !== undefined) await this.scheduleFlushRetry(Date.now());
+        return;
+      }
       if (
         !this.dirty &&
         (await this.ctx.storage.get<boolean>(META_DIRTY)) === true
@@ -1563,6 +1587,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             console.log(
               `[user-do] delegation for ${userDid} loaded from the deposited room state (${held ? 'the held copy was inside the margin' : 'header-less turn'})`,
             );
+            await this.onDelegationReplaced();
           }
           return;
         }
@@ -2458,6 +2483,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         META_FLUSH_AT,
         META_UPLOADED_GEN,
         META_FLUSH_FAILURES,
+        META_FLUSH_WAITS_FOR_DELEGATION,
         META_LAST_VACUUM,
       ]);
       this.flushAt = null;
@@ -2777,6 +2803,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         flushAt: await this.ctx.storage.get<number>(META_FLUSH_AT),
         now,
         idle,
+        waitingForDelegation:
+          (await this.ctx.storage.get<unknown>(
+            META_FLUSH_WAITS_FOR_DELEGATION,
+          )) !== undefined,
       });
       if (flush.action === 'flush') {
         try {
@@ -2786,9 +2816,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             `[user-do] flush failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
           );
           // `flushOnce` arms the retry on an upload failure; anything that
-          // failed before the upload gets the same retry window here.
-          await this.scheduleFlushRetry(now + FLUSH_RETRY_DELAY_MS);
-          deadlines.push(now + FLUSH_RETRY_DELAY_MS);
+          // failed before the upload gets the same retry window here. A
+          // missing delegation is not retried: the copy waits for one.
+          if (!(err instanceof VfsNoDelegationError)) {
+            await this.scheduleFlushRetry(now + FLUSH_RETRY_DELAY_MS);
+            deadlines.push(now + FLUSH_RETRY_DELAY_MS);
+          }
         }
       } else if (flush.action === 'wait') {
         deadlines.push(Math.max(flush.at, now + 1000));
@@ -2931,10 +2964,18 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           return;
         }
         if (outcome === 'not-current') {
-          console.warn(
-            `[user-do] ${this.userDid} is idle but the owner copy is not verified current — keeping the working copy`,
-          );
-          deadlines.push(now + FLUSH_RETRY_DELAY_MS);
+          // Waiting for a delegation, the copy stays until one arrives (the
+          // idle horizon below still wakes the object now and then).
+          if (
+            (await this.ctx.storage.get<unknown>(
+              META_FLUSH_WAITS_FOR_DELEGATION,
+            )) === undefined
+          ) {
+            console.warn(
+              `[user-do] ${this.userDid} is idle but the owner copy is not verified current — keeping the working copy`,
+            );
+            deadlines.push(now + FLUSH_RETRY_DELAY_MS);
+          }
         } else {
           console.log(
             `[user-do] ${this.userDid} became active during the idle check — keeping the working copy`,
@@ -5667,8 +5708,29 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           const failures =
             ((await this.ctx.storage.get<number>(META_FLUSH_FAILURES)) ?? 0) +
             1;
-          await this.ctx.storage.put(META_FLUSH_FAILURES, failures);
           const detail = err instanceof Error ? err.message : String(err);
+          if (err instanceof VfsNoDelegationError) {
+            // Nothing to retry until the user deposits a delegation that
+            // reaches the owner copy: say so once, drop the deadline, and
+            // let the next delegation (or the next turn's daily deadline)
+            // upload it.
+            const already = await this.ctx.storage.get<unknown>(
+              META_FLUSH_WAITS_FOR_DELEGATION,
+            );
+            if (already === undefined) {
+              await this.ctx.storage.put(META_FLUSH_WAITS_FOR_DELEGATION, {
+                reason: detail,
+                since: Date.now(),
+              });
+              console.warn(
+                `[user-do] owner copy for ${this.userDid} waits for a delegation — working copy kept, no retry until one arrives: ${detail}`,
+              );
+            }
+            this.flushAt = null;
+            await this.ctx.storage.delete(META_FLUSH_AT);
+            throw err;
+          }
+          await this.ctx.storage.put(META_FLUSH_FAILURES, failures);
           const line = `[user-do] owner-store flush failed (${failures} in a row) for ${this.userDid} — working copy kept dirty, retrying in ${FLUSH_RETRY_DELAY_MS / 60_000} min: ${detail}`;
           if (failures >= FLUSH_FAILURES_ERROR_THRESHOLD) console.error(line);
           else console.warn(line);
@@ -5679,7 +5741,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         await this.ctx.storage.put(META_LAST_CHECKSUM, checksum);
         await this.ctx.storage.put(META_LAST_FLUSH, Date.now());
         await this.ctx.storage.put(META_UPLOADED_GEN, snapshot.generation);
-        await this.ctx.storage.delete(META_FLUSH_FAILURES);
+        await this.ctx.storage.delete([
+          META_FLUSH_FAILURES,
+          META_FLUSH_WAITS_FOR_DELEGATION,
+        ]);
         await this.clearDirty();
         console.log(
           `[user-do] flushed ${snapshot.size} bytes (${saved.bytes} sent) to ${store.kind} for ${this.userDid} (${saved.etag})`,
@@ -5917,6 +5982,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         lastChecksum: await this.ctx.storage.get<string>(META_LAST_CHECKSUM),
         flushFailures:
           (await this.ctx.storage.get<number>(META_FLUSH_FAILURES)) ?? 0,
+        flushWaitsForDelegation:
+          (await this.ctx.storage.get<{ reason: string; since: number }>(
+            META_FLUSH_WAITS_FOR_DELEGATION,
+          )) ?? null,
         lastVacuumAt: await this.ctx.storage.get<number>(META_LAST_VACUUM),
         legacyCleared:
           (await this.ctx.storage.get<boolean>(META_LEGACY_CLEARED)) === true,

@@ -806,6 +806,90 @@ describe('delegations', () => {
     });
   });
 
+  /** A dirty copy whose due upload fails for want of a delegation. */
+  async function waitingForDelegation(h: UserObjectHarness): Promise<number> {
+    await verifiedCopy(h);
+    await h.writeTurn('pending');
+    await h.call('markDirty');
+    h.store.save.mockImplementationOnce(async () => {
+      throw new VfsNoDelegationError(USER_DID, 'no-delegation');
+    });
+    // `markDirty` arms the daily deadline in the background: let it land
+    // before the deadline is brought forward to now.
+    await vi.waitFor(async () =>
+      expect(await h.storage.get('meta:flushAt')).toEqual(expect.any(Number)),
+    );
+    await h.call('scheduleFlushRetry', Date.now());
+    await h.storage.put('meta:housekeepingAt', Date.now());
+    await h.fireAlarm();
+    expect(h.store.save).toHaveBeenCalledTimes(2);
+    return h.store.save.mock.calls.length;
+  }
+
+  it('a flush without a delegation waits for one instead of retrying every 10 minutes', async () => {
+    await withObject('delegation-missing-waits', {}, async (h) => {
+      const saves = await waitingForDelegation(h);
+
+      expect(
+        await h.storage.get<{ reason: string; since: number }>(
+          'meta:flushWaitsForDelegation',
+        ),
+      ).toMatchObject({
+        reason: expect.stringContaining('has not deposited a delegation'),
+        since: expect.any(Number),
+      });
+      expect(await h.storage.get('meta:flushAt')).toBeUndefined();
+      expect(await h.storage.get('meta:flushFailures')).toBeUndefined();
+      expect(h.field('dirty')).toBe(true);
+      // No 10-minute retry: the next wake is the idle horizon, days away.
+      expect(await h.storage.getAlarm()).toBeGreaterThan(Date.now() + DAY_MS);
+      // A wake for anything else does not try the upload again.
+      await h.fireAlarm();
+      expect(h.store.save).toHaveBeenCalledTimes(saves);
+      expect(
+        (await h.call('storageStatus')) as Record<string, unknown>,
+      ).toMatchObject({
+        flushWaitsForDelegation: {
+          reason: expect.stringContaining('has not deposited a delegation'),
+        },
+      });
+    });
+  });
+
+  it('a request carrying a delegation uploads the copy that waited for one', async () => {
+    await withObject('delegation-waiting-request', {}, async (h) => {
+      const saves = await waitingForDelegation(h);
+
+      await h.call('ready', as('fresh-grant'));
+      await h.settle();
+      await vi.waitFor(() =>
+        expect(h.store.save).toHaveBeenCalledTimes(saves + 1),
+      );
+      await Promise.resolve(h.field('flushInFlight')).catch(() => undefined);
+      expect(
+        await h.storage.get('meta:flushWaitsForDelegation'),
+      ).toBeUndefined();
+      expect(h.field('dirty')).toBe(false);
+    });
+  });
+
+  it('a deposited delegation (POST /delegation) uploads the copy that waited for one', async () => {
+    await withObject('delegation-waiting-deposit', {}, async (h) => {
+      const saves = await waitingForDelegation(h);
+
+      await h.call('setDelegation', USER_DID, 'deposited-grant');
+      await h.settle();
+      await vi.waitFor(() =>
+        expect(h.store.save).toHaveBeenCalledTimes(saves + 1),
+      );
+      await Promise.resolve(h.field('flushInFlight')).catch(() => undefined);
+      expect(
+        await h.storage.get('meta:flushWaitsForDelegation'),
+      ).toBeUndefined();
+      expect(h.field('dirty')).toBe(false);
+    });
+  });
+
   it('stores a delegation once, not on every request that carries it', async () => {
     await withObject('delegation-stored-once', {}, async (h) => {
       await h.ready();

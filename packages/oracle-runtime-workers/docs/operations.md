@@ -1282,8 +1282,23 @@ becomes a turn (`src/matrix/group-chat.ts`):
   fast path trusts, so an attached socket never delays them; a run's
   keep-alive deadline is what boots a reset object to recover its runs. `GET /debug/storage` shows `writeGeneration` /
   `uploadedGeneration`, `dirty`, `nextFlushAt` (the deadline, absent when
-  clean), `lastFlushAt`, `flushFailures`, `lastVacuumAt`, `legacyCleared`,
-  `indexingInFlight`, `flushInFlight` and the alarm.
+  clean), `lastFlushAt`, `flushFailures`, `flushWaitsForDelegation`,
+  `lastVacuumAt`, `legacyCleared`, `indexingInFlight`, `flushInFlight` and
+  the alarm.
+- **A user without a delegation.** The owner copy is written with the user's
+  delegation to the oracle (`ixo:filesystem` on `/.oracles`). When an upload
+  fails because there is none, or it carries no such capability
+  (`VfsNoDelegationError`), the copy is not retried every 10 min: the object
+  logs once (`owner copy for <did> waits for a delegation — working copy
+kept, no retry until one arrives`), drops the flush deadline and records
+  `meta:flushWaitsForDelegation` (`flushWaitsForDelegation` in
+  `/debug/storage`). The working copy stays in Durable Object storage and is
+  never evicted while it waits. The next delegation the object receives —
+  `POST /delegation`, a request's delegation header, or the room-state
+  deposit a header-less turn reads — clears the wait and uploads at once
+  (`has a delegation again — uploading the owner copy that waited for it`).
+  Before this, such users were retried every 10 min indefinitely (thousands
+  of `owner-store flush failed (N in a row)` lines each).
 - **Session titles** are generated in the background (`ctx.waitUntil`),
   bounded by a 15 s timeout and by the turn's abort, so `done` and the
   Matrix reply never wait for them. Restricted task sessions get no title.
