@@ -1,5 +1,11 @@
 # @ixo/oracle-runtime-workers
 
+## 0.37.2
+
+### Patch Changes
+
+- [#462](https://github.com/ixoworld/qiforge/pull/462) [`9ef81ca`](https://github.com/ixoworld/qiforge/commit/9ef81caa9439b60a7a9f63508d87957fe7ccb358) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - A user object whose owner-copy upload fails because the user has no delegation to the oracle (or one without `ixo:filesystem` on `/.oracles`) no longer retries every 10 minutes. It logs once, keeps the working copy (never evicted while it waits) and uploads as soon as a delegation arrives: `POST /delegation`, a request's delegation header, or the room-state deposit a header-less turn reads. `GET /debug/storage` shows `flushWaitsForDelegation`. Before, such users were retried indefinitely: thousands of `owner-store flush failed (N in a row)` errors each on mainnet.
+
 ## 0.37.1
 
 ### Patch Changes
