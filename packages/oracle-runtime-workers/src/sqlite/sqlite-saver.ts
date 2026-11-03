@@ -25,6 +25,13 @@
  * - `pending_sends` migration for pre-v4 checkpoints.
  * - Serialization is `JsonPlusSerializer` (the `BaseCheckpointSaver` default).
  *
+ * Attachment bytes are never stored: every write path (message rows, the
+ * checkpoint blob's channel values, pending writes) stores a human message
+ * that carries inline base64 blocks as its placeholder copy
+ * (`inline-payloads.ts`), while the run's in-memory state keeps the blocks.
+ * Whatever reads the database back — the next turn, a durable run resumed
+ * after a reset, the transcript, the owner copy — sees the placeholder.
+ *
  * Differences: everything is async (wa-sqlite API), `console` replaces the
  * `@ixo/logger` Logger, the oracle name stamped on messages comes from
  * `options.oracleName` instead of `process.env`, and each `put`/`putWrites`/
@@ -54,6 +61,11 @@ import {
   stringify,
   type CleanAdditionalKwargs,
 } from './serialization';
+import { withoutInlinePayloads } from './inline-payloads';
+import {
+  hasInlinePayload,
+  offloadInlinePayloads,
+} from '../attachments/retention';
 
 export interface SqliteSaverOptions {
   /**
@@ -143,6 +155,17 @@ function sameFingerprint(
     a.status === b.status &&
     a.kwargs === b.kwargs
   );
+}
+
+/**
+ * The stored form of one message object: the fingerprint it was encoded
+ * from, its blob and, when the stored form is a placeholder copy (inline
+ * attachment bytes left out), that copy's `message_content` text.
+ */
+interface EncodedMessage {
+  fingerprint: MessageFingerprint;
+  blob: Uint8Array;
+  storedContent?: string;
 }
 
 /** A message's row parameters, and whether its stored row already holds them. */
@@ -334,10 +357,7 @@ export class SqliteSaver extends BaseCheckpointSaver {
    * third one per step — on a long thread, the peak that reset a 128 MB
    * isolate at the end of a tool turn.
    */
-  private readonly encoded = new WeakMap<
-    BaseMessage,
-    { fingerprint: MessageFingerprint; blob: Uint8Array }
-  >();
+  private readonly encoded = new WeakMap<BaseMessage, EncodedMessage>();
 
   constructor(
     db: DoSqliteDatabase,
@@ -548,8 +568,8 @@ export class SqliteSaver extends BaseCheckpointSaver {
   /**
    * The thread's messages whose stored plain content (`message_content`)
    * contains `contentContains`, oldest first — a SQL `LIKE` pre-filter, so
-   * only the matching rows' blobs are inflated. Attachment payload retention
-   * uses it to find rows that still hold inline bytes / a placeholder.
+   * only the matching rows' blobs are inflated. `view_attachment` uses it to
+   * find the messages that quote an attachment reference.
    */
   async listThreadMessagesMatching(
     threadId: string,
@@ -586,28 +606,6 @@ export class SqliteSaver extends BaseCheckpointSaver {
       ],
     );
     return rows.length > 0;
-  }
-
-  /**
-   * Rewrite one persisted message in place — same row, checkpoint linkage
-   * and `created_at` (transcript order) untouched. Returns false when the
-   * thread has no row for the message's id. Attachment payload retention
-   * uses it to swap inline bytes for a placeholder after a turn.
-   */
-  async replaceThreadMessage(
-    threadId: string,
-    message: BaseMessage,
-  ): Promise<boolean> {
-    await this.setup();
-    // Only the type/content/blob columns of the row are taken from the
-    // encoder; the checkpoint columns it also produces stay as stored.
-    const [, , , messageId, messageType, messageContent, blob] =
-      await this.toMessageRow(message, threadId, '', '');
-    const result = await this.db.run(
-      'UPDATE messages SET message_type = ?, message_content = ?, message = ? WHERE thread_id = ? AND message_id = ?',
-      [messageType!, messageContent!, blob!, threadId, messageId!],
-    );
-    return result.changes > 0;
   }
 
   private async loadMessage(raw: Uint8Array | string): Promise<BaseMessage> {
@@ -859,7 +857,7 @@ export class SqliteSaver extends BaseCheckpointSaver {
     if (typeof checkpointNs !== 'string')
       throw new Error('"checkpoint_ns" must be a string.');
 
-    const { checkpoint, messages } = removeMessagesFromCheckpoint(checkpointIn);
+    const { checkpoint, messages } = toStoredCheckpoint(checkpointIn);
     const [[type1, serializedCheckpoint], [type2, serializedMetadata]] =
       await Promise.all([
         this.serde.dumpsTyped(checkpoint),
@@ -1034,6 +1032,9 @@ export class SqliteSaver extends BaseCheckpointSaver {
    */
   private rememberLoaded(message: BaseMessage, raw: Uint8Array | string): void {
     if (!(raw instanceof Uint8Array)) return;
+    // A row written before attachment bytes were left out of storage still
+    // holds them: not remembered, so the next `put` stores its placeholder.
+    if (hasInlinePayload(message)) return;
     this.encoded.set(message, {
       fingerprint: fingerprintOf(message, this.normalizeKwargs(message)),
       blob: raw,
@@ -1044,6 +1045,9 @@ export class SqliteSaver extends BaseCheckpointSaver {
    * A message's row parameters. A message whose fingerprint matches the
    * blob last encoded or loaded for it reuses that blob without
    * serializing it (`unchanged`); any other is serialized and compressed.
+   * A human message with inline attachment bytes is stored as its
+   * placeholder copy (`offloadInlinePayloads`): the copy is serialized once
+   * and dropped, and only its blob and content text are remembered.
    */
   private async encodeMessageRow(
     message: BaseMessage,
@@ -1053,20 +1057,26 @@ export class SqliteSaver extends BaseCheckpointSaver {
   ): Promise<EncodedMessageRow> {
     const merged = this.normalizeKwargs(message);
     const fingerprint = fingerprintOf(message, merged);
-    const cached = this.encoded.get(message);
-    let serialized: Uint8Array;
+    let encoded = this.encoded.get(message);
     let unchanged = false;
     if (
-      cached !== undefined &&
-      sameFingerprint(cached.fingerprint, fingerprint)
+      encoded !== undefined &&
+      sameFingerprint(encoded.fingerprint, fingerprint)
     ) {
-      serialized = cached.blob;
       unchanged = true;
     } else {
-      serialized = await compressForStorage(
-        stringify(message, (_key, value) => _default(value)),
-      );
-      this.encoded.set(message, { fingerprint, blob: serialized });
+      const placeholder = offloadInlinePayloads(message);
+      const stored = placeholder ?? message;
+      encoded = {
+        fingerprint,
+        blob: await compressForStorage(
+          stringify(stored, (_key, value) => _default(value)),
+        ),
+        ...(placeholder
+          ? { storedContent: contentColumn(placeholder.content) }
+          : {}),
+      };
+      this.encoded.set(message, encoded);
     }
     const messageId =
       message.id ??
@@ -1081,10 +1091,8 @@ export class SqliteSaver extends BaseCheckpointSaver {
         checkpointId,
         messageId,
         message.getType(),
-        typeof message.content === 'string'
-          ? message.content
-          : JSON.stringify(message.content),
-        serialized,
+        encoded.storedContent ?? contentColumn(message.content),
+        encoded.blob,
         merged.timestamp,
       ],
       unchanged,
@@ -1172,7 +1180,9 @@ export class SqliteSaver extends BaseCheckpointSaver {
 
     const rows = await Promise.all(
       writes.map(async (write, idx): Promise<SqlParam[]> => {
-        const [type, serialized] = await this.serde.dumpsTyped(write[1]);
+        const [type, serialized] = await this.serde.dumpsTyped(
+          withoutInlinePayloads(write[1]),
+        );
         return [
           resolvedThreadId,
           ns,
@@ -1253,18 +1263,42 @@ function asReasoningDetails(
   );
 }
 
+/** The `messages.message_content` text of a message's content. */
+function contentColumn(content: BaseMessage['content']): string {
+  return typeof content === 'string' ? content : JSON.stringify(content);
+}
+
 function isCheckpointWithMessages(
   checkpoint: Checkpoint,
 ): checkpoint is CheckpointWithMessages {
   return 'messages' in checkpoint.channel_values;
 }
 
-function removeMessagesFromCheckpoint(checkpoint: Checkpoint): {
+/**
+ * The checkpoint as its blob stores it: `channel_values.messages` taken out
+ * (they become message rows, returned) and inline attachment bytes left out
+ * of every other channel value. The input is never modified; it is returned
+ * as is when there is nothing to take out.
+ */
+function toStoredCheckpoint(checkpoint: Checkpoint): {
   checkpoint: Checkpoint;
   messages?: BaseMessage[];
 } {
-  if (!isCheckpointWithMessages(checkpoint)) return { checkpoint };
+  const messages = isCheckpointWithMessages(checkpoint)
+    ? checkpoint.channel_values.messages
+    : undefined;
+  let channelValues: ChannelValues | undefined;
+  for (const [channel, value] of Object.entries(checkpoint.channel_values)) {
+    if (channel === 'messages') continue;
+    const stored = withoutInlinePayloads(value);
+    if (stored === value) continue;
+    channelValues ??= { ...checkpoint.channel_values };
+    channelValues[channel] = stored;
+  }
+  if (messages === undefined && channelValues === undefined)
+    return { checkpoint };
   const copy = copyCheckpoint(checkpoint);
+  if (channelValues !== undefined) copy.channel_values = channelValues;
   delete copy.channel_values.messages;
-  return { checkpoint: copy, messages: checkpoint.channel_values.messages };
+  return { checkpoint: copy, ...(messages ? { messages } : {}) };
 }

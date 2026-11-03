@@ -1242,9 +1242,10 @@ async function main(): Promise<void> {
           /green/i,
           `image colour not recognised: "${first.text.slice(0, 200)}"`,
         );
-        // Two plain user turns push the image turn out of the retention
-        // window (ATTACHMENT_PAYLOAD_TURNS = 2): its payload is rewritten to a
-        // placeholder when the second one completes.
+        // The image bytes were never stored: every later turn loads the
+        // placeholder. Two plain user turns push the image turn out of the
+        // recall window (the newest 2 user turns), so the next question has
+        // to fetch it again through `view_attachment`.
         for (const prompt of [
           'Reply with exactly: OK',
           'Reply with exactly: OK again',

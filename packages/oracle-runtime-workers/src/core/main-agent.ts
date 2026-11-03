@@ -28,6 +28,7 @@ import { describeBudget } from './context-budget';
 import { createContextGuardMiddleware } from './middlewares/context-guard';
 import { repetitionCapsFromEnv } from './middlewares/tool-repetition-guard';
 import {
+  createAttachmentRecallMiddleware,
   createByoHistorySanitizerMiddleware,
   createCapabilityGateMiddleware,
   createDanglingToolCallRepairMiddleware,
@@ -840,6 +841,17 @@ export async function createMainAgent(
               ? { onOverflow: hooks.onContextOverflow }
               : {}),
             ...(hooks?.onContextEvent ? { onEvent: hooks.onContextEvent } : {}),
+            logger: ambient.logger,
+          }),
+        ]
+      : []),
+    // Inside the guard: recalled images (attachment-recall.ts) reach the
+    // provider but are not counted as chars/4 text, which their base64 is
+    // not; graph state never holds them.
+    ...(hooks?.attachmentRecall
+      ? [
+          createAttachmentRecallMiddleware({
+            ...hooks.attachmentRecall,
             logger: ambient.logger,
           }),
         ]

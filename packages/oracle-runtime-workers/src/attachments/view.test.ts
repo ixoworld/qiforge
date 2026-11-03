@@ -12,6 +12,8 @@ import { describe, expect, it } from 'vitest';
 import type { MatrixMediaSource } from './download';
 import { IngestTextLru, type AttachmentTextCache } from './view-cache';
 import { makePdf } from './fixtures/make-pdf';
+import { fakeImages } from './fixtures/fake-images';
+import { NATIVE_DOCUMENT_MAX_BYTES } from './route';
 import {
   createAttachmentViewSurface,
   extractAttachmentText,
@@ -295,6 +297,7 @@ describe('viewAttachment: content check', () => {
         filename: 'report.docx',
         mimetype: DOCX,
         mxcUri: 'mxc://hs/docx',
+        size: 6,
         category: 'document',
       },
       {
@@ -912,5 +915,156 @@ describe('findPersistedAttachmentMeta', () => {
       text: 'earlier',
     });
     expect(scans).toEqual(['matching:$old']);
+  });
+});
+
+describe('viewAttachment: document size and image resize', () => {
+  function pdfOf(length: number): Uint8Array {
+    const bytes = new Uint8Array(length).fill(0x20);
+    bytes.set(new TextEncoder().encode('%PDF-1.4 fake'));
+    return bytes;
+  }
+
+  function helper(content: string) {
+    const calls: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      calls.push(String(input));
+      return Response.json({ choices: [{ message: { content } }] });
+    };
+    return { calls, fetchImpl };
+  }
+
+  function counted(files: Record<string, Uint8Array>) {
+    const downloads: string[] = [];
+    const inner = source(files);
+    const media: MatrixMediaSource = {
+      downloadMxc: (mxc, maxBytes, signal) => {
+        downloads.push(mxc);
+        return inner.downloadMxc(mxc, maxBytes, signal);
+      },
+      downloadEvent: (roomId, eventId, maxBytes, signal) => {
+        downloads.push(eventId);
+        return inner.downloadEvent(roomId, eventId, maxBytes, signal);
+      },
+    };
+    return { downloads, media };
+  }
+
+  it('returns a document over the limit, declared or of unknown size, as helper-model text', async () => {
+    const pdf = pdfOf(NATIVE_DOCUMENT_MAX_BYTES + 1);
+    for (const size of [pdf.length, undefined]) {
+      const { calls, fetchImpl } = helper('Quarterly numbers.');
+      const view = await viewAttachment(
+        {
+          filename: 'r.pdf',
+          mimetype: 'application/pdf',
+          mxcUri: 'mxc://hs/r',
+          ...(size !== undefined ? { size } : {}),
+          category: 'document',
+        },
+        {
+          source: source({ 'mxc://hs/r': pdf }),
+          extraction: PROVIDER,
+          caps: ALL_CAPS,
+          fetchImpl,
+          logger: LOGGER,
+        },
+      );
+      expect(view.kind).toBe('text');
+      if (view.kind !== 'text') throw new Error('unreachable');
+      expect(view.text).toContain('Quarterly numbers.');
+      expect(calls).toHaveLength(1);
+    }
+  });
+
+  it('re-attaches a document of unknown size natively when its bytes are within the limit', async () => {
+    const pdf = pdfOf(1024);
+    const view = await viewAttachment(
+      {
+        filename: 'r.pdf',
+        mimetype: 'application/pdf',
+        mxcUri: 'mxc://hs/r',
+        category: 'document',
+      },
+      {
+        source: source({ 'mxc://hs/r': pdf }),
+        extraction: null,
+        caps: ALL_CAPS,
+        logger: LOGGER,
+      },
+    );
+    expect(view).toMatchObject({
+      kind: 'native',
+      native: { kind: 'file', mimeType: 'application/pdf' },
+    });
+  });
+
+  it('reads a document declared small but found large as text from the one download, and caches it', async () => {
+    const pdf = pdfOf(600 * 1024);
+    const { downloads, media } = counted({ 'mxc://hs/big': pdf });
+    const { calls, fetchImpl } = helper('Long report.');
+    const entries = new Map<string, string>();
+    const cache: AttachmentTextCache = {
+      async get(ref, model) {
+        return entries.get(`${ref}|${model}`);
+      },
+      async put(ref, model, text) {
+        entries.set(`${ref}|${model}`, text);
+      },
+    };
+    const meta = {
+      filename: 'big.pdf',
+      mimetype: 'application/pdf',
+      mxcUri: 'mxc://hs/big',
+      size: 1000,
+      category: 'document',
+    };
+    const deps = {
+      source: media,
+      extraction: PROVIDER,
+      caps: ALL_CAPS,
+      fetchImpl,
+      logger: LOGGER,
+      cache,
+    };
+    const first = await viewAttachment(meta, deps);
+    expect(first).toMatchObject({ kind: 'text' });
+    expect(downloads).toEqual(['mxc://hs/big']);
+    expect(calls).toHaveLength(1);
+    // The next view still downloads (the declared size says native), then
+    // finds the text it cached instead of calling the helper again.
+    const second = await viewAttachment(meta, deps);
+    expect(second).toEqual(first);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('re-attaches a downscaled image when the Images binding is bound', async () => {
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xdb, 5]);
+    const images = fakeImages({ width: 3000, output: jpeg });
+    const view = await viewAttachment(
+      {
+        filename: 'red.png',
+        mimetype: 'image/png',
+        mxcUri: 'mxc://hs/red',
+        category: 'image',
+      },
+      {
+        source: source({ 'mxc://hs/red': PNG }),
+        extraction: null,
+        caps: ALL_CAPS,
+        images,
+        logger: LOGGER,
+      },
+    );
+    expect(view).toEqual({
+      kind: 'native',
+      native: {
+        kind: 'image',
+        mimeType: 'image/jpeg',
+        base64: btoa(String.fromCharCode(...jpeg)),
+        filename: 'red.png',
+      },
+    });
+    expect(images.seen[0]).toEqual(PNG);
   });
 });

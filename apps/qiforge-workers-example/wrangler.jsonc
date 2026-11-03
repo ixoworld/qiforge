@@ -45,6 +45,11 @@
   // Workers AI binding: lets DECISION_PROVIDER=cloudflare-jev run bounded
   // Decisions without account credentials. Leave off unless the oracle uses them.
   // "ai": { "binding": "AI" },
+  // Cloudflare Images binding: images sent natively to a model are downscaled
+  // to a 1568 px long edge (JPEG) first; the sandbox keeps the original. Billed at
+  // $0.50 per 1,000 unique transformations after 5,000 free a month. Without
+  // it images go as they are. See docs/configuration.md ("Wrangler config").
+  // "images": { "binding": "IMAGES" },
   "durable_objects": {
     "bindings": [
       // One instance per (user DID, oracle): the user's SQLite working copy +

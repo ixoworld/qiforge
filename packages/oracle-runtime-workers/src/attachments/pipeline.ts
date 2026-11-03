@@ -4,13 +4,19 @@
  * processAttachments`:
  *
  *  1. classify + route each attachment by the selected model's native input
- *     capabilities (`send-native` / `parse-local` / `model-extract`);
+ *     capabilities (`route.ts`: `send-native` / `parse-local` /
+ *     `model-extract`) — the same rule for every source; a document whose
+ *     declared size is over `NATIVE_DOCUMENT_MAX_BYTES` skips the native
+ *     lane, one of unknown or smaller size is a native candidate;
  *  2. NATIVE lane: download, sniff, base64 into LangChain content blocks on
- *     the human message; the original is archived to the sandbox in the
- *     background. A failed download falls back to extraction so a bad
- *     download never drops the whole message; a file that is itself refused
- *     (empty, over the budget) is noted, and one whose content is not what it
- *     claims goes to the extract lane with its bytes — never downloaded a
+ *     the human message; an image is first downscaled for the model when the
+ *     oracle binds Cloudflare Images (`resize.ts`), and the ORIGINAL is
+ *     archived to the sandbox in the background. A failed download falls
+ *     back to extraction so a bad download never drops the whole message; a
+ *     file that is itself refused (empty, over the budget) is noted, and one
+ *     whose content is not what it claims, or a document whose downloaded
+ *     length is over `NATIVE_DOCUMENT_MAX_BYTES` (the length decides: a
+ *     declared size may be missing or wrong), goes to the extract lane with its bytes — never downloaded a
  *     second time, never sent as a native block;
  *  3. EXTRACT lane: sequential, plain text read locally, everything else
  *     described / transcribed / extracted by the helper model, then archived
@@ -65,7 +71,8 @@ import {
   type ExtractionUsage,
 } from './extract';
 import { categorizeFile, verifyMagicBytes, type FileCategory } from './magic';
-import { routeAttachment } from './route';
+import { resizeForModel } from './resize';
+import { NATIVE_DOCUMENT_MAX_BYTES, routeAttachment } from './route';
 import {
   buildAnalysisMarkdown,
   uploadToSandbox,
@@ -94,6 +101,8 @@ export interface AttachmentPipelineDeps {
   extraction: ExtractionProvider | null;
   /** Sandbox archive target; null → originals are not archived (logged once per turn). */
   sandbox: SandboxUploadConfig | null;
+  /** Cloudflare Images: downscales native images for the model; absent = sent as they are. */
+  images?: ImagesBinding;
   fetchImpl?: typeof fetch;
   signal?: AbortSignal;
   logger: Logger;
@@ -443,9 +452,11 @@ export async function prepareAttachments(
   }> = [];
   for (const attachment of params.attachments) {
     const kind = classifyAttachment(attachment);
-    const strategy = routeAttachment(kind, params.caps);
+    const strategy = routeAttachment(kind, params.caps, {
+      size: attachment.size,
+    });
     deps.logger.log(
-      `[attachments] "${attachment.filename}" (${attachment.mimetype}) kind=${kind} model=${params.model} → ${strategy}`,
+      `[attachments] "${attachment.filename}" (${attachment.mimetype}) kind=${kind} size=${attachment.size ?? 'unknown'} model=${params.model} → ${strategy}`,
     );
     // A file larger than a model is handed is never sent as a block.
     if (
@@ -485,17 +496,31 @@ export async function prepareAttachments(
         extractQueue.push({ attachment, preloaded: bytes });
         continue;
       }
+      if (kind === 'document' && bytes.length > NATIVE_DOCUMENT_MAX_BYTES) {
+        deps.logger.log(
+          `[attachments] "${attachment.filename}" is ${bytes.length} bytes (declared ${attachment.size ?? 'unknown'}), over the ${NATIVE_DOCUMENT_MAX_BYTES}-byte native document limit → model-extract`,
+        );
+        extractQueue.push({ attachment, preloaded: bytes });
+        continue;
+      }
+      // The model gets a downscaled copy; the sandbox keeps the original.
+      const sent =
+        kind === 'image'
+          ? await resizeForModel(bytes, mimetype, deps.images, {
+              logger: deps.logger,
+            })
+          : { bytes, mimetype };
       natives.push({
         kind: kind === 'image' ? 'image' : 'file',
-        mimeType: mimetype,
-        base64: bytesToBase64(bytes),
+        mimeType: sent.mimetype,
+        base64: bytesToBase64(sent.bytes),
         filename: sanitizeAttachmentFilename(attachment.filename),
       });
       const note = nativeAttachmentNote(attachment);
       if (note)
         nativeNotes.push({ text: note, meta: attachmentMetaFor(attachment) });
       deps.logger.log(
-        `[attachments] NATIVE → "${attachment.filename}" sent directly to ${params.model} (${bytes.length} bytes, ${kind})`,
+        `[attachments] NATIVE → "${attachment.filename}" sent directly to ${params.model} (${sent.bytes.length} bytes, ${kind})`,
       );
       if (deps.sandbox) {
         const storedName = archiveName(attachment);

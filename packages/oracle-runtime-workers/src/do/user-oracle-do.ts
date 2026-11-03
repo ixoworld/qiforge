@@ -123,19 +123,20 @@ import {
   type BaseMessage,
 } from '@langchain/core/messages';
 import {
-  applyAttachmentRetention,
-  ATTACHMENT_PAYLOAD_TURNS,
   ATTACHMENT_PLACEHOLDER_PREFIX,
+  classifyAttachment,
   createAttachmentViewSurface,
   findPersistedAttachmentMeta,
   IngestTextLru,
-  INLINE_PAYLOAD_NEEDLE,
   isAttachmentViewMessage,
-  offloadInlinePayloads,
+  loadAttachmentBytes,
   parseAttachmentInputs,
   prepareAttachments,
+  resizeForModel,
+  sanitizeAttachmentFilename,
   ChannelAttachmentLinkStore,
   type AttachmentViewSurface,
+  type AttachmentInput,
   type MatrixMediaSource,
   type ViewAttachmentDeps,
   type SandboxUploadConfig,
@@ -314,6 +315,8 @@ import { freshStub } from './fresh-stub';
 import { WorkStatusProducer } from '../matrix/work-status';
 import { fetchUserMatrixServerName } from '../matrix/user-homeserver';
 import { createWorkStatusMiddleware } from '../core/middlewares/work-status';
+import type { RecallImageLoader } from '../core/middlewares/attachment-recall';
+import { bytesToBase64 } from '../plugins/base64';
 import { UserPreferencesStore } from '../plugins/user-preferences/user-preferences-store';
 import { SqliteUserKv } from '../sqlite/user-kv-store';
 import {
@@ -7339,45 +7342,57 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /**
-     * Attachment payload retention (`src/attachments/retention.ts`), run
-     * once a turn has completed and its checkpoints are written: inline
-     * payloads older than the newest `ATTACHMENT_PAYLOAD_TURNS` user turns
-     * are rewritten in place in the messages table — the rows the next turn
-     * loads, so the model sees the placeholder and the bytes leave the
-     * database. Rows the graph state no longer references (summarised away)
-     * are older than any retained turn and are rewritten too. Idempotent:
-     * a rewritten row holds no inline block and is never selected again.
+     * Image fetch for the attachment recall middleware
+     * (`core/middlewares/attachment-recall.ts`): one image of this session,
+     * read through the same sources as the turn pipeline (Matrix media
+     * through the gateway, the session's channel links, http(s)), capped at
+     * `MAX_FILE_SIZE`, refused unless the bytes are an image, downscaled
+     * for the model when the oracle binds Cloudflare Images, as base64.
      */
-    private async retainAttachmentPayloads(
-      sessionId: string,
-      stateMessages: BaseMessage[],
-    ): Promise<void> {
-      // Nothing captured (an interrupted stream): never offload blindly.
-      if (stateMessages.length === 0) return;
-      const saver = this.saver!;
-      const { retainedIds, rewrites } = applyAttachmentRetention(
-        stateMessages,
-        ATTACHMENT_PAYLOAD_TURNS,
-      );
-      const pending = new Set(rewrites.map((m) => m.id));
-      const stale = await saver.listThreadMessagesMatching(sessionId, {
-        messageType: 'human',
-        contentContains: INLINE_PAYLOAD_NEEDLE,
-      });
-      for (const row of stale) {
-        if (!row.id || retainedIds.has(row.id) || pending.has(row.id)) continue;
-        const rewritten = offloadInlinePayloads(row);
-        if (rewritten) rewrites.push(rewritten);
-      }
-      let replaced = 0;
-      for (const message of rewrites) {
-        if (await saver.replaceThreadMessage(sessionId, message)) replaced += 1;
-      }
-      if (replaced > 0) {
-        console.log(
-          `[user-do] attachments: offloaded the inline payload of ${replaced} message(s) in ${sessionId}`,
+    private recallImageLoader(input: {
+      sessionId: string;
+      roomId: string | undefined;
+      /** The links of this turn's channel files (earlier ones come from the store). */
+      channelLinks: ReturnType<typeof channelTurnLinks>;
+    }): RecallImageLoader {
+      return async (meta, signal) => {
+        const attachment: AttachmentInput = {
+          filename: meta.filename,
+          mimetype: meta.mimetype,
+          ...(meta.size !== undefined ? { size: meta.size } : {}),
+          ...(meta.mxcUri ? { mxcUri: meta.mxcUri } : {}),
+          ...(meta.eventId ? { eventId: meta.eventId } : {}),
+          ...(meta.channelRef ? { channelRef: meta.channelRef } : {}),
+        };
+        const channel = turnChannelMediaSource({
+          sessionId: input.sessionId,
+          turnLinks: input.channelLinks,
+          store: this.channelAttachmentLinks,
+          channelServiceDid: this.env.CHANNEL_SERVICE_DID,
+        });
+        const { bytes, mimetype, sniffed } = await loadAttachmentBytes(
+          attachment,
+          input.roomId,
+          this.matrixMediaSource(),
+          { signal, maxBytes: MAX_FILE_SIZE, channel },
         );
-      }
+        // Bytes that are not an image never go back as an image block.
+        const kind = classifyAttachment({
+          mimetype,
+          filename: sniffed ? '' : attachment.filename,
+        });
+        if (kind !== 'image')
+          throw new Error(`content is ${mimetype}, not an image`);
+        const sent = await resizeForModel(bytes, mimetype, this.env.IMAGES, {
+          logger: console,
+        });
+        return {
+          kind: 'image',
+          mimeType: sent.mimetype,
+          base64: bytesToBase64(sent.bytes),
+          filename: sanitizeAttachmentFilename(attachment.filename),
+        };
+      };
     }
 
     /**
@@ -7698,6 +7713,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               ...(channelMedia ? { channel: channelMedia } : {}),
               extraction: this.extractionProvider(baseAmbient.llm, core.llm),
               sandbox: await this.sandboxArchiveConfig(req.identity.userDid),
+              ...(this.env.IMAGES ? { images: this.env.IMAGES } : {}),
               signal: abortController.signal,
               logger: console,
             },
@@ -7709,9 +7725,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         );
       }
 
-      // `view_attachment` for this session: payloads older than the newest
-      // `ATTACHMENT_PAYLOAD_TURNS` user turns are placeholders by now (see
-      // `retainAttachmentPayloads`); the tool fetches one again on demand.
+      // `view_attachment` for this session: attachment bytes are never
+      // stored with the conversation (the checkpointer keeps a placeholder,
+      // `src/sqlite/inline-payloads.ts`); the tool fetches one again on
+      // demand.
       // Cleanups registered by tools for THIS turn (MCP clients …): run once
       // the turn ends, however it ends — see `RuntimeContext.onTurnEnd`.
       abortController.signal.addEventListener('abort', () => {
@@ -8038,6 +8055,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               }
             : {}),
           ...(hostSafetyModel ? { safetyModel: hostSafetyModel(ambient) } : {}),
+          // The images of the newest user turns, back in each model request
+          // (their bytes are not stored with the conversation).
+          ...(suppliedContextOnly
+            ? {}
+            : {
+                attachmentRecall: {
+                  loadImage: this.recallImageLoader({
+                    sessionId: req.sessionId,
+                    roomId: sessionRoomId,
+                    channelLinks: turnLinks,
+                  }),
+                  imageInput: getModelCapabilities(attachmentModel).image,
+                  signal: abortController.signal,
+                },
+              }),
         },
         requestCtx: {
           user: {
@@ -8333,13 +8365,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     ): Promise<void> {
       const sessions = this.sessions!;
       await sessions.touchSession(sessionId);
-      await this.retainAttachmentPayloads(sessionId, messages).catch(
-        (err: unknown) => {
-          console.warn(
-            `[user-do] attachment payload retention failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        },
-      );
       if (disposition.kind === 'agent')
         await this.compareShadowRoute(sessionId);
       const row = await sessions.getSession(sessionId);

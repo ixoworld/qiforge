@@ -1,11 +1,14 @@
 /**
  * Re-fetch one attachment of a session on demand — the `view_attachment`
  * lane behind payload retention (`retention.ts`). The same routing as the
- * turn pipeline applies: when the current model reads the modality the bytes
- * come back as a native content block, otherwise the helper (`vision` role)
- * model turns them into text; plain text is decoded locally. Text results
- * are cached per session (`deps.cache`); native views are not (they are the
- * bytes themselves).
+ * turn pipeline applies (`route.ts`: capability, and size for a document):
+ * when the current model reads the modality the bytes come back as a native
+ * content block (an image downscaled when `deps.images` is bound, see
+ * `resize.ts`), otherwise the helper (`vision` role) model turns them into
+ * text; plain text is decoded locally. A document whose downloaded length is
+ * over `NATIVE_DOCUMENT_MAX_BYTES` comes back as text from the bytes already
+ * loaded. Text results are cached per session (`deps.cache`); native views
+ * are not (they are the bytes themselves).
  */
 import type { ChannelMediaSource } from './channel';
 import { classifyAttachment } from './classify';
@@ -20,7 +23,8 @@ import {
 import { categorizeFile, isPlainTextType, verifyMagicBytes } from './magic';
 import { extractPdfText } from './pdf-text';
 import { attachmentMetas, attachmentRef } from './retention';
-import { routeAttachment } from './route';
+import { resizeForModel } from './resize';
+import { NATIVE_DOCUMENT_MAX_BYTES, routeAttachment } from './route';
 import {
   NOTE_FILENAME_MAX,
   NOTE_MIMETYPE_MAX,
@@ -47,6 +51,8 @@ export interface ViewAttachmentDeps {
   /** Where `channel:` references are read (the owner object's links). */
   channel?: ChannelMediaSource;
   extraction: ExtractionProvider | null;
+  /** Cloudflare Images: downscales native images for the model; absent = sent as they are. */
+  images?: ImagesBinding;
   /** Capabilities of the model that will read the result. */
   caps: ModelInputCapabilities;
   roomId?: string;
@@ -129,7 +135,9 @@ export async function viewAttachment(
 ): Promise<AttachmentView> {
   const attachment = toInput(meta);
   const kind = classifyAttachment(attachment);
-  const strategy = routeAttachment(kind, deps.caps);
+  const strategy = routeAttachment(kind, deps.caps, { size: meta.size });
+  // A document downloaded for a native view but too long for one: read as text.
+  let preloaded: { bytes: Uint8Array; mimetype: string } | undefined;
   if (strategy === 'send-native') {
     const { bytes, mimetype, sniffed } = await loadAttachmentBytes(
       attachment,
@@ -138,7 +146,7 @@ export async function viewAttachment(
       downloadOptions(deps),
     );
     deps.logger.log(
-      `[attachments] view "${attachment.filename}" (${mimetype}) kind=${kind} → ${strategy} (${bytes.length} bytes)`,
+      `[attachments] view "${attachment.filename}" (${mimetype}) kind=${kind} size=${meta.size ?? 'unknown'} → ${strategy} (${bytes.length} bytes)`,
     );
     const loaded = classifyAttachment({
       mimetype,
@@ -149,15 +157,28 @@ export async function viewAttachment(
       throw new Error(
         `File content mismatch: claimed ${attachment.mimetype} but detected ${mimetype}`,
       );
-    return {
-      kind: 'native',
-      native: {
-        kind: loaded === 'image' ? 'image' : 'file',
-        mimeType: mimetype,
-        base64: bytesToBase64(bytes),
-        filename: attachment.filename,
-      },
-    };
+    if (loaded === 'document' && bytes.length > NATIVE_DOCUMENT_MAX_BYTES) {
+      deps.logger.log(
+        `[attachments] view "${attachment.filename}" is ${bytes.length} bytes, over the ${NATIVE_DOCUMENT_MAX_BYTES}-byte native document limit → model-extract`,
+      );
+      preloaded = { bytes, mimetype };
+    } else {
+      const sent =
+        loaded === 'image'
+          ? await resizeForModel(bytes, mimetype, deps.images, {
+              logger: deps.logger,
+            })
+          : { bytes, mimetype };
+      return {
+        kind: 'native',
+        native: {
+          kind: loaded === 'image' ? 'image' : 'file',
+          mimeType: sent.mimetype,
+          base64: bytesToBase64(sent.bytes),
+          filename: attachment.filename,
+        },
+      };
+    }
   }
 
   const category = categorizeFile(attachment.mimetype);
@@ -183,15 +204,18 @@ export async function viewAttachment(
       return { kind: 'text', text: cached };
     }
   }
-  const { bytes, mimetype } = await loadAttachmentBytes(
-    attachment,
-    deps.roomId,
-    deps.source,
-    downloadOptions(deps),
-  );
-  deps.logger.log(
-    `[attachments] view "${attachment.filename}" (${mimetype}) kind=${kind} → ${strategy} (${bytes.length} bytes)`,
-  );
+  const { bytes, mimetype } =
+    preloaded ??
+    (await loadAttachmentBytes(
+      attachment,
+      deps.roomId,
+      deps.source,
+      downloadOptions(deps),
+    ));
+  if (!preloaded)
+    deps.logger.log(
+      `[attachments] view "${attachment.filename}" (${mimetype}) kind=${kind} size=${meta.size ?? 'unknown'} → ${strategy} (${bytes.length} bytes)`,
+    );
   verifyMagicBytes(bytes, category, attachment, (m) =>
     deps.logger.warn(`[attachments] ${m}`),
   );

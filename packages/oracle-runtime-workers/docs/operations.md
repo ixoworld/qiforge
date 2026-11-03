@@ -869,6 +869,53 @@ the model natively or through the helper model's extraction:
   native block, by a turn or by `view_attachment`: the turn hands the bytes
   it already downloaded to the extraction lane, whose content check notes
   the mismatch.
+- **Documents are routed by size, images are downscaled.** The same rule
+  for every source (Portal, Matrix rooms, chat channels;
+  `src/attachments/route.ts`): an image goes to the model natively whenever
+  it reads images, downscaled to at most 1568 px on its long edge when the
+  oracle binds Cloudflare Images (`IMAGES`, `configuration.md`; without the
+  binding the original bytes go as they are); a document goes natively
+  only when the model reads files and its downloaded length is at most
+  `NATIVE_DOCUMENT_MAX_BYTES` (80 KiB, about 27k tokens as a base64 block),
+  a declared size over that skips the download, and a larger document takes
+  the extraction lane: the helper model's text (cut at 50k characters), a
+  sandbox copy and a 500-character inline excerpt with the sandbox path.
+  Log line: `[attachments] "<name>" (<type>) kind=<kind> size=<bytes>
+model=<model> → <lane>`.
+- **Bytes are never stored.** A file the model reads natively is inline,
+  as base64, only in the turn's in-memory state. The checkpointer writes
+  every human message that carries such blocks (the person's message and
+  the re-attachment message `view_attachment` adds) with the blocks
+  replaced by one placeholder text, `[attachment offloaded] The attachment
+bytes of this message are not stored with the conversation. …`, that
+  lists each attachment with its reference (`src/sqlite/inline-payloads.ts`;
+  message rows, checkpoint blobs and pending writes, `Send` packets
+  included). The `attachment(s)` metadata is kept, so transcripts still
+  show the file chips. Every later turn loads the placeholder, and so does
+  a durable run resumed after a reset in the middle of its turn: from then
+  on the turn's own file comes back like an earlier one (below). A row
+  stored with its bytes before this rule (the newest 2 user turns of a
+  session kept them) is rewritten to the placeholder by the next checkpoint
+  that still holds the message; a row summarised out of the state before
+  that keeps its bytes.
+- **Recent images are recalled per model call.** Right before each model
+  call, the images of the newest 2 user turns (a re-attachment message
+  counts with the turn before it) whose message holds the placeholder are
+  downloaded again from their source (Matrix media, the session's channel
+  links, http(s); `MAX_FILE_SIZE`), refused unless the bytes are an image,
+  downscaled when the oracle binds `IMAGES`, and put back into that
+  request only (`src/core/middlewares/attachment-recall.ts`): at most 4 per
+  request, newest first, each fetched once per run with a 15 s deadline
+  (`ATTACHMENT_RECALL_TIMEOUT_MS`). Nothing is recalled when the turn's
+  model does not read images. Documents and older images are never
+  recalled: the model calls `view_attachment` with the reference the
+  placeholder lists. Log lines: `[attachments] recall: <ref> re-attached
+(<mimetype>, N base64 chars, N ms)` on the first fetch of each image of a
+  run; `[attachments] recall: <ref> failed (<reason>); the placeholder
+stays` and `[attachments] recall: <ref> is not available; the placeholder
+stays` (warn, once per reference per run; the request goes out with the
+  placeholder). The recalled images are added inside the context guard,
+  which therefore does not count them.
 - **`view_attachment`** keeps the text it extracted in the user's SQLite
   (`attachment_text_cache`, per session, attachment and extraction model,
   at most 65,536 characters per entry, `VIEW_CACHE_MAX_CHARS`), so a second

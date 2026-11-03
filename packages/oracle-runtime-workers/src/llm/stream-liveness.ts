@@ -83,11 +83,12 @@ export class ProviderStallError extends Error {
 /**
  * The `ProviderStallError` in `error` or its `cause` chain — the OpenAI SDK
  * wraps a failed `fetch` in `APIConnectionError` with the original as
- * `cause`, LangChain's middleware errors wrap again.
+ * `cause`, LangChain's middleware errors wrap again, once per middleware
+ * layer (a dozen on the main agent), so the walk goes deep.
  */
 export function findProviderStall(error: unknown): ProviderStallError | null {
   let current: unknown = error;
-  for (let depth = 0; depth < 8; depth += 1) {
+  for (let depth = 0; depth < 32; depth += 1) {
     if (current instanceof ProviderStallError) return current;
     if (!current || typeof current !== 'object' || !('cause' in current))
       return null;

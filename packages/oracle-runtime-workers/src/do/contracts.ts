@@ -248,6 +248,13 @@ export interface OracleWorkerEnv {
    * `"ai": { "binding": "AI" }` in the wrangler config.
    */
   AI?: Ai;
+  /**
+   * Cloudflare Images binding. Optional: images sent natively to a model are
+   * downscaled to a 1568 px long edge as JPEG first (`attachments/resize.ts`); the
+   * sandbox keeps the original. Absent = images go as they are. Declare it
+   * with `"images": { "binding": "IMAGES" }` in the wrangler config.
+   */
+  IMAGES?: ImagesBinding;
 
   // --- llm ----------------------------------------------------------------
   OPEN_ROUTER_API_KEY: string;
