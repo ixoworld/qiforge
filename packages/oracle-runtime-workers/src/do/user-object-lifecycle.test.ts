@@ -50,7 +50,6 @@ import type {
 } from './contracts';
 import { createAttachmentEncryptor } from '@ixo/matrix-bot-workers-sdk';
 import { ChannelAttachmentLinkStore } from '../attachments';
-import { CHANNEL_MEDIA_DAILY_FILES } from '../attachments/room-media';
 import { installTimerTracker, pendingTimers } from './debug-timers';
 /**
  * The user object's lifecycle over a real Durable Object's storage: boot and
@@ -1946,30 +1945,6 @@ describe('channel files in the session thread', () => {
         (await post(h, channelRequest([photo]), { resumed: true })).size,
       ).toBe(0);
       expect(h.gateway.botCredentials).not.toHaveBeenCalled();
-    });
-  });
-
-  it('reads the files from the gateway once the daily cap is reached', async () => {
-    await withObject('thread-files-cap', { env: ENV }, async (h) => {
-      await h.ready();
-      encryptedRoom(h);
-      await h.storage.put('channel-media-day', {
-        day: new Date().toISOString().slice(0, 10),
-        files: CHANNEL_MEDIA_DAILY_FILES,
-        bytes: 0,
-      });
-      const photo = await channelPhoto(jpeg(100, 5), 'r');
-      const uploads = network(
-        new Map([[photo.url.split('?')[0]!, async () => jpeg(100, 5)]]),
-      );
-      const warn = vi.spyOn(console, 'warn');
-      const copies = await post(h, channelRequest([photo]));
-      for (const copy of copies.values()) expect(await copy).toBeNull();
-      await h.settle();
-      expect(uploads).toEqual([]);
-      expect(
-        warn.mock.calls.some(([line]) => String(line).includes('daily cap')),
-      ).toBe(true);
     });
   });
 

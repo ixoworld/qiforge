@@ -14,9 +14,6 @@ import {
 } from './channel';
 import { MAX_FILE_SIZE } from './download';
 import {
-  admitToDailyCap,
-  CHANNEL_MEDIA_DAILY_BYTES,
-  CHANNEL_MEDIA_DAILY_FILES,
   ChannelMediaUploadError,
   channelFilesToKeep,
   channelMediaTxnId,
@@ -497,32 +494,6 @@ describe('the turn-level rules', () => {
     ).toEqual(new Set([image.ref, smallDoc.ref]));
     const huge = await fileOf(plaintext(10), { size: MAX_FILE_SIZE + 1 }, 'f');
     expect(channelFilesToKeep([huge])).toEqual(new Set());
-  });
-
-  it('admits files to the daily cap in order and starts afresh the next UTC day', async () => {
-    const file = await fileOf(plaintext(10));
-    const day = Date.UTC(2026, 10, 3, 12);
-    const full = admitToDailyCap(
-      [file, file],
-      { day: '2026-11-03', files: CHANNEL_MEDIA_DAILY_FILES - 1, bytes: 0 },
-      day,
-    );
-    expect(full.admitted).toHaveLength(1);
-    expect(full.refused).toHaveLength(1);
-    expect(full.usage).toEqual({
-      day: '2026-11-03',
-      files: CHANNEL_MEDIA_DAILY_FILES,
-      bytes: 10,
-    });
-    const bytesFull = admitToDailyCap(
-      [file],
-      { day: '2026-11-03', files: 0, bytes: CHANNEL_MEDIA_DAILY_BYTES - 5 },
-      day,
-    );
-    expect(bytesFull.refused).toHaveLength(1);
-    const nextDay = admitToDailyCap([file], full.usage, day + 24 * 3600_000);
-    expect(nextDay.admitted).toHaveLength(1);
-    expect(nextDay.usage).toEqual({ day: '2026-11-04', files: 1, bytes: 10 });
   });
 
   it('hashes the request into the transaction id, one per file', async () => {

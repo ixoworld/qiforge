@@ -154,10 +154,6 @@ import {
 } from '../attachments/download';
 // Not in the attachments index: it loads the bot SDK, which only workerd runs.
 import {
-  admitToDailyCap,
-  CHANNEL_MEDIA_DAILY_BYTES,
-  CHANNEL_MEDIA_DAILY_FILES,
-  CHANNEL_MEDIA_DAY_KEY,
   CHANNEL_MEDIA_SEND_TIMEOUT_MS,
   CHANNEL_MEDIA_TEXT_WAIT_MS,
   CHANNEL_MEDIA_TURN_TIMEOUT_MS,
@@ -165,8 +161,6 @@ import {
   channelMediaTxnId,
   startChannelFileUploads,
   type ChannelFileUpload,
-  type ChannelMediaDay,
-  type ChannelThreadFile,
   type ThreadFileCopy,
 } from '../attachments/room-media';
 import {
@@ -1229,9 +1223,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       string,
       { at: number; waiter?: () => void }
     >();
-    /** Today's posted channel files (`CHANNEL_MEDIA_DAY_KEY`), once loaded. */
-    private channelMediaUsage: ChannelMediaDay | undefined;
-    private channelMediaUsageLoad: Promise<void> | null = null;
     /** Images the recall middleware re-attached lately, kept across this instance's turns. */
     private readonly recallCache = new RecalledImageCache();
     private channelTurns: ChannelTurns | null = null;
@@ -8573,33 +8564,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /**
-     * The per-user daily cap on posted channel files (`admitToDailyCap`),
-     * counted in the object's storage (`CHANNEL_MEDIA_DAY_KEY`). The count is
-     * read once per instance and updated in memory without an await between
-     * the check and the update, so concurrent turns cannot both take the
-     * last place.
-     */
-    private async admitChannelFilesToday(
-      files: readonly ChannelThreadFile[],
-    ): Promise<ReturnType<typeof admitToDailyCap>> {
-      this.channelMediaUsageLoad ??= this.ctx.storage
-        .get<ChannelMediaDay>(CHANNEL_MEDIA_DAY_KEY)
-        .then((stored) => {
-          this.channelMediaUsage ??= stored;
-        })
-        .catch((error: unknown) => {
-          this.channelMediaUsageLoad = null;
-          throw error;
-        });
-      await this.channelMediaUsageLoad;
-      const result = admitToDailyCap(files, this.channelMediaUsage, Date.now());
-      this.channelMediaUsage = result.usage;
-      if (result.admitted.length)
-        await this.ctx.storage.put(CHANNEL_MEDIA_DAY_KEY, result.usage);
-      return result;
-    }
-
-    /**
      * Post a channel turn's files as encrypted media events in the session
      * thread (`attachments/room-media.ts`), off the turn's critical path.
      * Returns at once: per file the turn may read directly
@@ -8611,8 +8575,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      *   reads by `CHANNEL_MEDIA_TURN_TIMEOUT_MS` from now and by the run's
      *   signal; on a failure (or a room that is not Megolm-encrypted) one
      *   line is logged and nothing is posted;
-     * - the daily cap (`admitChannelFilesToday`): a file over it is only read
-     *   from the gateway, with one log line for the turn;
      * - the uploads (`startChannelFileUploads`), kept alive by `waitUntil`;
      * - one event per file on the session's mirror chain, queued in message
      *   order right after the person's text (`afterChannelText`) at
@@ -8673,14 +8635,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             );
             return [];
           }
-          const { admitted, refused } =
-            await this.admitChannelFilesToday(files);
-          if (refused.length)
-            console.warn(
-              `[attachments] ${refused.length} channel file(s) of ${req.sessionId} not posted to its thread: the daily cap (${CHANNEL_MEDIA_DAILY_FILES} files / ${CHANNEL_MEDIA_DAILY_BYTES} bytes) is reached; the turn reads them from the channel gateway`,
-            );
           const run = startChannelFileUploads({
-            files: admitted,
+            files,
             sessionId: req.sessionId,
             deps: {
               origins: channelGatewayOrigins(this.env.CHANNEL_SERVICE_DID),

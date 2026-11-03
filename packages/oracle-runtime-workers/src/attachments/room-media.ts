@@ -79,10 +79,6 @@ export const CHANNEL_MEDIA_SEND_TIMEOUT_MS = 300_000;
 export const CHANNEL_MEDIA_CONCURRENCY = 3;
 /** The most plaintext one turn keeps for the model across its files (16 MiB). */
 export const CHANNEL_MEDIA_KEEP_TOTAL_BYTES = 16 * 1024 * 1024;
-/** Files one user may have posted to their room per UTC day. */
-export const CHANNEL_MEDIA_DAILY_FILES = 200;
-/** Bytes one user may have posted to their room per UTC day (1 GiB). */
-export const CHANNEL_MEDIA_DAILY_BYTES = 1024 * 1024 * 1024;
 
 export type ChannelFileKind = 'image' | 'video' | 'document' | 'audio';
 
@@ -523,54 +519,6 @@ export async function channelMediaTxnId(input: {
       input.index,
     ]),
   )}`;
-}
-
-/** The user object's storage key of `ChannelMediaDay`. */
-export const CHANNEL_MEDIA_DAY_KEY = 'channel-media-day';
-
-/** What one user posted to their room on one UTC day. */
-export interface ChannelMediaDay {
-  /** `YYYY-MM-DD` (UTC). */
-  day: string;
-  files: number;
-  bytes: number;
-}
-
-/**
- * The per-user daily cap on posted files: `files` in order while the day's
- * count stays within `CHANNEL_MEDIA_DAILY_FILES` and its bytes within
- * `CHANNEL_MEDIA_DAILY_BYTES` (`usage` from another day starts afresh).
- * Returns the files to post, the ones left to the gateway, and the usage to
- * store (the admitted files counted: an upload spends its bandwidth whether
- * or not its event is sent).
- */
-export function admitToDailyCap(
-  files: readonly ChannelThreadFile[],
-  usage: ChannelMediaDay | undefined,
-  now: number,
-): {
-  admitted: ChannelThreadFile[];
-  refused: ChannelThreadFile[];
-  usage: ChannelMediaDay;
-} {
-  const day = new Date(now).toISOString().slice(0, 10);
-  const next: ChannelMediaDay =
-    usage?.day === day ? { ...usage } : { day, files: 0, bytes: 0 };
-  const admitted: ChannelThreadFile[] = [];
-  const refused: ChannelThreadFile[] = [];
-  for (const file of files) {
-    if (
-      next.files + 1 > CHANNEL_MEDIA_DAILY_FILES ||
-      next.bytes + file.size > CHANNEL_MEDIA_DAILY_BYTES
-    ) {
-      refused.push(file);
-      continue;
-    }
-    next.files += 1;
-    next.bytes += file.size;
-    admitted.push(file);
-  }
-  return { admitted, refused, usage: next };
 }
 
 /**

@@ -11,7 +11,8 @@ graph LR
     Shell -->|per user DID| UserDO[UserOracleDO × N users]
     Matrix[(Matrix homeserver)] <-->|/sync, E2EE| Gateway[MatrixGatewayDO × 1]
     Gateway -->|decrypted turn| UserDO
-    UserDO -->|reply / media| Gateway
+    UserDO -->|reply / media events| Gateway
+    UserDO -->|media upload + download, plugin device| Matrix
     UserDO -->|export .db.gz| Owner[User-owned file in the IXO VFS]
 ```
 

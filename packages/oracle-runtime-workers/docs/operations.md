@@ -876,9 +876,10 @@ the model natively or through the helper model's extraction:
   oracle binds Cloudflare Images (`IMAGES`, `configuration.md`; without the
   binding the original bytes go as they are); a document goes natively
   only when the model reads files and its downloaded length is at most
-  `NATIVE_DOCUMENT_MAX_BYTES` (80 KiB, about 27k tokens as a base64 block),
-  a declared size over that skips the download, and a larger document takes
-  the extraction lane: the helper model's text (cut at 50k characters), a
+  `NATIVE_DOCUMENT_MAX_BYTES` (20 KiB, about 7k tokens as a base64 block;
+  providers charge a native PDF per page, so this keeps one to a few
+  pages), a declared size over that skips the download, and a larger
+  document always takes the extraction lane: the helper model's text (cut at 50k characters), a
   sandbox copy and a 500-character inline excerpt with the sandbox path.
   Log line: `[attachments] "<name>" (<type>) kind=<kind> size=<bytes>
 model=<model> → <lane>`.
@@ -972,7 +973,7 @@ retrying once without them, not recalled again this run: <refs>`. The
   the person's text, at background priority; the Matrix gateway object only
   sends the event. The turn never waits for the homeserver or the room: it
   names the files by their `channel:` reference and takes the plaintext of
-  an image (at most 25 MB) or a small document (at most 80 KiB) the moment
+  an image (at most 25 MB) or a small document (at most 20 KiB) the moment
   its read passes the size and digest check, up to 16 MiB per turn
   (`CHANNEL_MEDIA_KEEP_TOTAL_BYTES`); every other file is read from the
   gateway by the extract lane as before. Limits: 3 files read at a time
@@ -982,10 +983,8 @@ retrying once without them, not recalled again this run: <refs>`. The
   homeserver's answer (`CHANNEL_MEDIA_UPLOAD_TIMEOUT_MS`) and 300 s per
   event in the background (`CHANNEL_MEDIA_SEND_TIMEOUT_MS`); the events wait
   up to 60 s for the person's text to be queued first
-  (`CHANNEL_MEDIA_TEXT_WAIT_MS`). At most 200 files and 1 GiB per user and
-  UTC day are posted (`CHANNEL_MEDIA_DAILY_FILES`,
-  `CHANNEL_MEDIA_DAILY_BYTES`; user-object storage key
-  `channel-media-day`). Only a Megolm-encrypted room gets a file. The lines:
+  (`CHANNEL_MEDIA_TEXT_WAIT_MS`). Only a Megolm-encrypted room gets a file.
+  The lines:
   - `[attachments] uploaded <n>/<m> channel file(s) of thread <session> in <ms> ms`
     — one per channel turn whose uploads started (not on a resumed attempt).
   - `[attachments] channel file channel:<16 hex> (<kind>, <bytes> bytes) not posted to thread <session>: <reason>`
@@ -1005,8 +1004,7 @@ rate-limited this turn`); `Reading the channel file timed out after 60 s`
   - `[attachments] channel files of <session> not posted to its thread; the turn reads them from the channel gateway: <reason>`
     — the room's encryption check or the plugin device lookup
     (`botCredentials`) failed or outlived the turn's deadline;
-    `… not posted to its thread: the room is not end-to-end encrypted`;
-    `<n> channel file(s) of <session> not posted to its thread: the daily cap … is reached`.
+    `… not posted to its thread: the room is not end-to-end encrypted`.
   - `[attachments] the text of <request> was not queued within 60000 ms; its files are queued without it`
     — the session's text mirrors are backing off; the room may show the
     files before the text.
@@ -1201,11 +1199,21 @@ catch-up, but it stalls sends for ~30 s.
   (`/_matrix/client/v1/media/download`, `/_matrix/media/v3/download` on a
   `404`; a `401` makes it report the token and retry once), decrypts it
   (`createAttachmentDecryptor`) and enforces the size caps chunk by chunk.
-  Snapshots (the legacy owner copy) still cross the RPC as streams, as
-  stored, and are decrypted the same way. The SDK's whole-buffer download decrypted inside
-  the crypto WASM and grew its heap for good (a buffered 10 MiB round trip
-  took it from 7 to 41 MB); the streamed calls keep the gateway's memory
-  flat whatever the file size.
+  Snapshots (the legacy owner copy) still cross the RPC as a stream
+  (`downloadUserSnapshotStream`), as stored, and are decrypted the same
+  way. The SDK's whole-buffer download decrypted inside the crypto WASM and
+  grew its heap for good (a buffered 10 MiB round trip took it from 7 to
+  41 MB); reading media in the user object and streaming the snapshot keep
+  the gateway's memory flat whatever the file size. **Two-script
+  deployments:** this changed the RPC between the scripts, so deploy both
+  from the same release back to back, the oracle script first. An older
+  gateway script has no `eventMediaInfo`, so until it is deployed a file
+  referenced by its Matrix event (a Matrix room attachment, a channel
+  file's room copy) cannot be read and is noted for the model, while one
+  referenced by its `mxc://` URI is read directly as before; an older
+  oracle script reads every Matrix file through the download stream RPCs
+  (`downloadEventMediaStream`, `downloadMxcMediaStream`) that the new
+  gateway no longer has.
 - **Shared bot account.** Every extra client logged in as the oracle user is
   a separate device that also answers room messages and that every peer has
   to encrypt to. Keep the device list short: the gateway device (`deviceId`

@@ -18,14 +18,16 @@ export type AttachmentStrategy =
   | 'model-extract';
 
 /**
- * The largest document sent to the model as a native file block (80 KiB).
+ * The largest document sent to the model as a native file block (20 KiB).
  * The block is the file's base64, which the runtime counts as tokens at
- * chars/4: 81,920 bytes are ~109k base64 chars ≈ 27k tokens by that estimate,
- * far under the request cap, and a few such files fit one turn. A larger
- * document goes through the extract lane: its text (cut at 50k chars), a
- * sandbox copy and a 500-char inline excerpt with the sandbox path.
+ * chars/4: 20,480 bytes are ~27k base64 chars ≈ 7k tokens by that estimate.
+ * Providers charge a native PDF per page, so this keeps a native document
+ * to a few pages. A larger document
+ * always goes through the extract lane: its text from the helper model (cut
+ * at 50k chars), a sandbox copy and a 500-char inline excerpt with the
+ * sandbox path.
  */
-export const NATIVE_DOCUMENT_MAX_BYTES = 81_920;
+export const NATIVE_DOCUMENT_MAX_BYTES = 20_480;
 
 /**
  * Decide, for one attachment, how to get it to the selected model — the single
