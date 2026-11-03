@@ -852,11 +852,11 @@ the model natively or through the helper model's extraction:
   the model, never downloaded a second time. Usage of paid extractions is
   counted even when a later file is refused.
 - **Deadlines.** Every download, http(s) or Matrix media, has a 60 s
-  deadline (`DOWNLOAD_TIMEOUT_MS`) from the request to the last byte. The
-  gateway applies it to Matrix media on its side of the RPC (an
-  `AbortSignal` cannot cross a Durable Object RPC); when the turn is
-  aborted, the user object cancels the stream it reads, which stops the
-  gateway's download. A redirect without a `Location` header is reported
+  deadline (`DOWNLOAD_TIMEOUT_MS`) from the request to the last byte, and
+  the turn's abort ends it. Matrix media is read by the user object itself
+  (below), so both apply on its side; the gateway's `eventMediaInfo`
+  carries the deadline across the RPC (an `AbortSignal` cannot cross a
+  Durable Object RPC). A redirect without a `Location` header is reported
   as such.
 - **Type.** The content's magic bytes are checked against the declared
   type. A container format whose bytes are consistent with the claim keeps
@@ -869,6 +869,93 @@ the model natively or through the helper model's extraction:
   native block, by a turn or by `view_attachment`: the turn hands the bytes
   it already downloaded to the extraction lane, whose content check notes
   the mismatch.
+- **Documents are routed by size, images are downscaled.** The same rule
+  for every source (Portal, Matrix rooms, chat channels;
+  `src/attachments/route.ts`): an image goes to the model natively whenever
+  it reads images, downscaled to at most 1568 px on its long edge when the
+  oracle binds Cloudflare Images (`IMAGES`, `configuration.md`; without the
+  binding the original bytes go as they are); a document goes natively
+  only when the model reads files and its downloaded length is at most
+  `NATIVE_DOCUMENT_MAX_BYTES` (20 KiB, about 7k tokens as a base64 block;
+  providers charge a native PDF per page, so this keeps one to a few
+  pages), a declared size over that skips the download, and a larger
+  document always takes the extraction lane: the helper model's text (cut at 50k characters), a
+  sandbox copy and a 500-character inline excerpt with the sandbox path.
+  Log line: `[attachments] "<name>" (<type>) kind=<kind> size=<bytes>
+model=<model> → <lane>`.
+- **Bytes are never stored.** A file the model reads natively is inline,
+  as base64, only in the turn's in-memory state. The checkpointer writes
+  every human message that carries such blocks (the person's message and
+  the re-attachment message `view_attachment` adds) with the blocks
+  replaced by one placeholder text, `[attachment offloaded] The attachment
+bytes of this message are not stored with the conversation. …`, that
+  lists each attachment with its reference (`src/sqlite/inline-payloads.ts`;
+  message rows, checkpoint blobs and pending writes, `Send` packets
+  included). The `attachment(s)` metadata is kept, so transcripts still
+  show the file chips. Every later turn loads the placeholder, and so does
+  a durable run resumed after a reset in the middle of its turn: from then
+  on the turn's own file comes back like an earlier one (below). Rows
+  stored with their bytes before this rule (the newest 2 user turns of a
+  session kept them, and rows summarised out of the state never get
+  written again) are rewritten once per thread, on the thread's first load
+  (the turn, the transcript): the human rows whose `message_content` holds
+  `"source_type":"base64"` are rewritten in place as their placeholder, 8
+  per transaction, and the thread is recorded in
+  `attachment_payload_sweeps`, so it is never scanned again. Log line:
+  `[sqlite-saver] thread <id>: N of M stored human message(s) with inline
+attachment bytes rewritten as their placeholder` (only when a row
+  matched); a failed sweep is logged as a warning and runs again on the
+  next load. A session that is never opened again keeps its old bytes in
+  the owner copy. **Limit:** only human messages are stripped. A tool or AI
+  message that carries base64 (an MCP tool's screenshot) is stored and
+  replayed as it is, since nothing could fetch its bytes again. Every write
+  whose serialized form still holds an inline payload — such a message, or
+  a human message in a shape the stripping does not reach (a plain
+  `{ role, content }` object, a `Map`, a value nested deeper than 12
+  levels) — logs one warning per write: `[sqlite-saver] a pending write of
+thread <id> (task <id>, channel <names>) still holds inline base64 after
+attachment stripping: …` or `[sqlite-saver] the checkpoint of thread <id>
+still holds inline base64 …`.
+- **Recent images are recalled per model call.** Right before each model
+  call, the images of the newest 2 user turns (a re-attachment message
+  counts with the turn before it) whose message holds the placeholder are
+  downloaded again from their source (Matrix media, the session's channel
+  links, http(s)), refused unless the bytes are an image, downscaled when
+  the oracle binds `IMAGES`, and put back into that request only
+  (`src/core/middlewares/attachment-recall.ts`). Limits: at most 4 per
+  request, newest first, fetched one at a time with a 15 s deadline each
+  (`ATTACHMENT_RECALL_TIMEOUT_MS`); an image whose recorded size is over
+  5 MiB (`ATTACHMENT_RECALL_MAX_IMAGE_BYTES`) is not fetched, one of unknown
+  size is cut off at 5 MiB and skipped; the recalled images of one request
+  hold at most 10 MiB of base64 together
+  (`ATTACHMENT_RECALL_MAX_TOTAL_BYTES`), an image that would pass it is
+  left out. An image the request already carries as bytes (the turn's own
+  message, a re-attachment) is not recalled, nor the same file twice (a
+  channel photo sent again matches by its channel reference). An image the
+  resize step reports `dropped` (malformed, too large, transformation
+  failed; `configuration.md`) is not recalled. The finished images
+  (resized, base64) are kept in a least-recently-used cache of the user
+  object (8 images, 10 MiB of base64), so the next turns neither download
+  nor transform them again; a failure is not cached across turns. When the
+  provider refuses a request carrying recalled images with a 4xx client
+  error that is not a context overflow, a credential, billing, timeout or
+  rate-limit status (401, 402, 403, 408, 429), the call is made once more
+  with the request as it came in, without the recalled images, and those
+  images are not recalled again in that run. Nothing is recalled when the
+  turn's model does not read images. Documents and older images are never
+  recalled: the model calls `view_attachment` with the reference the
+  placeholder lists. Log lines: `[attachments] recall: <ref> re-attached
+(<mimetype>, N base64 chars, N ms)` on each fetch (none on a cache hit);
+  warnings, once per reference per run, with the placeholder left in the
+  request: `[attachments] recall: <ref> failed (<reason>); the placeholder
+stays`, `[attachments] recall: <ref> is not available; the placeholder
+stays`, `[attachments] recall: <ref> is N bytes, over the N-byte recall
+limit; the placeholder stays`; `[attachments] recall: <ref> left out (…)`
+  when the request's total is reached; and `[attachments] recall: the
+provider refused a request with N recalled image(s) (<status>: <message>);
+retrying once without them, not recalled again this run: <refs>`. The
+  recalled images are added inside the context guard, which therefore
+  neither counts them nor sees the refusal that the retry answered.
 - **`view_attachment`** keeps the text it extracted in the user's SQLite
   (`attachment_text_cache`, per session, attachment and extraction model,
   at most 65,536 characters per entry, `VIEW_CACHE_MAX_CHARS`), so a second
@@ -878,6 +965,75 @@ the model natively or through the helper model's extraction:
   session keeps its newest 50 (`VIEW_CACHE_MAX_PER_SESSION`), and the cache
   goes with its session. An unsupported file type is reported without a
   download.
+- **Channel files in the session thread** (`src/attachments/room-media.ts`,
+  [channels](channels.md#request)). Alongside a channel turn, the user
+  object streams each file once from the gateway's link to the homeserver
+  (encrypted, no name or type on the upload, with the oracle's plugin
+  device) and later posts it as a media event in the session thread, after
+  the person's text, at background priority; the Matrix gateway object only
+  sends the event. The turn never waits for the homeserver or the room: it
+  names the files by their `channel:` reference and takes the plaintext of
+  an image (at most 25 MB) or a small document (at most 20 KiB) the moment
+  its read passes the size and digest check, up to 16 MiB per turn
+  (`CHANNEL_MEDIA_KEEP_TOTAL_BYTES`); every other file is read from the
+  gateway by the extract lane as before. Limits: 3 files read at a time
+  (`CHANNEL_MEDIA_CONCURRENCY`), 60 s per read from opening the link to the
+  check (`DOWNLOAD_TIMEOUT_MS`), 120 s for all of a turn's reads and the
+  setup before them (`CHANNEL_MEDIA_TURN_TIMEOUT_MS`), then 60 s for the
+  homeserver's answer (`CHANNEL_MEDIA_UPLOAD_TIMEOUT_MS`) and 300 s per
+  event in the background (`CHANNEL_MEDIA_SEND_TIMEOUT_MS`); the events wait
+  up to 60 s for the person's text to be queued first
+  (`CHANNEL_MEDIA_TEXT_WAIT_MS`). Only a Megolm-encrypted room gets a file.
+  The lines:
+  - `[attachments] uploaded <n>/<m> channel file(s) of thread <session> in <ms> ms`
+    — one per channel turn whose uploads started (not on a resumed attempt).
+  - `[attachments] channel file channel:<16 hex> (<kind>, <bytes> bytes) not posted to thread <session>: <reason>`
+    — one per file that was not uploaded; the reason never carries the link.
+    `its bytes do not match the digest the channel sent` / `it is larger
+(smaller) than the channel announced`: the gateway served another file
+    (the upload never completed); `the homeserver refused the upload:
+<status> …`: a `413` is the homeserver's upload limit, a `401` makes the
+    user object report the token to the gateway (`botCredentials({ rejected
+})`), which re-validates its plugin device or logs it in again once; a
+    `429` also skips the turn's remaining files (`the homeserver
+rate-limited this turn`); `Reading the channel file timed out after 60 s`
+    / `Reading the turn's channel files timed out after 120 s` /
+    `Uploading the file to the homeserver timed out after 60 s`: a
+    deadline. The turn goes on as before this feature: a file whose copy
+    did not come is read from the gateway.
+  - `[attachments] channel files of <session> not posted to its thread; the turn reads them from the channel gateway: <reason>`
+    — the room's encryption check or the plugin device lookup
+    (`botCredentials`) failed or outlived the turn's deadline;
+    `… not posted to its thread: the room is not end-to-end encrypted`.
+  - `[attachments] the text of <request> was not queued within 60000 ms; its files are queued without it`
+    — the session's text mirrors are backing off; the room may show the
+    files before the text.
+  - `[user-do] Matrix replay (channel file) → <event id> in thread <session>`
+    and `… send failed (attempt n) — retrying …`: the event send, on the
+    same per-session chain as the text mirrors;
+    `[attachments] channel file channel:<16 hex> not posted to thread <session>: <reason>`
+    when it failed or ran out of its 300 s.
+  - `[attachments] could not keep the thread events of <session>'s channel files: …`
+    — the event ids were not stored next to the links; those files are
+    then served by their links alone, and not after the links expire.
+- **One account sends every mirror and file event.** The deployment's
+  oracle account sends the room mirrors of every Portal and channel turn,
+  every channel file event and every reply, through one gateway object.
+  Synapse's stock `rc_message` is 0.2 messages per second with a burst of
+  10 per user; the bot SDK paces the account's sends with its own token
+  bucket, 5/s with a burst of 20 by default (`MATRIX_SEND_RATE_PER_SECOND`,
+  `MATRIX_SEND_BURST`), which assumes the homeserver's limit was raised for
+  the bot and trims itself on `429`; and the gateway holds background sends
+  (mirrors, file events) to two at a time ahead of replies
+  (`BACKGROUND_SEND_CONCURRENCY`). A deployment that expects channel
+  traffic at volume (each file turn is one text event, one event per file
+  and one reply) needs a per-user override for the oracle account on the
+  homeserver (Synapse admin API `POST
+/_synapse/admin/v1/users/<user id>/override_ratelimit` with
+  `messages_per_second` and `burst_count`, or `0` / `0` for none) and a load
+  test at the expected rate before it relies on the room copy: past the
+  limit the homeserver answers `429`, the SDK backs off and the background
+  events fall behind their 300 s bound (logged, not retried).
 
 ### Tasks: the run ledger
 
@@ -1010,11 +1166,19 @@ catch-up, but it stalls sends for ~30 s.
 - The gateway's own device is logged in with the password and its id is
   pinned in storage; the token is verified with `/account/whoami` on every
   boot and re-minted for the same device id when rejected.
-- Plugins that run their own client (editor, flows) use a second, crypto-less
-  device (`identity:bot-client` in gateway storage, display name "QiForge
-  oracle plugins (…)"), minted on first use. Deleting it turns page edits
-  into `401 Invalid access token` until the gateway re-logs it in; the
-  editor's Matrix client is rebuilt whenever the gateway hands out a
+- Plugins that run their own client (editor, flows) and the user objects'
+  own media transfers (channel file uploads, Matrix media downloads) use a
+  second, crypto-less device (`identity:bot-client` in gateway storage,
+  display name "QiForge oracle plugins (…)"), minted on first use and
+  cached by the gateway after one `/account/whoami`; concurrent first
+  callers share one lookup. The gateway does not notice a deleted device on
+  its own: a caller whose request was answered `401` reports the token
+  (`botCredentials({ rejected })`, which the user objects do for media), the
+  gateway drops its cache when that is still the cached token and
+  re-validates or logs the same device id in again, once for every caller
+  waiting. Plugins that do not report it see `401 Invalid access token`
+  until the gateway object restarts or a media transfer reports the token;
+  the editor's Matrix client is rebuilt whenever the gateway hands out a
   different access token or homeserver, so the next turn uses the new
   token without an isolate restart.
 - **One-time-key conflicts.** If a restored crypto store is behind the
@@ -1026,13 +1190,30 @@ catch-up, but it stalls sends for ~30 s.
   account backup, the old device drained and logged out. Each rotation costs
   a fresh boot with a backup restore. `POST /debug/matrix/rotate-device`
   does it on demand.
-- **Media never sits in the gateway.** Snapshots (the legacy owner copy)
-  and attachments cross the RPC to the user object as streams, as stored:
-  the object decrypts them (`createAttachmentDecryptor`) and enforces the
-  size caps chunk by chunk. The SDK's whole-buffer download decrypted inside
-  the crypto WASM and grew its heap for good (a buffered 10 MiB round trip
-  took it from 7 to 41 MB); the streamed calls keep the gateway's memory
-  flat whatever the file size.
+- **Media never sits in the gateway.** Attachment media (Portal and Matrix
+  files, channel files' room copies, image recall) never crosses it: the
+  gateway answers only the media event's small JSON (`eventMediaInfo`: the
+  `mxc://` and the `EncryptedFile` fields, decrypted from the event with
+  the room keys), and the user object downloads the media from the
+  homeserver itself with the plugin device's token
+  (`/_matrix/client/v1/media/download`, `/_matrix/media/v3/download` on a
+  `404`; a `401` makes it report the token and retry once), decrypts it
+  (`createAttachmentDecryptor`) and enforces the size caps chunk by chunk.
+  Snapshots (the legacy owner copy) still cross the RPC as a stream
+  (`downloadUserSnapshotStream`), as stored, and are decrypted the same
+  way. The SDK's whole-buffer download decrypted inside the crypto WASM and
+  grew its heap for good (a buffered 10 MiB round trip took it from 7 to
+  41 MB); reading media in the user object and streaming the snapshot keep
+  the gateway's memory flat whatever the file size. **Two-script
+  deployments:** this changed the RPC between the scripts, so deploy both
+  from the same release back to back, the oracle script first. An older
+  gateway script has no `eventMediaInfo`, so until it is deployed a file
+  referenced by its Matrix event (a Matrix room attachment, a channel
+  file's room copy) cannot be read and is noted for the model, while one
+  referenced by its `mxc://` URI is read directly as before; an older
+  oracle script reads every Matrix file through the download stream RPCs
+  (`downloadEventMediaStream`, `downloadMxcMediaStream`) that the new
+  gateway no longer has.
 - **Shared bot account.** Every extra client logged in as the oracle user is
   a separate device that also answers room messages and that every peer has
   to encrypt to. Keep the device list short: the gateway device (`deviceId`

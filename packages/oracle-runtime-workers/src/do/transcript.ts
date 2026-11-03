@@ -111,7 +111,7 @@ export function contentToText(content: BaseMessage['content']): string {
         if (typeof part === 'string') return part;
         if (part && typeof part === 'object' && 'text' in part) {
           const text = (part as { text?: unknown }).text;
-          // The retention placeholder is model-facing only; the transcript
+          // The attachment placeholder is model-facing only; the transcript
           // keeps listing the attachment from its metadata.
           return typeof text === 'string' && !isAttachmentPlaceholderText(text)
             ? text

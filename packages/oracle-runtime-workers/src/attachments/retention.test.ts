@@ -1,17 +1,17 @@
 /**
- * Attachment payload retention — window selection, the placeholder rewrite,
- * idempotence and the re-attachment message's turn membership. Pure
+ * The attachment placeholder: the copy the checkpointer stores in place of a
+ * message with inline bytes (`src/sqlite/inline-payloads.ts`). Pure
  * functions over LangChain messages (no platform APIs).
  */
 import { AIMessage, HumanMessage } from '@langchain/core/messages';
 import { describe, expect, it } from 'vitest';
 import {
-  applyAttachmentRetention,
   ATTACHMENT_PLACEHOLDER_PREFIX,
   ATTACHMENT_VIEW_SOURCE,
   buildPlaceholderText,
   hasInlinePayload,
   isAttachmentPlaceholderText,
+  isAttachmentViewMessage,
   offloadInlinePayloads,
 } from './retention';
 
@@ -42,7 +42,6 @@ function imageTurn(id: string | undefined, text: string): HumanMessage {
 }
 const textTurn = (id: string, text: string): HumanMessage =>
   new HumanMessage({ id, content: text });
-const ai = (id: string): AIMessage => new AIMessage({ id, content: 'ok' });
 const viewMessage = (id: string): HumanMessage =>
   new HumanMessage({
     id,
@@ -53,105 +52,55 @@ const viewMessage = (id: string): HumanMessage =>
     },
   });
 
-describe('applyAttachmentRetention', () => {
-  it('keeps the newest N user turns inline and rewrites older payloads', () => {
-    const messages = [
-      imageTurn('h1', 'first'),
-      ai('a1'),
-      imageTurn('h2', 'second'),
-      ai('a2'),
-      textTurn('h3', 'third'),
-      ai('a3'),
-    ];
-    const { retainedIds, rewrites } = applyAttachmentRetention(messages, 2);
-    expect([...retainedIds]).toEqual(['h2']);
-    expect(rewrites.map((m) => m.id)).toEqual(['h1']);
-    const rewritten = rewrites[0]!;
+describe('offloadInlinePayloads / buildPlaceholderText', () => {
+  it('replaces the inline block by a placeholder naming view_attachment, kwargs and the original untouched', () => {
+    const message = imageTurn('h1', 'first');
+    const rewritten = offloadInlinePayloads(message)!;
     expect(rewritten.type).toBe('human');
+    expect(rewritten.id).toBe('h1');
     expect(hasInlinePayload(rewritten)).toBe(false);
-    expect(Array.isArray(rewritten.content)).toBe(true);
     const blocks = rewritten.content as Array<{ type: string; text?: string }>;
     expect(blocks.map((b) => b.type)).toEqual(['text', 'text']);
     expect(blocks[0]!.text).toBe('first');
     const placeholder = blocks[1]!.text!;
     expect(isAttachmentPlaceholderText(placeholder)).toBe(true);
+    expect(placeholder).toContain('not stored with the conversation');
+    expect(placeholder).not.toContain('user turns');
     expect(placeholder).toContain('"red.png" (image/png, 1 KB)');
     expect(placeholder).toContain('ref: mxc://hs/abc');
-    expect(placeholder).toContain('view_attachment');
+    expect(placeholder).toContain('call view_attachment with its ref');
     // Metadata the transcript renders from is untouched.
-    expect(rewritten.additional_kwargs).toEqual(messages[0]!.additional_kwargs);
+    expect(rewritten.additional_kwargs).toEqual(message.additional_kwargs);
     // The original is not mutated.
-    expect(hasInlinePayload(messages[0]!)).toBe(true);
+    expect(hasInlinePayload(message)).toBe(true);
   });
 
-  it('is idempotent: a rewritten message is never selected again', () => {
-    const first = applyAttachmentRetention(
-      [
-        imageTurn('h1', 'a'),
-        ai('a1'),
-        textTurn('h2', 'b'),
-        ai('a2'),
-        textTurn('h3', 'c'),
-        ai('a3'),
-      ],
-      2,
-    );
-    expect(first.rewrites).toHaveLength(1);
-    const second = applyAttachmentRetention(
-      [
-        first.rewrites[0]!,
-        ai('a1'),
-        textTurn('h2', 'b'),
-        ai('a2'),
-        textTurn('h3', 'c'),
-        ai('a3'),
-      ],
-      2,
-    );
-    expect(second.rewrites).toHaveLength(0);
-    expect(second.retainedIds.size).toBe(0);
+  it('keeps the re-attachment marker and the speaker name', () => {
+    const view = offloadInlinePayloads(viewMessage('v1'))!;
+    expect(isAttachmentViewMessage(view)).toBe(true);
+    expect(hasInlinePayload(view)).toBe(false);
+    const named = offloadInlinePayloads(
+      new HumanMessage({
+        id: 'n',
+        name: 'alice',
+        content: [{ type: 'text', text: 'hi' }, IMAGE_BLOCK],
+        additional_kwargs: { attachments: [META] },
+      }),
+    )!;
+    expect(named.name).toBe('alice');
   });
 
-  it('counts a re-attachment message with the user turn it followed', () => {
-    const base = [
-      imageTurn('h1', 'first'),
-      ai('a1'),
-      textTurn('h2', 'look again'),
-      viewMessage('v1'),
-      ai('a2'),
-      textTurn('h3', 'thanks'),
-      ai('a3'),
-    ];
-    // h3 = turn 1, v1 belongs to h2 = turn 2 → still inline; h1 = turn 3 → out.
-    const inWindow = applyAttachmentRetention(base, 2);
-    expect([...inWindow.retainedIds]).toEqual(['v1']);
-    expect(inWindow.rewrites.map((m) => m.id)).toEqual(['h1']);
-    // One more user turn pushes the re-attachment out as well.
-    const later = applyAttachmentRetention(
-      [...base, textTurn('h4', 'more'), ai('a4')],
-      2,
-    );
-    expect(later.retainedIds.size).toBe(0);
-    expect(later.rewrites.map((m) => m.id).sort()).toEqual(['h1', 'v1']);
+  it('leaves a message that is not a human message alone', () => {
+    expect(
+      offloadInlinePayloads(
+        new AIMessage({
+          id: 'a',
+          content: [{ type: 'text', text: 'x' }, IMAGE_BLOCK],
+        }),
+      ),
+    ).toBeNull();
   });
 
-  it('leaves messages without an id alone (they cannot be rewritten in place)', () => {
-    const { retainedIds, rewrites } = applyAttachmentRetention(
-      [
-        imageTurn(undefined, 'x'),
-        ai('a1'),
-        textTurn('h2', 'y'),
-        ai('a2'),
-        textTurn('h3', 'z'),
-      ],
-      1,
-    );
-    expect(retainedIds.size).toBe(0);
-    expect(rewrites).toHaveLength(0);
-  });
-});
-
-describe('offloadInlinePayloads / buildPlaceholderText', () => {
   it('returns null for messages without an inline payload', () => {
     expect(offloadInlinePayloads(textTurn('h', 'plain'))).toBeNull();
     expect(

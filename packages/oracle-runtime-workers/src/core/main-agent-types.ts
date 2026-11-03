@@ -1,5 +1,6 @@
 import type { TaskExecutionProfile } from '../core/execution-profile';
 import type { ContextBudget } from './context-budget';
+import type { AttachmentRecallMiddlewareOptions } from './middlewares/attachment-recall';
 import type { ContextGuardEvent } from './middlewares/context-guard';
 import type { ResultCapConfig } from './middlewares/result-cap';
 import type { ReadResultOutcome } from '../do/result-store';
@@ -144,6 +145,13 @@ export interface MainAgentHooks {
    * the run once the tool has answered, without another model call.
    */
   turnTools?: Array<{ tool: PluginTool; returnDirect?: boolean }>;
+  /**
+   * Puts the images of the newest user turns back into each model request
+   * (attachment-recall.ts): attachment bytes are never stored with the
+   * conversation, so a message loaded from the checkpoint carries a
+   * placeholder instead. Absent = no recall.
+   */
+  attachmentRecall?: Omit<AttachmentRecallMiddlewareOptions, 'logger'>;
 }
 
 export interface MainAgentArgs {

@@ -3,14 +3,15 @@
  * state), with the homeserver and the user objects scripted: who a room
  * message is attributed to (the verified room alias), what happens when the
  * homeserver fails while a message is prepared, the inbox replay caps, the
- * in-memory memos, the cheap status/health surface and the media deadlines.
+ * in-memory memos, the cheap status/health surface and the media event
+ * lookup with its deadline.
  */
 import { env, runInDurableObject } from 'cloudflare:test';
-import type { BotMessage } from '@ixo/matrix-bot-workers-sdk';
+import { MatrixBotDO, type BotMessage } from '@ixo/matrix-bot-workers-sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SqliteTestDO } from '../sqlite/test-do';
 import type { JsonString, OracleWorkerEnv, TurnResult } from '../do/contracts';
-import { MatrixGatewayDO } from './gateway-do';
+import { BACKGROUND_SEND_CONCURRENCY, MatrixGatewayDO } from './gateway-do';
 import type { GateDecision } from './group-chat';
 import { insertInboxRow, listInboxRows, MAX_TURN_REPLAYS } from './inbox-store';
 import type { IngestTurn } from './ingest';
@@ -88,6 +89,12 @@ class TestGateway extends MatrixGatewayDO {
   beforeResolve: () => Promise<void> = async () => undefined;
   /** Event ids `getEvent` was asked for, in order. */
   readonly eventReads: string[] = [];
+  /** Runs before each `getEvent` answers (replace to hold it). */
+  beforeEventRead: () => Promise<void> = async () => undefined;
+  /** Decrypted events `getEvent` answers with, by id. */
+  readonly events = new Map<string, unknown>();
+  /** Whether the gateway sees the room as end-to-end encrypted. */
+  roomEncrypted = true;
   /** Resolves a turn; replace to hold one open. */
   turnResult: () => Promise<TurnResult> = async () => ({
     sessionId: 's',
@@ -160,7 +167,13 @@ class TestGateway extends MatrixGatewayDO {
     eventId: string,
   ): Promise<JsonString | null> {
     this.eventReads.push(eventId);
-    return null;
+    await this.beforeEventRead();
+    const event = this.events.get(eventId);
+    return event === undefined ? null : JSON.stringify(event);
+  }
+
+  override async isRoomEncrypted(): Promise<boolean> {
+    return this.roomEncrypted;
   }
 
   override async getJoinedRoomMembers(): Promise<string[]> {
@@ -546,36 +559,73 @@ describe('health and status', () => {
   });
 });
 
-describe('media downloads', () => {
-  it('a media stream that stalls mid-body errors once the bound passes', async () => {
-    await withGateway('gw-media-stall', async (gw) => {
-      gw.mediaOpen = async () => ({
-        stream: new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(new Uint8Array([1, 2, 3]));
-            // … and nothing more, ever.
-          },
-        }),
+const ENCRYPTED_FILE = {
+  v: 'v2',
+  key: {
+    kty: 'oct',
+    key_ops: ['encrypt', 'decrypt'],
+    alg: 'A256CTR',
+    k: 'qcHVMSgYg-71CauWBezXI5qkaRb0LuIy-Wx5kIaHMIA',
+    ext: true,
+  },
+  iv: 'X85+XgHN+HEAAAAAAAAAAA',
+  hashes: { sha256: 'aWOHudBnDkJ9IwaR1Nd8XKoI7DOrqDTwt6xDPfVGN6Q' },
+};
+
+describe('media event info', () => {
+  it('answers the media event as small JSON, the attachment left on the homeserver', async () => {
+    await withGateway('gw-media-info', async (gw) => {
+      gw.events.set('$enc', {
+        type: 'm.room.message',
+        content: {
+          msgtype: 'm.image',
+          body: 'photo.jpg',
+          info: { mimetype: 'image/jpeg', size: 1234 },
+          file: { url: 'mxc://hs.test/abc', ...ENCRYPTED_FILE },
+        },
       });
-      const media = await gw.downloadEventMediaStream(ROOM, '$img', {
-        timeoutMs: 50,
+      gw.events.set('$plain', {
+        type: 'm.room.message',
+        content: { msgtype: 'm.file', body: 'a.pdf', url: 'mxc://hs.test/p' },
       });
-      const reader = media!.stream.getReader();
-      expect((await reader.read()).value).toEqual(new Uint8Array([1, 2, 3]));
-      await expect(reader.read()).rejects.toThrow(
-        'media download timed out after 50 ms',
+      gw.events.set('$redacted', { type: 'm.room.message', content: {} });
+      gw.events.set('$bad', {
+        type: 'm.room.message',
+        content: {
+          msgtype: 'm.file',
+          file: { url: 'mxc://hs.test/x', ...ENCRYPTED_FILE, v: 'v1' },
+        },
+      });
+      gw.mediaOpen = () => {
+        throw new Error('the gateway must not open the media');
+      };
+      expect(await gw.eventMediaInfo(ROOM, '$enc')).toEqual({
+        mxc: 'mxc://hs.test/abc',
+        file: ENCRYPTED_FILE,
+        mimetype: 'image/jpeg',
+        filename: 'photo.jpg',
+        size: 1234,
+      });
+      expect(await gw.eventMediaInfo(ROOM, '$plain')).toEqual({
+        mxc: 'mxc://hs.test/p',
+        filename: 'a.pdf',
+      });
+      expect(await gw.eventMediaInfo(ROOM, '$redacted')).toBeNull();
+      expect(await gw.eventMediaInfo(ROOM, '$missing')).toBeNull();
+      await expect(gw.eventMediaInfo(ROOM, '$bad')).rejects.toThrow(
+        'unsupported version',
       );
     });
   });
 
-  it('a download that never opens rejects at the bound, and a caller signal ends it sooner', async () => {
-    await withGateway('gw-media-never', async (gw) => {
-      gw.mediaOpen = () => new Promise(() => undefined);
+  it('a lookup the homeserver never answers rejects at the bound, and a caller signal ends it sooner', async () => {
+    await withGateway('gw-media-info-never', async (gw) => {
+      gw.beforeEventRead = () => new Promise(() => undefined);
       await expect(
-        gw.downloadEventMediaStream(ROOM, '$img', { timeoutMs: 50 }),
+        gw.eventMediaInfo(ROOM, '$img', { timeoutMs: 50 }),
       ).rejects.toBeInstanceOf(MediaDownloadTimeoutError);
       const caller = new AbortController();
-      const pending = gw.downloadEventMediaStream(ROOM, '$img', {
+      const pending = gw.eventMediaInfo(ROOM, '$img', {
         timeoutMs: 60_000,
         signal: caller.signal,
       });
@@ -583,23 +633,142 @@ describe('media downloads', () => {
       await expect(pending).rejects.toThrow('turn aborted');
     });
   });
+});
 
-  it('a complete download passes through untouched', async () => {
-    await withGateway('gw-media-ok', async (gw) => {
-      gw.mediaOpen = async () => ({
-        stream: new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(new Uint8Array([7, 8]));
-            controller.close();
-          },
+describe('event sends', () => {
+  it('never sends an attachment key into a room it does not see as encrypted', async () => {
+    await withGateway('gw-send-refuse', async (gw) => {
+      const send = vi
+        .spyOn(MatrixBotDO.prototype, 'sendEvent')
+        .mockResolvedValue('$sent');
+      gw.roomEncrypted = false;
+      const content = JSON.stringify({
+        msgtype: 'm.image',
+        body: 'photo.jpg',
+        file: { url: 'mxc://hs.test/a', ...ENCRYPTED_FILE },
+      });
+      await expect(
+        gw.sendEvent(ROOM, 'm.room.message', content),
+      ).rejects.toThrow('not end-to-end encrypted');
+      expect(send).not.toHaveBeenCalled();
+      // Without a key, or in an encrypted room, the send goes through.
+      await gw.sendEvent(
+        ROOM,
+        'm.room.message',
+        '{"msgtype":"m.text","body":"x"}',
+      );
+      gw.roomEncrypted = true;
+      await gw.sendEvent(ROOM, 'm.room.message', content, { txnId: 't1' });
+      expect(send.mock.calls.map((call) => call[3])).toEqual([
+        {},
+        { txnId: 't1' },
+      ]);
+    });
+  });
+
+  it('holds background sends to a small lane, interactive ones never wait for it', async () => {
+    await withGateway('gw-send-lane', async (gw) => {
+      const held: Array<() => void> = [];
+      let inFlight = 0;
+      let most = 0;
+      vi.spyOn(MatrixBotDO.prototype, 'sendEvent').mockImplementation(
+        async (_room, _type, content) => {
+          if (content.includes('reply')) return '$reply';
+          inFlight += 1;
+          most = Math.max(most, inFlight);
+          await new Promise<void>((resolve) => held.push(resolve));
+          inFlight -= 1;
+          return '$file';
+        },
+      );
+      const files = Array.from({ length: 5 }, (_, i) =>
+        gw.sendEvent(ROOM, 'm.room.message', `{"body":"file ${i}"}`, {
+          priority: 'background',
         }),
-      });
-      const media = await gw.downloadEventMediaStream(ROOM, '$img', {
-        timeoutMs: 1_000,
-      });
-      expect(
-        new Uint8Array(await new Response(media!.stream).arrayBuffer()),
-      ).toEqual(new Uint8Array([7, 8]));
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(inFlight).toBe(BACKGROUND_SEND_CONCURRENCY);
+      // A reply is not queued behind the waiting file events.
+      await expect(
+        gw.sendEvent(ROOM, 'm.room.message', '{"body":"reply"}'),
+      ).resolves.toBe('$reply');
+      while (held.length || inFlight) {
+        held.splice(0).forEach((release) => release());
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      await Promise.all(files);
+      expect(most).toBe(BACKGROUND_SEND_CONCURRENCY);
+    });
+  });
+});
+
+describe('plugin device credentials', () => {
+  /** The homeserver's `whoami` and `login`, scripted. */
+  function homeserver(opts: { validTokens: Set<string> }) {
+    const calls: string[] = [];
+    let logins = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      const headers = new Headers(
+        input instanceof Request ? input.headers : init?.headers,
+      );
+      calls.push(url.pathname);
+      if (url.pathname.endsWith('/account/whoami')) {
+        const token =
+          headers.get('authorization')?.replace('Bearer ', '') ?? '';
+        return opts.validTokens.has(token)
+          ? Response.json({ user_id: BOT, device_id: 'PLUGINS' })
+          : Response.json(
+              { errcode: 'M_UNKNOWN_TOKEN', error: 'Unknown token' },
+              { status: 401 },
+            );
+      }
+      if (url.pathname.endsWith('/login')) {
+        logins += 1;
+        const token = `token-${logins}`;
+        opts.validTokens.add(token);
+        return Response.json({
+          user_id: BOT,
+          device_id: 'PLUGINS',
+          access_token: token,
+        });
+      }
+      return new Response('not found', { status: 404 });
+    });
+    return { calls, logins: () => logins };
+  }
+
+  it('lets concurrent first callers share one login, and re-logs in once when a caller reports the cached token rejected', async () => {
+    await withGateway('gw-plugin-device', async (gw) => {
+      const valid = new Set<string>();
+      const hs = homeserver({ validTokens: valid });
+      const herd = await Promise.all([
+        gw.botCredentials(),
+        gw.botCredentials(),
+        gw.botCredentials(),
+      ]);
+      expect(new Set(herd.map((c) => c.accessToken))).toEqual(
+        new Set(['token-1']),
+      );
+      expect(hs.logins()).toBe(1);
+
+      // A caller holding a token that is no longer the cached one changes nothing.
+      expect((await gw.botCredentials({ rejected: 'stale' })).accessToken).toBe(
+        'token-1',
+      );
+      expect(hs.calls.filter((c) => c.endsWith('/login'))).toHaveLength(1);
+
+      // The homeserver dropped the token: callers report it, one re-login serves them all.
+      valid.delete('token-1');
+      const recovered = await Promise.all([
+        gw.botCredentials({ rejected: 'token-1' }),
+        gw.botCredentials({ rejected: 'token-1' }),
+      ]);
+      expect(recovered.map((c) => c.accessToken)).toEqual([
+        'token-2',
+        'token-2',
+      ]);
+      expect(hs.logins()).toBe(2);
     });
   });
 });

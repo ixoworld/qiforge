@@ -1,11 +1,18 @@
 /**
  * Re-fetch one attachment of a session on demand — the `view_attachment`
- * lane behind payload retention (`retention.ts`). The same routing as the
- * turn pipeline applies: when the current model reads the modality the bytes
- * come back as a native content block, otherwise the helper (`vision` role)
- * model turns them into text; plain text is decoded locally. Text results
- * are cached per session (`deps.cache`); native views are not (they are the
- * bytes themselves).
+ * lane: attachment bytes are never stored with the conversation (the
+ * checkpointer keeps a placeholder, `src/sqlite/inline-payloads.ts`), so a
+ * file of an earlier turn is read again from its source. The same routing as
+ * the turn pipeline applies (`route.ts`: capability, and size for a
+ * document): when the current model reads the modality the bytes come back
+ * as a native content block (an image downscaled when `deps.images` is
+ * bound, see `resize.ts`), otherwise the helper (`vision` role) model turns
+ * them into text; plain text is decoded locally. A document whose downloaded
+ * length is over `NATIVE_DOCUMENT_MAX_BYTES`, or an image the resize step
+ * could not make fit (`dropped`), comes back as text from the bytes already
+ * loaded. Text results are cached per session (`deps.cache`); native views
+ * are not (they are the bytes themselves). Log lines name a file by its
+ * cleaned name (`sanitizeAttachmentFilename`).
  */
 import type { ChannelMediaSource } from './channel';
 import { classifyAttachment } from './classify';
@@ -20,10 +27,12 @@ import {
 import { categorizeFile, isPlainTextType, verifyMagicBytes } from './magic';
 import { extractPdfText } from './pdf-text';
 import { attachmentMetas, attachmentRef } from './retention';
-import { routeAttachment } from './route';
+import { resizeForModel } from './resize';
+import { NATIVE_DOCUMENT_MAX_BYTES, routeAttachment } from './route';
 import {
   NOTE_FILENAME_MAX,
   NOTE_MIMETYPE_MAX,
+  sanitizeAttachmentFilename,
   sanitizeNoteField,
 } from './sanitize';
 import {
@@ -47,6 +56,8 @@ export interface ViewAttachmentDeps {
   /** Where `channel:` references are read (the owner object's links). */
   channel?: ChannelMediaSource;
   extraction: ExtractionProvider | null;
+  /** Cloudflare Images: downscales native images for the model; absent = sent as they are. */
+  images?: ImagesBinding;
   /** Capabilities of the model that will read the result. */
   caps: ModelInputCapabilities;
   roomId?: string;
@@ -129,7 +140,10 @@ export async function viewAttachment(
 ): Promise<AttachmentView> {
   const attachment = toInput(meta);
   const kind = classifyAttachment(attachment);
-  const strategy = routeAttachment(kind, deps.caps);
+  const strategy = routeAttachment(kind, deps.caps, { size: meta.size });
+  const name = sanitizeAttachmentFilename(attachment.filename);
+  // Downloaded for a native view but unfit for one: read as text instead.
+  let preloaded: { bytes: Uint8Array; mimetype: string } | undefined;
   if (strategy === 'send-native') {
     const { bytes, mimetype, sniffed } = await loadAttachmentBytes(
       attachment,
@@ -138,7 +152,7 @@ export async function viewAttachment(
       downloadOptions(deps),
     );
     deps.logger.log(
-      `[attachments] view "${attachment.filename}" (${mimetype}) kind=${kind} → ${strategy} (${bytes.length} bytes)`,
+      `[attachments] view "${name}" (${mimetype}) kind=${kind} size=${meta.size ?? 'unknown'} → ${strategy} (${bytes.length} bytes)`,
     );
     const loaded = classifyAttachment({
       mimetype,
@@ -149,15 +163,37 @@ export async function viewAttachment(
       throw new Error(
         `File content mismatch: claimed ${attachment.mimetype} but detected ${mimetype}`,
       );
-    return {
-      kind: 'native',
-      native: {
-        kind: loaded === 'image' ? 'image' : 'file',
-        mimeType: mimetype,
-        base64: bytesToBase64(bytes),
-        filename: attachment.filename,
-      },
+    let sent: { bytes: Uint8Array; mimetype: string } | null = {
+      bytes,
+      mimetype,
     };
+    if (loaded === 'document' && bytes.length > NATIVE_DOCUMENT_MAX_BYTES) {
+      deps.logger.log(
+        `[attachments] view "${name}" is ${bytes.length} bytes, over the ${NATIVE_DOCUMENT_MAX_BYTES}-byte native document limit → model-extract`,
+      );
+      sent = null;
+    } else if (loaded === 'image') {
+      const resized = await resizeForModel(bytes, mimetype, deps.images, {
+        logger: deps.logger,
+      });
+      if (resized.dropped) {
+        deps.logger.log(
+          `[attachments] view "${name}" cannot go to the model as an image (${resized.dropped}) → model-extract`,
+        );
+        sent = null;
+      } else sent = resized;
+    }
+    if (sent)
+      return {
+        kind: 'native',
+        native: {
+          kind: loaded === 'image' ? 'image' : 'file',
+          mimeType: sent.mimetype,
+          base64: bytesToBase64(sent.bytes),
+          filename: name,
+        },
+      };
+    preloaded = { bytes, mimetype };
   }
 
   const category = categorizeFile(attachment.mimetype);
@@ -178,22 +214,28 @@ export async function viewAttachment(
     const cached = await deps.cache?.get(cacheKey.ref, cacheKey.model);
     if (cached !== undefined) {
       deps.logger.log(
-        `[attachments] view "${attachment.filename}" → cached text (${cacheKey.model})`,
+        `[attachments] view "${name}" → cached text (${cacheKey.model})`,
       );
       return { kind: 'text', text: cached };
     }
   }
-  const { bytes, mimetype } = await loadAttachmentBytes(
-    attachment,
-    deps.roomId,
-    deps.source,
-    downloadOptions(deps),
-  );
-  deps.logger.log(
-    `[attachments] view "${attachment.filename}" (${mimetype}) kind=${kind} → ${strategy} (${bytes.length} bytes)`,
-  );
-  verifyMagicBytes(bytes, category, attachment, (m) =>
-    deps.logger.warn(`[attachments] ${m}`),
+  const { bytes, mimetype } =
+    preloaded ??
+    (await loadAttachmentBytes(
+      attachment,
+      deps.roomId,
+      deps.source,
+      downloadOptions(deps),
+    ));
+  if (!preloaded)
+    deps.logger.log(
+      `[attachments] view "${name}" (${mimetype}) kind=${kind} size=${meta.size ?? 'unknown'} → ${strategy} (${bytes.length} bytes)`,
+    );
+  verifyMagicBytes(
+    bytes,
+    category,
+    { mimetype: attachment.mimetype, filename: name },
+    (m) => deps.logger.warn(`[attachments] ${m}`),
   );
   const { text } = await extractText(
     bytes,
@@ -237,6 +279,7 @@ export async function extractAttachmentText(
   opts: { maxChars: number },
 ): Promise<AttachmentTextExtraction> {
   const attachment = toInput(meta);
+  const name = sanitizeAttachmentFilename(attachment.filename);
   const category = categorizeFile(attachment.mimetype);
   if (category === 'unsupported') {
     throw new Error(
@@ -276,7 +319,7 @@ export async function extractAttachmentText(
       const hit = deps.ingestCache?.get(ref, key);
       if (!hit) continue;
       deps.logger.log(
-        `[attachments] ingest "${attachment.filename}" → cached text (${key}, memory)`,
+        `[attachments] ingest "${name}" → cached text (${key}, memory)`,
       );
       const capped = capText(hit.text, opts.maxChars);
       return result(
@@ -294,9 +337,7 @@ export async function extractAttachmentText(
     for (const [key, method] of lookups) {
       const cached = await cache.get(ref, key);
       if (cached === undefined) continue;
-      deps.logger.log(
-        `[attachments] ingest "${attachment.filename}" → cached text (${key})`,
-      );
+      deps.logger.log(`[attachments] ingest "${name}" → cached text (${key})`);
       const capped = capText(cached, opts.maxChars);
       return result(
         capped.text,
@@ -325,11 +366,14 @@ export async function extractAttachmentText(
     deps.source,
     downloadOptions(deps),
   );
-  verifyMagicBytes(bytes, category, attachment, (m) =>
-    deps.logger.warn(`[attachments] ${m}`),
+  verifyMagicBytes(
+    bytes,
+    category,
+    { mimetype: attachment.mimetype, filename: name },
+    (m) => deps.logger.warn(`[attachments] ${m}`),
   );
   deps.logger.log(
-    `[attachments] ingest "${attachment.filename}" (${mimetype}) (${bytes.length} bytes)`,
+    `[attachments] ingest "${name}" (${mimetype}) (${bytes.length} bytes)`,
   );
   const store = async (
     key: string,
@@ -378,13 +422,13 @@ export async function extractAttachmentText(
         );
       }
       deps.logger.log(
-        `[attachments] ingest "${attachment.filename}": no text layer (${pdf.pages} page(s)), using the helper model`,
+        `[attachments] ingest "${name}": no text layer (${pdf.pages} page(s)), using the helper model`,
       );
     } catch (error) {
       // A cancelled turn stops here; it must not start a model call.
       if (deps.signal?.aborted) throw error;
       deps.logger.warn(
-        `[attachments] ingest "${attachment.filename}": local PDF parse failed (${error instanceof Error ? error.message : String(error)}), using the helper model`,
+        `[attachments] ingest "${name}": local PDF parse failed (${error instanceof Error ? error.message : String(error)}), using the helper model`,
       );
     }
   }

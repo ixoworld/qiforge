@@ -3,10 +3,17 @@
  * user's own SQLite file in their own table, apart from the messages: the
  * messages, the model and the transcript carry only the `channel:`
  * reference, and `view_attachment` resolves it here once the turn that
- * brought the file has ended. A row lives until its link expires (the
- * gateway signs links for 30 days; `exp` in the link) and goes with its
+ * brought the file has ended. A link is served until it expires (the
+ * gateway signs links for 30 days; `exp` in the link); a row goes with its
  * session (`forgetSession`). Failures are logged and treated as a miss: a
  * missing link makes the file unavailable, never the turn.
+ *
+ * A row also keeps the Matrix event the file was posted as in the session
+ * thread (`event_id`, `attachments/room-media.ts`): that room copy serves
+ * the file when the link fails or has expired, so a row that carries one
+ * outlives its link (the expiry sweep only removes rows without it). A
+ * resend of the same file in a later turn refreshes the link and keeps the
+ * event until the new post records its own.
  */
 import type { DoSqliteDatabase } from '../sqlite/database';
 import type { Logger } from '../plugin-api/types';
@@ -32,7 +39,7 @@ export class ChannelAttachmentLinkStore {
   private setupPromise: Promise<void> | undefined;
 
   constructor(
-    private readonly db: Pick<DoSqliteDatabase, 'run' | 'get'>,
+    private readonly db: Pick<DoSqliteDatabase, 'run' | 'get' | 'exec'>,
     private readonly log: Pick<Logger, 'warn'>,
     private readonly now: () => number = Date.now,
   ) {}
@@ -54,16 +61,30 @@ export class ChannelAttachmentLinkStore {
          url TEXT NOT NULL,
          sha256 TEXT NOT NULL,
          expires_at INTEGER NOT NULL,
+         event_id TEXT,
          UNIQUE (session_id, ref)
        )`,
     );
+    // A table created before `event_id` existed (CREATE TABLE IF NOT
+    // EXISTS leaves it as it was).
+    const columns = await this.db.exec<{ name: string }>(
+      'PRAGMA table_info(channel_attachment_links)',
+    );
+    if (!columns.some((column) => column.name === 'event_id'))
+      await this.db.run(
+        'ALTER TABLE channel_attachment_links ADD COLUMN event_id TEXT',
+      );
     await this.db.run(
       `CREATE INDEX IF NOT EXISTS idx_channel_attachment_links_expiry
        ON channel_attachment_links(expires_at)`,
     );
   }
 
-  /** Keep the links of a turn's files for its session (a resend refreshes them). */
+  /**
+   * Keep the links of a turn's files for its session (a resend refreshes
+   * them, keeping a recorded room event), then sweep expired rows that have
+   * no room copy.
+   */
   async put(
     sessionId: string,
     links: ReadonlyArray<ChannelMediaLink & { ref: string }>,
@@ -74,9 +95,12 @@ export class ChannelAttachmentLinkStore {
       const now = this.now();
       for (const link of links)
         await this.db.run(
-          `INSERT OR REPLACE INTO channel_attachment_links
+          `INSERT INTO channel_attachment_links
              (session_id, ref, binding_id, url, sha256, expires_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT (session_id, ref) DO UPDATE SET
+             binding_id = excluded.binding_id, url = excluded.url,
+             sha256 = excluded.sha256, expires_at = excluded.expires_at`,
           [
             sessionId,
             link.ref,
@@ -87,7 +111,7 @@ export class ChannelAttachmentLinkStore {
           ],
         );
       await this.db.run(
-        'DELETE FROM channel_attachment_links WHERE expires_at <= ?',
+        'DELETE FROM channel_attachment_links WHERE expires_at <= ? AND event_id IS NULL',
         [now],
       );
     } catch (error) {
@@ -119,6 +143,49 @@ export class ChannelAttachmentLinkStore {
     } catch (error) {
       this.log.warn(
         `[attachments] channel file link read failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * Record the session-thread events the turn's files were posted as
+   * (reference → event id). A failure is logged: the files are then served
+   * by their links alone.
+   */
+  async setEventIds(
+    sessionId: string,
+    eventIds: ReadonlyMap<string, string>,
+  ): Promise<void> {
+    if (eventIds.size === 0) return;
+    try {
+      await this.setup();
+      for (const [ref, eventId] of eventIds)
+        await this.db.run(
+          `UPDATE channel_attachment_links SET event_id = ?
+           WHERE session_id = ? AND ref = ?`,
+          [eventId, sessionId, ref],
+        );
+    } catch (error) {
+      this.log.warn(
+        `[attachments] could not keep the thread events of ${sessionId}'s channel files: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /** The session-thread event recorded for `ref`, expired link or not. */
+  async eventIdOf(sessionId: string, ref: string): Promise<string | undefined> {
+    try {
+      await this.setup();
+      const row = await this.db.get<{ event_id: string | null }>(
+        `SELECT event_id FROM channel_attachment_links
+         WHERE session_id = ? AND ref = ?`,
+        [sessionId, ref],
+      );
+      return row?.event_id ?? undefined;
+    } catch (error) {
+      this.log.warn(
+        `[attachments] channel file thread event read failed: ${error instanceof Error ? error.message : String(error)}`,
       );
       return undefined;
     }

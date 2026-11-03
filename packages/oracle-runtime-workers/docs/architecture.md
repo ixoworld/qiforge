@@ -11,7 +11,8 @@ graph LR
     Shell -->|per user DID| UserDO[UserOracleDO × N users]
     Matrix[(Matrix homeserver)] <-->|/sync, E2EE| Gateway[MatrixGatewayDO × 1]
     Gateway -->|decrypted turn| UserDO
-    UserDO -->|reply / media| Gateway
+    UserDO -->|reply / media events| Gateway
+    UserDO -->|media upload + download, plugin device| Matrix
     UserDO -->|export .db.gz| Owner[User-owned file in the IXO VFS]
 ```
 
@@ -829,9 +830,9 @@ and an object stops hibernating or a request dies with an opaque error.
   evicted first).
 
 - **An `AbortSignal` cannot cross a Durable Object RPC.** A deadline the
-  other object must honour travels as a number (`timeoutMs`), and a caller
-  that reads a stream stops the far side by cancelling the stream (the
-  Matrix media downloads do both).
+  other object must honour travels as a number (`timeoutMs`, as the
+  gateway's `eventMediaInfo` lookup takes it), and a caller that reads a
+  stream stops the far side by cancelling the stream.
 
 ### What the shell relies on from `@ixo/ucan`
 

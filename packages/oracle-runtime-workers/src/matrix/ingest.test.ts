@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { MessagePipeline } from '@ixo/matrix-bot-workers-sdk';
+import { describe, expect, it, vi } from 'vitest';
 import {
   aliasPartToDid,
   attributeUser,
@@ -524,5 +525,86 @@ describe('media messages', () => {
       ['$pic', 'User shared a file: pic.png'],
       ['$cap', 'nice?'],
     ]);
+  });
+});
+
+describe("the oracle's own media events", () => {
+  // What the oracle posts in a channel session's thread for a WhatsApp photo
+  // (attachments/room-media.ts): a media message sent by the bot account.
+  const ownFile = {
+    msgtype: 'm.image',
+    body: 'photo.jpg',
+    filename: 'photo.jpg',
+    info: { mimetype: 'image/jpeg', size: 12 },
+    file: { url: 'mxc://ixo.test/abc', v: 'v2' },
+    'm.relates_to': {
+      rel_type: 'm.thread',
+      event_id: '$session',
+      is_falling_back: true,
+      'm.in_reply_to': { event_id: '$session' },
+    },
+    'org.ixo.qi.origin': {
+      v: 1,
+      transport: 'whatsapp',
+      binding_id: 'chb_one',
+      remote_ref: `hmac:${'a'.repeat(64)}`,
+    },
+  };
+
+  it("never reach the gateway: the bot SDK drops the bot account's messages before `onMessage`", async () => {
+    const deliver = vi.fn(async () => undefined);
+    const sdk = new MessagePipeline({
+      botUserId: BOT,
+      staleBefore: 0,
+      debounceMs: 0,
+      isJoined: () => true,
+      hasProcessed: () => false,
+      markProcessed: () => undefined,
+      deliver,
+    });
+    const own = {
+      eventId: '$own-file',
+      roomId: ROOM,
+      sender: BOT,
+      ts: Date.now(),
+      body: ownFile.body,
+      msgtype: ownFile.msgtype,
+      threadRootId: '$session',
+      content: ownFile,
+    };
+    expect(sdk.offer(own)).toBe('own');
+    // The same file from the person is delivered.
+    expect(sdk.offer({ ...own, eventId: '$their-file', sender: USER })).toBe(
+      'queued',
+    );
+    await sleep(10);
+    expect(deliver).toHaveBeenCalledOnce();
+  });
+
+  it('never become a turn in the ingest pipeline, even when offered again from the inbox', async () => {
+    const { pipeline, turns } = harness();
+    expect(
+      pipeline.offer(
+        msg({
+          eventId: '$own-file',
+          sender: BOT,
+          body: '',
+          threadRootId: '$session',
+          attachment: {
+            eventId: '$own-file',
+            filename: 'photo.jpg',
+            mimetype: 'image/jpeg',
+            size: 12,
+          },
+        }),
+      ),
+    ).toBe('own');
+    expect(
+      pipeline.offer(
+        msg({ sender: BOT, body: 'mirrored text', threadRootId: '$session' }),
+      ),
+    ).toBe('own');
+    await sleep(80);
+    expect(turns).toHaveLength(0);
   });
 });

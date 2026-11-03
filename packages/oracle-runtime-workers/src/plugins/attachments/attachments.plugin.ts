@@ -1,7 +1,7 @@
 /**
- * Attachments plugin — the agent-facing half of attachment payload
- * retention (`src/attachments/retention.ts`), Workers-only: the Node runtime
- * keeps every attachment inline for the life of a session.
+ * Attachments plugin — the agent-facing half of keeping attachment bytes
+ * out of storage (`src/attachments/retention.ts`), Workers-only: the Node
+ * runtime keeps every attachment inline for the life of a session.
  *
  * Contributes one request-time tool, `view_attachment`, and only on turns
  * whose session already has an offloaded payload (the host surface says so),

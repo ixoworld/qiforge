@@ -1,9 +1,11 @@
 /**
- * Fetching attachment bytes — Matrix media (through the gateway, which holds
- * the authenticated client and the room keys), channel files (through the
- * owner object's `ChannelMediaSource`, see `channel.ts`) and plain `http(s)`
- * URLs with the Node runtime's SSRF guard, manual redirect validation and
- * streaming size cap.
+ * Fetching attachment bytes — Matrix media (the owner object asks the
+ * gateway for the media event's small JSON — it alone holds the room keys —
+ * and reads the bytes from the homeserver itself, `openHomeserverMedia`),
+ * channel files (through the owner object's `ChannelMediaSource`, see
+ * `channel.ts`, with the file's room copy as the fallback) and plain
+ * `http(s)` URLs with the Node runtime's SSRF guard, manual redirect
+ * validation and streaming size cap.
  */
 import type { ChannelMediaSource } from './channel';
 import { containerMatchesClaim, detectMimeFromMagicBytes } from './magic';
@@ -53,7 +55,7 @@ function tooLarge(maxBytes: number): AttachmentTooLargeError {
 }
 
 /** The signal's reason as an Error (an aborter may pass any value). */
-function abortError(signal: AbortSignal): Error {
+export function abortError(signal: AbortSignal): Error {
   const reason: unknown = signal.reason;
   if (reason instanceof Error) return reason;
   return new Error(
@@ -65,7 +67,10 @@ function abortError(signal: AbortSignal): Error {
  * `work`, or the signal's reason as soon as it aborts — so a transfer that
  * ignores the signal still cannot hold the caller past it.
  */
-function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+export function untilAborted<T>(
+  work: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
   if (signal.aborted) {
     work.catch(() => undefined);
     return Promise.reject(abortError(signal));
@@ -105,8 +110,9 @@ export function validateUrlTarget(targetUrl: string): void {
 }
 
 /**
- * Matrix media access the pipeline needs. Implemented over the gateway
- * Durable Object in the user object; tests pass an in-memory fake.
+ * Matrix media access the pipeline needs. Implemented in the user object
+ * (the event's media info from the gateway, the bytes from the homeserver);
+ * tests pass an in-memory fake.
  *
  * `signal` aborts at the download deadline or when the turn is aborted: an
  * implementation stops the transfer then (`readBytesCapped` with the signal
@@ -148,15 +154,69 @@ export interface DownloadOptions {
   maxRedirects?: number;
   /** Where a `channelRef` attachment's bytes come from; absent = none can be read. */
   channel?: ChannelMediaSource;
+  /**
+   * The attachment's bytes as this turn already read them (a channel file
+   * read while it was posted to the session thread): used in place of a
+   * download, under the same size, emptiness and type checks.
+   */
+  preloaded?: { bytes: Uint8Array; contentType?: string };
+}
+
+/** The homeserver answered 401: the access token it was given is no longer valid. */
+export class HomeserverUnauthorizedError extends Error {
+  override readonly name: string = 'HomeserverUnauthorizedError';
+}
+
+/** `mxc://<server>/<media id>`, the parts checked before they go into a URL. */
+const MXC_PATTERN = /^mxc:\/\/([A-Za-z0-9.:[\]-]+)\/([A-Za-z0-9_-]+)$/;
+
+/**
+ * Open the media behind `mxc` on the homeserver as the account behind
+ * `accessToken`: the authenticated endpoint
+ * (`/_matrix/client/v1/media/download`), then the legacy one
+ * (`/_matrix/media/v3/download`) when the server answers 404 — the order
+ * matrix-js-sdk's `mxcUrlToHttp` and the bot SDK use. The body is returned
+ * unread; a 401 is `HomeserverUnauthorizedError`.
+ */
+export async function openHomeserverMedia(
+  mxc: string,
+  homeserver: { baseUrl: string; accessToken: string },
+  opts: { signal?: AbortSignal; fetchImpl?: typeof fetch } = {},
+): Promise<ReadableStream<Uint8Array>> {
+  const match = MXC_PATTERN.exec(mxc);
+  if (!match) throw new Error('Invalid mxc URI');
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const path = `${match[1]}/${match[2]}?allow_redirect=true`;
+  const headers = { authorization: `Bearer ${homeserver.accessToken}` };
+  const open = (prefix: string): Promise<Response> =>
+    fetchImpl(new URL(`${prefix}/${path}`, homeserver.baseUrl), {
+      headers,
+      ...(opts.signal ? { signal: opts.signal } : {}),
+    });
+  let res = await open('/_matrix/client/v1/media/download');
+  if (res.status === 404) {
+    await res.body?.cancel().catch(() => undefined);
+    res = await open('/_matrix/media/v3/download');
+  }
+  if (!res.ok || !res.body) {
+    await res.body?.cancel().catch(() => undefined);
+    if (res.status === 401)
+      throw new HomeserverUnauthorizedError(
+        'the homeserver rejected the access token (401)',
+      );
+    throw new Error(`Matrix media download failed: HTTP ${res.status}`);
+  }
+  return res.body;
 }
 
 /**
  * A controller that aborts on `signal` (with its reason) OR after
- * `timeoutMs` (with a timeout error), whichever comes first.
+ * `timeoutMs` (with a timeout error naming `what`), whichever comes first.
  */
-function boundedSignal(
+export function boundedSignal(
   signal: AbortSignal | undefined,
   timeoutMs: number,
+  what = 'Attachment download',
 ): { signal: AbortSignal; release: () => void } {
   const controller = new AbortController();
   const onAbort = (): void => {
@@ -167,9 +227,7 @@ function boundedSignal(
   const timer = setTimeout(
     () =>
       controller.abort(
-        new Error(
-          `Attachment download timed out after ${Math.round(timeoutMs / 1000)} s`,
-        ),
+        new Error(`${what} timed out after ${Math.round(timeoutMs / 1000)} s`),
       ),
     timeoutMs,
   );
@@ -298,10 +356,86 @@ export async function downloadFromUrl(
 }
 
 /**
+ * The Matrix media event `eventId` of `roomId`, under the download deadline
+ * (`opts.timeoutMs`, default `DOWNLOAD_TIMEOUT_MS`) and `opts.signal`.
+ */
+async function loadMatrixEvent(
+  eventId: string,
+  roomId: string | undefined,
+  source: MatrixMediaSource,
+  maxBytes: number,
+  opts: DownloadOptions,
+): Promise<{ bytes: Uint8Array; httpType?: string }> {
+  if (!roomId)
+    throw new Error(
+      `Cannot fetch event ${eventId}: no Matrix room for this turn`,
+    );
+  const bound = boundedSignal(
+    opts.signal,
+    opts.timeoutMs ?? DOWNLOAD_TIMEOUT_MS,
+  );
+  try {
+    const media = await untilAborted(
+      source.downloadEvent(roomId, eventId, maxBytes, bound.signal),
+      bound.signal,
+    );
+    if (!media) throw new Error(`Matrix event ${eventId} not found`);
+    return {
+      bytes: media.bytes,
+      ...(media.mimetype ? { httpType: media.mimetype } : {}),
+    };
+  } finally {
+    bound.release();
+  }
+}
+
+/**
+ * A channel file's bytes: from its link, else — when the link is gone or
+ * fails for any reason but an abort or the size cap — from the copy posted
+ * in the session thread (`postedAs`, else the event the channel source
+ * recorded), which outlives the gateway's 30-day link.
+ */
+async function loadChannelFile(
+  ref: string,
+  postedAs: string | undefined,
+  roomId: string | undefined,
+  source: MatrixMediaSource,
+  maxBytes: number,
+  opts: DownloadOptions,
+): Promise<{ bytes: Uint8Array; httpType?: string }> {
+  try {
+    if (!opts.channel)
+      throw new Error('Channel files cannot be read on this host');
+    const loaded = await opts.channel.load(ref, {
+      maxBytes,
+      ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
+      ...(opts.signal ? { signal: opts.signal } : {}),
+      ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    });
+    return {
+      bytes: loaded.bytes,
+      ...(loaded.contentType ? { httpType: loaded.contentType } : {}),
+    };
+  } catch (error) {
+    if (
+      opts.signal?.aborted ||
+      error instanceof AttachmentTooLargeError ||
+      !roomId
+    )
+      throw error;
+    const eventId = postedAs ?? (await opts.channel?.roomEventOf?.(ref));
+    if (!eventId) throw error;
+    return loadMatrixEvent(eventId, roomId, source, maxBytes, opts);
+  }
+}
+
+/**
  * Bytes for one attachment from whichever source it names, with the per-file
  * cap (`opts.maxBytes`, default `MAX_FILE_SIZE`) enforced before and during
  * the transfer and the `DOWNLOAD_TIMEOUT_MS` deadline (or `opts.timeoutMs`)
- * on every source — Matrix media included. `mimetype` is the best-known
+ * on every source — Matrix media included; `opts.preloaded` bytes are
+ * checked the same way without a download. A channel file whose link fails
+ * is read from its room copy when one is known (`loadChannelFile`). `mimetype` is the best-known
  * type: content sniffing (`sniffed` is then true; a container signature
  * consistent with the claim, such as a zip for a `.docx`, keeps the claimed
  * type), then the HTTP `content-type`, then the client's claim. An empty
@@ -326,47 +460,36 @@ export async function loadAttachmentBytes(
 
   let bytes: Uint8Array;
   let httpType: string | undefined;
-  if (attachment.channelRef) {
-    if (!opts.channel)
-      throw new Error('Channel files cannot be read on this host');
-    const loaded = await opts.channel.load(attachment.channelRef, {
+  if (opts.preloaded) {
+    bytes = opts.preloaded.bytes;
+    httpType = opts.preloaded.contentType;
+  } else if (attachment.channelRef) {
+    ({ bytes, httpType } = await loadChannelFile(
+      attachment.channelRef,
+      attachment.eventId,
+      roomId,
+      source,
       maxBytes,
-      ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
-      ...(opts.signal ? { signal: opts.signal } : {}),
-      ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
-    });
-    bytes = loaded.bytes;
-    httpType = loaded.contentType;
-  } else if (attachment.eventId || attachment.mxcUri!.startsWith('mxc://')) {
+      opts,
+    ));
+  } else if (attachment.eventId) {
+    ({ bytes, httpType } = await loadMatrixEvent(
+      attachment.eventId,
+      roomId,
+      source,
+      maxBytes,
+      opts,
+    ));
+  } else if (attachment.mxcUri!.startsWith('mxc://')) {
     const bound = boundedSignal(
       opts.signal,
       opts.timeoutMs ?? DOWNLOAD_TIMEOUT_MS,
     );
     try {
-      if (attachment.eventId) {
-        if (!roomId)
-          throw new Error(
-            `Cannot fetch event ${attachment.eventId}: no Matrix room for this turn`,
-          );
-        const media = await untilAborted(
-          source.downloadEvent(
-            roomId,
-            attachment.eventId,
-            maxBytes,
-            bound.signal,
-          ),
-          bound.signal,
-        );
-        if (!media)
-          throw new Error(`Matrix event ${attachment.eventId} not found`);
-        bytes = media.bytes;
-        httpType = media.mimetype;
-      } else {
-        bytes = await untilAborted(
-          source.downloadMxc(attachment.mxcUri!, maxBytes, bound.signal),
-          bound.signal,
-        );
-      }
+      bytes = await untilAborted(
+        source.downloadMxc(attachment.mxcUri!, maxBytes, bound.signal),
+        bound.signal,
+      );
     } finally {
       bound.release();
     }
