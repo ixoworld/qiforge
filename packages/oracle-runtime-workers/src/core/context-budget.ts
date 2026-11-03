@@ -226,11 +226,50 @@ export function contextBudgetFor(
   };
 }
 
-/** chars/4 over a message's content, whatever its shape. */
+/**
+ * What one image block costs the model, whatever its byte size. Providers
+ * bill an image by its pixels, not by its base64: every one the runtime
+ * sends is scaled to a 1568 px long edge by the provider (or before, by the
+ * `IMAGES` binding), which is at most ~3,300 tokens on the costliest
+ * provider formula (width × height / 750). Counting the base64 at chars/4
+ * instead made one resized phone photo look like ~128k tokens, enough for
+ * the context guard to refuse the turn on a model with a smaller window.
+ */
+export const IMAGE_BLOCK_TOKENS = 3_300;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * An image content block in any of the shapes a message carries: the
+ * LangChain data block the attachments build (`type: 'image'` with `data`
+ * or `url`) or the OpenAI chat shape (`type: 'image_url'`). File blocks are
+ * not images: a document's cost does follow its size, and native documents
+ * are kept small (`NATIVE_DOCUMENT_MAX_BYTES`).
+ */
+function isImageBlock(block: unknown): boolean {
+  return (
+    isRecord(block) && (block.type === 'image' || block.type === 'image_url')
+  );
+}
+
+/**
+ * chars/4 over a message's content, whatever its shape; each image block
+ * counts {@link IMAGE_BLOCK_TOKENS} instead of its base64.
+ */
 export function estimateContentTokens(content: unknown): number {
   if (typeof content === 'string') return estimateTokensApprox(content);
   if (content == null) return 0;
   try {
+    if (Array.isArray(content) && content.some(isImageBlock)) {
+      const images = content.filter(isImageBlock).length;
+      const rest = content.filter((block) => !isImageBlock(block));
+      return (
+        images * IMAGE_BLOCK_TOKENS +
+        (rest.length ? estimateTokensApprox(JSON.stringify(rest)) : 0)
+      );
+    }
     return estimateTokensApprox(JSON.stringify(content));
   } catch {
     return 0;
