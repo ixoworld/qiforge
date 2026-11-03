@@ -324,12 +324,12 @@ describe('renderSurfaceSection', () => {
     expect(
       renderSurfaceSection(profile, true, true)
         .split('\n')
-        .filter((text) => text.includes('attached or delivered')),
+        .filter((text) => text.includes('attached, ready or delivered')),
     ).toHaveLength(1);
     // Without send_file the section is as it was.
     const before = renderSurfaceSection(profile, true, false);
     expect(before).not.toContain('scans');
-    expect(before).not.toContain('attached or delivered');
+    expect(before).not.toContain('attached, ready or delivered');
     // A Matrix room posts a link: no gateway checks the file there.
     const matrix = renderSurfaceSection(
       resolveDeliveryProfile(
@@ -340,7 +340,7 @@ describe('renderSurfaceSection', () => {
       true,
     );
     expect(matrix).not.toContain('scans');
-    expect(matrix).not.toContain('attached or delivered');
+    expect(matrix).not.toContain('attached, ready or delivered');
     // The Portal and every non-chat surface get no section at all.
     expect(renderSurfaceSection({ kind: 'stream' }, true, true)).toBe('');
     expect(

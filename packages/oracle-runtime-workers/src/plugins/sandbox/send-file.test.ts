@@ -209,7 +209,7 @@ describe('send_file', () => {
       mimetype:
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       delivery:
-        'Goes out with your reply, after the gateway has checked the file. Do not paste a link, and do not state that it is attached or delivered.',
+        'Goes out with your reply, after the gateway has checked the file. Do not paste a link, and do not state that it is attached, ready or delivered.',
     });
     const file = {
       url: SIGNED,
@@ -470,12 +470,14 @@ describe('send_file', () => {
     expect(chat).toContain(FILE_SAFETY_NOTE);
     expect(FILE_SAFETY_NOTE).toContain('blocks macros, embedded objects');
     expect(FILE_SAFETY_NOTE).toContain(
-      'do not state that it is attached or delivered',
+      'do not state that it is attached, ready or delivered',
     );
+    expect(FILE_SAFETY_NOTE).toContain('live-data formulas');
+    expect(FILE_SAFETY_NOTE).toContain('fetch it and write the values in');
     // A Matrix room posts a link; nothing checks the file, so nothing changes there.
     const room = buildSendFileTool({ invoke }, false);
     expect(room.description).not.toContain('scans');
-    expect(room.description).not.toContain('attached or delivered');
+    expect(room.description).not.toContain('attached, ready or delivered');
     const posted = (await room.handler(
       { path: '/output/report.docx' },
       contextWith(recordingLogger()),
