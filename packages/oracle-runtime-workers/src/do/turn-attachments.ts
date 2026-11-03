@@ -15,6 +15,7 @@ import {
   type ChannelMediaSource,
   type PreparedAttachments,
 } from '../attachments';
+import type { ChannelThreadFile } from '../attachments/room-media';
 import { parseChannelServiceDids } from '../channels/auth';
 import {
   channelAttachmentInputs,
@@ -58,6 +59,52 @@ export function channelTurnLinks(
   }));
 }
 
+/** A channel turn's files as `room-media.ts` posts them to the session thread. */
+export function channelThreadFiles(req: TurnFiles): ChannelThreadFile[] {
+  if (req.client !== 'channel' || !req.channel?.attachments?.length) return [];
+  const bindingId = req.channel.bindingId;
+  return req.channel.attachments.map((file) => ({
+    ref: channelAttachmentRef(file.sha256),
+    link: { url: file.url, sha256: file.sha256, bindingId },
+    filename: file.filename,
+    mimetype: file.mimetype,
+    size: file.size,
+    kind: file.kind,
+  }));
+}
+
+/** What posting a turn's channel files to the session thread left for the run. */
+export interface ThreadFilesOfTurn {
+  /** The media event of each posted file, by `channel:` reference. */
+  eventIds: Map<string, string>;
+  /** The bytes read while posting (files the model lane may read), by reference. */
+  preloaded?: Map<string, { bytes: Uint8Array; mimetype: string }>;
+}
+
+/**
+ * The inputs with the session-thread event each channel file was posted as
+ * (`eventIds`, by `channel:` reference): the run then names the file by its
+ * media event, and keeps the reference for the link and the archive name.
+ */
+export function withThreadEvents(
+  inputs: readonly AttachmentInput[],
+  eventIds: ReadonlyMap<string, string>,
+): AttachmentInput[] {
+  return inputs.map((input) => {
+    const eventId = input.channelRef
+      ? eventIds.get(input.channelRef)
+      : undefined;
+    return eventId ? { ...input, eventId } : input;
+  });
+}
+
+/** The https origins channel files are fetched from: the gateways of `CHANNEL_SERVICE_DID`. */
+export function channelGatewayOrigins(
+  channelServiceDid: string | undefined,
+): string[] {
+  return channelMediaOrigins(parseChannelServiceDids(channelServiceDid));
+}
+
 /**
  * The channel source of a turn in `sessionId`: a reference resolves to the
  * turn's own files first, then to the links kept for the session; only the
@@ -70,9 +117,7 @@ export function turnChannelMediaSource(input: {
   channelServiceDid: string | undefined;
 }): ChannelMediaSource {
   return createChannelMediaSource({
-    origins: channelMediaOrigins(
-      parseChannelServiceDids(input.channelServiceDid),
-    ),
+    origins: channelGatewayOrigins(input.channelServiceDid),
     resolve: async (ref) => {
       const own = input.turnLinks.find((link) => link.ref === ref);
       if (own) return own;

@@ -925,6 +925,37 @@ stays` (warn, once per reference per run; the request goes out with the
   session keeps its newest 50 (`VIEW_CACHE_MAX_PER_SESSION`), and the cache
   goes with its session. An unsupported file type is reported without a
   download.
+- **Channel files in the session thread** (`src/attachments/room-media.ts`,
+  [channels](channels.md#matrix-continuity)). Before a channel turn reads
+  its files, the user object streams each from the gateway's link to the
+  homeserver (encrypted, with the oracle's plugin device) and posts it as a
+  media event in the session thread; the Matrix gateway object only sends
+  the event. Limits: 3 files at a time
+  (`CHANNEL_MEDIA_CONCURRENCY`), 60 s per file from opening the link to the
+  event id (`DOWNLOAD_TIMEOUT_MS`), 120 s for all of a turn's files
+  (`CHANNEL_MEDIA_TURN_TIMEOUT_MS`), memory O(chunk) per upload plus a
+  plaintext copy of each file of at most 25 MB for the model, kept in turn
+  order up to the 50 MB turn budget. The lines:
+  - `[attachments] posted <n>/<m> channel file(s) to thread <session> in <ms> ms`
+    — one per channel turn with files (not on a resumed attempt).
+  - `[attachments] channel file channel:<16 hex> (<kind>, <bytes> bytes) not posted to thread <session>; the turn reads it from the channel gateway: <reason>`
+    — one per file that was not posted; the reason never carries the link.
+    `its bytes do not match the digest the channel sent` / `it is larger
+(smaller) than the channel announced`: the gateway served another file
+    (nothing was uploaded); `the homeserver refused the upload: <status> …`:
+    a `413` is the homeserver's upload limit, a `401` makes the object ask
+    the gateway for the plugin device again on the next turn; `… timed out
+after 60 s` / `120 s`: the deadline. The turn goes on with the gateway
+    download, as before this feature.
+  - `[attachments] channel files of <session> not posted to its thread; the turn reads them from the channel gateway: <reason>`
+    — the room's encryption check or the plugin device lookup
+    (`botCredentials`) failed.
+  - `[user-do] Matrix replay (channel file) → <event id> in thread <session>`
+    and `… send failed (attempt n) — retrying …`: the event send, on the
+    same per-session chain as the text mirrors.
+  - `[attachments] could not keep the thread events of <session>'s channel files: …`
+    — the event ids were not stored next to the links; a resumed attempt
+    then names those files by their `channel:` reference only.
 
 ### Tasks: the run ledger
 

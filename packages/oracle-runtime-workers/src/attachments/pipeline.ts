@@ -36,7 +36,9 @@
  * the bytes already loaded, never by URL; the model, the notes and the
  * stored metadata know it only by its `channel:` reference. It may be up to
  * the gateway's 50 MiB: one above `MAX_FILE_SIZE` is archived to the
- * sandbox and noted, never handed to a model.
+ * sandbox and noted, never handed to a model. One the owner object already
+ * read while posting it to the session thread (`room-media.ts`) arrives in
+ * `deps.preloaded` and is not downloaded again.
  */
 import type { MessageContent } from '@langchain/core/messages';
 import type { ModelInputCapabilities } from '../core/llm';
@@ -97,6 +99,13 @@ export interface AttachmentPipelineDeps {
   source: MatrixMediaSource;
   /** Where `channelRef` files are read; absent = none can be read (noted). */
   channel?: ChannelMediaSource;
+  /**
+   * Channel files this turn already holds, by `channel:` reference: read
+   * from here instead of `channel`, counted against the budget like a
+   * download. Each entry is removed once it is read, so the map lets go of
+   * the bytes as the turn moves on.
+   */
+  preloaded?: Map<string, { bytes: Uint8Array; mimetype: string }>;
   /** Helper-model provider for the extract lane; null → media cannot be extracted here. */
   extraction: ExtractionProvider | null;
   /** Sandbox archive target; null → originals are not archived (logged once per turn). */
@@ -246,6 +255,9 @@ class DownloadBudget {
     if (remaining === 0 || (attachment.size && attachment.size > remaining))
       throw new AttachmentRejectedError(BUDGET_EXCEEDED);
     const cap = Math.min(perFile, remaining);
+    const ref = attachment.channelRef;
+    const preloaded = ref ? deps.preloaded?.get(ref) : undefined;
+    if (ref && preloaded) deps.preloaded?.delete(ref);
     try {
       const loaded = await loadAttachmentBytes(
         attachment,
@@ -256,6 +268,14 @@ class DownloadBudget {
           signal: deps.signal,
           maxBytes: cap,
           ...(deps.channel ? { channel: deps.channel } : {}),
+          ...(preloaded
+            ? {
+                preloaded: {
+                  bytes: preloaded.bytes,
+                  contentType: preloaded.mimetype,
+                },
+              }
+            : {}),
         },
       );
       this.used += loaded.bytes.length;

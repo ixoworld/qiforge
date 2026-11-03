@@ -94,7 +94,8 @@ export function isGatewayMediaUrl(
   );
 }
 
-function hex(bytes: ArrayBuffer): string {
+/** Lowercase hex of a digest. */
+export function hex(bytes: ArrayBuffer): string {
   return Array.from(new Uint8Array(bytes), (byte) =>
     byte.toString(16).padStart(2, '0'),
   ).join('');

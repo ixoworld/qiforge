@@ -145,11 +145,17 @@ import {
   readBytesCapped,
   AttachmentTextCacheStore,
 } from '../attachments';
+// Not in the attachments index: it loads the bot SDK, which only workerd runs.
+import { postChannelFilesToThread } from '../attachments/room-media';
 import {
+  channelGatewayOrigins,
+  channelThreadFiles,
   channelTurnLinks,
   prepareTurnAttachments,
   turnAttachmentInputs,
   turnChannelMediaSource,
+  withThreadEvents,
+  type ThreadFilesOfTurn,
 } from './turn-attachments';
 import type { RuntimeCore } from '../core';
 import {
@@ -275,6 +281,7 @@ import {
 } from './ambient';
 import {
   checkpointStorageKey,
+  type BotCredentials,
   type MatrixGatewayObject,
   type OracleWorkerEnv,
   type SessionSummary,
@@ -1186,6 +1193,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private matrixLedger: MatrixTurnLedger | null = null;
     /** Room mirrors of HTTP turns, serialised per session and retried across gateway restarts (see room-mirror.ts). */
     private mirror: RoomMirror | null = null;
+    /** The plugin device channel files are uploaded with (see `mediaUploadDevice`). */
+    private mediaDevice: Promise<BotCredentials> | null = null;
     private channelTurns: ChannelTurns | null = null;
     /** Anonymous-feedback idempotency markers and the user's submission limit. */
     private feedbackMarkers: FeedbackMarkers | null = null;
@@ -7680,7 +7689,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // A channel turn's files are read by their `channel:` reference; their
       // links stay on the server (the run request and the session's link
       // store), out of every message and note.
-      const attachmentInputs = turnAttachmentInputs(req, body.attachments);
       const attachmentModel =
         effectiveModel && isAllowedModel(effectiveModel)
           ? effectiveModel
@@ -7696,6 +7704,31 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         : undefined;
       if (turnLinks.length && !run.resumed)
         await this.channelAttachmentLinks?.put(req.sessionId, turnLinks);
+      // A channel turn's files become media events in the session thread
+      // (attachments/room-media.ts): the run names each by its event, and
+      // the bytes read on the way reach the pipeline without a second
+      // download. A resumed attempt names them by the events its first
+      // attempt recorded and posts nothing.
+      const threadFiles: ThreadFilesOfTurn | null =
+        turnLinks.length && sessionRoomId
+          ? run.resumed
+            ? {
+                eventIds:
+                  (await this.channelAttachmentLinks?.eventIds(
+                    req.sessionId,
+                    turnLinks.map((link) => link.ref),
+                  )) ?? new Map<string, string>(),
+              }
+            : await this.postChannelFilesToThread(
+                req,
+                sessionRoomId,
+                abortController.signal,
+              )
+          : null;
+      const attachmentInputs = withThreadEvents(
+        turnAttachmentInputs(req, body.attachments),
+        threadFiles?.eventIds ?? new Map<string, string>(),
+      );
       const { prepared, metas: turnMetas } = await prepareTurnAttachments({
         inputs: attachmentInputs,
         resumed: run.resumed,
@@ -7711,6 +7744,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             {
               source: this.matrixMediaSource(),
               ...(channelMedia ? { channel: channelMedia } : {}),
+              ...(threadFiles?.preloaded
+                ? { preloaded: threadFiles.preloaded }
+                : {}),
               extraction: this.extractionProvider(baseAmbient.llm, core.llm),
               sandbox: await this.sandboxArchiveConfig(req.identity.userDid),
               ...(this.env.IMAGES ? { images: this.env.IMAGES } : {}),
@@ -7719,6 +7755,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             },
           ),
       });
+      // Bytes the pipeline did not read (a file it refused) go now, not
+      // with the turn.
+      threadFiles?.preloaded?.clear();
       if (prepared) {
         console.log(
           `[user-do] attachments: ${attachmentInputs.length} attached, ${prepared.extracted.length} extracted, ${Array.isArray(prepared.content) ? prepared.content.length - 1 : 0} native`,
@@ -8350,11 +8389,112 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                 priority: 'background',
                 txnId: send.txnId,
               }),
+        sendEvent: (roomId, content, txnId) =>
+          this.gateway.sendEvent(roomId, 'm.room.message', content, { txnId }),
         keepAlive: (work) => this.ctx.waitUntil(work),
         log: (message) => console.log(message),
         warn: (message) => console.warn(message),
       });
       return this.mirror;
+    }
+
+    /**
+     * The oracle's plugin device (`botCredentials`, one gateway RPC per
+     * instance): what channel files are uploaded to the homeserver with.
+     * Dropped when the homeserver rejects its token, so the next turn asks
+     * the gateway again (which re-logs the device in).
+     */
+    private mediaUploadDevice(): Promise<BotCredentials> {
+      return (this.mediaDevice ??= this.gateway
+        .botCredentials()
+        .catch((error: unknown) => {
+          this.mediaDevice = null;
+          throw error;
+        }));
+    }
+
+    /**
+     * Post a channel turn's files as media events in the session thread
+     * (`attachments/room-media.ts`), behind the turn's own text mirror, and
+     * record their events with the session's links so a resumed attempt
+     * names them the same way. Never throws: a file that cannot be posted
+     * is logged without its link and the turn reads it from the gateway as
+     * before.
+     */
+    private async postChannelFilesToThread(
+      req: TurnRequest,
+      roomId: string,
+      signal: AbortSignal,
+    ): Promise<ThreadFilesOfTurn> {
+      const eventIds = new Map<string, string>();
+      const preloaded = new Map<
+        string,
+        { bytes: Uint8Array; mimetype: string }
+      >();
+      const result: ThreadFilesOfTurn = { eventIds, preloaded };
+      const files = channelThreadFiles(req);
+      // A channel session is always a thread under its marker event.
+      if (!files.length || !req.channel || !req.sessionId.startsWith('$'))
+        return result;
+      const channel = req.channel;
+      let encrypted: boolean;
+      let device: BotCredentials;
+      try {
+        [encrypted, device] = await Promise.all([
+          this.roomIsEncrypted(roomId),
+          this.mediaUploadDevice(),
+        ]);
+      } catch (error) {
+        console.warn(
+          `[attachments] channel files of ${req.sessionId} not posted to its thread; the turn reads them from the channel gateway: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return result;
+      }
+      // The person's text first: the mirror pass posts it too, with the same
+      // transaction id, so whichever send comes second is deduplicated by
+      // the homeserver and the files always follow their message.
+      this.replayToRoom(req, req.message, 'user').catch(() => undefined);
+      const posted = await postChannelFilesToThread({
+        files,
+        target: {
+          roomId,
+          threadId: req.sessionId,
+          origin: {
+            provider: channel.provider,
+            bindingId: channel.bindingId,
+            remoteMessageRef: channel.remoteMessageRef,
+          },
+          encrypted,
+        },
+        sessionId: req.sessionId,
+        requestId: req.requestId,
+        deps: {
+          origins: channelGatewayOrigins(this.env.CHANNEL_SERVICE_DID),
+          homeserver: {
+            baseUrl: device.baseUrl,
+            accessToken: device.accessToken,
+          },
+          send: (event, sendSignal) =>
+            this.roomMirror().sendMedia(
+              req.sessionId,
+              event,
+              'channel file',
+              sendSignal,
+            ),
+          onUnauthorized: () => {
+            this.mediaDevice = null;
+          },
+          signal,
+          log: console,
+        },
+      });
+      for (const [ref, media] of posted) {
+        eventIds.set(ref, media.eventId);
+        if (media.bytes)
+          preloaded.set(ref, { bytes: media.bytes, mimetype: media.mimetype });
+      }
+      await this.channelAttachmentLinks?.setEventIds(req.sessionId, eventIds);
+      return result;
     }
 
     private async afterTurn(

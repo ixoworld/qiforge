@@ -176,6 +176,77 @@ describe('channel file links', () => {
 });
 
 describe('channel files in the attachment pipeline', () => {
+  it('reads a file posted to the session thread from the bytes the turn already holds, names it by its event and keeps its reference', async () => {
+    const { input, link } = await channelFile(JPEG, 'photo.jpg', 'image/jpeg');
+    const fetchImpl = gatewayFetch(() => {
+      throw new Error('no download expected');
+    });
+    const preloaded = new Map([
+      [link.ref, { bytes: JPEG, mimetype: 'image/jpeg' }],
+    ]);
+    const out = await prepareAttachments(
+      {
+        text: '[photo]',
+        attachments: [{ ...input, eventId: '$file-event' }],
+        model: 'm',
+        caps: ALL_CAPS,
+      },
+      {
+        source: NO_MATRIX,
+        channel: sourceOf([link]),
+        preloaded,
+        extraction: PROVIDER,
+        sandbox: null,
+        fetchImpl,
+        logger: LOGGER,
+      },
+    );
+    expect(Array.isArray(out.content)).toBe(true);
+    expect(fetchImpl.urls).toEqual([]);
+    // The pipeline lets go of the bytes once it has read them.
+    expect(preloaded.size).toBe(0);
+    expect(out.nativeNotes.map((n) => n.text)).toEqual([
+      '[source: eventId="$file-event"] "photo.jpg" (image/jpeg) is attached to this message.',
+    ]);
+    expect(out.metas).toEqual([
+      {
+        filename: 'photo.jpg',
+        mimetype: 'image/jpeg',
+        size: JPEG.length,
+        eventId: '$file-event',
+        channelRef: link.ref,
+        category: 'image',
+      },
+    ]);
+  });
+
+  it('checks preloaded bytes like a download: content that is not what it claims goes to the extract lane', async () => {
+    const pdf = new TextEncoder().encode('%PDF-1.4 not a photo');
+    const { input, link } = await channelFile(pdf, 'photo.jpg', 'image/jpeg');
+    const fetchImpl = gatewayFetch((url) =>
+      url.endsWith('/chat/completions')
+        ? Response.json({ choices: [{ message: { content: 'text' } }] })
+        : new Response('unexpected', { status: 500 }),
+    );
+    const out = await prepareAttachments(
+      { text: '[photo]', attachments: [input], model: 'm', caps: ALL_CAPS },
+      {
+        source: NO_MATRIX,
+        channel: sourceOf([link]),
+        preloaded: new Map([
+          [link.ref, { bytes: pdf, mimetype: 'image/jpeg' }],
+        ]),
+        extraction: PROVIDER,
+        sandbox: null,
+        fetchImpl,
+        logger: LOGGER,
+      },
+    );
+    expect(out.content).toBe('[photo]');
+    expect(out.extracted).toHaveLength(1);
+    expect(fetchImpl.urls).not.toContain(link.url);
+  });
+
   it('sends a photo natively as its bytes and shows the model only its reference', async () => {
     const { input, link } = await channelFile(JPEG, 'photo.jpg', 'image/jpeg');
     const fetchImpl = gatewayFetch(() => new Response(JPEG));

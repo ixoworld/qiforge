@@ -1,0 +1,5 @@
+---
+'@ixo/oracle-runtime-workers': minor
+---
+
+Files a person sends on an IXO Channels turn (a WhatsApp photo, video, audio file or document) now appear in Qi.Space: before the run reads them, the user's object posts each one as an encrypted media event of the oracle (`m.image` / `m.video` / `m.audio` / `m.file`) in the session's thread, after the message's text and before the reply. The file is streamed once from the gateway's link to the homeserver with the oracle's plugin device, encrypted chunk by chunk, and checked against the gateway's size and SHA-256 on the way (a mismatch never completes an upload and sends no event); only the small event send goes through the shared Matrix gateway object. The run names the file by its media event and reads files of up to 25 MB from the bytes already loaded, so nothing is downloaded twice; a resumed attempt reuses the recorded events (`channel_attachment_links.event_id`, added at startup). Any failure is logged without the link and the turn reads the file from the gateway as before. The ingest pipeline also drops the oracle's own messages explicitly (`own`).

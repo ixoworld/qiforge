@@ -53,7 +53,7 @@ function tooLarge(maxBytes: number): AttachmentTooLargeError {
 }
 
 /** The signal's reason as an Error (an aborter may pass any value). */
-function abortError(signal: AbortSignal): Error {
+export function abortError(signal: AbortSignal): Error {
   const reason: unknown = signal.reason;
   if (reason instanceof Error) return reason;
   return new Error(
@@ -65,7 +65,10 @@ function abortError(signal: AbortSignal): Error {
  * `work`, or the signal's reason as soon as it aborts — so a transfer that
  * ignores the signal still cannot hold the caller past it.
  */
-function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+export function untilAborted<T>(
+  work: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
   if (signal.aborted) {
     work.catch(() => undefined);
     return Promise.reject(abortError(signal));
@@ -148,15 +151,22 @@ export interface DownloadOptions {
   maxRedirects?: number;
   /** Where a `channelRef` attachment's bytes come from; absent = none can be read. */
   channel?: ChannelMediaSource;
+  /**
+   * The attachment's bytes as this turn already read them (a channel file
+   * loaded while it was posted to the session thread): used in place of a
+   * download, under the same size, emptiness and type checks.
+   */
+  preloaded?: { bytes: Uint8Array; contentType?: string };
 }
 
 /**
  * A controller that aborts on `signal` (with its reason) OR after
- * `timeoutMs` (with a timeout error), whichever comes first.
+ * `timeoutMs` (with a timeout error naming `what`), whichever comes first.
  */
-function boundedSignal(
+export function boundedSignal(
   signal: AbortSignal | undefined,
   timeoutMs: number,
+  what = 'Attachment download',
 ): { signal: AbortSignal; release: () => void } {
   const controller = new AbortController();
   const onAbort = (): void => {
@@ -167,9 +177,7 @@ function boundedSignal(
   const timer = setTimeout(
     () =>
       controller.abort(
-        new Error(
-          `Attachment download timed out after ${Math.round(timeoutMs / 1000)} s`,
-        ),
+        new Error(`${what} timed out after ${Math.round(timeoutMs / 1000)} s`),
       ),
     timeoutMs,
   );
@@ -301,7 +309,8 @@ export async function downloadFromUrl(
  * Bytes for one attachment from whichever source it names, with the per-file
  * cap (`opts.maxBytes`, default `MAX_FILE_SIZE`) enforced before and during
  * the transfer and the `DOWNLOAD_TIMEOUT_MS` deadline (or `opts.timeoutMs`)
- * on every source — Matrix media included. `mimetype` is the best-known
+ * on every source — Matrix media included; `opts.preloaded` bytes are
+ * checked the same way without a download. `mimetype` is the best-known
  * type: content sniffing (`sniffed` is then true; a container signature
  * consistent with the claim, such as a zip for a `.docx`, keeps the claimed
  * type), then the HTTP `content-type`, then the client's claim. An empty
@@ -326,7 +335,10 @@ export async function loadAttachmentBytes(
 
   let bytes: Uint8Array;
   let httpType: string | undefined;
-  if (attachment.channelRef) {
+  if (opts.preloaded) {
+    bytes = opts.preloaded.bytes;
+    httpType = opts.preloaded.contentType;
+  } else if (attachment.channelRef) {
     if (!opts.channel)
       throw new Error('Channel files cannot be read on this host');
     const loaded = await opts.channel.load(attachment.channelRef, {

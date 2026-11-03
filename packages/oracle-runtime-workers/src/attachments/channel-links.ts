@@ -7,6 +7,11 @@
  * gateway signs links for 30 days; `exp` in the link) and goes with its
  * session (`forgetSession`). Failures are logged and treated as a miss: a
  * missing link makes the file unavailable, never the turn.
+ *
+ * A row also keeps the Matrix event the file was posted as in the session
+ * thread (`event_id`, `attachments/room-media.ts`), so a resumed attempt of
+ * the turn names the file as the first attempt did without posting it again.
+ * A resend of the same file in a later turn replaces the row and clears it.
  */
 import type { DoSqliteDatabase } from '../sqlite/database';
 import type { Logger } from '../plugin-api/types';
@@ -32,7 +37,7 @@ export class ChannelAttachmentLinkStore {
   private setupPromise: Promise<void> | undefined;
 
   constructor(
-    private readonly db: Pick<DoSqliteDatabase, 'run' | 'get'>,
+    private readonly db: Pick<DoSqliteDatabase, 'run' | 'get' | 'exec'>,
     private readonly log: Pick<Logger, 'warn'>,
     private readonly now: () => number = Date.now,
   ) {}
@@ -54,9 +59,19 @@ export class ChannelAttachmentLinkStore {
          url TEXT NOT NULL,
          sha256 TEXT NOT NULL,
          expires_at INTEGER NOT NULL,
+         event_id TEXT,
          UNIQUE (session_id, ref)
        )`,
     );
+    // A table created before `event_id` existed (CREATE TABLE IF NOT
+    // EXISTS leaves it as it was).
+    const columns = await this.db.exec<{ name: string }>(
+      'PRAGMA table_info(channel_attachment_links)',
+    );
+    if (!columns.some((column) => column.name === 'event_id'))
+      await this.db.run(
+        'ALTER TABLE channel_attachment_links ADD COLUMN event_id TEXT',
+      );
     await this.db.run(
       `CREATE INDEX IF NOT EXISTS idx_channel_attachment_links_expiry
        ON channel_attachment_links(expires_at)`,
@@ -122,6 +137,55 @@ export class ChannelAttachmentLinkStore {
       );
       return undefined;
     }
+  }
+
+  /**
+   * Record the session-thread events the turn's files were posted as
+   * (reference → event id). A failure is logged: a resumed attempt then
+   * names those files by their reference alone.
+   */
+  async setEventIds(
+    sessionId: string,
+    eventIds: ReadonlyMap<string, string>,
+  ): Promise<void> {
+    if (eventIds.size === 0) return;
+    try {
+      await this.setup();
+      for (const [ref, eventId] of eventIds)
+        await this.db.run(
+          `UPDATE channel_attachment_links SET event_id = ?
+           WHERE session_id = ? AND ref = ?`,
+          [eventId, sessionId, ref],
+        );
+    } catch (error) {
+      this.log.warn(
+        `[attachments] could not keep the thread events of ${sessionId}'s channel files: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /** The session-thread event recorded for each of `refs` that has one. */
+  async eventIds(
+    sessionId: string,
+    refs: readonly string[],
+  ): Promise<Map<string, string>> {
+    const found = new Map<string, string>();
+    try {
+      await this.setup();
+      for (const ref of new Set(refs)) {
+        const row = await this.db.get<{ event_id: string | null }>(
+          `SELECT event_id FROM channel_attachment_links
+           WHERE session_id = ? AND ref = ?`,
+          [sessionId, ref],
+        );
+        if (row?.event_id) found.set(ref, row.event_id);
+      }
+    } catch (error) {
+      this.log.warn(
+        `[attachments] channel file thread event read failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return found;
   }
 
   /** Drop every link of a deleted session. */
