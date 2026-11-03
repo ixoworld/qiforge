@@ -1,5 +1,11 @@
 # @ixo/oracle-runtime-workers
 
+## 0.37.1
+
+### Patch Changes
+
+- [#460](https://github.com/ixoworld/qiforge/pull/460) [`0c563ee`](https://github.com/ixoworld/qiforge/commit/0c563ee3b69e10779799ab115869a573c0644302) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Chat file safety prompt: name live-data formulas among what the gateway blocks, ask for fetched values instead, and never call a file "ready"; a delivery notice now asks for a corrected file that still gives the user what they asked for, with live data written in as values.
+
 ## 0.37.0
 
 ### Minor Changes
