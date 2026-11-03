@@ -1211,7 +1211,7 @@ async function main(): Promise<void> {
     );
 
     await step(
-      'attachments (retention): an image older than 2 user turns is offloaded; view_attachment fetches it again; transcript keeps the metadata',
+      'attachments (not stored): an image past the 2-turn recall window comes back only through view_attachment; transcript keeps the metadata',
       async () => {
         const green = makePng(48, 48, [20, 200, 40]);
         const img = await mx.uploadContent(new Blob([green]), {

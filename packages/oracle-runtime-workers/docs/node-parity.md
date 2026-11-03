@@ -292,6 +292,11 @@ runtime since then exist only here; they are listed under
   newest 2 user turns back from their source (at most 4 per request,
   `src/core/middlewares/attachment-recall.ts`), and anything else through
   the `view_attachment` tool (offered in sessions with a placeholder).
+  Human message rows stored with their bytes before this rule are
+  rewritten to the placeholder once per thread, on its first load. Only
+  human messages are stripped: a tool or AI message that carries base64
+  (an MCP tool's screenshot) is stored and replayed as it is, like Node,
+  since nothing could fetch its bytes again; the saver logs such a write.
 - **Owner copies are never written to Matrix.** The IXO VFS is the system of
   record; Matrix media is read once as legacy — streamed, never held whole,
   where Node buffered the file — and then redacted (see

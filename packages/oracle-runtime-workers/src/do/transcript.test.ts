@@ -6,9 +6,10 @@ import {
   isDeliveryNoticeMessage,
 } from '../channels/replies';
 /**
- * Transcript rendering around attachment payload retention: an offloaded
- * message still lists its attachment metadata with its original text, and
- * the `view_attachment` re-attachment message never shows.
+ * Transcript rendering of stored attachment messages: a message stored with
+ * its placeholder (attachment bytes are never stored) still lists its
+ * attachment metadata with its original text, and the `view_attachment`
+ * re-attachment message never shows.
  */
 import {
   AIMessage,

@@ -830,9 +830,10 @@ export async function createMainAgent(
     ...(returnDirectNames.size > 0
       ? [createReturnDirectFirstMiddleware(returnDirectNames)]
       : []),
-    // Innermost: sees the request exactly as it goes to the provider. Prunes
-    // old tool results under pressure, refuses what cannot fit, and learns
-    // the window from a provider overflow (context-guard.ts).
+    // Innermost but one: sees the request as it goes to the provider, except
+    // the images the recall middleware below adds inside it. Prunes old tool
+    // results under pressure, refuses what cannot fit, and learns the window
+    // from a provider overflow (context-guard.ts).
     ...(contextBudget
       ? [
           createContextGuardMiddleware({
@@ -847,7 +848,9 @@ export async function createMainAgent(
       : []),
     // Inside the guard: recalled images (attachment-recall.ts) reach the
     // provider but are not counted as chars/4 text, which their base64 is
-    // not; graph state never holds them.
+    // not (they are bounded by the recall's own caps instead); graph state
+    // never holds them. A provider refusal of a request carrying them is
+    // retried here once without them, before the guard sees the error.
     ...(hooks?.attachmentRecall
       ? [
           createAttachmentRecallMiddleware({

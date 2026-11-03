@@ -7,9 +7,18 @@
  *
  * Only the copy handed to the model changes: callers archive the original
  * bytes. Without the binding, for a type the binding does not take (SVG,
- * BMP, TIFF, HEIC, …), for an image already within the bound, and on any
- * binding error, the input is returned unchanged, so an oracle that does not
- * bind Images behaves as before.
+ * BMP, TIFF, HEIC, …), for an image already within the bound, and when
+ * `info()` fails for another reason than a malformed image (its dimensions
+ * are then unknown), the input is returned unchanged, so an oracle that does
+ * not bind Images behaves as before.
+ *
+ * An image that must not go to the model as it is comes back with
+ * `dropped`, a short reason, and the caller does not send it natively: one
+ * the binding reports as malformed (not an image, an unsupported format, a
+ * file it cannot decode), one over `RESIZE_HARD_MAX_PIXELS` /
+ * `RESIZE_HARD_MAX_SIDE` (never transformed), and one over the bound whose
+ * transformation fails or yields nothing. `bytes`/`mimetype` are then the
+ * input's, for the caller's log.
  *
  * The bound is on the LONG edge: `maxWidth` caps both width and height, so a
  * tall phone screenshot is reduced too. The dimensions are read first with
@@ -23,6 +32,31 @@ import type { Logger } from '../plugin-api/types';
 export const RESIZE_MAX_EDGE = 1568;
 /** JPEG quality of a downscaled image. */
 export const RESIZE_JPEG_QUALITY = 82;
+/**
+ * Largest image area transformed (pixels). Cloudflare refuses images over
+ * 100 megapixels (error 9413); half of that leaves no photo out and keeps a
+ * decompression bomb from being sent on.
+ */
+export const RESIZE_HARD_MAX_PIXELS = 50_000_000;
+/** Longest side transformed (px); a longer one is dropped. */
+export const RESIZE_HARD_MAX_SIDE = 12_000;
+
+/**
+ * Cloudflare Images error codes that mean the input itself is unusable:
+ * 9412 not an image, 9520 an unsupported format, 9523 an image it could
+ * not decode (developers.cloudflare.com/images/reference/troubleshooting).
+ */
+const MALFORMED_IMAGE_ERROR = /\b(9412|9520|9523)\b/;
+
+export interface ResizedImage {
+  bytes: Uint8Array;
+  mimetype: string;
+  /**
+   * Set when the image must not be sent to the model natively: why, in a
+   * few words (for logs and the model-facing note).
+   */
+  dropped?: string;
+}
 
 /**
  * Raster types the binding decodes. A GIF is flattened to its first frame by
@@ -47,18 +81,41 @@ export async function resizeForModel(
   mimetype: string,
   images: ImagesBinding | undefined,
   opts: { maxWidth?: number; quality?: number; logger?: Logger } = {},
-): Promise<{ bytes: Uint8Array; mimetype: string }> {
+): Promise<ResizedImage> {
   const original = { bytes, mimetype };
   if (!images) return original;
   const type = mimetype.split(';')[0]?.trim().toLowerCase() ?? '';
   if (!RESIZABLE_TYPES.has(type)) return original;
   // `maxWidth` (the caller's name) bounds both sides.
   const maxEdge = opts.maxWidth ?? RESIZE_MAX_EDGE;
+  const drop = (reason: string): ResizedImage => {
+    opts.logger?.warn(
+      `[attachments] image not sent to the model (${type}, ${bytes.length} bytes): ${reason}`,
+    );
+    return { ...original, dropped: reason };
+  };
+  let info: Awaited<ReturnType<ImagesBinding['info']>>;
   try {
-    const info = await images.info(streamOf(bytes));
-    // An SVG reports no dimensions; it is never rasterised here.
-    if (!('width' in info) || (info.width <= maxEdge && info.height <= maxEdge))
-      return original;
+    info = await images.info(streamOf(bytes));
+  } catch (error) {
+    const message = errorMessage(error);
+    if (MALFORMED_IMAGE_ERROR.test(message))
+      return drop(`not a readable image (${message})`);
+    opts.logger?.warn(
+      `[attachments] image info failed (${type}, ${bytes.length} bytes), sending the original: ${message}`,
+    );
+    return original;
+  }
+  // An SVG reports no dimensions; it is never rasterised here.
+  if (!('width' in info) || (info.width <= maxEdge && info.height <= maxEdge))
+    return original;
+  if (
+    info.width > RESIZE_HARD_MAX_SIDE ||
+    info.height > RESIZE_HARD_MAX_SIDE ||
+    info.width * info.height > RESIZE_HARD_MAX_PIXELS
+  )
+    return drop(`${info.width}×${info.height}px is over the size limit`);
+  try {
     const result = await images
       .input(streamOf(bytes))
       .transform({ width: maxEdge, height: maxEdge, fit: 'scale-down' })
@@ -74,9 +131,12 @@ export async function resizeForModel(
     );
     return { bytes: resized, mimetype: result.contentType() };
   } catch (error) {
-    opts.logger?.warn(
-      `[attachments] image resize failed (${type}, ${bytes.length} bytes), sending the original: ${error instanceof Error ? error.message : String(error)}`,
+    return drop(
+      `${info.width}×${info.height}px could not be resized (${errorMessage(error)})`,
     );
-    return original;
   }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

@@ -145,8 +145,30 @@ import {
   readBytesCapped,
   AttachmentTextCacheStore,
 } from '../attachments';
+import {
+  AttachmentTooLargeError,
+  boundedSignal,
+  HomeserverUnauthorizedError,
+  openHomeserverMedia,
+  untilAborted,
+} from '../attachments/download';
 // Not in the attachments index: it loads the bot SDK, which only workerd runs.
-import { postChannelFilesToThread } from '../attachments/room-media';
+import {
+  admitToDailyCap,
+  CHANNEL_MEDIA_DAILY_BYTES,
+  CHANNEL_MEDIA_DAILY_FILES,
+  CHANNEL_MEDIA_DAY_KEY,
+  CHANNEL_MEDIA_SEND_TIMEOUT_MS,
+  CHANNEL_MEDIA_TEXT_WAIT_MS,
+  CHANNEL_MEDIA_TURN_TIMEOUT_MS,
+  channelFilesToKeep,
+  channelMediaTxnId,
+  startChannelFileUploads,
+  type ChannelFileUpload,
+  type ChannelMediaDay,
+  type ChannelThreadFile,
+  type ThreadFileCopy,
+} from '../attachments/room-media';
 import {
   channelGatewayOrigins,
   channelThreadFiles,
@@ -154,8 +176,6 @@ import {
   prepareTurnAttachments,
   turnAttachmentInputs,
   turnChannelMediaSource,
-  withThreadEvents,
-  type ThreadFilesOfTurn,
 } from './turn-attachments';
 import type { RuntimeCore } from '../core';
 import {
@@ -322,7 +342,10 @@ import { freshStub } from './fresh-stub';
 import { WorkStatusProducer } from '../matrix/work-status';
 import { fetchUserMatrixServerName } from '../matrix/user-homeserver';
 import { createWorkStatusMiddleware } from '../core/middlewares/work-status';
-import type { RecallImageLoader } from '../core/middlewares/attachment-recall';
+import {
+  RecalledImageCache,
+  type RecallImageLoader,
+} from '../core/middlewares/attachment-recall';
 import { bytesToBase64 } from '../plugins/base64';
 import { UserPreferencesStore } from '../plugins/user-preferences/user-preferences-store';
 import { SqliteUserKv } from '../sqlite/user-kv-store';
@@ -1193,8 +1216,24 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private matrixLedger: MatrixTurnLedger | null = null;
     /** Room mirrors of HTTP turns, serialised per session and retried across gateway restarts (see room-mirror.ts). */
     private mirror: RoomMirror | null = null;
-    /** The plugin device channel files are uploaded with (see `mediaUploadDevice`). */
-    private mediaDevice: Promise<BotCredentials> | null = null;
+    /** The oracle's plugin device, once known (see `pluginDevice`). */
+    private pluginCredentials: BotCredentials | null = null;
+    /** Its lookup in flight: concurrent callers share one gateway RPC. */
+    private pluginCredentialsLoad: Promise<BotCredentials> | null = null;
+    /**
+     * Channel requests with files whose person's text the mirror pass has
+     * queued on the session chain (value without `waiter`), or whose file
+     * events wait for that (`waiter`); see `afterChannelText`.
+     */
+    private readonly channelTextQueued = new Map<
+      string,
+      { at: number; waiter?: () => void }
+    >();
+    /** Today's posted channel files (`CHANNEL_MEDIA_DAY_KEY`), once loaded. */
+    private channelMediaUsage: ChannelMediaDay | undefined;
+    private channelMediaUsageLoad: Promise<void> | null = null;
+    /** Images the recall middleware re-attached lately, kept across this instance's turns. */
+    private readonly recallCache = new RecalledImageCache();
     private channelTurns: ChannelTurns | null = null;
     /** Anonymous-feedback idempotency markers and the user's submission limit. */
     private feedbackMarkers: FeedbackMarkers | null = null;
@@ -7253,50 +7292,79 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     // ── turn plumbing ──────────────────────────────────────────────────────
 
     /**
-     * Matrix media access for the attachments pipeline, through the gateway.
-     * Both transfers stream across the object boundary and are cut off at
-     * the attachment cap; an encrypted attachment is decrypted HERE, not in
-     * the gateway (its whole-buffer download grew the crypto WASM heap for
-     * good, and a hash mismatch on the far side of the RPC would only reach
-     * this object as a disconnect).
-     *
-     * The gateway bounds each transfer to the attachment download deadline,
-     * from opening it to the last byte. An `AbortSignal` cannot cross the
-     * Durable Object RPC, so the turn's abort acts on this side instead:
-     * `readBytesCapped` cancels the stream it reads, and the cancel travels
-     * back over the RPC stream to stop the gateway's download.
+     * Matrix media access for the attachments pipeline. The gateway is asked
+     * only for the media event's small JSON (`eventMediaInfo`: it alone holds
+     * the room keys); the bytes come straight from the homeserver on the
+     * plugin device's token (`openMatrixMedia`) and an encrypted attachment
+     * is decrypted HERE, so no media byte crosses the shared gateway object.
+     * Each transfer is bounded by the attachment download deadline (and the
+     * caller's signal), from opening it to the last byte, and cut off at
+     * `maxBytes`.
      */
     private matrixMediaSource(): MatrixMediaSource {
-      const deadline = { timeoutMs: DOWNLOAD_TIMEOUT_MS };
-      return {
-        downloadMxc: async (mxc, maxBytes = MAX_FILE_SIZE, signal) =>
-          readBytesCapped(
-            await this.gateway.downloadMxcMediaStream(mxc, deadline),
-            maxBytes,
-            signal,
-          ),
-        downloadEvent: async (
-          roomId,
-          eventId,
-          maxBytes = MAX_FILE_SIZE,
+      const bounded = async <T>(
+        signal: AbortSignal | undefined,
+        work: (signal: AbortSignal) => Promise<T>,
+      ): Promise<T> => {
+        const bound = boundedSignal(
           signal,
-        ) => {
-          const media = await this.gateway.downloadEventMediaStream(
-            roomId,
-            eventId,
-            deadline,
-          );
-          if (!media) return null;
-          const plain = media.file
-            ? media.stream.pipeThrough(createAttachmentDecryptor(media.file))
-            : media.stream;
-          return {
-            bytes: await readBytesCapped(plain, maxBytes, signal),
-            ...(media.mimetype ? { mimetype: media.mimetype } : {}),
-            ...(media.filename ? { filename: media.filename } : {}),
-          };
-        },
+          DOWNLOAD_TIMEOUT_MS,
+          'Matrix media download',
+        );
+        try {
+          return await untilAborted(work(bound.signal), bound.signal);
+        } finally {
+          bound.release();
+        }
       };
+      return {
+        downloadMxc: (mxc, maxBytes = MAX_FILE_SIZE, signal) =>
+          bounded(signal, async (bound) =>
+            readBytesCapped(
+              await this.openMatrixMedia(mxc, bound),
+              maxBytes,
+              bound,
+            ),
+          ),
+        downloadEvent: (roomId, eventId, maxBytes = MAX_FILE_SIZE, signal) =>
+          bounded(signal, async (bound) => {
+            const info = await this.gateway.eventMediaInfo(roomId, eventId, {
+              timeoutMs: DOWNLOAD_TIMEOUT_MS,
+            });
+            if (!info) return null;
+            const stream = await this.openMatrixMedia(info.mxc, bound);
+            const plain = info.file
+              ? stream.pipeThrough(createAttachmentDecryptor(info.file))
+              : stream;
+            return {
+              bytes: await readBytesCapped(plain, maxBytes, bound),
+              ...(info.mimetype ? { mimetype: info.mimetype } : {}),
+              ...(info.filename ? { filename: info.filename } : {}),
+            };
+          }),
+      };
+    }
+
+    /**
+     * The media behind `mxc`, opened on the homeserver with the plugin
+     * device's token; a 401 asks the gateway for fresh credentials
+     * (`botCredentials({ rejected })`) and tries once more.
+     */
+    private async openMatrixMedia(
+      mxc: string,
+      signal: AbortSignal,
+    ): Promise<ReadableStream<Uint8Array>> {
+      const device = await untilAborted(this.pluginDevice(), signal);
+      try {
+        return await openHomeserverMedia(mxc, device, { signal });
+      } catch (error) {
+        if (!(error instanceof HomeserverUnauthorizedError)) throw error;
+        const fresh = await untilAborted(
+          this.pluginDevice({ rejected: device.accessToken }),
+          signal,
+        );
+        return openHomeserverMedia(mxc, fresh, { signal });
+      }
     }
 
     /**
@@ -7326,6 +7394,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         findPersistedAttachmentMeta(saver, input.sessionId, ref);
       const viewDeps = (): ViewAttachmentDeps => ({
         source: this.matrixMediaSource(),
+        ...(this.env.IMAGES ? { images: this.env.IMAGES } : {}),
         channel: turnChannelMediaSource({
           sessionId: input.sessionId,
           turnLinks: input.channelLinks,
@@ -7353,10 +7422,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     /**
      * Image fetch for the attachment recall middleware
      * (`core/middlewares/attachment-recall.ts`): one image of this session,
-     * read through the same sources as the turn pipeline (Matrix media
-     * through the gateway, the session's channel links, http(s)), capped at
-     * `MAX_FILE_SIZE`, refused unless the bytes are an image, downscaled
-     * for the model when the oracle binds Cloudflare Images, as base64.
+     * read through the same sources as the turn pipeline (Matrix media from
+     * the homeserver, the session's channel links or their room copies,
+     * http(s)), cut off at the middleware's `maxBytes` (null then), refused
+     * unless the bytes are an image, downscaled for the model when the
+     * oracle binds Cloudflare Images, as base64. An image the resize step
+     * drops resolves null: its original never goes to the model.
      */
     private recallImageLoader(input: {
       sessionId: string;
@@ -7364,7 +7435,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       /** The links of this turn's channel files (earlier ones come from the store). */
       channelLinks: ReturnType<typeof channelTurnLinks>;
     }): RecallImageLoader {
-      return async (meta, signal) => {
+      return async (meta, { signal, maxBytes }) => {
         const attachment: AttachmentInput = {
           filename: meta.filename,
           mimetype: meta.mimetype,
@@ -7373,18 +7444,29 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           ...(meta.eventId ? { eventId: meta.eventId } : {}),
           ...(meta.channelRef ? { channelRef: meta.channelRef } : {}),
         };
+        const name = sanitizeAttachmentFilename(attachment.filename);
         const channel = turnChannelMediaSource({
           sessionId: input.sessionId,
           turnLinks: input.channelLinks,
           store: this.channelAttachmentLinks,
           channelServiceDid: this.env.CHANNEL_SERVICE_DID,
         });
-        const { bytes, mimetype, sniffed } = await loadAttachmentBytes(
-          attachment,
-          input.roomId,
-          this.matrixMediaSource(),
-          { signal, maxBytes: MAX_FILE_SIZE, channel },
-        );
+        let loaded: Awaited<ReturnType<typeof loadAttachmentBytes>>;
+        try {
+          loaded = await loadAttachmentBytes(
+            attachment,
+            input.roomId,
+            this.matrixMediaSource(),
+            { signal, maxBytes, channel },
+          );
+        } catch (error) {
+          if (!(error instanceof AttachmentTooLargeError)) throw error;
+          console.warn(
+            `[attachments] recall: "${name}" is over the ${maxBytes}-byte recall limit`,
+          );
+          return null;
+        }
+        const { bytes, mimetype, sniffed } = loaded;
         // Bytes that are not an image never go back as an image block.
         const kind = classifyAttachment({
           mimetype,
@@ -7395,11 +7477,17 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         const sent = await resizeForModel(bytes, mimetype, this.env.IMAGES, {
           logger: console,
         });
+        if (sent.dropped) {
+          console.warn(
+            `[attachments] recall: "${name}" not re-attached: ${sent.dropped}`,
+          );
+          return null;
+        }
         return {
           kind: 'image',
           mimeType: sent.mimetype,
           base64: bytesToBase64(sent.bytes),
-          filename: sanitizeAttachmentFilename(attachment.filename),
+          filename: name,
         };
       };
     }
@@ -7704,31 +7792,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         : undefined;
       if (turnLinks.length && !run.resumed)
         await this.channelAttachmentLinks?.put(req.sessionId, turnLinks);
-      // A channel turn's files become media events in the session thread
-      // (attachments/room-media.ts): the run names each by its event, and
-      // the bytes read on the way reach the pipeline without a second
-      // download. A resumed attempt names them by the events its first
-      // attempt recorded and posts nothing.
-      const threadFiles: ThreadFilesOfTurn | null =
+      // A channel turn's files are also posted to the session thread as
+      // encrypted media events (attachments/room-media.ts), in the
+      // background: the run names each by its `channel:` reference, and the
+      // copies read on the way reach the pipeline instead of a second
+      // download. A resumed attempt posts nothing.
+      const threadCopies =
         turnLinks.length && sessionRoomId
-          ? run.resumed
-            ? {
-                eventIds:
-                  (await this.channelAttachmentLinks?.eventIds(
-                    req.sessionId,
-                    turnLinks.map((link) => link.ref),
-                  )) ?? new Map<string, string>(),
-              }
-            : await this.postChannelFilesToThread(
-                req,
-                sessionRoomId,
-                abortController.signal,
-              )
+          ? this.postChannelFilesToThread(
+              req,
+              sessionRoomId,
+              abortController.signal,
+              run.resumed,
+            )
           : null;
-      const attachmentInputs = withThreadEvents(
-        turnAttachmentInputs(req, body.attachments),
-        threadFiles?.eventIds ?? new Map<string, string>(),
-      );
+      const attachmentInputs = turnAttachmentInputs(req, body.attachments);
       const { prepared, metas: turnMetas } = await prepareTurnAttachments({
         inputs: attachmentInputs,
         resumed: run.resumed,
@@ -7744,9 +7822,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             {
               source: this.matrixMediaSource(),
               ...(channelMedia ? { channel: channelMedia } : {}),
-              ...(threadFiles?.preloaded
-                ? { preloaded: threadFiles.preloaded }
-                : {}),
+              ...(threadCopies ? { preloaded: threadCopies } : {}),
               extraction: this.extractionProvider(baseAmbient.llm, core.llm),
               sandbox: await this.sandboxArchiveConfig(req.identity.userDid),
               ...(this.env.IMAGES ? { images: this.env.IMAGES } : {}),
@@ -7755,9 +7831,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             },
           ),
       });
-      // Bytes the pipeline did not read (a file it refused) go now, not
+      // Copies the pipeline did not take (a file it refused) go now, not
       // with the turn.
-      threadFiles?.preloaded?.clear();
+      threadCopies?.clear();
       if (prepared) {
         console.log(
           `[user-do] attachments: ${attachmentInputs.length} attached, ${prepared.extracted.length} extracted, ${Array.isArray(prepared.content) ? prepared.content.length - 1 : 0} native`,
@@ -8107,6 +8183,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                   }),
                   imageInput: getModelCapabilities(attachmentModel).image,
                   signal: abortController.signal,
+                  cache: this.recallCache,
                 },
               }),
         },
@@ -8313,6 +8390,18 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       who: 'user' | 'oracle',
       receipt = false,
     ): Promise<void> {
+      const queued = this.queueReplay(req, text, who, receipt);
+      // The turn's file events follow the person's text on the chain.
+      if (who === 'user') this.noteChannelTextQueued(req);
+      return queued;
+    }
+
+    private queueReplay(
+      req: TurnRequest,
+      text: string,
+      who: 'user' | 'oracle',
+      receipt: boolean,
+    ): Promise<void> {
       if (req.client === 'matrix' && !receipt) return Promise.resolve();
       if (req.sessionId.startsWith(SYNTHETIC_SESSION_PREFIX))
         return Promise.resolve();
@@ -8379,7 +8468,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                 send.roomId,
                 'm.room.message',
                 JSON.stringify(mirrorEventContent(send)),
-                { txnId: send.txnId },
+                { txnId: send.txnId, priority: 'background' },
               )
             : this.gateway.sendText(send.roomId, send.body, {
                 threadId: send.threadId,
@@ -8390,7 +8479,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                 txnId: send.txnId,
               }),
         sendEvent: (roomId, content, txnId) =>
-          this.gateway.sendEvent(roomId, 'm.room.message', content, { txnId }),
+          this.gateway.sendEvent(roomId, 'm.room.message', content, {
+            txnId,
+            priority: 'background',
+          }),
         keepAlive: (work) => this.ctx.waitUntil(work),
         log: (message) => console.log(message),
         warn: (message) => console.warn(message),
@@ -8399,102 +8491,303 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /**
-     * The oracle's plugin device (`botCredentials`, one gateway RPC per
-     * instance): what channel files are uploaded to the homeserver with.
-     * Dropped when the homeserver rejects its token, so the next turn asks
-     * the gateway again (which re-logs the device in).
+     * The oracle's plugin device (`botCredentials`): what channel files are
+     * uploaded and Matrix media downloaded with. One gateway RPC per
+     * instance, shared by concurrent callers. A caller the homeserver
+     * answered 401 passes the token it used as `rejected`: the cache is
+     * dropped only when it still holds that token, and the gateway
+     * re-validates its device (or logs it in again) once for everyone.
      */
-    private mediaUploadDevice(): Promise<BotCredentials> {
-      return (this.mediaDevice ??= this.gateway
-        .botCredentials()
-        .catch((error: unknown) => {
-          this.mediaDevice = null;
-          throw error;
-        }));
+    private pluginDevice(
+      opts: { rejected?: string } = {},
+    ): Promise<BotCredentials> {
+      if (
+        opts.rejected &&
+        this.pluginCredentials?.accessToken === opts.rejected
+      )
+        this.pluginCredentials = null;
+      if (this.pluginCredentials)
+        return Promise.resolve(this.pluginCredentials);
+      this.pluginCredentialsLoad ??= this.gateway
+        .botCredentials(opts.rejected ? { rejected: opts.rejected } : {})
+        .then((credentials) => {
+          this.pluginCredentials = credentials;
+          return credentials;
+        })
+        .finally(() => {
+          this.pluginCredentialsLoad = null;
+        });
+      return this.pluginCredentialsLoad;
     }
 
     /**
-     * Post a channel turn's files as media events in the session thread
-     * (`attachments/room-media.ts`), behind the turn's own text mirror, and
-     * record their events with the session's links so a resumed attempt
-     * names them the same way. Never throws: a file that cannot be posted
-     * is logged without its link and the turn reads it from the gateway as
-     * before.
+     * The mirror pass has queued the person's text of channel request
+     * `req` on the session chain (or found none to queue): release the
+     * request's file events waiting for it, or remember it for a turn that
+     * has not asked yet. Only requests with files are tracked; entries older
+     * than the wait are dropped.
      */
-    private async postChannelFilesToThread(
+    private noteChannelTextQueued(req: TurnRequest): void {
+      if (req.client !== 'channel' || !req.channel?.attachments?.length) return;
+      const entry = this.channelTextQueued.get(req.requestId);
+      if (entry?.waiter) {
+        this.channelTextQueued.delete(req.requestId);
+        entry.waiter();
+        return;
+      }
+      const now = Date.now();
+      for (const [requestId, noted] of this.channelTextQueued)
+        if (!noted.waiter && now - noted.at > CHANNEL_MEDIA_TEXT_WAIT_MS)
+          this.channelTextQueued.delete(requestId);
+      this.channelTextQueued.set(req.requestId, { at: now });
+    }
+
+    /**
+     * `queued` resolves once the person's text of `requestId` is queued on
+     * the session chain (true), after `CHANNEL_MEDIA_TEXT_WAIT_MS` (false),
+     * or with null when `cancel` is called first (nothing left to post).
+     */
+    private afterChannelText(requestId: string): {
+      queued: Promise<boolean | null>;
+      cancel: () => void;
+    } {
+      const noted = this.channelTextQueued.get(requestId);
+      if (noted && !noted.waiter) {
+        this.channelTextQueued.delete(requestId);
+        return { queued: Promise.resolve(true), cancel: () => undefined };
+      }
+      let settle: (value: boolean | null) => void = () => undefined;
+      const queued = new Promise<boolean | null>((resolve) => {
+        settle = resolve;
+      });
+      const finish = (value: boolean | null): void => {
+        clearTimeout(timer);
+        if (this.channelTextQueued.get(requestId)?.waiter === waiter)
+          this.channelTextQueued.delete(requestId);
+        settle(value);
+      };
+      const waiter = (): void => finish(true);
+      const timer = setTimeout(() => finish(false), CHANNEL_MEDIA_TEXT_WAIT_MS);
+      this.channelTextQueued.set(requestId, { at: Date.now(), waiter });
+      return { queued, cancel: () => finish(null) };
+    }
+
+    /**
+     * The per-user daily cap on posted channel files (`admitToDailyCap`),
+     * counted in the object's storage (`CHANNEL_MEDIA_DAY_KEY`). The count is
+     * read once per instance and updated in memory without an await between
+     * the check and the update, so concurrent turns cannot both take the
+     * last place.
+     */
+    private async admitChannelFilesToday(
+      files: readonly ChannelThreadFile[],
+    ): Promise<ReturnType<typeof admitToDailyCap>> {
+      this.channelMediaUsageLoad ??= this.ctx.storage
+        .get<ChannelMediaDay>(CHANNEL_MEDIA_DAY_KEY)
+        .then((stored) => {
+          this.channelMediaUsage ??= stored;
+        })
+        .catch((error: unknown) => {
+          this.channelMediaUsageLoad = null;
+          throw error;
+        });
+      await this.channelMediaUsageLoad;
+      const result = admitToDailyCap(files, this.channelMediaUsage, Date.now());
+      this.channelMediaUsage = result.usage;
+      if (result.admitted.length)
+        await this.ctx.storage.put(CHANNEL_MEDIA_DAY_KEY, result.usage);
+      return result;
+    }
+
+    /**
+     * Post a channel turn's files as encrypted media events in the session
+     * thread (`attachments/room-media.ts`), off the turn's critical path.
+     * Returns at once: per file the turn may read directly
+     * (`channelFilesToKeep`), a promise of its verified plaintext, resolved
+     * as soon as the read passes its check, or null when no copy comes (the
+     * pipeline then reads the gateway as before). In the background:
+     *
+     * - the encryption check and the plugin device, bounded with the uploads'
+     *   reads by `CHANNEL_MEDIA_TURN_TIMEOUT_MS` from now and by the run's
+     *   signal; on a failure (or a room that is not Megolm-encrypted) one
+     *   line is logged and nothing is posted;
+     * - the daily cap (`admitChannelFilesToday`): a file over it is only read
+     *   from the gateway, with one log line for the turn;
+     * - the uploads (`startChannelFileUploads`), kept alive by `waitUntil`;
+     * - one event per file on the session's mirror chain, queued in message
+     *   order right after the person's text (`afterChannelText`) at
+     *   background priority, each within `CHANNEL_MEDIA_SEND_TIMEOUT_MS`;
+     *   their event ids then go to the link store (`setEventIds`), whose room
+     *   copies serve the files once their links expire.
+     *
+     * A resumed attempt posts nothing: its first attempt did, or lost the
+     * uploads with the object, and the person's message is in the
+     * checkpoint already.
+     */
+    private postChannelFilesToThread(
       req: TurnRequest,
       roomId: string,
-      signal: AbortSignal,
-    ): Promise<ThreadFilesOfTurn> {
-      const eventIds = new Map<string, string>();
-      const preloaded = new Map<
-        string,
-        { bytes: Uint8Array; mimetype: string }
-      >();
-      const result: ThreadFilesOfTurn = { eventIds, preloaded };
+      runSignal: AbortSignal,
+      resumed: boolean,
+    ): Map<string, Promise<ThreadFileCopy | null>> {
+      const copies = new Map<string, Promise<ThreadFileCopy | null>>();
       const files = channelThreadFiles(req);
-      // A channel session is always a thread under its marker event.
-      if (!files.length || !req.channel || !req.sessionId.startsWith('$'))
-        return result;
       const channel = req.channel;
-      let encrypted: boolean;
-      let device: BotCredentials;
-      try {
-        [encrypted, device] = await Promise.all([
-          this.roomIsEncrypted(roomId),
-          this.mediaUploadDevice(),
-        ]);
-      } catch (error) {
-        console.warn(
-          `[attachments] channel files of ${req.sessionId} not posted to its thread; the turn reads them from the channel gateway: ${error instanceof Error ? error.message : String(error)}`,
+      // A channel session is always a thread under its marker event.
+      if (
+        resumed ||
+        !files.length ||
+        !channel ||
+        !req.sessionId.startsWith('$')
+      )
+        return copies;
+      const keep = channelFilesToKeep(files);
+      const pending = new Map<
+        string,
+        (copy: Promise<ThreadFileCopy | null> | null) => void
+      >();
+      for (const ref of keep)
+        copies.set(
+          ref,
+          new Promise((resolve) => {
+            pending.set(ref, resolve);
+          }),
         );
-        return result;
-      }
-      // The person's text first: the mirror pass posts it too, with the same
-      // transaction id, so whichever send comes second is deduplicated by
-      // the homeserver and the files always follow their message.
-      this.replayToRoom(req, req.message, 'user').catch(() => undefined);
-      const posted = await postChannelFilesToThread({
-        files,
-        target: {
-          roomId,
-          threadId: req.sessionId,
-          origin: {
-            provider: channel.provider,
-            bindingId: channel.bindingId,
-            remoteMessageRef: channel.remoteMessageRef,
-          },
-          encrypted,
-        },
-        sessionId: req.sessionId,
-        requestId: req.requestId,
-        deps: {
-          origins: channelGatewayOrigins(this.env.CHANNEL_SERVICE_DID),
-          homeserver: {
-            baseUrl: device.baseUrl,
-            accessToken: device.accessToken,
-          },
-          send: (event, sendSignal) =>
-            this.roomMirror().sendMedia(
-              req.sessionId,
-              event,
-              'channel file',
-              sendSignal,
-            ),
-          onUnauthorized: () => {
-            this.mediaDevice = null;
-          },
-          signal,
-          log: console,
-        },
+      const textOrder = this.afterChannelText(req.requestId);
+      const deadline = Date.now() + CHANNEL_MEDIA_TURN_TIMEOUT_MS;
+
+      const started = (async (): Promise<ChannelFileUpload[]> => {
+        const setup = boundedSignal(
+          runSignal,
+          CHANNEL_MEDIA_TURN_TIMEOUT_MS,
+          'Preparing the channel file posts',
+        );
+        try {
+          const [encrypted, device] = await untilAborted(
+            Promise.all([this.roomIsEncrypted(roomId), this.pluginDevice()]),
+            setup.signal,
+          );
+          if (!encrypted) {
+            console.warn(
+              `[attachments] channel files of ${req.sessionId} not posted to its thread: the room is not end-to-end encrypted`,
+            );
+            return [];
+          }
+          const { admitted, refused } =
+            await this.admitChannelFilesToday(files);
+          if (refused.length)
+            console.warn(
+              `[attachments] ${refused.length} channel file(s) of ${req.sessionId} not posted to its thread: the daily cap (${CHANNEL_MEDIA_DAILY_FILES} files / ${CHANNEL_MEDIA_DAILY_BYTES} bytes) is reached; the turn reads them from the channel gateway`,
+            );
+          const run = startChannelFileUploads({
+            files: admitted,
+            sessionId: req.sessionId,
+            deps: {
+              origins: channelGatewayOrigins(this.env.CHANNEL_SERVICE_DID),
+              homeserver: {
+                baseUrl: device.baseUrl,
+                accessToken: device.accessToken,
+              },
+              keep,
+              turnTimeoutMs: Math.max(0, deadline - Date.now()),
+              onUnauthorized: (token) => {
+                void this.pluginDevice({ rejected: token }).catch(
+                  () => undefined,
+                );
+              },
+              log: console,
+            },
+          });
+          this.ctx.waitUntil(run.done);
+          for (const upload of run.uploads)
+            pending.get(upload.file.ref)?.(upload.copy);
+          return run.uploads;
+        } catch (error) {
+          console.warn(
+            `[attachments] channel files of ${req.sessionId} not posted to its thread; the turn reads them from the channel gateway: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return [];
+        } finally {
+          setup.release();
+          // A copy not handed over by now never comes (a resolved one stays).
+          for (const resolve of pending.values()) resolve(null);
+        }
+      })();
+
+      const origin = {
+        provider: channel.provider,
+        bindingId: channel.bindingId,
+        remoteMessageRef: channel.remoteMessageRef,
+      };
+      // Nothing to post: the events need not wait for the text.
+      void started.then((uploads) => {
+        if (uploads.length === 0) textOrder.cancel();
       });
-      for (const [ref, media] of posted) {
-        eventIds.set(ref, media.eventId);
-        if (media.bytes)
-          preloaded.set(ref, { bytes: media.bytes, mimetype: media.mimetype });
-      }
-      await this.channelAttachmentLinks?.setEventIds(req.sessionId, eventIds);
-      return result;
+      const posted = textOrder.queued.then(async (afterText) => {
+        if (afterText === null) return;
+        if (!afterText)
+          console.warn(
+            `[attachments] the text of ${req.requestId} was not queued within ${CHANNEL_MEDIA_TEXT_WAIT_MS} ms; its files are queued without it`,
+          );
+        // Queued synchronously, one after the other: the chain keeps the
+        // message order whichever upload ends first.
+        const sent = await Promise.all(
+          files.map(async (file): Promise<[string, string] | null> => {
+            const bound = boundedSignal(
+              undefined,
+              CHANNEL_MEDIA_SEND_TIMEOUT_MS,
+              'Posting the channel file',
+            );
+            try {
+              const eventId = await this.roomMirror().sendMedia(
+                req.sessionId,
+                async () => {
+                  const upload = (await started).find(
+                    (entry) => entry.file.ref === file.ref,
+                  );
+                  // A failed upload is logged by `startChannelFileUploads`.
+                  const media = await upload?.uploaded.catch(() => null);
+                  if (!media) return null;
+                  return {
+                    roomId,
+                    threadId: req.sessionId,
+                    txnId: await channelMediaTxnId({
+                      userDid: req.identity.userDid,
+                      bindingId: channel.bindingId,
+                      requestId: req.requestId,
+                      index: file.index,
+                    }),
+                    origin,
+                    media,
+                  };
+                },
+                'channel file',
+                bound.signal,
+              );
+              return eventId ? [file.ref, eventId] : null;
+            } catch (error) {
+              console.warn(
+                `[attachments] channel file ${file.ref} not posted to thread ${req.sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+              );
+              return null;
+            } finally {
+              bound.release();
+            }
+          }),
+        );
+        const eventIds = new Map(
+          sent.filter((entry): entry is [string, string] => entry !== null),
+        );
+        await this.channelAttachmentLinks?.setEventIds(req.sessionId, eventIds);
+      });
+      this.ctx.waitUntil(
+        posted.catch((error: unknown) => {
+          console.warn(
+            `[attachments] channel file posts of ${req.sessionId} failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }),
+      );
+      return copies;
     }
 
     private async afterTurn(

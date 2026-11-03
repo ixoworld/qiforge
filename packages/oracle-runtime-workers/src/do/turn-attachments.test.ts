@@ -18,7 +18,6 @@ import {
   prepareTurnAttachments,
   turnAttachmentInputs,
   turnChannelMediaSource,
-  withThreadEvents,
 } from './turn-attachments';
 
 const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
@@ -189,16 +188,17 @@ describe('turn attachments', () => {
       expect(await store.get('session-a', kept!.ref)).toBeUndefined();
     });
   });
-  it('names a posted file by its thread event, keeps its reference, and lists the files to post', async () => {
+  it('lists the files to post once each, with their place in the message, and the run still names them by reference', async () => {
     const file = await photo();
     const req = {
       client: 'channel',
-      channel: { bindingId: 'chb_one', attachments: [file] },
+      channel: { bindingId: 'chb_one', attachments: [file, file] },
     };
     const ref = channelAttachmentRef(file.sha256);
     expect(channelThreadFiles(req)).toEqual([
       {
         ref,
+        index: 0,
         link: { url: file.url, sha256: file.sha256, bindingId: 'chb_one' },
         filename: 'photo.jpg',
         mimetype: 'image/jpeg',
@@ -207,14 +207,12 @@ describe('turn attachments', () => {
       },
     ]);
     expect(channelThreadFiles({ client: 'portal' })).toEqual([]);
-    const inputs = turnAttachmentInputs(req, undefined);
-    expect(withThreadEvents(inputs, new Map([[ref, '$file']]))).toEqual([
-      { ...inputs[0], eventId: '$file' },
-    ]);
-    expect(withThreadEvents(inputs, new Map())).toEqual(inputs);
+    expect(
+      turnAttachmentInputs(req, undefined).map((input) => input.eventId),
+    ).toEqual([undefined, undefined]);
   });
 
-  it('keeps the thread event of each file with its link for a resumed attempt, adding the column to an older table', async () => {
+  it('keeps the thread event of each file with its link, past the link expiry, adding the column to an older table', async () => {
     const stub = env.TASKS_TEST.get(
       env.TASKS_TEST.idFromName('channel-link-events'),
     );
@@ -228,29 +226,44 @@ describe('turn attachments', () => {
            UNIQUE (session_id, ref)
          )`,
       );
-      const store = new ChannelAttachmentLinkStore(
-        db,
-        console,
-        () => 1_800_000_000_000,
-      );
+      let now = 1_800_000_000_000;
+      const store = new ChannelAttachmentLinkStore(db, console, () => now);
       const file = await photo();
-      const [kept] = channelTurnLinks({
-        client: 'channel',
-        channel: { bindingId: 'chb_one', attachments: [file] },
+      const other = ChannelAttachment.parse({
+        ...file,
+        sha256: 'f'.repeat(64),
       });
-      await store.put('session-a', [kept!]);
-      expect(await store.eventIds('session-a', [kept!.ref])).toEqual(new Map());
+      const [kept, plain] = channelTurnLinks({
+        client: 'channel',
+        channel: { bindingId: 'chb_one', attachments: [file, other] },
+      });
+      await store.put('session-a', [kept!, plain!]);
+      expect(await store.eventIdOf('session-a', kept!.ref)).toBeUndefined();
       await store.setEventIds('session-a', new Map([[kept!.ref, '$file']]));
-      expect(
-        await store.eventIds('session-a', [
-          kept!.ref,
-          'channel:ffffffffffffffff',
-        ]),
-      ).toEqual(new Map([[kept!.ref, '$file']]));
-      expect(await store.eventIds('session-b', [kept!.ref])).toEqual(new Map());
-      // A resend of the file in a later turn starts without an event.
+      expect(await store.eventIdOf('session-a', kept!.ref)).toBe('$file');
+      expect(await store.eventIdOf('session-b', kept!.ref)).toBeUndefined();
+      // A resend in a later turn refreshes the link and keeps the event.
       await store.put('session-a', [kept!]);
-      expect(await store.eventIds('session-a', [kept!.ref])).toEqual(new Map());
+      expect(await store.eventIdOf('session-a', kept!.ref)).toBe('$file');
+      // Past the links' expiry (`exp` 1893456000) the sweep drops the row
+      // without a room copy and keeps the other, whose link is no longer
+      // served while its event still is.
+      now = 1_893_456_000_000 + 1;
+      const source = turnChannelMediaSource({
+        sessionId: 'session-a',
+        turnLinks: [],
+        store,
+        channelServiceDid: 'did:web:channels.test',
+      });
+      await store.put('session-z', [
+        { ...kept!, url: link('chb_one', 1_999_999_999) },
+      ]);
+      expect(await store.get('session-a', kept!.ref)).toBeUndefined();
+      expect(await source.roomEventOf?.(kept!.ref)).toBe('$file');
+      const rows = await db.exec<{ ref: string }>(
+        "SELECT ref FROM channel_attachment_links WHERE session_id = 'session-a'",
+      );
+      expect(rows.map((row) => row.ref)).toEqual([kept!.ref]);
     });
   });
 });

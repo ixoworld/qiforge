@@ -21,12 +21,18 @@ import {
  *   turn's mirrors queue behind an earlier turn's.
  *
  * The same chain carries the media events of a channel turn's files
- * (`sendMedia`, built by `attachments/room-media.ts`): each is posted after
- * the mirrors queued before it and before the reply.
+ * (`sendMedia`, built by `attachments/room-media.ts`): the owner object
+ * queues them in file order right after the person's text, so each is
+ * posted after that text and before the reply, whenever its upload ends.
  */
 import type { EncryptedFileInfo } from '@ixo/matrix-bot-workers-sdk';
+import { abortError, untilAborted } from '../attachments/download';
 import { matrixTxnId } from '../matrix/txn-id';
-import { retryGateway, type RetryGatewayOptions } from './gateway-retry';
+import {
+  isTransientGatewayError,
+  retryGateway,
+  type RetryGatewayOptions,
+} from './gateway-retry';
 
 export type MirrorAuthor = 'user' | 'oracle';
 
@@ -71,10 +77,11 @@ export interface MediaMessage {
   body: string;
   filename: string;
   info: { mimetype: string; size: number };
-  /** An encrypted attachment: its `mxc://` plus the `EncryptedFile` fields. */
-  file?: { url: string } & EncryptedFileInfo;
-  /** A plain attachment (a room that is not end-to-end encrypted). */
-  url?: string;
+  /**
+   * The encrypted attachment: its `mxc://` plus the `EncryptedFile` fields.
+   * Always encrypted: a file is only ever posted into a Megolm room.
+   */
+  file: { url: string } & EncryptedFileInfo;
 }
 
 export interface MediaMirrorSend {
@@ -88,7 +95,11 @@ export interface MediaMirrorSend {
 
 export interface RoomMirrorDeps {
   sendText(send: MirrorSend): Promise<string>;
-  /** Send one timeline event (`content` JSON-encoded) with a pinned transaction id; returns its event id. */
+  /**
+   * Send one file event (`content` JSON-encoded) with a pinned transaction
+   * id, at background priority (`MatrixGatewayObject.sendEvent`); returns
+   * its event id.
+   */
   sendEvent(roomId: string, content: string, txnId: string): Promise<string>;
   /** Keeps the (un-awaited) send alive past the request that started it: `ctx.waitUntil`. */
   keepAlive(work: Promise<unknown>): void;
@@ -183,34 +194,34 @@ export class RoomMirror {
   }
 
   /**
-   * Queue one file event behind the session's previous mirrors and resolve
-   * with its event id; a send that fails (after the transient retries)
-   * rejects. When `signal` has aborted by the time the event's turn in the
-   * chain comes, nothing is sent and the call rejects with its reason: a
-   * caller that stopped waiting never gets an event it no longer expects.
+   * Queue one file event behind the session's previous mirrors. When its
+   * turn in the chain comes, `prepare` builds the event (it waits for the
+   * file's upload; `null` = nothing to post) and the send follows with the
+   * transient retries; resolves with the event id, or null when nothing was
+   * posted. `signal` is honoured throughout: checked before `prepare` and
+   * before every send attempt, and it ends the wait on `prepare` — once it
+   * aborts no further attempt is made and the call rejects with its reason.
+   * A send that fails after the retries rejects.
    */
   sendMedia(
     sessionId: string,
-    send: MediaMirrorSend,
+    prepare: () => Promise<MediaMirrorSend | null>,
     label: string,
     signal?: AbortSignal,
-  ): Promise<string> {
-    return this.chain(sessionId, () => {
-      if (signal?.aborted)
-        return Promise.reject(
-          signal.reason instanceof Error
-            ? signal.reason
-            : new Error('the media send was abandoned'),
-        );
+  ): Promise<string | null> {
+    return this.chain(sessionId, async () => {
+      if (signal?.aborted) throw abortError(signal);
+      const send = await (signal ? untilAborted(prepare(), signal) : prepare());
+      if (!send) return null;
+      const content = JSON.stringify(mediaEventContent(send));
       return this.send(
-        () =>
-          this.deps.sendEvent(
-            send.roomId,
-            JSON.stringify(mediaEventContent(send)),
-            send.txnId,
-          ),
+        () => {
+          if (signal?.aborted) return Promise.reject(abortError(signal));
+          return this.deps.sendEvent(send.roomId, content, send.txnId);
+        },
         send.threadId,
         label,
+        signal,
       );
     });
   }
@@ -245,9 +256,13 @@ export class RoomMirror {
     post: () => Promise<string>,
     threadId: string,
     label: string,
+    signal?: AbortSignal,
   ): Promise<string> {
+    const isTransient = this.deps.retry?.isTransient ?? isTransientGatewayError;
     const eventId = await retryGateway(post, {
       ...this.deps.retry,
+      // An abort is final: the transient check would otherwise retry it.
+      isTransient: (err) => !signal?.aborted && isTransient(err),
       onRetry: (err, attempt, delayMs) =>
         this.deps.warn(
           `[user-do] Matrix replay (${label}) send failed (attempt ${attempt}) — retrying in ${delayMs} ms with the same transaction id: ${errorText(err)}`,

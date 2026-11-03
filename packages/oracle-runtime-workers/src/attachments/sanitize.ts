@@ -17,18 +17,28 @@ function cutUnits(value: string, max: number): string {
 }
 
 /**
- * Strip control characters and bracket sequences from a filename to prevent
- * prompt injection when interpolated into LLM context. The archive writes
- * under this exact name.
+ * `value` without what can disguise text: Unicode controls (Cc), format
+ * characters (Cf: bidi overrides such as U+202E, zero-width joiners), line
+ * and paragraph separators (Zl, Zp), and `[` / `]` (they would forge a
+ * `[source: …]` note).
+ */
+function visibleText(value: string): string {
+  return value.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}[\]]/gu, '');
+}
+
+/**
+ * Clean a client-supplied filename before it reaches LLM context, a log
+ * line, a room event or an archive path (the archive writes under this exact
+ * name): `visibleText`, then only the last path segment is kept (`/` and
+ * `\` both separate) and any remaining `..` becomes `_`, cut to 255 UTF-16
+ * units without splitting a surrogate pair.
  */
 export function sanitizeAttachmentFilename(filename: string): string {
-  return cutUnits(
-    filename
-      // eslint-disable-next-line no-control-regex
-      .replace(/[\x00-\x1f\x7f]/g, '')
-      .replace(/[[\]]/g, ''),
-    255,
+  const visible = visibleText(filename);
+  const basename = visible.slice(
+    Math.max(visible.lastIndexOf('/'), visible.lastIndexOf('\\')) + 1,
   );
+  return cutUnits(basename.replace(/\.\.+/g, '_'), 255);
 }
 
 /** Longest filename / mimetype / event id / mxc URI written into a hidden note. */
@@ -39,12 +49,13 @@ export const NOTE_URI_MAX = 512;
 
 /**
  * Clean a client-supplied value (filename, mimetype, media event id, mxc
- * URI) for the hidden notes the model reads: the filename cleaner plus
- * quotes removed (the notes wrap names and refs in `"…"`), cut to `max`
- * UTF-16 units without splitting a surrogate pair.
+ * URI) for the hidden notes the model reads: `visibleText` (no path
+ * handling: a mimetype or a URI keeps its slashes) plus quotes removed
+ * (the notes wrap names and refs in `"…"`), cut to `max` UTF-16 units
+ * without splitting a surrogate pair.
  */
 export function sanitizeNoteField(value: string, max: number): string {
-  return cutUnits(sanitizeAttachmentFilename(value).replace(/"/g, ''), max);
+  return cutUnits(visibleText(value).replace(/"/g, ''), max);
 }
 
 /**

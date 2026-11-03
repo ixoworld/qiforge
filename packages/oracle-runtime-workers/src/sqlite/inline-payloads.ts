@@ -12,6 +12,12 @@
  * in-memory state keeps the real blocks: nothing here mutates its input,
  * and a container is copied only when something inside it was replaced,
  * so a value without inline payloads comes back as the same object.
+ *
+ * Only human messages are replaced: a tool or AI message that carries
+ * base64 (an MCP screenshot) is stored as it is, since nothing could bring
+ * its bytes back. The saver scans what it serializes for the payload text
+ * (`containsInlinePayload`) and logs a write that still holds one, so a
+ * shape this walk misses is visible.
  */
 import { isBaseMessage } from '@langchain/core/messages';
 import { offloadInlinePayloads } from '../attachments/retention';
@@ -84,4 +90,32 @@ function strip(value: unknown, depth: number): unknown {
  */
 export function withoutInlinePayloads(value: unknown): unknown {
   return strip(value, 0);
+}
+
+/**
+ * The text every serialized inline payload block contains (`JSON.stringify`
+ * writes no spaces): what the stored-form checks and the one-time sweep of
+ * old rows look for. User text quoting it matches too, harmlessly.
+ */
+export const INLINE_PAYLOAD_NEEDLE = '"source_type":"base64"';
+
+const NEEDLE_BYTES = new TextEncoder().encode(INLINE_PAYLOAD_NEEDLE);
+
+/**
+ * Whether serialized bytes still contain an inline payload block: a shape
+ * `withoutInlinePayloads` does not reach (a plain `{ role, content }`
+ * object, a `Map` or class instance, a value nested deeper than
+ * `MAX_DEPTH`) or a non-human message carrying base64 (tool output, never
+ * stripped). One linear scan, no decoding.
+ */
+export function containsInlinePayload(bytes: Uint8Array): boolean {
+  const first = NEEDLE_BYTES[0]!;
+  const last = bytes.length - NEEDLE_BYTES.length;
+  for (let i = bytes.indexOf(first); i !== -1 && i <= last; ) {
+    let j = 1;
+    while (j < NEEDLE_BYTES.length && bytes[i + j] === NEEDLE_BYTES[j]) j++;
+    if (j === NEEDLE_BYTES.length) return true;
+    i = bytes.indexOf(first, i + 1);
+  }
+  return false;
 }

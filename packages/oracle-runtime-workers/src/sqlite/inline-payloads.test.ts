@@ -3,7 +3,10 @@
  * checkpointer (message rows, the checkpoint blob's other channels, pending
  * writes and `Send` packets) stores a human message with inline base64
  * blocks as its placeholder copy, the metadata intact, while the in-memory
- * message keeps its blocks. Runs inside workerd on the real SQLite VFS.
+ * message keeps its blocks. Rows written with their bytes before that are
+ * rewritten once per thread on its first load, and a write that still
+ * stores base64 after stripping is logged. Runs inside workerd on the real
+ * SQLite VFS.
  */
 import {
   AIMessage,
@@ -18,7 +21,7 @@ import {
   uuid6,
 } from '@langchain/langgraph-checkpoint';
 import { env, runInDurableObject } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   ATTACHMENT_VIEW_SOURCE,
   hasInlinePayload,
@@ -27,7 +30,10 @@ import {
 } from '../attachments/retention';
 import { compressForStorage, readBlobText } from './blob-codec';
 import { DoSqliteDatabase } from './database';
-import { withoutInlinePayloads } from './inline-payloads';
+import {
+  containsInlinePayload,
+  withoutInlinePayloads,
+} from './inline-payloads';
 import { _default, stringify } from './serialization';
 import { SqliteSaver } from './sqlite-saver';
 import type { SqliteTestDO } from './test-do';
@@ -300,24 +306,165 @@ describe('attachment bytes are never stored', () => {
     });
   });
 
-  it('a row written with the bytes before this change is stored as its placeholder on the next put', async () => {
+  it('a row loaded with its bytes after the thread was swept is stored as its placeholder on the next put', async () => {
     await runInDurableObject(stub('inline-legacy'), async (_i, state) => {
       const db = await DoSqliteDatabase.open(state, 'legacy.db');
       const writer = new SqliteSaver(db);
       const turn = imageTurn('h-1');
       await put(writer, 't', { messages: [turn] }, 0);
-      // What the saver used to store: the message with its inline block.
-      await db.run("UPDATE messages SET message = ? WHERE message_id = 'h-1'", [
-        await compressForStorage(
-          stringify(turn, (_key, value) => _default(value)),
-        ),
-      ]);
+      // The thread's one-time sweep has run (nothing to rewrite).
+      await writer.getTuple(config('t'));
+      await injectLegacyBytes(db, turn);
       const reader = new SqliteSaver(db);
       const tuple = await reader.getTuple(config('t'));
       const loaded = messagesOf(tuple?.checkpoint.channel_values['messages']);
       expect(hasInlinePayload(loaded[0]!)).toBe(true);
       await put(reader, 't', { messages: loaded }, 1);
       expect(await storedText(db)).not.toContain(PAYLOAD);
+      await db.close();
+    });
+  });
+});
+
+/** Store `message` as the saver used to: content and blob with the bytes. */
+async function injectLegacyBytes(
+  db: DoSqliteDatabase,
+  message: BaseMessage,
+): Promise<void> {
+  await db.run(
+    'UPDATE messages SET message_content = ?, message = ? WHERE message_id = ?',
+    [
+      JSON.stringify(message.content),
+      await compressForStorage(
+        stringify(message, (_key, value) => _default(value)),
+      ),
+      message.id ?? '',
+    ],
+  );
+}
+
+async function rowOf(
+  db: DoSqliteDatabase,
+  id: string,
+): Promise<{ rowid: number; content: string; text: string; created: string }> {
+  const row = await db.get<{
+    rowid: number;
+    message_content: string;
+    message: Uint8Array | string;
+    created_at: string;
+  }>(
+    'SELECT rowid, message_content, message, created_at FROM messages WHERE message_id = ?',
+    [id],
+  );
+  if (!row) throw new Error(`no row ${id}`);
+  return {
+    rowid: row.rowid,
+    content: row.message_content,
+    text: await readBlobText(row.message),
+    created: row.created_at,
+  };
+}
+
+describe('the one-time sweep of rows stored with their bytes', () => {
+  it('rewrites only human rows holding base64, in place with their kwargs, on the first load, once', async () => {
+    await runInDurableObject(stub('sweep-once'), async (_i, state) => {
+      const db = await DoSqliteDatabase.open(state, 'sweep.db');
+      const writer = new SqliteSaver(db);
+      const old = imageTurn('h-old');
+      const plain = new HumanMessage({ id: 'h-plain', content: 'hello' });
+      // A tool-style AI message with base64 is never stripped.
+      const screenshot = new AIMessage({
+        id: 'a-shot',
+        content: [{ type: 'text', text: 'shot' }, IMAGE_BLOCK],
+      });
+      await put(writer, 't', { messages: [old, plain, screenshot] }, 0);
+      // Summarised out of state before this version: rows that hold bytes.
+      await injectLegacyBytes(db, old);
+      await put(writer, 'other', { messages: [imageTurn('h-other')] }, 0);
+      await injectLegacyBytes(db, imageTurn('h-other'));
+      const before = {
+        old: await rowOf(db, 'h-old'),
+        plain: await rowOf(db, 'h-plain'),
+        shot: await rowOf(db, 'a-shot'),
+      };
+      expect(before.old.text).toContain(PAYLOAD);
+
+      const info = vi.spyOn(console, 'info');
+      const reader = new SqliteSaver(db);
+      await reader.listThreadMessages('t');
+      const after = await rowOf(db, 'h-old');
+      expect(after.rowid).toBe(before.old.rowid);
+      expect(after.created).toBe(before.old.created);
+      expect(after.content).not.toContain(PAYLOAD);
+      expect(after.text).not.toContain(PAYLOAD);
+      expect(
+        isAttachmentPlaceholderText(JSON.parse(after.content)[1].text),
+      ).toBe(true);
+      const [swept] = (await reader.listThreadMessages('t')).filter(
+        (m) => m.id === 'h-old',
+      );
+      expect(swept!.additional_kwargs).toEqual(old.additional_kwargs);
+      // Every other row is byte for byte as it was.
+      expect(await rowOf(db, 'h-plain')).toEqual(before.plain);
+      expect(await rowOf(db, 'a-shot')).toEqual(before.shot);
+      // Another thread is swept on its own first load, not before.
+      expect((await rowOf(db, 'h-other')).text).toContain(PAYLOAD);
+      expect(
+        info.mock.calls.filter(([line]) =>
+          String(line).includes('thread t: 1 of 1 stored human message'),
+        ),
+      ).toHaveLength(1);
+
+      // Recorded in SQLite: a new saver (a restarted object) does not sweep
+      // the thread again.
+      await injectLegacyBytes(db, old);
+      const restarted = new SqliteSaver(db);
+      await restarted.getTuple(config('t'));
+      expect((await rowOf(db, 'h-old')).text).toContain(PAYLOAD);
+      await restarted.getTuple(config('other'));
+      expect((await rowOf(db, 'h-other')).text).not.toContain(PAYLOAD);
+      info.mockRestore();
+      await db.close();
+    });
+  });
+});
+
+describe('stored-payload warning', () => {
+  it('logs a pending write and a checkpoint that still store base64 after stripping, once per write', async () => {
+    await runInDurableObject(stub('inline-warn'), async (_i, state) => {
+      const db = await DoSqliteDatabase.open(state, 'warn.db');
+      const saver = new SqliteSaver(db);
+      const warn = vi.spyOn(console, 'warn');
+      const id = await put(saver, 't', { messages: [imageTurn('h-1')] });
+      expect(warn).not.toHaveBeenCalled();
+
+      // A plain `{ role, content }` dict is not a message the walk replaces.
+      const dict = { role: 'user', content: [IMAGE_BLOCK, IMAGE_BLOCK] };
+      await saver.putWrites(
+        {
+          configurable: {
+            thread_id: 't',
+            checkpoint_ns: '',
+            checkpoint_id: id,
+          },
+        },
+        [
+          ['raw', [dict]],
+          ['other', { again: dict }],
+        ],
+        'task-1',
+      );
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]![0])).toContain(
+        'a pending write of thread t (task task-1, channel raw, other) still holds inline base64',
+      );
+
+      await put(saver, 't', { messages: [], carried: new Map([['k', dict]]) });
+      expect(warn).toHaveBeenCalledTimes(2);
+      expect(String(warn.mock.calls[1]![0])).toContain(
+        'the checkpoint of thread t still holds inline base64',
+      );
+      warn.mockRestore();
       await db.close();
     });
   });
@@ -341,5 +488,20 @@ describe('withoutInlinePayloads', () => {
     });
     const list = [tool];
     expect(withoutInlinePayloads(list)).toBe(list);
+  });
+});
+
+describe('containsInlinePayload', () => {
+  const bytes = (text: string) => new TextEncoder().encode(text);
+  it('finds the payload text anywhere, and only the whole of it', () => {
+    expect(containsInlinePayload(bytes('{"source_type":"base64"}'))).toBe(true);
+    expect(
+      containsInlinePayload(
+        bytes(`"x""${'a'.repeat(50)}"source_type":"base64"`),
+      ),
+    ).toBe(true);
+    expect(containsInlinePayload(bytes('{"source_type":"base6'))).toBe(false);
+    expect(containsInlinePayload(bytes('{"source_type":"url"}'))).toBe(false);
+    expect(containsInlinePayload(new Uint8Array(0))).toBe(false);
   });
 });

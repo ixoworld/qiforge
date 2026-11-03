@@ -3,7 +3,8 @@
  * fixed dimensions (or SVG), and a transform outputs `output` bytes. Records the
  * bytes it was given and every transform/output option, so tests can prove
  * what reached the binding and that nothing else did. `fail` makes the named
- * step throw like a binding error.
+ * step throw like a binding error, with `failMessage` as its message (by
+ * default an internal error code, not one that marks the input malformed).
  */
 export interface FakeImages extends ImagesBinding {
   /** The bytes of each stream handed to `info()` / `input()`. */
@@ -26,6 +27,7 @@ export function fakeImages(opts: {
   svg?: boolean;
   output?: Uint8Array;
   fail?: 'info' | 'output';
+  failMessage?: string;
 }): FakeImages {
   const seen: Uint8Array[] = [];
   const transforms: ImageTransform[] = [];
@@ -42,7 +44,8 @@ export function fakeImages(opts: {
     async output(options) {
       await Promise.all(pending);
       outputs.push(options);
-      if (opts.fail === 'output') throw new Error('ImagesError 9422');
+      if (opts.fail === 'output')
+        throw new Error(opts.failMessage ?? 'ImagesError 9424');
       return {
         response: () =>
           new Response(output, { headers: { 'content-type': options.format } }),
@@ -58,7 +61,8 @@ export function fakeImages(opts: {
     outputs,
     async info(stream) {
       seen.push(await drain(stream));
-      if (opts.fail === 'info') throw new Error('ImagesError 9412');
+      if (opts.fail === 'info')
+        throw new Error(opts.failMessage ?? 'ImagesError 9424');
       return opts.svg
         ? { format: 'image/svg+xml' }
         : {

@@ -1,23 +1,32 @@
 /**
  * A channel file posted to the session thread: streamed once from the
- * gateway's link to a fake homeserver (encrypted in a Megolm room), checked
- * against the gateway's size and SHA-256 on the way, then sent as one media
- * event through a fake gateway. Runs in workerd: the pipeline needs
- * `crypto.DigestStream` and `FixedLengthStream`.
+ * gateway's link to a fake homeserver, encrypted, checked against the
+ * gateway's size and SHA-256 on the way; the turn's copy arrives as soon as
+ * the check passes, the event content once the homeserver answers. Runs in
+ * workerd: the pipeline needs `crypto.DigestStream` and `FixedLengthStream`.
  */
 import { createAttachmentDecryptor } from '@ixo/matrix-bot-workers-sdk';
 import { describe, expect, it, vi } from 'vitest';
-import type { MediaMirrorSend } from '../do/room-mirror';
-import { channelAttachmentRef, hex } from './channel';
 import {
+  channelAttachmentRef,
+  ChannelFileUnavailableError,
+  hex,
+} from './channel';
+import { MAX_FILE_SIZE } from './download';
+import {
+  admitToDailyCap,
+  CHANNEL_MEDIA_DAILY_BYTES,
+  CHANNEL_MEDIA_DAILY_FILES,
   ChannelMediaUploadError,
+  channelFilesToKeep,
   channelMediaTxnId,
-  postChannelFilesToThread,
-  uploadChannelFileToThread,
+  roomMediaType,
+  startChannelFileUploads,
+  uploadChannelFile,
   type ChannelThreadFile,
-  type ThreadMediaDeps,
-  type ThreadMediaTarget,
+  type ChannelUploadDeps,
 } from './room-media';
+import { NATIVE_DOCUMENT_MAX_BYTES } from './route';
 
 const GATEWAY = 'https://channels.test';
 const HOMESERVER = 'https://hs.test';
@@ -27,9 +36,11 @@ async function sha256(bytes: Uint8Array): Promise<string> {
   return hex(await crypto.subtle.digest('SHA-256', bytes));
 }
 
+/** `size` bytes that sniff as a JPEG. */
 function plaintext(size: number): Uint8Array {
   const out = new Uint8Array(size);
   for (let i = 0; i < size; i++) out[i] = (i * 31 + 7) & 0xff;
+  out.set([0xff, 0xd8, 0xff, 0xe0].slice(0, size));
   return out;
 }
 
@@ -46,6 +57,7 @@ async function fileOf(
       sha256: digest,
       bindingId: 'chb_one',
     },
+    index: 0,
     filename: 'photo.jpg',
     mimetype: 'image/jpeg',
     size: bytes.byteLength,
@@ -61,16 +73,28 @@ async function fileOf(
  */
 function served(
   bytes: Uint8Array,
-  opts: { chunk?: number; stall?: boolean; onEnd?: () => void } = {},
+  opts: {
+    chunk?: number;
+    stall?: boolean;
+    /** An empty chunk after the last one. */
+    trailingEmpty?: boolean;
+    onEnd?: () => void;
+  } = {},
 ): (signal?: AbortSignal | null) => ReadableStream<Uint8Array> {
   return (signal) => {
     const chunk = opts.chunk ?? 1000;
     let offset = 0;
+    let emptySent = false;
     return new ReadableStream<Uint8Array>({
       pull(controller) {
         if (signal?.aborted) return undefined;
         if (offset >= bytes.byteLength) {
           if (opts.stall) return undefined;
+          if (opts.trailingEmpty && !emptySent) {
+            emptySent = true;
+            controller.enqueue(new Uint8Array(0));
+            return undefined;
+          }
           controller.close();
           opts.onEnd?.();
           return undefined;
@@ -94,8 +118,9 @@ interface Upload {
 
 /**
  * The gateway's links serve `bodies` (by URL); the homeserver reads the
- * whole upload, then answers `answer` (default 200 with `MXC`). A body that
- * errors makes the upload request fail, like a real fetch.
+ * whole upload, then answers `answer` (default 200 with `MXC`) once `hold`
+ * (if any) settles. A body that errors makes the upload request fail, like
+ * a real fetch; an aborted request rejects with the signal's reason.
  */
 function network(opts: {
   bodies: Map<
@@ -104,9 +129,12 @@ function network(opts: {
   >;
   answer?: () => Response;
   gatewayStatus?: number;
+  hold?: Promise<void>;
 }) {
   const uploads: Upload[] = [];
   const opened: string[] = [];
+  /** Bytes each upload request delivered to the homeserver. */
+  const received: number[] = [];
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     if (url.origin === GATEWAY) {
@@ -115,17 +143,37 @@ function network(opts: {
       if (opts.gatewayStatus)
         return new Response('gone', { status: opts.gatewayStatus });
       const body = opts.bodies.get(url.href);
-      return body
-        ? new Response(body(init?.signal), {
-            headers: { 'content-type': 'image/jpeg' },
-          })
-        : new Response('not found', { status: 404 });
+      if (!body) return new Response('not found', { status: 404 });
+      const res = new Response('', {
+        headers: { 'content-type': 'image/jpeg' },
+      });
+      // The stream itself, chunk for chunk (a Response body would coalesce
+      // or drop chunks, an empty one included).
+      Object.defineProperty(res, 'body', { value: body(init?.signal) });
+      return res;
     }
     expect(url.href.startsWith(`${HOMESERVER}/_matrix/media/v3/upload`)).toBe(
       true,
     );
     const signal = init?.signal;
-    const read = new Response(init?.body).arrayBuffer();
+    // What reached the homeserver, failed request or not: a real server
+    // acts on a body once its Content-Length has arrived.
+    let arrived = 0;
+    received.push(0);
+    const slot = received.length - 1;
+    const counted =
+      init?.body instanceof ReadableStream
+        ? init.body.pipeThrough(
+            new TransformStream<Uint8Array, Uint8Array>({
+              transform(chunk, controller) {
+                arrived += chunk.byteLength;
+                received[slot] = arrived;
+                controller.enqueue(chunk);
+              },
+            }),
+          )
+        : init?.body;
+    const read = new Response(counted).arrayBuffer();
     const body = new Uint8Array(
       signal
         ? await new Promise<ArrayBuffer>((resolve, reject) => {
@@ -135,40 +183,23 @@ function network(opts: {
         : await read,
     );
     uploads.push({ url, headers: new Headers(init?.headers), body });
+    if (opts.hold)
+      await new Promise<void>((resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(signal.reason));
+        opts.hold?.then(resolve, reject);
+      });
     return opts.answer?.() ?? Response.json({ content_uri: MXC });
   };
-  return { fetchImpl, uploads, opened };
+  return { fetchImpl, uploads, opened, received };
 }
-
-function gateway(answer: (event: MediaMirrorSend) => Promise<string>) {
-  const sent: MediaMirrorSend[] = [];
-  const send = vi.fn(async (event: MediaMirrorSend) => {
-    sent.push(event);
-    return answer(event);
-  });
-  return { send, sent };
-}
-
-const TARGET: ThreadMediaTarget = {
-  roomId: '!room:hs.test',
-  threadId: '$session',
-  origin: {
-    provider: 'whatsapp',
-    bindingId: 'chb_one',
-    remoteMessageRef: `hmac:${'a'.repeat(64)}`,
-  },
-  encrypted: true,
-};
 
 function deps(
   net: ReturnType<typeof network>,
-  send: ThreadMediaDeps['send'],
-  over: Partial<ThreadMediaDeps> = {},
-): ThreadMediaDeps {
+  over: Partial<ChannelUploadDeps> = {},
+): ChannelUploadDeps {
   return {
     origins: [GATEWAY],
     homeserver: { baseUrl: HOMESERVER, accessToken: 'plugin-token' },
-    send,
     fetchImpl: net.fetchImpl,
     ...over,
   };
@@ -182,264 +213,344 @@ async function decrypt(cipher: Uint8Array, info: unknown): Promise<Uint8Array> {
   );
 }
 
-describe('uploadChannelFileToThread', () => {
-  it('streams an encrypted upload and posts one media event in the thread', async () => {
+/** A promise and its resolve. */
+function gate(): { promise: Promise<void>; open: () => void } {
+  let open: () => void = () => undefined;
+  const promise = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { promise, open };
+}
+
+describe('uploadChannelFile', () => {
+  it('streams an encrypted upload with no name or type, and hands the copy over before the homeserver answers', async () => {
     const bytes = plaintext(5000);
-    const file = await fileOf(bytes);
+    const file = await fileOf(bytes, {
+      filename: 'Report\u202Egpj.exe/../photo.jpg',
+    });
+    const answer = gate();
     const net = network({
       bodies: new Map([[file.link.url, served(bytes)]]),
+      hold: answer.promise,
     });
-    const gw = gateway(async () => '$file-event');
-    const result = await uploadChannelFileToThread(
-      file,
-      TARGET,
-      'media-txn',
-      deps(net, gw.send),
-    );
+    const upload = uploadChannelFile(file, { ...deps(net), keep: true });
+    // The copy comes while the homeserver has not answered yet.
+    expect(await upload.copy).toEqual({ bytes, mimetype: 'image/jpeg' });
+    answer.open();
+    const media = await upload.uploaded;
 
-    expect(result).toEqual({
-      eventId: '$file-event',
-      mxc: MXC,
-      bytes,
-      mimetype: 'image/jpeg',
-    });
     expect(net.opened).toEqual([file.link.url]);
     expect(net.uploads).toHaveLength(1);
-    const upload = net.uploads[0]!;
-    expect(upload.url.searchParams.get('filename')).toBe('photo.jpg');
-    expect(upload.headers.get('authorization')).toBe('Bearer plugin-token');
-    expect(upload.headers.get('content-type')).toBe('application/octet-stream');
-    expect(upload.body.byteLength).toBe(bytes.byteLength);
-    expect(upload.body).not.toEqual(bytes);
-
-    expect(gw.sent).toHaveLength(1);
-    const event = gw.sent[0]!;
-    expect(event).toMatchObject({
-      roomId: TARGET.roomId,
-      threadId: '$session',
-      txnId: 'media-txn',
-      origin: TARGET.origin,
-      media: {
-        msgtype: 'm.image',
-        body: 'photo.jpg',
-        filename: 'photo.jpg',
-        info: { mimetype: 'image/jpeg', size: 5000 },
-        file: { url: MXC, v: 'v2' },
-      },
+    const sent = net.uploads[0]!;
+    expect(sent.url.pathname).toBe('/_matrix/media/v3/upload');
+    expect(sent.url.search).toBe('');
+    expect(sent.headers.get('authorization')).toBe('Bearer plugin-token');
+    expect(sent.headers.get('content-type')).toBe('application/octet-stream');
+    expect(sent.body.byteLength).toBe(bytes.byteLength);
+    expect(sent.body).not.toEqual(bytes);
+    expect(media).toMatchObject({
+      msgtype: 'm.image',
+      // Cleaned: no bidi override, no path.
+      body: 'photo.jpg',
+      filename: 'photo.jpg',
+      info: { mimetype: 'image/jpeg', size: 5000 },
+      file: { url: MXC, v: 'v2' },
     });
-    expect(event.media.url).toBeUndefined();
     // What the room's clients download decrypts to the person's file.
-    expect(await decrypt(upload.body, event.media.file)).toEqual(bytes);
+    expect(await decrypt(sent.body, media.file)).toEqual(bytes);
   });
 
-  it('uploads the plaintext with its type and sends `url` in a room that is not encrypted', async () => {
-    const bytes = plaintext(1200);
-    const file = await fileOf(bytes, {
-      kind: 'document',
-      filename: 'report.pdf',
-      mimetype: 'application/pdf',
+  it('names the type from the bytes, not the claim', async () => {
+    const pdf = new TextEncoder().encode('%PDF-1.4 pretending to be a photo');
+    const file = await fileOf(pdf, { mimetype: 'image/jpeg' });
+    const net = network({ bodies: new Map([[file.link.url, served(pdf)]]) });
+    const media = await uploadChannelFile(file, { ...deps(net), keep: false })
+      .uploaded;
+    expect(media.msgtype).toBe('m.file');
+    expect(media.info.mimetype).toBe('application/pdf');
+  });
+
+  it('keeps no copy when not asked to', async () => {
+    const bytes = plaintext(300);
+    const file = await fileOf(bytes);
+    const net = network({ bodies: new Map([[file.link.url, served(bytes)]]) });
+    const upload = uploadChannelFile(file, { ...deps(net), keep: false });
+    expect(await upload.copy).toBeNull();
+    await expect(upload.uploaded).resolves.toMatchObject({
+      msgtype: 'm.image',
     });
+  });
+
+  it("refuses bytes whose digest is not the gateway's, even after an empty last chunk: the upload never completes", async () => {
+    // A whole number of AES blocks: the cipher holds nothing back itself.
+    const bytes = plaintext(3200);
+    const file = await fileOf(bytes);
     const net = network({
-      bodies: new Map([[file.link.url, served(bytes)]]),
+      bodies: new Map([
+        [file.link.url, served(bytes, { trailingEmpty: true })],
+      ]),
     });
-    const gw = gateway(async () => '$doc');
-    await uploadChannelFileToThread(
-      file,
-      { ...TARGET, encrypted: false },
-      't',
-      deps(net, gw.send),
+    const upload = uploadChannelFile(
+      { ...file, link: { ...file.link, sha256: '0'.repeat(64) } },
+      { ...deps(net), keep: true },
     );
-    expect(net.uploads[0]!.headers.get('content-type')).toBe('application/pdf');
-    expect(net.uploads[0]!.body).toEqual(bytes);
-    expect(gw.sent[0]!.media).toEqual({
-      msgtype: 'm.file',
-      body: 'report.pdf',
-      filename: 'report.pdf',
-      info: { mimetype: 'application/pdf', size: 1200 },
-      url: MXC,
-    });
-  });
-
-  it('keeps no plaintext copy of a file above the model cap', async () => {
-    const bytes = plaintext(3000);
-    const file = await fileOf(bytes, { kind: 'video', mimetype: 'video/mp4' });
-    const net = network({
-      bodies: new Map([[file.link.url, served(bytes)]]),
-    });
-    const gw = gateway(async () => '$video');
-    const result = await uploadChannelFileToThread(
-      file,
-      TARGET,
-      't',
-      deps(net, gw.send, { keepMaxBytes: 2999 }),
+    await expect(upload.uploaded).rejects.toThrow(
+      'its bytes do not match the digest the channel sent',
     );
-    expect(result.bytes).toBeUndefined();
-    expect(result.eventId).toBe('$video');
-    expect(gw.sent[0]!.media.msgtype).toBe('m.video');
+    expect(await upload.copy).toBeNull();
+    // The homeserver never received the whole file: the last chunk was held.
+    expect(net.uploads).toEqual([]);
+    expect(net.received).toHaveLength(1);
+    expect(net.received[0]).toBeLessThan(bytes.byteLength);
   });
 
-  it("refuses bytes whose digest is not the gateway's: the upload never completes and no event is sent", async () => {
-    const bytes = plaintext(4000);
-    const file = await fileOf(bytes, {
-      link: {
-        ...(await fileOf(bytes)).link,
-        sha256: await sha256(plaintext(10)),
-      },
-    });
+  it('verifies a file whose stream ends with an empty chunk', async () => {
+    const bytes = plaintext(2500);
+    const file = await fileOf(bytes);
     const net = network({
-      bodies: new Map([[file.link.url, served(bytes)]]),
+      bodies: new Map([
+        [file.link.url, served(bytes, { trailingEmpty: true })],
+      ]),
     });
-    const gw = gateway(async () => '$never');
-    await expect(
-      uploadChannelFileToThread(file, TARGET, 't', deps(net, gw.send)),
-    ).rejects.toThrow('its bytes do not match the digest the channel sent');
-    expect(net.uploads).toHaveLength(0);
-    expect(gw.send).not.toHaveBeenCalled();
+    const upload = uploadChannelFile(file, { ...deps(net), keep: true });
+    expect((await upload.copy)?.bytes).toEqual(bytes);
+    await expect(upload.uploaded).resolves.toMatchObject({
+      msgtype: 'm.image',
+    });
   });
 
   it('refuses a file longer or shorter than announced', async () => {
-    const bytes = plaintext(2000);
-    for (const [announced, message] of [
-      [1500, 'larger than the channel announced'],
-      [2500, 'smaller than the channel announced'],
-    ] as const) {
-      const file = await fileOf(bytes, { size: announced });
+    const bytes = plaintext(1000);
+    for (const size of [999, 1001]) {
+      const file = await fileOf(bytes, { size });
       const net = network({
         bodies: new Map([[file.link.url, served(bytes)]]),
       });
-      const gw = gateway(async () => '$never');
-      await expect(
-        uploadChannelFileToThread(file, TARGET, 't', deps(net, gw.send)),
-      ).rejects.toThrow(message);
-      expect(net.uploads).toHaveLength(0);
-      expect(gw.send).not.toHaveBeenCalled();
-    }
-  });
-
-  it('reports a refused or failed upload with the homeserver status and sends nothing', async () => {
-    const bytes = plaintext(800);
-    for (const status of [413, 502]) {
-      const file = await fileOf(bytes);
-      const net = network({
-        bodies: new Map([[file.link.url, served(bytes)]]),
-        answer: () => Response.json({ errcode: 'M_TOO_LARGE' }, { status }),
-      });
-      const gw = gateway(async () => '$never');
-      const error = await uploadChannelFileToThread(
-        file,
-        TARGET,
-        't',
-        deps(net, gw.send),
-      ).catch((e: unknown) => e);
-      expect(error).toBeInstanceOf(ChannelMediaUploadError);
-      expect(error instanceof ChannelMediaUploadError && error.status).toBe(
-        status,
+      const upload = uploadChannelFile(file, { ...deps(net), keep: true });
+      await expect(upload.uploaded).rejects.toBeInstanceOf(
+        ChannelFileUnavailableError,
       );
-      expect(gw.send).not.toHaveBeenCalled();
+      expect(await upload.copy).toBeNull();
     }
   });
 
-  it('tells the caller when the homeserver rejects the device token', async () => {
-    const bytes = plaintext(100);
+  it('keeps the verified copy when the homeserver then refuses the upload, with its status', async () => {
+    const bytes = plaintext(800);
+    const file = await fileOf(bytes);
+    const net = network({
+      bodies: new Map([[file.link.url, served(bytes)]]),
+      answer: () => new Response('{"errcode":"M_UNKNOWN"}', { status: 500 }),
+    });
+    const upload = uploadChannelFile(file, { ...deps(net), keep: true });
+    const error = await upload.uploaded.catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ChannelMediaUploadError);
+    expect(error).toMatchObject({ status: 500 });
+    expect((await upload.copy)?.bytes).toEqual(bytes);
+  });
+
+  it('tells the caller which token the homeserver rejected', async () => {
+    const bytes = plaintext(200);
     const file = await fileOf(bytes);
     const net = network({
       bodies: new Map([[file.link.url, served(bytes)]]),
       answer: () =>
-        Response.json({ errcode: 'M_UNKNOWN_TOKEN' }, { status: 401 }),
+        new Response('{"errcode":"M_UNKNOWN_TOKEN"}', { status: 401 }),
     });
     const onUnauthorized = vi.fn();
     await expect(
-      uploadChannelFileToThread(
-        file,
-        TARGET,
-        't',
-        deps(net, gateway(async () => '$never').send, { onUnauthorized }),
-      ),
-    ).rejects.toThrow('401');
-    expect(onUnauthorized).toHaveBeenCalledOnce();
+      uploadChannelFile(file, { ...deps(net, { onUnauthorized }), keep: false })
+        .uploaded,
+    ).rejects.toMatchObject({ status: 401 });
+    expect(onUnauthorized).toHaveBeenCalledWith('plugin-token');
   });
 
-  it('rejects when the event send fails', async () => {
-    const bytes = plaintext(600);
+  it('gives up at the read deadline when the gateway stalls: no copy, no upload', async () => {
+    const file = await fileOf(plaintext(100), { size: 200 });
+    const net = network({
+      bodies: new Map([
+        [file.link.url, served(plaintext(100), { stall: true })],
+      ]),
+    });
+    const upload = uploadChannelFile(file, {
+      ...deps(net, { readTimeoutMs: 50 }),
+      keep: true,
+    });
+    await expect(upload.uploaded).rejects.toThrow('timed out');
+    expect(await upload.copy).toBeNull();
+    expect(net.uploads).toEqual([]);
+  });
+
+  it('when the homeserver, not the gateway, stalls: the copy comes on time and only the upload hits its own deadline', async () => {
+    const bytes = plaintext(1500);
     const file = await fileOf(bytes);
     const net = network({
       bodies: new Map([[file.link.url, served(bytes)]]),
+      // Reads the whole body, then never answers.
+      hold: new Promise<void>(() => undefined),
     });
-    await expect(
-      uploadChannelFileToThread(
-        file,
-        TARGET,
-        't',
-        deps(
-          net,
-          gateway(async () => {
-            throw new Error('M_FORBIDDEN: not in room');
-          }).send,
-        ),
-      ),
-    ).rejects.toThrow('M_FORBIDDEN');
-    expect(net.uploads).toHaveLength(1);
-  });
-
-  it('gives up at the deadline when the gateway stalls, without sending', async () => {
-    const bytes = plaintext(3000);
-    const file = await fileOf(bytes, { size: 6000 });
-    const net = network({
-      bodies: new Map([[file.link.url, served(bytes, { stall: true })]]),
+    const startedAt = Date.now();
+    const upload = uploadChannelFile(file, {
+      ...deps(net, { readTimeoutMs: 5_000, uploadTimeoutMs: 80 }),
+      keep: true,
     });
-    const gw = gateway(async () => '$never');
-    await expect(
-      uploadChannelFileToThread(
-        file,
-        TARGET,
-        't',
-        deps(net, gw.send, { timeoutMs: 50 }),
-      ),
-    ).rejects.toThrow('Posting the file to the session thread timed out');
-    expect(gw.send).not.toHaveBeenCalled();
+    expect((await upload.copy)?.bytes).toEqual(bytes);
+    await expect(upload.uploaded).rejects.toThrow(
+      'Uploading the file to the homeserver timed out',
+    );
+    // Well before the read deadline.
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
   });
 
   it("never opens a link that is not the gateway's, and names no link in its errors", async () => {
-    const bytes = plaintext(10);
+    const bytes = plaintext(100);
     const file = await fileOf(bytes);
-    const foreign = {
-      ...file,
-      link: { ...file.link, url: 'https://evil.test/media/chb_one/x?sig=s' },
-    };
     const net = network({ bodies: new Map() });
-    await expect(
-      uploadChannelFileToThread(
-        foreign,
-        TARGET,
-        't',
-        deps(net, gateway(async () => '$never').send),
-      ),
-    ).rejects.toThrow('not one this channel gateway serves');
-    expect(net.opened).toHaveLength(0);
-
-    const gone = network({ bodies: new Map(), gatewayStatus: 410 });
-    const error = await uploadChannelFileToThread(
-      file,
-      TARGET,
-      't',
-      deps(gone, gateway(async () => '$never').send),
-    ).catch((e: unknown) => e);
-    expect(String(error)).toContain('the channel gateway answered 410');
+    const offHost = {
+      ...file,
+      link: {
+        ...file.link,
+        url: file.link.url.replace(GATEWAY, 'https://evil.test'),
+      },
+    };
+    const error = await uploadChannelFile(offHost, {
+      ...deps(net),
+      keep: true,
+    }).uploaded.catch((e: unknown) => e);
+    expect(String(error)).toContain('not one this channel gateway serves');
     expect(String(error)).not.toContain('sig=');
+    expect(net.opened).toEqual([]);
+    const gone = network({ bodies: new Map(), gatewayStatus: 410 });
+    const refused = await uploadChannelFile(file, {
+      ...deps(gone),
+      keep: true,
+    }).uploaded.catch((e: unknown) => e);
+    expect(String(refused)).toContain('the channel gateway answered 410');
+    expect(String(refused)).not.toContain('sig=');
   });
 });
 
-describe('postChannelFilesToThread', () => {
-  it("posts a turn's files a few at a time, each with its own transaction id, and logs a failure without its link", async () => {
+describe('roomMediaType', () => {
+  const head = (...bytes: number[]) => new Uint8Array(bytes);
+  it('m.image only for a raster image the bytes prove', () => {
+    expect(roomMediaType(head(0x89, 0x50, 0x4e, 0x47), 'image/png')).toEqual({
+      mimetype: 'image/png',
+      msgtype: 'm.image',
+    });
+    // A claim the bytes do not back is not trusted.
+    expect(roomMediaType(head(1, 2, 3, 4, 5), 'image/png')).toEqual({
+      mimetype: 'application/octet-stream',
+      msgtype: 'm.file',
+    });
+    // A raster type outside the allowlist.
+    expect(roomMediaType(head(0x42, 0x4d, 0, 0), 'image/bmp')).toEqual({
+      mimetype: 'application/octet-stream',
+      msgtype: 'm.file',
+    });
+  });
+
+  it('keeps a more precise claim of the sniffed container, and names audio and video', () => {
+    const ftyp = head(0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70);
+    expect(roomMediaType(ftyp, 'audio/mp4')).toEqual({
+      mimetype: 'audio/mp4',
+      msgtype: 'm.audio',
+    });
+    expect(roomMediaType(ftyp, 'video/mp4')).toEqual({
+      mimetype: 'video/mp4',
+      msgtype: 'm.video',
+    });
+    expect(
+      roomMediaType(head(0x4f, 0x67, 0x67, 0x53), 'audio/ogg; codecs=opus'),
+    ).toEqual({
+      mimetype: 'audio/ogg',
+      msgtype: 'm.audio',
+    });
+    expect(roomMediaType(head(0x25, 0x50, 0x44, 0x46), 'text/html')).toEqual({
+      mimetype: 'application/pdf',
+      msgtype: 'm.file',
+    });
+  });
+});
+
+describe('the turn-level rules', () => {
+  it('keeps copies only of files the model may read directly, in order, within the total', async () => {
+    const image = await fileOf(plaintext(400), {}, 'a');
+    const bigDoc = await fileOf(
+      plaintext(NATIVE_DOCUMENT_MAX_BYTES + 1),
+      {
+        kind: 'document',
+        mimetype: 'application/pdf',
+      },
+      'b',
+    );
+    const smallDoc = await fileOf(
+      plaintext(500),
+      {
+        kind: 'document',
+        mimetype: 'application/pdf',
+      },
+      'c',
+    );
+    const video = await fileOf(plaintext(100), { kind: 'video' }, 'd');
+    const late = await fileOf(plaintext(300), {}, 'e');
+    expect(
+      channelFilesToKeep([image, bigDoc, smallDoc, video, late], 950),
+    ).toEqual(new Set([image.ref, smallDoc.ref]));
+    const huge = await fileOf(plaintext(10), { size: MAX_FILE_SIZE + 1 }, 'f');
+    expect(channelFilesToKeep([huge])).toEqual(new Set());
+  });
+
+  it('admits files to the daily cap in order and starts afresh the next UTC day', async () => {
+    const file = await fileOf(plaintext(10));
+    const day = Date.UTC(2026, 10, 3, 12);
+    const full = admitToDailyCap(
+      [file, file],
+      { day: '2026-11-03', files: CHANNEL_MEDIA_DAILY_FILES - 1, bytes: 0 },
+      day,
+    );
+    expect(full.admitted).toHaveLength(1);
+    expect(full.refused).toHaveLength(1);
+    expect(full.usage).toEqual({
+      day: '2026-11-03',
+      files: CHANNEL_MEDIA_DAILY_FILES,
+      bytes: 10,
+    });
+    const bytesFull = admitToDailyCap(
+      [file],
+      { day: '2026-11-03', files: 0, bytes: CHANNEL_MEDIA_DAILY_BYTES - 5 },
+      day,
+    );
+    expect(bytesFull.refused).toHaveLength(1);
+    const nextDay = admitToDailyCap([file], full.usage, day + 24 * 3600_000);
+    expect(nextDay.admitted).toHaveLength(1);
+    expect(nextDay.usage).toEqual({ day: '2026-11-04', files: 1, bytes: 10 });
+  });
+
+  it('hashes the request into the transaction id, one per file', async () => {
+    const id = {
+      userDid: 'did:ixo:ixo1user',
+      bindingId: 'chb_one',
+      requestId: 'req-secret',
+      index: 0,
+    };
+    const first = await channelMediaTxnId(id);
+    expect(first).toMatch(/^channel-[0-9a-f]{64}$/);
+    expect(first).not.toContain('req-secret');
+    expect(await channelMediaTxnId(id)).toBe(first);
+    expect(await channelMediaTxnId({ ...id, index: 1 })).not.toBe(first);
+  });
+});
+
+describe('startChannelFileUploads', () => {
+  it("uploads a turn's files a few at a time, in message order, and logs a failure without its link", async () => {
     const files = await Promise.all(
-      [1, 2, 3, 4].map((n) => fileOf(plaintext(500 + n), {}, `obj-${n}`)),
+      [1, 2, 3, 4].map((n) =>
+        fileOf(plaintext(500 + n), { index: n - 1 }, `obj-${n}`),
+      ),
     );
     const broken = {
       ...files[2]!,
       link: { ...files[2]!.link, sha256: '0'.repeat(64) },
     };
-    const turnFiles = [files[0]!, files[1]!, broken, files[3]!, files[0]!];
-    // Links being read at the same time.
     let open = 0;
     let mostOpen = 0;
     const bodies = new Map(
@@ -458,64 +569,67 @@ describe('postChannelFilesToThread', () => {
       ]),
     );
     const net = network({ bodies });
-    const gw = gateway(async (event) => `$${event.txnId}`);
     const log = { log: vi.fn(), warn: vi.fn() };
-    const posted = await postChannelFilesToThread({
-      files: turnFiles,
-      target: TARGET,
+    const run = startChannelFileUploads({
+      files: [files[0]!, files[1]!, broken, files[3]!],
       sessionId: '$session',
-      requestId: 'req-1',
-      deps: { ...deps(net, gw.send), concurrency: 2, log },
+      deps: {
+        ...deps(net),
+        keep: new Set([files[0]!.ref]),
+        concurrency: 2,
+        log,
+      },
     });
-
-    expect([...posted.keys()]).toEqual(
-      expect.arrayContaining([files[0]!.ref, files[1]!.ref, files[3]!.ref]),
-    );
-    expect(posted.size).toBe(3);
-    expect(posted.get(files[3]!.ref)?.eventId).toBe(
-      `$${channelMediaTxnId('$session', 'req-1', 3)}`,
-    );
+    expect(run.uploads.map((u) => u.file.ref)).toEqual([
+      files[0]!.ref,
+      files[1]!.ref,
+      broken.ref,
+      files[3]!.ref,
+    ]);
+    await run.done;
     expect(mostOpen).toBe(2);
-    // The file sent twice in the message is posted once.
-    expect(gw.sent).toHaveLength(3);
+    expect((await run.uploads[0]!.copy)?.bytes.byteLength).toBe(501);
+    expect(await run.uploads[1]!.copy).toBeNull();
+    await expect(run.uploads[2]!.uploaded).rejects.toThrow('digest');
+    await expect(run.uploads[3]!.uploaded).resolves.toMatchObject({
+      msgtype: 'm.image',
+    });
     expect(log.warn).toHaveBeenCalledOnce();
     const line = String(log.warn.mock.calls[0]?.[0]);
     expect(line).toContain(broken.ref);
-    expect(line).toContain('do not match the digest');
     expect(line).not.toContain('sig=');
     expect(String(log.log.mock.calls[0]?.[0])).toContain(
-      'posted 3/4 channel file(s) to thread $session',
+      'uploaded 3/4 channel file(s) of thread $session',
     );
   });
 
-  it('keeps plaintext copies in turn order only while they fit the turn budget', async () => {
+  it("skips the turn's remaining files once the homeserver rate-limits it", async () => {
     const files = await Promise.all(
-      [400, 500, 300].map((size, n) => fileOf(plaintext(size), {}, `b-${n}`)),
+      [1, 2, 3].map((n) => fileOf(plaintext(100 + n), {}, `r-${n}`)),
     );
     const net = network({
       bodies: new Map(
         files.map((f) => [f.link.url, served(plaintext(f.size))]),
       ),
+      answer: () =>
+        new Response('{"errcode":"M_LIMIT_EXCEEDED"}', { status: 429 }),
     });
-    const posted = await postChannelFilesToThread({
+    const log = { log: vi.fn(), warn: vi.fn() };
+    const run = startChannelFileUploads({
       files,
-      target: TARGET,
       sessionId: '$session',
-      requestId: 'req-3',
-      deps: {
-        ...deps(net, gateway(async (event) => `$${event.txnId}`).send),
-        keepTotalBytes: 750,
-        log: { log: vi.fn(), warn: vi.fn() },
-      },
+      deps: { ...deps(net), keep: new Set(), concurrency: 1, log },
     });
-    expect(files.map((f) => posted.get(f.ref)?.bytes?.byteLength)).toEqual([
-      400,
-      undefined,
-      300,
-    ]);
+    await run.done;
+    expect(net.uploads).toHaveLength(1);
+    for (const upload of run.uploads)
+      await expect(upload.uploaded).rejects.toBeInstanceOf(
+        ChannelMediaUploadError,
+      );
+    expect(String(log.warn.mock.calls[2]?.[0])).toContain('rate-limited');
   });
 
-  it('stops at the turn deadline and leaves the rest to the gateway download', async () => {
+  it('stops reading at the turn deadline and resolves the copies it never got', async () => {
     const stalled = await fileOf(plaintext(100), { size: 200 }, 'slow');
     const queued = await fileOf(plaintext(50), {}, 'later');
     const net = network({
@@ -524,17 +638,22 @@ describe('postChannelFilesToThread', () => {
         [queued.link.url, served(plaintext(50))],
       ]),
     });
-    const gw = gateway(async () => '$never');
     const log = { log: vi.fn(), warn: vi.fn() };
-    const posted = await postChannelFilesToThread({
+    const run = startChannelFileUploads({
       files: [stalled, queued],
-      target: TARGET,
       sessionId: '$session',
-      requestId: 'req-2',
-      deps: { ...deps(net, gw.send), concurrency: 1, turnTimeoutMs: 50, log },
+      deps: {
+        ...deps(net),
+        keep: new Set([stalled.ref, queued.ref]),
+        concurrency: 1,
+        turnTimeoutMs: 50,
+        log,
+      },
     });
-    expect(posted.size).toBe(0);
-    expect(gw.send).not.toHaveBeenCalled();
+    expect(await run.uploads[0]!.copy).toBeNull();
+    expect(await run.uploads[1]!.copy).toBeNull();
+    await run.done;
+    expect(net.uploads).toEqual([]);
     expect(log.warn).toHaveBeenCalledTimes(2);
     expect(String(log.warn.mock.calls[1]?.[0])).toContain('timed out');
   });

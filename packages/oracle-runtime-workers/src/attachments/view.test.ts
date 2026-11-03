@@ -78,6 +78,36 @@ describe('viewAttachment', () => {
     expect(atob(view.native.base64)).toHaveLength(PNG.length);
   });
 
+  it('reads an image the resize step drops as text, never as its original bytes', async () => {
+    const asked: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      asked.push(String(input));
+      return Response.json({
+        choices: [{ message: { content: 'a very wide banner' } }],
+      });
+    };
+    const view = await viewAttachment(
+      {
+        filename: 'wide.png',
+        mimetype: 'image/png',
+        mxcUri: 'mxc://hs/wide',
+        category: 'image',
+      },
+      {
+        source: source({ 'mxc://hs/wide': PNG }),
+        extraction: PROVIDER,
+        images: fakeImages({ width: 20_000, height: 100 }),
+        caps: ALL_CAPS,
+        fetchImpl,
+        logger: LOGGER,
+      },
+    );
+    expect(view.kind).toBe('text');
+    if (view.kind !== 'text') throw new Error('unreachable');
+    expect(view.text).toContain('a very wide banner');
+    expect(asked).toHaveLength(1);
+  });
+
   it('falls back to the helper model when the model cannot read images', async () => {
     const seen: string[] = [];
     const fetchImpl: typeof fetch = async (input, init) => {

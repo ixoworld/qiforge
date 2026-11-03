@@ -617,7 +617,7 @@ describe('migration 002 (unused message indexes)', () => {
       const versions = await db.exec<{ version: number }>(
         'SELECT version FROM schema_migrations ORDER BY version',
       );
-      expect(versions.map((v) => v.version)).toEqual([1, 2]);
+      expect(versions.map((v) => v.version)).toEqual([1, 2, 3]);
       expect(await integrityOk(db)).toBe(true);
       await db.close();
     });

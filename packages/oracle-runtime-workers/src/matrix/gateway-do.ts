@@ -24,9 +24,11 @@ import {
   listPendingSends,
   MatrixBotDO,
   optionsFromEnv,
+  parseEncryptedFileInfo,
   Semaphore,
   withRateLimitRetry,
   type BotMessage,
+  type EncryptedFileInfo,
   type BotTimelineEvent,
   type MatrixBotOptions,
   type StartResult,
@@ -37,6 +39,7 @@ import {
   userOracleRoomAlias,
   type BotCredentials,
   type CreateRoomOptions,
+  type EventMediaInfo,
   type GatewayStatus,
   type GroupRoomInfo,
   type JsonString,
@@ -99,11 +102,7 @@ import {
 } from './user-homeserver';
 import { replyPartTxnId, roomReplyMessages } from './reply-parts';
 import { VerifiedRoomAliases } from './room-alias';
-import {
-  boundedSignal,
-  raceSignal,
-  streamWithDeadline,
-} from './media-deadline';
+import { boundedSignal, raceSignal } from './media-deadline';
 
 const TYPING_REFRESH_MS = 20_000;
 const TYPING_TIMEOUT_MS = 30_000;
@@ -122,11 +121,19 @@ const MEMO_MAX_ENTRIES = 5_000;
  */
 const STATUS_CACHE_MS = 5_000;
 /**
- * Upper bound on one media download (response and body), unless the caller
- * asks for less. A stalled homeserver stream must not hold the reader — and
- * with it the user's turn — open indefinitely.
+ * Upper bound on one media event lookup (`eventMediaInfo`), unless the caller
+ * asks for less. A stalled homeserver must not hold the user's turn open
+ * indefinitely.
  */
 export const MEDIA_DOWNLOAD_TIMEOUT_MS = 60_000;
+/**
+ * `sendEvent` calls with `priority: 'background'` (channel text mirrors and
+ * file events) in the SDK's send path at once. The SDK 0.7.0 `sendEvent`
+ * dispatches every event `interactive`, so this lane is what keeps a burst
+ * of them from queueing ahead of replies in the rate-limited sender: at most
+ * this many sit there, the rest wait here.
+ */
+export const BACKGROUND_SEND_CONCURRENCY = 2;
 /**
  * A live message whose sender's homeserver could not be looked up stays in
  * the inbox and is replayed on its own after this delay (each replay is
@@ -184,6 +191,90 @@ interface OracleGatewayConfig {
   oracleRoomDid: string;
 }
 
+/** A JSON object's own property, or undefined. */
+function prop(value: unknown, name: string): unknown {
+  return typeof value === 'object' && value !== null && name in value
+    ? Reflect.get(value, name)
+    : undefined;
+}
+
+/** Whether event content (JSON) carries an attachment key (`file.key`, `EncryptedFile`). */
+function carriesAttachmentKey(content: JsonString): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    // The SDK refuses content that is not a JSON object.
+    return false;
+  }
+  return prop(prop(parsed, 'file'), 'key') !== undefined;
+}
+
+/**
+ * The `EncryptedFile` fields of an event's `file`, validated
+ * (`parseEncryptedFileInfo` throws on a malformed one) and rebuilt from the
+ * checked values, without `url`, `mimetype` and `size`.
+ */
+function encryptedFileOf(file: unknown): EncryptedFileInfo {
+  parseEncryptedFileInfo(file);
+  const key = prop(file, 'key');
+  const k = prop(key, 'k');
+  const iv = prop(file, 'iv');
+  const sha256 = prop(prop(file, 'hashes'), 'sha256');
+  if (
+    typeof k !== 'string' ||
+    typeof iv !== 'string' ||
+    typeof sha256 !== 'string'
+  )
+    throw new Error('encrypted attachment: malformed EncryptedFile');
+  const ops = prop(key, 'key_ops');
+  return {
+    v: 'v2',
+    key: {
+      kty: 'oct',
+      key_ops: Array.isArray(ops)
+        ? ops.filter((op): op is string => typeof op === 'string')
+        : ['encrypt', 'decrypt'],
+      alg: 'A256CTR',
+      k,
+      ext: true,
+    },
+    iv,
+    hashes: { sha256 },
+  };
+}
+
+/**
+ * Where a decrypted media event's file lives (`eventMediaInfo`): null for a
+ * redaction, a redacted (empty) event or one without an `mxc://` URL.
+ */
+export function mediaInfoOfEvent(
+  event: unknown,
+  eventId: string,
+): EventMediaInfo | null {
+  if (prop(event, 'type') === 'm.room.redaction') return null;
+  const content = prop(event, 'content');
+  if (typeof content !== 'object' || content === null) return null;
+  if (Object.keys(content).length === 0) return null;
+  const file = prop(content, 'file');
+  const mxc = file !== undefined ? prop(file, 'url') : prop(content, 'url');
+  if (typeof mxc !== 'string' || !mxc.startsWith('mxc://'))
+    throw new Error(
+      `MatrixGatewayDO: media event ${eventId} carries no mxc url`,
+    );
+  const info = prop(content, 'info');
+  const mimetype = prop(info, 'mimetype');
+  const size = prop(info, 'size');
+  const filename = prop(content, 'filename') ?? prop(content, 'body');
+  return {
+    mxc,
+    ...(file !== undefined ? { file: encryptedFileOf(file) } : {}),
+    ...(typeof mimetype === 'string' ? { mimetype } : {}),
+    ...(typeof filename === 'string' ? { filename } : {}),
+    ...(typeof size === 'number' ? { size } : {}),
+  };
+}
+
 /** The plugins' device credentials as stored (`identity:bot-client`). */
 interface StoredDevice {
   userId: string;
@@ -197,9 +288,9 @@ interface AliasCacheEntry {
   at: number;
 }
 
-/** A media download's bound. `signal` only works for a caller in this isolate: an `AbortSignal` cannot cross an RPC boundary. */
+/** A media event lookup's bound. `signal` only works for a caller in this isolate: an `AbortSignal` cannot cross an RPC boundary. */
 export interface MediaDownloadOptions {
-  /** Upper bound on the whole transfer (default `MEDIA_DOWNLOAD_TIMEOUT_MS`). */
+  /** Upper bound on the whole lookup (default `MEDIA_DOWNLOAD_TIMEOUT_MS`). */
   timeoutMs?: number;
   signal?: AbortSignal;
 }
@@ -371,6 +462,9 @@ export class MatrixGatewayDO
     gateSizeFromEnv(this.env.MATRIX_TURN_CONCURRENCY, DEFAULT_TURN_CONCURRENCY),
   );
   private pluginDevice: BotCredentials | null = null;
+  /** The plugin device lookup in flight: concurrent first callers share one `whoami` / login. */
+  private pluginDeviceLoad: Promise<BotCredentials> | null = null;
+  private readonly backgroundSends = new Semaphore(BACKGROUND_SEND_CONCURRENCY);
   /** Memoised `getOracleSecretsKey` result (private JWK JSON). */
   private oracleSecretsKeyJson: string | null = null;
   private oracleSigningMnemonic: string | null = null;
@@ -1535,7 +1629,7 @@ export class MatrixGatewayDO
   }
 
   // -------------------------------------------------------------------------
-  // User snapshots (SQLite files as room media) and media downloads
+  // User snapshots (SQLite files as room media) and media event lookups
   // -------------------------------------------------------------------------
 
   async uploadUserSnapshotStream(
@@ -1648,105 +1742,28 @@ export class MatrixGatewayDO
   }
 
   /**
-   * A media message (`m.image` / `m.file` / …) for the attachments pipeline,
-   * as stored (see `mediaStream`). Null when the event is unknown or redacted.
+   * See `MatrixGatewayObject.eventMediaInfo`: the media event fetched and
+   * decrypted here, its file left on the homeserver for the caller to read.
    */
-  async downloadEventMediaStream(
+  async eventMediaInfo(
     roomId: string,
     eventId: string,
     opts: MediaDownloadOptions = {},
-  ): Promise<MediaStream | null> {
+  ): Promise<EventMediaInfo | null> {
     const bound = boundedSignal(
       opts.timeoutMs ?? MEDIA_DOWNLOAD_TIMEOUT_MS,
       opts.signal,
     );
-    let media: MediaStream | null;
     try {
-      // The SDK opens the download without a signal: race it, and release a
-      // stream that arrives after the bound.
-      media = await raceSignal(
-        this.mediaStream(roomId, eventId),
+      const raw = await raceSignal(
+        this.getEvent(roomId, eventId),
         bound.signal,
-        (late) => void late?.stream.cancel().catch(() => undefined),
+        () => undefined,
       );
-    } catch (err) {
+      return raw ? mediaInfoOfEvent(JSON.parse(raw), eventId) : null;
+    } finally {
       bound.clear();
-      throw err;
     }
-    if (!media) {
-      bound.clear();
-      return null;
-    }
-    return { ...media, stream: streamWithDeadline(media.stream, bound) };
-  }
-
-  /**
-   * Authenticated download of an `mxc://` URI as a stream
-   * (`/_matrix/client/v1/media/download`, legacy fallback on 404), bounded
-   * by `opts.timeoutMs` (default `MEDIA_DOWNLOAD_TIMEOUT_MS`) from the
-   * request to the last byte.
-   */
-  async downloadMxcMediaStream(
-    mxc: string,
-    opts: MediaDownloadOptions = {},
-  ): Promise<ReadableStream<Uint8Array>> {
-    const bound = boundedSignal(
-      opts.timeoutMs ?? MEDIA_DOWNLOAD_TIMEOUT_MS,
-      opts.signal,
-    );
-    try {
-      const body = await this.fetchMxc(mxc, bound.signal);
-      return streamWithDeadline(body, bound);
-    } catch (err) {
-      bound.clear();
-      throw err;
-    }
-  }
-
-  private async fetchMxc(
-    mxc: string,
-    signal: AbortSignal,
-  ): Promise<ReadableStream<Uint8Array>> {
-    const client = await this.startedClient();
-    const token = client.getAccessToken();
-    const headers: Record<string, string> = token
-      ? { Authorization: `Bearer ${token}` }
-      : {};
-    const authed = client.mxcUrlToHttp(
-      mxc,
-      undefined,
-      undefined,
-      undefined,
-      false,
-      true,
-      true,
-    );
-    if (!authed) throw new Error(`MatrixGatewayDO: invalid mxc url ${mxc}`);
-    let res = await fetch(authed, { headers, signal });
-    if (res.status === 404) {
-      const legacy = client.mxcUrlToHttp(
-        mxc,
-        undefined,
-        undefined,
-        undefined,
-        false,
-        true,
-        false,
-      );
-      if (legacy) {
-        await res.body?.cancel().catch(() => undefined);
-        res = await fetch(legacy, { headers, signal });
-      }
-    }
-    if (!res.ok) {
-      await res.body?.cancel().catch(() => undefined);
-      throw new Error(
-        `MatrixGatewayDO: media download failed: ${res.status} ${res.statusText}`,
-      );
-    }
-    if (!res.body)
-      throw new Error('MatrixGatewayDO: media download has no body');
-    return res.body;
   }
 
   // -------------------------------------------------------------------------
@@ -1801,13 +1818,31 @@ export class MatrixGatewayDO
   /**
    * See `MatrixGatewayObject.botCredentials`: a second password device with
    * NO crypto store, for plugins that drive a raw matrix-js-sdk client
-   * (editor, flows) — it must never be the gateway's own E2EE device, whose
-   * one-time keys and store are the SDK's. Its id is pinned in storage so a
-   * re-login (token rejected) keeps the same device. Cached per instance
-   * after one `whoami`.
+   * (editor, flows) and the user objects' media transfers — it must never
+   * be the gateway's own E2EE device, whose one-time keys and store are the
+   * SDK's. Its id is pinned in storage so a re-login keeps the same device.
+   * Cached per instance after one `whoami`; concurrent callers share one
+   * lookup (a login rotates the token, so a herd would invalidate each
+   * other's). `rejected` drops the cache only when it is the cached token.
    */
-  async botCredentials(): Promise<BotCredentials> {
+  async botCredentials(
+    opts: { rejected?: string } = {},
+  ): Promise<BotCredentials> {
+    if (opts.rejected && this.pluginDevice?.accessToken === opts.rejected) {
+      this.log(
+        'warn',
+        'plugin device token rejected by a caller; re-validating',
+      );
+      this.pluginDevice = null;
+    }
     if (this.pluginDevice) return this.pluginDevice;
+    this.pluginDeviceLoad ??= this.loadPluginDevice().finally(() => {
+      this.pluginDeviceLoad = null;
+    });
+    return this.pluginDeviceLoad;
+  }
+
+  private async loadPluginDevice(): Promise<BotCredentials> {
     const cfg = this.cfg();
     const stored = await this.ctx.storage.get<StoredDevice>(
       BOT_CLIENT_IDENTITY_KEY,
@@ -1839,6 +1874,33 @@ export class MatrixGatewayDO
     this.log('info', `plugin device ${device.deviceId} logged in`);
     this.pluginDevice = { baseUrl: cfg.baseUrl, ...device };
     return this.pluginDevice;
+  }
+
+  /**
+   * See `MatrixGatewayObject.sendEvent`: the SDK's send, behind the
+   * background lane for `priority: 'background'`, and never an attachment
+   * key into a room this gateway does not see as end-to-end encrypted.
+   */
+  override async sendEvent(
+    roomId: string,
+    type: string,
+    content: JsonString,
+    opts: { txnId?: string; priority?: 'interactive' | 'background' } = {},
+  ): Promise<string> {
+    if (carriesAttachmentKey(content) && !(await this.isRoomEncrypted(roomId)))
+      throw new Error(
+        `MatrixGatewayDO: refusing to send an encrypted attachment's key into ${roomId}, which is not end-to-end encrypted`,
+      );
+    const send = (): Promise<string> =>
+      super.sendEvent(
+        roomId,
+        type,
+        content,
+        opts.txnId ? { txnId: opts.txnId } : {},
+      );
+    return opts.priority === 'background'
+      ? this.backgroundSends.run(send)
+      : send();
   }
 
   // -------------------------------------------------------------------------
