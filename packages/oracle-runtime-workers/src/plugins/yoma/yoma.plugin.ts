@@ -1,8 +1,10 @@
 import { NetworkSchema } from '@ixo/ixo-transaction';
+import { createMiddleware, type AgentMiddleware } from 'langchain';
 import type { Model } from 'survey-core';
 import { z } from 'zod';
 import { ixoAddressOf } from '../../core/user-identity';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin';
+import { acceptedNote, newlyAccepted } from './accepted';
 import type {
   MergedConfig,
   PluginManifest,
@@ -764,6 +766,42 @@ export class YomaPlugin extends OraclePlugin {
 
   constructor(private readonly options: YomaPluginOptions = {}) {
     super();
+  }
+
+  /**
+   * "You were accepted", told once at the start of the person's next
+   * message (`accepted.ts`): the plugin cannot message first, so the news
+   * waits for them. Never fails the turn: a read that fails is tried on a
+   * later message.
+   */
+  override async getRequestMiddlewares(
+    ctx: RuntimeContext,
+  ): Promise<AgentMiddleware[]> {
+    const call = chainCall(ctx);
+    const address = ixoAddressOf(ctx.user.did);
+    if (!ctx.kv || !call || !address) return [];
+    let note: string | undefined;
+    try {
+      const accepted = await newlyAccepted(ctx.kv, call, address);
+      if (accepted.length) note = acceptedNote(accepted);
+    } catch (error) {
+      if (ctx.abortSignal.aborted) throw error;
+      console.warn(
+        `[yoma] acceptance check failed: ${error instanceof Error ? error.name : 'unknown'}`,
+      );
+    }
+    if (!note) return [];
+    const text = note;
+    return [
+      createMiddleware({
+        name: 'YomaAcceptedNotice',
+        wrapModelCall: (request, handler) =>
+          handler({
+            ...request,
+            systemMessage: request.systemMessage.concat(text),
+          }),
+      }),
+    ];
   }
 
   override getTools(): PluginTool[] {
