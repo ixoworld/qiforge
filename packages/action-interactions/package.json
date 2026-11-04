@@ -3,6 +3,11 @@
   "version": "0.1.1",
   "type": "module",
   "description": "Portable private interaction draft contracts and authenticated client",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ixoworld/qiforge.git",
+    "directory": "packages/action-interactions"
+  },
   "exports": {
     ".": "./src/index.ts",
     "./package.json": "./package.json"
