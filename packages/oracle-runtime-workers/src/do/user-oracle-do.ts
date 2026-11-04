@@ -1,6 +1,9 @@
 import {
+  CHANNEL_DELIVERY_NOTICE_KWARG,
+  channelDeliveryNote,
   channelReplyNote,
   CHANNEL_REPLY_NOTE_KWARG,
+  isDeliveryNoticeMessage,
 } from '../channels/replies';
 import { channelRoutingConfig } from '../channels/routing';
 import { digestTopicProposalEffect } from '../action-proposals/topic-store';
@@ -120,19 +123,20 @@ import {
   type BaseMessage,
 } from '@langchain/core/messages';
 import {
-  applyAttachmentRetention,
-  ATTACHMENT_PAYLOAD_TURNS,
   ATTACHMENT_PLACEHOLDER_PREFIX,
+  classifyAttachment,
   createAttachmentViewSurface,
   findPersistedAttachmentMeta,
   IngestTextLru,
-  INLINE_PAYLOAD_NEEDLE,
   isAttachmentViewMessage,
-  offloadInlinePayloads,
+  loadAttachmentBytes,
   parseAttachmentInputs,
   prepareAttachments,
+  resizeForModel,
+  sanitizeAttachmentFilename,
   ChannelAttachmentLinkStore,
   type AttachmentViewSurface,
+  type AttachmentInput,
   type MatrixMediaSource,
   type ViewAttachmentDeps,
   type SandboxUploadConfig,
@@ -142,6 +146,26 @@ import {
   AttachmentTextCacheStore,
 } from '../attachments';
 import {
+  AttachmentTooLargeError,
+  boundedSignal,
+  HomeserverUnauthorizedError,
+  openHomeserverMedia,
+  untilAborted,
+} from '../attachments/download';
+// Not in the attachments index: it loads the bot SDK, which only workerd runs.
+import {
+  CHANNEL_MEDIA_SEND_TIMEOUT_MS,
+  CHANNEL_MEDIA_TEXT_WAIT_MS,
+  CHANNEL_MEDIA_TURN_TIMEOUT_MS,
+  channelFilesToKeep,
+  channelMediaTxnId,
+  startChannelFileUploads,
+  type ChannelFileUpload,
+  type ThreadFileCopy,
+} from '../attachments/room-media';
+import {
+  channelGatewayOrigins,
+  channelThreadFiles,
   channelTurnLinks,
   prepareTurnAttachments,
   turnAttachmentInputs,
@@ -162,9 +186,15 @@ import {
   DEFAULT_MODEL_ID,
 } from '../core/llm';
 import { renderTurnTimeNote } from '../core/prompt-composer';
+import type { RegisteredManifest } from '../core/registries';
+import {
+  TURN_GUIDE_NOTE_KWARG,
+  USAGE_CARRIED_KWARG,
+} from '../core/operating-guides';
 import { TURN_TIME_NOTE_KWARG, withTurnTimeNote } from '../core/turn-time-note';
 import {
   capabilityRouterMode,
+  preloadThreshold,
   createCapabilityRouter,
   shadowAgreement,
   type CapabilityRouter,
@@ -179,7 +209,6 @@ import type {
   RequestAdmissionResult,
   RequestDisposition,
 } from '../plugin-api/request-admission';
-import { bootHiddenPlugins } from '../core/tool-access';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { AmbientServices, LlmAdapter } from '../core/runtime-context';
 import { chatGptBackendFromEnv } from '../llm/byo-client';
@@ -196,6 +225,8 @@ import { parseJwk } from '../secrets/jwe';
 import { WorkersSecretsService } from '../secrets/secrets-service';
 import { createSecretsAdapter } from './secrets-adapter';
 import {
+  EDITOR_PLUGIN_NAME,
+  editorContextActive,
   metadataBuildState,
   metadataGraphInput,
   parseTurnMetadata,
@@ -261,6 +292,7 @@ import {
 import {
   IxoVfsOwnerStore,
   VFS_DEFAULT_BASE_URLS,
+  VfsNoDelegationError,
 } from '../owner-store/ixo-vfs-store';
 import type { OwnerStore } from '../owner-store/types';
 import {
@@ -270,6 +302,7 @@ import {
 } from './ambient';
 import {
   checkpointStorageKey,
+  type BotCredentials,
   type MatrixGatewayObject,
   type OracleWorkerEnv,
   type SessionSummary,
@@ -310,6 +343,11 @@ import { freshStub } from './fresh-stub';
 import { WorkStatusProducer } from '../matrix/work-status';
 import { fetchUserMatrixServerName } from '../matrix/user-homeserver';
 import { createWorkStatusMiddleware } from '../core/middlewares/work-status';
+import {
+  RecalledImageCache,
+  type RecallImageLoader,
+} from '../core/middlewares/attachment-recall';
+import { bytesToBase64 } from '../plugins/base64';
 import { UserPreferencesStore } from '../plugins/user-preferences/user-preferences-store';
 import { SqliteUserKv } from '../sqlite/user-kv-store';
 import {
@@ -317,6 +355,7 @@ import {
   pageOfMessages,
   SessionHistoryIndexer,
   type HistoryEntry,
+  conversationReader,
   type HistoryMessage,
   type HistoryPage,
   type IndexableSession,
@@ -404,6 +443,7 @@ import { buildCreateArtifactTool } from '../artifacts/tool';
 import { resolveDeliveryProfile } from '../delivery/profile';
 import {
   draftReplyPlan,
+  failedRunFiles,
   materializeReplyPlan,
   turnSteps,
 } from '../delivery/plan';
@@ -423,6 +463,7 @@ import {
   contentToText,
   isSummarizationMessage,
   pageThreadTranscript,
+  recentTurnTexts,
   TranscriptCursorError,
   transformTranscript,
   type TranscriptPageOptions,
@@ -541,6 +582,15 @@ type UserContextSettle = (
   signal: AbortSignal,
 ) => Promise<UserContextData | undefined>;
 
+/**
+ * What the capability router sees of the thread: enough to route a follow-up
+ * (two exchanges, each turn cut short), read from a bounded number of rows so
+ * a long thread costs nothing extra.
+ */
+const ROUTER_RECENT_TURNS = 4;
+const ROUTER_RECENT_TURN_CHARS = 300;
+const ROUTER_RECENT_ROWS = 12;
+
 /** How long a first turn waits on the user-context prefetch before saying so. */
 const USER_CONTEXT_PROGRESS_GRACE_MS = 300;
 const USER_CONTEXT_PROGRESS_STEP = 'Recalling your memories…';
@@ -572,14 +622,16 @@ function hasUserContext(value: unknown): boolean {
 
 /**
  * Whether a turn is offered to the plugins' admission handlers. Not for a
- * turn with attachments, a scheduled task run, or a Matrix group room: a
- * direct read is posted into the room, so one user's authorized read would
- * be shown to every member.
+ * turn with attachments, a gateway's delivery notice (no request of the
+ * person to read), a scheduled task run, or a Matrix group room: a direct
+ * read is posted into the room, so one user's authorized read would be
+ * shown to every member.
  */
 function admissionApplies(req: TurnRequest): boolean {
   return (
     !req.attachments?.length &&
     !req.channel?.attachments?.length &&
+    !req.channel?.notice &&
     !req.taskRunId &&
     !req.sessionId.startsWith(TASK_SESSION_PREFIX) &&
     req.roomKind !== 'group'
@@ -727,6 +779,14 @@ interface MatrixUserIdCache {
 }
 /** Consecutive flush failures (cleared on success). */
 const META_FLUSH_FAILURES = 'meta:flushFailures';
+/**
+ * Set when an upload failed because the user has no delegation to this
+ * oracle that reaches the owner copy (`VfsNoDelegationError`): the copy then
+ * waits for one instead of retrying every `FLUSH_RETRY_DELAY_MS`, and the
+ * next delegation (`POST /delegation`, a request's header, the room state)
+ * uploads it. Holds the reason and when the wait began.
+ */
+const META_FLUSH_WAITS_FOR_DELEGATION = 'meta:flushWaitsForDelegation';
 const META_LAST_VACUUM = 'meta:lastVacuumAt';
 /** When the last R2 page-tier eviction pass ran (see `tierTick`). */
 const META_LAST_TIER_PASS = 'meta:lastTierPassAt';
@@ -1170,6 +1230,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private matrixLedger: MatrixTurnLedger | null = null;
     /** Room mirrors of HTTP turns, serialised per session and retried across gateway restarts (see room-mirror.ts). */
     private mirror: RoomMirror | null = null;
+    /** The oracle's plugin device, once known (see `pluginDevice`). */
+    private pluginCredentials: BotCredentials | null = null;
+    /** Its lookup in flight: concurrent callers share one gateway RPC. */
+    private pluginCredentialsLoad: Promise<BotCredentials> | null = null;
+    /**
+     * Channel requests with files whose person's text the mirror pass has
+     * queued on the session chain (value without `waiter`), or whose file
+     * events wait for that (`waiter`); see `afterChannelText`.
+     */
+    private readonly channelTextQueued = new Map<
+      string,
+      { at: number; waiter?: () => void }
+    >();
+    /** Images the recall middleware re-attached lately, kept across this instance's turns. */
+    private readonly recallCache = new RecalledImageCache();
     private channelTurns: ChannelTurns | null = null;
     /** Anonymous-feedback idempotency markers and the user's submission limit. */
     private feedbackMarkers: FeedbackMarkers | null = null;
@@ -1469,9 +1544,24 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private async onDelegationReplaced(): Promise<void> {
       const failures =
         (await this.ctx.storage.get<number>(META_FLUSH_FAILURES)) ?? 0;
-      if (failures === 0) return;
-      await this.ctx.storage.delete(META_FLUSH_FAILURES);
-      if (!this.db) return;
+      const waiting = await this.ctx.storage.get<unknown>(
+        META_FLUSH_WAITS_FOR_DELEGATION,
+      );
+      if (failures === 0 && waiting === undefined) return;
+      await this.ctx.storage.delete([
+        META_FLUSH_FAILURES,
+        META_FLUSH_WAITS_FOR_DELEGATION,
+      ]);
+      if (waiting !== undefined)
+        console.log(
+          `[user-do] ${this.userDid ?? 'user'} has a delegation again — uploading the owner copy that waited for it`,
+        );
+      // Not booted yet (a delegation adopted before boot): the alarm boots
+      // the object and serves the upload at once.
+      if (!this.db) {
+        if (waiting !== undefined) await this.scheduleFlushRetry(Date.now());
+        return;
+      }
       if (
         !this.dirty &&
         (await this.ctx.storage.get<boolean>(META_DIRTY)) === true
@@ -1559,6 +1649,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             console.log(
               `[user-do] delegation for ${userDid} loaded from the deposited room state (${held ? 'the held copy was inside the margin' : 'header-less turn'})`,
             );
+            await this.onDelegationReplaced();
           }
           return;
         }
@@ -2476,6 +2567,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         META_FLUSH_AT,
         META_UPLOADED_GEN,
         META_FLUSH_FAILURES,
+        META_FLUSH_WAITS_FOR_DELEGATION,
         META_LAST_VACUUM,
       ]);
       this.flushAt = null;
@@ -2795,6 +2887,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         flushAt: await this.ctx.storage.get<number>(META_FLUSH_AT),
         now,
         idle,
+        waitingForDelegation:
+          (await this.ctx.storage.get<unknown>(
+            META_FLUSH_WAITS_FOR_DELEGATION,
+          )) !== undefined,
       });
       if (flush.action === 'flush') {
         try {
@@ -2804,9 +2900,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             `[user-do] flush failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
           );
           // `flushOnce` arms the retry on an upload failure; anything that
-          // failed before the upload gets the same retry window here.
-          await this.scheduleFlushRetry(now + FLUSH_RETRY_DELAY_MS);
-          deadlines.push(now + FLUSH_RETRY_DELAY_MS);
+          // failed before the upload gets the same retry window here. A
+          // missing delegation is not retried: the copy waits for one.
+          if (!(err instanceof VfsNoDelegationError)) {
+            await this.scheduleFlushRetry(now + FLUSH_RETRY_DELAY_MS);
+            deadlines.push(now + FLUSH_RETRY_DELAY_MS);
+          }
         }
       } else if (flush.action === 'wait') {
         deadlines.push(Math.max(flush.at, now + 1000));
@@ -2949,10 +3048,18 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           return;
         }
         if (outcome === 'not-current') {
-          console.warn(
-            `[user-do] ${this.userDid} is idle but the owner copy is not verified current — keeping the working copy`,
-          );
-          deadlines.push(now + FLUSH_RETRY_DELAY_MS);
+          // Waiting for a delegation, the copy stays until one arrives (the
+          // idle horizon below still wakes the object now and then).
+          if (
+            (await this.ctx.storage.get<unknown>(
+              META_FLUSH_WAITS_FOR_DELEGATION,
+            )) === undefined
+          ) {
+            console.warn(
+              `[user-do] ${this.userDid} is idle but the owner copy is not verified current — keeping the working copy`,
+            );
+            deadlines.push(now + FLUSH_RETRY_DELAY_MS);
+          }
         } else {
           console.log(
             `[user-do] ${this.userDid} became active during the idle check — keeping the working copy`,
@@ -4717,9 +4824,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const messages = await this.saver!.listThreadMessages(sessionId);
       return messages
         .filter(
-          (m) => !isSummarizationMessage(m) && !isAttachmentViewMessage(m),
+          (m) =>
+            !isSummarizationMessage(m) &&
+            !isAttachmentViewMessage(m) &&
+            !isDeliveryNoticeMessage(m),
         )
-        .map((m) => ({ type: m.type, content: visibleText(m) }));
+        .map(conversationReader());
     }
 
     /**
@@ -4742,6 +4852,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       }
       const pageRows = Math.max(1, limit);
       const entries: HistoryEntry[] = [];
+      const read = conversationReader();
       for (;;) {
         const rows = await saver.listThreadMessageRows(sessionId, {
           direction: 'newer',
@@ -4751,9 +4862,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         for (const row of rows) {
           anchor = row.anchor;
           const m = row.message;
-          if (isSummarizationMessage(m) || isAttachmentViewMessage(m)) continue;
+          if (
+            isSummarizationMessage(m) ||
+            isAttachmentViewMessage(m) ||
+            isDeliveryNoticeMessage(m)
+          )
+            continue;
           entries.push({
-            message: { type: m.type, content: visibleText(m) },
+            message: read(m),
             cursor: row.messageId,
           });
         }
@@ -4948,6 +5064,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       prior: unknown;
       client: TurnRequest['client'];
       roomKind: TurnRequest['roomKind'];
+      /** The provider's cache has expired, so the prompt may change. */
+      coldTurn: boolean;
     }): UserContextSettle | null {
       // A first contact that fetches nothing still prints the one
       // first-contact line (see the settle step below), with its reason, so
@@ -5002,9 +5120,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         // room answer — but only one already in the cache: an upload that
         // just invalidated the room must not make the next message wait for
         // a gather. On a miss the thread keeps its context and the
-        // (single-flight) refresh warms the cache for a later turn.
+        // (single-flight) refresh warms the cache for a later turn. The
+        // answer sits in the system prompt, so it waits for a cold turn: a
+        // change there re-reads the whole request at the uncached price.
         const warm =
-          input.client === 'channel'
+          input.client === 'channel' && input.coldTurn
             ? fetcher.readCached(input.roomId)
             : undefined;
         keepGathering();
@@ -5677,8 +5797,29 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           const failures =
             ((await this.ctx.storage.get<number>(META_FLUSH_FAILURES)) ?? 0) +
             1;
-          await this.ctx.storage.put(META_FLUSH_FAILURES, failures);
           const detail = err instanceof Error ? err.message : String(err);
+          if (err instanceof VfsNoDelegationError) {
+            // Nothing to retry until the user deposits a delegation that
+            // reaches the owner copy: say so once, drop the deadline, and
+            // let the next delegation (or the next turn's daily deadline)
+            // upload it.
+            const already = await this.ctx.storage.get<unknown>(
+              META_FLUSH_WAITS_FOR_DELEGATION,
+            );
+            if (already === undefined) {
+              await this.ctx.storage.put(META_FLUSH_WAITS_FOR_DELEGATION, {
+                reason: detail,
+                since: Date.now(),
+              });
+              console.warn(
+                `[user-do] owner copy for ${this.userDid} waits for a delegation — working copy kept, no retry until one arrives: ${detail}`,
+              );
+            }
+            this.flushAt = null;
+            await this.ctx.storage.delete(META_FLUSH_AT);
+            throw err;
+          }
+          await this.ctx.storage.put(META_FLUSH_FAILURES, failures);
           const line = `[user-do] owner-store flush failed (${failures} in a row) for ${this.userDid} — working copy kept dirty, retrying in ${FLUSH_RETRY_DELAY_MS / 60_000} min: ${detail}`;
           if (failures >= FLUSH_FAILURES_ERROR_THRESHOLD) console.error(line);
           else console.warn(line);
@@ -5689,7 +5830,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         await this.ctx.storage.put(META_LAST_CHECKSUM, checksum);
         await this.ctx.storage.put(META_LAST_FLUSH, Date.now());
         await this.ctx.storage.put(META_UPLOADED_GEN, snapshot.generation);
-        await this.ctx.storage.delete(META_FLUSH_FAILURES);
+        await this.ctx.storage.delete([
+          META_FLUSH_FAILURES,
+          META_FLUSH_WAITS_FOR_DELEGATION,
+        ]);
         await this.clearDirty();
         console.log(
           `[user-do] flushed ${snapshot.size} bytes (${saved.bytes} sent) to ${store.kind} for ${this.userDid} (${saved.etag})`,
@@ -5927,6 +6071,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         lastChecksum: await this.ctx.storage.get<string>(META_LAST_CHECKSUM),
         flushFailures:
           (await this.ctx.storage.get<number>(META_FLUSH_FAILURES)) ?? 0,
+        flushWaitsForDelegation:
+          (await this.ctx.storage.get<{ reason: string; since: number }>(
+            META_FLUSH_WAITS_FOR_DELEGATION,
+          )) ?? null,
         lastVacuumAt: await this.ctx.storage.get<number>(META_LAST_VACUUM),
         legacyCleared:
           (await this.ctx.storage.get<boolean>(META_LEGACY_CLEARED)) === true,
@@ -6647,18 +6795,26 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           completed && delivery.kind === 'chat'
             ? await this.replyPlanOf(live, req, capture, delivery)
             : undefined;
+        // `send_file` always needs another model step, which can fail. A
+        // gateway reads a plan only off a `finished` run, so a run that failed
+        // after sending files finishes with them; the row keeps the error.
+        const filesPlan =
+          outcome.status === 'failed' && delivery.kind === 'chat'
+            ? await this.filesOfFailedRun(live, sessionId, delivery)
+            : null;
         const text =
           (live.continuation ?? '') +
           (completed ? lastAiText(capture) : outcome.fullText);
         return {
           status:
-            outcome.status === 'completed'
+            outcome.status === 'completed' || filesPlan
               ? 'finished'
               : outcome.status === 'aborted'
                 ? 'aborted'
                 : 'failed',
           text,
           ...(plan ? { plan } : {}),
+          ...(filesPlan ? { plan: filesPlan } : {}),
           ...(messageId ? { messageId } : {}),
           toolCalls,
           ...(outcome.status === 'failed' ? { error: outcome.error } : {}),
@@ -6686,10 +6842,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       delivery: Extract<DeliveryProfile, { kind: 'chat' }>,
     ): Promise<ReplyPlan> {
       const artifacts = this.artifacts?.canShare ? this.artifacts : null;
-      const { steps, toolResults } = turnSteps(capture);
+      const { steps, toolResults, toolArtifacts } = turnSteps(capture);
       const draft = draftReplyPlan({
         steps,
         toolResults,
+        toolArtifacts,
         continuation: live.continuation,
         limits: delivery.limits,
         canSpill: artifacts !== null,
@@ -6714,9 +6871,47 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       });
       await this.runStore!.setPlan(live.runId, JSON.stringify(plan));
       console.log(
-        `[delivery] run ${live.runId}: ${delivery.surface} reply in ${plan.parts.length} parts (${plan.parts.filter((p) => p.kind === 'artifact').length} artefacts)`,
+        `[delivery] run ${live.runId}: ${delivery.surface} reply in ${plan.parts.length} parts (${plan.parts.filter((p) => p.kind === 'artifact').length} artefacts, ${plan.parts.filter((p) => p.kind === 'file').length} files)`,
       );
       return plan;
+    }
+
+    /**
+     * The plan of a chat run that failed after sending files, or null. It
+     * reads the checkpoint, not `capture`: without the graph's own end,
+     * `capture` is whatever node ended last with messages, and nothing when
+     * an attempt failed early, which would lose an earlier attempt's files.
+     * A read failure leaves the run failed, as it was.
+     */
+    private async filesOfFailedRun(
+      live: LiveRun,
+      sessionId: string,
+      delivery: Extract<DeliveryProfile, { kind: 'chat' }>,
+    ): Promise<ReplyPlan | null> {
+      try {
+        const tuple = await this.saver!.getTuple({
+          configurable: { thread_id: sessionId },
+        });
+        const channel: unknown = tuple?.checkpoint.channel_values.messages;
+        const marks = await this.runStore!.listMarks(live.runId);
+        const plan = await failedRunFiles(
+          Array.isArray(channel) ? channel.filter(isBaseMessage) : [],
+          new Set(marks.map((mark) => mark.toolCallId)),
+          delivery.limits,
+        );
+        if (plan) {
+          await this.runStore!.setPlan(live.runId, JSON.stringify(plan));
+          console.warn(
+            `[delivery] run ${live.runId}: failed after sending ${plan.parts.filter((p) => p.kind === 'file').length} files; delivering them`,
+          );
+        }
+        return plan;
+      } catch (error) {
+        console.warn(
+          `[delivery] run ${live.runId}: could not read the files of a failed run: ${error instanceof Error ? error.name : 'unknown'}`,
+        );
+        return null;
+      }
     }
 
     private async runDirectRead(
@@ -7030,13 +7225,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       sessionId: string,
     ): Promise<SessionContextStatus | null> {
       if (!(await this.sessions!.getSession(sessionId))) return null;
-      const tuple = await this.saver!.getTuple({
-        configurable: { thread_id: sessionId },
-      });
-      const channel: unknown = tuple?.checkpoint.channel_values.messages;
-      const context: BaseMessage[] = Array.isArray(channel)
-        ? channel.filter(isBaseMessage)
-        : [];
+      const context = await this.contextMessages(sessionId);
       const thread = await this.saver!.listThreadMessages(sessionId);
       const stats = await this.ctx.storage.get<SessionContextCounters>(
         contextStatsKey(sessionId),
@@ -7054,6 +7243,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         }),
         ...(stats ?? EMPTY_CONTEXT_COUNTERS),
       };
+    }
+
+    /** The messages the session's model calls start from (a summary, then the kept tail, once condensed). */
+    private async contextMessages(sessionId: string): Promise<BaseMessage[]> {
+      const tuple = await this.saver!.getTuple({
+        configurable: { thread_id: sessionId },
+      });
+      const channel: unknown = tuple?.checkpoint.channel_values.messages;
+      return Array.isArray(channel) ? channel.filter(isBaseMessage) : [];
     }
 
     /** Fold a guard event into the session's stored counters (ordered, never throws). */
@@ -7074,7 +7272,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           switch (event.kind) {
             case 'prune':
               next.prunes += 1;
-              if (event.stage !== 'soft') next.hardPrunes += 1;
+              if (event.stage === 'hard' || event.stage === 'overflow')
+                next.hardPrunes += 1;
               next.prunedResults += event.pruned;
               break;
             case 'overflow-retry':
@@ -7135,50 +7334,79 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     // ── turn plumbing ──────────────────────────────────────────────────────
 
     /**
-     * Matrix media access for the attachments pipeline, through the gateway.
-     * Both transfers stream across the object boundary and are cut off at
-     * the attachment cap; an encrypted attachment is decrypted HERE, not in
-     * the gateway (its whole-buffer download grew the crypto WASM heap for
-     * good, and a hash mismatch on the far side of the RPC would only reach
-     * this object as a disconnect).
-     *
-     * The gateway bounds each transfer to the attachment download deadline,
-     * from opening it to the last byte. An `AbortSignal` cannot cross the
-     * Durable Object RPC, so the turn's abort acts on this side instead:
-     * `readBytesCapped` cancels the stream it reads, and the cancel travels
-     * back over the RPC stream to stop the gateway's download.
+     * Matrix media access for the attachments pipeline. The gateway is asked
+     * only for the media event's small JSON (`eventMediaInfo`: it alone holds
+     * the room keys); the bytes come straight from the homeserver on the
+     * plugin device's token (`openMatrixMedia`) and an encrypted attachment
+     * is decrypted HERE, so no media byte crosses the shared gateway object.
+     * Each transfer is bounded by the attachment download deadline (and the
+     * caller's signal), from opening it to the last byte, and cut off at
+     * `maxBytes`.
      */
     private matrixMediaSource(): MatrixMediaSource {
-      const deadline = { timeoutMs: DOWNLOAD_TIMEOUT_MS };
-      return {
-        downloadMxc: async (mxc, maxBytes = MAX_FILE_SIZE, signal) =>
-          readBytesCapped(
-            await this.gateway.downloadMxcMediaStream(mxc, deadline),
-            maxBytes,
-            signal,
-          ),
-        downloadEvent: async (
-          roomId,
-          eventId,
-          maxBytes = MAX_FILE_SIZE,
+      const bounded = async <T>(
+        signal: AbortSignal | undefined,
+        work: (signal: AbortSignal) => Promise<T>,
+      ): Promise<T> => {
+        const bound = boundedSignal(
           signal,
-        ) => {
-          const media = await this.gateway.downloadEventMediaStream(
-            roomId,
-            eventId,
-            deadline,
-          );
-          if (!media) return null;
-          const plain = media.file
-            ? media.stream.pipeThrough(createAttachmentDecryptor(media.file))
-            : media.stream;
-          return {
-            bytes: await readBytesCapped(plain, maxBytes, signal),
-            ...(media.mimetype ? { mimetype: media.mimetype } : {}),
-            ...(media.filename ? { filename: media.filename } : {}),
-          };
-        },
+          DOWNLOAD_TIMEOUT_MS,
+          'Matrix media download',
+        );
+        try {
+          return await untilAborted(work(bound.signal), bound.signal);
+        } finally {
+          bound.release();
+        }
       };
+      return {
+        downloadMxc: (mxc, maxBytes = MAX_FILE_SIZE, signal) =>
+          bounded(signal, async (bound) =>
+            readBytesCapped(
+              await this.openMatrixMedia(mxc, bound),
+              maxBytes,
+              bound,
+            ),
+          ),
+        downloadEvent: (roomId, eventId, maxBytes = MAX_FILE_SIZE, signal) =>
+          bounded(signal, async (bound) => {
+            const info = await this.gateway.eventMediaInfo(roomId, eventId, {
+              timeoutMs: DOWNLOAD_TIMEOUT_MS,
+            });
+            if (!info) return null;
+            const stream = await this.openMatrixMedia(info.mxc, bound);
+            const plain = info.file
+              ? stream.pipeThrough(createAttachmentDecryptor(info.file))
+              : stream;
+            return {
+              bytes: await readBytesCapped(plain, maxBytes, bound),
+              ...(info.mimetype ? { mimetype: info.mimetype } : {}),
+              ...(info.filename ? { filename: info.filename } : {}),
+            };
+          }),
+      };
+    }
+
+    /**
+     * The media behind `mxc`, opened on the homeserver with the plugin
+     * device's token; a 401 asks the gateway for fresh credentials
+     * (`botCredentials({ rejected })`) and tries once more.
+     */
+    private async openMatrixMedia(
+      mxc: string,
+      signal: AbortSignal,
+    ): Promise<ReadableStream<Uint8Array>> {
+      const device = await untilAborted(this.pluginDevice(), signal);
+      try {
+        return await openHomeserverMedia(mxc, device, { signal });
+      } catch (error) {
+        if (!(error instanceof HomeserverUnauthorizedError)) throw error;
+        const fresh = await untilAborted(
+          this.pluginDevice({ rejected: device.accessToken }),
+          signal,
+        );
+        return openHomeserverMedia(mxc, fresh, { signal });
+      }
     }
 
     /**
@@ -7208,6 +7436,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         findPersistedAttachmentMeta(saver, input.sessionId, ref);
       const viewDeps = (): ViewAttachmentDeps => ({
         source: this.matrixMediaSource(),
+        ...(this.env.IMAGES ? { images: this.env.IMAGES } : {}),
         channel: turnChannelMediaSource({
           sessionId: input.sessionId,
           turnLinks: input.channelLinks,
@@ -7233,45 +7462,76 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /**
-     * Attachment payload retention (`src/attachments/retention.ts`), run
-     * once a turn has completed and its checkpoints are written: inline
-     * payloads older than the newest `ATTACHMENT_PAYLOAD_TURNS` user turns
-     * are rewritten in place in the messages table — the rows the next turn
-     * loads, so the model sees the placeholder and the bytes leave the
-     * database. Rows the graph state no longer references (summarised away)
-     * are older than any retained turn and are rewritten too. Idempotent:
-     * a rewritten row holds no inline block and is never selected again.
+     * Image fetch for the attachment recall middleware
+     * (`core/middlewares/attachment-recall.ts`): one image of this session,
+     * read through the same sources as the turn pipeline (Matrix media from
+     * the homeserver, the session's channel links or their room copies,
+     * http(s)), cut off at the middleware's `maxBytes` (null then), refused
+     * unless the bytes are an image, downscaled for the model when the
+     * oracle binds Cloudflare Images, as base64. An image the resize step
+     * drops resolves null: its original never goes to the model.
      */
-    private async retainAttachmentPayloads(
-      sessionId: string,
-      stateMessages: BaseMessage[],
-    ): Promise<void> {
-      // Nothing captured (an interrupted stream): never offload blindly.
-      if (stateMessages.length === 0) return;
-      const saver = this.saver!;
-      const { retainedIds, rewrites } = applyAttachmentRetention(
-        stateMessages,
-        ATTACHMENT_PAYLOAD_TURNS,
-      );
-      const pending = new Set(rewrites.map((m) => m.id));
-      const stale = await saver.listThreadMessagesMatching(sessionId, {
-        messageType: 'human',
-        contentContains: INLINE_PAYLOAD_NEEDLE,
-      });
-      for (const row of stale) {
-        if (!row.id || retainedIds.has(row.id) || pending.has(row.id)) continue;
-        const rewritten = offloadInlinePayloads(row);
-        if (rewritten) rewrites.push(rewritten);
-      }
-      let replaced = 0;
-      for (const message of rewrites) {
-        if (await saver.replaceThreadMessage(sessionId, message)) replaced += 1;
-      }
-      if (replaced > 0) {
-        console.log(
-          `[user-do] attachments: offloaded the inline payload of ${replaced} message(s) in ${sessionId}`,
-        );
-      }
+    private recallImageLoader(input: {
+      sessionId: string;
+      roomId: string | undefined;
+      /** The links of this turn's channel files (earlier ones come from the store). */
+      channelLinks: ReturnType<typeof channelTurnLinks>;
+    }): RecallImageLoader {
+      return async (meta, { signal, maxBytes }) => {
+        const attachment: AttachmentInput = {
+          filename: meta.filename,
+          mimetype: meta.mimetype,
+          ...(meta.size !== undefined ? { size: meta.size } : {}),
+          ...(meta.mxcUri ? { mxcUri: meta.mxcUri } : {}),
+          ...(meta.eventId ? { eventId: meta.eventId } : {}),
+          ...(meta.channelRef ? { channelRef: meta.channelRef } : {}),
+        };
+        const name = sanitizeAttachmentFilename(attachment.filename);
+        const channel = turnChannelMediaSource({
+          sessionId: input.sessionId,
+          turnLinks: input.channelLinks,
+          store: this.channelAttachmentLinks,
+          channelServiceDid: this.env.CHANNEL_SERVICE_DID,
+        });
+        let loaded: Awaited<ReturnType<typeof loadAttachmentBytes>>;
+        try {
+          loaded = await loadAttachmentBytes(
+            attachment,
+            input.roomId,
+            this.matrixMediaSource(),
+            { signal, maxBytes, channel },
+          );
+        } catch (error) {
+          if (!(error instanceof AttachmentTooLargeError)) throw error;
+          console.warn(
+            `[attachments] recall: "${name}" is over the ${maxBytes}-byte recall limit`,
+          );
+          return null;
+        }
+        const { bytes, mimetype, sniffed } = loaded;
+        // Bytes that are not an image never go back as an image block.
+        const kind = classifyAttachment({
+          mimetype,
+          filename: sniffed ? '' : attachment.filename,
+        });
+        if (kind !== 'image')
+          throw new Error(`content is ${mimetype}, not an image`);
+        const sent = await resizeForModel(bytes, mimetype, this.env.IMAGES, {
+          logger: console,
+        });
+        if (sent.dropped) {
+          console.warn(
+            `[attachments] recall: "${name}" not re-attached: ${sent.dropped}`,
+          );
+          return null;
+        }
+        return {
+          kind: 'image',
+          mimeType: sent.mimetype,
+          base64: bytesToBase64(sent.bytes),
+          filename: name,
+        };
+      };
     }
 
     /**
@@ -7512,6 +7772,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         configurable: { thread_id: req.sessionId },
       });
       const priorState = existing?.checkpoint.channel_values ?? {};
+      // A new thread, or quiet for longer than the provider's cache lives:
+      // this turn pays a miss whatever it sends, so it is the one to change
+      // the prefix on.
+      const coldTurn =
+        !existing ||
+        turnAt.getTime() - Date.parse(existing.checkpoint.ts) >=
+          contextBudget.cacheColdMs;
       // What the memory engine knows about the user, for the prompt's
       // context block: started now so the round-trip overlaps the rest of
       // the build, settled right before the agent is built.
@@ -7525,6 +7792,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             prior: priorState.userContext,
             client: req.client,
             roomKind: req.roomKind,
+            coldTurn,
           });
 
       // A Matrix turn with no usable delegation: ask the web app to open its
@@ -7559,7 +7827,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // A channel turn's files are read by their `channel:` reference; their
       // links stay on the server (the run request and the session's link
       // store), out of every message and note.
-      const attachmentInputs = turnAttachmentInputs(req, body.attachments);
       const attachmentModel =
         effectiveModel && isAllowedModel(effectiveModel)
           ? effectiveModel
@@ -7575,6 +7842,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         : undefined;
       if (turnLinks.length && !run.resumed)
         await this.channelAttachmentLinks?.put(req.sessionId, turnLinks);
+      // A channel turn's files are also posted to the session thread as
+      // encrypted media events (attachments/room-media.ts), in the
+      // background: the run names each by its `channel:` reference, and the
+      // copies read on the way reach the pipeline instead of a second
+      // download. A resumed attempt posts nothing.
+      const threadCopies =
+        turnLinks.length && sessionRoomId
+          ? this.postChannelFilesToThread(
+              req,
+              sessionRoomId,
+              abortController.signal,
+              run.resumed,
+            )
+          : null;
+      const attachmentInputs = turnAttachmentInputs(req, body.attachments);
       const { prepared, metas: turnMetas } = await prepareTurnAttachments({
         inputs: attachmentInputs,
         resumed: run.resumed,
@@ -7590,22 +7872,28 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             {
               source: this.matrixMediaSource(),
               ...(channelMedia ? { channel: channelMedia } : {}),
+              ...(threadCopies ? { preloaded: threadCopies } : {}),
               extraction: this.extractionProvider(baseAmbient.llm, core.llm),
               sandbox: await this.sandboxArchiveConfig(req.identity.userDid),
+              ...(this.env.IMAGES ? { images: this.env.IMAGES } : {}),
               signal: abortController.signal,
               logger: console,
             },
           ),
       });
+      // Copies the pipeline did not take (a file it refused) go now, not
+      // with the turn.
+      threadCopies?.clear();
       if (prepared) {
         console.log(
           `[user-do] attachments: ${attachmentInputs.length} attached, ${prepared.extracted.length} extracted, ${Array.isArray(prepared.content) ? prepared.content.length - 1 : 0} native`,
         );
       }
 
-      // `view_attachment` for this session: payloads older than the newest
-      // `ATTACHMENT_PAYLOAD_TURNS` user turns are placeholders by now (see
-      // `retainAttachmentPayloads`); the tool fetches one again on demand.
+      // `view_attachment` for this session: attachment bytes are never
+      // stored with the conversation (the checkpointer keeps a placeholder,
+      // `src/sqlite/inline-payloads.ts`); the tool fetches one again on
+      // demand.
       // Cleanups registered by tools for THIS turn (MCP clients …): run once
       // the turn ends, however it ends — see `RuntimeContext.onTurnEnd`.
       abortController.signal.addEventListener('abort', () => {
@@ -7633,11 +7921,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         suppliedContextOnly ? {} : priorState,
       );
 
-      // Capability router: predict the on-demand plugin this message needs
-      // and preload it for THIS turn only. `on` is awaited here, ahead of the
-      // first model call; `shadow` returns at once and logs its verdict when
-      // it lands. The preload never enters `stateInput` — the checkpointed
-      // `loadedPlugins` channel is written by `load_capability` alone.
       const priorLoaded: ReadonlySet<string> = new Set(
         priorMeta.loadedPlugins ?? [],
       );
@@ -7656,45 +7939,49 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             client: req.client,
             env: langsmithEnvFromWorkerEnv(this.env),
           });
-      const preloadedPlugins =
-        !suppliedContextOnly && this.capabilityRouter
-          ? await this.capabilityRouter({
-              mode: capabilityRouterMode(core.validatedEnv.CAPABILITY_ROUTER),
-              manifests: core.registries.manifests.collect(),
-              loaded: priorLoaded,
-              hidden: () =>
-                bootHiddenPlugins({
-                  registries: core.registries,
-                  buildCtx: core.buildCtx(),
-                  has: (resource, action) =>
-                    ambient.ucan.hasCapability(
-                      ucanDelegation,
-                      resource,
-                      action,
+      // Capability router: from what is left to load this turn (the build
+      // works that out from the turn's tools), the plugins this message needs.
+      // `on` is awaited in the build, ahead of the first model call, and the
+      // plugins load on the thread like any other; `shadow` returns at once
+      // and logs its verdict when it lands. A resumed attempt keeps what the
+      // run started with.
+      const router = this.capabilityRouter;
+      const routeCapabilities =
+        !suppliedContextOnly && !run.resumed && router
+          ? (candidates: readonly RegisteredManifest[]) =>
+              router({
+                mode: capabilityRouterMode(core.validatedEnv.CAPABILITY_ROUTER),
+                candidates,
+                ...preloadThreshold(coldTurn, core.validatedEnv),
+                text: body.message,
+                recentTurns: async () =>
+                  recentTurnTexts(
+                    await saver.listRecentThreadMessages(
+                      req.sessionId,
+                      ROUTER_RECENT_ROWS,
                     ),
-                }),
-              hasCapability: (resource, action) =>
-                ambient.ucan.hasCapability(ucanDelegation, resource, action),
-              text: body.message,
-              requestId: req.requestId,
-              signal: abortController.signal,
-              trace: {
-                ...(tracing.callbacks && { callbacks: tracing.callbacks }),
-                // `thread_id` matches the graph run's, so LangSmith's thread
-                // view groups the router span with the turn.
-                metadata: {
-                  ...tracing.metadata,
-                  thread_id: req.sessionId,
-                  request_id: req.requestId,
+                    ROUTER_RECENT_TURNS,
+                    ROUTER_RECENT_TURN_CHARS,
+                  ),
+                requestId: req.requestId,
+                signal: abortController.signal,
+                trace: {
+                  ...(tracing.callbacks && { callbacks: tracing.callbacks }),
+                  // `thread_id` matches the graph run's, so LangSmith's thread
+                  // view groups the router span with the turn.
+                  metadata: {
+                    ...tracing.metadata,
+                    thread_id: req.sessionId,
+                    request_id: req.requestId,
+                  },
                 },
-              },
-              onShadowVerdict: (wouldPreload) =>
-                this.shadowRoutes.set(req.sessionId, {
-                  requestId: req.requestId,
-                  priorLoaded,
-                  wouldPreload,
-                }),
-            })
+                onShadowVerdict: (wouldPreload) =>
+                  this.shadowRoutes.set(req.sessionId, {
+                    requestId: req.requestId,
+                    priorLoaded,
+                    wouldPreload,
+                  }),
+              })
           : undefined;
 
       // Host page-context / safety-guardrail hooks, resolved against this
@@ -7865,13 +8152,44 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           )
         : undefined;
 
+      // On a cold turn the thread's history shows which capabilities it has
+      // moved on from. The messages are read only then, and only for a
+      // thread with something to unload; the editor stays while its context
+      // is active, and a resumed attempt keeps what the run started with.
+      const unloadable = (priorMeta.loadedPlugins ?? []).filter(
+        (plugin) =>
+          plugin !== EDITOR_PLUGIN_NAME ||
+          !editorContextActive(meta, priorMeta),
+      );
+      const capabilityExpiry =
+        coldTurn &&
+        !run.resumed &&
+        contextBudget.pluginIdleTurns > 0 &&
+        unloadable.length > 0
+          ? {
+              loaded: unloadable,
+              maxIdleTurns: contextBudget.pluginIdleTurns,
+              messages: await this.contextMessages(req.sessionId),
+            }
+          : undefined;
+
       const built = await createMainAgent({
         executionProfile: req.executionProfile,
+        ...(capabilityExpiry ? { capabilityExpiry } : {}),
         registries: core.registries,
         identity: core.identity,
         config: core.validatedEnv,
         availablePlugins: core.availablePlugins,
-        preloadedPlugins,
+        ...(routeCapabilities ? { routeCapabilities } : {}),
+        promptCache: {
+          cold: coldTurn && !run.resumed,
+          ...(priorMeta.promptGuides
+            ? { promptGuides: priorMeta.promptGuides }
+            : {}),
+          ...(priorMeta.capabilityUsage
+            ? { capabilityUsage: priorMeta.capabilityUsage }
+            : {}),
+        },
         byoProvider: byoTurn?.provider,
         contextBudget,
         turnBudget: budget,
@@ -7932,6 +8250,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               }
             : {}),
           ...(hostSafetyModel ? { safetyModel: hostSafetyModel(ambient) } : {}),
+          // The images of the newest user turns, back in each model request
+          // (their bytes are not stored with the conversation).
+          ...(suppliedContextOnly
+            ? {}
+            : {
+                attachmentRecall: {
+                  loadImage: this.recallImageLoader({
+                    sessionId: req.sessionId,
+                    roomId: sessionRoomId,
+                    channelLinks: turnLinks,
+                  }),
+                  imageInput: getModelCapabilities(attachmentModel).image,
+                  signal: abortController.signal,
+                  cache: this.recallCache,
+                },
+              }),
         },
         requestCtx: {
           user: {
@@ -7979,7 +8313,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         checkpointer: saver,
         abortSignal: abortController.signal,
       });
-      const { agent, context } = built;
+      const { agent, context, guideNote } = built;
       for (const [name, effect] of built.toolEffects)
         toolEffects.set(name, effect);
       for (const [name, surface] of built.toolSurfaces)
@@ -8021,19 +8355,36 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const timeNote = suppliedContextOnly
         ? undefined
         : renderTurnTimeNote(turnAt, req.identity.timezone);
+      // A delivery notice stands where the person's words would be (the
+      // message is empty): readers take it off with `userContent` and hide
+      // the message (`isDeliveryNoticeMessage`).
+      const noticeNote = channelDeliveryNote(req.channel?.notice);
+      const noticed = noticeNote
+        ? withTurnTimeNote(spoken, noticeNote)
+        : spoken;
       const replyNote = channelReplyNote(req.channel?.replyContext);
       const referenced = replyNote
-        ? withTurnTimeNote(spoken, replyNote)
-        : spoken;
-      const content = timeNote
-        ? withTurnTimeNote(referenced, timeNote)
+        ? withTurnTimeNote(noticed, replyNote)
+        : noticed;
+      const guided = guideNote
+        ? withTurnTimeNote(referenced, guideNote.text)
         : referenced;
+      const content = timeNote ? withTurnTimeNote(guided, timeNote) : guided;
       const human = new HumanMessage({
         content,
         additional_kwargs: {
           timestamp: turnAt.toISOString(),
           ...(timeNote ? { [TURN_TIME_NOTE_KWARG]: timeNote } : {}),
           ...(replyNote ? { [CHANNEL_REPLY_NOTE_KWARG]: replyNote } : {}),
+          ...(noticeNote
+            ? { [CHANNEL_DELIVERY_NOTICE_KWARG]: noticeNote }
+            : {}),
+          ...(guideNote
+            ? {
+                [TURN_GUIDE_NOTE_KWARG]: guideNote.text,
+                [USAGE_CARRIED_KWARG]: guideNote.plugins,
+              }
+            : {}),
           oracleName: core.identity.name,
           msgFromMatrixRoom: req.client === 'matrix',
           ...speakerKwargs,
@@ -8064,6 +8415,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         // every slot present; later turns write nothing and keep it.
         ...(userContext ? { userContext } : {}),
         ...metadataGraphInput(meta, priorMeta),
+        ...built.stateUpdate,
         ...surface.input,
       };
       const config = {
@@ -8125,6 +8477,18 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       text: string,
       who: 'user' | 'oracle',
       receipt = false,
+    ): Promise<void> {
+      const queued = this.queueReplay(req, text, who, receipt);
+      // The turn's file events follow the person's text on the chain.
+      if (who === 'user') this.noteChannelTextQueued(req);
+      return queued;
+    }
+
+    private queueReplay(
+      req: TurnRequest,
+      text: string,
+      who: 'user' | 'oracle',
+      receipt: boolean,
     ): Promise<void> {
       if (req.client === 'matrix' && !receipt) return Promise.resolve();
       if (req.sessionId.startsWith(SYNTHETIC_SESSION_PREFIX))
@@ -8192,7 +8556,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                 send.roomId,
                 'm.room.message',
                 JSON.stringify(mirrorEventContent(send)),
-                { txnId: send.txnId },
+                { txnId: send.txnId, priority: 'background' },
               )
             : this.gateway.sendText(send.roomId, send.body, {
                 threadId: send.threadId,
@@ -8202,11 +8566,281 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                 priority: 'background',
                 txnId: send.txnId,
               }),
+        sendEvent: (roomId, content, txnId) =>
+          this.gateway.sendEvent(roomId, 'm.room.message', content, {
+            txnId,
+            priority: 'background',
+          }),
         keepAlive: (work) => this.ctx.waitUntil(work),
         log: (message) => console.log(message),
         warn: (message) => console.warn(message),
       });
       return this.mirror;
+    }
+
+    /**
+     * The oracle's plugin device (`botCredentials`): what channel files are
+     * uploaded and Matrix media downloaded with. One gateway RPC per
+     * instance, shared by concurrent callers. A caller the homeserver
+     * answered 401 passes the token it used as `rejected`: the cache is
+     * dropped only when it still holds that token, and the gateway
+     * re-validates its device (or logs it in again) once for everyone.
+     */
+    private pluginDevice(
+      opts: { rejected?: string } = {},
+    ): Promise<BotCredentials> {
+      if (
+        opts.rejected &&
+        this.pluginCredentials?.accessToken === opts.rejected
+      )
+        this.pluginCredentials = null;
+      if (this.pluginCredentials)
+        return Promise.resolve(this.pluginCredentials);
+      this.pluginCredentialsLoad ??= this.gateway
+        .botCredentials(opts.rejected ? { rejected: opts.rejected } : {})
+        .then((credentials) => {
+          this.pluginCredentials = credentials;
+          return credentials;
+        })
+        .finally(() => {
+          this.pluginCredentialsLoad = null;
+        });
+      return this.pluginCredentialsLoad;
+    }
+
+    /**
+     * The mirror pass has queued the person's text of channel request
+     * `req` on the session chain (or found none to queue): release the
+     * request's file events waiting for it, or remember it for a turn that
+     * has not asked yet. Only requests with files are tracked; entries older
+     * than the wait are dropped.
+     */
+    private noteChannelTextQueued(req: TurnRequest): void {
+      if (req.client !== 'channel' || !req.channel?.attachments?.length) return;
+      const entry = this.channelTextQueued.get(req.requestId);
+      if (entry?.waiter) {
+        this.channelTextQueued.delete(req.requestId);
+        entry.waiter();
+        return;
+      }
+      const now = Date.now();
+      for (const [requestId, noted] of this.channelTextQueued)
+        if (!noted.waiter && now - noted.at > CHANNEL_MEDIA_TEXT_WAIT_MS)
+          this.channelTextQueued.delete(requestId);
+      this.channelTextQueued.set(req.requestId, { at: now });
+    }
+
+    /**
+     * `queued` resolves once the person's text of `requestId` is queued on
+     * the session chain (true), after `CHANNEL_MEDIA_TEXT_WAIT_MS` (false),
+     * or with null when `cancel` is called first (nothing left to post).
+     */
+    private afterChannelText(requestId: string): {
+      queued: Promise<boolean | null>;
+      cancel: () => void;
+    } {
+      const noted = this.channelTextQueued.get(requestId);
+      if (noted && !noted.waiter) {
+        this.channelTextQueued.delete(requestId);
+        return { queued: Promise.resolve(true), cancel: () => undefined };
+      }
+      let settle: (value: boolean | null) => void = () => undefined;
+      const queued = new Promise<boolean | null>((resolve) => {
+        settle = resolve;
+      });
+      const finish = (value: boolean | null): void => {
+        clearTimeout(timer);
+        if (this.channelTextQueued.get(requestId)?.waiter === waiter)
+          this.channelTextQueued.delete(requestId);
+        settle(value);
+      };
+      const waiter = (): void => finish(true);
+      const timer = setTimeout(() => finish(false), CHANNEL_MEDIA_TEXT_WAIT_MS);
+      this.channelTextQueued.set(requestId, { at: Date.now(), waiter });
+      return { queued, cancel: () => finish(null) };
+    }
+
+    /**
+     * Post a channel turn's files as encrypted media events in the session
+     * thread (`attachments/room-media.ts`), off the turn's critical path.
+     * Returns at once: per file the turn may read directly
+     * (`channelFilesToKeep`), a promise of its verified plaintext, resolved
+     * as soon as the read passes its check, or null when no copy comes (the
+     * pipeline then reads the gateway as before). In the background:
+     *
+     * - the encryption check and the plugin device, bounded with the uploads'
+     *   reads by `CHANNEL_MEDIA_TURN_TIMEOUT_MS` from now and by the run's
+     *   signal; on a failure (or a room that is not Megolm-encrypted) one
+     *   line is logged and nothing is posted;
+     * - the uploads (`startChannelFileUploads`), kept alive by `waitUntil`;
+     * - one event per file on the session's mirror chain, queued in message
+     *   order right after the person's text (`afterChannelText`) at
+     *   background priority, each within `CHANNEL_MEDIA_SEND_TIMEOUT_MS`;
+     *   their event ids then go to the link store (`setEventIds`), whose room
+     *   copies serve the files once their links expire.
+     *
+     * A resumed attempt posts nothing: its first attempt did, or lost the
+     * uploads with the object, and the person's message is in the
+     * checkpoint already.
+     */
+    private postChannelFilesToThread(
+      req: TurnRequest,
+      roomId: string,
+      runSignal: AbortSignal,
+      resumed: boolean,
+    ): Map<string, Promise<ThreadFileCopy | null>> {
+      const copies = new Map<string, Promise<ThreadFileCopy | null>>();
+      const files = channelThreadFiles(req);
+      const channel = req.channel;
+      // A channel session is always a thread under its marker event.
+      if (
+        resumed ||
+        !files.length ||
+        !channel ||
+        !req.sessionId.startsWith('$')
+      )
+        return copies;
+      const keep = channelFilesToKeep(files);
+      const pending = new Map<
+        string,
+        (copy: Promise<ThreadFileCopy | null> | null) => void
+      >();
+      for (const ref of keep)
+        copies.set(
+          ref,
+          new Promise((resolve) => {
+            pending.set(ref, resolve);
+          }),
+        );
+      const textOrder = this.afterChannelText(req.requestId);
+      const deadline = Date.now() + CHANNEL_MEDIA_TURN_TIMEOUT_MS;
+
+      const started = (async (): Promise<ChannelFileUpload[]> => {
+        const setup = boundedSignal(
+          runSignal,
+          CHANNEL_MEDIA_TURN_TIMEOUT_MS,
+          'Preparing the channel file posts',
+        );
+        try {
+          const [encrypted, device] = await untilAborted(
+            Promise.all([this.roomIsEncrypted(roomId), this.pluginDevice()]),
+            setup.signal,
+          );
+          if (!encrypted) {
+            console.warn(
+              `[attachments] channel files of ${req.sessionId} not posted to its thread: the room is not end-to-end encrypted`,
+            );
+            return [];
+          }
+          const run = startChannelFileUploads({
+            files,
+            sessionId: req.sessionId,
+            deps: {
+              origins: channelGatewayOrigins(this.env.CHANNEL_SERVICE_DID),
+              homeserver: {
+                baseUrl: device.baseUrl,
+                accessToken: device.accessToken,
+              },
+              keep,
+              turnTimeoutMs: Math.max(0, deadline - Date.now()),
+              onUnauthorized: (token) => {
+                void this.pluginDevice({ rejected: token }).catch(
+                  () => undefined,
+                );
+              },
+              log: console,
+            },
+          });
+          this.ctx.waitUntil(run.done);
+          for (const upload of run.uploads)
+            pending.get(upload.file.ref)?.(upload.copy);
+          return run.uploads;
+        } catch (error) {
+          console.warn(
+            `[attachments] channel files of ${req.sessionId} not posted to its thread; the turn reads them from the channel gateway: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return [];
+        } finally {
+          setup.release();
+          // A copy not handed over by now never comes (a resolved one stays).
+          for (const resolve of pending.values()) resolve(null);
+        }
+      })();
+
+      const origin = {
+        provider: channel.provider,
+        bindingId: channel.bindingId,
+        remoteMessageRef: channel.remoteMessageRef,
+      };
+      // Nothing to post: the events need not wait for the text.
+      void started.then((uploads) => {
+        if (uploads.length === 0) textOrder.cancel();
+      });
+      const posted = textOrder.queued.then(async (afterText) => {
+        if (afterText === null) return;
+        if (!afterText)
+          console.warn(
+            `[attachments] the text of ${req.requestId} was not queued within ${CHANNEL_MEDIA_TEXT_WAIT_MS} ms; its files are queued without it`,
+          );
+        // Queued synchronously, one after the other: the chain keeps the
+        // message order whichever upload ends first.
+        const sent = await Promise.all(
+          files.map(async (file): Promise<[string, string] | null> => {
+            const bound = boundedSignal(
+              undefined,
+              CHANNEL_MEDIA_SEND_TIMEOUT_MS,
+              'Posting the channel file',
+            );
+            try {
+              const eventId = await this.roomMirror().sendMedia(
+                req.sessionId,
+                async () => {
+                  const upload = (await started).find(
+                    (entry) => entry.file.ref === file.ref,
+                  );
+                  // A failed upload is logged by `startChannelFileUploads`.
+                  const media = await upload?.uploaded.catch(() => null);
+                  if (!media) return null;
+                  return {
+                    roomId,
+                    threadId: req.sessionId,
+                    txnId: await channelMediaTxnId({
+                      userDid: req.identity.userDid,
+                      bindingId: channel.bindingId,
+                      requestId: req.requestId,
+                      index: file.index,
+                    }),
+                    origin,
+                    media,
+                  };
+                },
+                'channel file',
+                bound.signal,
+              );
+              return eventId ? [file.ref, eventId] : null;
+            } catch (error) {
+              console.warn(
+                `[attachments] channel file ${file.ref} not posted to thread ${req.sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+              );
+              return null;
+            } finally {
+              bound.release();
+            }
+          }),
+        );
+        const eventIds = new Map(
+          sent.filter((entry): entry is [string, string] => entry !== null),
+        );
+        await this.channelAttachmentLinks?.setEventIds(req.sessionId, eventIds);
+      });
+      this.ctx.waitUntil(
+        posted.catch((error: unknown) => {
+          console.warn(
+            `[attachments] channel file posts of ${req.sessionId} failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }),
+      );
+      return copies;
     }
 
     private async afterTurn(
@@ -8217,13 +8851,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     ): Promise<void> {
       const sessions = this.sessions!;
       await sessions.touchSession(sessionId);
-      await this.retainAttachmentPayloads(sessionId, messages).catch(
-        (err: unknown) => {
-          console.warn(
-            `[user-do] attachment payload retention failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        },
-      );
       if (disposition.kind === 'agent')
         await this.compareShadowRoute(sessionId);
       const row = await sessions.getSession(sessionId);
@@ -8365,7 +8992,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     ): Promise<string | null> {
       const human = messages.find((m) => m.type === 'human');
       const ai = [...messages].reverse().find((m) => m.type === 'ai');
-      if (!human) return null;
+      // A delivery notice is the gateway's text, not an exchange to name
+      // the session after: it stays untitled until the person's next turn.
+      if (!human || isDeliveryNoticeMessage(human)) return null;
       // The ambient adapter honours LLM_PROVIDER; fall back to the core's
       // OpenRouter adapter if boot has not built the ambient bag yet.
       const model = (this.ambient?.llm ?? this.core.llm).get('session-title');

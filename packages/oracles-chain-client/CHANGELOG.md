@@ -1,5 +1,11 @@
 # @ixo/oracles-chain-client
 
+## 2.1.4
+
+### Patch Changes
+
+- [#442](https://github.com/ixoworld/qiforge/pull/442) [`e90df77`](https://github.com/ixoworld/qiforge/commit/e90df770503fe0a43be1e6897de2c70ed3f874cd) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - `fetchLinkedResourceDoc` sends the Matrix access token only for `/_matrix/client/v1/media/download/` on the caller's own homeserver, and follows no redirect with it. Any other `serviceEndpoint`, which an oracle's owner writes on chain, is fetched with no credential. `matrixHomeServer` may now be a URL as well as a bare host.
+
 ## 2.1.3
 
 ### Patch Changes

@@ -6,13 +6,8 @@ import type {
   PluginTool,
 } from '../plugin-api/types';
 import type { CapabilityRequirement } from './manifest';
-import type {
-  RegisteredSubAgent,
-  SubAgentRegistry,
-  ToolRegistry,
-} from './registries';
+import type { RegisteredSubAgent } from './registries';
 import { computeSubAgentToolName } from './subagent-as-tool';
-import { NOOP_LOGGER } from './utils';
 
 /** `ctx.ucan.hasCapability` bound to the turn's delegation. */
 export type HasCapability = (resource: string, action: string) => boolean;
@@ -53,8 +48,8 @@ export interface TurnToolAccess<
   /**
    * Plugins that contributed tools or sub-agents of which none is left.
    * Treated like a plugin whose `requires` are unmet (left out of the
-   * prompt, refused by `load_capability`, never preloaded) except that they
-   * are hidden outright: `list_capabilities` does not list them.
+   * prompt, refused by `load_capability`, not offered to the router) except
+   * that they are hidden outright: `list_capabilities` does not list them.
    */
   hiddenPlugins: ReadonlySet<string>;
 }
@@ -143,30 +138,6 @@ export function resolveTurnToolAccess<
     [...contributing].filter((pluginName) => !usable.has(pluginName)),
   );
   return { tools, subAgents, withheldToolNames, hiddenPlugins };
-}
-
-/**
- * `hiddenPlugins` from the boot-time contributions alone, for the
- * capability router, which predicts before the turn's request-time tools are
- * collected. A plugin whose request-time tools would make it usable may be
- * left out here (the router does not offer it; `load_capability` still
- * can); one whose request-time tools are all withheld may be offered, and
- * the turn's build voids that preload (`createMainAgent`).
- */
-export async function bootHiddenPlugins(input: {
-  registries: { tools: ToolRegistry; subAgents: SubAgentRegistry };
-  buildCtx: PluginContext;
-  has: HasCapability;
-}): Promise<ReadonlySet<string>> {
-  const { registries, buildCtx, has } = input;
-  return resolveTurnToolAccess({
-    tools: await registries.tools.collectBoot(buildCtx),
-    subAgents: registries.subAgents.collectBoot(buildCtx),
-    buildCtx,
-    has,
-    // A failing sub-agent is reported by the turn's build, once.
-    logger: NOOP_LOGGER,
-  }).hiddenPlugins;
 }
 
 /**

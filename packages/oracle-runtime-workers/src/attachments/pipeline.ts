@@ -4,14 +4,21 @@
  * processAttachments`:
  *
  *  1. classify + route each attachment by the selected model's native input
- *     capabilities (`send-native` / `parse-local` / `model-extract`);
+ *     capabilities (`route.ts`: `send-native` / `parse-local` /
+ *     `model-extract`) — the same rule for every source; a document whose
+ *     declared size is over `NATIVE_DOCUMENT_MAX_BYTES` skips the native
+ *     lane, one of unknown or smaller size is a native candidate;
  *  2. NATIVE lane: download, sniff, base64 into LangChain content blocks on
- *     the human message; the original is archived to the sandbox in the
- *     background. A failed download falls back to extraction so a bad
- *     download never drops the whole message; a file that is itself refused
- *     (empty, over the budget) is noted, and one whose content is not what it
- *     claims goes to the extract lane with its bytes — never downloaded a
- *     second time, never sent as a native block;
+ *     the human message; an image is first downscaled for the model when the
+ *     oracle binds Cloudflare Images (`resize.ts`), and the ORIGINAL is
+ *     archived to the sandbox in the background. A failed download falls
+ *     back to extraction so a bad download never drops the whole message; a
+ *     file that is itself refused (empty, over the budget) is noted, and one
+ *     whose content is not what it claims, a document whose downloaded
+ *     length is over `NATIVE_DOCUMENT_MAX_BYTES` (the length decides: a
+ *     declared size may be missing or wrong) or an image the resize step
+ *     could not make fit (`dropped`) goes to the extract lane with its
+ *     bytes — never downloaded a second time, never sent as a native block;
  *  3. EXTRACT lane: sequential, plain text read locally, everything else
  *     described / transcribed / extracted by the helper model, then archived
  *     to the sandbox — when the archive succeeds the text handed to the model
@@ -28,9 +35,13 @@
  * A channel file (`channelRef`, see `channel.ts`) is private: it is read
  * through the owner object's channel source and always goes to a model as
  * the bytes already loaded, never by URL; the model, the notes and the
- * stored metadata know it only by its `channel:` reference. It may be up to
- * the gateway's 50 MiB: one above `MAX_FILE_SIZE` is archived to the
- * sandbox and noted, never handed to a model.
+ * stored metadata know it only by its `channel:` reference. The gateway
+ * serves files of up to 50 MiB, but any file declared over `MAX_FILE_SIZE`
+ * is noted without being read: no model is handed it, and the sandbox
+ * archive refuses files over 25 MB (413), so reading it would only cost
+ * memory. A file the owner object reads while posting it to the session
+ * thread (`room-media.ts`) arrives as a pending copy in `deps.preloaded`: the
+ * turn waits for that one read instead of starting a second.
  */
 import type { MessageContent } from '@langchain/core/messages';
 import type { ModelInputCapabilities } from '../core/llm';
@@ -43,7 +54,6 @@ import {
   type NativeAttachment,
 } from './content-blocks';
 import {
-  CHANNEL_MAX_FILE_BYTES,
   channelArchiveName,
   ChannelFileUnavailableError,
   type ChannelMediaSource,
@@ -55,6 +65,7 @@ import {
   loadAttachmentBytes,
   MAX_FILE_SIZE,
   MAX_TOTAL_SIZE,
+  untilAborted,
   type MatrixMediaSource,
 } from './download';
 import {
@@ -65,7 +76,8 @@ import {
   type ExtractionUsage,
 } from './extract';
 import { categorizeFile, verifyMagicBytes, type FileCategory } from './magic';
-import { routeAttachment } from './route';
+import { resizeForModel } from './resize';
+import { NATIVE_DOCUMENT_MAX_BYTES, routeAttachment } from './route';
 import {
   buildAnalysisMarkdown,
   uploadToSandbox,
@@ -90,10 +102,25 @@ export interface AttachmentPipelineDeps {
   source: MatrixMediaSource;
   /** Where `channelRef` files are read; absent = none can be read (noted). */
   channel?: ChannelMediaSource;
+  /**
+   * Channel files this turn is already reading, by `channel:` reference:
+   * each resolves with the verified bytes, or null when no copy came (the
+   * file is then read from `channel` as usual). A copy is counted against
+   * the budget like a download and serves only its own reference; the
+   * entry is removed when it is taken, so the map lets go of the bytes as
+   * the turn moves on. Never rejects (`room-media.ts`); the wait ends with
+   * `signal` too.
+   */
+  preloaded?: Map<
+    string,
+    Promise<{ bytes: Uint8Array; mimetype: string } | null>
+  >;
   /** Helper-model provider for the extract lane; null → media cannot be extracted here. */
   extraction: ExtractionProvider | null;
   /** Sandbox archive target; null → originals are not archived (logged once per turn). */
   sandbox: SandboxUploadConfig | null;
+  /** Cloudflare Images: downscales native images for the model; absent = sent as they are. */
+  images?: ImagesBinding;
   fetchImpl?: typeof fetch;
   signal?: AbortSignal;
   logger: Logger;
@@ -145,9 +172,17 @@ export function attachmentMetaFor(attachment: AttachmentInput): AttachmentMeta {
   };
 }
 
+/** A filename as log lines show it (cleaned like every model-facing name). */
+function logName(attachment: AttachmentInput): string {
+  return sanitizeAttachmentFilename(attachment.filename);
+}
+
 /** A filename as the hidden notes quote it (no controls, brackets or quotes). */
 function noteName(attachment: AttachmentInput): string {
-  return sanitizeNoteField(attachment.filename, NOTE_FILENAME_MAX);
+  return sanitizeNoteField(
+    sanitizeAttachmentFilename(attachment.filename),
+    NOTE_FILENAME_MAX,
+  );
 }
 
 /** A mimetype as the hidden notes show it. */
@@ -196,11 +231,6 @@ function archiveName(attachment: AttachmentInput): string {
     : safeName;
 }
 
-/** The largest file of this source the turn downloads. */
-function fileCap(attachment: AttachmentInput): number {
-  return attachment.channelRef ? CHANNEL_MAX_FILE_BYTES : MAX_FILE_SIZE;
-}
-
 function megabytes(bytes: number): string {
   return `${Math.round(bytes / 1024 / 1024)} MB`;
 }
@@ -213,9 +243,10 @@ const BUDGET_EXCEEDED = 'Total attachment size budget exceeded';
 
 /**
  * The turn's download budget: `MAX_TOTAL_SIZE` across every attachment,
- * both lanes. A file is checked against what is left before its download
- * (declared size) and fetched under a cap of what is left, so a download
- * never runs past the budget and an over-budget file is never fetched twice.
+ * both lanes, and `MAX_FILE_SIZE` per file. A file is checked against what
+ * is left before its download (declared size) and fetched under a cap of
+ * what is left, so a download never runs past the budget and an
+ * over-budget file is never fetched twice.
  */
 class DownloadBudget {
   private used = 0;
@@ -230,13 +261,19 @@ class DownloadBudget {
     params: PrepareAttachmentsParams,
     deps: AttachmentPipelineDeps,
   ): Promise<{ bytes: Uint8Array; mimetype: string; sniffed: boolean }> {
-    const perFile = fileCap(attachment);
+    const perFile = MAX_FILE_SIZE;
     if (attachment.size && attachment.size > perFile)
       throw new AttachmentTooLargeError('File exceeds maximum size');
     const remaining = this.remaining;
     if (remaining === 0 || (attachment.size && attachment.size > remaining))
       throw new AttachmentRejectedError(BUDGET_EXCEEDED);
     const cap = Math.min(perFile, remaining);
+    const ref = attachment.channelRef;
+    const pending = ref ? deps.preloaded?.get(ref) : undefined;
+    if (ref && pending) deps.preloaded?.delete(ref);
+    const preloaded = pending
+      ? await (deps.signal ? untilAborted(pending, deps.signal) : pending)
+      : null;
     try {
       const loaded = await loadAttachmentBytes(
         attachment,
@@ -247,6 +284,14 @@ class DownloadBudget {
           signal: deps.signal,
           maxBytes: cap,
           ...(deps.channel ? { channel: deps.channel } : {}),
+          ...(preloaded
+            ? {
+                preloaded: {
+                  bytes: preloaded.bytes,
+                  contentType: preloaded.mimetype,
+                },
+              }
+            : {}),
         },
       );
       this.used += loaded.bytes.length;
@@ -280,17 +325,26 @@ async function extractOne(
   const category: FileCategory = categorizeFile(attachment.mimetype);
   if (category === 'unsupported') {
     deps.logger.warn(
-      `[attachments] unsupported file type ${attachment.mimetype} for ${attachment.filename}`,
+      `[attachments] unsupported file type ${noteType(attachment)} for "${logName(attachment)}"`,
     );
     return {
       text: `[File "${noteName(attachment)}" (${noteType(attachment)}) is not a supported file type and could not be processed]`,
     };
   }
 
+  // No model reads it and the sandbox refuses it: not worth a download.
+  if (attachment.size !== undefined && attachment.size > MAX_FILE_SIZE)
+    return {
+      text: `[File "${noteName(attachment)}" (${noteType(attachment)}, ${megabytes(attachment.size)}) is larger than the ${megabytes(MAX_FILE_SIZE)} a model or the sandbox takes here, so it was neither read nor archived]`,
+    };
+
   const bytes =
     preloaded ?? (await budget.load(attachment, params, deps)).bytes;
-  verifyMagicBytes(bytes, category, attachment, (m) =>
-    deps.logger.warn(`[attachments] ${m}`),
+  verifyMagicBytes(
+    bytes,
+    category,
+    { mimetype: attachment.mimetype, filename: logName(attachment) },
+    (m) => deps.logger.warn(`[attachments] ${m}`),
   );
 
   // Public http(s) images/videos: let the provider fetch the URL itself. A
@@ -302,10 +356,7 @@ async function extractOne(
     /^https?:\/\//i.test(attachment.mxcUri ?? '');
   let text: string | undefined;
   let usage: ExtractionUsage | undefined;
-  if (bytes.length > MAX_FILE_SIZE) {
-    // A channel file larger than any model is handed here: kept, not read.
-    text = `[File "${noteName(attachment)}" (${noteType(attachment)}, ${megabytes(bytes.length)}) is larger than the ${megabytes(MAX_FILE_SIZE)} a model reads here, so its content was not read]`;
-  } else if (
+  if (
     isHttpUrl &&
     deps.extraction &&
     (category === 'image' || category === 'video')
@@ -323,7 +374,7 @@ async function extractOne(
       }
     } catch (error) {
       deps.logger.warn(
-        `[attachments] URL passthrough failed for "${attachment.filename}", falling back to bytes: ${errorMessage(error)}`,
+        `[attachments] URL passthrough failed for "${logName(attachment)}", falling back to bytes: ${errorMessage(error)}`,
       );
     }
   }
@@ -356,10 +407,7 @@ async function extractOne(
     );
     const actualPath = sanitizeSandboxPath(archived.path);
     let analysisPath: string | undefined;
-    if (
-      bytes.length <= MAX_FILE_SIZE &&
-      (category === 'image' || category === 'video' || category === 'audio')
-    ) {
+    if (category === 'image' || category === 'video' || category === 'audio') {
       const analysisFilename = `${storedName.replace(/\.[^.]+$/, '')}-analysis.md`;
       const analysisDest = `${SANDBOX_OUTPUT_PREFIX}/${analysisFilename}`;
       try {
@@ -382,7 +430,7 @@ async function extractOne(
         analysisPath = sanitizeSandboxPath(analysis.path);
       } catch (error) {
         deps.logger.warn(
-          `[attachments] analysis .md upload failed for "${attachment.filename}": ${errorMessage(error)}`,
+          `[attachments] analysis .md upload failed for "${logName(attachment)}": ${errorMessage(error)}`,
         );
       }
     }
@@ -404,7 +452,7 @@ async function extractOne(
     };
   } catch (error) {
     deps.logger.warn(
-      `[attachments] sandbox upload failed for "${attachment.filename}": ${errorMessage(error)}`,
+      `[attachments] sandbox upload failed for "${logName(attachment)}": ${errorMessage(error)}`,
     );
     return {
       text: `${text}\n\n[Warning: sandbox upload failed — file content is included above]`,
@@ -443,9 +491,11 @@ export async function prepareAttachments(
   }> = [];
   for (const attachment of params.attachments) {
     const kind = classifyAttachment(attachment);
-    const strategy = routeAttachment(kind, params.caps);
+    const strategy = routeAttachment(kind, params.caps, {
+      size: attachment.size,
+    });
     deps.logger.log(
-      `[attachments] "${attachment.filename}" (${attachment.mimetype}) kind=${kind} model=${params.model} → ${strategy}`,
+      `[attachments] "${logName(attachment)}" (${noteType(attachment)}) kind=${kind} size=${attachment.size ?? 'unknown'} model=${params.model} → ${strategy}`,
     );
     // A file larger than a model is handed is never sent as a block.
     if (
@@ -474,28 +524,46 @@ export async function prepareAttachments(
         mimetype,
         filename: sniffed ? '' : attachment.filename,
       });
-      if (bytes.length > MAX_FILE_SIZE) {
-        extractQueue.push({ attachment, preloaded: bytes });
-        continue;
-      }
       if (kind !== classifyAttachment(attachment)) {
         deps.logger.warn(
-          `[attachments] "${attachment.filename}" claims ${attachment.mimetype} but is ${mimetype} — not sent natively`,
+          `[attachments] "${logName(attachment)}" claims ${noteType(attachment)} but is ${mimetype} — not sent natively`,
         );
         extractQueue.push({ attachment, preloaded: bytes });
         continue;
       }
+      if (kind === 'document' && bytes.length > NATIVE_DOCUMENT_MAX_BYTES) {
+        deps.logger.log(
+          `[attachments] "${logName(attachment)}" is ${bytes.length} bytes (declared ${attachment.size ?? 'unknown'}), over the ${NATIVE_DOCUMENT_MAX_BYTES}-byte native document limit → model-extract`,
+        );
+        extractQueue.push({ attachment, preloaded: bytes });
+        continue;
+      }
+      // The model gets a downscaled copy; the sandbox keeps the original.
+      let sent = { bytes, mimetype };
+      if (kind === 'image') {
+        const resized = await resizeForModel(bytes, mimetype, deps.images, {
+          logger: deps.logger,
+        });
+        if (resized.dropped) {
+          deps.logger.log(
+            `[attachments] "${logName(attachment)}" cannot go to the model as an image (${resized.dropped}) → model-extract`,
+          );
+          extractQueue.push({ attachment, preloaded: bytes });
+          continue;
+        }
+        sent = resized;
+      }
       natives.push({
         kind: kind === 'image' ? 'image' : 'file',
-        mimeType: mimetype,
-        base64: bytesToBase64(bytes),
+        mimeType: sent.mimetype,
+        base64: bytesToBase64(sent.bytes),
         filename: sanitizeAttachmentFilename(attachment.filename),
       });
       const note = nativeAttachmentNote(attachment);
       if (note)
         nativeNotes.push({ text: note, meta: attachmentMetaFor(attachment) });
       deps.logger.log(
-        `[attachments] NATIVE → "${attachment.filename}" sent directly to ${params.model} (${bytes.length} bytes, ${kind})`,
+        `[attachments] NATIVE → "${logName(attachment)}" sent directly to ${params.model} (${sent.bytes.length} bytes, ${kind})`,
       );
       if (deps.sandbox) {
         const storedName = archiveName(attachment);
@@ -510,20 +578,20 @@ export async function prepareAttachments(
           deps.fetchImpl,
         ).catch((error: unknown) => {
           deps.logger.warn(
-            `[attachments] background archive failed for "${attachment.filename}": ${errorMessage(error)}`,
+            `[attachments] background archive failed for "${logName(attachment)}": ${errorMessage(error)}`,
           );
         });
       }
     } catch (error) {
       if (error instanceof AttachmentRejectedError) {
         deps.logger.warn(
-          `[attachments] "${attachment.filename}" refused: ${errorMessage(error)}`,
+          `[attachments] "${logName(attachment)}" refused: ${errorMessage(error)}`,
         );
         extractQueue.push({ attachment, refused: error });
         continue;
       }
       deps.logger.warn(
-        `[attachments] native load failed for "${attachment.filename}", falling back to extraction: ${errorMessage(error)}`,
+        `[attachments] native load failed for "${logName(attachment)}", falling back to extraction: ${errorMessage(error)}`,
       );
       extractQueue.push({ attachment });
     }
@@ -563,7 +631,7 @@ export async function prepareAttachments(
         text = result.text;
       } catch (error) {
         deps.logger.error(
-          `[attachments] failed to process ${attachment.filename}: ${errorMessage(error)}`,
+          `[attachments] failed to process "${logName(attachment)}": ${errorMessage(error)}`,
         );
         // A channel file's error never names its link (`channel.ts`).
         text =

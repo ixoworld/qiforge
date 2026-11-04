@@ -27,10 +27,7 @@ import {
 } from '../types';
 
 const base = {
-  flowRef: z
-    .string()
-    .optional()
-    .describe('Which flow. Omit to use the flow that is currently open.'),
+  flowRef: z.string().optional().describe('Default: the open flow.'),
 };
 
 const inputsSchema = z.object({

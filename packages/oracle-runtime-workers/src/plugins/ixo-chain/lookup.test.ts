@@ -282,7 +282,7 @@ describe('runRequests', () => {
         ok: false,
         reason: 'invalid_input',
         detail: expect.stringMatching(
-          /^Invalid args for kind "stub" \(id: .+\)\. Call describe_chain_kinds with \["stub"\] for its arguments\.$/,
+          /^Invalid args for kind "stub" \(id: .+\)\. Its args: id \(required\), reads, first\. describe_chain_kinds with \["stub"\] explains them\.$/,
         ),
         retryable: false,
       },

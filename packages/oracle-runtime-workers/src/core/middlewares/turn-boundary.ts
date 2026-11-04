@@ -23,6 +23,7 @@ import {
 import { isAttachmentViewMessage } from '../../attachments/retention';
 import { isCapabilityGateRefusal } from './capability-gate';
 import { isToolNotRun } from '../tool-not-run';
+import { SEND_FILE_TOOL } from '../../plugins/sandbox/send-file';
 
 export const SUMMARY_PREFIX = 'Here is a summary of the conversation to date:';
 
@@ -45,6 +46,12 @@ export interface CarriedToolCall {
   status: 'success' | 'error';
   /** The start of its result, for the repetition guard to quote. */
   result: string;
+  /**
+   * A `send_file` call's `ToolMessage.artifact` and tool call id: the Reply
+   * Plan still owes the user that file after the summary removed the call.
+   */
+  artifact?: unknown;
+  id?: string;
 }
 
 /** `additional_kwargs` key of the calls a mid-turn summary carries. */
@@ -65,6 +72,8 @@ export function turnCarryOf(
     const name: unknown = Reflect.get(entry, 'name');
     const status: unknown = Reflect.get(entry, 'status');
     const result: unknown = Reflect.get(entry, 'result');
+    const artifact: unknown = Reflect.get(entry, 'artifact');
+    const id: unknown = Reflect.get(entry, 'id');
     if (typeof name !== 'string') return [];
     if (status !== 'success' && status !== 'error') return [];
     return [
@@ -73,27 +82,39 @@ export function turnCarryOf(
         args: Reflect.get(entry, 'args'),
         status,
         result: typeof result === 'string' ? result : '',
+        ...(artifact !== undefined ? { artifact } : {}),
+        ...(typeof id === 'string' ? { id } : {}),
       },
     ];
   });
 }
 
 /**
- * Index of the message that opens the current turn: the latest human
- * message other than the ones the runtime writes itself, or a summary that
- * carries the calls of a turn it condensed mid-way. 0 when there is none.
+ * A turn opens at a human message other than the ones the runtime writes
+ * itself, or at a summary that carries the calls of a turn it condensed
+ * mid-way.
  */
+function opensTurn(message: BaseMessage | undefined): boolean {
+  if (!message || !HumanMessage.isInstance(message)) return false;
+  if (isSummarizationMessage(message))
+    return turnCarryOf(message) !== undefined;
+  return !isAttachmentViewMessage(message);
+}
+
+/** Index of the message that opens the current turn; 0 when there is none. */
 export function turnStart(messages: readonly BaseMessage[]): number {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i];
-    if (!message || !HumanMessage.isInstance(message)) continue;
-    if (isSummarizationMessage(message)) {
-      if (turnCarryOf(message) !== undefined) return i;
-      continue;
-    }
-    if (!isAttachmentViewMessage(message)) return i;
-  }
+  for (let i = messages.length - 1; i >= 0; i--)
+    if (opensTurn(messages[i])) return i;
   return 0;
+}
+
+/** The indexes of every turn-opening message, oldest first. */
+export function turnOpenings(messages: readonly BaseMessage[]): number[] {
+  const openings: number[] = [];
+  messages.forEach((message, index) => {
+    if (opensTurn(message)) openings.push(index);
+  });
+  return openings;
 }
 
 function resultText(message: ToolMessage): string {
@@ -154,6 +175,9 @@ export function carriedCallsOfTurn(
       args: call.args,
       status: message.status === 'error' ? 'error' : 'success',
       result: resultText(message),
+      ...(call.name === SEND_FILE_TOOL && message.artifact !== undefined
+        ? { artifact: message.artifact, id: message.tool_call_id }
+        : {}),
     });
   }
   return carried;

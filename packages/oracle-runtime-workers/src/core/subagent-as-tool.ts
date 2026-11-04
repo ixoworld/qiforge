@@ -33,6 +33,8 @@ import { NOOP_LOGGER } from './utils';
 export interface AgentSpec {
   name: string;
   description: string;
+  /** Added to the error the parent reads when the sub-agent could not run. */
+  failureHint?: string;
   tools?: StructuredTool[];
   passthroughTools?: StructuredTool[];
   systemPrompt: string;
@@ -356,7 +358,8 @@ export function createSubagentAsTool(
         // to the parent as its result.
         if (config.signal?.aborted || isHarnessLimitError(err)) throw err;
         const message = err instanceof Error ? err.message : String(err);
-        return `Error running ${spec.name}: ${message}`;
+        const hint = spec.failureHint ? ` ${spec.failureHint}` : '';
+        return `Error running ${spec.name}: ${message}${hint}`;
       }
     },
     {

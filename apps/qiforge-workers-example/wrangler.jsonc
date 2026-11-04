@@ -8,6 +8,13 @@
   "compatibility_date": "2026-07-15",
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
+  // Minify the bundle: unminified, the isolate's heap is already near
+  // 96 MB of its 128 MB before the first turn, about 65 MB minified (see
+  // packages/oracle-runtime-workers/docs/operations.md, "Isolate memory").
+  // keep_names (already wrangler's default) keeps class and function `.name`
+  // values, which LangChain's serialisation reads; it stays explicit here.
+  "minify": true,
+  "keep_names": true,
   // @matrix-org/matrix-sdk-crypto-wasm's stock entrypoints can't load on
   // workerd (runtime wasm compilation is disallowed; the node entry reads from
   // disk). The bot SDK ships a loader that imports the .wasm as a build-time
@@ -38,6 +45,11 @@
   // Workers AI binding: lets DECISION_PROVIDER=cloudflare-jev run bounded
   // Decisions without account credentials. Leave off unless the oracle uses them.
   // "ai": { "binding": "AI" },
+  // Cloudflare Images binding: images sent natively to a model are downscaled
+  // to a 1568 px long edge (JPEG) first; the sandbox keeps the original. Billed at
+  // $0.50 per 1,000 unique transformations after 5,000 free a month. Without
+  // it images go as they are. See docs/configuration.md ("Wrangler config").
+  // "images": { "binding": "IMAGES" },
   "durable_objects": {
     "bindings": [
       // One instance per (user DID, oracle): the user's SQLite working copy +

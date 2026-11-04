@@ -98,6 +98,7 @@ export const OraclesProvider = ({
   transactSignX,
   createDelegation,
   createInvocation,
+  getRoomsBotAuth,
   onDelegationRenewed,
   queryClient: externalQueryClient,
 }: PropsWithChildren<IOraclesProviderProps>) => {
@@ -459,6 +460,7 @@ export const OraclesProvider = ({
     () => ({
       wallet: initialWallet,
       transactSignX,
+      getRoomsBotAuth,
       authedRequest,
       getDelegation,
       getInvocation,
@@ -473,6 +475,7 @@ export const OraclesProvider = ({
     [
       initialWallet,
       transactSignX,
+      getRoomsBotAuth,
       authedRequest,
       getDelegation,
       getInvocation,

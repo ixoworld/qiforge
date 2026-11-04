@@ -68,3 +68,22 @@ tune prompts or thresholds on the final confirmation set.
 Databricks must be tested as two separate assurance classes:
 `databricks-systemone` (explicit Unity Gateway model service) and
 `databricks-ai-decide` (managed function with mutable backend).
+
+## `runtime.route-capabilities` result (Nov 2026)
+
+A hand-labelled set of 166 messages (single annotator, not sampled traffic;
+dev and test splits) compared the question shapes on `typesafe/jev-1.13`
+and cheap LLM classifiers. What carried over to the runtime:
+
+- A single `choice` puts its mass on one option, so it misses the second need
+  of a two-need message, and it collapses when two candidates read alike:
+  recall fell to 0.74 on the real plugin list at every threshold.
+- A yes/no question per candidate has no rival options, so a loose question
+  fires on most candidates. Asking for a direct ask lifted precision without
+  losing recall.
+- Description quality outweighed the question shape: the same question went
+  from recall 0.74 (t=0.3) to 1.00 by adding the manifest's `whenToUse` lines.
+- Thresholds do not carry between description styles.
+- Jev is about 300 ms; the LLM classifiers that matched its recall took about
+  900 ms or more, so a 1 s budget cuts their effective recall. They cost less
+  per call, and neither cost matters beside a model call.

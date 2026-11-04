@@ -1,6 +1,6 @@
 # Chat-native delivery: concise replies, multi-message turns and browser artefacts
 
-**Status:** Accepted; phases 1 and 2 implemented · **Date:** 2026-09-25
+**Status:** Accepted; phases 1 and 2 implemented · **Date:** 2026-09-25 · **Revised 2026-10-30: WhatsApp-first.** Ordinary answers stay in chat; only document-length output or a file the user asked for becomes an artefact ([§2](#2-principles), [§4](#4-surfaces-and-delivery-profiles)–[§7](#7-artefacts)).
 **Scope:** `packages/oracle-runtime-workers`, `ixoworld/ixo-channel-gateway`, `ixoworld/ixo-portal` (the shared viewer), `ixoworld/companion` (configuration only)
 **Builds on:** `packages/oracle-runtime-workers/docs/channels.md`, `docs/plans/durable-runs.md`, the gateway's `docs/engineering-spec.txt`
 
@@ -23,9 +23,9 @@ The Companion replies on WhatsApp, Matrix and (later) Telegram and Slack the sam
 
 This spec makes chat a **delivery profile**, chosen per turn, inside the same runtime. It has four pieces:
 
-1. **A surface section in the prompt.** On chat surfaces the model is told it is texting: lead with the answer, write 1–3 short messages, and don't use headings or tables.
+1. **A surface section in the prompt.** On chat surfaces the model is told it is texting: lead with the answer, prefer two or three messages (more when the answer needs them), and don't use headings or tables.
 2. **Reply Plans.** A run on a chat surface finishes as an ordered list of **parts**: short text messages and artefact links. Every part has a stable ID and is delivered exactly once, extending the idempotency that channel runs already have.
-3. **Artefacts.** Long output (plans, reports, tables, drafts) becomes a document the user opens in a browser. The model creates one with `create_artifact`, and a deterministic shaper creates one automatically when the model writes too much anyway. The user's own database holds the canonical copy. The link serves only ciphertext, and the key sits in the URL fragment, so link unfurlers never see the content.
+3. **Artefacts.** Document-length output (a long report, long code, several screens of text) or a file the user asked for becomes a document the user opens in a browser, while the conversation keeps its conclusions, decisions and next actions. The model creates one with `create_artifact`, and a deterministic shaper creates one automatically when a step is document-length anyway. The user's own database holds the canonical copy. The link serves only ciphertext, and the key sits in the URL fragment, so link unfurlers never see the content.
 4. **Rendering stays at the edge.** QiForge decides what the parts are. IXO Channels decides how each provider renders and paces them. The Matrix gateway does the same for Matrix rooms. The Portal is unchanged.
 
 **Recommendation: do not run a separate instance of the Workers runtime for chat.** Everything chat needs is a per-turn decision the runtime can already key on (`TurnRequest.client`, `channel.provider`). A second instance would either create a second Companion, which breaks the one-identity invariant of IXO Channels, or put two writers on each user's owner file. See [§9](#9-recommendation-one-companion-no-separate-runtime-instance).
@@ -58,6 +58,7 @@ Finding 9 blocks any live channel acceptance run and should be fixed first. The 
 4. **Exactly-once per part.** The `(userDid, bindingId, requestId)` idempotency extends to `(…, partId)`. It is still better to lose a message than to send a duplicate.
 5. **Private by default.** Artefact links are safe against link unfurlers. No plaintext is stored in R2; the operator still holds each share key (see the runtime's `docs/chat-delivery.md`). The canonical copy belongs to the user.
 6. **The Portal's streaming is untouched.** Its SSE streaming, frames and tools do not change. The Portal gains only the shared artefact viewer.
+7. **Chat first; a link is never the only copy of an ordinary answer.** Many users have WhatsApp-only data plans and cannot open a general browser. Most answers stay in the conversation, split into two or three coherent messages where that helps; three is a presentation preference, never a reason to drop content. Small tables and lists are rewritten for chat, not exported. An artefact is reserved for necessarily long output or a file the user asked for, and even then the conversation keeps the conclusions, decisions and next actions. The prompt, the `create_artifact` description and the shaper state this policy together and must change together.
 
 ---
 
@@ -84,7 +85,7 @@ A turn resolves a **delivery profile** from its surface. The profile feeds four 
 | Consumer         | What the profile changes                                                                                        |
 | ---------------- | --------------------------------------------------------------------------------------------------------------- |
 | Prompt composer  | Adds the `surface` section ([§5](#5-writing-for-the-surface))                                                   |
-| Tool surface     | Binds `create_artifact` on chat surfaces only ([§7](#7-artefacts))                                              |
+| Tool surface     | Binds `create_artifact` and `send_file` on chat surfaces only ([§7](#7-artefacts))                              |
 | Run completion   | Projects the run into a Reply Plan, running the shaper per model step ([§6](#6-reply-plans))                    |
 | Delivery drivers | The gateway renders and paces parts. The Matrix gateway posts one event per part ([§8](#8-delivery-by-surface)) |
 
@@ -94,12 +95,12 @@ A turn resolves a **delivery profile** from its surface. The profile feeds four 
 
 The runtime already knows the surface of every turn:
 
-| Ingress               | `TurnRequest.client` | Extra                           | Profile                                                                              |
-| --------------------- | -------------------- | ------------------------------- | ------------------------------------------------------------------------------------ |
-| Portal HTTP           | `portal`             | none                            | `stream`: today's behaviour, no shaping                                              |
-| `POST /channels/turn` | `channel`            | `channel.provider`              | `chat` with that provider's limits (`whatsapp`, `telegram`, `slack`), else `generic` |
-| Matrix room message   | `matrix`             | `roomKind` (`direct` / `group`) | `chat` `matrix`; a group room gets at most 2 messages per step and 3 parts per reply |
-| Scheduled task run    | `matrix`             | `task:` session                 | `chat` `matrix`; the task delivers the reply as one message (the plan's text)        |
+| Ingress               | `TurnRequest.client` | Extra                           | Profile                                                                                         |
+| --------------------- | -------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Portal HTTP           | `portal`             | none                            | `stream`: today's behaviour, no shaping                                                         |
+| `POST /channels/turn` | `channel`            | `channel.provider`              | `chat` with that provider's limits (`whatsapp`, `telegram`, `slack`), else `generic`            |
+| Matrix room message   | `matrix`             | `roomKind` (`direct` / `group`) | `chat` `matrix`; a group room gets 1–2 messages, 3 parts per reply, spill over 2,400 characters |
+| Scheduled task run    | `matrix`             | `task:` session                 | `stream` on every surface: a stored result keeps the model's whole text, never a chat rendering |
 
 ```ts
 // src/delivery/types.ts
@@ -108,29 +109,34 @@ export type DeliveryProfile =
   | { kind: 'chat'; surface: string; label: string; limits: ChatLimits };
 
 export interface ChatLimits {
-  bubbleTarget: number; // soft size of one message, characters
+  bubbleTarget: number; // soft size of one message, characters; the prompt asks for it
   bubbleMax: number; // hard size before a sentence split
   minBubble: number; // shorter fragments merge into the next message
-  maxBubbles: number; // per model step; more → spill to an artefact
+  maxBubbles: number; // preferred messages per answer: the prompt asks for it, packing merges toward it; never a spill trigger
   maxPartsPerRun: number; // across the whole reply
-  spillChars: number; // a step's text longer than this → spill
-  maxListItems: number; // a longer list → spill with a preview
+  spillChars: number; // a step's rendered text longer than this → spill
+  maxListItems: number; // a longer list, or a table with more rows → spill with a preview
   previewItems: number; // list items kept in the lead message
   maxCodeLines: number; // a longer code block → spill
-  tables: boolean; // may a table stay inline?
+  tables: boolean; // may a table stay inline as a table? Otherwise one line per row; never a spill trigger
 }
 ```
 
 These are the defaults. An oracle overrides them per surface in `OracleConfig.delivery.limits`; a count must be a whole number of at least 1, or the default stays. Matrix rooms get the `stream` profile unless `MATRIX_CHAT_DELIVERY=true` or `OracleConfig.delivery.matrixChat: true`, and scheduled task runs always do. Artefacts are available on every chat surface whenever artefact storage is configured.
 
-| Field                    | `whatsapp`  | `telegram`  | `slack`       | `matrix`      | `generic`   |
-| ------------------------ | ----------- | ----------- | ------------- | ------------- | ----------- |
-| bubbleTarget / bubbleMax | 600 / 1,500 | 800 / 2,000 | 1,200 / 3,000 | 1,200 / 4,000 | 600 / 1,500 |
-| maxBubbles / per run     | 4 / 6       | 4 / 6       | 3 / 5         | 3 / 5         | 3 / 5       |
-| spillChars               | 1,800       | 2,400       | 3,500         | 4,000         | 1,800       |
-| tables inline            | no          | no          | no            | no            | no          |
+| Field                       | `whatsapp`  | `telegram`  | `slack`       | `matrix`      | `generic`   |
+| --------------------------- | ----------- | ----------- | ------------- | ------------- | ----------- |
+| bubbleTarget / bubbleMax    | 600 / 1,500 | 800 / 2,000 | 1,200 / 3,000 | 1,200 / 4,000 | 600 / 1,500 |
+| minBubble                   | 60          | 60          | 60            | 60            | 60          |
+| maxBubbles / maxPartsPerRun | 3 / 8       | 3 / 8       | 3 / 8         | 3 / 8         | 3 / 8       |
+| spillChars                  | 4,500       | 4,500       | 6,000         | 8,000         | 4,500       |
+| maxListItems / previewItems | 15 / 3      | 15 / 3      | 15 / 3        | 15 / 3        | 15 / 3      |
+| maxCodeLines                | 40          | 40          | 40            | 40            | 40          |
+| tables inline               | no          | no          | no            | no            | no          |
 
-The runtime targets are deliberately far below the provider hard limits in the [appendix](#appendix-provider-limits-that-shape-the-design). The gateway enforces those limits a second time.
+A Matrix group room overrides `maxBubbles` to 2, `maxPartsPerRun` to 3 and `spillChars` to 2,400, so a group never hears a long answer in chat.
+
+The defaults keep an ordinary answer in chat: a 4,500-character answer is three full WhatsApp messages at `bubbleMax`, a 15-item list and a 40-line code block are still readable on a phone, and a table is rewritten as lines. Message sizes stay deliberately far below the provider hard limits in the [appendix](#appendix-provider-limits-that-shape-the-design) (WhatsApp 4,096 per message against a `bubbleMax` of 1,500). The gateway enforces those limits a second time.
 
 The profile also appears on `RuntimeContext` as `ctx.session.surface`: `{ kind: 'stream' }` or `{ kind: 'chat', surface, label }`. Plugins can then adapt their output, for example a tasks plugin returning a compact list on chat. This is a public API addition, so it needs a matching update to the public docs.
 
@@ -143,17 +149,18 @@ This is a new framework-owned slot in `core/prompt-composer.ts`, after `COMMUNIC
 ```text
 ## Where this conversation is happening
 
-You are replying in {label}. The user reads your reply as chat messages, not as a document.
+You are replying in {label}. The user reads your reply as chat messages, often on a phone with a chat-only data plan and no browser, so the answer itself belongs in the messages.
 
 - Lead with the answer. Write like a sharp person texting: short sentences, no preamble, no sign-off.
-- Aim for one to three short messages. A blank line starts a new message; keep each under about {bubbleTarget} characters.
-- No headings, tables or horizontal rules. Short lists (up to {maxListItems} items) and **bold** for the key fact are fine.
-- Anything longer, such as a plan, report, comparison, draft, table or code, goes in `create_artifact`: the full Markdown as the document, a one-line message, and at most one follow-up question. The user gets the message, a link that opens the document in their browser, then the question.
+- Prefer {two or three messages}. A blank line marks where a message may break; short paragraphs are grouped so the reply reads as {two or three messages}. Keep each paragraph under about {bubbleTarget} characters. Use more messages when the answer needs them; never leave content out to fit.
+- Ordinary answers stay in chat, including explanations, comparisons, short plans and step-by-step instructions. No headings or horizontal rules. Lists up to {maxListItems} items, code up to {maxCodeLines} lines and **bold** for the key fact are fine in chat. Write a small comparison as one short line per item, not a table.
+- Deliver every file meant for the user (a Word document, PDF, spreadsheet, slide deck, image, CSV or anything else) with `send_file`: the user receives the file itself here, as an attachment. When the user asks for a file in a particular format, build it in the sandbox and send it this way. Never paste a download link, and do not describe how to open or download it. Do not send helper scripts or intermediate files. Call it once per file, after the sandbox call that saved the file has finished.
+- Use `create_artifact` for a document with no particular file format, or when the output is genuinely document-length: several screens of text, long code, a long report. Even then, its message carries the conclusions, decisions and next actions, and the document holds the detail. Call it last: the user gets the message, the document, then at most one follow-up question.
 - The user sees a typing indicator while you work. Do not narrate your steps or announce tool calls.
 - End with at most one question.
 ```
 
-Without artefact storage, the `create_artifact` line reads instead: "When something is too long for chat, send the short version and offer the rest."
+The `send_file` line appears only when the tool is bound, and then comes first. In a Matrix room it says a link to the file is posted instead of promising an attachment. Without `send_file` the `create_artifact` line reads "only when the user asks for a document or file". `{two or three messages}` is `maxBubbles` in words: "one message", "one or two messages", "two or three messages", else "up to N messages". Without artefact storage, the `create_artifact` line reads instead: "Everything you write is delivered as messages; when something is genuinely long, put the essential part first." (Nothing is withheld there: the shaper never spills without storage.)
 
 Why a composer slot rather than a plugin middleware: the surface belongs to the framework, like Node's Slack slot, not to any plugin. The Companion's own `communicationStyle` ("Match energy: one-liners back when terse…") is consistent with the slot and needs no change.
 
@@ -167,7 +174,8 @@ Why a composer slot rather than a plugin middleware: the surface belongs to the 
 // Shared by the runtime, the channel contract and the gateway.
 export type ReplyPart =
   | { partId: string; kind: 'text'; text: string }
-  | { partId: string; kind: 'artifact'; artifact: ArtifactRef };
+  | { partId: string; kind: 'artifact'; artifact: ArtifactRef }
+  | { partId: string; kind: 'file'; file: ReplyFile };
 
 export interface ReplyPlan {
   v: 1;
@@ -195,44 +203,46 @@ The plan is built **once, when the run finishes** (`src/delivery/plan.ts`). Ther
 1. The turn's **model steps** are its AI messages after the last human message. Each step can write text and call tools.
 2. Text of 200 characters or less that precedes a tool call, in one paragraph with no list or code, is **narration** and is dropped. Once the answer arrives, "Checking your calendar" adds nothing.
 3. Any other step text is **content**. It goes through the shaper ([§6.3](#63-the-shaper)). This fixes finding 4: a plan the model writes before calling tools is no longer lost.
-4. A `create_artifact` call adds three parts in order: its `message` as a text part, its `artifact` part, then its optional `followUp` question. This is the same lead → artefact → question shape as an automatic spill.
-5. The reply is capped at `maxPartsPerRun` by merging the shortest adjacent pair of text parts, as long as the result fits `bubbleMax`. If that is not enough, a spill's lead and closing question go, because its artefact holds both. Text found nowhere else is never dropped, so a reply with several documents, or a long reply without artefact storage, can stay over the cap.
+4. A `create_artifact` call adds three parts in order: its `message` as a text part, its `artifact` part, then its optional `followUp` question. This is the same lead → artefact → closing shape as an automatic spill. A `send_file` call adds a `file` part in its place.
+5. The reply is capped at `maxPartsPerRun` by merging the shortest adjacent pair of text parts, as long as the result fits `bubbleMax`. If that is not enough, a spill's lead and closing go, because its artefact holds both; the reply's last part stays as long as possible. Text found nowhere else is never dropped, so a reply with several documents, or a long reply without artefact storage, can stay over the cap.
 6. A resumed run puts back the text it had streamed before the reset, minus the steps the checkpoint kept, in front of the first step after them.
 
 The model's checkpointed messages are **never rewritten**. The model remembers what it actually wrote, and the plan is a projection of it for one surface.
 
 ### 6.3 The shaper
 
-This is a pure function, `shape(markdown, profile) → ReplyPart[]`. It uses the `marked` lexer, already a runtime dependency, and `Intl.Segmenter` for sentence boundaries.
+This is a pure function, `shape(markdown, profile) → ReplyPart[]`. It uses the `marked` lexer, already a runtime dependency, and `Intl.Segmenter` (locale pinned to `en`, so a rebuilt plan splits the same way on every runtime) for sentence and grapheme boundaries. No message, lead or closing it produces is longer than `bubbleMax`.
 
 1. **Lex** the step text into blocks: paragraph, list, code, table, heading, quote, rule.
-2. **Decide whether to spill.** A step spills if its rendered length is over `spillChars`, if it contains a table (unless `tables`) or a code block over `maxCodeLines`, if it has a list over `maxListItems`, or if packing would need more than `maxBubbles`.
+2. **Decide whether to spill**, before packing. A step spills only when it is document-length: its rendered text (the blocks joined by blank lines) is longer than `spillChars`, it has a code block over `maxCodeLines` lines, or a list with more than `maxListItems` items or a table with more than `maxListItems` rows. Nothing else spills it: a small table is rewritten as one line per row (unless `tables`), and the number of messages a step packs into never counts, because `maxBubbles` is a packing preference (step 3) and the run's cap is applied later, by merging ([§6.2](#62-from-a-run-to-a-plan)).
 3. **Pack**, when not spilling:
    - A heading becomes a bold line attached to the block that follows it.
-   - A paragraph ending in `:` stays with the list or code block after it.
-   - A fragment shorter than `minBubble` merges into the next one.
-   - Anything over `bubbleMax` is split at sentence boundaries, then at word boundaries.
+   - A paragraph ending in `:` stays with the list, table or code block after it.
+   - Either starts the message that holds what follows it. When joining would pass `bubbleMax`, the next block is split with the room left (`bubbleMax` minus the heading or lead-in), so the heading rides on its first piece. Only a lead-in longer than half of `bubbleMax` is sent ahead as message(s) of its own, and those are never joined onto the message before them.
+   - A fragment shorter than `minBubble` merges into the next one, when the result fits `bubbleMax`.
+   - Anything over `bubbleMax` is split at paragraph, line, sentence, then word boundaries, and as a last resort between graphemes (never inside an emoji or a surrogate pair). A code block is re-fenced per piece.
+   - **Toward `maxBubbles`:** a step with no more units than `maxBubbles` keeps the model's own message breaks. Otherwise the units are filled left to right into messages of at most `bubbleTarget` (joined by a blank line). If that still leaves more than `maxBubbles`, the original units are filled again, left to right, up to `bubbleMax`. A unit holding a code block is never joined to another here: a code block of at least `minBubble` characters keeps its own message; a shorter one merges forward like any fragment (the `minBubble` step above). Greedy filling gives the fewest messages for the order given; a step that cannot fit stays at more messages, and nothing is dropped or spilled on count. Five 250-character paragraphs become 3 messages; ten 432-character paragraphs become 4.
    - Each resulting unit is one bubble.
-4. **Spill**, when needed. The output is **lead → artefact → closing question**:
-   - The lead is the first content block, cut to `bubbleTarget` at a sentence boundary. A lead-in that ends in `:` keeps its list's first `previewItems` items plus "…and N more".
-   - The artefact is the whole step text, titled by its first heading or else its first sentence.
-   - If the step ends with a question, that question is kept as a final bubble, because chat depends on it.
-5. **Normalise** to chat Markdown. Headings become bold, rules and raw HTML are dropped, and tables go to an artefact. Without artefact storage, a table becomes a list instead.
+4. **Spill**, when needed. The output is **lead → artefact → closing**, so the conversation keeps the substance even when the document is never opened:
+   - The lead is the first block after any heading. A leading code block is skipped (the artefact holds it, so a spill caused by long code never repeats it in chat); the lead comes from the block after it, or is empty. When that block is a paragraph and the step's last block ("Want me to apply it?"), it is the closing instead, after the link, and there is no lead. A paragraph or quote is kept whole when it fits `bubbleMax`, else cut at a sentence boundary. A list or table, or a lead-in that ends in `:` followed by one, is previewed: its first `previewItems` items or rows (as chat lines) plus "…and N more". A preview that does not fit `bubbleMax` keeps fewer items (down to one), then cuts that item and, if needed, the lead-in with "…"; the trailer and its count always stay.
+   - The artefact is the whole step text, titled by its first heading or else its first sentence (cut at 60 characters without splitting a grapheme).
+   - The closing is the step's last block, when the lead did not use it. A list or table (with its `:` lead-in, if the block before it is one) is previewed the same way, so "Next steps:" and its first items stay in chat. A last paragraph is joined to the paragraph before it when both fit `bubbleMax` (a conclusion and its question), else kept alone when it fits, else its last sentences that fit. It is kept whether or not it is a question, and never equals the lead.
+   - Lead and closing are spill framing: when a run is over `maxPartsPerRun` and merging text is not enough, `capParts` drops them, the reply's last part last ([§6.2](#62-from-a-run-to-a-plan)). The artefact holds both. A Matrix group room (3 parts per run) reaches that point soonest.
+5. **Normalise** to chat Markdown. Headings become bold, rules and raw HTML are dropped, and a table becomes one line per row (`- **first cell** · Header: value · …`) unless `tables` is set.
 
-The rules above were checked on a scratch prototype with typical Companion output. Example: "plan my week", 789 characters with a table and a 5-step list, is what the model writes for the Portal today.
+Example (a golden test): "plan my week", 789 characters with a table and a 3-step list, is what the model writes for the Portal. Before the 2026-10-30 revision it spilled because of its table; it now stays in chat as one message: its four blocks are more than the preferred three, and together they fit `bubbleTarget`:
 
-| Today on WhatsApp (one message)                                                                                                          | With this design (three parts)                                                                                               |
-| ---------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `## Your week at a glance` ↵ `You have **14 meetings**…` ↵ `### Deadlines` ↵ `\| Item \| Due \| Status \|` ↵ `\|---\|---\|---\|` … (raw) | 💬 You have **14 meetings** this week, with Tuesday and Wednesday the heaviest (5 each). Three deadlines land before Friday. |
-|                                                                                                                                          | 🔗 **Your week at a glance** · _Open_ (artefact card: the full plan, table included)                                         |
-|                                                                                                                                          | 💬 Want me to add the focus blocks and move the 1:1 with Sam?                                                                |
+| Today on WhatsApp before chat delivery (one message)                                                                                     | With this design (one message, no link)                                                                                                                                                                                                                                                        |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `## Your week at a glance` ↵ `You have **14 meetings**…` ↵ `### Deadlines` ↵ `\| Item \| Due \| Status \|` ↵ `\|---\|---\|---\|` … (raw) | **Your week at a glance** ↵ You have **14 meetings** this week… ↵ **Deadlines** ↵ - **Board deck** · Due: Wed 1 Oct · Status: Draft 60% ↵ … ↵ **Suggested plan** ↵ 1. **Monday 08:00–10:00**: focus block for the board deck. ↵ … ↵ Want me to add the focus blocks and move the 1:1 with Sam? |
 
-Two more prototype results:
+More results from the golden tests:
 
-- A 190-character flight answer stayed as 2 bubbles, with no spill.
-- A 10-item restaurant list became the lead-in, the first 3 items and "…and 7 more", then the artefact, then "Should I book one of these?".
+- A 190-character flight answer stays as 2 messages.
+- A 10-item restaurant list stays in chat: the lead-in with the list, then "Should I book one of these?". A 20-item list spills as the lead-in, the first 3 items and "…and 17 more", then the artefact, then the question.
+- A 5,000-character step spills with its whole first paragraph before the link and its last two paragraphs (ending "Next step: take the signed form…") after it.
 
-With the §5 prompt the model should usually write the short form itself. The shaper is the safety net.
+With the §5 prompt the model should usually write the chat form itself. The shaper is the safety net.
 
 ### 6.4 Durability and idempotency
 
@@ -262,15 +272,21 @@ The runtime binds this tool on chat turns when artefact storage is configured (`
 create_artifact({
   title: string,        // ≤ 120 characters
   content: string,      // full Markdown, ≤ 200,000 characters
-  message: string,      // the one-line chat message sent before the link, ≤ 600
+  message: string,      // the chat message sent before the link: conclusions, decisions, next actions; ≤ 1,000
   followUp?: string,    // at most one question, sent after the link, ≤ 300
 }) → { ok: true, artifactId, title, url, mime, bytes, expiresAt }
 ```
+
+The tool's description carries the same policy as the prompt: use it **only** when the user asked for a file or document, or when the output is genuinely document-length (a long report, long code, several screens of text). Ordinary answers, comparisons, short plans and lists stay in chat as messages. `content` holds the full Markdown; `message` holds the conclusions, decisions and next actions, so the user has them without opening the document. `message` allows 1,000 characters for that. It is delivered as its own text part before the link, which a gateway splits at its provider's limit (4,096 on WhatsApp); it is never put inside the link card.
 
 - **Return-direct.** It ends the run without another model call, which saves a full-context round trip for every artefact.
   - LangChain 1.4's `createAgent` exits only when the **last** tool result of a step comes from a return-direct tool. So the tool description asks for `create_artifact` as the final call, on its own.
   - When the model calls it alongside other tools anyway, an `afterModel` hook in the core (`middlewares/return-direct-first.ts`) moves it to the front of that step's tool calls. The loop then continues, and the model sees every result.
 - **Read access.** A second tool, `read_artifact`, would let the model quote from or update an earlier artefact. Later.
+
+### 7.1.1 `send_file`
+
+A file the oracle built in the sandbox (Word, PDF, a spreadsheet, an image) is not a Markdown document. It goes through `send_file({ path, caption? })`, which the sandbox plugin binds on chat turns when the sandbox can sign links (`src/plugins/sandbox/send-file.ts`). The tool signs the stored file server side and the plan delivers a `file` part; the gateway fetches it and sends a native attachment. On chat turns `artifact_get_presigned_url` is not offered and the other `artifact_*` lookups lose their URL fields, so the model never holds a link to paste. The link rides in `ToolMessage.artifact`, not in the content the model reads. [Chat delivery](../packages/oracle-runtime-workers/docs/chat-delivery.md#files) has the details.
 
 ### 7.2 Storage
 
@@ -348,15 +364,15 @@ sequenceDiagram
     Q->>Q: mirror the reply to the Companion room
 ```
 
-| Area                          | Change                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `src/qiforge.ts`              | Parses `plan` next to `text`. A plan that does not parse is dropped (counted as `qiforge_plan_invalid_total`), and `text` is sent instead.                                                                                                                                                                                                                                                                                                 |
-| `outbound_delivery`           | One row per part: `part_id`, `UNIQUE(request_id, part_id)`. The ID is `del_` + HMAC(`delivery \0 requestId \0 partId`): still 64 hex characters, so the receipt regex and `biz_opaque_callback_data` reconciliation still work. Existing objects rebuild the table in place.                                                                                                                                                               |
-| Ordering and pacing           | Parts go out strictly in order, about a second apart. After an ambiguous (`unknown`) send, the rest of the reply waits ten seconds so the receipt can land first. Graph API pacing errors (pair rate limit 131056; throughput 4, 80007, 130429) are retried without spending the part's attempts.                                                                                                                                          |
-| Ambiguous sends               | A part in `unknown` is never resent. This keeps the gateway spec's rule: "prefer one missing response over multiple user-visible duplicate replies".                                                                                                                                                                                                                                                                                       |
-| Policy                        | The binding check and `channelPolicy` run again before **every** part. A binding revoked in the middle of a reply suppresses the rest. The 24-hour window is checked per part. A document link is allowed only as an outbound reply.                                                                                                                                                                                                       |
-| Liveness                      | While the turn runs, the message is marked read and the typing indicator is shown, renewed every 20 seconds while polling. The raw inbound message ID this needs is sealed in the pending payload and removed with it.                                                                                                                                                                                                                     |
-| `packages/whatsapp/render.ts` | Maps chat Markdown to WhatsApp syntax: `*bold*`, `_italic_`, `~strike~`, monospace, lists, quotes; `label (url)` for links. An artefact becomes a **CTA URL** card: the title as its header (≤ 60), the message before it as its body when that fits (≤ 1,024), "Open document" as its button, and the expiry as its footer. Anything over 4,096 characters is split at paragraph, line, sentence and word boundaries. **Never truncate.** |
+| Area                          | Change                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/qiforge.ts`              | Parses `plan` next to `text`. A plan that does not parse (an older gateway meeting a new part kind included) is dropped (counted as `qiforge_plan_invalid_total`), and `text` is sent instead.                                                                                                                                                                                                                                                                                                                                                  |
+| `outbound_delivery`           | One row per part: `part_id`, `UNIQUE(request_id, part_id)`. The ID is `del_` + HMAC(`delivery \0 requestId \0 partId`): still 64 hex characters, so the receipt regex and `biz_opaque_callback_data` reconciliation still work. Existing objects rebuild the table in place.                                                                                                                                                                                                                                                                    |
+| Ordering and pacing           | Parts go out strictly in order, about a second apart. After an ambiguous (`unknown`) send, the rest of the reply waits ten seconds so the receipt can land first. Graph API pacing errors (pair rate limit 131056; throughput 4, 80007, 130429) are retried without spending the part's attempts.                                                                                                                                                                                                                                               |
+| Ambiguous sends               | A part in `unknown` is never resent. This keeps the gateway spec's rule: "prefer one missing response over multiple user-visible duplicate replies".                                                                                                                                                                                                                                                                                                                                                                                            |
+| Policy                        | The binding check and `channelPolicy` run again before **every** part. A binding revoked in the middle of a reply suppresses the rest. The 24-hour window is checked per part. A document link is allowed only as an outbound reply.                                                                                                                                                                                                                                                                                                            |
+| Liveness                      | While the turn runs, the message is marked read and the typing indicator is shown, renewed every 20 seconds while polling. The raw inbound message ID this needs is sealed in the pending payload and removed with it.                                                                                                                                                                                                                                                                                                                          |
+| `packages/whatsapp/render.ts` | Maps chat Markdown to WhatsApp syntax: `*bold*`, `_italic_`, `~strike~`, monospace, lists, quotes; `label (url)` for links. An artefact becomes a **CTA URL** card: the title as its header (≤ 60), "Link valid until <date>" as its body (with the full title first when the header cuts it), and "Open document" as its button. The `create_artifact` message and a spill's lead go before the card as text parts of their own. Anything over 4,096 characters is split at paragraph, line, sentence and word boundaries. **Never truncate.** |
 
 Later adapters use the same parts:
 
@@ -439,6 +455,7 @@ Matrix rooms get the chat profile when it is turned on (`MATRIX_CHAT_DELIVERY=tr
 **Tests** (following `docs/testing/` conventions; no test-side retries that mask failures):
 
 - **Shaper:** pure unit tests with golden fixtures: short answer, list with a lead-in, table, long list, code, a closing question, CJK and emoji segmentation. Every output part is checked for byte and character limits, and for staying inside the chat Markdown subset.
+- **WhatsApp-first acceptance** (shaper goldens under the WhatsApp defaults). These stay in chat with no automatic artefact: a normal answer (1–2 messages); a 1,801–4,500-character answer (every message within `bubbleMax`, order kept, no text lost); five moderate paragraphs (filled into three messages, all text kept in order); an eight-item list (intact with its lead-in); a small comparison table (one line per row). These spill: a 5,000-character step (whole first paragraph as the lead, the last paragraphs as the closing without a question mark), a 20-item list (three-item preview and "…and 17 more"), a 40-row table (three-row preview) and a 60-line code block; a 30-line code block stays in chat, re-fenced where it is split. Boundaries: exactly `spillChars` stays in chat and one character more spills. Packing goldens: a three-paragraph step keeps the model's breaks, a code block of at least `minBubble` characters is never merged into a neighbour, paragraphs too large to pair stay separate, ten 432-character paragraphs become four messages, and eight paragraphs totalling 5,000 characters spill on length, not on count. Closings: a closing "Next steps:" list is previewed, a conclusion keeps its question, a last paragraph over `bubbleMax` keeps its trailing sentences, and the closing never repeats the lead. Previews keep "…and N more" when they must shrink (fewer items, then a cut item or lead-in). A leading code block that caused the spill is never the lead. A heading starts the message that holds its body. Cuts never split an emoji. Every shaper test checks that no message, lead or closing passes `bubbleMax`, including a 4,300-character lead-in and thirty headings in a row. The prompt test checks that `create_artifact` is mentioned only when bound and that its line no longer names comparisons or tables.
 - **Plans:** workerd tests for the plan a finished channel turn returns, the same plan on re-poll, idempotent artefact creation, and pruning that removes the plan with the run but keeps the tombstone.
 - **Gateway:** exactly one provider send per part under duplicate polls and restarts, `unknown` never resent, revocation in the middle of a reply suppressing the rest, pacing errors retried without spending attempts, the outbox migration, and never truncating.
 - **Viewer:** the page never renders content without the fragment; CSP and noindex headers are present; decryption round-trips; expired and revoked links return a clear page.
@@ -465,7 +482,7 @@ Matrix rooms get the chat profile when it is turned on (`MATRIX_CHAT_DELIVERY=tr
 4. **Viewer hostname.** _Decided:_ a shared Qi.Space viewer, with the runtime's built-in page as the default that needs nothing else.
 5. **Progress lines.** _Decided:_ none. The typing indicator is enough.
 6. **Summary quality on auto-spill.** The lead is extractive, and with the §5 prompt the model normally writes the summary itself. If measurement shows poor leads, an optional bounded Decision can pick the best lead paragraph without generating free text.
-7. **Pacing under WhatsApp's pair limit.** A reply of four parts is a burst that borrows from the next 24 seconds of quota. A quick follow-up can then hit error 131056, which the gateway waits out. If that proves common, merge adjacent text parts when the quota is short.
+7. **Pacing under WhatsApp's pair limit.** A reply of eight parts (the WhatsApp cap since the 2026-10-30 revision) is a burst that borrows from the next 48 seconds of quota. A quick follow-up can then hit error 131056, which the gateway waits out. If that proves common, merge adjacent text parts when the quota is short.
 
 ---
 

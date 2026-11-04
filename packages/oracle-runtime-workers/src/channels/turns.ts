@@ -4,9 +4,10 @@ import type { DoSqliteDatabase } from '../sqlite/database';
 import { UNTITLED_SESSION } from '../sqlite/sessions-store';
 import type { RunRecord } from '../do/run-store';
 import type { TurnIdentity, TurnRequest } from '../do/contracts';
-import { parseReplyPlan, planText } from '../delivery/schema';
+import { parseReplyPlan, planText, planTextForModel } from '../delivery/schema';
 import type { ReplyPlan } from '../delivery/types';
 import {
+  CHANNEL_TURN_FEATURES,
   ChannelError,
   type ChannelControlResult,
   StoredChannelControlResult,
@@ -196,6 +197,16 @@ function topicLine(text: string | null | undefined): string | null {
 
 function isPlaceholderTitle(title: string): boolean {
   return title.toLowerCase() === UNTITLED_SESSION.toLowerCase();
+}
+
+/**
+ * Whether a stored request holds a line of the conversation (`topics`, the
+ * thread index): a routing question's exchange is the oracle's words, and a
+ * delivery notice the gateway's, so neither is quoted as what the person
+ * said.
+ */
+function holdsConversationLine(request: TurnRequest): boolean {
+  return !request.channel?.routingClarification && !request.channel?.notice;
 }
 
 /** A stored title as the wire carries it: null when untitled, at most 200 code points. */
@@ -791,7 +802,7 @@ export class ChannelTurns {
     const none = { lastUser: null, lastReply: null };
     if (!newestRunId) return none;
     let found = await this.topicReceipt(newestRunId);
-    if (found?.request.channel?.routingClarification) {
+    if (found && !holdsConversationLine(found.request)) {
       found = undefined;
       const recent = await this.db.exec<{ run_id: string }>(
         'SELECT run_id FROM channel_requests WHERE binding_id=? AND session_id=? ORDER BY rowid DESC LIMIT ?',
@@ -799,7 +810,7 @@ export class ChannelTurns {
       );
       for (const row of recent) {
         const candidate = await this.topicReceipt(row.run_id);
-        if (candidate && !candidate.request.channel?.routingClarification) {
+        if (candidate && holdsConversationLine(candidate.request)) {
           found = candidate;
           break;
         }
@@ -926,8 +937,12 @@ export class ChannelTurns {
     const run = await this.host.getRun(receipt.run_id);
     if (!run) return unknown;
     let text: string;
-    if (reference.author === 'user') text = this.host.requestOf(run).message;
-    else {
+    if (reference.author === 'user') {
+      const request = this.host.requestOf(run);
+      // A delivery notice holds no words of the person to quote.
+      if (request.channel?.notice) return unknown;
+      text = request.message;
+    } else {
       if (run.status !== 'finished') return unknown;
       const reply = await this.reply(run.runId, run.partialText ?? '');
       const chunk = reference.partId
@@ -941,7 +956,10 @@ export class ChannelTurns {
               : undefined))
           : undefined;
       if (reference.partId && reply.plan && !matched) return unknown;
-      text = matched ? planText({ parts: [matched] }) : reply.rendered;
+      // The model reads this: a file part is named, never linked.
+      text = matched
+        ? planTextForModel({ parts: [matched] })
+        : reply.withFileNames;
     }
     return {
       kind: 'resolved',
@@ -1100,11 +1118,20 @@ export class ChannelTurns {
     while (this.draining) await this.draining;
   }
 
-  /** A finished run's Reply Plan, and the reply as the channel user sees it. */
+  /**
+   * A finished run's Reply Plan, the reply as a gateway that predates plans
+   * sends it, and the reply with each file named instead of linked: what the
+   * model reads when the user quotes it, and what the room mirror keeps,
+   * since a signed link expires.
+   */
   private async reply(
     runId: string,
     text: string,
-  ): Promise<{ plan: ReplyPlan | null; rendered: string }> {
+  ): Promise<{
+    plan: ReplyPlan | null;
+    rendered: string;
+    withFileNames: string;
+  }> {
     const plan = parseReplyPlan(await this.host.getPlan(runId));
     const row = await this.db.get<{ routing_json: string | null }>(
       'SELECT routing_json FROM channel_requests WHERE run_id=?',
@@ -1127,7 +1154,12 @@ export class ChannelTurns {
       const to = await this.boldTitle(route.destination.sessionId);
       notice = `Back to ${to ? `*${to}*` : 'an earlier topic'}. Send /resume to pick another topic.`;
     }
-    if (!notice) return { plan, rendered: plan ? planText(plan) : text };
+    if (!notice)
+      return {
+        plan,
+        rendered: plan ? planText(plan) : text,
+        withFileNames: plan ? planTextForModel(plan) : text,
+      };
     const decorated =
       plan && plan.parts.length < 999
         ? {
@@ -1142,11 +1174,12 @@ export class ChannelTurns {
             ],
           }
         : null;
+    const withNotice = (show: (plan: ReplyPlan) => string): string =>
+      decorated ? show(decorated) : `${notice}\n\n${plan ? show(plan) : text}`;
     return {
       plan: decorated,
-      rendered: decorated
-        ? planText(decorated)
-        : `${notice}\n\n${plan ? planText(plan) : text}`,
+      rendered: withNotice(planText),
+      withFileNames: withNotice(planTextForModel),
     };
   }
 
@@ -1288,7 +1321,9 @@ export class ChannelTurns {
   }
 
   private async indexThread(
-    input: ChannelTurnInput,
+    input: Pick<ChannelTurnInput, 'bindingId' | 'bindingRevision'> & {
+      message: string;
+    },
     sessionId: string,
     runId: string,
     at = this.now(),
@@ -1354,7 +1389,7 @@ export class ChannelTurns {
       const run = await this.host.getRun(row.run_id);
       if (!run) continue;
       const request = this.host.requestOf(run);
-      if (request.channel?.routingClarification) continue;
+      if (!holdsConversationLine(request)) continue;
       if (
         request.identity.channel?.bindingRevision !== input.bindingRevision ||
         request.channel?.bindingId !== input.bindingId
@@ -1400,7 +1435,7 @@ export class ChannelTurns {
         status: run?.status ?? 'history',
       });
     }
-    return selectChannelCandidates(candidates, input.message, baseline);
+    return selectChannelCandidates(candidates, input.message ?? '', baseline);
   }
 
   /**
@@ -1448,6 +1483,9 @@ export class ChannelTurns {
       routing.observe({ ...scoped, requestId: input.requestId });
     };
     let evaluate: (() => Promise<ChannelRouteObservation>) | undefined;
+    // A notice turn carries no message; it is sent with `sessionPolicy:
+    // 'continue'`, so it is never classified.
+    const message = input.message ?? '';
     if (state.force_next || input.sessionPolicy === 'continue')
       assignment.reason = 'explicit-control';
     else if (input.replyTo) {
@@ -1471,10 +1509,7 @@ export class ChannelTurns {
           assignment.destination = { kind: 'session', sessionId: session };
       } else if (mode === 'on')
         assignment.destination = { kind: 'clarify', text: ambiguousThreadText };
-    } else if (
-      input.attachments?.length &&
-      isAttachmentPlaceholder(input.message)
-    )
+    } else if (input.attachments?.length && isAttachmentPlaceholder(message))
       // A file with no caption, only the gateway's placeholder: nothing to
       // classify, so it stays in the current conversation.
       assignment.reason = 'attachment-placeholder';
@@ -1482,7 +1517,7 @@ export class ChannelTurns {
       const candidates = await this.routingCandidates(input, baseline);
       if (candidates.length) {
         const evidence = {
-          message: input.message,
+          message,
           currentSessionId: baseline,
           candidates,
         };
@@ -1852,12 +1887,14 @@ export class ChannelTurns {
       return this.respond(input, receipt, session, record);
     }
     // The run owes its user message to the user's oracle room from here on;
-    // the mirror pass sends it, the turn never waits for it.
+    // the mirror pass sends it, the turn never waits for it. A notice turn
+    // has no user message: the gateway's note is never mirrored, only the
+    // reply to it.
     await this.db.run(
-      `UPDATE channel_requests SET session_id = ?, user_mirrored = 0, reply_mirrored = 0,
+      `UPDATE channel_requests SET session_id = ?, user_mirrored = ?, reply_mirrored = 0,
          mirror_pending = 1, mirror_failures = 0, mirror_retry_at = NULL
        WHERE run_id = ?`,
-      [session, runId],
+      [session, input.notice ? 1 : 0, runId],
     );
     await this.host.changed();
     await this.recordSessionBinding(input, session);
@@ -1865,13 +1902,21 @@ export class ChannelTurns {
       'UPDATE channel_sessions SET force_next=0 WHERE binding_id=? AND force_next<>0',
       [input.bindingId],
     );
-    if (this.routingEnabled(input) && routing?.destination.kind !== 'clarify')
-      await this.indexThread(input, session, runId);
+    if (
+      this.routingEnabled(input) &&
+      routing?.destination.kind !== 'clarify' &&
+      input.message !== undefined
+    )
+      await this.indexThread(
+        { ...input, message: input.message },
+        session,
+        runId,
+      );
     const replyContext = await this.replyContext(input, session);
     const started = await this.host.begin(runId, {
       identity,
       sessionId: session,
-      message: input.message,
+      message: input.message ?? '',
       client: 'channel',
       requestId: input.requestId,
       multitask: 'enqueue',
@@ -1888,6 +1933,7 @@ export class ChannelTurns {
         ...(routing?.destination.kind === 'clarify'
           ? { routingClarification: routing.destination.text }
           : {}),
+        ...(input.notice ? { notice: input.notice } : {}),
       },
     });
     this.kick();
@@ -1926,6 +1972,7 @@ export class ChannelTurns {
       sessionId,
       sessionTitle: await this.titleOf(sessionId),
       status: record.status,
+      features: CHANNEL_TURN_FEATURES,
       ...(record.messageId ? { messageId: record.messageId } : {}),
       // `text` is the whole reply as one message for gateways that predate
       // plans: the rendered plan when there is one (it carries the artefact
@@ -2021,7 +2068,7 @@ export class ChannelTurns {
               record.runId,
               record.partialText ?? '',
             );
-            await this.host.mirror(request, reply.rendered, 'oracle');
+            await this.host.mirror(request, reply.withFileNames, 'oracle');
             await this.settleMirror(
               row.run_id,
               'reply_mirrored = 1, mirror_pending = 0',

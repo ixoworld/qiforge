@@ -89,5 +89,7 @@ export function createFirecrawlSubAgent(tools: PluginTool[]): PluginSubAgent {
     tools,
     model: 'subagent',
     middlewares: [],
+    failureHint:
+      'Web search is unavailable, but this is not the end of the request: a page or feed can still be fetched with code. Load the `sandbox` capability if it is not in your tool list and fetch the URL with `sandbox_run`, or use another capability that can answer. Tell the user only if none can.',
   };
 }

@@ -2863,6 +2863,50 @@ describe('request_chain_transaction', () => {
     );
   });
 
+  it('binds each kind by its fields and refuses its limits in the handler, naming the field', async () => {
+    const request = vi.fn(async () => reference);
+    const ctx = channelContext(async () => reference);
+    const generic = makeRuntimeContext({
+      ...ctx,
+      hubActions: { ...ctx.hubActions!, request },
+    });
+    const tool = new HubActionsPlugin()
+      .getTools()
+      .find((item) => item.name === 'request_hub_action');
+    if (!tool) throw new Error('request tool missing');
+    const text = JSON.stringify(z.toJSONSchema(tool.schema));
+    expect(text).not.toContain('maxLength');
+    expect(text).not.toContain('pattern');
+    // Every kind keeps its fields: a provider drops a field no schema declares.
+    expect(text).toContain(
+      '"required":["kind","connectionId","accountLabel","to","subject","body"]',
+    );
+    const mail = {
+      kind: 'gmail.message.send.v1',
+      connectionId: 'gmail-one',
+      accountLabel: 'alex@example.test',
+      to: 'sam@example.test',
+      subject: 'x'.repeat(201),
+      body: 'See you Tuesday.',
+    };
+    expect(tool.schema.safeParse({ operation: mail }).success).toBe(true);
+    expect(await tool.handler({ operation: mail }, generic)).toEqual({
+      status: 'unavailable',
+      reason: expect.stringMatching(
+        /^The requested operation is unsupported or incomplete \(subject: .+\)\.$/,
+      ),
+    });
+    expect(
+      tool.schema.safeParse({ operation: { ...mail, cc: 'a@b.test' } }).success,
+    ).toBe(false);
+    expect(
+      tool.schema.safeParse({
+        operation: { kind: 'gmail.message.send.v1', to: 'a@b.test' },
+      }).success,
+    ).toBe(false);
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it('refuses a chain transaction through the generic tool: the runtime fills chain, network and signer', async () => {
     const request = vi.fn(async () => reference);
     const ctx = channelContext(async () => reference);

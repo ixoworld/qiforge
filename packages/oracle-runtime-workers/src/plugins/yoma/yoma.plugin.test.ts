@@ -17,7 +17,12 @@ import {
   type HubActionOrigin,
 } from '../../hub-actions/store';
 import { resetUpstreamHealth, type ChainCall } from '../ixo-chain/http';
-import { fetchEntities, JOB_LIST_URLS, resetCatalogCache } from './catalog';
+import {
+  fetchEntities,
+  JOB_LIST_URLS,
+  resetCatalogCache,
+  type BotOnlyJob,
+} from './catalog';
 import { FORM_MAX_BYTES, getJson } from './reads';
 import type { ClefRequest, ClefResponse, ClefRunner } from './clef';
 import { allDrafts, draftKey, updateDraft, type Kv } from './drafts';
@@ -42,6 +47,8 @@ const ENTITY = 'did:ixo:entity:0123456789abcdef0123456789abcdef';
 const QUIET = 'did:ixo:entity:fedcba9876543210fedcba9876543210';
 const MILESTONE = 'did:ixo:entity:11111111111111111111111111111111';
 const TREES = 'did:ixo:entity:22222222222222222222222222222222';
+/** A programme Jambo does not list: offered in chat only. */
+const BOT_ONLY = 'did:ixo:entity:33333333333333333333333333333333';
 const USDC =
   'ibc/6BBE9BD4246F8E04948D5A4EEE7164B2630263B9EBB5E7DC5F0A46C62A2FF97B';
 
@@ -94,6 +101,31 @@ const COLLECTIONS = [
     state: 0,
     startDate: null,
     endDate: '2026-09-13T00:00:00',
+    quota: '0',
+    count: '0',
+    payments: null,
+  },
+  // BOT_ONLY's: 5005 is a bot-only job, 5006 is not.
+  {
+    id: '5005',
+    entity: BOT_ONLY,
+    admin: ADMIN,
+    protocol: MILESTONE,
+    state: 0,
+    startDate: null,
+    endDate: null,
+    quota: '0',
+    count: '0',
+    payments: null,
+  },
+  {
+    id: '5006',
+    entity: BOT_ONLY,
+    admin: ADMIN,
+    protocol: MILESTONE,
+    state: 0,
+    startDate: null,
+    endDate: null,
     quota: '0',
     count: '0',
     payments: null,
@@ -184,9 +216,12 @@ function graphql(query: string) {
     };
   if (query.includes('c: claimCollections'))
     data.c = {
-      nodes: query.includes('state: { equalTo: 0 }')
-        ? COLLECTIONS.filter((c) => c.state === 0)
-        : COLLECTIONS,
+      nodes: COLLECTIONS.filter(
+        (c) =>
+          (!query.includes('entity: { in:') ||
+            query.includes(JSON.stringify(c.entity))) &&
+          (!query.includes('state: { equalTo: 0 }') || c.state === 0),
+      ),
     };
   if (query.includes('e: entities'))
     data.e = {
@@ -353,6 +388,7 @@ function setup(
     operations?: Capabilities['operations'];
     expiresAt?: number;
     instantPermission?: InstantPermission;
+    botOnlyJobs?: BotOnlyJob[];
     /** Auth Hub's review status on a status read (default `prepared`). */
     reviewStatus?: HubActionStatusRead['reviewStatus'];
     hubActions?: (base: HubActions) => HubActions;
@@ -361,6 +397,7 @@ function setup(
   } = {},
 ) {
   const plugin = new YomaPlugin({
+    ...(opts.botOnlyJobs ? { botOnlyJobs: opts.botOnlyJobs } : {}),
     ...(opts.instantPermission
       ? { instantPermission: opts.instantPermission }
       : {}),
@@ -2314,6 +2351,59 @@ describe('upstream answers the plugin refuses', () => {
     const [big] = (await setup().lookup({ kind: 'job', collectionId: '8724' }))
       .results;
     expect(big.logWork).toMatchObject({ ok: false, reason: 'too_large' });
+  });
+});
+
+describe('bot-only jobs', () => {
+  const botOnlyJobs: BotOnlyJob[] = [
+    { programme: BOT_ONLY, collectionId: '5005' },
+    // Hidden on Jambo, still offered in chat.
+    { programme: ENTITY, collectionId: '9000' },
+  ];
+
+  it('shows a bot-only programme after Jambo, with only its bot-only jobs', async () => {
+    const { lookup } = setup({ botOnlyJobs });
+    const [programmes, bot, listed] = (
+      await lookup(
+        { kind: 'programmes' },
+        { kind: 'programme_jobs', programme: BOT_ONLY },
+        { kind: 'programme_jobs', programme: ENTITY },
+      )
+    ).results;
+    expect(
+      programmes.programmes.map((p: { programme: string }) => p.programme),
+    ).toEqual([ENTITY, QUIET, BOT_ONLY]);
+    expect(
+      bot.jobs.map((j: { collectionId: string }) => j.collectionId),
+    ).toEqual(['5005']);
+    expect(
+      listed.jobs.map((j: { collectionId: string }) => j.collectionId),
+    ).toEqual(['8724', '9000', '9787']);
+  });
+
+  it('starts an application on a bot-only job', async () => {
+    const { form } = setup({ botOnlyJobs });
+    const started = await form({
+      action: 'next',
+      form: 'application',
+      collectionId: '5005',
+    });
+    expect(started.ok).toBe(true);
+    expect(started).not.toHaveProperty('reason');
+  });
+
+  it('offers neither without the option', async () => {
+    const { lookup } = setup();
+    const [programmes, job] = (
+      await lookup(
+        { kind: 'programmes' },
+        { kind: 'job', collectionId: '5005' },
+      )
+    ).results;
+    expect(
+      programmes.programmes.map((p: { programme: string }) => p.programme),
+    ).toEqual([ENTITY, QUIET]);
+    expect(job).toMatchObject({ ok: false, reason: 'not_found' });
   });
 });
 

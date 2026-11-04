@@ -26,6 +26,7 @@ const CONFIG: RunDurabilityConfig = {
   segmentFlushMs: 20,
   segmentBytes: 16 * 1024,
   recoveryAttempts: 4,
+  recoveryTotalAttempts: 8,
   recoveryDelaysMs: [5_000, 15_000, 30_000, 60_000],
   multitaskDefault: 'interrupt',
 };
@@ -1225,6 +1226,114 @@ describe('recovery accounting at the cap', () => {
     });
     await restarted.runs.recoverOrphans();
     expect((await restarted.store.get('r1'))?.status).toBe('interrupted');
+  });
+});
+
+describe('recoveries in all', () => {
+  /**
+   * One restart of the object while `r1` is executing: a new coordinator
+   * (a new instance) over the same rows, as the boot builds it, recovers
+   * the orphan and starts its attempt when it is due. The attempt either
+   * resets the isolate again after one checkpoint (`progress`), or ends.
+   */
+  async function restart(
+    store: MemoryRunStore,
+    checkpoint: string,
+    now: number,
+  ) {
+    const h = harness();
+    // The harness's own store is replaced by the shared one.
+    h.host.store = store;
+    h.setCheckpoint(checkpoint);
+    const runs = new RunCoordinator({ ...h.host, now: () => now });
+    await runs.recoverOrphans();
+    await runs.resumeDue(now + 60_000);
+    return { runs, attempts: h.attempts, ended: h.ended };
+  }
+
+  it('closes a run that checkpoints once per attempt and resets again, after 8 recoveries, with its error and done frames', async () => {
+    let now = T0;
+    const store = new MemoryRunStore(() => now);
+    store.seed({ runId: 'r1', client: 'channel', checkpointId: 'cp0' });
+    const generations: number[] = [];
+    let last: Awaited<ReturnType<typeof restart>> | undefined;
+    for (let boot = 1; boot <= 12; boot += 1) {
+      now += 55_000;
+      // The previous attempt took one step before the isolate was reset:
+      // the checkpoint moved, so `attempts` never climbs past 1.
+      last = await restart(store, `cp${boot}`, now);
+      const row = (await store.get('r1'))!;
+      generations.push(row.generation);
+      if (row.status === 'interrupted') break;
+      expect(row.attempts).toBe(1);
+      expect(last.attempts).toHaveLength(1);
+      expect(last.attempts[0]!.resumed).toBe(true);
+    }
+    // Eight resumed attempts, then the ninth boot closes the run.
+    expect(generations).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(await store.get('r1')).toMatchObject({
+      status: 'interrupted',
+      generation: 9,
+      nextAttemptAt: null,
+      // error + done, numbered above every earlier attempt
+      lastSeq: attemptSeqBase(9) + 2,
+    });
+    expect(last!.attempts).toHaveLength(0);
+    expect(last!.ended.map((e) => e.outcome.status)).toEqual(['interrupted']);
+    expect(last!.ended[0]!.record.client).toBe('channel');
+  });
+
+  it('lets a run that resumes a few times finish', async () => {
+    let now = T0;
+    const store = new MemoryRunStore(() => now);
+    store.seed({ runId: 'r1', checkpointId: 'cp0' });
+    let last: Awaited<ReturnType<typeof restart>> | undefined;
+    for (let boot = 1; boot <= 3; boot += 1) {
+      now += 55_000;
+      last = await restart(store, `cp${boot}`, now);
+    }
+    expect(await store.get('r1')).toMatchObject({
+      status: 'running',
+      generation: 3,
+    });
+    const attempt = last!.attempts[0]!;
+    expect(attempt.resumed).toBe(true);
+    attempt.finish({ status: 'finished', text: 'Done at last' });
+    await attempt.live.done;
+    await settled();
+    expect(await store.get('r1')).toMatchObject({
+      status: 'finished',
+      generation: 3,
+    });
+    expect(last!.ended.map((e) => e.outcome.status)).toEqual(['finished']);
+  });
+
+  it('honours RUN_RECOVERY_TOTAL_ATTEMPTS: the last allowed recovery is scheduled, the next restart closes the run', async () => {
+    const h = harness({ recoveryTotalAttempts: 2 });
+    h.store.seed({
+      runId: 'r1',
+      attempts: 1,
+      generation: 1,
+      checkpointId: 'cp1',
+    });
+    h.setCheckpoint('cp2');
+    await h.runs.recoverOrphans();
+    expect(await h.store.get('r1')).toMatchObject({
+      status: 'recovering',
+      attempts: 1,
+      generation: 2,
+    });
+    const restarted = harness({ recoveryTotalAttempts: 2 });
+    restarted.store.seed({ ...(await h.store.get('r1'))!, status: 'running' });
+    restarted.setCheckpoint('cp3');
+    await restarted.runs.recoverOrphans();
+    expect(await restarted.store.get('r1')).toMatchObject({
+      status: 'interrupted',
+      generation: 3,
+    });
+    expect(restarted.ended.map((e) => e.outcome.status)).toEqual([
+      'interrupted',
+    ]);
   });
 });
 

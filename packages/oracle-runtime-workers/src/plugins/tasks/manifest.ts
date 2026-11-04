@@ -76,6 +76,7 @@ export const tasksManifest: PluginManifest = {
   ],
   category: 'automation',
   visibility: 'on-demand',
+  brief: 'reminders, scheduled and recurring background jobs',
   stability: 'beta',
   tags: ['scheduler', 'cron', 'automation', 'approval', 'background'],
 };

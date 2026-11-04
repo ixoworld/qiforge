@@ -25,6 +25,7 @@ import {
   loadForm,
   matchesQuery,
   notOpen,
+  type BotOnlyJob,
   type Catalog,
   type FormKind,
   type Job,
@@ -633,6 +634,8 @@ export interface YomaPluginOptions {
   getClef?: () => ClefRunner | undefined;
   /** Collections where a finished application gives permission at once, granted by the host. Absent: every job waits for acceptance. */
   instantPermission?: InstantPermission;
+  /** Test collections offered in chat but not on jambo.yoma.world, so partners' and opportunity providers' listings are untouched (see {@link BotOnlyJob}). Testing only. */
+  botOnlyJobs?: readonly BotOnlyJob[];
 }
 
 const manifest: PluginManifest = {
@@ -658,6 +661,7 @@ const manifest: PluginManifest = {
   category: 'data',
   // Yoma's assistant sets `visibility: 'always'` through `manifestOverrides`.
   visibility: 'on-demand',
+  brief: 'Yoma programmes and jobs; apply, log work, check payment',
   stability: 'beta',
 };
 
@@ -805,7 +809,8 @@ export class YomaPlugin extends OraclePlugin {
     if (!call) return NO_NETWORK;
     // The list is read once for every request that needs it.
     let catalog: Promise<Outcome<Catalog>> | undefined;
-    const getCatalog = () => (catalog ??= loadCatalog(call));
+    const getCatalog = () =>
+      (catalog ??= loadCatalog(call, undefined, this.options.botOnlyJobs));
     const results: Array<Record<string, unknown>> = [];
     for (const request of input.requests) {
       try {
@@ -1701,7 +1706,7 @@ export class YomaPlugin extends OraclePlugin {
     }
     let job: Job | undefined;
     if (!draft) {
-      const read = await loadCatalog(call);
+      const read = await loadCatalog(call, undefined, this.options.botOnlyJobs);
       if (!read.ok) return failed(read.failure);
       job = read.value.jobs.find((j) => j.collectionId === input.collectionId);
       if (!job) return failed(notOpen('job'));

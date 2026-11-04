@@ -91,7 +91,7 @@ export interface ToolSummary {
 export interface ToolSummarySource {
   toolSummariesForPlugin(
     pluginName: string,
-  ): Array<{ name: string; description: string }>;
+  ): Array<Pick<PluginTool, 'name' | 'description' | 'visibility'>>;
 }
 
 /**
@@ -99,7 +99,10 @@ export interface ToolSummarySource {
  * collection order — never another turn's.
  */
 export function turnToolSummaries(
-  tools: ReadonlyArray<{ pluginName: string; tool: PluginTool }>,
+  tools: ReadonlyArray<{
+    pluginName: string;
+    tool: Pick<PluginTool, 'name' | 'description' | 'visibility'>;
+  }>,
 ): ToolSummarySource {
   return {
     toolSummariesForPlugin: (pluginName) =>
@@ -108,6 +111,7 @@ export function turnToolSummaries(
         .map(({ tool }) => ({
           name: tool.name,
           description: tool.description,
+          visibility: tool.visibility,
         })),
   };
 }
@@ -291,10 +295,14 @@ export class ToolRegistry {
    */
   toolSummariesForPlugin(
     pluginName: string,
-  ): Array<{ name: string; description: string }> {
-    return this.summaries()
+  ): Array<Pick<PluginTool, 'name' | 'description' | 'visibility'>> {
+    return (this.bootCache ?? [])
       .filter((entry) => entry.pluginName === pluginName)
-      .map(({ name, description }) => ({ name, description }));
+      .map(({ tool: { name, description, visibility } }) => ({
+        name,
+        description,
+        visibility,
+      }));
   }
 
   /**

@@ -3,6 +3,7 @@ export {
   type InstantPermission,
   type YomaPluginOptions,
 } from './yoma.plugin';
+export type { BotOnlyJob } from './catalog';
 export {
   CLEF_MODEL,
   workersAiClefRunner,

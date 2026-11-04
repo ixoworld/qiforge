@@ -63,7 +63,7 @@ const STATUSES =
 const claimsKind = defineKind({
   name: 'claims',
   summary:
-    'Claims an agent submitted (default: the user), newest first, with evaluation and payment status.',
+    "One agent's claims (default: the user; `collectionId` needs `agent`), newest first, with evaluation and payment status. A collection's totals are in `claim_collection`.",
   explain: [
     'Each claim: claimId, collectionId, agent, submissionDate, `evaluation` (status, date) and `paymentsStatus` per payment leg (e.g. `approval: PAID`).',
     STATUSES,
@@ -73,7 +73,7 @@ const claimsKind = defineKind({
   source: 'blocksync',
   list: true,
   args: CORE_ARGS.claims,
-  example: { collectionId: '8250', first: 5 },
+  example: { first: 5 },
   plan: (args, ctx) => blocksyncPlan({ kind: 'claims', ...args }, ctx),
 });
 

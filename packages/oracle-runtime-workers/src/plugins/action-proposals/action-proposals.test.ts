@@ -145,6 +145,19 @@ describe('validated conversational actions', () => {
     expect(evaluate).not.toHaveBeenCalled();
     expect(create).not.toHaveBeenCalled();
   });
+  it('names what the strict schema refuses, past the bound schema', async () => {
+    const { ctx, create, evaluate } = context();
+    const tooPrecise = { ...args, amount: '1.1234567' };
+    const tool = new ActionProposalsPlugin().getTools()[0]!;
+    expect(tool.schema.safeParse(tooPrecise).success).toBe(true);
+    expect(await prepareAction(tooPrecise, ctx)).toEqual({
+      status: 'clarification_required',
+      reason: expect.stringContaining('amount:'),
+    });
+    expect(evaluate).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it('never reads the turn time note as evidence', async () => {
     const note = 'Current time: Saturday, 2026-10-03 14:05 (Europe/Berlin)';
     const { ctx, create, evaluate } = context();

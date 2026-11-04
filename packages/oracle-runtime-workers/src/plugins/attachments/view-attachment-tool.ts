@@ -1,6 +1,7 @@
 /**
- * `view_attachment` — fetch an attachment of this session again after its
- * inline payload was offloaded (see `src/attachments/retention.ts`).
+ * `view_attachment` — fetch an attachment of this session again: its bytes
+ * are not stored with the conversation, the stored message holds a
+ * placeholder instead (see `src/attachments/retention.ts`).
  *
  * Two result shapes, decided by the host surface with the same routing as
  * the turn pipeline:
@@ -11,8 +12,9 @@
  *    OpenAI-compatible wire, so the tool returns a LangGraph `Command` that
  *    appends its tool message AND a human message holding the block — the
  *    same proven shape a fresh attachment turn uses. That message is tagged
- *    `lc_source: attachment_view`: transcripts hide it, retention treats it
- *    as part of the current user turn and offloads it again later.
+ *    `lc_source: attachment_view`: transcripts hide it, the checkpointer
+ *    stores it with the placeholder like any other, and the image recall
+ *    counts it with the user turn before it.
  */
 import { HumanMessage, ToolMessage } from '@langchain/core/messages';
 import { Command } from '@langchain/langgraph';

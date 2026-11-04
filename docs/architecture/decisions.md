@@ -527,6 +527,11 @@ endpoint is still alpha, so the OpenRouter adapter pins a specific Jev model
 version by default rather than tracking `latest`; Cloudflare uses the
 account's `typesafe/jev` model.
 
+When the OpenRouter request fails (no answer, a non-2xx status or an
+unreadable answer), the adapter asks `microsoft/microsoft-decision-1` once with
+the same request; an abort is never retried. `fallbackModel: null` on
+`OpenRouterJevDecisionAdapter` turns this off.
+
 ### Jev mapping
 
 All Jev adapters share one wire layer (`packages/common/src/ai/decisions/jev/`)
@@ -588,9 +593,9 @@ suites are in `packages/common/src/ai/decisions/*.test.ts`.
 The capability router is the live consumer on the Workers runtime. It
 evaluates ahead of the first generative model call and fails open:
 
-| Consumer                                           | Decision                     | Where                                                                       | What the verdict drives                                                                                                                                               |
-| -------------------------------------------------- | ---------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Capability router (`CAPABILITY_ROUTER=on\|shadow`) | `runtime.route-capabilities` | `packages/oracle-runtime-workers/src/core/capability-router.ts`, every turn | which on-demand plugin's tools to expose for the turn; see the Workers [architecture](../../packages/oracle-runtime-workers/docs/architecture.md) (capability router) |
+| Consumer                                           | Decision                     | Where                                                                       | What the verdict drives                                                                                                                                                         |
+| -------------------------------------------------- | ---------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Capability router (`CAPABILITY_ROUTER=on\|shadow`) | `runtime.route-capabilities` | `packages/oracle-runtime-workers/src/core/capability-router.ts`, every turn | which plugins to load on the thread before the first model call; see the Workers [architecture](../../packages/oracle-runtime-workers/docs/architecture.md) (capability router) |
 
 The router's Decision and its policy (`decideCapabilityRoute`, the 0.7 floor)
 are defined in `@ixo/common/ai/decisions/capability-router.ts`. It does not

@@ -16,6 +16,12 @@ const noop = tool(async () => 'ok', {
   schema: z.object({}),
 });
 
+class FailingModel extends FakeListChatModel {
+  override async _generate(): Promise<never> {
+    throw new Error('Host not allowed');
+  }
+}
+
 function specWith(
   model: FakeListChatModel,
   extra: Partial<AgentSpec> = {},
@@ -77,6 +83,16 @@ describe('createSubagentAsTool', () => {
     );
     expect(await subagent.invoke({ task: 'x' })).toBe('done');
     expect(warnings.join('\n')).toContain('persist failed');
+  });
+
+  it('adds the failure hint to the error the parent reads when the sub-agent could not run', async () => {
+    const failing = new FailingModel({ responses: [] });
+    const subagent = createSubagentAsTool(
+      specWith(failing, { failureHint: 'Try the other capability.' }),
+    );
+    const result = await subagent.invoke({ task: 'x' });
+    expect(String(result)).toMatch(/^Error running Research Agent: /);
+    expect(String(result).endsWith(' Try the other capability.')).toBe(true);
   });
 
   it('propagates an aborted turn instead of reporting it as the sub-agent’s error', async () => {

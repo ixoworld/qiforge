@@ -61,8 +61,8 @@ describe('kind registry', () => {
   });
 
   it('reads the claims page without a total count, and stays out of the catalogue', () => {
-    const counted = CORE_KINDS[0]?.plan({ collectionId: '8250' }, contextOf());
-    const page = claimsPage.plan({ collectionId: '8250' }, contextOf());
+    const counted = CORE_KINDS[0]?.plan({}, contextOf());
+    const page = claimsPage.plan({}, contextOf());
     if (
       !counted ||
       'invalid' in counted ||

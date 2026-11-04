@@ -160,6 +160,75 @@ describe('durable channel requests', () => {
     });
   });
 
+  it('carries a file as a link line in the text, for a gateway that cannot read the part', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('reply-plan-file');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    const url = 'https://r2.example/o/report.docx?X-Amz-Signature=deadbeef';
+    const plan: ReplyPlan = {
+      v: 1,
+      parts: [
+        { partId: 'p1', kind: 'text', text: 'Here is the report.' },
+        {
+          partId: 'p2',
+          kind: 'file',
+          file: {
+            url,
+            filename: 'report.docx',
+            mimetype: 'application/msword',
+            caption: 'Q3',
+          },
+        },
+      ],
+    };
+    await stub.finish(first.result.runId, plan);
+    expect(await stub.submit(message)).toMatchObject({
+      ok: true,
+      result: {
+        status: 'finished',
+        text: `Here is the report.\n\nQ3\n\n[report.docx](${url})`,
+        plan,
+      },
+    });
+
+    // A quote of that reply reaches the model, so it names the file instead.
+    for (const [requestId, partId, text] of [
+      [
+        'wa:q-whole',
+        undefined,
+        'Here is the report.\n\nQ3\n\n[File sent: report.docx]',
+      ],
+      ['wa:q-part', 'p2', 'Q3\n\n[File sent: report.docx]'],
+    ] as const) {
+      const quoted = await stub.submit({
+        ...message,
+        requestId,
+        message: 'Thanks',
+        replyTo: {
+          kind: 'known',
+          requestId: message.requestId,
+          author: 'oracle',
+          ...(partId ? { partId } : {}),
+        },
+      });
+      if (!quoted.ok) throw new Error('Turn rejected');
+      const req = JSON.parse((await stub.run(quoted.result.runId))!.request);
+      expect(req.channel.replyContext).toEqual({
+        kind: 'resolved',
+        requestId: message.requestId,
+        author: 'oracle',
+        text,
+      });
+      expect(JSON.stringify(req)).not.toContain('X-Amz-Signature');
+    }
+
+    // The room keeps the file's name: a signed link expires.
+    await stub.settle();
+    expect(await stub.mirrorLog()).toContainEqual(
+      'oracle:Here is the report.\n\nQ3\n\n[File sent: report.docx]',
+    );
+  });
+
   it('erases expired response payloads without permitting a replay after reset', async () => {
     const stub = env.CHANNEL_TURNS_TEST.getByName('expired-response');
     const first = await stub.submit(message);
@@ -684,6 +753,48 @@ describe('oracle room mirrors stay off the channel path', () => {
   });
 });
 
+describe('a run the object keeps resetting under', () => {
+  it('ends interrupted after 8 recoveries, though every attempt made progress, and the channel answers it as over without a reply', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('reset-loop');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    // Eight restarts: each recovers the run and resumes it.
+    expect(await stub.resetDuringRun(8)).toEqual([]);
+    expect(await stub.run(first.result.runId)).toMatchObject({
+      status: 'running',
+      attempts: 1,
+      generation: 8,
+    });
+    expect(await stub.poll(message)).toMatchObject({
+      ok: true,
+      result: { status: 'running' },
+    });
+    // The ninth closes it.
+    expect(await stub.resetDuringRun(1)).toEqual(['interrupted']);
+    expect(await stub.run(first.result.runId)).toMatchObject({
+      status: 'interrupted',
+      generation: 9,
+    });
+    // What the gateway polls: a terminal status and no reply text. The
+    // channel gateway turns `interrupted` (like `failed`) into
+    // `turn_failed` and sends the user its failure message.
+    const polled = await stub.poll(message);
+    expect(polled).toMatchObject({
+      ok: true,
+      result: { runId: first.result.runId, status: 'interrupted' },
+    });
+    if (!polled?.ok) throw new Error('Not answered');
+    expect(polled.result).not.toHaveProperty('text');
+    expect(polled.result).not.toHaveProperty('plan');
+    // The room is owed no reply.
+    expect(await stub.receipt(message.requestId)).toMatchObject({
+      reply_mirrored: 2,
+      mirror_pending: 0,
+    });
+    expect(await stub.mirrors()).toEqual({ user: 1, oracle: 0 });
+  });
+});
+
 describe('channel record pruning', () => {
   it('removes, from the alarm, receipts that never started a run and run tombstones once 7 days old', async () => {
     const stub = env.CHANNEL_TURNS_TEST.getByName('pruning');
@@ -1087,6 +1198,239 @@ describe('channel quotes and controls', () => {
       ok: true,
       result: { sessionId: first.result.sessionId, command: 'status' },
     });
+  });
+});
+
+describe('delivery notices', () => {
+  const notice = {
+    kind: 'file_blocked' as const,
+    partId: 'p2',
+    filename: 'budget.xlsx',
+    reason: 'office_external' as const,
+    detail: 'sheet1.xml cell B2: a reference to another workbook',
+    originalRequestId: message.requestId,
+  };
+  /** The gateway's notice for a file of `message`'s plan, in its session. */
+  const noticeTurn = (sessionId: string): ChannelTurnInput => ({
+    ...message,
+    message: undefined,
+    requestId: 'notice:dlv_1:p2',
+    sessionId,
+    sessionPolicy: 'continue',
+    notice,
+  });
+
+  it('every turn result advertises delivery notices, on submit and on every poll', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('notice-features');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    expect(first.result.features).toEqual(['delivery_notice']);
+    expect(first.result.status).toBe('running');
+    const polled = await stub.poll(message);
+    expect(polled?.ok && polled.result.features).toEqual(['delivery_notice']);
+    await stub.fail(first.result.runId);
+    const failed = await stub.poll(message);
+    expect(failed?.ok && failed.result).toMatchObject({
+      status: 'failed',
+      features: ['delivery_notice'],
+    });
+    const second = await stub.submit({ ...message, requestId: 'wa:two' });
+    if (!second.ok) throw new Error('Turn rejected');
+    await stub.finish(second.result.runId);
+    expect(
+      await stub.submit({ ...message, requestId: 'wa:two' }),
+    ).toMatchObject({
+      ok: true,
+      result: { status: 'finished', features: ['delivery_notice'] },
+    });
+  });
+
+  it('runs a notice in the original session as a turn whose message is the gateway note, never the person', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('notice-run');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.finish(first.result.runId, undefined, 'Sending the budget.');
+    await stub.deliverReply();
+    const noticed = await stub.submit(noticeTurn(first.result.sessionId));
+    if (!noticed.ok) throw new Error(`Notice refused: ${noticed.code}`);
+    expect(noticed.result).toMatchObject({
+      status: 'running',
+      sessionId: first.result.sessionId,
+      features: ['delivery_notice'],
+    });
+    expect(noticed.result.runId).not.toBe(first.result.runId);
+    const request = JSON.parse(
+      (await stub.run(noticed.result.runId))!.request,
+    ) as {
+      message: string;
+      channel: { notice?: unknown; attachments?: unknown; replyTo?: unknown };
+    };
+    // The run carries the notice, and no words of the person.
+    expect(request.message).toBe('');
+    expect(request.channel.notice).toEqual(notice);
+    expect(request.channel).not.toHaveProperty('attachments');
+    expect(request.channel).not.toHaveProperty('replyTo');
+    // No user message is owed to the oracle room: only the reply is mirrored.
+    expect(await stub.receipt('notice:dlv_1:p2')).toMatchObject({
+      user_mirrored: 1,
+      reply_mirrored: 0,
+      mirror_pending: 1,
+    });
+    await stub.finish(
+      noticed.result.runId,
+      undefined,
+      'Removed the external reference; sending it again.',
+    );
+    await stub.deliverReply();
+    expect(await stub.mirrorLog()).toEqual([
+      'user:Help me plan',
+      'oracle:Sending the budget.',
+      'oracle:Removed the external reference; sending it again.',
+    ]);
+    expect(await stub.mirrorLog()).not.toContainEqual(
+      expect.stringContaining('budget.xlsx'),
+    );
+    expect(await stub.receipt('notice:dlv_1:p2')).toMatchObject({
+      user_mirrored: 1,
+      reply_mirrored: 1,
+      mirror_pending: 0,
+    });
+  });
+
+  it('replays by request id: the same notice again is the same run, a changed one a conflict', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('notice-replay');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.finish(first.result.runId);
+    const turn = noticeTurn(first.result.sessionId);
+    const [a, b] = await Promise.all([stub.submit(turn), stub.submit(turn)]);
+    if (!a.ok || !b.ok) throw new Error('Notice refused');
+    expect(a.result.runId).toBe(b.result.runId);
+    expect(await stub.count()).toBe(2);
+    await stub.finish(a.result.runId, undefined, 'Fixed.');
+    await stub.reopen();
+    expect(await stub.submit(turn)).toMatchObject({
+      ok: true,
+      result: {
+        runId: a.result.runId,
+        status: 'finished',
+        text: 'Fixed.',
+        features: ['delivery_notice'],
+      },
+    });
+    expect(await stub.count()).toBe(2);
+    // The same request id with another detail is another request.
+    expect(
+      await stub.submit({
+        ...turn,
+        notice: { ...notice, detail: 'something else' },
+      }),
+    ).toMatchObject({ ok: false, status: 409, code: 'request_conflict' });
+  });
+
+  it('a notice for a session the binding has left is a session conflict, like any turn', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('notice-left-session');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.finish(first.result.runId);
+    const reset = await stub.control({
+      provider: 'whatsapp',
+      bindingId: message.bindingId,
+      bindingRevision: 1,
+      requestId: 'wa:new',
+      cancelRequestIds: [],
+      command: { kind: 'new' },
+    });
+    if (!reset.ok) throw new Error('Reset refused');
+    expect(await stub.submit(noticeTurn(first.result.sessionId))).toMatchObject(
+      { ok: false, status: 409, code: 'session_conflict' },
+    );
+    // Nothing of it stays behind.
+    expect(await stub.receipt('notice:dlv_1:p2')).toBeNull();
+  });
+
+  it('never quotes a notice as what the person said: topics skip it, and a quote of it is unavailable', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('notice-lines');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.finish(first.result.runId, undefined, 'Sending the budget.');
+    const noticed = await stub.submit(noticeTurn(first.result.sessionId));
+    if (!noticed.ok) throw new Error('Notice refused');
+    await stub.finish(noticed.result.runId, undefined, 'Fixed and resent.');
+    const listed = await stub.control({
+      provider: 'whatsapp',
+      bindingId: message.bindingId,
+      bindingRevision: 1,
+      requestId: 'wa:topics',
+      cancelRequestIds: [],
+      command: { kind: 'topics' },
+    });
+    if (!listed.ok) throw new Error('Topics refused');
+    expect(listed.result.topics?.[0]).toMatchObject({
+      sessionId: first.result.sessionId,
+      lastUser: 'Help me plan',
+      lastReply: 'Sending the budget.',
+    });
+    // A reply quoting the notice "as the user's message" has nothing to show.
+    const quoted = await stub.submit({
+      ...message,
+      requestId: 'wa:quote-notice',
+      message: 'What was that?',
+      replyTo: { kind: 'known', author: 'user', requestId: 'notice:dlv_1:p2' },
+    });
+    if (!quoted.ok) throw new Error('Turn rejected');
+    const request = JSON.parse(
+      (await stub.run(quoted.result.runId))!.request,
+    ) as { channel: { replyContext?: unknown } };
+    expect(request.channel.replyContext).toEqual({
+      kind: 'unavailable',
+      reason: 'unknown',
+    });
+    // Quoting the oracle's reply to the notice works as for any reply.
+    const quotedReply = await stub.submit({
+      ...message,
+      requestId: 'wa:quote-reply',
+      message: 'Thanks',
+      replyTo: {
+        kind: 'known',
+        author: 'oracle',
+        requestId: 'notice:dlv_1:p2',
+      },
+    });
+    if (!quotedReply.ok) throw new Error('Turn rejected');
+    expect(
+      (
+        JSON.parse((await stub.run(quotedReply.result.runId))!.request) as {
+          channel: { replyContext?: { text?: string } };
+        }
+      ).channel.replyContext?.text,
+    ).toBe('Fixed and resent.');
+  });
+
+  it('with routing on, a notice stays in its session and is never classified or indexed', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('notice-routing');
+    await stub.configureRouting('on');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.finish(first.result.runId, undefined, 'Sending the budget.');
+    const inputsBefore = (await stub.routingInputs()).length;
+    const noticed = await stub.submit(noticeTurn(first.result.sessionId));
+    if (!noticed.ok) throw new Error(`Notice refused: ${noticed.code}`);
+    expect(noticed.result.sessionId).toBe(first.result.sessionId);
+    expect((await stub.routingInputs()).length).toBe(inputsBefore);
+    await stub.finish(noticed.result.runId, undefined, 'Fixed.');
+    // The thread index keeps the person's line, not the notice.
+    const next = await stub.submit({
+      ...message,
+      requestId: 'wa:after-notice',
+      message: 'And the forecast?',
+    });
+    if (!next.ok) throw new Error('Turn rejected');
+    const evidence = (await stub.routingInputs()).slice(inputsBefore);
+    for (const input of evidence) {
+      expect(input).not.toContain('budget.xlsx');
+      expect(input).not.toContain('Delivery notice');
+    }
   });
 });
 

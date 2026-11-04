@@ -62,6 +62,16 @@ export interface PriorMetadataState {
   sessionRunId?: string;
   currentEntityDid?: string;
   loadedPlugins?: string[];
+  /** The plugins whose operating guides the prompt carried (`operating-guides.ts`). */
+  promptGuides?: string[];
+  /** The plugins whose usage the thread's messages carry (`operating-guides.ts`). */
+  capabilityUsage?: string[];
+}
+
+function strings(value: unknown): string[] | undefined {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string')
+    : undefined;
 }
 
 function priorString(
@@ -75,15 +85,17 @@ function priorString(
 export function priorMetadataState(
   prior: Record<string, unknown>,
 ): PriorMetadataState {
-  const loaded = prior['loadedPlugins'];
+  const loaded = strings(prior['loadedPlugins']);
+  const promptGuides = strings(prior['promptGuides']);
+  const capabilityUsage = strings(prior['capabilityUsage']);
   return {
     editorRoomId: priorString(prior, 'editorRoomId'),
     spaceId: priorString(prior, 'spaceId'),
     sessionRunId: priorString(prior, 'sessionRunId'),
     currentEntityDid: priorString(prior, 'currentEntityDid'),
-    ...(Array.isArray(loaded)
-      ? { loadedPlugins: loaded.filter((p) => typeof p === 'string') }
-      : {}),
+    ...(loaded ? { loadedPlugins: loaded } : {}),
+    ...(promptGuides ? { promptGuides } : {}),
+    ...(capabilityUsage ? { capabilityUsage } : {}),
   };
 }
 

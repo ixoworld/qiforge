@@ -172,7 +172,64 @@ export function channelAttachmentInputs(
 /** Same cap as the attachment pipeline (`MAX_ATTACHMENTS`). */
 export const MAX_CHANNEL_ATTACHMENTS = 10;
 
-export const ChannelTurnBody = z.strictObject({
+/** The most code points a blocked file's name carries in a notice. */
+export const CHANNEL_NOTICE_FILENAME_MAX = 120;
+/** The most characters a notice's detail carries. */
+export const CHANNEL_NOTICE_DETAIL_MAX = 400;
+
+/**
+ * The gateway's reasons for blocking a file it checked after the run (its
+ * `file-safety` verdicts that concern the file's content; a refused type or
+ * size is never noticed).
+ */
+export const ChannelFileBlockReason = z.enum([
+  'content_mismatch',
+  'pdf_active',
+  'office_macro',
+  'office_embedded',
+  'office_external',
+  'unverifiable',
+  'zip_limits',
+]);
+export type ChannelFileBlockReason = z.infer<typeof ChannelFileBlockReason>;
+
+/**
+ * A delivery notice: the gateway blocked a file the oracle sent with
+ * `send_file`, after the run that sent it ended. The gateway sends it as a
+ * turn of its own in the session of the plan that held the file, so the
+ * model learns what was found and sends a corrected file. The runtime
+ * downloads and checks nothing: `filename` and `detail` are the gateway's
+ * words, shown to the model as quoted data, never to the person.
+ */
+export const ChannelFileNotice = z.strictObject({
+  kind: z.literal('file_blocked'),
+  /** The blocked part, as the plan named it. */
+  partId: z.string().min(1).max(64),
+  /** The file's name as the plan gave it, sanitised by the gateway. */
+  filename: codePoints(CHANNEL_NOTICE_FILENAME_MAX).min(1),
+  reason: ChannelFileBlockReason,
+  /** What was found, for the model: one line of plain text without a link. */
+  detail: z
+    .string()
+    .min(1)
+    .max(CHANNEL_NOTICE_DETAIL_MAX)
+    .refine((value) => !/[\r\n\u2028\u2029]/u.test(value), {
+      message: 'detail must be one line',
+    })
+    .refine((value) => !/[a-z][a-z0-9+.-]*:\/\//iu.test(value), {
+      message: 'detail must not carry a link',
+    }),
+  /** The request whose plan held the file. */
+  originalRequestId: z.string().min(1).max(180),
+});
+export type ChannelFileNotice = z.infer<typeof ChannelFileNotice>;
+
+/**
+ * Every field of a channel turn. `ChannelTurnBody` adds the rule that ties
+ * `message` and `notice` together; this object is what other schemas take
+ * fields from.
+ */
+const ChannelTurnFields = z.strictObject({
   provider: ChannelProviderId,
   bindingId: z.string().regex(/^chb_[A-Za-z0-9_-]{1,120}$/),
   bindingRevision: z.number().int().positive().safe(),
@@ -181,7 +238,8 @@ export const ChannelTurnBody = z.strictObject({
   sessionId: z.string().min(1).max(255).optional(),
   /** An explicit correction stays in its current session, even with routing enabled. */
   sessionPolicy: z.literal('continue').optional(),
-  message: z.string().min(1).max(16_000),
+  /** What the person sent. Required, except on a turn that carries `notice`. */
+  message: z.string().min(1).max(16_000).optional(),
   /** Files sent with the message; `message` carries the caption or a placeholder. */
   attachments: z
     .array(ChannelAttachment)
@@ -190,19 +248,64 @@ export const ChannelTurnBody = z.strictObject({
     .optional(),
   replyTo: ChannelReplyReference.optional(),
   /**
+   * A delivery notice instead of a message from the person. It runs in the
+   * session of the original turn's plan (`sessionId`, `sessionPolicy:
+   * 'continue'`), with no files and no quote, and is answered like a turn.
+   */
+  notice: ChannelFileNotice.optional(),
+  /**
    * Which kind of oracle the gateway believes it addresses. `companion` is
    * the legacy value; the gateway sends `oracle`. Both are accepted.
    */
   context: z.strictObject({ kind: z.enum(['companion', 'oracle']) }),
 });
 
+export const ChannelTurnBody = ChannelTurnFields.superRefine((body, ctx) => {
+  if (!body.notice) {
+    if (body.message === undefined)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['message'],
+        message: 'message is required',
+      });
+    return;
+  }
+  for (const field of ['attachments', 'replyTo'] as const)
+    if (body[field] !== undefined)
+      ctx.addIssue({
+        code: 'custom',
+        path: [field],
+        message: `${field} is not allowed with a notice`,
+      });
+  if (body.sessionId === undefined)
+    ctx.addIssue({
+      code: 'custom',
+      path: ['sessionId'],
+      message: 'a notice names the session of the original turn',
+    });
+  if (body.sessionPolicy !== 'continue')
+    ctx.addIssue({
+      code: 'custom',
+      path: ['sessionPolicy'],
+      message: "a notice is sent with sessionPolicy 'continue'",
+    });
+});
+
 export type ChannelTurnInput = z.infer<typeof ChannelTurnBody>;
+
+/**
+ * What the runtime can do beyond the base turn contract; every turn result
+ * carries the list. `delivery_notice`: a blocked file may be sent back as
+ * a `notice` turn.
+ */
+export const CHANNEL_TURN_FEATURES = ['delivery_notice'] as const;
+export type ChannelTurnFeature = (typeof CHANNEL_TURN_FEATURES)[number];
 
 export const ChannelOrigin = z.strictObject({
   v: z.literal(1),
   transport: ChannelProviderId,
-  binding_id: ChannelTurnBody.shape.bindingId,
-  remote_ref: ChannelTurnBody.shape.remoteMessageRef,
+  binding_id: ChannelTurnFields.shape.bindingId,
+  remote_ref: ChannelTurnFields.shape.remoteMessageRef,
 });
 
 export type ChannelOrigin = z.infer<typeof ChannelOrigin>;
@@ -244,10 +347,13 @@ export interface ChannelTurnResponse {
     | 'failed';
   messageId?: string;
   text?: string;
+  /** What this runtime supports beyond the base contract (`CHANNEL_TURN_FEATURES`). */
+  features: readonly ChannelTurnFeature[];
   /**
    * A finished turn's Reply Plan: the parts to deliver in order (short
-   * messages and artefact links). `text` stays the whole reply as one
-   * message for gateways that predate plans.
+   * messages, artefact links and files). `text` stays the whole reply as one
+   * message for gateways that predate plans, or that cannot read one of its
+   * parts: a file is a link line there.
    */
   plan?: ReplyPlan;
   actionOutcomes?: ActionOutcomeWire[];

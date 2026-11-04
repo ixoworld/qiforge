@@ -30,22 +30,25 @@ export function buildUserMessageContent(
 
   const content: MessageContent = [
     { type: 'text', text },
-    ...natives.map((native) =>
-      native.kind === 'image'
-        ? {
-            type: 'image',
-            source_type: 'base64',
-            mime_type: native.mimeType,
-            data: native.base64,
-          }
-        : {
-            type: 'file',
-            source_type: 'base64',
-            mime_type: native.mimeType,
-            data: native.base64,
-            filename: native.filename,
-          },
-    ),
+    ...natives.map(nativeContentBlock),
   ];
   return content;
+}
+
+/** The content block of one native attachment (the shape described above). */
+export function nativeContentBlock(native: NativeAttachment) {
+  return native.kind === 'image'
+    ? {
+        type: 'image',
+        source_type: 'base64',
+        mime_type: native.mimeType,
+        data: native.base64,
+      }
+    : {
+        type: 'file',
+        source_type: 'base64',
+        mime_type: native.mimeType,
+        data: native.base64,
+        filename: native.filename,
+      };
 }

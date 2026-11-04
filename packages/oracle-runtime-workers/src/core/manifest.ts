@@ -1,5 +1,9 @@
 import { z } from 'zod';
-import type { ManifestExample, PluginManifest } from '../plugin-api/types';
+import type {
+  ManifestExample,
+  PluginManifest,
+  PluginTool,
+} from '../plugin-api/types';
 
 // ── Schema ──────────────────────────────────────────────────────────────────
 
@@ -48,6 +52,9 @@ export const pluginManifestSchema: z.ZodType<PluginManifest> = z.object({
   tags: z.array(z.string()).optional(),
   category: manifestCategorySchema.optional(),
   visibility: manifestVisibilitySchema.optional(),
+  brief: z.string().optional(),
+  onDemandTools: z.array(z.string().min(1)).optional(),
+  routable: z.boolean().optional(),
   stability: manifestStabilitySchema.optional(),
   requires: z
     .array(z.object({ resource: z.string().min(1), action: z.string().min(1) }))
@@ -67,6 +74,19 @@ export function unmetRequirements(
   return (manifest.requires ?? []).filter(
     (r) => !hasCapability(r.resource, r.action),
   );
+}
+
+/**
+ * A tool's effective visibility: its own `visibility`, else the manifest's
+ * `onDemandTools`, else the plugin's visibility (`on-demand` by default).
+ */
+export function effectiveToolVisibility(
+  tool: Pick<PluginTool, 'name' | 'visibility'>,
+  manifest: PluginManifest | undefined,
+): NonNullable<PluginManifest['visibility']> {
+  if (tool.visibility) return tool.visibility;
+  if (manifest?.onDemandTools?.includes(tool.name)) return 'on-demand';
+  return manifest?.visibility ?? 'on-demand';
 }
 
 /** `can` on `with` pairs for a message: "`*` on `ixo:filesystem`, …". */
@@ -90,6 +110,7 @@ export interface ManifestValidationResult {
 /** Soft-cap thresholds — violations only emit warnings. */
 const SOFT_LIMITS = {
   summaryMaxChars: 120,
+  briefMaxChars: 60,
   whenToUseMaxItems: 8,
   whenToUseItemMaxChars: 100,
   whenNotToUseMaxItems: 4,
@@ -161,6 +182,13 @@ export function validateManifest(
     );
   }
 
+  // Soft rule: brief length cap.
+  if (m.brief && m.brief.length > SOFT_LIMITS.briefMaxChars) {
+    warnings.push(
+      `${tag(pluginName, 'brief')} is ${m.brief.length} chars (recommended ≤ ${SOFT_LIMITS.briefMaxChars}).`,
+    );
+  }
+
   // Soft rule: whenToUse caps.
   if (m.whenToUse.length > SOFT_LIMITS.whenToUseMaxItems) {
     warnings.push(
@@ -202,9 +230,9 @@ export function validateManifest(
 }
 
 /**
- * Cross-check `examples[].tool` references against the set of tool names
- * actually registered by this plugin. Run after the plugin's `getTools()`
- * has been invoked.
+ * Cross-check `examples[].tool` and `onDemandTools` references against the
+ * set of tool names actually registered by this plugin. Run after the
+ * plugin's `getTools()` has been invoked.
  *
  * **Lenient for request-time plugins**: when `registeredToolNames` is empty,
  * the plugin's tools come from `getRequestTools` — boot-time validation
@@ -218,15 +246,20 @@ export function validateExamplesAgainstTools(
   pluginName: string,
 ): { errors: string[] } {
   const errors: string[] = [];
-  if (!manifest.examples) return { errors };
-
   if (registeredToolNames.length === 0) return { errors };
 
   const known = new Set(registeredToolNames);
-  manifest.examples.forEach((ex, i) => {
+  manifest.examples?.forEach((ex, i) => {
     if (!known.has(ex.tool)) {
       errors.push(
         `${tag(pluginName, `examples[${i}].tool`)} references unknown tool "${ex.tool}".`,
+      );
+    }
+  });
+  manifest.onDemandTools?.forEach((name, i) => {
+    if (!known.has(name)) {
+      errors.push(
+        `${tag(pluginName, `onDemandTools[${i}]`)} references unknown tool "${name}".`,
       );
     }
   });
@@ -273,8 +306,20 @@ export interface Tier1Entry {
   manifest: PluginManifest;
 }
 
+/** One line of the on-demand catalogue. */
+export interface CatalogueEntry extends Tier1Entry {
+  /** The user's authorization lacks what the plugin requires. */
+  unavailable?: boolean;
+}
+
 export interface Tier1Input {
   manifests: Tier1Entry[];
+  /**
+   * Capabilities with something left to load this turn. Rendered whether or
+   * not the thread already loaded them, so the block does not change when a
+   * plugin is loaded and stays inside the provider's prompt cache.
+   */
+  catalogue?: CatalogueEntry[];
   /** Soft budget in tokens. Default 5000. Exceeding it triggers a warning. */
   tokenBudget?: number;
   /**
@@ -283,12 +328,6 @@ export interface Tier1Input {
    * budget is a soft operator hint where ±20% is immaterial.
    */
   estimateTokens?: (text: string) => number;
-  /**
-   * Whether the meta-tools are bound this turn. Default `true`. Pass `false`
-   * when they are not, so the block does not end by telling the model to
-   * call `list_capabilities` / `load_capability`.
-   */
-  capabilityDiscovery?: boolean;
 }
 
 export interface Tier1Output {
@@ -303,8 +342,10 @@ export interface Tier1Output {
 const DEFAULT_BUDGET = 5000;
 
 const HEADER = '## Available Capabilities\n\n';
-const FOOTER =
-  '\n\nFor more capabilities, call `list_capabilities()` to see what else is available,\nthen `load_capability({ names: ["cap1", "cap2"] })` to make their tools available in one call — pass all the capabilities you need at once rather than calling it multiple times.';
+const CATALOGUE_HEADER =
+  '## On-demand capabilities\n\nNot in your tool list until loaded. Call `load_capability({ names: [...] })` once with all you need, right from this list (no `list_capabilities` needed); the tools join your list on the next step. Anything already in your tool list needs no loading.\n\n';
+/** Catalogue line of a plugin that declares no `brief`. */
+const CLIPPED_SUMMARY_CHARS = 60;
 
 /**
  * Chars/4 token estimate. Replaces the Node runtime's `js-tiktoken`
@@ -331,6 +372,37 @@ function formatExample(ex: ManifestExample): string {
   return `"${ex.user}" → ${argSummary}`;
 }
 
+/** The manifest's `brief`, or its summary clipped at a word boundary. */
+function catalogueText(manifest: PluginManifest): string {
+  if (manifest.brief) return manifest.brief;
+  const summary = manifest.summary.trim();
+  if (summary.length <= CLIPPED_SUMMARY_CHARS) return summary;
+  const clipped = summary.slice(0, CLIPPED_SUMMARY_CHARS);
+  const boundary = clipped.lastIndexOf(' ');
+  return `${boundary > 0 ? clipped.slice(0, boundary) : clipped}…`;
+}
+
+function formatCatalogueLine({
+  pluginName,
+  manifest,
+  unavailable,
+}: CatalogueEntry): string {
+  const line = `- ${pluginName}: ${catalogueText(manifest)}`;
+  return unavailable ? `${line} (not authorized by this user)` : line;
+}
+
+/**
+ * The first example the prompt may teach: one naming a tool still behind
+ * `load_capability` would invite a call the capability gate refuses.
+ */
+function firstBoundExample(
+  manifest: PluginManifest,
+): ManifestExample | undefined {
+  return manifest.examples?.find(
+    (example) => !manifest.onDemandTools?.includes(example.tool),
+  );
+}
+
 function formatEntry(entry: Tier1Entry): string {
   const { pluginName, manifest } = entry;
   const lines: string[] = [`- **${pluginName}** — ${manifest.summary}`];
@@ -344,7 +416,7 @@ function formatEntry(entry: Tier1Entry): string {
     lines.push(`  - Avoid for: ${manifest.whenNotToUse[0]}`);
   }
 
-  const firstExample = manifest.examples?.[0];
+  const firstExample = firstBoundExample(manifest);
   if (firstExample) {
     lines.push(`  - Example: ${formatExample(firstExample)}`);
   }
@@ -355,10 +427,11 @@ function formatEntry(entry: Tier1Entry): string {
 /**
  * Compose the Tier-1 capability block from a list of plugin manifests.
  *
- * Only `visibility: 'always'` manifests are included, sorted alphabetically
- * for prompt-caching determinism. Over-budget calls produce a warning naming
- * the largest manifests so operators can mark them `'on-demand'` — degrading
- * verbosity is an operator decision, not a runtime guess.
+ * Full entries for the `visibility: 'always'` manifests, then one line per
+ * `catalogue` entry, each list sorted alphabetically for prompt-caching
+ * determinism. Over-budget calls produce a warning naming the largest
+ * manifests so operators can mark them `'on-demand'` — degrading verbosity
+ * is an operator decision, not a runtime guess.
  */
 export function renderTier1(input: Tier1Input): Tier1Output {
   const budget = input.tokenBudget ?? DEFAULT_BUDGET;
@@ -369,12 +442,20 @@ export function renderTier1(input: Tier1Input): Tier1Output {
     .slice()
     .sort((a, b) => a.pluginName.localeCompare(b.pluginName));
 
-  if (entries.length === 0) {
+  const catalogue = (input.catalogue ?? [])
+    .slice()
+    .sort((a, b) => a.pluginName.localeCompare(b.pluginName))
+    .map(formatCatalogueLine);
+
+  if (entries.length === 0 && catalogue.length === 0) {
     return { block: '', tokens: 0, warnings: [] };
   }
 
   const renderedLines = entries.map(formatEntry);
-  const tokens = renderedLines.reduce((sum, line) => sum + estimate(line), 0);
+  const tokens = [...renderedLines, ...catalogue].reduce(
+    (sum, line) => sum + estimate(line),
+    0,
+  );
   const warnings: string[] = [];
 
   if (tokens > budget) {
@@ -393,7 +474,11 @@ export function renderTier1(input: Tier1Input): Tier1Output {
     );
   }
 
-  const footer = input.capabilityDiscovery === false ? '' : FOOTER;
-  const block = `${HEADER}${renderedLines.join('\n\n')}${footer}`;
+  const block = [
+    entries.length > 0 ? `${HEADER}${renderedLines.join('\n\n')}` : '',
+    catalogue.length > 0 ? `${CATALOGUE_HEADER}${catalogue.join('\n')}` : '',
+  ]
+    .filter((section) => section !== '')
+    .join('\n\n');
   return { block, tokens, warnings };
 }

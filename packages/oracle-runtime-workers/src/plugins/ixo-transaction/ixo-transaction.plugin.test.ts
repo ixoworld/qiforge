@@ -319,7 +319,7 @@ describe('IxoTransactionPlugin in a turn', () => {
     expect(built.boundToolNames).toEqual(expect.arrayContaining(TOOL_NAMES));
     expect(tools.get('c1')?.status).toBe('error');
     expect(String(tools.get('c1')?.content)).toContain(
-      'belongs to the "ixo-transaction" capability, which is not loaded',
+      'belongs to the "ixo-transaction" capability, which was not loaded',
     );
     // Refused by the gate: nothing reached the wallet.
     expect(bridge.calls).toEqual([]);

@@ -7,7 +7,8 @@
  *     closed when the run ends. It carries what a later incarnation of the
  *     object needs to resume the run after a reset (the request), how many
  *     recovery attempts were spent without progress, and the checkpoint id
- *     seen at the last attempt (progress resets the counter).
+ *     seen at the last attempt (progress resets the counter), and how many
+ *     recoveries it got in all (`generation`, never reset).
  *   - `turn_run_segments`: the run's output, packed by `RunBuffer` into one
  *     row per flush, so a client can re-join after any cursor and a recovery
  *     can restore exactly what the user had already seen. Deleted at cutover.
@@ -117,6 +118,7 @@ export interface RunRecord {
    * are numbered from `attemptSeqBase(g)`, so a client's cursor from an
    * earlier attempt — even one pointing at frames that were never packed
    * before the reset — is below every frame a later attempt produces.
+   * Also the count `decideOrphanRecovery` caps (`recoveryTotalAttempts`).
    */
   generation: number;
   /** When the next recovery attempt is due (ms since epoch), while `recovering`. */
@@ -204,6 +206,14 @@ export const DEFAULT_RECOVERY_DELAYS_MS: readonly number[] = [
   5_000, 15_000, 30_000, 60_000,
 ];
 export const DEFAULT_RECOVERY_ATTEMPTS = 4;
+/**
+ * Recoveries a run gets in all, progress or not (`generation` is never
+ * reset). Each one is a restart of the object while the run was active; a
+ * turn that resets the isolate every time it makes a step (one checkpoint,
+ * then the next model call exceeds the memory limit) would otherwise be
+ * resumed for as long as each attempt checkpoints once.
+ */
+export const DEFAULT_RECOVERY_TOTAL_ATTEMPTS = 8;
 export const DEFAULT_KEEPALIVE_MS = 20_000;
 export const DEFAULT_SEGMENT_FLUSH_MS = 2_000;
 export const DEFAULT_SEGMENT_BYTES = 16 * 1024;
@@ -213,6 +223,8 @@ export interface RunDurabilityConfig {
   segmentFlushMs: number;
   segmentBytes: number;
   recoveryAttempts: number;
+  /** Recoveries in all, progress or not (`DEFAULT_RECOVERY_TOTAL_ATTEMPTS`). */
+  recoveryTotalAttempts: number;
   recoveryDelaysMs: readonly number[];
   multitaskDefault: 'interrupt' | 'enqueue';
 }
@@ -242,6 +254,11 @@ export function runDurabilityConfig(
     recoveryAttempts: int(
       'RUN_RECOVERY_ATTEMPTS',
       DEFAULT_RECOVERY_ATTEMPTS,
+      0,
+    ),
+    recoveryTotalAttempts: int(
+      'RUN_RECOVERY_TOTAL_ATTEMPTS',
+      DEFAULT_RECOVERY_TOTAL_ATTEMPTS,
       0,
     ),
     recoveryDelaysMs: delays.length > 0 ? delays : DEFAULT_RECOVERY_DELAYS_MS,
@@ -277,7 +294,16 @@ export function runHasCheckpointed(
 
 export type RecoveryDecision =
   | { action: 'schedule'; at: number; attempts: number }
-  | { action: 'interrupt'; attempts: number };
+  | {
+      action: 'interrupt';
+      attempts: number;
+      /**
+       * `no-progress`: `recoveryAttempts` consecutive attempts left the
+       * checkpoint where it was. `total`: the run was recovered
+       * `recoveryTotalAttempts` times in all (`decideOrphanRecovery`).
+       */
+      reason: 'no-progress' | 'total';
+    };
 
 /**
  * What to do with an orphaned run found at boot (or an attempt that just
@@ -294,10 +320,34 @@ export function decideRecovery(
   const progressed = checkpointAdvanced(run.checkpointId, currentCheckpointId);
   const spent = progressed ? 0 : run.attempts;
   if (spent >= config.recoveryAttempts)
-    return { action: 'interrupt', attempts: spent };
+    return { action: 'interrupt', attempts: spent, reason: 'no-progress' };
   const delays = config.recoveryDelaysMs;
   const delay = delays[Math.min(spent, delays.length - 1)] ?? 0;
   return { action: 'schedule', at: now + delay, attempts: spent + 1 };
+}
+
+/**
+ * What to do with a run a previous incarnation left running or recovering:
+ * `decideRecovery`, once the run is still within its recoveries in all.
+ * `generation` counts every recovery the run got and is never reset, so a
+ * run that checkpoints once per attempt and then resets the object again
+ * (progress each time, so `attempts` stays at 1) is closed after
+ * `recoveryTotalAttempts` recoveries instead of being resumed until its
+ * client gives up. A deferral (`RunAttemptDeferred`) is not a restart and
+ * is bounded by `decideRecovery` alone.
+ */
+export function decideOrphanRecovery(
+  run: Pick<RunRecord, 'attempts' | 'checkpointId' | 'generation'>,
+  currentCheckpointId: string | null,
+  now: number,
+  config: Pick<
+    RunDurabilityConfig,
+    'recoveryAttempts' | 'recoveryTotalAttempts' | 'recoveryDelaysMs'
+  >,
+): RecoveryDecision {
+  if (run.generation >= config.recoveryTotalAttempts)
+    return { action: 'interrupt', attempts: run.attempts, reason: 'total' };
+  return decideRecovery(run, currentCheckpointId, now, config);
 }
 
 type RunRow = {

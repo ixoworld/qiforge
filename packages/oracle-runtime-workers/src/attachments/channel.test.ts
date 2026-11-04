@@ -11,6 +11,7 @@ import {
 } from './channel';
 import { MAX_FILE_SIZE, type MatrixMediaSource } from './download';
 import type { ExtractionProvider } from './extract';
+import { fakeImages } from './fixtures/fake-images';
 import { prepareAttachments } from './pipeline';
 import type { AttachmentInput } from './types';
 
@@ -176,6 +177,237 @@ describe('channel file links', () => {
 });
 
 describe('channel files in the attachment pipeline', () => {
+  it('reads a file the turn is posting to its thread from the pending copy, once, and keeps naming it by its reference', async () => {
+    const { input, link } = await channelFile(JPEG, 'photo.jpg', 'image/jpeg');
+    const fetchImpl = gatewayFetch(() => {
+      throw new Error('no download expected');
+    });
+    let release: (copy: { bytes: Uint8Array; mimetype: string }) => void = () =>
+      undefined;
+    const preloaded = new Map([
+      [
+        link.ref,
+        new Promise<{ bytes: Uint8Array; mimetype: string } | null>(
+          (resolve) => {
+            release = resolve;
+          },
+        ),
+      ],
+    ]);
+    const prepared = prepareAttachments(
+      { text: '[photo]', attachments: [input], model: 'm', caps: ALL_CAPS },
+      {
+        source: NO_MATRIX,
+        channel: sourceOf([link]),
+        preloaded,
+        extraction: PROVIDER,
+        sandbox: null,
+        fetchImpl,
+        logger: LOGGER,
+      },
+    );
+    // The copy arrives while the pipeline waits for it.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    release({ bytes: JPEG, mimetype: 'image/jpeg' });
+    const out = await prepared;
+    expect(Array.isArray(out.content)).toBe(true);
+    expect(fetchImpl.urls).toEqual([]);
+    // Taken off the map as it is read: the turn lets go of the bytes.
+    expect(preloaded.size).toBe(0);
+    expect(out.nativeNotes.map((n) => n.text)).toEqual([
+      `[source: ref="${link.ref}"] "photo.jpg" (image/jpeg) is attached to this message.`,
+    ]);
+    expect(out.metas).toEqual([
+      {
+        filename: 'photo.jpg',
+        mimetype: 'image/jpeg',
+        size: JPEG.length,
+        channelRef: link.ref,
+        category: 'image',
+      },
+    ]);
+  });
+
+  it('reads the gateway as before when no copy comes, and never serves a copy for another reference', async () => {
+    const { input, link } = await channelFile(JPEG, 'photo.jpg', 'image/jpeg');
+    const other = await channelFile(
+      new Uint8Array([0x89, 0x50, 0x4e, 0x47, 9]),
+      'other.png',
+      'image/png',
+    );
+    const fetchImpl = gatewayFetch(() => new Response(JPEG));
+    const preloaded = new Map<
+      string,
+      Promise<{ bytes: Uint8Array; mimetype: string } | null>
+    >([
+      [link.ref, Promise.resolve(null)],
+      [
+        other.link.ref,
+        Promise.resolve({ bytes: JPEG, mimetype: 'image/jpeg' }),
+      ],
+    ]);
+    const out = await prepareAttachments(
+      { text: '[photo]', attachments: [input], model: 'm', caps: ALL_CAPS },
+      {
+        source: NO_MATRIX,
+        channel: sourceOf([link]),
+        preloaded,
+        extraction: PROVIDER,
+        sandbox: null,
+        fetchImpl,
+        logger: LOGGER,
+      },
+    );
+    expect(Array.isArray(out.content)).toBe(true);
+    expect(fetchImpl.urls).toEqual([link.url]);
+    // Only the file's own entry is taken.
+    expect([...preloaded.keys()]).toEqual([other.link.ref]);
+  });
+
+  it('counts a copy against the turn budget like a download', async () => {
+    const big = new Uint8Array(MAX_FILE_SIZE).fill(0x61);
+    const first = await channelFile(big, 'a.txt', 'text/plain');
+    const second = await channelFile(
+      new Uint8Array(MAX_FILE_SIZE).fill(0x62),
+      'b.txt',
+      'text/plain',
+    );
+    const third = await channelFile(
+      new TextEncoder().encode('small'),
+      'c.txt',
+      'text/plain',
+    );
+    const fetchImpl = gatewayFetch(() => new Response('unexpected'));
+    const out = await prepareAttachments(
+      {
+        text: 'files',
+        attachments: [first.input, second.input, third.input],
+        model: 'm',
+        caps: NO_CAPS,
+      },
+      {
+        source: NO_MATRIX,
+        channel: sourceOf([first.link, second.link, third.link]),
+        preloaded: new Map([
+          [
+            first.link.ref,
+            Promise.resolve({ bytes: big, mimetype: 'text/plain' }),
+          ],
+          [
+            second.link.ref,
+            Promise.resolve({
+              bytes: new Uint8Array(MAX_FILE_SIZE).fill(0x62),
+              mimetype: 'text/plain',
+            }),
+          ],
+        ]),
+        extraction: PROVIDER,
+        sandbox: null,
+        fetchImpl,
+        logger: LOGGER,
+      },
+    );
+    // 2 × 25 MB of copies spend the 50 MB budget: the third is refused unread.
+    expect(out.extracted[2]?.text).toContain(
+      'Total attachment size budget exceeded',
+    );
+    expect(fetchImpl.urls).toEqual([]);
+  });
+
+  it('sends an image the resize step drops to the extract lane with the bytes it already has', async () => {
+    const { input, link } = await channelFile(JPEG, 'wide.jpg', 'image/jpeg');
+    const fetchImpl = gatewayFetch((url) =>
+      url.endsWith('/chat/completions')
+        ? Response.json({ choices: [{ message: { content: 'a banner' } }] })
+        : new Response(JPEG),
+    );
+    const out = await prepareAttachments(
+      { text: '[photo]', attachments: [input], model: 'm', caps: ALL_CAPS },
+      {
+        source: NO_MATRIX,
+        channel: sourceOf([link]),
+        extraction: PROVIDER,
+        sandbox: null,
+        images: fakeImages({ width: 20_000, height: 100 }),
+        fetchImpl,
+        logger: LOGGER,
+      },
+    );
+    // No native block: the helper model described it from the one download.
+    expect(out.content).toBe('[photo]');
+    expect(out.extracted[0]?.text).toContain('a banner');
+    expect(fetchImpl.urls.filter((u) => u === link.url)).toHaveLength(1);
+  });
+
+  it('reads a channel file from its room copy once its link is gone', async () => {
+    const { input } = await channelFile(JPEG, 'photo.jpg', 'image/jpeg');
+    const fetchImpl = gatewayFetch(() => {
+      throw new Error('no gateway download expected');
+    });
+    const events: string[] = [];
+    const roomCopy: MatrixMediaSource = {
+      downloadMxc: async () => {
+        throw new Error('not by mxc');
+      },
+      downloadEvent: async (roomId, eventId) => {
+        events.push(`${roomId} ${eventId}`);
+        return { bytes: JPEG, mimetype: 'image/jpeg' };
+      },
+    };
+    const out = await prepareAttachments(
+      {
+        text: '[photo]',
+        attachments: [input],
+        roomId: '!room:test',
+        model: 'm',
+        caps: ALL_CAPS,
+      },
+      {
+        source: roomCopy,
+        // The link has expired: the store no longer serves it, only the event.
+        channel: createChannelMediaSource({
+          origins: ORIGINS,
+          resolve: async () => undefined,
+          roomEventOf: async () => '$room-copy',
+        }),
+        extraction: PROVIDER,
+        sandbox: null,
+        fetchImpl,
+        logger: LOGGER,
+      },
+    );
+    expect(Array.isArray(out.content)).toBe(true);
+    expect(events).toEqual(['!room:test $room-copy']);
+    expect(fetchImpl.urls).toEqual([]);
+  });
+
+  it('checks a copy like a download: content that is not what it claims goes to the extract lane', async () => {
+    const pdf = new TextEncoder().encode('%PDF-1.4 not a photo');
+    const { input, link } = await channelFile(pdf, 'photo.jpg', 'image/jpeg');
+    const fetchImpl = gatewayFetch((url) =>
+      url.endsWith('/chat/completions')
+        ? Response.json({ choices: [{ message: { content: 'text' } }] })
+        : new Response('unexpected', { status: 500 }),
+    );
+    const out = await prepareAttachments(
+      { text: '[photo]', attachments: [input], model: 'm', caps: ALL_CAPS },
+      {
+        source: NO_MATRIX,
+        channel: sourceOf([link]),
+        preloaded: new Map([
+          [link.ref, Promise.resolve({ bytes: pdf, mimetype: 'image/jpeg' })],
+        ]),
+        extraction: PROVIDER,
+        sandbox: null,
+        fetchImpl,
+        logger: LOGGER,
+      },
+    );
+    expect(out.content).toBe('[photo]');
+    expect(out.extracted).toHaveLength(1);
+    expect(fetchImpl.urls).not.toContain(link.url);
+  });
+
   it('sends a photo natively as its bytes and shows the model only its reference', async () => {
     const { input, link } = await channelFile(JPEG, 'photo.jpg', 'image/jpeg');
     const fetchImpl = gatewayFetch(() => new Response(JPEG));
@@ -327,23 +559,19 @@ describe('channel files in the attachment pipeline', () => {
     expect(quoted.startsWith('\u{1f4f7}')).toBe(true);
   });
 
-  it('archives a document larger than any model is handed here, and only notes it', async () => {
-    const big = new Uint8Array(MAX_FILE_SIZE + 1024).fill(0x61);
-    big.set(new TextEncoder().encode('%PDF-1.4 '));
+  it('notes a document larger than any model or the sandbox takes here without reading it', async () => {
     const { input, link } = await channelFile(
-      big,
+      new TextEncoder().encode('%PDF-1.4 '),
       'manual.pdf',
       'application/pdf',
     );
-    const fetchImpl = gatewayFetch((url) =>
-      url.endsWith('/artifacts/upload')
-        ? Response.json({ path: '/workspace/output/manual.pdf' })
-        : new Response(big),
-    );
+    const fetchImpl = gatewayFetch(() => {
+      throw new Error('no request expected');
+    });
     const out = await prepareAttachments(
       {
         text: '[document: manual.pdf]',
-        attachments: [input],
+        attachments: [{ ...input, size: MAX_FILE_SIZE + 1024 }],
         model: 'm',
         caps: ALL_CAPS,
       },
@@ -358,11 +586,9 @@ describe('channel files in the attachment pipeline', () => {
     );
     expect(out.content).toBe('[document: manual.pdf]');
     expect(out.extracted[0]?.text).toContain(
-      'is larger than the 25 MB a model reads here, so its content was not read',
+      'is larger than the 25 MB a model or the sandbox takes here, so it was neither read nor archived',
     );
-    expect(out.extracted[0]?.text).toContain('/workspace/output/manual.pdf');
-    expect(fetchImpl.urls.some((u) => u.endsWith('/chat/completions'))).toBe(
-      false,
-    );
+    // Neither the gateway, the helper model nor the sandbox was asked.
+    expect(fetchImpl.urls).toEqual([]);
   });
 });

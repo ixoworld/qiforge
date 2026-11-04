@@ -1,5 +1,133 @@
 # @ixo/oracle-runtime-workers
 
+## 0.38.0
+
+### Minor Changes
+
+- [#464](https://github.com/ixoworld/qiforge/pull/464) [`c0b81ab`](https://github.com/ixoworld/qiforge/commit/c0b81ab6a042ef1bf7b70c12077a53e1f0d3d902) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Attachment bytes are no longer stored with the conversation. A file the model reads natively stays inline, as base64, only in the turn's in-memory state; the checkpointer stores every message that carries such blocks (the person's message and the `view_attachment` re-attachment) with one placeholder text in their place, listing each attachment with its reference, in message rows, checkpoint blobs and pending writes alike. The attachment metadata is kept, so transcripts are unchanged. Before, the bytes sat in the checkpoint and were replayed on every model call until a turn completed and the retention pass rewrote turns older than the newest two; a large file could reset the user's Durable Object mid-turn, before that pass ever ran. The retention pass is removed. Human message rows stored with their bytes before this version are rewritten to the placeholder once per thread, on the thread's first load (recorded in a new `attachment_payload_sweeps` table). Tool and AI messages that carry base64 (an MCP screenshot) are still stored as they are; the saver logs every write whose serialized form still holds an inline payload.
+
+  Images of the newest two user turns are put back into each model request at call time, from their source (Matrix media, channel links, http(s)), downscaled when the oracle binds `IMAGES`: at most 4 per request, fetched one at a time with a 15 s deadline each, none over 5 MiB, at most 10 MiB of base64 per request, never an image the request already carries or the same file twice; finished images are kept in a small per-object cache so later turns neither fetch nor transform them again; a failed fetch leaves the placeholder. When the provider refuses a request with recalled images (a 4xx that is not a context overflow, credential, billing, timeout or rate limit), the call is retried once without them and they are not recalled again in that run. Documents and older images come back through `view_attachment`. A durable run resumed mid-turn sees the placeholder for its own files and recalls its images the same way.
+
+- [#464](https://github.com/ixoworld/qiforge/pull/464) [`c0b81ab`](https://github.com/ixoworld/qiforge/commit/c0b81ab6a042ef1bf7b70c12077a53e1f0d3d902) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Attachments now reach the model by size, the same for Portal, Matrix and channel files. A document (PDF, Office) is sent as a native file block only when the model reads files and its downloaded length is at most 20,480 bytes (20 KiB, `NATIVE_DOCUMENT_MAX_BYTES`: about 7k tokens as base64, and a few pages, since providers charge a native PDF per page); a declared size over the limit skips the native download, and a wrong or missing declared size cannot slip a large file through. A larger document always goes through the extract lane: helper-model text, a sandbox copy, and a 500-character excerpt with the sandbox path. Before, any document went natively to a file-reading model, so a 600 KB PDF became ~200k tokens on every model call and could reset the user's Durable Object. `view_attachment` follows the same rule.
+
+  Images still go natively to a vision model. With the new optional Cloudflare Images binding (`"images": { "binding": "IMAGES" }`), an image with either side over 1568 px is downscaled to fit 1568 × 1568 px (long edge 1568 px) as a JPEG at quality 82 before the model sees it; the sandbox keeps the original. Without the binding, for a type the binding does not take (SVG, BMP, TIFF, HEIC, …), or when the binding cannot read an image's dimensions for another reason, images are sent unchanged. An image the binding reports as malformed, one over 12,000 px a side or 50 megapixels, and one over 1568 px whose transformation fails are never sent natively: the turn and `view_attachment` hand them to the helper model instead, and the image recall leaves them out. Cloudflare bills $0.50 per 1,000 unique transformations after 5,000 free a month.
+
+- [#464](https://github.com/ixoworld/qiforge/pull/464) [`b123d44`](https://github.com/ixoworld/qiforge/commit/b123d443c29e21801f59df113b0124db75b27f68) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Files a person sends on an IXO Channels turn (a WhatsApp photo, video, audio file or document) now appear in Qi.Space: alongside the run, the user's object posts each one as an encrypted media event of the oracle in the session's thread, after the message's text and before the reply. Nothing of it is on the turn's critical path: the run names each file by its `channel:` reference as before and never waits for the homeserver or the room.
+
+  - Each file is streamed once from the gateway's link to the homeserver with the oracle's plugin device, encrypted chunk by chunk, with no name or type on the upload, and checked against the gateway's size and SHA-256 on the way (a mismatch never completes an upload). For an image or a document of at most 20 KiB, up to 16 MiB per turn, that same read hands the turn its verified bytes, so the model lane does not download the file a second time; any other file and a file whose read did not finish within its deadlines (60 s per file, 120 s per turn) are read from the gateway by the pipeline as before. A resumed attempt posts and downloads nothing (its message and files are in the checkpoint).
+  - The events are sent in the background, in message order, at background priority through a small gateway lane (the SDK's `sendEvent` sends every event as interactive), each within 300 s; their type and `msgtype` come from the file's own bytes. Only a Megolm-encrypted room gets a file, and the gateway refuses to send an attachment key into a room it does not see as encrypted. The event ids are kept with the links (`channel_attachment_links.event_id`, added at startup), and that room copy serves `view_attachment` and image recall once the gateway's 30-day link has expired.
+  - A homeserver `429` on an upload skips the turn's remaining files. Any failure is logged without the link and the turn reads the file from the gateway as before.
+  - Matrix media for every source (Portal, Matrix rooms, room copies) is now read from the homeserver by the user's object with the plugin device's token and decrypted there: the gateway object only answers the media event's small JSON (`eventMediaInfo`). `botCredentials({ rejected })` lets a caller that got a `401` have the gateway re-validate or re-log the plugin device once, and concurrent first callers share one login.
+  - In a two-script deployment (oracle script + gateway script) this changes the RPC between them: deploy both from this release back to back, the oracle script first. Until the gateway script is on this release, a file referenced by its Matrix event cannot be read (a file referenced by `mxc://` is read as before); an older oracle script cannot read Matrix media from the new gateway at all.
+  - A channel file declared over 25 MB is noted without being read: no model reads it and the sandbox archive refuses files over 25 MB, so it was downloaded only to be refused.
+  - Attachment file names are cleaned of control, format and bidi characters and reduced to their last path segment before they reach the model, a log line or a room event. The ingest pipeline also drops the oracle's own messages explicitly (`own`).
+
+## 0.37.2
+
+### Patch Changes
+
+- [#462](https://github.com/ixoworld/qiforge/pull/462) [`9ef81ca`](https://github.com/ixoworld/qiforge/commit/9ef81caa9439b60a7a9f63508d87957fe7ccb358) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - A user object whose owner-copy upload fails because the user has no delegation to the oracle (or one without `ixo:filesystem` on `/.oracles`) no longer retries every 10 minutes. It logs once, keeps the working copy (never evicted while it waits) and uploads as soon as a delegation arrives: `POST /delegation`, a request's delegation header, or the room-state deposit a header-less turn reads. `GET /debug/storage` shows `flushWaitsForDelegation`. Before, such users were retried indefinitely: thousands of `owner-store flush failed (N in a row)` errors each on mainnet.
+
+## 0.37.1
+
+### Patch Changes
+
+- [#460](https://github.com/ixoworld/qiforge/pull/460) [`0c563ee`](https://github.com/ixoworld/qiforge/commit/0c563ee3b69e10779799ab115869a573c0644302) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Chat file safety prompt: name live-data formulas among what the gateway blocks, ask for fetched values instead, and never call a file "ready"; a delivery notice now asks for a corrected file that still gives the user what they asked for, with live data written in as values.
+
+## 0.37.0
+
+### Minor Changes
+
+- [#457](https://github.com/ixoworld/qiforge/pull/457) [`290240a`](https://github.com/ixoworld/qiforge/commit/290240a43da72202891f6644f0c994588a3fb6cd) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Blocked files: the oracle learns why a chat gateway blocked a file it sent, and sends a corrected one.
+
+  - Every channel turn result (submit and every poll, whatever the status) carries `features: ["delivery_notice"]`.
+  - `ChannelTurnBody.notice` (`{ kind: "file_blocked", partId, filename, reason, detail, originalRequestId }`) is a turn the gateway sends in place of a message when it blocked a file for a content reason. It needs `sessionId` and `sessionPolicy: "continue"`, refuses `attachments` and `replyTo`, and is otherwise a turn: same admission, idempotent by `requestId`, same queue, recovery and Reply Plan. The model reads it as a note that is clearly not from the user, with the gateway's filename and detail quoted as data. The note is hidden wherever user messages are shown (Portal transcript and pages, history indexing, `topics` last lines, titles, quotes, routing, the oracle room mirror). The runtime downloads and checks no file.
+  - Where a gateway delivers the file, the `send_file` description, its result and the chat surface bullet say what the gateway blocks and tell the model to say it is sending the file, never that it is attached or delivered. The Portal, scheduled tasks and Matrix rooms are unchanged.
+
+### Patch Changes
+
+- [#459](https://github.com/ixoworld/qiforge/pull/459) [`d89e9f6`](https://github.com/ixoworld/qiforge/commit/d89e9f68fe121214c2853e4dbaadde85e37f832c) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Keep long threads from resetting the user object's 128 MB isolate on turns with tool calls: the main agent runs a message's tool calls in one tools node instead of one full-state graph task per call, LangSmith traces keep only the newest messages of a graph or middleware run's state (a model's prompt stays whole) and upload in batches of at most 4 MiB (no run is dropped), the checkpoint saver re-keys unchanged message rows without serializing them again, and the runtime's literals are Latin-1 so a minified bundle's source is stored at one byte per character.
+
+## 0.36.1
+
+### Patch Changes
+
+- [#453](https://github.com/ixoworld/qiforge/pull/453) [`b7dd124`](https://github.com/ixoworld/qiforge/commit/b7dd124e3bc4f5522713a7de4e76f3c651e8ba98) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Reverts [#449](https://github.com/ixoworld/qiforge/issues/449) (chat-channel files sent to the model as text instead of raw bytes), which went out in 0.36.0 before review. Channel attachments behave as in 0.35.1 again. The change is reopened as its own PR for review.
+
+- [#451](https://github.com/ixoworld/qiforge/pull/451) [`93be63d`](https://github.com/ixoworld/qiforge/commit/93be63db8043fae1d7797b400e488dabe83f235c) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - `send_file` sends only the types the channel gateway delivers: PDF, Word (`.docx`), Excel (`.xlsx`), PowerPoint (`.pptx`), text, CSV, Markdown, PNG and JPEG.
+
+  - Any other extension, the legacy `.doc`, `.xls` and `.ppt` included, fails the call before the file is signed, with an error that names the types and tells the model to convert the file or describe its contents.
+  - The tool description and the chat surface bullet for `send_file` name the same types, and tell the model to build the file in the sandbox rather than send a file downloaded from the internet, unless the user asked for that exact file. The Portal and non-chat surfaces are unchanged.
+
+## 0.36.0
+
+### Minor Changes
+
+- [#446](https://github.com/ixoworld/qiforge/pull/446) [`8de7258`](https://github.com/ixoworld/qiforge/commit/8de7258904ffff532c0f807de4887e7460d3f2ce) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - An oracle on a chat surface now delivers a file it made as an attachment instead of pasting a signed download link.
+
+  - New `send_file` tool (`{ path, caption? }`), bound only on chat surfaces and only when the sandbox can sign links. It signs the stored file through the sandbox's `artifact_get_presigned_url` and returns a new Reply Plan part, `{ partId, kind: 'file', file: { url, filename, mimetype, bytes?, caption?, expiresAt? } }`, in the place of the call. It is `effect: 'read'`: a resumed run may run it again.
+  - The model never receives the link: it travels in `ToolMessage.artifact`, which the checkpoint keeps and no provider is sent. A quote of the reply, the room mirror and the transcript name the file instead, and traces lose the signature of any signed storage link.
+  - A file sent twice in one reply, even under another path alias, is delivered once. A link over 3,800 characters or with credentials fails the call, with an error for the model.
+  - On chat surfaces `artifact_get_presigned_url` is not offered, and URL fields are removed from `artifact_get_by_path`, `artifact_list` and `artifact_get_by_cid` results before the model sees them. The Portal and every non-chat surface keep the upstream tools unchanged.
+  - `capParts` never drops a file part, and several files stay in order. A file already sent survives a reset and a mid-turn summary. A chat run that fails after sending files ends as `finished`, with those files and a line saying the rest is missing; its row keeps the error.
+  - A gateway that cannot read a `file` part drops the plan and sends `text`, which carries the file as a Markdown link line with its caption. Matrix rooms post the file as its name and an "Open file" link, valid until the link expires, and the prompt says so instead of promising an attachment.
+  - `renderSurfaceSection` takes a third, required argument, `files`: whether `send_file` is bound this turn.
+  - A turn's steps now start at the turn's real opening message, so a human message the runtime writes itself (`view_attachment`) no longer cuts earlier steps out of the Reply Plan.
+
+- [#447](https://github.com/ixoworld/qiforge/pull/447) [`ea2c08d`](https://github.com/ixoworld/qiforge/commit/ea2c08df7417708a571f6a0bae8af07a141d0e10) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Long threads no longer reset the user object's isolate in a loop.
+
+  - **A run is recovered at most 8 times in all** (`RUN_RECOVERY_TOTAL_ATTEMPTS`, new; counted by the row's `generation`). Progress still resets the consecutive no-progress counter, but a turn that checkpoints once and resets the isolate again is no longer resumed until its client gives up: it ends `interrupted`, and the channel gateway, the Matrix room and the Portal stream each get their failure notice.
+  - **`redactSignedLinks`** walks a run's payload and serializes it only when a signed link can be in it.
+
+- [#444](https://github.com/ixoworld/qiforge/pull/444) [`0282be6`](https://github.com/ixoworld/qiforge/commit/0282be67bb192bf929d28bf7ce5f8b7f72bc88cc) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Chat delivery is WhatsApp-first: an ordinary answer stays in the conversation instead of becoming a link, because many users read on a WhatsApp-only data plan with no browser. The surface prompt, the `create_artifact` description and the shaper now state the same policy.
+
+  - The shaper spills a step to an artefact only when it is document-length: rendered text (blocks joined by blank lines) over `spillChars`, a list or table with more than `maxListItems` items or rows, or a code block over `maxCodeLines` lines. A small table stays in chat as one line per row, and the number of messages a step packs into no longer spills it.
+  - **`maxBubbles` changed meaning.** It is no longer a spill trigger: a per-oracle `delivery.limits.<surface>.maxBubbles` override now sets how many messages the prompt asks for and the shaper groups toward (paragraphs filled left to right up to `bubbleTarget`, then up to `bubbleMax`; a code block of at least `minBubble` characters keeps its own message). An oracle that lowered it to send fewer messages before an artefact now gets fewer, fuller messages and no artefact.
+  - No message, spill lead or closing is longer than `bubbleMax`: a heading or "…:" lead-in that would pass it with the next block is sent on its own, and a short fragment merges forward only when the result fits.
+  - A spill keeps more in chat: its first block whole when it fits `bubbleMax` (a longer paragraph cut at a sentence; a list or table previewed), and after the link its closing list or table previewed, or its last paragraph (with the paragraph before it when both fit), whether or not it is a question.
+  - A header-only table renders as its header line, an empty first cell no longer renders as `- ****`, the hard split never cuts an emoji, and sentence splitting uses a pinned `en` locale.
+  - New defaults: `spillChars` 4,500 (Slack 6,000, Matrix 8,000), `maxListItems` 15, `maxCodeLines` 40, `maxPartsPerRun` 8, `maxBubbles` 3 on every surface (WhatsApp and Telegram were 4). Matrix group rooms get `maxBubbles: 2, maxPartsPerRun: 3, spillChars: 2400`. Per-oracle `delivery.limits` overrides work as before.
+  - The prompt asks for two or three messages (a blank line marks where a message may break; short paragraphs are grouped), more when the answer needs them, states the list and code sizes that stay in chat, keeps comparisons and short plans in chat, and reserves `create_artifact` for a document or file the user asked for or genuinely document-length output, with the conclusions, decisions and next actions in its message.
+  - `create_artifact`'s `message` now takes up to 1,000 characters (was 600) to hold those conclusions. It is delivered as its own text part before the link, never inside the link card.
+
+### Patch Changes
+
+- [#449](https://github.com/ixoworld/qiforge/pull/449) [`3f988c5`](https://github.com/ixoworld/qiforge/commit/3f988c5fd4b29fe770233017998bc953cb3b10ec) Thanks [@Zach-ixo](https://github.com/Zach-ixo)! - Files from a chat channel (WhatsApp) are never sent to the model as raw bytes. Photos, documents and videos go through the helper model and the turn's model gets their text, whatever it can read natively; `view_attachment` returns them as text too. A native block kept the whole file as base64 in a message that is replayed on every later turn and stored in the checkpoint: a 600 KB PDF counted as about 200,000 tokens and reset the user object's 128 MB isolate on every attempt, leaving the chat stuck until `/new`. Tools still read the file itself through `ctx.session.channel.attachments`, so claim evidence is unchanged. Portal and Matrix files are routed as before.
+
+- [#450](https://github.com/ixoworld/qiforge/pull/450) [`8048724`](https://github.com/ixoworld/qiforge/commit/8048724b7460eb965559d39658ba91aca6eac8b3) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Long threads use far less of the user object's memory. The checkpointer gzipped and gunzipped every message row through its own `CompressionStream` / `DecompressionStream` on every checkpoint read and write, and each stream holds its zlib state outside the JS heap until it is garbage collected, so a turn on a few hundred messages held tens of MiB of zlib state (a devnet test oracle reset at about 120k tokens). Rows are now gzipped with node:zlib's one-shot `gzipSync` / `gunzipSync` (the same gzip format, so existing files read back unchanged). Measured on a deployed oracle: a turn on a 200-message thread kept 50 MiB of headroom instead of 6 MiB.
+
+## 0.35.1
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @ixo/common@1.7.2
+  - @ixo/ixo-transaction@0.2.0
+
+## 0.35.0
+
+### Minor Changes
+
+- [#440](https://github.com/ixoworld/qiforge/pull/440) [`f03b2dd`](https://github.com/ixoworld/qiforge/commit/f03b2ddc9506262618cfd9d8161c64409566a057) Thanks [@Zach-ixo](https://github.com/Zach-ixo)! - Yoma plugin: `botOnlyJobs` option, strictly for testing on a production collection without affecting partners' and opportunity providers' listings or results. A host lists test collections (`{ programme, collectionId }`) to offer in chat but not on jambo.yoma.world; their programmes come after Jambo's, show only those jobs, and Jambo's hide list does not apply to them.
+
+## 0.34.1
+
+### Patch Changes
+
+- [#438](https://github.com/ixoworld/qiforge/pull/438) [`b3f1152`](https://github.com/ixoworld/qiforge/commit/b3f11528cedfbfb67aae716c28fc11ebf4c44f23) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - `ixo-chain` names wait up to 6 s instead of 4 s, and a slow batch now keeps the names that were ready. Each request sends the IXO Names worker's `options.budgetMs` (5 s): the worker answers with what it has, the rest come back `partial`, and it finishes them in the background for the next call. Before, a batch that took longer than the wait got no names at all.
+
+## 0.34.0
+
+### Minor Changes
+
+- [#435](https://github.com/ixoworld/qiforge/pull/435) [`4085175`](https://github.com/ixoworld/qiforge/commit/40851750dab2746d4105d4efd46857b399aa8c86) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - The `ixo-chain` tools call people and things by name, from the shared IXO Names worker.
+
+  - **One `names` map per answer.** `get_account_balances`, `get_account_overview` and `chain_lookup` keep every raw address and DID and add `names: { [id]: { name, source, selfChosen } }` for the identifiers in the answer (`ixo1…` account and contract addresses, `did:ixo:ixo1…`, `did:ixo:wasm:ixo1…`, entity DIDs, `ixovaloper1…`, and claim collection ids as `collection:<id>`); at most 40 per answer, never the user's own. An answer with nothing named has no `names`.
+  - **The model is told** (operating guide and `chain_lookup` description): call people and things by their `names` entry; give an address or DID only when asked; beside a `selfChosen` name the user did not pick, also give the short address (first 12 … last 6 characters).
+  - **Bounded.** Names wait at most 4 s per call, never into the last 1 s of its 20 s budget; misses of concurrent calls are batched per isolate (10 ms window, at most 40 ids per POST, an id in flight never asked twice), answers are memoised per isolate for up to 10 min, and a 429 or 5xx pauses names requests for the worker's `Retry-After` (at most 5 min). Any failure leaves the answer without names. `names` counts toward the 12,000-character cap: rows are cut first.
+  - **Survives a dead actor.** State shared across Durable Objects (name batches, shared chain, denom and overview reads, read permits) recovers by age, noticed by the next caller, and a call that joined a read which died stops at its own deadline.
+  - **Config.** `IXO_NAMES_URL` (optional https origin; defaults per `NETWORK`) and `IXO_NAMES` (`on` by default, `off` disables names).
+
 ## 0.33.2
 
 ### Patch Changes

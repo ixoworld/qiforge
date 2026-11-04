@@ -19,12 +19,14 @@
  * context where timers are allowed.
  */
 import type { MatrixClient } from 'matrix-js-sdk';
+import type { z } from 'zod';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin';
 import type {
   PluginManifest,
   PluginTool,
   RuntimeContext,
 } from '../../plugin-api/types';
+import { modelFacingSchema } from '../compact-schema';
 import { FLOWS_OPERATING_GUIDE, FLOWS_PLUGIN_NAME } from './prompts';
 
 export interface FlowsPluginOptions {
@@ -37,11 +39,9 @@ export interface FlowsPluginOptions {
  * `summary` is the one-line teaser; `whenToUse`/`whenNotToUse`/`examples` teach
  * the agent when and how to load it. The full operating contract,
  * `FLOWS_OPERATING_GUIDE` (prompts.ts), is the plugin's `operatingGuide`, not
- * part of the manifest: `load_capability` returns it when it loads flows (also
- * when the capability router had only preloaded it for the turn), and the
- * system prompt carries it on every later turn that starts with flows loaded
- * on the thread. A one-turn router preload leaves the system prompt alone, and
- * turns that never use flows pay no tokens for it.
+ * part of the manifest: it reaches the model with the load, in the system
+ * prompt on a cold turn and at the tail of the messages otherwise, and turns
+ * that never use flows pay no tokens for it (core/operating-guides.ts).
  */
 const manifest: PluginManifest = {
   title: 'Flow Builder',
@@ -80,8 +80,38 @@ const manifest: PluginManifest = {
   tags: ['flows', 'templates', 'automation', 'workflow', 'forms'],
   category: 'automation',
   visibility: 'on-demand',
+  brief: 'build and run automation flows from action blocks',
   stability: 'beta',
 };
+
+/**
+ * The tools that repeat `create_template`'s step in their schema. All 27 are
+ * bound together, so the step's words appear once, on `create_template`.
+ */
+const REPEATS_STEP: ReadonlySet<string> = new Set([
+  'validate_flow',
+  'add_step',
+  'update_step',
+]);
+
+const boundSchemas = new Map<string, z.ZodType>();
+
+/**
+ * What a flow tool binds: its schema's shape without limits and patterns.
+ * Every handler parses its own strict schema first and answers
+ * `validation_failed` with its messages.
+ * Built once per isolate; a tool's schema does not depend on the turn.
+ */
+function boundSchema(tool: PluginTool): z.ZodType {
+  let schema = boundSchemas.get(tool.name);
+  if (!schema) {
+    schema = modelFacingSchema(tool.schema, {
+      descriptions: !REPEATS_STEP.has(tool.name),
+    });
+    boundSchemas.set(tool.name, schema);
+  }
+  return schema;
+}
 
 export class FlowsPlugin extends OraclePlugin {
   readonly name = FLOWS_PLUGIN_NAME;
@@ -112,7 +142,7 @@ export class FlowsPlugin extends OraclePlugin {
         import('./tools/settings'),
       ]);
 
-    return [
+    const tools = [
       // Discovery
       discovery.buildListActionsTool(),
       discovery.buildDescribeActionTool(),
@@ -131,5 +161,6 @@ export class FlowsPlugin extends OraclePlugin {
       // Forms
       ...forms.buildFormTools(this.matrixClient),
     ];
+    return tools.map((tool) => ({ ...tool, schema: boundSchema(tool) }));
   }
 }

@@ -17,7 +17,8 @@
  *
  * A POST belongs to no call: it runs under its own {@link POST_TIMEOUT_MS}
  * through the plugin's bounded exchange (no redirects, body cut off at
- * {@link MAX_RESPONSE_BYTES}). Each call waits for its own ids only, until
+ * {@link MAX_RESPONSE_BYTES}) and asks the worker to answer by
+ * {@link RESPONSE_BUDGET_MS} with what is ready. Each call waits for its own ids only, until
  * its own deadline or its turn's abort; its answer then lands in the memo
  * for the next call. Names never fail a tool: any failure is one log line
  * (a status or an error class, never an identifier) and no names.
@@ -55,7 +56,14 @@ export const BATCH_WINDOW_MS = 10;
 /** An open batch this old lost its window timer: the next caller sends it. */
 export const BATCH_STALE_MS = 100;
 /** One POST's whole time, the body read included; no caller shortens it. */
-export const POST_TIMEOUT_MS = 4_000;
+export const POST_TIMEOUT_MS = 6_000;
+/**
+ * The worker answers by this time with what is ready, the rest as `partial`
+ * ids, and finishes them in the background for the next call. Below
+ * {@link POST_TIMEOUT_MS} by enough for network time and the worker's D1
+ * reads, which come on top: an answer past the timeout would lose every id.
+ */
+export const RESPONSE_BUDGET_MS = 5_000;
 /**
  * An id outstanding this long lost its POST: it is never joined again and
  * no longer counts toward {@link MAX_OUTSTANDING_IDS}.
@@ -185,8 +193,12 @@ function pause(baseUrl: string, retryAfterMs: number | undefined): number {
 
 /* ── one POST ─────────────────────────────────────────────────────────── */
 
-/** A POST's own signal: no caller's abort reaches it. */
-const NEVER_ABORTED = new AbortController().signal;
+/**
+ * A POST's own signal: no caller's abort reaches it. Made on first use:
+ * workerd refuses `new AbortController()` in global scope, so a module-level
+ * one stopped `wrangler dev` from loading the Worker.
+ */
+let neverAborted: AbortSignal | undefined;
 
 /**
  * Asks the worker for `ids` (at most {@link MAX_BATCH_IDS}); the answers it
@@ -206,7 +218,7 @@ async function post(
     blocksyncUrl: '',
     user: `names|${target.baseUrl}|${target.clientId}`,
     deadline: Date.now() + POST_TIMEOUT_MS,
-    signal: NEVER_ABORTED,
+    signal: (neverAborted ??= new AbortController().signal),
     fetch: fetcher,
   };
   try {
@@ -220,7 +232,10 @@ async function post(
           'content-type': 'application/json',
           'x-client-id': target.clientId,
         },
-        body: JSON.stringify({ ids, options: { include: ['name', 'cache'] } }),
+        body: JSON.stringify({
+          ids,
+          options: { include: ['name', 'cache'], budgetMs: RESPONSE_BUDGET_MS },
+        }),
       },
       { timeoutMs: POST_TIMEOUT_MS, maxBytes: MAX_RESPONSE_BYTES },
     );

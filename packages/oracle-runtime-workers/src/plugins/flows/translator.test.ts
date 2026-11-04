@@ -9,6 +9,7 @@ import {
   parseConditionsProp,
   stepIdToBlockId,
 } from './translator';
+import { listActions } from './actions';
 import { someActionType } from './test-support';
 import type { Condition, FlowSpecInput } from './types';
 
@@ -18,6 +19,17 @@ describe('translator: action resolution', () => {
     const can = actionToCan(action);
     expect(can).toBeTruthy();
     expect(canToAction(can)).toBe(action);
+  });
+
+  it('resolves every action list_actions offers, and back, the editor table or not', () => {
+    for (const { action } of listActions()) {
+      const can = actionToCan(action);
+      expect(can).toBeTruthy();
+      expect(canToAction(can)).toBe(action);
+    }
+    // One the editor's type-to-can table leaves out: its definition answers.
+    expect(actionToCan('qi/form.submit')).toBe('form/submit');
+    expect(canToAction('form/submit')).toBe('qi/form.submit');
   });
 
   it('throws a friendly error for an unknown action', () => {

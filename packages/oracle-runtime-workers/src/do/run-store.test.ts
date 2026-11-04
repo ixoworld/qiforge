@@ -2,8 +2,10 @@ import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import type { RunStoreTestDO } from './run-store-test-do';
 import {
+  decideOrphanRecovery,
   decideRecovery,
   DEFAULT_RECOVERY_DELAYS_MS,
+  DEFAULT_RECOVERY_TOTAL_ATTEMPTS,
   RUN_RETENTION_MS,
   runDurabilityConfig,
 } from './run-store';
@@ -46,13 +48,63 @@ describe('decideRecovery', () => {
     ).toMatchObject({ at: 60_000, attempts: 4 });
     expect(
       decideRecovery({ attempts: 4, checkpointId: 'cp1' }, 'cp1', 0, config),
-    ).toEqual({ action: 'interrupt', attempts: 4 });
+    ).toEqual({ action: 'interrupt', attempts: 4, reason: 'no-progress' });
   });
 
   it('resets the counter when the checkpoint moved since the last attempt', () => {
     expect(
       decideRecovery({ attempts: 3, checkpointId: 'cp1' }, 'cp2', 0, config),
     ).toEqual({ action: 'schedule', at: 5000, attempts: 1 });
+  });
+
+  it('caps recoveries in all on the generation, which progress never resets', () => {
+    const capped = { ...config, recoveryTotalAttempts: 8 };
+    // Progress every time keeps `attempts` at 1: without the total cap the
+    // run would be resumed for ever.
+    let run = { attempts: 0, checkpointId: 'cp0', generation: 0 };
+    const decisions = [];
+    for (let g = 0; g < 10; g += 1) {
+      const decision = decideOrphanRecovery(run, `cp${g + 1}`, 0, capped);
+      decisions.push(decision);
+      if (decision.action === 'interrupt') break;
+      run = {
+        attempts: decision.attempts,
+        checkpointId: `cp${g + 1}`,
+        generation: run.generation + 1,
+      };
+    }
+    expect(decisions.slice(0, 8)).toEqual(
+      Array.from({ length: 8 }, () => ({
+        action: 'schedule',
+        at: 5_000,
+        attempts: 1,
+      })),
+    );
+    expect(decisions[8]).toEqual({
+      action: 'interrupt',
+      attempts: 1,
+      reason: 'total',
+    });
+    expect(decisions).toHaveLength(9);
+    // Below the total cap it is `decideRecovery`: no progress still ends
+    // the run after `recoveryAttempts`.
+    expect(
+      decideOrphanRecovery(
+        { attempts: 4, checkpointId: 'cp1', generation: 4 },
+        'cp1',
+        0,
+        capped,
+      ),
+    ).toEqual({ action: 'interrupt', attempts: 4, reason: 'no-progress' });
+    // 0 closes every orphan, like `RUN_RECOVERY_ATTEMPTS=0`.
+    expect(
+      decideOrphanRecovery(
+        { attempts: 0, checkpointId: 'cp1', generation: 0 },
+        'cp2',
+        0,
+        { ...config, recoveryTotalAttempts: 0 },
+      ),
+    ).toMatchObject({ action: 'interrupt', reason: 'total' });
   });
 
   it('honours the env knobs and falls back on bad values', () => {
@@ -65,6 +117,16 @@ describe('decideRecovery', () => {
     });
     expect(c.keepAliveMs).toBe(20_000);
     expect(c.recoveryAttempts).toBe(2);
+    expect(c.recoveryTotalAttempts).toBe(DEFAULT_RECOVERY_TOTAL_ATTEMPTS);
+    expect(DEFAULT_RECOVERY_TOTAL_ATTEMPTS).toBe(8);
+    expect(
+      runDurabilityConfig({ RUN_RECOVERY_TOTAL_ATTEMPTS: '3' })
+        .recoveryTotalAttempts,
+    ).toBe(3);
+    expect(
+      runDurabilityConfig({ RUN_RECOVERY_TOTAL_ATTEMPTS: '-1' })
+        .recoveryTotalAttempts,
+    ).toBe(8);
     expect(c.recoveryDelaysMs).toEqual([1, 2]);
     expect(c.multitaskDefault).toBe('enqueue');
     expect(c.segmentBytes).toBe(16 * 1024);

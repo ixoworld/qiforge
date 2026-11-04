@@ -14,6 +14,7 @@ import {
   PAUSE_DEFAULT_MS,
   PAUSE_MAX_MS,
   POST_TIMEOUT_MS,
+  RESPONSE_BUDGET_MS,
   batcherState,
   resetNamesClient,
   resolveNames,
@@ -69,7 +70,10 @@ const dead = () => new Promise<Response>(() => undefined);
 
 const bodySchema = z.object({
   ids: z.array(z.string()),
-  options: z.object({ include: z.array(z.string()) }),
+  options: z.object({
+    include: z.array(z.string()),
+    budgetMs: z.number(),
+  }),
 });
 
 interface Post {
@@ -109,7 +113,7 @@ function request(
     baseUrl: BASE,
     clientId: CLIENT,
     fetch,
-    deadline: Date.now() + 4_000,
+    deadline: Date.now() + POST_TIMEOUT_MS,
     signal: new AbortController().signal,
     ...over,
   };
@@ -150,8 +154,13 @@ describe('resolveNames: the request', () => {
     expect(post?.headers.get('x-client-id')).toBe(CLIENT);
     expect(post?.body).toEqual({
       ids: [entity(1), entity(2)],
-      options: { include: ['name', 'cache'] },
+      options: { include: ['name', 'cache'], budgetMs: RESPONSE_BUDGET_MS },
     });
+  });
+
+  it('asks the worker to answer before the POST times out', () => {
+    expect(RESPONSE_BUDGET_MS).toBeGreaterThanOrEqual(250);
+    expect(POST_TIMEOUT_MS - RESPONSE_BUDGET_MS).toBeGreaterThanOrEqual(1_000);
   });
 
   it('asks the worker of the request, by its own base URL', async () => {

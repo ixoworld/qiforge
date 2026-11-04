@@ -7,10 +7,10 @@ import {
 } from '@langchain/core/messages';
 import { FakeListChatModel } from '@langchain/core/utils/testing';
 import { MemorySaver } from '@langchain/langgraph';
-import { FakeToolCallingModel } from 'langchain';
+import { createMiddleware, FakeToolCallingModel } from 'langchain';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin';
-import type { ModelRole } from '../plugin-api/types';
+import type { ModelRole, PluginManifest } from '../plugin-api/types';
 import { createRuntimeCore, type RuntimeCore } from './index';
 import { contextBudgetFor, DEFAULT_CONTEXT_KNOBS } from './context-budget';
 import { budgetedLlm } from './budgeted-llm';
@@ -20,7 +20,10 @@ import {
   toolEffectOf,
   type ToolMarkStore,
 } from './middlewares/tool-marks';
-import { createMainAgent } from './main-agent';
+import { createMainAgent, type MainAgentBuildResult } from './main-agent';
+import { USAGE_CARRIED_KWARG } from './operating-guides';
+import { withTurnTimeNote } from './turn-time-note';
+import { validateExamplesAgainstTools } from './manifest';
 import type { ContextGuardEvent } from './middlewares/context-guard';
 import { isSummarizationMessage } from './middlewares/summarization';
 import { SkillsPlugin } from './plugins/skills';
@@ -40,7 +43,11 @@ import {
 import { createToolExecutionMiddleware } from './middlewares/tool-execution';
 import { ToolScheduler } from './tool-scheduler';
 import { tool as pluginTool } from '../plugin-api/tool-helper';
+import { draftReplyPlan, failedRunFiles, turnSteps } from '../delivery/plan';
 import { resolveDeliveryProfile } from '../delivery/profile';
+import type { DeliveryProfile } from '../delivery/types';
+import { SANDBOX_CAPABILITY } from '../plugins/delegated-capabilities';
+import { SandboxPlugin } from '../plugins/sandbox';
 import { harnessLimitOf, TurnBudget } from './turn-budget';
 import { z } from 'zod';
 
@@ -120,11 +127,13 @@ type Script = Array<
 
 function scriptedLlm(
   scripts: Partial<Record<string, Script>>,
+  indexRef?: { current: number },
 ): AmbientServices['llm'] {
   return {
     get: (role: ModelRole) =>
       new FakeToolCallingModel({
         toolCalls: scripts[String(role)] ?? [],
+        ...(indexRef ? { indexRef } : {}),
       }) as unknown as BaseChatModel,
   };
 }
@@ -334,19 +343,20 @@ describe('createMainAgent', () => {
     const tools = toolMessages(result.messages);
     expect(tools.map((t) => t.tool_call_id)).toEqual(['c1', 'c2']);
     // load_capability returned a Command: state updated AND a ToolMessage
-    // with the manifest + tool list landed on the same turn.
+    // with the usage + tool names landed on the same turn.
     const loaded = JSON.parse(String(tools[0]?.content)) as Array<{
-      title: string;
+      name: string;
       alreadyAvailable: boolean;
-      tools: Array<{ name: string }>;
+      tools: string[];
     }>;
     expect(loaded[0]).toMatchObject({
-      title: 'Weather',
+      name: 'weather',
       alreadyAvailable: false,
     });
-    expect(loaded[0]?.tools.map((t) => t.name)).toEqual([
+    expect(loaded[0]?.tools).toEqual([
       'get_current_weather',
       'get_weather_forecast',
+      'call_weather_planner_agent',
     ]);
     expect(result.loadedPlugins).toEqual(['weather']);
     // The weather tool ran against the (stubbed) Open-Meteo API.
@@ -365,74 +375,176 @@ describe('createMainAgent', () => {
     expect(snapshot.values.loadedPlugins).toEqual(['weather']);
   });
 
-  it('preloadedPlugins reach the gate and ctx.loadedPlugins but never the graph state', async () => {
-    // An on-demand probe plugin whose tool reports what the RuntimeContext
-    // considers loaded at call time.
+  it('keeps every loaded capability across load_capability calls, also two in one model response', async () => {
+    const run = async (script: Script, threadId: string) => {
+      const core = bootCore([new WeatherPlugin(), new FlowsPlugin()]);
+      await core.warm();
+      const { agent } = await createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(core, scriptedLlm({ main: script })),
+        requestCtx,
+        state: {},
+        checkpointer: new MemorySaver(),
+      });
+      const result = (await agent.invoke(
+        { messages: [new HumanMessage('Load both.')] },
+        { configurable: { thread_id: threadId } },
+      )) as { loadedPlugins?: string[] };
+      return result.loadedPlugins;
+    };
+    const load = (name: string, id: string) => ({
+      name: 'load_capability',
+      args: { names: [name] },
+      id,
+    });
+    expect(
+      await run(
+        [[load('weather', 'c1')], [load('flows', 'c2')], []],
+        'load-steps',
+      ),
+    ).toEqual(['weather', 'flows']);
+    const sameStep = await run(
+      [[load('weather', 'c1'), load('flows', 'c2')], []],
+      'load-same-step',
+    );
+    expect([...(sameStep ?? [])].sort()).toEqual(['flows', 'weather']);
+  });
+
+  it('on a cold turn drops a capability the thread stopped using, from the tools, the guide and the handlers', async () => {
+    const GUIDE = 'Probe mode: keep the probe warm.';
     const probe = makePlugin({
       name: 'probe',
       manifest: makeManifest({
         title: 'Probe',
-        summary: 'Reports the loaded plugins.',
+        summary: 'Counts its runs.',
         visibility: 'on-demand',
       }),
+      operatingGuide: GUIDE,
+      getTools: () => [makeTool('probe_run')],
+    });
+    const seen: string[][] = [];
+    const reader = makePlugin({
+      name: 'reader',
+      manifest: makeManifest({
+        title: 'Reader',
+        summary: 'Reports what is loaded.',
+        visibility: 'always',
+      }),
       getTools: () => [
-        makeTool('probe_loaded', {
-          handler: async (_args, ctx) => Array.from(ctx.loadedPlugins),
+        makeTool('what_is_loaded', {
+          handler: async (_args, ctx) => {
+            seen.push([...ctx.loadedPlugins].sort());
+            return 'ok';
+          },
         }),
       ],
     });
-    const core = bootCore([new WeatherPlugin(), probe]);
+    const core = bootCore([probe, reader]);
     await core.warm();
-    const llm = scriptedLlm({
-      main: [[{ name: 'probe_loaded', args: {}, id: 'c1' }], []],
+    const build = (capabilityExpiry?: {
+      loaded: string[];
+      maxIdleTurns: number;
+      messages: BaseMessage[];
+    }) =>
+      createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(
+          core,
+          scriptedLlm({
+            main: [[{ name: 'what_is_loaded', args: {}, id: 'c1' }], []],
+          }),
+        ),
+        requestCtx,
+        state: { loadedPlugins: ['probe'] },
+        ...(capabilityExpiry ? { capabilityExpiry } : {}),
+      });
+    const quiet = Array.from({ length: 3 }, (_, i) => [
+      new HumanMessage({ id: `h${i}`, content: `question ${i}` }),
+      new AIMessage({ id: `a${i}`, content: `answer ${i}` }),
+    ]).flat();
+
+    const warm = await build();
+    expect(warm.systemPrompt).toContain(GUIDE);
+    expect(warm.stateUpdate.loadedPlugins).toBeUndefined();
+
+    const cold = await build({
+      loaded: ['probe'],
+      maxIdleTurns: 3,
+      messages: quiet,
     });
-    const gateLines: string[] = [];
-    const ambient = createNoopAmbient({
-      config: core.validatedEnv,
-      identity: core.identity,
-      availablePlugins: core.availablePlugins,
-      llm,
-      logger: {
-        log: (message: unknown) => {
-          if (String(message).startsWith('[CapabilityGateMiddleware]'))
-            gateLines.push(String(message));
-        },
-        warn: () => undefined,
-        error: () => undefined,
-      },
+    expect(cold.stateUpdate.loadedPlugins).toEqual({ replace: [] });
+    expect(cold.systemPrompt).not.toContain(GUIDE);
+    await cold.agent.invoke({ messages: [new HumanMessage('go')] });
+    expect(seen).toEqual([[]]);
+
+    // A use inside the window keeps it, guide included.
+    const used = await build({
+      loaded: ['probe'],
+      maxIdleTurns: 3,
+      messages: [
+        ...quiet.slice(0, 4),
+        new HumanMessage({ id: 'h9', content: 'probe it' }),
+        new AIMessage({
+          id: 'a9',
+          content: '',
+          tool_calls: [{ id: 'c9', name: 'probe_run', args: {} }],
+        }),
+      ],
+    });
+    expect(used.stateUpdate.loadedPlugins).toBeUndefined();
+    expect(used.systemPrompt).toContain(GUIDE);
+  });
+
+  it('takes a replacement of the loaded plugins from the turn input, and a later load adds to it', async () => {
+    const core = bootCore([new WeatherPlugin(), new FlowsPlugin()]);
+    await core.warm();
+    const load = (name: string, id: string) => ({
+      name: 'load_capability',
+      args: { names: [name] },
+      id,
     });
     const checkpointer = new MemorySaver();
+    const config = { configurable: { thread_id: 'replace' } };
+    const script: Script = [];
+    const indexRef = { current: 0 };
+    let agent: Awaited<ReturnType<typeof createMainAgent>>['agent'];
+    // One build per turn, as the user object does.
+    const turn = async (steps: Script, input: Record<string, unknown> = {}) => {
+      indexRef.current = script.length;
+      script.push(...steps);
+      ({ agent } = await createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(core, scriptedLlm({ main: script }, indexRef)),
+        requestCtx,
+        state: {},
+        checkpointer,
+      }));
+      await agent.invoke(
+        { messages: [new HumanMessage('go')], ...input },
+        config,
+      );
+      return checkpointedLoadedPlugins(await agent.getState(config));
+    };
 
-    const { agent } = await createMainAgent({
-      registries: core.registries,
-      identity: core.identity,
-      config: core.validatedEnv,
-      availablePlugins: core.availablePlugins,
-      preloadedPlugins: new Set(['probe']),
-      ambient,
-      requestCtx,
-      state: {},
-      checkpointer,
-    });
-
-    const config = { configurable: { thread_id: 'sess-preload' } };
-    const result = (await agent.invoke(
-      { messages: [new HumanMessage('What is loaded?')] },
-      config,
-    )) as { messages: BaseMessage[]; loadedPlugins?: string[] };
-
-    // The gate admitted the probe tool (weather stayed hidden), so the
-    // model's first call ran without a `load_capability` round trip …
-    expect(gateLines).toHaveLength(2);
-    expect(gateLines[0]).toContain('preloadedPlugins=probe');
-    const tools = toolMessages(result.messages);
-    expect(tools.map((t) => t.tool_call_id)).toEqual(['c1']);
-    // … and the handler saw the preload as loaded …
-    expect(JSON.parse(String(tools[0]?.content))).toEqual(['probe']);
-    // … while the checkpointed channel never learned about it: the turn
-    // output and the checkpoint carry no `loadedPlugins` beyond the default.
-    expect(result.loadedPlugins ?? []).toEqual([]);
-    expect(checkpointedLoadedPlugins(await agent.getState(config))).toEqual([]);
+    expect(
+      await turn([[load('weather', 'c1')], [load('flows', 'c2')], []]),
+    ).toEqual(['weather', 'flows']);
+    expect(await turn([[]], { loadedPlugins: { replace: ['flows'] } })).toEqual(
+      ['flows'],
+    );
+    expect(await turn([[load('weather', 'c3')], []])).toEqual([
+      'flows',
+      'weather',
+    ]);
   });
 
   it('runs an identical write once per turn, whether repeated in a later step or in the same response', async () => {
@@ -574,22 +686,37 @@ describe('createMainAgent', () => {
       id,
     });
 
-    // Called by name while hidden: refused and never run; after the load
-    // step the same tool runs.
+    // Called by name while hidden: refused and never run, the capability
+    // loaded on that call, so the same tool runs on the next step with no
+    // load step of its own.
     const direct = await run(
       [
         [{ name: 'probe_run', args: {}, id: 'c1' }],
-        [loadProbe('c2')],
-        [{ name: 'probe_run', args: {}, id: 'c3' }],
+        [{ name: 'probe_run', args: {}, id: 'c2' }],
         [],
       ],
       'gate-direct',
     );
     expect(direct.get('c1')?.status).toBe('error');
     expect(String(direct.get('c1')?.content)).toContain(
-      'belongs to the "probe" capability, which is not loaded',
+      'belongs to the "probe" capability, which was not loaded',
     );
-    expect(String(direct.get('c3')?.content)).toBe('probe ran');
+    expect(String(direct.get('c2')?.content)).toBe('probe ran');
+    expect(probeRuns).toBe(1);
+
+    // Two hidden tools in one model response load in one step.
+    const parallel = await run(
+      [
+        [
+          { name: 'probe_run', args: {}, id: 'c1' },
+          { name: 'probe_run', args: { again: true }, id: 'c2' },
+        ],
+        [],
+      ],
+      'gate-parallel',
+    );
+    expect(parallel.get('c1')?.status).toBe('error');
+    expect(parallel.get('c2')?.status).toBe('error');
     expect(probeRuns).toBe(1);
 
     // A load in the same model response does not unlock the call beside
@@ -605,6 +732,241 @@ describe('createMainAgent', () => {
     expect(sameStep.get('c2')?.status).toBe('error');
     expect(String(sameStep.get('c3')?.content)).toBe('probe ran');
     expect(probeRuns).toBe(2);
+  });
+
+  describe('tools behind `onDemandTools` and the on-demand catalogue', () => {
+    function curated(overrides?: Partial<PluginManifest>): OraclePlugin {
+      return makePlugin({
+        name: 'notes',
+        manifest: makeManifest({
+          title: 'Notes',
+          summary: 'Notes on every turn.',
+          brief: 'share or delete notes',
+          visibility: 'always',
+          onDemandTools: ['notes_delete'],
+          examples: [
+            { user: 'Delete it', tool: 'notes_delete' },
+            { user: 'Find it', tool: 'notes_find' },
+          ],
+          ...overrides,
+        }),
+        getTools: () => [
+          makeTool('notes_find', { handler: async () => 'found' }),
+          makeTool('notes_delete', { handler: async () => 'deleted' }),
+        ],
+      });
+    }
+
+    async function build(core: RuntimeCore, script: Script, thread = 't') {
+      const models: Array<{ tools: string[] }> = [];
+      const built = await createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(core, scriptedLlm({ main: script })),
+        requestCtx,
+        state: {},
+        checkpointer: new MemorySaver(),
+        hooks: {
+          middlewares: [
+            createMiddleware({
+              name: 'SeenToolsMiddleware',
+              wrapModelCall: (request, handler) => {
+                models.push({
+                  tools: request.tools.flatMap((t) =>
+                    typeof t.name === 'string' ? [t.name] : [],
+                  ),
+                });
+                return handler(request);
+              },
+            }),
+          ],
+        },
+      });
+      const run = async () =>
+        (await built.agent.invoke(
+          { messages: [new HumanMessage('Go.')] },
+          { configurable: { thread_id: thread } },
+        )) as { messages: BaseMessage[]; loadedPlugins?: string[] };
+      return { ...built, run, models };
+    }
+
+    it('keeps the plugin in Tier-1, hides the listed tool until a load names the plugin, and answers a repeat load as a no-op', async () => {
+      const core = bootCore([curated()]);
+      await core.warm();
+      const { systemPrompt, run, models } = await build(core, [
+        [{ name: 'load_capability', args: { names: ['notes'] }, id: 'c1' }],
+        [
+          { name: 'notes_delete', args: {}, id: 'c2' },
+          { name: 'load_capability', args: { names: ['notes'] }, id: 'c3' },
+        ],
+        [],
+      ]);
+      expect(systemPrompt).toContain('- **notes** — Notes on every turn.');
+      expect(systemPrompt).toContain('- notes: share or delete notes');
+      // An example would teach a tool that is not bound yet.
+      expect(systemPrompt).toContain('"Find it" → notes_find()');
+      expect(systemPrompt).not.toContain('notes_delete');
+
+      const result = await run();
+      const tools = new Map(
+        toolMessages(result.messages).map((m) => [m.tool_call_id, m]),
+      );
+      expect(models[0]?.tools).toContain('notes_find');
+      expect(models[0]?.tools).not.toContain('notes_delete');
+      expect(models[1]?.tools).toContain('notes_delete');
+      expect(JSON.parse(String(tools.get('c1')?.content))).toMatchObject([
+        { name: 'notes', alreadyAvailable: false },
+      ]);
+      expect(String(tools.get('c2')?.content)).toBe('deleted');
+      expect(JSON.parse(String(tools.get('c3')?.content))).toMatchObject([
+        { name: 'notes', alreadyAvailable: true },
+      ]);
+      expect(result.loadedPlugins).toEqual(['notes']);
+    });
+
+    it('lets a host bind everything with `manifestOverrides`', async () => {
+      const core = createRuntimeCore({
+        config: { name: 'TestOracle' },
+        plugins: [curated()],
+        env: makeEnv(),
+        manifestOverrides: { notes: { onDemandTools: [] } },
+      });
+      await core.warm();
+      const { systemPrompt, run, models } = await build(core, [[]]);
+      await run();
+      expect(models[0]?.tools).toContain('notes_delete');
+      expect(systemPrompt).not.toContain('## On-demand capabilities');
+    });
+
+    it('a tool of its own `visibility` beats the manifest list', async () => {
+      const plugin = makePlugin({
+        name: 'notes',
+        manifest: makeManifest({
+          visibility: 'always',
+          onDemandTools: ['notes_find'],
+        }),
+        getTools: () => [makeTool('notes_find', { visibility: 'always' })],
+      });
+      const core = bootCore([plugin]);
+      await core.warm();
+      const { run, models } = await build(core, [[]]);
+      await run();
+      expect(models[0]?.tools).toContain('notes_find');
+    });
+
+    it('reports a list entry naming no boot-time tool of the plugin', () => {
+      const { errors } = validateExamplesAgainstTools(
+        makeManifest({ onDemandTools: ['notes_typo'] }),
+        ['notes_find'],
+        'notes',
+      );
+      expect(errors).toEqual([
+        '[notes] onDemandTools[0]: references unknown tool "notes_typo".',
+      ]);
+    });
+
+    it('lists on-demand plugins with tools this turn, sorted, and the same before and after a load', async () => {
+      const silentPlugin = makePlugin({
+        name: 'quiet',
+        manifest: makeManifest({ visibility: 'silent' }),
+        getTools: () => [makeTool('quiet_run')],
+      });
+      const empty = makePlugin({
+        name: 'empty',
+        manifest: makeManifest({ visibility: 'on-demand', brief: 'nothing' }),
+      });
+      const core = bootCore([
+        new WeatherPlugin(),
+        curated(),
+        silentPlugin,
+        empty,
+      ]);
+      await core.warm();
+      const fresh = await build(core, [[]]);
+      expect(fresh.systemPrompt).toContain(
+        '- notes: share or delete notes\n- weather: current weather and forecasts',
+      );
+      expect(fresh.systemPrompt).not.toContain('- quiet:');
+      expect(fresh.systemPrompt).not.toContain('- empty:');
+
+      const loaded = await createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(core, scriptedLlm({ main: [[]] })),
+        requestCtx,
+        state: { loadedPlugins: ['notes'] },
+      });
+      // The provider's cache does not reach into a system prompt that
+      // changed, so a load must not change it.
+      expect(loaded.systemPrompt).toBe(fresh.systemPrompt);
+    });
+
+    it('marks a plugin the delegation does not grant, so the load can say what is missing', async () => {
+      const locked = makePlugin({
+        name: 'vault',
+        manifest: makeManifest({
+          visibility: 'on-demand',
+          brief: 'the vault',
+          requires: [{ resource: 'ixo:vault', action: 'vault/read' }],
+        }),
+        getTools: () => [makeTool('vault_read')],
+      });
+      const core = bootCore([locked]);
+      await core.warm();
+      const { systemPrompt } = await build(core, [[]]);
+      expect(systemPrompt).toContain(
+        '- vault: the vault (not authorized by this user)',
+      );
+    });
+
+    it('keeps what the thread loaded when a later turn loads something else', async () => {
+      const other = makePlugin({
+        name: 'other',
+        manifest: makeManifest({ visibility: 'on-demand' }),
+        getTools: () => [makeTool('other_run')],
+      });
+      const core = bootCore([new WeatherPlugin(), other]);
+      await core.warm();
+      const checkpointer = new MemorySaver();
+      const turn = async (name: string, id: string, firstMessage: number) => {
+        // The fake model ids its messages by script position, and a repeated
+        // id would replace the previous turn's message in the thread.
+        const toolCalls: Script = [
+          ...Array.from({ length: firstMessage }, () => []),
+          [{ name: 'load_capability', args: { names: [name] }, id }],
+          [],
+        ];
+        const { agent } = await createMainAgent({
+          registries: core.registries,
+          identity: core.identity,
+          config: core.validatedEnv,
+          availablePlugins: core.availablePlugins,
+          ambient: ambientFor(core, {
+            get: () =>
+              new FakeToolCallingModel({
+                toolCalls,
+                index: firstMessage,
+              }),
+          }),
+          requestCtx,
+          state: {},
+          checkpointer,
+        });
+        return (await agent.invoke(
+          { messages: [new HumanMessage('Load it.')] },
+          { configurable: { thread_id: 'sticky' } },
+        )) as { loadedPlugins?: string[] };
+      };
+      await turn('weather', 'c1', 0);
+      expect((await turn('other', 'c2', 2)).loadedPlugins).toEqual([
+        'weather',
+        'other',
+      ]);
+    });
   });
 
   it("keeps a plugin the user's delegation does not grant out of reach: load refused, tools never run", async () => {
@@ -709,7 +1071,7 @@ describe('createMainAgent', () => {
     expect(runs).toEqual({ files: 1, vault: 1 });
   });
 
-  it('renders the "Browser tools this turn" block from state.browserTools, with the load line until portal is loaded', async () => {
+  it('renders the "Browser tools this turn" block from state.browserTools, whose load line stays when portal is loaded', async () => {
     const core = bootCore([new PortalPlugin(), new SkillsPlugin()]);
     await core.warm();
     const ambient = ambientFor(core, scriptedLlm({}));
@@ -733,7 +1095,7 @@ describe('createMainAgent', () => {
         })
       ).systemPrompt;
     const LOAD_LINE =
-      "They are bound behind the `portal` capability — call `load_capability({ names: ['portal'] })` once before using them.";
+      "Unless they are in your tool list, call `load_capability({ names: ['portal'] })` once before using them.";
 
     // Portal is on-demand by default and not loaded yet: block + load line.
     const gated = await promptFor({ browserTools });
@@ -742,10 +1104,11 @@ describe('createMainAgent', () => {
     );
     expect(gated).toContain(LOAD_LINE);
 
-    // Loaded this thread: the block stays, the load line goes.
+    // Loaded this thread: the block does not move, or the load would cost a
+    // cache miss on the next turn.
     const loaded = await promptFor({ browserTools, loadedPlugins: ['portal'] });
     expect(loaded).toContain('## Browser tools this turn');
-    expect(loaded).not.toContain(LOAD_LINE);
+    expect(loaded).toContain(LOAD_LINE);
 
     // No browser tools on the request: the block costs nothing.
     expect(await promptFor({})).not.toContain('## Browser tools this turn');
@@ -960,10 +1323,11 @@ describe('createMainAgent', () => {
         availablePlugins: core.availablePlugins,
         ambient: ambientFor(core, llm),
         requestCtx,
-        state: {},
+        state: { loadedPlugins: ['skills'] },
       });
       const result = (await agent.invoke({
         messages: [new HumanMessage('What skills do you have?')],
+        loadedPlugins: ['skills'],
       })) as { messages: BaseMessage[] };
       const [listMsg] = toolMessages(result.messages);
       const payload = JSON.parse(String(listMsg?.content)) as {
@@ -1073,7 +1437,7 @@ describe('createMainAgent', () => {
     expect(boundToolNames).toContain('read_result');
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining(
-        '[context] model=m window=32000 (override) summarizeAt=18400 pruneAt=11200 resultCap=15360c',
+        '[context] model=m window=32000 (override) summarizeAt=18400 pruneAt=11200 staleTurns=2 coldMs=2100000 pluginIdle=3 resultCap=15360c',
       ),
     );
 
@@ -1099,6 +1463,56 @@ describe('createMainAgent', () => {
     expect(kept).toHaveLength(6);
     expect(kept.every((m) => String(m.content).length > 8_000)).toBe(true);
     expect(result.messages.some(isSummarizationMessage)).toBe(false);
+  });
+
+  it('on a cold turn trims old results from the request once, and read_result still reads them', async () => {
+    const core = bootCore([new WeatherPlugin()]);
+    const events: ContextGuardEvent[] = [];
+    const llm = scriptedLlm({
+      main: [[{ name: 'read_result', args: { id: 'c0' }, id: 'back' }], []],
+    });
+    const { agent } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(core, llm),
+      requestCtx,
+      state: {},
+      contextBudget: budget,
+      hooks: { readResult: vi.fn(), onContextEvent: (e) => events.push(e) },
+    });
+    const dated = (turn: BaseMessage[], minutes: number): BaseMessage[] => {
+      const [human, ...rest] = turn;
+      return [
+        new HumanMessage({
+          id: human?.id,
+          content: human?.content ?? '',
+          additional_kwargs: {
+            timestamp: new Date(minutes * 60_000).toISOString(),
+          },
+        }),
+        ...rest,
+      ];
+    };
+    const history = [0, 1, 2].flatMap((i) => dated(pastTurn(i, 2_000), i));
+    const result = (await agent.invoke(
+      { messages: [...history, ...dated([new HumanMessage('and now?')], 120)] },
+      { configurable: { thread_id: 'stale-1' } },
+    )) as { messages: BaseMessage[] };
+    // Two model calls, one report: the line holds across the turn.
+    expect(events).toEqual([
+      expect.objectContaining({ kind: 'prune', stage: 'stale', pruned: 1 }),
+    ]);
+    // The state keeps the result whole, and the tool serves it from there.
+    const back = toolMessages(result.messages).find(
+      (m) => m.tool_call_id === 'back',
+    );
+    expect(JSON.parse(String(back?.content))).toMatchObject({
+      id: 'c0',
+      size: 2_002,
+      text: `0:${'w'.repeat(3_998)}`.slice(0, 2_002),
+    });
   });
 
   it('a context budget summarizes the history at the window fraction with no message-count trigger', async () => {
@@ -1385,6 +1799,8 @@ describe('createMainAgent — chat delivery', () => {
       remoteMessageRef: 'hmac:x',
     },
   });
+  if (whatsapp.kind !== 'chat') throw new Error('expected a chat profile');
+  const chatLimits = whatsapp.limits;
 
   it('binds the turn tool, tells the model it is in a chat and ends the run on a return-direct call', async () => {
     const core = bootCore();
@@ -1497,6 +1913,231 @@ describe('createMainAgent — chat delivery', () => {
       { configurable: { thread_id: 'sess-file' }, context },
     );
     expect(seen).toEqual([[photo]]);
+  });
+
+  describe('send_file', () => {
+    const SANDBOX = SandboxPlugin.NAME;
+    const SIGNED = 'https://r2.example/o/report.docx?X-Amz-Signature=deadbeef';
+    const sandboxPlugin = (): SandboxPlugin =>
+      new SandboxPlugin({
+        authBuilder: async () => ({ Authorization: 'Bearer ucan' }),
+        mcpClientFactory: () => ({
+          getTools: async () => [
+            {
+              name: 'artifact_get_presigned_url',
+              description: 'Sign a link.',
+              schema: z.object({ path: z.string() }),
+              invoke: async (input) =>
+                JSON.stringify({
+                  downloadUrl: SIGNED,
+                  path: (input as { path: string }).path,
+                  expiresIn: 10_800,
+                }),
+            },
+          ],
+          close: async () => undefined,
+        }),
+      });
+    const build = async (
+      delivery: DeliveryProfile,
+      script: Script,
+    ): Promise<MainAgentBuildResult> => {
+      const core = createRuntimeCore({
+        config: { name: 'TestOracle', org: 'Acme', description: 'a test' },
+        plugins: [sandboxPlugin()],
+        env: makeEnv({ SANDBOX_MCP_URL: 'https://sandbox.example/mcp' }),
+      });
+      return createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(core, scriptedLlm({ main: script })),
+        requestCtx: {
+          ...requestCtx,
+          user: {
+            ...requestCtx.user,
+            ucanDelegation: {
+              raw: 'ucan',
+              capabilities: [SANDBOX_CAPABILITY],
+            },
+          },
+          session: { ...requestCtx.session, client: 'channel' },
+        },
+        // The sandbox made the file, so its tools are loaded on the thread.
+        state: { loadedPlugins: [SANDBOX] },
+        delivery,
+      });
+    };
+
+    it('on a thread without the sandbox loaded: the first call loads it, the second sends', async () => {
+      const { agent, context } = await build(whatsapp, [
+        [
+          {
+            name: 'send_file',
+            args: { path: '/output/report.docx' },
+            id: 'f1',
+          },
+        ],
+        [
+          {
+            name: 'send_file',
+            args: { path: '/output/report.docx' },
+            id: 'f2',
+          },
+        ],
+        [],
+      ]);
+      const { messages, loadedPlugins } = (await agent.invoke(
+        { messages: [new HumanMessage('Send me the report again')] },
+        { configurable: { thread_id: 'sess-send-file-unloaded' }, context },
+      )) as { messages: BaseMessage[]; loadedPlugins?: string[] };
+      const [refused, sent] = toolMessages(messages);
+      expect(refused?.tool_call_id).toBe('f1');
+      expect(String(refused?.content)).toContain(
+        'it belongs to the "sandbox" capability, which was not loaded',
+      );
+      expect(sent?.tool_call_id).toBe('f2');
+      expect(JSON.parse(String(sent?.content))).toMatchObject({ ok: true });
+      expect(loadedPlugins).toContain(SANDBOX);
+    });
+
+    it('runs on a chat turn: the plan gets the link, the model and its prompt never do', async () => {
+      const { agent, systemPrompt, boundToolNames, toolEffects, context } =
+        await build(whatsapp, [
+          [
+            {
+              name: 'send_file',
+              args: { path: '/output/report.docx', caption: 'Q3' },
+              id: 'f1',
+            },
+          ],
+          [],
+        ]);
+      expect(boundToolNames).toContain('send_file');
+      expect(boundToolNames).not.toContain('artifact_get_presigned_url');
+      expect(toolEffects.get('send_file')).toBe('read');
+      expect(systemPrompt).toContain('`send_file`');
+
+      const { messages } = (await agent.invoke(
+        {
+          messages: [new HumanMessage('Send me the report')],
+          loadedPlugins: [SANDBOX],
+        },
+        { configurable: { thread_id: 'sess-send-file' }, context },
+      )) as { messages: BaseMessage[] };
+
+      const [result] = toolMessages(messages);
+      expect(result?.tool_call_id).toBe('f1');
+      expect(result?.name).toBe('send_file');
+      expect(JSON.stringify(result?.content)).not.toContain('r2.example');
+      expect(JSON.parse(String(result?.content))).toMatchObject({ ok: true });
+      // The fake model writes back everything it was sent.
+      const echoed = String(messages.at(-1)?.content);
+      expect(echoed).toContain('"filename":"report.docx"');
+      expect(echoed).not.toContain('r2.example');
+
+      const { steps, toolResults, toolArtifacts } = turnSteps(messages);
+      expect(
+        draftReplyPlan({
+          steps,
+          toolResults,
+          toolArtifacts,
+          limits: chatLimits,
+          canSpill: false,
+        }),
+      ).toContainEqual({
+        kind: 'file',
+        file: expect.objectContaining({
+          url: SIGNED,
+          filename: 'report.docx',
+          caption: 'Q3',
+        }),
+      });
+    });
+
+    it('keeps the files of a run whose closing model call fails, in the checkpoint', async () => {
+      // A model whose third call fails: the first two send a file each.
+      let calls = 0;
+      class FailingModel extends FakeToolCallingModel {
+        override async _generate(
+          ...args: Parameters<FakeToolCallingModel['_generate']>
+        ): ReturnType<FakeToolCallingModel['_generate']> {
+          calls += 1;
+          if (calls === 3) throw new Error('provider down');
+          return super._generate(...args);
+        }
+        override bindTools(): this {
+          return this;
+        }
+      }
+      const core = createRuntimeCore({
+        config: { name: 'TestOracle', org: 'Acme', description: 'a test' },
+        plugins: [sandboxPlugin()],
+        env: makeEnv({ SANDBOX_MCP_URL: 'https://sandbox.example/mcp' }),
+      });
+      const model = new FailingModel({
+        toolCalls: [
+          [{ name: 'send_file', args: { path: '/output/a.pdf' }, id: 'f1' }],
+          [{ name: 'send_file', args: { path: '/output/b.pdf' }, id: 'f2' }],
+          [],
+        ],
+      });
+      const checkpointer = new MemorySaver();
+      const { agent, context } = await createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(core, {
+          get: () => model as unknown as BaseChatModel,
+        }),
+        requestCtx: {
+          ...requestCtx,
+          user: {
+            ...requestCtx.user,
+            ucanDelegation: { raw: 'ucan', capabilities: [SANDBOX_CAPABILITY] },
+          },
+          session: { ...requestCtx.session, client: 'channel' },
+        },
+        state: { loadedPlugins: [SANDBOX] },
+        delivery: whatsapp,
+        checkpointer,
+      });
+      const config = { configurable: { thread_id: 'sess-failed' }, context };
+
+      await expect(
+        agent.invoke(
+          {
+            messages: [new HumanMessage('Send both')],
+            loadedPlugins: [SANDBOX],
+          },
+          config,
+        ),
+      ).rejects.toThrow('provider down');
+
+      const tuple = await checkpointer.getTuple(config);
+      const plan = await failedRunFiles(
+        tuple?.checkpoint.channel_values.messages as BaseMessage[],
+        new Set(['f1', 'f2']),
+        chatLimits,
+      );
+      expect(plan?.parts.map((part) => part.kind)).toEqual([
+        'file',
+        'file',
+        'text',
+      ]);
+    });
+
+    it('is not bound on a Portal turn, which keeps the upstream tool', async () => {
+      const { systemPrompt, boundToolNames } = await build(
+        { kind: 'stream' },
+        [],
+      );
+      expect(boundToolNames).not.toContain('send_file');
+      expect(boundToolNames).toContain('artifact_get_presigned_url');
+      expect(systemPrompt).not.toContain('send_file');
+    });
   });
 
   it('adds nothing to a Portal turn', async () => {
@@ -2366,8 +3007,8 @@ describe('createMainAgent — per-turn isolation and a stable prompt', () => {
       )) as { messages: BaseMessage[] };
       const [entry] = JSON.parse(
         String(toolMessages(result.messages)[0]?.content),
-      ) as Array<{ tools: Array<{ name: string }> }>;
-      return entry?.tools.map((t) => t.name);
+      ) as Array<{ tools: string[] }>;
+      return entry?.tools;
     };
     expect(await listed(b, 'iso-b')).toEqual(['dyn_b']);
     expect(await listed(a, 'iso-a')).toEqual(['dyn_a']);
@@ -2551,7 +3192,6 @@ describe('createMainAgent — plugin operating guides', () => {
     plugins: OraclePlugin[],
     options: {
       loaded?: string[];
-      preloaded?: string[];
       currentTime?: string;
       requestId?: string;
     } = {},
@@ -2576,9 +3216,6 @@ describe('createMainAgent — plugin operating guides', () => {
           },
         },
         state: { loadedPlugins: options.loaded ?? [] },
-        ...(options.preloaded
-          ? { preloadedPlugins: new Set(options.preloaded) }
-          : {}),
       })
     ).systemPrompt;
   };
@@ -2618,22 +3255,14 @@ describe('createMainAgent — plugin operating guides', () => {
     );
   });
 
-  it("keeps a router preload's guide out of the system prompt, which stays as it was", async () => {
-    const preloaded = await promptOf([guided('probe', GUIDE)], {
-      preloaded: ['probe'],
-    });
-    expect(preloaded).not.toContain(GUIDE);
-    expect(preloaded).toBe(await promptOf([guided('probe', GUIDE)]));
-  });
-
-  it('never shows the guide of a plugin the delegation cannot use, loaded or preloaded', async () => {
+  it('never shows the guide of a plugin the delegation cannot use, even loaded', async () => {
     const unmet = await promptOf(
       [
         guided('files', '### Files mode\n\nF.', {
           requires: [{ resource: 'ixo:filesystem', action: 'fs/read' }],
         }),
       ],
-      { loaded: ['files'], preloaded: ['files'] },
+      { loaded: ['files'] },
     );
     expect(unmet).not.toContain('Files mode');
     const withheld = await promptOf(
@@ -2642,7 +3271,7 @@ describe('createMainAgent — plugin operating guides', () => {
           makeTool('ops_reset', { plane: 'admin' }),
         ]),
       ],
-      { loaded: ['ops'], preloaded: ['ops'] },
+      { loaded: ['ops'] },
     );
     expect(withheld).not.toContain('Ops mode');
     expect(withheld).not.toContain('## Capabilities in use');
@@ -2732,4 +3361,459 @@ describe('createMainAgent — plugin operating guides', () => {
       ).toEqual(expected);
     },
   );
+});
+
+// ── The prompt prefix across the turns of a thread ──────────────────────────
+
+describe('the cached prefix across turns', () => {
+  const GUIDE = '### Probe mode\n\nCheck the probe twice.';
+  const GUIDE_WORDS = 'Check the probe twice.';
+  const probePlugin = () =>
+    makePlugin({
+      name: 'probe',
+      manifest: makeManifest({ title: 'Probe', visibility: 'on-demand' }),
+      operatingGuide: GUIDE,
+      getTools: () => [makeTool('probe_run')],
+    });
+  const quietPlugin = () =>
+    makePlugin({
+      name: 'quiet',
+      manifest: makeManifest({
+        title: 'Quiet',
+        visibility: 'on-demand',
+        whenToUse: ['Never describe it as zero-knowledge.'],
+      }),
+      getTools: () => [makeTool('quiet_run')],
+    });
+
+  interface ModelCall {
+    system: string;
+    tools: string[];
+    messages: BaseMessage[];
+  }
+  interface TurnOptions {
+    cold?: boolean;
+    script?: Script;
+    route?: (names: string[]) => string[];
+    /** A summary condensed the messages that carried the plugins' usage. */
+    usageCondensed?: boolean;
+  }
+
+  /** One thread, driven the way the user object drives it. */
+  async function openThread(plugins: OraclePlugin[]) {
+    const core = bootCore(plugins);
+    await core.warm();
+    const checkpointer = new MemorySaver();
+    const config = { configurable: { thread_id: 'thread' } };
+    const calls: ModelCall[] = [];
+    let offered: string[] = [];
+    // The fake model names a reply after its place in the script: one script
+    // for the whole thread, or a later reply would replace an earlier one.
+    const script: Script = [];
+    const indexRef = { current: 0 };
+    const spy = createMiddleware({
+      name: 'PrefixSpy',
+      wrapModelCall: (request, handler) => {
+        calls.push({
+          system: request.systemMessage?.text ?? '',
+          tools: request.tools.map((t) => String(t.name)),
+          messages: request.messages,
+        });
+        return handler(request);
+      },
+    });
+    const turn = async (options: TurnOptions = {}) => {
+      const tuple = await checkpointer.getTuple(config);
+      const prior = tuple?.checkpoint.channel_values ?? {};
+      const { route } = options;
+      indexRef.current = script.length;
+      script.push(...(options.script ?? [[]]));
+      const built = await createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(core, scriptedLlm({ main: script }, indexRef)),
+        requestCtx,
+        state: {
+          loadedPlugins: (prior.loadedPlugins ?? []) as string[],
+        },
+        checkpointer,
+        hooks: { middlewares: [spy] },
+        promptCache: {
+          cold: options.cold ?? !tuple,
+          ...(prior.promptGuides
+            ? { promptGuides: prior.promptGuides as string[] }
+            : {}),
+          ...(options.usageCondensed
+            ? { capabilityUsage: [] }
+            : prior.capabilityUsage
+              ? { capabilityUsage: prior.capabilityUsage as string[] }
+              : {}),
+        },
+        ...(route
+          ? {
+              routeCapabilities: async (candidates) => {
+                offered = candidates.map((c) => c.pluginName);
+                return new Set(route(offered));
+              },
+            }
+          : {}),
+      });
+      const { guideNote } = built;
+      await built.agent.invoke(
+        {
+          messages: [
+            new HumanMessage({
+              content: guideNote
+                ? withTurnTimeNote('go on', guideNote.text)
+                : 'go on',
+              additional_kwargs: guideNote
+                ? { [USAGE_CARRIED_KWARG]: guideNote.plugins }
+                : {},
+            }),
+          ],
+          ...built.stateUpdate,
+        },
+        config,
+      );
+      return built;
+    };
+    return { calls, turn, offered: () => offered };
+  }
+
+  /** How many times a sequence of model calls moved from one value to another. */
+  const changes = (values: string[]): number =>
+    values.filter((value, i) => i > 0 && value !== values[i - 1]).length;
+  const toolLists = (calls: ModelCall[]) => calls.map((c) => c.tools.join());
+  const systems = (calls: ModelCall[]) => calls.map((c) => c.system);
+
+  describe('a router preload', () => {
+    it('changes the tool list exactly once, on the turn it loads, and the system message not at all on a warm thread', async () => {
+      const { calls, turn } = await openThread([probePlugin()]);
+      await turn();
+      await turn({ route: () => ['probe'] });
+      await turn();
+      await turn();
+
+      expect(calls).toHaveLength(4);
+      expect(calls[0]?.tools).not.toContain('probe_run');
+      expect(calls[1]?.tools).toContain('probe_run');
+      expect(changes(toolLists(calls))).toBe(1);
+      expect(changes(systems(calls))).toBe(0);
+    });
+
+    it('lets the first model call use the tool, with no load step', async () => {
+      const { calls, turn } = await openThread([probePlugin()]);
+      await turn({
+        route: () => ['probe'],
+        script: [[{ name: 'probe_run', args: {}, id: 'c1' }], []],
+      });
+      expect(calls).toHaveLength(2);
+      expect(calls[0]?.tools).toContain('probe_run');
+      const results = calls[1]?.messages.filter((m) =>
+        ToolMessage.isInstance(m),
+      );
+      expect(results?.map((m) => m.name)).toEqual(['probe_run']);
+    });
+
+    it('brings the guide on the warm turn it loads, on the message, the system message unchanged', async () => {
+      const { calls, turn } = await openThread([probePlugin()]);
+      await turn();
+      const built = await turn({ route: () => ['probe'] });
+
+      expect(built.systemPrompt).not.toContain(GUIDE);
+      expect(calls[1]?.system).toBe(calls[0]?.system);
+      expect(built.guideNote).toEqual({
+        plugins: ['probe'],
+        text: expect.stringContaining(GUIDE_WORDS),
+      });
+      expect(String(calls[1]?.messages.at(-1)?.content)).toContain(GUIDE_WORDS);
+
+      // The thread has it now: not sent again.
+      expect((await turn()).guideNote).toBeUndefined();
+    });
+
+    it('is free on a brand-new thread: tools and guide are there from the first call', async () => {
+      const { calls, turn } = await openThread([probePlugin()]);
+      const built = await turn({ route: () => ['probe'] });
+      await turn();
+
+      expect(built.guideNote?.text).toContain('always for testing');
+      expect(built.guideNote?.text).not.toContain(GUIDE_WORDS);
+      expect(calls[0]?.tools).toContain('probe_run');
+      expect(calls[0]?.system).toContain(GUIDE);
+      expect(changes(toolLists(calls))).toBe(0);
+      expect(changes(systems(calls))).toBe(0);
+    });
+
+    it('takes the guide to the system message on a cold turn, the note keeping only the usage', async () => {
+      const { calls, turn } = await openThread([probePlugin()]);
+      await turn();
+      const built = await turn({ cold: true, route: () => ['probe'] });
+
+      expect(built.guideNote?.text).toContain('always for testing');
+      expect(built.guideNote?.text).not.toContain(GUIDE_WORDS);
+      expect(built.systemPrompt).toContain(GUIDE);
+      expect(calls[1]?.tools).toContain('probe_run');
+    });
+
+    it('brings the rules of a plugin with no guide, which a tool list does not', async () => {
+      const { calls, turn } = await openThread([quietPlugin()]);
+      await turn();
+      const built = await turn({ route: () => ['quiet'] });
+
+      expect(built.guideNote?.plugins).toEqual(['quiet']);
+      expect(String(calls[1]?.messages.at(-1)?.content)).toContain(
+        'Never describe it as zero-knowledge.',
+      );
+      expect(changes(systems(calls))).toBe(0);
+    });
+
+    it('writes the plugin to the thread, so it is loaded when a later build starts', async () => {
+      const { turn, offered } = await openThread([
+        probePlugin(),
+        quietPlugin(),
+      ]);
+      const built = await turn({ route: () => ['probe'] });
+      expect(built.stateUpdate.loadedPlugins).toEqual(['probe']);
+      await turn({ route: () => [] });
+      expect(offered()).toEqual(['quiet']);
+    });
+
+    it('ignores a name it did not offer and treats an empty answer as no preload', async () => {
+      const { calls, turn } = await openThread([probePlugin()]);
+      const built = await turn({ route: () => ['ghost'] });
+      expect(built.stateUpdate.loadedPlugins).toBeUndefined();
+      expect(calls[0]?.tools).not.toContain('probe_run');
+    });
+  });
+
+  describe('what the router is offered', () => {
+    it('an `always` plugin with an `onDemandTools` tool, once, and never a plugin with nothing left to load', async () => {
+      const { turn, offered } = await openThread([
+        probePlugin(),
+        makePlugin({
+          name: 'mixed',
+          manifest: makeManifest({
+            title: 'Mixed',
+            visibility: 'always',
+            onDemandTools: ['mixed_write'],
+          }),
+          getTools: () => [makeTool('mixed_read'), makeTool('mixed_write')],
+        }),
+        makePlugin({
+          name: 'plain-always',
+          manifest: makeManifest({ title: 'Plain', visibility: 'always' }),
+          getTools: () => [makeTool('plain_read')],
+        }),
+        makePlugin({
+          name: 'all-bound',
+          manifest: makeManifest({ title: 'All', visibility: 'on-demand' }),
+          getTools: () => [makeTool('bound_read', { visibility: 'always' })],
+        }),
+        makePlugin({
+          name: 'nothing-this-turn',
+          manifest: makeManifest({ title: 'None', visibility: 'on-demand' }),
+          getRequestTools: () => [],
+        }),
+      ]);
+      await turn({ route: () => ['mixed'] });
+      expect(offered().sort()).toEqual(['mixed', 'probe']);
+      await turn({ route: () => [] });
+      expect(offered()).toEqual(['probe']);
+    });
+
+    it('never a plugin that opted out, which `load_capability` still loads', async () => {
+      const { calls, turn, offered } = await openThread([
+        probePlugin(),
+        makePlugin({
+          name: 'admin',
+          manifest: makeManifest({
+            title: 'Admin',
+            visibility: 'on-demand',
+            routable: false,
+          }),
+          getTools: () => [makeTool('admin_run')],
+        }),
+      ]);
+      await turn({ route: () => ['admin'] });
+      expect(offered()).toEqual(['probe']);
+      expect(calls[0]?.tools).not.toContain('admin_run');
+      expect(calls[0]?.system).toContain('- admin:');
+      await turn({
+        script: [
+          [{ name: 'load_capability', args: { names: ['admin'] }, id: 'l1' }],
+          [],
+        ],
+      });
+      expect(calls.at(-1)?.tools).toContain('admin_run');
+    });
+
+    it('never a plugin the delegation cannot use', async () => {
+      const { turn, offered } = await openThread([
+        probePlugin(),
+        makePlugin({
+          name: 'files',
+          manifest: makeManifest({
+            title: 'Files',
+            visibility: 'on-demand',
+            requires: [{ resource: 'ixo:filesystem', action: 'fs/read' }],
+          }),
+          getTools: () => [makeTool('files_read')],
+        }),
+        makePlugin({
+          name: 'ops',
+          manifest: makeManifest({ title: 'Ops', visibility: 'on-demand' }),
+          getTools: () => [makeTool('ops_reset', { plane: 'admin' })],
+        }),
+      ]);
+      await turn({ route: () => [] });
+      expect(offered()).toEqual(['probe']);
+    });
+
+    it('a capability a cold turn just unloaded, which then stays and keeps its guide', async () => {
+      const { calls, turn } = await openThread([probePlugin()]);
+      const idle = await turn({ route: () => ['probe'] });
+      expect(idle.systemPrompt).toContain(GUIDE);
+      const back = await turn({ cold: true, route: () => ['probe'] });
+      expect(back.systemPrompt).toContain(GUIDE);
+      expect(calls[1]?.tools).toContain('probe_run');
+    });
+  });
+
+  describe('a load during a warm turn', () => {
+    const load = [
+      [{ name: 'load_capability', args: { names: ['probe'] }, id: 'l1' }],
+      [],
+    ];
+
+    it('brings the guide in the load result, and the next turn keeps the system message and tool list', async () => {
+      const { calls, turn } = await openThread([probePlugin()]);
+      await turn();
+      await turn({ script: load });
+      const next = await turn();
+
+      // Call 2 sees the load; the guide is in its result, not the prompt.
+      const result = calls[2]?.messages.at(-1);
+      expect(result?.additional_kwargs[USAGE_CARRIED_KWARG]).toEqual(['probe']);
+      expect(String(result?.content)).toContain(GUIDE_WORDS);
+      expect(next.guideNote).toBeUndefined();
+      expect(changes(systems(calls))).toBe(0);
+      expect(changes(toolLists(calls))).toBe(1);
+    });
+
+    it('brings the guide with the capability gate on a hidden call, and the next turn stays the same', async () => {
+      const { calls, turn } = await openThread([probePlugin()]);
+      await turn();
+      await turn({
+        script: [[{ name: 'probe_run', args: {}, id: 'p1' }], []],
+      });
+      const next = await turn();
+
+      const refusal = calls[2]?.messages.at(-1);
+      expect(refusal?.additional_kwargs[USAGE_CARRIED_KWARG]).toEqual([
+        'probe',
+      ]);
+      expect(String(refusal?.content)).toContain(GUIDE_WORDS);
+      expect(next.guideNote).toBeUndefined();
+      expect(changes(systems(calls))).toBe(0);
+    });
+
+    it('moves the guide to the system message on the next cold turn, once', async () => {
+      const { calls, turn } = await openThread([probePlugin()]);
+      await turn();
+      await turn({ script: load });
+      await turn({ cold: true });
+      await turn();
+
+      expect(calls.at(-2)?.system).toContain(GUIDE);
+      expect(calls.at(-1)?.system).toBe(calls.at(-2)?.system);
+      expect(changes(systems(calls))).toBe(1);
+    });
+
+    it('does not change the on-demand catalogue, which names the plugin before and after', async () => {
+      const { calls, turn } = await openThread([probePlugin(), quietPlugin()]);
+      await turn();
+      await turn({ script: load });
+      await turn({ cold: true });
+      const line = '- probe:';
+      expect(calls[0]?.system).toContain(line);
+      expect(calls.at(-1)?.system).toContain(line);
+    });
+
+    it('sends guide and usage again on the message when a summary has condensed them away, and keeps the system message', async () => {
+      const { calls, turn } = await openThread([probePlugin()]);
+      await turn();
+      await turn({ script: load });
+      const built = await turn({ usageCondensed: true });
+
+      expect(built.guideNote?.plugins).toEqual(['probe']);
+      expect(built.guideNote?.text).toContain(GUIDE_WORDS);
+      expect(built.guideNote?.text).toContain('always for testing');
+      expect(built.systemPrompt).not.toContain(GUIDE);
+      expect(changes(systems(calls))).toBe(0);
+    });
+
+    it('keeps a guide the prompt carries out of a note sent after a summary', async () => {
+      const { turn } = await openThread([probePlugin()]);
+      await turn({ route: () => ['probe'] });
+      const built = await turn({ usageCondensed: true });
+
+      expect(built.systemPrompt).toContain(GUIDE);
+      expect(built.guideNote?.text).toContain('always for testing');
+      expect(built.guideNote?.text).not.toContain(GUIDE_WORDS);
+    });
+
+    it('holds nothing in the prompt back on a thread from before the record: what was loaded stays', async () => {
+      const core = bootCore([probePlugin()]);
+      await core.warm();
+      const built = await createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(core, scriptedLlm({})),
+        requestCtx,
+        state: { loadedPlugins: ['probe'] },
+        promptCache: { cold: false },
+      });
+      expect(built.systemPrompt).toContain(GUIDE);
+      expect(built.stateUpdate.promptGuides).toEqual(['probe']);
+      expect(built.guideNote).toBeUndefined();
+    });
+  });
+
+  it('keeps a turn without any of this byte-identical, tools and system message, across a day of warm turns', async () => {
+    const { calls, turn } = await openThread([probePlugin(), quietPlugin()]);
+    await turn();
+    await turn();
+    await turn();
+    expect(changes(systems(calls))).toBe(0);
+    expect(changes(toolLists(calls))).toBe(0);
+  });
+
+  it('does not change the browser-tool section when the Portal capability loads', async () => {
+    const browserTools = [
+      { name: 'open_page', description: 'Open a page.', schema: {} },
+    ];
+    const core = bootCore([new PortalPlugin()]);
+    await core.warm();
+    const prompt = async (loadedPlugins: string[]) =>
+      (
+        await createMainAgent({
+          registries: core.registries,
+          identity: core.identity,
+          config: core.validatedEnv,
+          availablePlugins: core.availablePlugins,
+          ambient: ambientFor(core, scriptedLlm({})),
+          requestCtx,
+          state: { loadedPlugins, browserTools },
+          promptCache: { cold: false, promptGuides: [] },
+        })
+      ).systemPrompt;
+    const before = await prompt([]);
+    expect(before).toContain('open_page');
+    expect(await prompt(['portal'])).toBe(before);
+  });
 });

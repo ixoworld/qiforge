@@ -5,7 +5,7 @@ import {
   type UcanAdapter,
 } from '../../core/runtime-context';
 import { makeRuntimeContext } from '../../core/test-fixtures';
-import type { RuntimeContext } from '../../plugin-api/types';
+import type { RuntimeContext, SessionSurface } from '../../plugin-api/types';
 import {
   SandboxPlugin,
   type SandboxMcpClientFactory,
@@ -77,7 +77,10 @@ describe('SandboxPlugin (Workers port)', () => {
     };
   });
 
-  function makeCtx(overrides: Partial<UcanAdapter> = {}): RuntimeContext {
+  function makeCtx(
+    overrides: Partial<UcanAdapter> = {},
+    surface?: SessionSurface,
+  ): RuntimeContext {
     const ucan: UcanAdapter = {
       ...createUnsignedUcanAdapter(),
       hasSigningKey: () => true,
@@ -120,6 +123,7 @@ describe('SandboxPlugin (Workers port)', () => {
               client: 'matrix',
               requestId: 'req-1',
               roomId: '!room:example.org',
+              ...(surface ? { surface } : {}),
             },
           },
         },
@@ -261,5 +265,128 @@ describe('SandboxPlugin (Workers port)', () => {
     );
     expect(tools).toEqual([]);
     expect(capturedConfigs.length).toBe(0);
+  });
+  describe('files on a chat surface', () => {
+    const WHATSAPP: SessionSurface = {
+      kind: 'chat',
+      surface: 'whatsapp',
+      label: 'WhatsApp',
+    };
+    const SIGNED = 'https://r2.example/o/a.pdf?X-Amz-Signature=deadbeef';
+    const LOOKUP = JSON.stringify({
+      previewUrl: SIGNED,
+      downloadUrl: SIGNED,
+      url: SIGNED,
+      path: '/output/a.pdf',
+      filename: 'a.pdf',
+      expiresIn: 10_800,
+    });
+    const LIST = JSON.stringify({
+      artifacts: [{ path: '/output/a.pdf', size: 3 }],
+      nextCursor: null,
+    });
+    const artifactTools: SandboxMcpTool[] = [
+      ...[
+        ['artifact_get_presigned_url', LOOKUP],
+        ['artifact_get_by_path', LOOKUP],
+        ['artifact_get_by_cid', LOOKUP],
+        ['artifact_list', LIST],
+        ['load_artifact', JSON.stringify({ path: '/w/a.pdf', size: 3 })],
+      ].map(([name, result]) => ({
+        name: name as string,
+        description: `${name} tool`,
+        schema: z.object({}),
+        invoke: async () => result,
+      })),
+    ];
+
+    const names = (tools: { name: string }[]): string[] =>
+      tools.map((t) => t.name);
+
+    it('binds send_file and hides the signing tool on a chat surface', async () => {
+      upstream = [...upstream, ...artifactTools];
+      const plugin = new SandboxPlugin({ mcpClientFactory: factory });
+      const tools = await plugin.getRequestTools(makeCtx({}, WHATSAPP));
+      expect(names(tools)).toContain('send_file');
+      expect(names(tools)).not.toContain('artifact_get_presigned_url');
+      // The warm path goes through the same tail.
+      const warm = await plugin.getRequestTools(makeCtx({}, WHATSAPP));
+      expect(names(warm)).toEqual(names(tools));
+    });
+
+    it('leaves the Portal, and every surface that is not chat, as it was', async () => {
+      upstream = [...upstream, ...artifactTools];
+      for (const surface of [{ kind: 'stream' } as const, undefined]) {
+        const plugin = new SandboxPlugin({ mcpClientFactory: factory });
+        const tools = await plugin.getRequestTools(makeCtx({}, surface));
+        expect(names(tools)).not.toContain('send_file');
+        expect(names(tools)).toContain('artifact_get_presigned_url');
+        for (const name of [
+          'artifact_get_presigned_url',
+          'artifact_get_by_path',
+          'artifact_get_by_cid',
+        ]) {
+          const tool = tools.find((t) => t.name === name);
+          expect(tool?.description).toBe(`${name} tool`);
+          expect(await tool?.handler({}, makeCtx())).toBe(LOOKUP);
+        }
+        const list = tools.find((t) => t.name === 'artifact_list');
+        expect(await list?.handler({}, makeCtx())).toBe(LIST);
+      }
+    });
+
+    it('strips the URL fields of every lookup before the model sees them', async () => {
+      upstream = [...upstream, ...artifactTools];
+      const plugin = new SandboxPlugin({ mcpClientFactory: factory });
+      const ctx = makeCtx({}, WHATSAPP);
+      const tools = await plugin.getRequestTools(ctx);
+      for (const name of ['artifact_get_by_path', 'artifact_get_by_cid']) {
+        const tool = tools.find((t) => t.name === name);
+        const result = await tool?.handler({}, ctx);
+        expect(JSON.parse(result as string)).toEqual({
+          path: '/output/a.pdf',
+          filename: 'a.pdf',
+        });
+        expect(tool?.description).toContain('`send_file`');
+      }
+      const list = tools.find((t) => t.name === 'artifact_list');
+      expect(JSON.parse((await list?.handler({}, ctx)) as string)).toEqual({
+        artifacts: [{ path: '/output/a.pdf', size: 3 }],
+        nextCursor: null,
+      });
+      const load = tools.find((t) => t.name === 'load_artifact');
+      expect(load?.description).toBe('load_artifact tool');
+    });
+
+    it('signs through the upstream tool it hides', async () => {
+      upstream = [...upstream, ...artifactTools];
+      const plugin = new SandboxPlugin({ mcpClientFactory: factory });
+      const ctx = makeCtx({}, WHATSAPP);
+      const tools = await plugin.getRequestTools(ctx);
+      const sendFile = tools.find((t) => t.name === 'send_file');
+      const message = await sendFile?.handler({ path: '/output/a.pdf' }, ctx);
+      expect(message).toMatchObject({
+        artifact: { url: SIGNED, filename: 'a.pdf' },
+      });
+    });
+
+    it('does not promise an attachment in a Matrix room', async () => {
+      upstream = [...upstream, ...artifactTools];
+      const plugin = new SandboxPlugin({ mcpClientFactory: factory });
+      const tools = await plugin.getRequestTools(
+        makeCtx(
+          {},
+          { kind: 'chat', surface: 'matrix', label: 'a Matrix chat room' },
+        ),
+      );
+      const sendFile = tools.find((t) => t.name === 'send_file');
+      expect(sendFile?.description).not.toContain('attachment');
+    });
+
+    it('offers no send_file when the sandbox cannot sign', async () => {
+      const plugin = new SandboxPlugin({ mcpClientFactory: factory });
+      const tools = await plugin.getRequestTools(makeCtx({}, WHATSAPP));
+      expect(names(tools)).not.toContain('send_file');
+    });
   });
 });

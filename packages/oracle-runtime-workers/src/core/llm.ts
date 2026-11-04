@@ -11,6 +11,7 @@ import {
 import {
   LLM_BYO_STREAM_IDLE_TIMEOUT_MS_DEFAULT,
   LLM_HEADERS_TIMEOUT_MS_DEFAULT,
+  LLM_MAX_OUTPUT_TOKENS_DEFAULT,
   LLM_STREAM_IDLE_TIMEOUT_MS_DEFAULT,
   LLM_STREAM_RETRIES_DEFAULT,
   LLM_STREAM_RETRIES_MAX,
@@ -18,6 +19,7 @@ import {
 } from './env';
 import { fetchOpenRouterPrices } from './openrouter-pricing';
 import type { LlmAdapter } from './runtime-context';
+import { stringify } from '../sqlite/serialization';
 import { NOOP_LOGGER } from './utils';
 
 // ── Catalog ─────────────────────────────────────────────────────────────────
@@ -617,6 +619,8 @@ export interface LlmEnv {
   LLM_STREAM_RETRIES?: number;
   /** The turn deadline the stall retries are clamped to. */
   TURN_TIMEOUT_MS?: number;
+  /** Most tokens one call may generate; 0 = the model's own limit. */
+  LLM_MAX_OUTPUT_TOKENS?: number;
 }
 
 /** The liveness-related env keys, as validated config (numbers) or raw Worker env (strings). */
@@ -637,6 +641,19 @@ function wholeNumber(value: unknown, min: number): number | undefined {
         ? Number(value)
         : Number.NaN;
   return Number.isInteger(n) && n >= min ? n : undefined;
+}
+
+/**
+ * The `maxTokens` field every platform model gets: `LLM_MAX_OUTPUT_TOKENS`
+ * (default `LLM_MAX_OUTPUT_TOKENS_DEFAULT`), none when it is 0. Reasoning
+ * counts against it, and a caller's own `maxTokens` wins.
+ */
+function outputCapModelFields(env: { LLM_MAX_OUTPUT_TOKENS?: unknown }): {
+  maxTokens?: number;
+} {
+  const cap =
+    wholeNumber(env.LLM_MAX_OUTPUT_TOKENS, 0) ?? LLM_MAX_OUTPUT_TOKENS_DEFAULT;
+  return cap > 0 ? { maxTokens: cap } : {};
 }
 
 /**
@@ -703,7 +720,16 @@ export function llmEnvFromWorkerEnv(env: Record<string, unknown>): LlmEnv {
     LLM_PROVIDER: str('LLM_PROVIDER') === 'nebius' ? 'nebius' : 'openrouter',
     NEBIUS_API_KEY: str('NEBIUS_API_KEY'),
     ...platformStreamLivenessEnv(env),
+    ...outputCapEnv(env),
   };
+}
+
+/** `LLM_MAX_OUTPUT_TOKENS` of `env` as a number (unset when absent or invalid). */
+export function outputCapEnv(env: {
+  LLM_MAX_OUTPUT_TOKENS?: unknown;
+}): Pick<LlmEnv, 'LLM_MAX_OUTPUT_TOKENS'> {
+  const cap = wholeNumber(env.LLM_MAX_OUTPUT_TOKENS, 0);
+  return cap !== undefined ? { LLM_MAX_OUTPUT_TOKENS: cap } : {};
 }
 
 /** The platform lane's liveness keys of `env`, as numbers (unset when absent or invalid). */
@@ -788,6 +814,7 @@ export function createLlmAdapter(
   const liveness = streamLivenessFromEnv(env, 'platform');
   const mainEffort = env.MAIN_REASONING_EFFORT ?? 'medium';
   const headers = openRouterAttributionHeaders(env.ORACLE_NAME);
+  const outputCap = outputCapModelFields(env);
 
   const modelForRole = (role: ModelRole): string => {
     if (role === 'main' || role === 'summarizer') return defaultModelId;
@@ -842,6 +869,7 @@ export function createLlmAdapter(
       temperature: 0.8,
       maxRetries: 2,
       ...livenessModelFields(liveness),
+      ...outputCap,
       apiKey: env.OPEN_ROUTER_API_KEY,
       ...rest,
       model,
@@ -900,6 +928,7 @@ function createNebiusAdapter(
   const modelForRole = (role: ModelRole): string =>
     NEBIUS_MODEL_MAP[role as ProviderModelRole] ?? NEBIUS_MODEL_MAP.subagent;
   const liveness = streamLivenessFromEnv(env, 'platform');
+  const outputCap = outputCapModelFields(env);
 
   const get = (role: ModelRole, params?: ChatOpenAIFields): BaseChatModel => {
     const {
@@ -920,6 +949,7 @@ function createNebiusAdapter(
       temperature: role === 'guard' ? 0 : 0.8,
       maxRetries: 2,
       ...livenessModelFields(liveness),
+      ...outputCap,
       apiKey,
       __includeRawResponse: true,
       ...rest,
@@ -1014,6 +1044,114 @@ export interface LangsmithTracingDecision {
   callbacks?: [LangChainTracer];
 }
 
+/** The signature of a signed storage link, whatever carries the link. */
+const SIGNED_LINK_SIGNATURE = /(X-Amz-Signature=)[0-9a-f]+/gi;
+
+/** What `SIGNED_LINK_SIGNATURE` needs to match somewhere: the marker and one hex digit. */
+const SIGNED_LINK_MARKER = /X-Amz-Signature=[0-9a-f]/i;
+
+/**
+ * Whether `values` needs the full pass of `redactSignedLinks`: some string
+ * its JSON would carry (a value or a key, through `toJSON` like
+ * `JSON.stringify`) holds a signature, or the walk cannot tell (a BigInt, a
+ * getter or `toJSON` that throws: the full pass decides what is sent).
+ * JSON escaping never touches the marker's characters, so the marker is in
+ * the JSON exactly when it is in one of those strings. Walks without
+ * serializing: every run of a traced turn carries the whole history, and a
+ * stringify per run was a copy of it per run.
+ */
+function needsSignedLinkPass(values: unknown): boolean {
+  const pending: unknown[] = [values];
+  const seen = new Set<object>();
+  try {
+    while (pending.length > 0) {
+      const value = pending.pop();
+      if (typeof value === 'string') {
+        if (SIGNED_LINK_MARKER.test(value)) return true;
+        continue;
+      }
+      if (typeof value === 'bigint') return true;
+      if (value === null || typeof value !== 'object') continue;
+      // A shared object adds no string a first visit did not; a cycle none.
+      if (seen.has(value)) continue;
+      seen.add(value);
+      const toJSON: unknown = Reflect.get(value, 'toJSON');
+      if (typeof toJSON === 'function') {
+        pending.push(toJSON.call(value, ''));
+        continue;
+      }
+      for (const key of Object.keys(value)) {
+        if (SIGNED_LINK_MARKER.test(key)) return true;
+        pending.push(Reflect.get(value, key));
+      }
+    }
+  } catch {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * What a trace may keep of a run's inputs and outputs. A signed link is a
+ * bearer credential, and a trace holds every `ToolMessage.artifact`, so its
+ * signature goes. A value that cannot be read is not sent. A payload with
+ * no signature anywhere is handed back as it is, without serializing it.
+ */
+export function redactSignedLinks(
+  values: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!needsSignedLinkPass(values)) return values;
+  const json = stringify(values);
+  const redacted = json.replace(SIGNED_LINK_SIGNATURE, '$1[redacted]');
+  if (redacted !== json) return JSON.parse(redacted) as Record<string, unknown>;
+  // `stringify` answers with a bare string when it cannot serialize.
+  return json.startsWith('{') ? values : {};
+}
+
+/** Newest messages a traced graph/middleware/tool run keeps of the thread state. */
+export const TRACE_STATE_TAIL_MESSAGES = 4;
+
+/**
+ * Collapse the thread state a traced graph, node or middleware run carries
+ * (`{ messages: [...whole thread], ...}`) to its newest
+ * `TRACE_STATE_TAIL_MESSAGES` messages plus a count of what was left out.
+ * Every such run of a turn carries the whole history, and the client
+ * serializes each one for upload: on a long thread a tool turn shipped tens
+ * of full copies of it from the user object's isolate. A chat model's run is
+ * left whole — its inputs are `{ messages: [[...]] }` (one list per prompt),
+ * the prompt the model really read, which is what a trace is for.
+ */
+export function collapseTracedState(
+  values: Record<string, unknown>,
+): Record<string, unknown> {
+  const messages = values.messages;
+  if (
+    !Array.isArray(messages) ||
+    messages.length <= TRACE_STATE_TAIL_MESSAGES ||
+    messages.some((entry) => Array.isArray(entry))
+  )
+    return values;
+  return {
+    ...values,
+    messages: messages.slice(-TRACE_STATE_TAIL_MESSAGES),
+    messagesOmitted: messages.length - TRACE_STATE_TAIL_MESSAGES,
+  };
+}
+
+/** What a trace keeps of a run's inputs or outputs: collapsed state, signed links redacted. */
+function traceValues(values: Record<string, unknown>): Record<string, unknown> {
+  return redactSignedLinks(collapseTracedState(values));
+}
+
+/**
+ * Upload batch size of the tracing client. The library default (24 MiB)
+ * assumes a server process; a user object shares a 128 MB isolate with the
+ * turn it traces, and a batch is serialized as a whole before it is sent,
+ * so its size is the transient cost of an upload. Smaller batches drop
+ * nothing: the queue is left at the library default, so no run is dropped.
+ */
+const TRACE_BATCH_BYTES = 4 * 1024 * 1024;
+
 /**
  * One `langsmith` Client per (apiKey, endpoint) per isolate. Tracer instances
  * are per-turn and cheap; the client owns the batched upload queue, so
@@ -1025,7 +1163,13 @@ function langsmithClientFor(apiKey: string, endpoint?: string): Client {
   const key = `${apiKey}\n${endpoint ?? ''}`;
   let client = langsmithClients.get(key);
   if (!client) {
-    client = new Client({ apiKey, ...(endpoint && { apiUrl: endpoint }) });
+    client = new Client({
+      apiKey,
+      ...(endpoint && { apiUrl: endpoint }),
+      hideInputs: traceValues,
+      hideOutputs: traceValues,
+      batchSizeBytesLimit: TRACE_BATCH_BYTES,
+    });
     langsmithClients.set(key, client);
   }
   return client;

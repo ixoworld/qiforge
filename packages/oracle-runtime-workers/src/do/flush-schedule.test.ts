@@ -21,6 +21,15 @@ describe('decideFlush', () => {
     });
   });
 
+  it('does not upload a copy that waits for a delegation, whatever the deadline or idle state', () => {
+    const waiting = { ...base, waitingForDelegation: true };
+    const skip = { action: 'skip', reason: 'waiting-for-delegation' };
+    expect(decideFlush(waiting)).toEqual(skip);
+    expect(decideFlush({ ...waiting, flushAt: now - 1 })).toEqual(skip);
+    expect(decideFlush({ ...waiting, flushAt: undefined })).toEqual(skip);
+    expect(decideFlush({ ...waiting, idle: true })).toEqual(skip);
+  });
+
   it('waits for a deadline in the future (a keep-alive or heartbeat wake never uploads)', () => {
     expect(decideFlush(base)).toEqual({ action: 'wait', at: now + day });
     expect(

@@ -96,6 +96,7 @@ const manifest: PluginManifest = {
   tags: ['ixo', 'transaction', 'wallet', 'portal', 'cosmos'],
   category: 'integration',
   visibility: 'on-demand',
+  brief: 'prepare chain transactions for wallet signing in Portal',
   stability: 'experimental',
 };
 

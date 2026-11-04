@@ -32,70 +32,59 @@ const DOCUMENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/;
 const spaceSchema = z
   .enum(['public', 'private'])
   .describe(
-    "Which knowledge space: 'public' is shared with every user of this oracle; 'private' is visible only to the domain's members (its controllers, owner, admins and DAO members).",
+    "'public': every user of this oracle. 'private': the domain's members only (controllers, owner, admins, DAO members).",
   );
 
 const sourceSchema = z
   .object({
     kind: z
       .enum(['attachment', 'vfs'])
-      .describe(
-        "'attachment' for a file the person attached in this conversation, 'vfs' for a file in their Library.",
-      ),
+      .describe("'attachment': attached here. 'vfs': in their Library."),
     ref: z
       .string()
       .min(1)
       .describe(
-        'For kind attachment: the value inside the `[source: eventId="…"]` (or `[source: url="…"]`) line that accompanies the attached file, passed exactly as given (an event id such as "$abc…" or an mxc:// URL). For kind vfs: the file path in the Library, for example /private/policies/travel.pdf.',
+        'attachment: the value in the `[source: eventId="…"]` or `[source: url="…"]` line beside the file, exactly as given ("$abc…" or an mxc:// URL). vfs: the Library path, e.g. /private/policies/travel.pdf.',
       ),
   })
-  .strict()
-  .describe('Where the file is.');
+  .strict();
 
 export const addOracleDocumentSchema = z
   .object({
     source: sourceSchema,
-    title: z
-      .string()
-      .min(1)
-      .max(200)
-      .describe('A short human title for the document, 1 to 200 characters.'),
+    title: z.string().min(1).max(200),
     knowledge_space_type: spaceSchema,
-    group_as_document: z
-      .boolean()
-      .describe(
-        'Required, no default. true: the file is ONE coherent record and is kept together under a document id (it can be listed and removed as one). false: the file is a collection of unrelated facts and each part is stored as ordinary loose knowledge with no document grouping. Decide with the person, see the tool description.',
-      ),
+    group_as_document: z.boolean(),
     document_id: z
       .string()
       .regex(DOCUMENT_ID_PATTERN)
       .optional()
       .describe(
-        "Only with group_as_document true (ignored otherwise). A stable id such as 'board-resolution-2026-10' (letters, digits, '.', '_' and '-', up to 120 characters, starting with a letter or digit). Adding a document with an id that already exists replaces it. Leave out and the tool derives one from the title and the content, so adding the same file again replaces it.",
+        "Grouped only: a stable id such as 'board-resolution-2026-10'. Default: derived from title and content, so adding the same file again replaces it.",
       ),
     source_description: z
       .string()
       .max(500)
       .optional()
       .describe(
-        "Only with group_as_document true (ignored otherwise). One line saying where the document comes from, up to 500 characters (for example 'Signed PDF from the board secretary, 12 Oct 2026').",
+        "Grouped only: where it comes from, e.g. 'Signed PDF from the board secretary, 12 Oct 2026'.",
       ),
     if_exists: z
       .enum(['replace', 'fail'])
       .optional()
       .describe(
-        "Only with group_as_document true (ignored otherwise). 'replace' (default) overwrites a grouped document with the same document_id; 'fail' refuses instead.",
+        "Grouped only: for a document_id that exists, 'replace' (default) or 'fail'.",
       ),
     allow_truncation: z
       .boolean()
       .optional()
       .describe(
-        'Default false. When the file is larger than the limits the tool refuses and tells you the size. Set true only after the person agreed that the first part of the file is enough.',
+        'true keeps only the first part of a file over the limits. Only after the person agreed.',
       ),
     confirmed_insertion_from_user: z
       .boolean()
       .describe(
-        'true only when the person has explicitly asked you to store this file as oracle knowledge after you told them who will be able to see it. Otherwise ask first.',
+        'true only after the person asked to store this file and you told them who will see it.',
       ),
   })
   .strict();
@@ -108,57 +97,43 @@ export const listOracleDocumentsSchema = z
     knowledge_space_type: spaceSchema,
     status: z
       .enum(['ingesting', 'ready', 'partial', 'deleting', 'delete_failed'])
-      .optional()
-      .describe('Only list documents in this status. Leave out for all.'),
+      .optional(),
     limit: z
       .number()
       .int()
       .min(1)
       .max(MAX_LIST_LIMIT)
       .optional()
-      .describe(
-        `Most documents to list, 1 to ${MAX_LIST_LIMIT} (default ${DEFAULT_LIST_LIMIT}).`,
-      ),
+      .describe(`Default ${DEFAULT_LIST_LIMIT}.`),
   })
   .strict();
 
 export const deleteOracleDocumentSchema = z
   .object({
-    document_id: z
-      .string()
-      .regex(DOCUMENT_ID_PATTERN)
-      .describe(
-        'The id of a grouped document, as shown by list_oracle_documents.',
-      ),
+    document_id: z.string().regex(DOCUMENT_ID_PATTERN),
     knowledge_space_type: spaceSchema,
-    confirmed_deletion_from_user: z
-      .boolean()
-      .describe(
-        'true only when the person has explicitly asked you to remove this document after you told them it will be deleted for everyone who can see that space.',
-      ),
+    confirmed_deletion_from_user: z.boolean(),
   })
   .strict();
 
 export const ADD_ORACLE_DOCUMENT_DESCRIPTION = [
-  "Use this, not memory-engine__add_oracle_knowledge, whenever the knowledge comes from a file: one the person attached or one in their Library, even when the file's text is visible in the conversation. Store that file as this oracle's domain knowledge. For an attachment, set source to kind 'attachment' and ref to the value inside the `[source: eventId=…]` (or `[source: url=…]`) line that accompanies the attached file: pass that eventId or mxc URL as ref. For a Library file, kind 'vfs' and ref the path. The text is read out of the file, split into parts and written to the public or private knowledge space of this oracle. Only a controller, owner, admin or DAO member of the domain can do this; the memory engine checks and refuses anyone else.",
+  "Use this, not memory-engine__add_oracle_knowledge, whenever the knowledge comes from a file the person attached or one in their Library, even when its text is visible in the conversation. The file's text is split into parts and stored in this oracle's public or private knowledge space. The memory engine refuses anyone but a controller, owner, admin or DAO member of the domain.",
   '',
-  'Decide with group_as_document, which is required and has no default:',
-  '- true: the file is ONE coherent record that belongs together, such as a board resolution, a contract or a report. It is stored under one document id, so it can be listed with list_oracle_documents, replaced by adding it again with the same document_id, and removed as one with delete_oracle_document.',
-  '- false: the file is a place where someone dumped many unrelated company facts to upload them easily (for example a notes file with the office address, the refund rule, the CEO name and the opening hours). Each part is stored as an ordinary knowledge fact with no document grouping. Loose facts cannot be listed as a document or removed as a group; they are found by search and removed one by one with delete_episode.',
+  'group_as_document is required and has no default:',
+  '- true: ONE coherent record, such as a board resolution, a contract or a report. Kept under one document id: listed with list_oracle_documents, replaced by adding it again, removed as one with delete_oracle_document.',
+  '- false: a dump of unrelated company facts (a notes file with the office address, the refund rule, the opening hours). Each part becomes a loose fact: found by search, removed one by one with delete_episode.',
+  'If the file could be either, ask the person first: say what you found in one sentence and offer the two options in plain words. Never pick silently.',
   '',
-  'If it is not obvious which one the file is, ask the person before you call this tool. Say what you found in the file in one sentence and offer the two options in plain words. Never pick one silently when the file could be either.',
+  'Always confirm first: tell the person which space will hold the content and only then set confirmed_insertion_from_user. Never store a file they did not ask you to store.',
   '',
-  'Always confirm first: tell the person whether the public space (every user of this oracle) or the private space (the members of the domain only: controllers, owner, admins and DAO members) will hold the content, and set confirmed_insertion_from_user to true only after they say yes. Do not store files the person did not ask you to store.',
-  '',
-  'Limits: a text file or a PDF with a text layer up to 25 MB; a scanned PDF, an image or an Office file (read by a helper model) up to 10 MB. Text is split into parts of about 12 KB, at most 64 parts (about 750 KB of text, the memory engine accepts 900 KB per document). A larger file is refused with its size unless allow_truncation is true, which keeps only the first part of the file; use that only if the person agrees. Without a document_id a grouped document gets one derived from the title and content, so repeating the call after a timeout replaces rather than duplicates; the result reports the id.',
-  'The result says how many parts were queued. Indexing continues in the background; for a grouped document list_oracle_documents shows the status (ingesting, ready, partial, deleting or delete_failed).',
+  'Limits: text or a PDF with a text layer up to 25 MB; a scanned PDF, image or Office file up to 10 MB; at most 64 parts of about 12 KB. A larger file is refused with its size unless allow_truncation is set. The result gives the parts queued and the document id; indexing continues in the background (list_oracle_documents shows its status).',
 ].join('\n');
 
 export const LIST_ORACLE_DOCUMENTS_DESCRIPTION =
-  "List the grouped documents in one of this oracle's knowledge spaces with their id, title, status (ingesting, ready, partial, deleting or delete_failed) and number of parts. Optional status filter and limit (default 100, at most 500). Loose facts stored with group_as_document false are not listed here; they are ordinary knowledge found by search.";
+  "List the grouped documents in one of this oracle's knowledge spaces: id, title, status, parts. This is the oracle's knowledge base, not the domain documents of the verified domain context. Loose facts (group_as_document false) are not listed; they are found by search.";
 
 export const DELETE_ORACLE_DOCUMENT_DESCRIPTION =
-  'Remove a grouped document and every one of its parts from the public or private knowledge space of this oracle. Use the id from list_oracle_documents. This cannot be undone and it takes effect for everyone who can see that space, so tell the person which document will go and set confirmed_deletion_from_user to true only after they say yes. Loose facts are not documents; remove those with delete_episode. The removal runs in the background; if list_oracle_documents later shows the document as delete_failed, call this again to retry it.';
+  'Remove a grouped document, with all its parts, for everyone who can see that space. Cannot be undone: tell the person which document will go and set confirmed_deletion_from_user only after they say yes. Loose facts: use delete_episode. Runs in the background; if list_oracle_documents later shows delete_failed, call this again to retry.';
 
 const NO_ENGINE_MESSAGE =
   'Memory engine is not reachable from this oracle (missing MEMORY_ENGINE_URL or signing key).';

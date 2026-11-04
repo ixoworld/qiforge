@@ -151,7 +151,6 @@ function restrictedObject(
     sandboxArchiveConfig: forbidden,
     ready: vi.fn(async () => {}),
     markDirty: vi.fn(),
-    retainAttachmentPayloads: vi.fn(async () => {}),
   });
   const call = async (method: string, ...args: unknown[]): Promise<unknown> =>
     Reflect.apply(Reflect.get(host, method), host, args);

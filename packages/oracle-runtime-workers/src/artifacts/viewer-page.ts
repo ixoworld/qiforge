@@ -45,7 +45,7 @@ footer { margin-top: 16px; font-size: 0.8rem; color: var(--muted); }
 export const VIEWER_SCRIPT = String.raw`
 (function () {
   'use strict';
-  // ── Inline and block parsing: pure, linear in its input ──
+  // -- Inline and block parsing: pure, linear in its input --
   // A document is model output and may carry text shaped by anything the
   // model read, so no line may make the reader's tab backtrack for seconds:
   // every closer is found by a forward search whose start only moves on.
@@ -191,7 +191,7 @@ export const VIEWER_SCRIPT = String.raw`
           value.charAt(close + 1) === '(' &&
           targetOf !== close
         ) {
-          // The target: no spaces or parentheses, except balanced (…) pairs.
+          // The target: no spaces or parentheses, except balanced (...) pairs.
           var at = close + 2;
           for (;;) {
             var ch = value.charAt(at);
@@ -324,7 +324,7 @@ export const VIEWER_SCRIPT = String.raw`
   // The |---|:---:| line under a table's header row.
   var DIVIDER =
     /^[ \t]*(?:\|[ \t]*)?:?-{3,}:?[ \t]*(?:\|[ \t]*:?-{3,}:?[ \t]*)*(?:\|[ \t]*)?$/;
-  // ── End of parsing ──
+  // -- End of parsing --
   var article = document.getElementById('doc');
   var status = document.getElementById('status');
   var actions = document.getElementById('actions');
@@ -438,7 +438,7 @@ export const VIEWER_SCRIPT = String.raw`
       var item = el('li');
       var task = m[3].match(/^\[( |x|X)\]\s+(.*)$/);
       if (task) {
-        item.appendChild(document.createTextNode(task[1] === ' ' ? '☐ ' : '☑ '));
+        item.appendChild(document.createTextNode(task[1] === ' ' ? '\u2610 ' : '\u2611 '));
         inline(task[2], item);
       } else inline(m[3], item);
       node.appendChild(item);

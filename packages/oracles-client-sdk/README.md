@@ -52,6 +52,8 @@ function App() {
       // by it: { serialized, expiresAt }
       createDelegation={(oracleDid) => myWallet.delegateTo(oracleDid)}
       createInvocation={(oracleDid) => myWallet.invoke(oracleDid)}
+      // UCAN headers for the rooms bot, needed by contractOracle
+      getRoomsBotAuth={(roomsBotUrl) => myWallet.roomsBotHeaders(roomsBotUrl)}
     >
       <ChatInterface />
     </OraclesProvider>
@@ -109,6 +111,8 @@ function ChatInterface() {
 ```
 
 `myWallet` stands for the host app's own UCAN signing. `createInvocation` is optional in the type, but the Workers runtime (`@ixo/oracle-runtime-workers`) authenticates a request only by its invocation (`Authorization: Bearer <invocation>`); a request carrying only the delegation gets 401 unless the oracle sets `UCAN_ALLOW_BARE_DELEGATION_AUTH=true`. The delegation must have an expiry.
+
+`getRoomsBotAuth` returns the headers for an invocation addressed to `did:web:<host of roomsBotUrl>`, with `can: '*'` on `ixo:matrix-rooms-bot`. `contractOracle` throws without it: a rooms bot never receives the Matrix access token. `wallet.matrix.homeServer` is the homeserver the session logged in to; every call carrying the access token goes there, not to the homeserver named by the user's DID.
 
 ### Credentials and renewal
 

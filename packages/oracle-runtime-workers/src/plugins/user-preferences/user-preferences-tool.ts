@@ -1,8 +1,7 @@
 /**
- * `set_user_preferences` — the Node runtime's tool, verbatim in schema and
- * description (the description is prompt material the model has been tuned
- * against; keep it in sync with `packages/oracle-runtime`). The handler
- * writes through the host's `ctx.preferences` surface for the active room.
+ * `set_user_preferences`: the Node runtime's tool, the same schema with
+ * shorter text (the model reads it on every call). The handler writes
+ * through the host's `ctx.preferences` surface for the active room.
  */
 import { z } from 'zod';
 import { tool } from '../../plugin-api/tool-helper';
@@ -26,67 +25,42 @@ export const setUserPreferencesSchema = z.object({
     .string()
     .max(80)
     .optional()
-    .describe(
-      "What the user wants you (the agent) to be called (e.g. 'Companion'). Use exactly the form the user asked for. Max 80 characters.",
-    ),
+    .describe('What the user wants to call you, in exactly their form.'),
   userName: z
     .string()
     .max(80)
     .optional()
-    .describe(
-      "What the user wants you to call them (e.g. 'Yousef'). Use exactly the form the user asked for. Max 80 characters.",
-    ),
+    .describe('What the user wants to be called, in exactly their form.'),
   language: z
     .string()
     .max(20)
     .optional()
     .describe(
-      "Preferred reply language as a free-form code or name (e.g. 'en', 'ar', 'Arabic', 'Egyptian Arabic'). " +
-        'Be precise — if the user specified a dialect or variant, capture that. Max 20 characters.',
+      "Reply language, code or name, with any dialect (e.g. 'ar', 'Egyptian Arabic').",
     ),
   tone: z
     .string()
     .max(MAX_TONE_LENGTH)
     .optional()
     .describe(
-      "Short tone label your future self will see at the top of every prompt (e.g. 'playful and warm', " +
-        `'concise and dry', 'patient teacher'). Pick descriptive words, not vague ones. Max ${MAX_TONE_LENGTH} characters.`,
+      "Short descriptive tone label (e.g. 'playful and warm', 'concise and dry').",
     ),
   formality: z
     .enum(FORMALITY_LEVELS)
     .optional()
-    .describe(
-      'How formal the replies should be. Pick the value closest to what the user actually wants, ' +
-        'not what the request literally said.',
-    ),
+    .describe('The value closest to what the user actually wants.'),
   customInstructions: z
     .string()
     .max(2000)
     .optional()
     .describe(
-      'Free-form custom instructions your FUTURE SELF will read every turn. Treat this like writing ' +
-        'a system prompt: be specific, complete, and unambiguous. Include the WHY when it matters ' +
-        "(e.g. 'User has dyslexia — keep sentences short and avoid long lists'). " +
-        'When updating, MERGE with existing instructions rather than replacing — read what is already ' +
-        'there (visible in your current system prompt under "User Preferences") and write the full new ' +
-        'instruction set, preserving anything still relevant. Max 2000 characters.',
+      'Instructions you will read on every turn, like a system prompt: specific, complete, with the why when it matters (e.g. \'User has dyslexia: short sentences, no long lists\'). This field is replaced whole: write the full new set, keeping what is still relevant from "User Preferences" in your system prompt.',
     ),
 });
 
 export const SET_USER_PREFERENCES_DESCRIPTION =
-  "Update the user's preferences. Call this whenever the user asks you to change how you behave " +
-  "(e.g. 'call me Yousef', 'reply in Arabic', 'be more casual').\n\n" +
-  'IMPORTANT — you are writing instructions for your FUTURE SELF. ' +
-  'On every later turn this exact text will be injected back into your system prompt and you will read it cold, ' +
-  'with no memory of this conversation or why the user asked. So:\n' +
-  "  • Be specific and self-contained. Don't write 'be more casual' — write 'Use casual, conversational " +
-  "tone. Avoid corporate phrasing. Use contractions. Drop filler words.'\n" +
-  "  • Capture intent, not just the literal request. If the user says 'stop being so formal', infer the " +
-  'positive form: what should you do instead?\n' +
-  '  • Preserve existing instructions when adding new ones — only overwrite the fields you mean to change. ' +
-  'Other fields are kept as-is.\n' +
-  "  • If unsure between two interpretations, pick the more specific one — your future self can't ask back.\n\n" +
-  "Note: changes apply from the user's NEXT message (the current turn's prompt is already built).";
+  "Save how the user wants you to behave (e.g. 'call me Yousef', 'reply in Arabic', 'be more casual'). Takes effect from their NEXT message. Only the fields you pass change.\n\n" +
+  "You are writing for your FUTURE SELF, who reads this text cold on every later turn with no memory of why. Be specific and self-contained: not 'be more casual' but 'Use a casual, conversational tone. Use contractions. Avoid corporate phrasing.' Capture the intent as what to do ('stop being so formal' becomes what to do instead). Between two readings pick the more specific one.";
 
 export interface CreateSetUserPreferencesToolOptions {
   logger?: Logger;

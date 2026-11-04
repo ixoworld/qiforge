@@ -13,6 +13,7 @@ import {
 import { ChannelAttachment } from '../channels/contract';
 import { DoSqliteDatabase } from '../sqlite/database';
 import {
+  channelThreadFiles,
   channelTurnLinks,
   prepareTurnAttachments,
   turnAttachmentInputs,
@@ -185,6 +186,84 @@ describe('turn attachments', () => {
       });
       await store.forgetSession('session-a');
       expect(await store.get('session-a', kept!.ref)).toBeUndefined();
+    });
+  });
+  it('lists the files to post once each, with their place in the message, and the run still names them by reference', async () => {
+    const file = await photo();
+    const req = {
+      client: 'channel',
+      channel: { bindingId: 'chb_one', attachments: [file, file] },
+    };
+    const ref = channelAttachmentRef(file.sha256);
+    expect(channelThreadFiles(req)).toEqual([
+      {
+        ref,
+        index: 0,
+        link: { url: file.url, sha256: file.sha256, bindingId: 'chb_one' },
+        filename: 'photo.jpg',
+        mimetype: 'image/jpeg',
+        size: JPEG.length,
+        kind: 'image',
+      },
+    ]);
+    expect(channelThreadFiles({ client: 'portal' })).toEqual([]);
+    expect(
+      turnAttachmentInputs(req, undefined).map((input) => input.eventId),
+    ).toEqual([undefined, undefined]);
+  });
+
+  it('keeps the thread event of each file with its link, past the link expiry, adding the column to an older table', async () => {
+    const stub = env.TASKS_TEST.get(
+      env.TASKS_TEST.idFromName('channel-link-events'),
+    );
+    await runInDurableObject(stub, async (_instance, state) => {
+      const db = await DoSqliteDatabase.open(state, 'channel-link-events.db');
+      // The table as runtimes before thread events created it.
+      await db.run(
+        `CREATE TABLE channel_attachment_links (
+           session_id TEXT NOT NULL, ref TEXT NOT NULL, binding_id TEXT NOT NULL,
+           url TEXT NOT NULL, sha256 TEXT NOT NULL, expires_at INTEGER NOT NULL,
+           UNIQUE (session_id, ref)
+         )`,
+      );
+      let now = 1_800_000_000_000;
+      const store = new ChannelAttachmentLinkStore(db, console, () => now);
+      const file = await photo();
+      const other = ChannelAttachment.parse({
+        ...file,
+        sha256: 'f'.repeat(64),
+      });
+      const [kept, plain] = channelTurnLinks({
+        client: 'channel',
+        channel: { bindingId: 'chb_one', attachments: [file, other] },
+      });
+      await store.put('session-a', [kept!, plain!]);
+      expect(await store.eventIdOf('session-a', kept!.ref)).toBeUndefined();
+      await store.setEventIds('session-a', new Map([[kept!.ref, '$file']]));
+      expect(await store.eventIdOf('session-a', kept!.ref)).toBe('$file');
+      expect(await store.eventIdOf('session-b', kept!.ref)).toBeUndefined();
+      // A resend in a later turn refreshes the link and keeps the event.
+      await store.put('session-a', [kept!]);
+      expect(await store.eventIdOf('session-a', kept!.ref)).toBe('$file');
+      // Past the links' expiry (`exp` 1893456000) the sweep drops the row
+      // without a room copy and keeps the other, whose link is no longer
+      // served while its event still is.
+      now = 1_893_456_000_000 + 1;
+      const source = turnChannelMediaSource({
+        sessionId: 'session-a',
+        turnLinks: [],
+        store,
+        channelServiceDid: 'did:web:channels.test',
+      });
+      await store.put('session-z', [
+        { ...kept!, url: link('chb_one', 1_999_999_999) },
+      ]);
+      expect(await store.get('session-a', kept!.ref)).toBeUndefined();
+      expect(await source.roomEventOf?.(kept!.ref)).toBe('$file');
+      const rows = await db.exec<{ ref: string }>(
+        "SELECT ref FROM channel_attachment_links WHERE session_id = 'session-a'",
+      );
+      expect(rows.map((row) => row.ref)).toEqual([kept!.ref]);
     });
   });
 });

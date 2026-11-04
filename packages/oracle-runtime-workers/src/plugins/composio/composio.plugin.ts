@@ -100,6 +100,7 @@ const manifest: PluginManifest = {
   ],
   category: 'integration',
   visibility: 'on-demand',
+  brief: 'Gmail, GitHub, Slack, Calendar and hundreds of apps',
   stability: 'stable',
   requires: [SANDBOX_CAPABILITY],
 };

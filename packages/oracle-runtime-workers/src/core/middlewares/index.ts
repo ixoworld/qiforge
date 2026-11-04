@@ -18,6 +18,11 @@ export {
 } from './summarization';
 export type { SummarizationMiddlewareOptions } from './summarization';
 export { createByoHistorySanitizerMiddleware } from './byo-history-sanitizer';
+export { createAttachmentRecallMiddleware } from './attachment-recall';
+export type {
+  AttachmentRecallMiddlewareOptions,
+  RecallImageLoader,
+} from './attachment-recall';
 export {
   createDanglingToolCallRepairMiddleware,
   repairDanglingToolCalls,

@@ -1,8 +1,13 @@
 /**
  * The deterministic shaper: one model step's Markdown → chat messages, or a
- * spill (lead message, artefact, closing question) when the step is too long
- * or too structured for chat. No model call; the same input always gives the
- * same output, which is what makes a Reply Plan safe to rebuild on recovery.
+ * spill (lead message, artefact, closing message) when the step is
+ * document-length: longer than `spillChars`, or holding a list, table or
+ * code block too long to read in chat. Everything else stays in chat: short
+ * messages are grouped toward `maxBubbles`, a step that cannot fit that many
+ * keeps more messages rather than losing text, a table is rewritten as one
+ * line per row, and no message is longer than `bubbleMax`. No model call; the same
+ * input always gives the same output, which is what makes a Reply Plan safe
+ * to rebuild on recovery.
  */
 import { marked, type Token, type Tokens } from 'marked';
 import type { ChatLimits } from './types';
@@ -11,9 +16,17 @@ export interface SpillShape {
   title: string;
   /** The whole step as the model wrote it: the artefact's content. */
   markdown: string;
-  /** What stays in chat: the first block, or a list's lead-in and first items. */
+  /**
+   * What stays in chat before the link, within `bubbleMax`: the first block
+   * whole (a paragraph over `bubbleMax` cut at a sentence), or a list's or
+   * table's lead-in and first items.
+   */
   lead: string;
-  /** The step's closing question, kept as its own message after the link. */
+  /**
+   * What stays in chat after the link, within `bubbleMax`: the step's last
+   * paragraph (with the paragraph before it when both fit), or its closing
+   * list or table previewed. Its conclusion, next actions or question.
+   */
   closing?: string;
 }
 
@@ -37,8 +50,12 @@ const isCode = (t: Token): t is Tokens.Code => t.type === 'code';
 const isTable = (t: Token): t is Tokens.Table => t.type === 'table';
 const isHtml = (t: Token): t is Tokens.HTML => t.type === 'html';
 
-const sentenceSegmenter = new Intl.Segmenter(undefined, {
+// A pinned locale, so a rebuilt plan splits the same way on every runtime.
+const sentenceSegmenter = new Intl.Segmenter('en', {
   granularity: 'sentence',
+});
+const graphemeSegmenter = new Intl.Segmenter('en', {
+  granularity: 'grapheme',
 });
 
 /**
@@ -145,18 +162,33 @@ function plainText(text: string): string {
     .trim();
 }
 
-function tableAsList(table: Tokens.Table): string {
-  return table.rows
-    .map((row) => {
-      const [first, ...rest] = row.map((cell) => cell.text.trim());
-      const pairs = rest.map((value, i) => {
-        const header = table.header[i + 1]?.text.trim();
-        return header ? `${header}: ${value}` : value;
-      });
-      return `- **${first ?? ''}**${pairs.length ? ` · ${pairs.join(' · ')}` : ''}`;
-    })
-    .join('\n');
+/** One table row as a chat line: `- **first cell** · Header: value · …`. */
+function rowLine(first: string, rest: string[]): string {
+  const parts = [...(first ? [`**${first}**`] : []), ...rest].filter(Boolean);
+  return parts.length ? `- ${parts.join(' · ')}` : '';
 }
+
+/** A table's chat lines, one per row; a table with no body rows is its header. */
+function tableLines(table: Tokens.Table): string[] {
+  const headers = table.header.map((cell) => cell.text.trim());
+  const lines =
+    table.rows.length === 0
+      ? [rowLine(headers[0] ?? '', headers.slice(1))]
+      : table.rows.map((row) => {
+          const [first, ...rest] = row.map((cell) => cell.text.trim());
+          return rowLine(
+            first ?? '',
+            rest.map((value, i) => {
+              const header = headers[i + 1];
+              return header && value ? `${header}: ${value}` : value;
+            }),
+          );
+        });
+  return lines.filter(Boolean);
+}
+
+const tableAsList = (table: Tokens.Table): string =>
+  tableLines(table).join('\n');
 
 function toBlocks(markdown: string, limits: ChatLimits): Block[] {
   const blocks: Block[] = [];
@@ -171,11 +203,8 @@ function toBlocks(markdown: string, limits: ChatLimits): Block[] {
     } else if (isCode(token)) {
       blocks.push({ kind: 'code', md: token.raw.trim(), token });
     } else if (isTable(token)) {
-      blocks.push({
-        kind: 'table',
-        md: limits.tables ? token.raw.trim() : tableAsList(token),
-        token,
-      });
+      const md = limits.tables ? token.raw.trim() : tableAsList(token);
+      if (!isBlank(md)) blocks.push({ kind: 'table', md, token });
     } else if (token.type === 'blockquote') {
       blocks.push({ kind: 'quote', md: chatMarkdown(token).trim(), token });
     } else {
@@ -228,9 +257,38 @@ export function splitText(text: string, max: number): string[] {
   if (sentences.length > 1) return packPieces(sentences, '', size);
   const words = text.split(/(?<=\s)/);
   if (words.length > 1) return packPieces(words, '', size);
+  // The hard cut never splits a grapheme (an emoji, a surrogate pair); one
+  // grapheme longer than `size` is a piece of its own.
   const out: string[] = [];
-  for (let i = 0; i < text.length; i += size) out.push(text.slice(i, i + size));
+  let rest = text;
+  while (rest) {
+    const piece = graphemePrefix(rest, size) || firstGrapheme(rest);
+    out.push(piece);
+    rest = rest.slice(piece.length);
+  }
   return out;
+}
+
+/** The longest prefix of whole graphemes within `max` characters. */
+function graphemePrefix(text: string, max: number): string {
+  let out = '';
+  for (const { segment } of graphemeSegmenter.segment(text)) {
+    if (out.length + segment.length > max) break;
+    out += segment;
+  }
+  return out;
+}
+
+function firstGrapheme(text: string): string {
+  for (const { segment } of graphemeSegmenter.segment(text)) return segment;
+  return '';
+}
+
+/** `text` cut to `max` characters with "…", at a word when one is near. */
+function cutWithEllipsis(text: string, max: number): string {
+  const cut = graphemePrefix(text, max - 1);
+  const space = cut.lastIndexOf(' ');
+  return `${(space > max / 2 ? cut.slice(0, space) : cut).trimEnd()}…`;
 }
 
 /** A code block too long for one message is re-fenced per piece. */
@@ -255,42 +313,159 @@ function trimToSentence(text: string, max: number): string {
     out += sentence;
   }
   if (out.trim()) return out.trim();
-  const cut = text.slice(0, max - 1);
-  const space = cut.lastIndexOf(' ');
-  return `${(space > max / 2 ? cut.slice(0, space) : cut).trimEnd()}…`;
+  return cutWithEllipsis(text, max);
+}
+
+/** The last sentences of `text` that fit `max`, or '' when none does. */
+function lastSentences(text: string, max: number): string {
+  let out = '';
+  for (const sentence of sentencesOf(text).reverse()) {
+    if ((sentence + out).trim().length > max) break;
+    out = sentence + out;
+  }
+  return out.trim();
 }
 
 function titleOf(text: string): string {
   const plain = plainText(sentencesOf(text)[0] ?? text).replace(/[:.]$/, '');
   if (plain.length <= TITLE_MAX) return plain;
-  const cut = plain.slice(0, TITLE_MAX - 1);
-  const space = cut.lastIndexOf(' ');
-  return `${(space > TITLE_MAX / 2 ? cut.slice(0, space) : cut).trimEnd()}…`;
+  return cutWithEllipsis(plain, TITLE_MAX);
 }
 
 function firstLine(text: string): string {
   return (text.split('\n')[0] ?? '').trim();
 }
 
-function preview(list: Tokens.List, count: number): string {
+/** A list's or a table's items as chat lines: a list item by its first line. */
+function itemLines(block: Block): string[] {
+  if (isTable(block.token)) return tableLines(block.token);
+  if (!isList(block.token)) return [];
+  const list = block.token;
   const start = typeof list.start === 'number' ? list.start : 1;
-  const items = list.items
-    .slice(0, count)
-    .map(
-      (item, i) =>
-        `${list.ordered ? `${start + i}.` : '-'} ${firstLine(item.text)}`,
-    );
-  const more = list.items.length - count;
-  return items.join('\n') + (more > 0 ? `\n…and ${more} more` : '');
+  return list.items.map(
+    (item, i) =>
+      `${list.ordered ? `${start + i}.` : '-'} ${firstLine(item.text)}`,
+  );
 }
+
+function previewText(head: string, lines: string[], total: number): string {
+  const more = total - lines.length;
+  return joinBlocks(
+    head,
+    lines.join('\n') + (more > 0 ? `\n…and ${more} more` : ''),
+  );
+}
+
+/**
+ * A list or table previewed within `bubbleMax`, after an optional "…:"
+ * lead-in: its first `previewItems` items and "…and N more". Fewer items
+ * are kept (down to one) until it fits; then that item, and if needed the
+ * lead-in, is cut with "…". The trailer and its count always stay.
+ */
+function fittedPreview(head: string, block: Block, limits: ChatLimits): string {
+  const lines = itemLines(block);
+  const max = limits.bubbleMax;
+  if (lines.length === 0)
+    return head.length <= max ? head : trimToSentence(head, max);
+  for (
+    let count = Math.min(limits.previewItems, lines.length);
+    count >= 1;
+    count--
+  ) {
+    const text = previewText(head, lines.slice(0, count), lines.length);
+    if (text.length <= max) return text;
+  }
+  const more = lines.length - 1;
+  const trailer = more > 0 ? `\n…and ${more} more` : '';
+  const line = lines[0]!;
+  // Room for the item first (up to a third of the message), then the lead-in.
+  const itemRoom = Math.min(line.length, Math.floor(max / 3));
+  const headMax = max - 2 - itemRoom - trailer.length;
+  const fittedHead =
+    !head || head.length <= headMax ? head : trimToSentence(head, headMax);
+  const lineMax =
+    max - (fittedHead ? fittedHead.length + 2 : 0) - trailer.length;
+  const fittedLine =
+    line.length <= lineMax ? line : cutWithEllipsis(line, lineMax);
+  return previewText(fittedHead, [fittedLine], lines.length);
+}
+
+const isItems = (block: Block): boolean =>
+  block.kind === 'list' || block.kind === 'table';
 
 const endsWithColon = (md: string): boolean => /:\s*$/.test(md);
 const joinBlocks = (a: string, b: string): string => (a ? `${a}\n\n${b}` : b);
 
-/** Blocks → messages: headings and "…:" lead-ins stay with what follows. */
+/**
+ * One message being packed: `code` when it holds a fenced code block,
+ * `opens` when it must start a message (a heading or lead-in sent ahead of
+ * its body; the body may still join it).
+ */
+interface Unit {
+  text: string;
+  code: boolean;
+  opens?: boolean;
+}
+
+/**
+ * Units filled left to right into messages of at most `max` characters. A
+ * code unit is never joined to another, so a fenced block keeps its own
+ * message. Greedy filling gives the fewest messages for the order given.
+ */
+function fill(units: Unit[], max: number): Unit[] {
+  const out: Unit[] = [];
+  for (const unit of units) {
+    const last = out.at(-1);
+    if (
+      last &&
+      !last.code &&
+      !unit.code &&
+      !unit.opens &&
+      last.text.length + 2 + unit.text.length <= max
+    )
+      out[out.length - 1] = {
+        text: joinBlocks(last.text, unit.text),
+        code: false,
+        ...(last.opens ? { opens: true } : {}),
+      };
+    else out.push(unit);
+  }
+  return out;
+}
+
+/**
+ * Toward `maxBubbles` messages. A step already within it keeps the model's
+ * own message breaks. Otherwise units are filled up to `bubbleTarget`, and
+ * when that still leaves too many, the original units are filled again up
+ * to `bubbleMax`. A step that cannot fit stays at more messages: nothing is
+ * dropped, and nothing spills on count.
+ */
+function preferFewer(units: Unit[], limits: ChatLimits): Unit[] {
+  if (units.length <= limits.maxBubbles) return units;
+  const byTarget = fill(units, limits.bubbleTarget);
+  return byTarget.length <= limits.maxBubbles
+    ? byTarget
+    : fill(units, limits.bubbleMax);
+}
+
+/**
+ * Blocks → messages, each within `bubbleMax`. Headings and "…:" lead-ins
+ * start the message that holds what follows them: when joining would pass
+ * `bubbleMax`, the block after them is split with the room left, so they
+ * ride on its first piece; only a lead-in too long for that (over half of
+ * `bubbleMax`) is sent ahead as messages of its own, which nothing joins
+ * from behind. Fragments under `minBubble` merge forward when the result
+ * fits, then short messages are grouped toward `maxBubbles` (`preferFewer`).
+ */
 function pack(blocks: Block[], limits: ChatLimits): string[] {
-  const units: string[] = [];
+  const units: Unit[] = [];
   let carry = '';
+  const flush = (opens: boolean): void => {
+    for (const piece of splitText(carry, limits.bubbleMax))
+      if (!isBlank(piece))
+        units.push({ text: piece, code: false, ...(opens ? { opens } : {}) });
+    carry = '';
+  };
   blocks.forEach((block, i) => {
     const next = blocks[i + 1];
     const leadIn =
@@ -302,23 +477,56 @@ function pack(blocks: Block[], limits: ChatLimits): string[] {
       carry = joinBlocks(carry, block.md);
       return;
     }
-    const pieces = splitBlock(block, limits.bubbleMax);
-    pieces.forEach((piece, j) => {
-      units.push(j === 0 ? joinBlocks(carry, piece) : piece);
-    });
+    const code = block.kind === 'code';
+    const room = limits.bubbleMax - carry.length - 2;
+    let pieces: string[];
+    if (!carry || joinBlocks(carry, block.md).length <= limits.bubbleMax)
+      pieces = splitBlock(block, limits.bubbleMax);
+    else if (room >= limits.bubbleMax / 2) pieces = splitBlock(block, room);
+    else {
+      flush(true);
+      pieces = splitBlock(block, limits.bubbleMax);
+    }
+    const [head = '', ...rest] = pieces;
+    units.push({ text: joinBlocks(carry, head), code });
+    for (const piece of rest) units.push({ text: piece, code });
     carry = '';
   });
-  if (carry) units.push(carry);
-  const merged: string[] = [];
+  if (carry) flush(false);
+  const merged: Unit[] = [];
   for (let i = 0; i < units.length; i++) {
     const unit = units[i]!;
-    if (unit.length < limits.minBubble && i + 1 < units.length)
-      units[i + 1] = joinBlocks(unit, units[i + 1]!);
+    const next = units[i + 1];
+    const joined = next ? joinBlocks(unit.text, next.text) : '';
+    if (
+      next &&
+      unit.text.length < limits.minBubble &&
+      joined.length <= limits.bubbleMax
+    )
+      units[i + 1] = {
+        text: joined,
+        code: unit.code || next.code,
+        ...(unit.opens ? { opens: true } : {}),
+      };
     else merged.push(unit);
   }
-  return merged;
+  return preferFewer(merged, limits).map((unit) => unit.text);
 }
 
+/**
+ * What a spill keeps in chat, so the conversation still carries the
+ * substance when the document cannot be opened, each within `bubbleMax`:
+ *
+ *  - lead: the first block after any heading (after a leading code block,
+ *    which only the artefact holds, unless that block is a lone trailing
+ *    paragraph, which is the closing instead): a paragraph or quote
+ *    whole when it fits, else cut at a sentence; a list or table, with its
+ *    "…:" lead-in, previewed (`fittedPreview`);
+ *  - closing: the last block, when the lead did not use it: a list or table
+ *    (with its lead-in) previewed, or the last paragraph, joined to the
+ *    paragraph before it when both fit (a conclusion and its question), or
+ *    its last sentences that fit.
+ */
 function spillOf(
   markdown: string,
   blocks: Block[],
@@ -326,30 +534,63 @@ function spillOf(
 ): SpillShape {
   const heading = blocks.find((b) => b.kind === 'heading');
   const content = blocks.filter((b) => b.kind !== 'heading');
-  const [first, second] = content;
+  const max = limits.bubbleMax;
+  const used = new Set<Block>();
+  const start = content.findIndex((b) => b.kind !== 'code');
+  const first = start >= 0 ? content[start] : undefined;
+  const second = start >= 0 ? content[start + 1] : undefined;
+  // After leading code, a lone trailing paragraph ("Want me to apply it?")
+  // is the closing, after the link, not the lead.
+  const onlyClosing =
+    start > 0 && first === content.at(-1) && first?.kind === 'paragraph';
   let lead = '';
-  if (first && isList(first.token))
-    lead = preview(first.token, limits.previewItems);
-  else if (
+  if (onlyClosing) {
+    // No lead: the closing below takes the paragraph.
+  } else if (first && isItems(first)) {
+    lead = fittedPreview('', first, limits);
+    used.add(first);
+  } else if (
     first?.kind === 'paragraph' &&
     endsWithColon(first.md) &&
     second &&
-    isList(second.token)
-  )
-    lead = joinBlocks(first.md, preview(second.token, limits.previewItems));
-  else if (first && (first.kind === 'paragraph' || first.kind === 'quote'))
-    lead = trimToSentence(first.md, limits.bubbleTarget);
+    isItems(second)
+  ) {
+    lead = fittedPreview(first.md, second, limits);
+    used.add(first).add(second);
+  } else if (first && (first.kind === 'paragraph' || first.kind === 'quote')) {
+    lead = first.md.length <= max ? first.md : trimToSentence(first.md, max);
+    used.add(first);
+  }
   const last = content.at(-1);
-  const closing =
-    last &&
-    last !== first &&
-    last.kind === 'paragraph' &&
-    /\?\s*$/.test(last.md) &&
-    last.md.length <= limits.bubbleMax
-      ? last.md
-      : undefined;
+  const before = content.at(-2);
+  let closing: string | undefined;
+  if (last && !used.has(last)) {
+    if (isItems(last)) {
+      const leadIn =
+        before?.kind === 'paragraph' &&
+        endsWithColon(before.md) &&
+        !used.has(before)
+          ? before.md
+          : '';
+      closing = fittedPreview(leadIn, last, limits);
+    } else if (last.kind === 'paragraph') {
+      const pair =
+        before?.kind === 'paragraph' && !used.has(before)
+          ? joinBlocks(before.md, last.md)
+          : '';
+      closing =
+        pair && pair.length <= max
+          ? pair
+          : last.md.length <= max
+            ? last.md
+            : lastSentences(last.md, max);
+    }
+  }
+  if (closing === lead || (closing !== undefined && isBlank(closing)))
+    closing = undefined;
   const titleSource =
-    heading?.md ?? (first?.kind === 'paragraph' ? first.md : undefined);
+    heading?.md ??
+    (content[0]?.kind === 'paragraph' ? content[0].md : undefined);
   return {
     title: (titleSource && titleOf(titleSource)) || 'Details',
     markdown,
@@ -359,9 +600,14 @@ function spillOf(
 }
 
 /**
- * Shape one model step for a chat surface. With `canSpill` false (no
- * artefact storage configured) the step is always split into messages:
- * tables become lists and nothing is dropped.
+ * Shape one model step for a chat surface. A step spills only when it is
+ * document-length: its rendered text (blocks joined by blank lines) is over
+ * `spillChars`, a list or a table has more than `maxListItems` items or
+ * rows, or a code block more than `maxCodeLines` lines. Otherwise it stays in
+ * chat as the messages it packs into (grouped toward `maxBubbles`, never
+ * spilled on count; the run's cap is `capParts`' job). With `canSpill` false
+ * (no artefact storage configured) the step is always split into messages
+ * and nothing is dropped.
  */
 export function shapeStep(
   markdown: string,
@@ -369,21 +615,17 @@ export function shapeStep(
   canSpill: boolean,
 ): StepShape {
   const blocks = toBlocks(markdown.trim(), limits);
-  const messages = pack(blocks, limits);
-  if (!canSpill) return { kind: 'messages', messages };
-  const length = blocks.reduce((n, b) => n + b.md.length + 2, 0);
-  const tooStructured = blocks.some(
-    (b) =>
-      (b.kind === 'table' && !limits.tables) ||
-      (isCode(b.token) &&
-        b.token.text.split('\n').length > limits.maxCodeLines) ||
-      (isList(b.token) && b.token.items.length > limits.maxListItems),
-  );
-  if (
-    length > limits.spillChars ||
-    tooStructured ||
-    messages.length > limits.maxBubbles
-  )
-    return { kind: 'spill', spill: spillOf(markdown.trim(), blocks, limits) };
-  return { kind: 'messages', messages };
+  if (canSpill) {
+    const length = blocks.map((b) => b.md).join('\n\n').length;
+    const tooLongForChat = blocks.some(
+      (b) =>
+        (isCode(b.token) &&
+          b.token.text.split('\n').length > limits.maxCodeLines) ||
+        (isList(b.token) && b.token.items.length > limits.maxListItems) ||
+        (isTable(b.token) && b.token.rows.length > limits.maxListItems),
+    );
+    if (length > limits.spillChars || tooLongForChat)
+      return { kind: 'spill', spill: spillOf(markdown.trim(), blocks, limits) };
+  }
+  return { kind: 'messages', messages: pack(blocks, limits) };
 }

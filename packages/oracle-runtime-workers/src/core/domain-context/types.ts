@@ -7,6 +7,7 @@
  */
 import type { DomainDocument } from '@ixo/domain.md/workers';
 import type { RuntimeContext } from '../../plugin-api/types';
+import type { DomainBriefDetail } from './document';
 
 export interface DomainContextOptions {
   mode: 'off' | 'observe';
@@ -16,6 +17,15 @@ export interface DomainContextOptions {
   allowedOrigins?: string[];
   /** https gateway used for `ipfs://` URIs; `ipfs://` documents are refused without one. */
   ipfsGateway?: string;
+  /**
+   * How much of each domain sits in the prompt of every model call. `compact`
+   * (default) carries what `domain.md` §3 has an agent always load, as a
+   * short index; `full` adds the constitution's id lists, the source and
+   * privacy detail, every document's permissions and the provenance the
+   * static validator always reports. Both leave the documents one
+   * `read_domain_document` away.
+   */
+  detail?: DomainBriefDetail;
   /** Bounds of the documents read before the first model call. */
   pass1?: {
     /** Pass-1 documents read per domain. Default 4. */
@@ -24,6 +34,13 @@ export interface DomainContextOptions {
     maxTokens?: number;
     /** One overall bound for every pass-1 read of the turn. Default 3000. */
     timeoutMs?: number;
+    /**
+     * Characters of each pass-1 document inlined in the prompt; the rest
+     * pages through `read_domain_document` from `nextOffset`. `0` inlines
+     * none and reads none before the first model call. Default 1200 at
+     * `detail: 'compact'`, 4000 at `detail: 'full'`.
+     */
+    excerptChars?: number;
   };
   /**
    * Host adapter for private documents that are not VFS files. It must

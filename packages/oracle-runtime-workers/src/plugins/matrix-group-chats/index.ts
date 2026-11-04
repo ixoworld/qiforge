@@ -91,6 +91,7 @@ const manifest: PluginManifest = {
   tags: ['matrix', 'group-chat', 'memory'],
   category: 'communication',
   visibility: 'on-demand',
+  brief: 'search what was said in this group room',
   stability: 'beta',
 };
 

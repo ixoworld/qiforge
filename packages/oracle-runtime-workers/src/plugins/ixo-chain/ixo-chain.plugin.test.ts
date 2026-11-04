@@ -13,6 +13,7 @@ import {
   NAMES_RESERVE_MS,
   chainLookupSchema,
   chainRestUrl,
+  KIND_ARGS,
   namesClientId,
   namesUrl,
 } from './ixo-chain.plugin';
@@ -201,14 +202,32 @@ describe('IxoChainPlugin', () => {
       );
     // Raised from 4,000 for the names rule, which the guide and the
     // `chain_lookup` description both state (a router preload shows no
-    // guide).
-    expect(footprint).toBeLessThanOrEqual(4_420);
+    // guide), and from 4,420 for `KIND_ARGS`: about 120 tokens per model
+    // call against the `describe_chain_kinds` round trip it saves (see
+    // docs/chain-tools.md for the sum).
+    expect(footprint).toBeLessThanOrEqual(5_000);
     // The lookup schema names each kind once, in its `kind` enum.
     const lookupSchema = JSON.stringify(z.toJSONSchema(chainLookupSchema));
     expect(lookupSchema).toContain(
       JSON.stringify(KINDS.map((kind) => kind.name)),
     );
     expect(lookupSchema).not.toContain('properties":{"agent"');
+  });
+
+  it('names every kind with other arguments in the chain_lookup description, from the kinds themselves', () => {
+    const lookup = new IxoChainPlugin()
+      .getTools()
+      .find((tool) => tool.name === 'chain_lookup');
+    expect(KIND_ARGS).toContain(
+      'claims(agent,collectionId,after) [default: user]',
+    );
+    expect(KIND_ARGS).toContain('claim_collection(id) [totals]');
+    expect(KIND_ARGS).toContain('fee_grants(direction)');
+    expect(KIND_ARGS).toContain('dao_proposals(dao,status)');
+    // Only `address` and `first`: the description's general rule covers it.
+    expect(KIND_ARGS).not.toContain('token_balances');
+    expect(KIND_ARGS).not.toContain('network_economics');
+    expect(lookup?.description).toContain(KIND_ARGS);
   });
 
   it('validates its env keys on the composed schema', () => {
@@ -661,7 +680,7 @@ describe('chain_lookup', () => {
     const result = await tool('chain_lookup').handler(
       {
         requests: [
-          { kind: 'claims', args: { collectionId: '8250' } },
+          { kind: 'claims', args: { agent: ADDRESS, collectionId: '8250' } },
           { kind: 'claim_collections' },
           { kind: 'claim', args: { claimId: 'not a claim id' } },
           {
@@ -1090,13 +1109,68 @@ describe('chain_lookup', () => {
           ok: false,
           reason: 'invalid_input',
           detail: expect.stringContaining(
-            'Invalid args for kind "claims" (Unrecognized key: "agentDid"). Call describe_chain_kinds with ["claims"] for its arguments.',
+            'Invalid args for kind "claims" (Unrecognized key: "agentDid"). Its args: agent, collectionId, first, after. describe_chain_kinds with ["claims"] explains them.',
           ),
           retryable: false,
         },
         { kind: 'token_balances', ok: true },
       ],
     });
+  });
+
+  it("refuses a collection without an agent instead of answering with the user's claims in it", async () => {
+    const posts: string[] = [];
+    stubFetch((url, init) => {
+      posts.push(String(init?.body));
+      return json({ data: {} });
+    });
+    // The exact call a model made for "How many claims are in claim
+    // collection 999?": answered as the user's own (none), it read as 0.
+    const result = await tool('chain_lookup').handler(
+      {
+        requests: [
+          { kind: 'claims', args: { collectionId: '999', first: 20 } },
+        ],
+      },
+      ctxFor(),
+    );
+    expect(posts).toHaveLength(0);
+    expect(result).toMatchObject({
+      ok: true,
+      results: [
+        {
+          kind: 'claims',
+          ok: false,
+          reason: 'invalid_input',
+          detail: expect.stringContaining(
+            'use claim_collection with id "999"; for one agent\'s claims in it, pass agent too',
+          ),
+          retryable: false,
+        },
+      ],
+    });
+  });
+
+  it('lists the valid keys in a refusal, so a guessed key is corrected without describing the kind', async () => {
+    stubFetch(() => json({}));
+    const result = await tool('chain_lookup').handler(
+      {
+        requests: [
+          { kind: 'fee_grants', args: { account: OTHER } },
+          { kind: 'claim', args: { id: 'x' } },
+          { kind: 'network_economics', args: { address: OTHER } },
+        ],
+      },
+      ctxFor(),
+    );
+    const details = (result as { results: { detail?: string }[] }).results.map(
+      ({ detail }) => detail,
+    );
+    expect(details[0]).toBe(
+      'Invalid args for kind "fee_grants" (Unrecognized key: "account"). Its args: direction, address, first. describe_chain_kinds with ["fee_grants"] explains them.',
+    );
+    expect(details[1]).toContain('Its args: claimId (required).');
+    expect(details[2]).toContain('This kind takes no args.');
   });
 
   it('takes 1–8 requests of a registered kind, each { kind, args? }', () => {
@@ -1174,7 +1248,8 @@ describe('describe_chain_kinds', () => {
               },
               collectionId: {
                 type: 'string',
-                description: 'Only claims in this collection, e.g. "8250".',
+                description:
+                  'Only this agent\'s claims in this collection, e.g. "8250"; needs `agent`.',
               },
               first: {
                 type: 'integer',
@@ -1193,7 +1268,7 @@ describe('describe_chain_kinds', () => {
           },
           example: {
             kind: 'claims',
-            args: { collectionId: '8250', first: 5 },
+            args: { first: 5 },
           },
           explain: claims?.explain,
         },
@@ -1203,9 +1278,7 @@ describe('describe_chain_kinds', () => {
     // The example is a request chain_lookup takes.
     expect(
       chainLookupSchema.safeParse({
-        requests: [
-          { kind: 'claims', args: { collectionId: '8250', first: 5 } },
-        ],
+        requests: [{ kind: 'claims', args: { first: 5 } }],
       }).success,
     ).toBe(true);
   });
@@ -1531,7 +1604,7 @@ describe('names', () => {
     const balances = tool('get_account_balances');
 
     // Twelve denoms read four at a time, 5 s each: the balances read ends
-    // 15 s into the call, so names get their whole 4 s.
+    // 15 s into the call, so names get the 4 s left of the budget.
     let asked = slow(5_000);
     let start = Date.now();
     let pending = balances.handler({ address: OTHER }, on());

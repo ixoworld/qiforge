@@ -1,12 +1,17 @@
-import { HumanMessage } from '@langchain/core/messages';
+import { HumanMessage, ToolMessage } from '@langchain/core/messages';
+import { LangChainTracer } from '@langchain/core/tracers/tracer_langchain';
 import { ChatOpenAI } from '@langchain/openai';
+import { createAgent, FakeToolCallingModel, tool } from 'langchain';
+import { Client } from 'langsmith';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import {
   BYO_PROVIDER_MODELS,
   BYO_PROVIDERS,
   BYO_ROLE_MODELS,
 } from '../llm/byo-catalog';
 import { createByoChatModel } from '../llm/byo-client';
+import { LLM_MAX_OUTPUT_TOKENS_DEFAULT } from './env';
 import {
   catalogCandidates,
   MAX_CONTEXT_TOKENS,
@@ -21,7 +26,11 @@ import {
   BUILTIN_CONTEXT_WINDOWS,
   createLlmAdapter,
   llmEnvFromWorkerEnv,
+  outputCapEnv,
+  redactSignedLinks,
+  resolveLangsmithTracing,
   streamLivenessFromEnv,
+  TRACE_STATE_TAIL_MESSAGES,
   DEFAULT_MODEL_ID,
   getModelCapabilities,
   listModelCatalog,
@@ -156,6 +165,69 @@ describe('summarizer role', () => {
     const summarizer = adapter.get('summarizer');
     if (!(summarizer instanceof ChatOpenAI)) throw new Error('unreachable');
     expect(summarizer.model).toBe(NEBIUS_MODEL_MAP.main);
+  });
+});
+
+describe('output cap', () => {
+  /** The `max_tokens` a Chat Completions request from this model would carry. */
+  const wireMaxTokens = (model: ChatOpenAI): number | null | undefined => {
+    const params = model.invocationParams({});
+    return 'max_tokens' in params ? params.max_tokens : undefined;
+  };
+
+  it('caps every platform call at LLM_MAX_OUTPUT_TOKENS, sent as max_tokens', () => {
+    const adapter = createLlmAdapter({
+      OPEN_ROUTER_API_KEY: 'k',
+      DEFAULT_MODEL: 'openai/gpt-5.6-luna',
+    });
+    for (const role of ['main', 'summarizer', 'subagent'] as const) {
+      const model = adapter.get(role);
+      if (!(model instanceof ChatOpenAI)) throw new Error('unreachable');
+      expect(model.maxTokens).toBe(LLM_MAX_OUTPUT_TOKENS_DEFAULT);
+    }
+    const main = adapter.get('main');
+    if (!(main instanceof ChatOpenAI)) throw new Error('unreachable');
+    expect(wireMaxTokens(main)).toBe(LLM_MAX_OUTPUT_TOKENS_DEFAULT);
+
+    const nebius = createLlmAdapter({
+      OPEN_ROUTER_API_KEY: '',
+      LLM_PROVIDER: 'nebius',
+      NEBIUS_API_KEY: 'n',
+      LLM_MAX_OUTPUT_TOKENS: 4096,
+    }).get('main');
+    if (!(nebius instanceof ChatOpenAI)) throw new Error('unreachable');
+    expect(nebius.maxTokens).toBe(4096);
+  });
+
+  it('leaves the limit to the model at 0, and lets a caller set its own', () => {
+    const uncapped = createLlmAdapter({
+      OPEN_ROUTER_API_KEY: 'k',
+      LLM_MAX_OUTPUT_TOKENS: 0,
+    }).get('main');
+    if (!(uncapped instanceof ChatOpenAI)) throw new Error('unreachable');
+    expect(uncapped.maxTokens).toBeUndefined();
+    expect(wireMaxTokens(uncapped)).toBeUndefined();
+
+    const own = createLlmAdapter({ OPEN_ROUTER_API_KEY: 'k' }).get('main', {
+      maxTokens: 500,
+    });
+    if (!(own instanceof ChatOpenAI)) throw new Error('unreachable');
+    expect(own.maxTokens).toBe(500);
+  });
+
+  it('reads the cap from raw Worker env and validated config alike', () => {
+    expect(
+      llmEnvFromWorkerEnv({ LLM_MAX_OUTPUT_TOKENS: '2048' })
+        .LLM_MAX_OUTPUT_TOKENS,
+    ).toBe(2048);
+    expect(
+      llmEnvFromWorkerEnv({ LLM_MAX_OUTPUT_TOKENS: 'lots' })
+        .LLM_MAX_OUTPUT_TOKENS,
+    ).toBeUndefined();
+    expect(outputCapEnv({ LLM_MAX_OUTPUT_TOKENS: 0 })).toEqual({
+      LLM_MAX_OUTPUT_TOKENS: 0,
+    });
+    expect(outputCapEnv({})).toEqual({});
   });
 });
 
@@ -333,3 +405,183 @@ describe('a stall before the first byte through the OpenAI SDK', () => {
     expect(calls).toBe(1);
   });
 });
+
+describe('redactSignedLinks', () => {
+  const SIGNED =
+    'https://r2.example/o/a.docx?X-Amz-Expires=10800&X-Amz-Signature=deadbeef0123&x-id=GetObject';
+
+  it('removes the signature from a signed link, wherever it sits', () => {
+    const redacted = JSON.stringify(
+      redactSignedLinks({
+        output: new ToolMessage({
+          tool_call_id: 'f1',
+          content: '{"ok":true}',
+          artifact: { url: SIGNED },
+        }),
+        text: `[a.docx](${SIGNED})`,
+      }),
+    );
+    expect(redacted).not.toContain('deadbeef0123');
+    expect(redacted).toContain('X-Amz-Signature=[redacted]&x-id=GetObject');
+  });
+
+  it('hands back a payload with no signed link untouched', () => {
+    const values = { messages: [new HumanMessage('hello')] };
+    expect(redactSignedLinks(values)).toBe(values);
+  });
+
+  it('sends nothing it cannot read', () => {
+    expect(redactSignedLinks({ big: 1n })).toEqual({});
+    expect(
+      redactSignedLinks({
+        nested: [
+          {
+            broken: {
+              toJSON: () => {
+                throw new Error('no');
+              },
+            },
+          },
+        ],
+      }),
+    ).toEqual({});
+  });
+
+  it('serializes nothing when no signature can be present', () => {
+    let serialized = 0;
+    const history = {
+      toJSON() {
+        serialized += 1;
+        return { messages: ['x'.repeat(10_000)] };
+      },
+    };
+    const values = { inputs: [history, history] };
+    expect(redactSignedLinks(values)).toBe(values);
+    // The walk read it once (a shared object once); no stringify read it again.
+    expect(serialized).toBe(1);
+  });
+
+  it('finds a signature wherever the JSON would carry one, as the full pass does', () => {
+    const cyclic: Record<string, unknown> = { text: `see ${SIGNED}` };
+    cyclic.self = cyclic;
+    const cases: Array<Record<string, unknown>> = [
+      // in a message, through its toJSON
+      { messages: [[new HumanMessage(`open ${SIGNED}`)]] },
+      // in a key
+      { [SIGNED]: 1 },
+      // any case, deep in an array
+      { a: [[[{ b: SIGNED.replace('X-Amz-Signature', 'x-amz-signature') }]]] },
+      // in a cycle
+      { cyclic },
+    ];
+    for (const values of cases) {
+      const out = redactSignedLinks(values);
+      expect(out).not.toBe(values);
+      expect(JSON.stringify(out)).not.toContain('deadbeef0123');
+    }
+    // The marker without a signature, a Map (no JSON keys) and a typed
+    // array are left alone, as the full pass leaves them.
+    for (const values of [
+      { text: 'X-Amz-Signature=&x' },
+      { map: new Map([['k', SIGNED]]) },
+      { bytes: new Uint8Array([1, 2, 3]) },
+    ])
+      expect(redactSignedLinks(values)).toBe(values);
+  });
+
+  it('is what every tracer client applies to inputs and outputs, after collapsing thread state', () => {
+    const { callbacks } = resolveLangsmithTracing({
+      userDid: 'did:ixo:user',
+      client: 'channel',
+      env: { apiKey: 'key', tracing: 'true' },
+    });
+    const client = Object(Reflect.get(callbacks?.[0] ?? {}, 'client'));
+    const thread = Array.from(
+      { length: 10 },
+      (_, i) => new HumanMessage({ id: `m${i}`, content: `turn ${i}` }),
+    );
+    for (const key of ['hideInputs', 'hideOutputs']) {
+      const hide: unknown = Reflect.get(client, key);
+      expect(typeof hide).toBe('function');
+      const apply = (values: Record<string, unknown>): unknown =>
+        Reflect.apply(Function.prototype.call, hide, [undefined, values]);
+      // A node's thread state keeps its newest messages and a count.
+      const collapsed = Object(apply({ messages: thread, step: 3 }));
+      expect(collapsed.messages).toEqual(
+        thread.slice(-TRACE_STATE_TAIL_MESSAGES),
+      );
+      expect(collapsed.messagesOmitted).toBe(
+        thread.length - TRACE_STATE_TAIL_MESSAGES,
+      );
+      expect(collapsed.step).toBe(3);
+      // A chat model's prompt (one list per prompt) is traced whole.
+      const prompt = { messages: [thread] };
+      expect(apply(prompt)).toBe(prompt);
+      // Signed links are still redacted.
+      expect(JSON.stringify(apply({ text: SIGNED }))).not.toContain(
+        SIGNED.slice(SIGNED.indexOf('X-Amz-Signature=')),
+      );
+    }
+  });
+
+  it('keeps the signature out of everything a traced turn uploads', async () => {
+    const trace = async (
+      anonymizer: typeof redactSignedLinks | undefined,
+    ): Promise<string[]> => {
+      const bodies: string[] = [];
+      vi.stubGlobal(
+        'fetch',
+        async (_url: unknown, init?: { body?: unknown }) => {
+          bodies.push(new TextDecoder().decode(toBytes(init?.body)));
+          return new Response('{}', { status: 200 });
+        },
+      );
+      try {
+        const client = new Client({
+          apiKey: 'key',
+          apiUrl: 'https://langsmith.example',
+          autoBatchTracing: false,
+          ...(anonymizer ? { anonymizer } : {}),
+        });
+        const sendFile = tool(
+          async (_args, config: { toolCall?: { id?: string } }) =>
+            new ToolMessage({
+              tool_call_id: config.toolCall?.id ?? '',
+              name: 'send_file',
+              content: '{"ok":true}',
+              artifact: { url: SIGNED },
+            }),
+          { name: 'send_file', description: 'Send.', schema: z.object({}) },
+        );
+        await createAgent({
+          model: new FakeToolCallingModel({
+            toolCalls: [[{ name: 'send_file', args: {}, id: 'f1' }], []],
+          }) as never,
+          tools: [sendFile],
+        }).invoke(
+          { messages: [new HumanMessage('go')] },
+          { callbacks: [new LangChainTracer({ client, projectName: 'p' })] },
+        );
+        await vi.waitFor(() => {
+          expect(bodies.length).toBeGreaterThan(0);
+        });
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return bodies;
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    };
+
+    const unprotected = await trace(undefined);
+    expect(unprotected.join('\n')).toContain('deadbeef0123');
+    const protectedBodies = await trace(redactSignedLinks);
+    expect(protectedBodies.length).toBeGreaterThan(0);
+    expect(protectedBodies.join('\n')).toContain('[redacted]');
+    expect(protectedBodies.join('\n')).not.toContain('deadbeef0123');
+  });
+});
+
+function toBytes(body: unknown): Uint8Array {
+  if (body instanceof Uint8Array) return body;
+  return new TextEncoder().encode(typeof body === 'string' ? body : '');
+}
