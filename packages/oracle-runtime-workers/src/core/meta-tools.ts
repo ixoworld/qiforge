@@ -5,11 +5,13 @@ import { tool } from '../plugin-api/tool-helper';
 import type { PluginManifest, PluginTool } from '../plugin-api/types';
 import {
   describeRequirements,
+  effectiveToolVisibility,
   unmetRequirements,
   type CapabilityRequirement,
 } from './manifest';
 import type { ManifestRegistry, ToolSummarySource } from './registries';
 import { withoutWithheldExamples, type TurnToolAccess } from './tool-access';
+import { USAGE_CARRIED_KWARG } from './operating-guides';
 import { acquireToolLock } from './utils';
 
 export const LOAD_CAPABILITY_TOOL_NAME = 'load_capability';
@@ -27,14 +29,43 @@ export const META_TOOL_NAMES: readonly string[] = [
 export type MetaToolAccess = Pick<
   TurnToolAccess<never>,
   'withheldToolNames' | 'hiddenPlugins'
-> & {
-  /**
-   * Plugins available this turn only through the capability router's
-   * preload: usable, but their operating guide is not in the system prompt,
-   * so `load_capability` still returns it.
-   */
-  preloadedOnly?: ReadonlySet<string>;
-};
+>;
+
+// ── Shared loading rules ────────────────────────────────────────────────────
+
+/** Whether `manifest`'s plugin still has a tool behind `load_capability`. */
+function hasGatedTools(
+  pluginName: string,
+  manifest: PluginManifest,
+  toolSource: ToolSummarySource,
+  access: MetaToolAccess,
+): boolean {
+  return toolSource
+    .toolSummariesForPlugin(pluginName)
+    .some(
+      (tool) =>
+        !access.withheldToolNames.has(tool.name) &&
+        effectiveToolVisibility(tool, manifest) === 'on-demand',
+    );
+}
+
+/**
+ * Whether the plugin has nothing left to load: the thread loaded it, or it is
+ * `always` visible with no tool behind `load_capability`.
+ */
+function fullyBound(
+  pluginName: string,
+  manifest: PluginManifest,
+  loaded: ReadonlySet<string> | undefined,
+  toolSource: ToolSummarySource,
+  access: MetaToolAccess,
+): boolean {
+  return (
+    loaded?.has(pluginName) === true ||
+    (manifest.visibility === 'always' &&
+      !hasGatedTools(pluginName, manifest, toolSource, access))
+  );
+}
 
 // ── list_capabilities ───────────────────────────────────────────────────────
 
@@ -68,13 +99,15 @@ interface CapabilityListing {
  * Build the `list_capabilities` meta-tool.
  *
  * Returns one entry per loaded plugin, with a `loaded` flag that combines
- * the boot-time always-on plugins (`visibility === 'always'`) with the set
- * of plugins the agent has explicitly loaded for this thread. A plugin left
- * with nothing by the turn's tool planes (`access.hiddenPlugins`) is not
- * listed at all; one whose `requires` are unmet is listed as `unavailable`.
+ * the boot-time always-on plugins (`visibility === 'always'`, with no tool
+ * behind `load_capability`) with the set of plugins the agent has explicitly
+ * loaded for this thread. A plugin left with nothing by the turn's tool
+ * planes (`access.hiddenPlugins`) is not listed at all; one whose `requires`
+ * are unmet is listed as `unavailable`.
  */
 export function buildListCapabilitiesTool(
   manifestRegistry: ManifestRegistry,
+  toolSource: ToolSummarySource,
   access: MetaToolAccess,
 ): PluginTool {
   return tool(
@@ -101,7 +134,7 @@ export function buildListCapabilitiesTool(
           visibility,
           loaded:
             missing.length === 0 &&
-            (visibility === 'always' || loadedSet.has(pluginName)),
+            fullyBound(pluginName, manifest, loadedSet, toolSource, access),
           category: manifest.category,
           tags: manifest.tags ?? [],
           ...(missing.length > 0 ? { unavailable: { missing } } : {}),
@@ -130,35 +163,152 @@ const loadCapabilitySchema = z.object({
     .array(z.string())
     .min(1)
     .describe(
-      'One or more capability names to load, as returned by list_capabilities.',
+      'One or more capability names to load, from the on-demand capability list.',
     ),
 });
 
-interface ToolDetail {
-  name: string;
-  description: string;
-}
+/** The note a no-op load carries, in place of the plugin's manifest. */
+const ALREADY_BOUND_NOTE =
+  'Nothing to load: these tools are already in your tool list. Call them directly.';
 
-interface LoadCapabilityResult extends PluginManifest {
+interface LoadCapabilityResult extends Partial<
+  Pick<PluginManifest, 'summary' | 'whenToUse' | 'whenNotToUse' | 'examples'>
+> {
+  name: string;
   /**
-   * `true` when the plugin was already loaded (or has `visibility: 'always'`),
-   * `false` when this call moved it into the loaded set.
+   * `true` when the plugin had nothing left to load, `false` when this call
+   * moved it into the loaded set (or refused it).
    */
   alreadyAvailable: boolean;
-  /** One entry per tool the plugin contributes. */
-  tools: ToolDetail[];
+  /**
+   * The plugin's tool names. Their definitions reach the model in its tool
+   * list on the next step, so repeating the descriptions here would pay for
+   * them twice, and for the rest of the conversation.
+   */
+  tools: string[];
+  /** Present on a no-op load: says there is nothing to do. */
+  note?: string;
   /**
    * The plugin's working rules (`OraclePlugin.operatingGuide`), present when
-   * this call loaded it or the router only preloaded it, once per turn. A
-   * plugin loaded on the thread (or `always` visible) has it in the system
-   * prompt, so it is not repeated.
+   * this call loaded it, once per turn, unless the system prompt carries them
+   * (`operating-guides.ts`).
    */
   operatingGuide?: string;
   /**
-   * Present when the plugin was NOT loaded because the user's authorization
-   * does not grant what it requires (`manifest.requires`).
+   * Present when the plugin was NOT loaded: it does not exist, or the user's
+   * authorization does not grant what it requires (`manifest.requires`, the
+   * `missing` list).
    */
   refused?: { missing: CapabilityRequirement[]; reason: string };
+}
+
+/**
+ * What a load tells the model, shared by `load_capability` and the capability
+ * gate's load on a hidden tool call. Built per turn: it remembers what the
+ * turn already loaded, which the tool context cannot show (a state update
+ * made earlier in the turn is not in it).
+ */
+export interface CapabilityLoader {
+  /** The plugin's tools the turn does not withhold. */
+  toolNames(pluginName: string): string[];
+  /**
+   * What the model needs to use the plugin: how to use it, the tool names,
+   * and its operating guide (once per turn) unless the prompt carries it.
+   * Records the plugin as loaded this turn.
+   */
+  describe(
+    pluginName: string,
+    manifest: PluginManifest,
+    guideInPrompt: boolean,
+  ): LoadCapabilityResult;
+  /** Whether this turn already loaded the plugin. */
+  loadedThisTurn(pluginName: string): boolean;
+  /** The gate's load: `describe` as a tool result. */
+  describeForGate(pluginName: string): GateLoadResult;
+}
+
+/** What the capability gate's refusal adds to its tool message. */
+export interface GateLoadResult {
+  text: string;
+  additional_kwargs: Record<string, unknown>;
+}
+
+/** What marks a message as carrying the usage of `plugins`. */
+function usageMark(plugins: readonly string[]): Record<string, unknown> {
+  return plugins.length > 0 ? { [USAGE_CARRIED_KWARG]: plugins } : {};
+}
+
+export function createCapabilityLoader(
+  manifestRegistry: ManifestRegistry,
+  toolSource: ToolSummarySource,
+  access: MetaToolAccess,
+): CapabilityLoader {
+  const loadedThisTurn = new Set<string>();
+  const guidesReturned = new Set<string>();
+
+  const toolNames = (pluginName: string): string[] =>
+    toolSource
+      .toolSummariesForPlugin(pluginName)
+      .filter((tool) => !access.withheldToolNames.has(tool.name))
+      .map((tool) => tool.name);
+
+  const describe: CapabilityLoader['describe'] = (
+    pluginName,
+    manifest,
+    guideInPrompt,
+  ) => {
+    loadedThisTurn.add(pluginName);
+    const { summary, whenToUse, whenNotToUse, examples } =
+      withoutWithheldExamples(manifest, access.withheldToolNames);
+    const guide =
+      guideInPrompt ||
+      manifest.visibility === 'always' ||
+      guidesReturned.has(pluginName)
+        ? undefined
+        : manifestRegistry.operatingGuide(pluginName);
+    if (guide) guidesReturned.add(pluginName);
+    return {
+      name: pluginName,
+      alreadyAvailable: false,
+      tools: toolNames(pluginName),
+      summary,
+      whenToUse,
+      whenNotToUse,
+      examples,
+      ...(guide ? { operatingGuide: guide } : {}),
+    };
+  };
+
+  return {
+    toolNames,
+    describe,
+    loadedThisTurn: (pluginName) => loadedThisTurn.has(pluginName),
+    describeForGate: (pluginName) => {
+      const entry = manifestRegistry
+        .collect()
+        .find((m) => m.pluginName === pluginName);
+      if (!entry) return { text: '', additional_kwargs: {} };
+      return {
+        text: JSON.stringify(describe(pluginName, entry.manifest, false)),
+        additional_kwargs: usageMark([pluginName]),
+      };
+    },
+  };
+}
+
+/** The names the error for an unknown capability offers. */
+function loadableNames(
+  manifestRegistry: ManifestRegistry,
+  access: MetaToolAccess,
+): string[] {
+  return manifestRegistry
+    .collect()
+    .filter(
+      ({ pluginName, manifest }) =>
+        manifest.visibility !== 'silent' &&
+        !access.hiddenPlugins.has(pluginName),
+    )
+    .map(({ pluginName }) => pluginName);
 }
 
 /**
@@ -168,22 +318,25 @@ interface LoadCapabilityResult extends PluginManifest {
  * capabilities into a single call. A per-session lock ensures the tool
  * cannot be invoked in parallel — concurrent calls throw immediately.
  *
- * Behavior per name:
+ * Every name is judged before any is loaded, and a name that cannot be loaded
+ * never stops the rest of the batch. Behavior per name:
  *  - Unknown plugin, or one the turn's tool planes left with nothing
  *    (`access.hiddenPlugins`, answered exactly like an unknown one) →
- *    throws, instructing the agent to call `list_capabilities` first.
- *  - `silent` plugin → throws (silent plugins are not agent-loadable).
+ *    `refused`, naming the capabilities that can be loaded.
+ *  - `silent` plugin → `refused` (silent plugins are not agent-loadable).
  *  - Plugin whose `requires` the user's delegation does not grant →
- *    included in the result with `refused` (what is missing) and not
- *    loaded; the rest of the batch is unaffected.
- *  - Plugin already loaded, or visibility is `always` → included in result
- *    with `alreadyAvailable: true` (no state change for that plugin).
+ *    `refused`, with what is missing.
+ *  - Plugin with nothing left to load: loaded on the thread or earlier this
+ *    turn, or `always` visible with no tool behind `load_capability` → a
+ *    no-op entry with `alreadyAvailable: true`, its tool names and a note
+ *    saying so (no state change for that plugin). An `always` plugin with
+ *    `on-demand` tools does load, once.
  *  - Otherwise → added to the `loadedPlugins` state update.
  *
- * The tool list and `examples` leave out the tools the turn withholds
- * (`access.withheldToolNames`). A plugin this call loads, or one the router
- * only preloaded, comes with its `operatingGuide` when it has one — once per
- * turn; a refused one never does.
+ * The tool names and `examples` leave out the tools the turn withholds
+ * (`access.withheldToolNames`). A plugin this call loads comes with its usage
+ * and its `operatingGuide` when it has one, once per turn, and the result is
+ * marked as carrying them; a refused one never does.
  *
  * Return value:
  *  - If all requested plugins were already available: returns the result
@@ -196,89 +349,80 @@ export function buildLoadCapabilityTool(
   manifestRegistry: ManifestRegistry,
   toolSource: ToolSummarySource,
   access: MetaToolAccess,
+  loader: CapabilityLoader = createCapabilityLoader(
+    manifestRegistry,
+    toolSource,
+    access,
+  ),
 ): PluginTool {
-  // Guides this tool already returned: the tool is built per turn, and the
-  // context it reads does not see a load made earlier in the same turn.
-  const guidesReturned = new Set<string>();
   return tool(
     async (args, ctx) => {
       const { names } = loadCapabilitySchema.parse(args);
 
       const releaseLock = acquireToolLock(`${ctx.session.id}:load_capability`);
       try {
-        const results: LoadCapabilityResult[] = [];
-        const newToLoad: string[] = [];
+        const refused = (
+          name: string,
+          reason: string,
+          missing: CapabilityRequirement[] = [],
+        ): LoadCapabilityResult => ({
+          name,
+          alreadyAvailable: false,
+          tools: [],
+          refused: { missing, reason },
+        });
+        const nothingToLoad = (name: string): LoadCapabilityResult => ({
+          name,
+          alreadyAvailable: true,
+          tools: loader.toolNames(name),
+          note: ALREADY_BOUND_NOTE,
+        });
 
-        for (const name of names) {
+        // Judged first: `describe` records the load, so it runs only for what
+        // this call really loads.
+        const judged = names.map((name) => {
           const entry = manifestRegistry
             .collect()
             .find((m) => m.pluginName === name);
-
-          if (!entry || access.hiddenPlugins.has(name)) {
-            throw new Error(
-              `Capability "${name}" does not exist. Call list_capabilities first to discover available plugins.`,
+          if (!entry || access.hiddenPlugins.has(name))
+            return refused(
+              name,
+              `Capability "${name}" does not exist. Loadable capabilities: ${loadableNames(manifestRegistry, access).join(', ')}.`,
             );
-          }
-
-          if (entry.manifest.visibility === 'silent') {
-            throw new Error(
-              `Capability "${name}" is internal and cannot be loaded by the agent. Call list_capabilities first to discover loadable plugins.`,
+          if (entry.manifest.visibility === 'silent')
+            return refused(
+              name,
+              `Capability "${name}" is internal and cannot be loaded by the agent. Loadable capabilities: ${loadableNames(manifestRegistry, access).join(', ')}.`,
             );
-          }
-
           const missing = unmetRequirements(
             entry.manifest,
             ctx.ucan.hasCapability,
           );
-          if (missing.length > 0) {
-            results.push({
-              ...withoutWithheldExamples(
-                entry.manifest,
-                access.withheldToolNames,
-              ),
-              alreadyAvailable: false,
-              tools: [],
-              refused: {
-                missing,
-                reason: `The user's authorization for this oracle does not grant ${describeRequirements(missing)}, which "${name}" requires, so it was not loaded. Tell the user; they can re-authorize the oracle with that permission and ask again.`,
-              },
-            });
-            continue;
-          }
+          if (missing.length > 0)
+            return refused(
+              name,
+              `The user's authorization for this oracle does not grant ${describeRequirements(missing)}, which "${name}" requires, so it was not loaded. Tell the user; they can re-authorize the oracle with that permission and ask again.`,
+              missing,
+            );
+          return fullyBound(
+            name,
+            entry.manifest,
+            ctx.loadedPlugins,
+            toolSource,
+            access,
+          )
+            ? nothingToLoad(name)
+            : entry.manifest;
+        });
 
-          const tools: ToolDetail[] = toolSource
-            .toolSummariesForPlugin(name)
-            .filter((t) => !access.withheldToolNames.has(t.name))
-            .map((t) => ({
-              name: t.name,
-              description: t.description,
-            }));
-
-          const alreadyLoaded = ctx.loadedPlugins?.has(name) === true;
-          const alwaysVisible = entry.manifest.visibility === 'always';
-          const alreadyAvailable = alreadyLoaded || alwaysVisible;
-
-          const guideInPrompt =
-            alreadyAvailable && access.preloadedOnly?.has(name) !== true;
-          const guide =
-            guideInPrompt || guidesReturned.has(name)
-              ? undefined
-              : manifestRegistry.operatingGuide(name);
-          if (guide) guidesReturned.add(name);
-          results.push({
-            ...withoutWithheldExamples(
-              entry.manifest,
-              access.withheldToolNames,
-            ),
-            alreadyAvailable,
-            tools,
-            ...(guide ? { operatingGuide: guide } : {}),
-          });
-
-          if (!alreadyAvailable) {
-            newToLoad.push(name);
-          }
-        }
+        const newToLoad: string[] = [];
+        const results = judged.map((verdict, index) => {
+          if ('alreadyAvailable' in verdict) return verdict;
+          const name = names[index] ?? '';
+          if (loader.loadedThisTurn(name)) return nothingToLoad(name);
+          newToLoad.push(name);
+          return loader.describe(name, verdict, false);
+        });
 
         // Text, never the bare array: LangChain would pass an array of
         // objects through as the message's content blocks.
@@ -290,10 +434,12 @@ export function buildLoadCapabilityTool(
           loadedPlugins: newToLoad,
         };
         if (ctx.toolCallId) {
+          update.capabilityUsage = newToLoad;
           update.messages = [
             new ToolMessage({
               content: JSON.stringify(results),
               tool_call_id: ctx.toolCallId,
+              additional_kwargs: usageMark(newToLoad),
             }),
           ];
         }
@@ -305,7 +451,7 @@ export function buildLoadCapabilityTool(
     {
       name: LOAD_CAPABILITY_TOOL_NAME,
       description:
-        "Load one or more capabilities for the rest of this conversation. Pass all capabilities you need in a single call — batching is preferred over multiple calls. The response is an array of plugin manifests plus tool lists; after this call, the new capabilities' tools are usable on the next model step.",
+        'Load capabilities that are not in your tool list yet. Pass all you need in one call. Returns how to use each and its tool names; the tools are usable on your next step. A capability left unused for a while is unloaded; load it again when you need it. Never needed for a tool already in your tool list.',
       schema: loadCapabilitySchema,
     },
   );
@@ -323,6 +469,8 @@ export interface BuildMetaToolsOptions {
   toolRegistry: ToolSummarySource;
   /** The turn's tool-plane result (`resolveTurnToolAccess`). */
   toolAccess: MetaToolAccess;
+  /** The turn's loader, when the capability gate shares it. */
+  loader?: CapabilityLoader;
 }
 
 /**
@@ -330,13 +478,13 @@ export interface BuildMetaToolsOptions {
  * plugins are loaded:
  *
  *  - `load_capability`   — mark a plugin as loaded for this thread; returns
- *                          the plugin's full manifest + tool list.
+ *                          how to use it + its tool names.
  *  - `list_capabilities` — list every visible plugin with status flags.
  */
 export function buildMetaTools(opts: BuildMetaToolsOptions): PluginTool[] {
-  const { manifestRegistry, toolRegistry, toolAccess } = opts;
+  const { manifestRegistry, toolRegistry, toolAccess, loader } = opts;
   return [
-    buildLoadCapabilityTool(manifestRegistry, toolRegistry, toolAccess),
-    buildListCapabilitiesTool(manifestRegistry, toolAccess),
+    buildLoadCapabilityTool(manifestRegistry, toolRegistry, toolAccess, loader),
+    buildListCapabilitiesTool(manifestRegistry, toolRegistry, toolAccess),
   ];
 }

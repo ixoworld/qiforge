@@ -65,18 +65,13 @@ describe('VfsPlugin (Workers port)', () => {
     expect(plugin.getRequestTools(ctx)).toEqual([]);
   });
 
-  it('registers the ten file tools; search/read stay always-visible', () => {
+  it('registers the ten file tools, all inheriting the on-demand manifest', () => {
     const plugin = new VfsPlugin();
     const tools = plugin.getRequestTools(makeSignedCtx({ NETWORK: 'devnet' }));
 
     expect(tools.map((t) => t.name)).toEqual(VFS_TOOL_NAMES);
-    expect(tools.find((t) => t.name === 'vfs_search')?.visibility).toBe(
-      'always',
-    );
-    expect(tools.find((t) => t.name === 'vfs_read')?.visibility).toBe('always');
-    expect(
-      tools.find((t) => t.name === 'vfs_write')?.visibility,
-    ).toBeUndefined();
+    expect(plugin.manifest.visibility).toBe('on-demand');
+    expect(tools.every((t) => t.visibility === undefined)).toBe(true);
   });
 
   it('adds the two sandbox bridge tools only when SANDBOX_MCP_URL is set', () => {

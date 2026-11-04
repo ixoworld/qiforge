@@ -268,10 +268,13 @@ export function markPlatformFallbackFailure(error: unknown): void {
   if (error && typeof error === 'object') PLATFORM_FALLBACK_FAILURES.add(error);
 }
 
-/** The error, or one it wraps (`cause`, as LangChain's MiddlewareError does). */
+/**
+ * The error, or one it wraps (`cause`, as LangChain's MiddlewareError does,
+ * once per middleware layer).
+ */
 function isPlatformFallbackFailure(error: unknown): boolean {
   let current: unknown = error;
-  for (let depth = 0; depth < 8; depth += 1) {
+  for (let depth = 0; depth < 32; depth += 1) {
     if (!current || typeof current !== 'object') return false;
     if (PLATFORM_FALLBACK_FAILURES.has(current)) return true;
     current = 'cause' in current ? current.cause : undefined;

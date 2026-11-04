@@ -11,7 +11,8 @@ graph LR
     Shell -->|per user DID| UserDO[UserOracleDO × N users]
     Matrix[(Matrix homeserver)] <-->|/sync, E2EE| Gateway[MatrixGatewayDO × 1]
     Gateway -->|decrypted turn| UserDO
-    UserDO -->|reply / media| Gateway
+    UserDO -->|reply / media events| Gateway
+    UserDO -->|media upload + download, plugin device| Matrix
     UserDO -->|export .db.gz| Owner[User-owned file in the IXO VFS]
 ```
 
@@ -120,7 +121,11 @@ queries' `oracle_dids`), which the engine keys every memory space by
 ([memory engine contract](configuration.md#memory-engine-contract)); without
 `ORACLE_ENTITY_DID` nothing is fetched. The result is written to the
 thread's `userContext` channel once, on first contact, and rendered by the
-prompt composer. A thread's context is stable for the thread's life: later
+prompt composer. The block is capped at 2,000 characters. Past that it fills
+kind by kind, facts first, then entities, topic clusters and raw episodes, one
+line from every bucket in turn, so no bucket waits behind an earlier one's list
+and a raw episode only takes room nothing else wants. A thread's context is
+stable for the thread's life: later
 turns never wait and never adopt a cached or refreshed answer, they only
 refresh the room's cache in the background, which the next session of the
 user benefits from. Matrix group rooms never prefetch (the reply goes to
@@ -131,19 +136,100 @@ built once per isolate and shared by every turn of every user, so they hold
 no request-time data. A turn's request-time tools are returned to that turn
 only, and `load_capability` lists the tools of the turn that calls it.
 
+**What a turn pays for, and when it may change.** Three measured facts on
+`openai/gpt-5.6-luna` shape everything from here to capability expiry: any
+change to the tool list or the system message leaves the next call with 0
+cached tokens (Amazon Bedrock and OpenAI routes alike); a cold token costs
+12.5 times a cached one ($0.25/M against $0.02/M); and messages appended at the
+tail keep the cache, which lives 20 to 35 minutes idle. So the runtime keeps the
+first call small, changes the prefix as rarely as it can, and saves its changes
+for a cold turn: a new thread, or one quiet for `CONTEXT_CACHE_COLD_MS`, where
+the miss has already happened.
+
+| Mechanism             | What it does                                                              | Where a change lands                                                                                          |
+| --------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Selective discovery   | Binds few tools on every call; the catalogue in the prompt names the rest | Nothing per thread: the catalogue does not depend on what is loaded                                           |
+| `load_capability`     | The model loads what it needs; the tools stay until expiry                | One tool-list change; usage and guide in the load result, at the tail                                         |
+| Capability gate       | A call to a hidden tool loads its plugin instead of running               | The same as `load_capability`                                                                                 |
+| Capability router     | A load made before the first model call, saving the round trip            | The same, once, with usage in a note on the turn's message; free on a cold turn, so a warm turn asks for more |
+| Operating guides      | In the system prompt from a cold turn on; at the tail until then          | The system message only on a cold turn                                                                        |
+| Capability expiry     | Unloads what the last turns did not touch                                 | Only on a cold turn                                                                                           |
+| Stale result trimming | Stubs old tool results (`context-guard.ts`)                               | Only on a cold turn                                                                                           |
+
+```mermaid
+stateDiagram-v2
+    NotLoaded --> LoadedTail: warm turn, a load or a preload (one tool-list change, guide at the tail)
+    NotLoaded --> LoadedPrompt: cold turn, a preload (no extra miss, guide in the prompt)
+    LoadedTail --> LoadedPrompt: cold turn, still in use
+    LoadedTail --> NotLoaded: cold turn, idle
+    LoadedPrompt --> NotLoaded: cold turn, idle
+```
+
 **Capability gate.** On-demand plugin tools and sub-agents are bound at
 build time but hidden from the model until the thread has loaded their plugin
-(`load_capability`) or the turn preloaded it. The gate
+(`load_capability`, the capability router or the gate itself). The gate
 (`src/core/middlewares/capability-gate.ts`) applies the same rule on both
 sides of the model: it trims the tools each model request advertises, and it
 checks every tool call before it runs. A call to a hidden tool (named from
-an earlier thread, guessed, or planted by injected text) is not executed: it
-is answered with an error tool message naming the capability to load, and
-logged as `[CapabilityGateMiddleware] refused a call to <tool>`. The check
-reads the graph state the tool node runs with, so a load from an earlier step
-of the run counts and a `load_capability` in the same model response as the
-call does not. The repetition guard lets the same call through again after a
-refusal, since the tool never ran.
+an earlier thread, guessed, or planted by injected text) is not executed,
+whatever its effect: the model has not seen the tool's schema. The gate
+answers with an error tool message and loads the capability on that call
+(`loadedPlugins`, the same update `load_capability` makes), so the tool is in
+the model's list on its next step, with the plugin's usage and operating guide
+in the message, and the refusal costs one step instead of two. It is logged as
+`[CapabilityGateMiddleware] refused a call to <tool> and loaded capability
+<plugin>`; loading grants nothing `load_capability` would not. The check reads
+the graph state the tool node runs with, so a load from an earlier step of the
+run counts and a `load_capability` in the same model response as the call does
+not. The repetition guard lets the same call through again after a refusal,
+since the tool never ran.
+
+**Selective discovery.** What the model has in hand on the first call of a
+turn is decided per tool, by `effectiveToolVisibility`
+(`src/core/manifest.ts`): the tool's own `visibility`, else the manifest's
+`onDemandTools`, else the plugin's `visibility`. `onDemandTools` holds tools
+back inside an `always` plugin: the plugin keeps its Tier-1 entry and its other
+tools, the listed names wait for `load_capability` with the plugin's name, and
+the names are matched at request time, so MCP-sourced tools can be listed with
+their upstream text untouched. A host undoes it with `manifestOverrides: {
+memory: { onDemandTools: [] } }`, and a manifest `visibility` set through
+`manifestOverrides` applies to everything the plugin does not list.
+
+The bundled split, for an oracle with these plugins enabled: bound on every
+call are `memory-engine__search_memory_engine`, `memory-engine__add_memory`,
+`list_oracle_documents`, `search_skills`, the meta-tools, `read_result`, the
+two domain tools on an observe turn, and whatever the host keeps `always`.
+`memory` holds back `add_oracle_knowledge`, `add_oracle_document`,
+`delete_oracle_document`, `delete_episode`, `delete_edge` and `clear`;
+`skills` holds back `list_skills`; `user-preferences` holds back
+`set_user_preferences` and keeps its Tier-1 entry, because a preference that
+is not saved fails silently. `sandbox` (including `load_skill` and the skill
+authoring tools) and `vfs` (including `vfs_search` and `vfs_read`) are wholly
+on-demand. `refresh_domain_context` stays bound: domain tools belong to no
+plugin, so nothing can load them.
+
+The system prompt names everything that can be loaded in `## On-demand
+capabilities` (`renderTier1`), one line per plugin from `manifest.brief`
+(a clipped `summary` for a plugin with none), so reaching a capability takes
+one `load_capability` and no `list_capabilities`. A plugin is listed when it
+has an `on-demand` tool or sub-agent this turn, or when the user's
+authorization lacks what it `requires`, marked as such, so a load can say what
+is missing. The list does not depend on what the thread loaded. That is
+deliberate: on `openai/gpt-5.6-luna` (OpenRouter, both the Amazon Bedrock and
+the OpenAI endpoints, measured Nov 2026) any change to the tool list, at any
+position, and any change inside the system message, tail included, leaves the
+next call with 0 cached tokens, while a change of the later messages does not.
+So a load costs one uncached call, tool order does not affect that, and
+nothing about loaded plugins goes in the system prompt except operating guides.
+
+`load_capability` returns the tool names, not their descriptions (the
+definitions reach the model in its tool list on the next step), the plugin's
+`summary`, `whenToUse`, `whenNotToUse` and `examples`, and its operating guide
+unless the plugin is `always` visible. A plugin with nothing left to load comes
+back as a no-op entry (`alreadyAvailable: true`, the tool names, a note saying
+to call them directly), including a repeat load in the same turn. Every name is
+judged before any is loaded: an unknown or `silent` name comes back as a
+`refused` entry naming what can be loaded, and the rest of the batch loads.
 
 **Plugin requirements.** Loading is discovery; authorization comes from the
 user's delegation to the oracle. A manifest may declare `requires: [{
@@ -207,19 +293,15 @@ manifest `examples` naming a withheld tool from the Tier-1 prompt and the
 `load_capability` result. A plugin that contributed tools or sub-agents and
 is left with none is treated like one whose `requires` are unmet — out of
 the prompt, refused by `load_capability` (which answers exactly as for an
-unknown name and loads nothing), void as a router preload — except that it
-is hidden outright: `list_capabilities` never lists it, not even as
-`unavailable`, and the capability router is not offered it. A call naming a
+unknown name and loads nothing), not offered to the capability router —
+except that it is hidden outright: `list_capabilities` never lists it, not even
+as `unavailable`. A call naming a
 withheld tool is refused by the gate ("not available in this
 conversation", logged `refused a call to <tool>: an admin tool …`), and
 `wrapPluginTool` checks the capability once more right before the handler
 (`requireToolPlane`), so a host that binds an admin tool past the turn's
 filtering still cannot run it; the editor's inner content agent, which calls
-its tools' handlers directly, applies the same check. The router decides
-before the turn's request-time tools are collected, so it judges from the
-boot-time tools (`bootHiddenPlugins`): it may skip a plugin that only its
-request-time tools would make usable, and a preload of a plugin the build
-then hides is dropped.
+its tools' handlers directly, applies the same check.
 
 The delegation every one of these checks reads is the one the **user**
 issued to the oracle (the request's, or on a Matrix turn the stored one;
@@ -235,37 +317,131 @@ action guard still applies to an admin tool's real-world effect).
 
 **Capability router.** Loading a plugin with `load_capability` costs a
 model round trip. With `CAPABILITY_ROUTER=on` the turn build
-(`prepareTurn`) first evaluates the shared `capabilityRouteDecision`
-(`src/core/capability-router.ts`) over the user's message and the on-demand
-plugins the thread has not loaded — leaving out every plugin whose
-`requires` the turn's delegation does not grant, and computing the hidden
-plugins only when it actually evaluates — and hands the routed plugin to
-`createMainAgent` as `preloadedPlugins`. The gate admits its tools and tool
-handlers see it in `ctx.loadedPlugins` for that turn only: the preload is
-never written to the checkpointed `loadedPlugins` channel, which stays the
-monotonic record of what `load_capability` loaded. The router fails open — a
-missing provider, an ambiguous multi-provider configuration (no route or
-default for `runtime.route-capabilities`), a timeout or a malformed verdict
-preloads nothing and warns
-`[capability-router] … status=fallback reason=<error name>`; a preload logs
-`[capability-router] request=… preloaded=[…] candidates=<n>`. `shadow` runs
-the same evaluation under `waitUntil` without awaiting it, logs
-`[capability-router-shadow] … wouldPreload=[…] calibrationProfile=<profile id>`
-(the provisional calibration profile whose threshold decided the verdict),
-and after the turn compares
+(`createMainAgent`, through `MainAgentArgs.routeCapabilities`) evaluates the
+shared `capabilityPreloadDecision` (`src/core/capability-router.ts`) after it
+has collected the turn's tools, over the user's message, the thread's latest
+visible turns and what a `load_capability` could load right now: the catalogue
+of the prompt minus what is loaded. That offers an `always` plugin with
+`onDemandTools` until they are loaded, and never a plugin with nothing left to
+load this turn, one whose `requires` the delegation does not grant, one the
+tool planes left with nothing, or one whose manifest says `routable: false`.
+`memory` does: recall and saving are always bound, and on the first full lab run
+none of its 31 preloads was used. So does `editor`, which an open document loads
+by itself. Both stay in the catalogue, one `load_capability` away.
+
+A preload is a normal load. It goes into the turn's graph input
+(`MainAgentBuildResult.stateUpdate`), so the gate reads it from
+`state.loadedPlugins`, the tool list changes once and stays until a cold turn
+unloads the plugin, and `load_capability` answers it as a no-op. What that call
+would have returned goes in a note on the turn's message (see Operating
+guides). It costs the miss a `load_capability` would and saves the extra call.
+A plugin the router
+misses is still one `load_capability` away, and a resumed attempt does not
+route: it keeps what the run started with.
+
+Which turns preload is a matter of what a wrong one costs. On a cold turn the
+prefix is being paid for anyway, so a wrong preload costs its tools and usage
+and the calibrated threshold applies (0.7, `CAPABILITY_ROUTER_COLD_THRESHOLD`).
+On a warm turn it costs a full cache
+miss, about 11 times the one cached round trip a right one saves, so a preload
+needs a score of `CAPABILITY_ROUTER_WARM_THRESHOLD` (default 0.8; above 1 the
+router does not evaluate on a warm turn at all). Both are provisional. Over
+two full lab runs (372 turns) preloads scored 0.6 to 0.7 were used 10 times in
+43, 0.7 to 0.8 10 in 19, 0.8 to 0.9 25 in 30 and above 0.9 83 in 83. A wrong
+preload also steers: its usage note sits on the user's message, and a model
+handed the library's tools searched the library for the oracle's handbook
+before the memory search it already had. They have not been measured on real
+traffic.
+
+A preload does not cost the first call a shared cache prefix. With Companion's
+model (`openai/gpt-5.6-luna`, served by Amazon Bedrock through OpenRouter) every
+cached read in both lab runs, 490 of them, covered a whole earlier request
+(everything but its last two tokens): the previous call of the turn, or the
+same question asked again. None covered part of one, so the first call of a new
+session is cold whatever its tool list, and a changed tool list misses even
+when the old tools lead it (17 of 17 within-turn changes). Ordering tools or
+prompt sections for a shared prefix pays only on a provider that caches
+partial prefixes.
+
+The Decision asks one yes/no question per candidate, so a message that needs
+two plugins preloads both and plain chat scores low everywhere, with no
+separate "needs a tool?" question. Each candidate is described by its
+manifest `summary` plus its `whenToUse` lines: the threshold
+(`CAPABILITY_PRELOAD_CALIBRATION_PROFILE`, provisional) only holds for
+descriptions that name what a plugin does, so a plugin that is hard to route
+needs a better `whenToUse`, not a lower threshold. The recent turns are the
+last four visible ones, cut to 300 characters each, read from a bounded
+number of rows (`listRecentThreadMessages`, `recentTurnTexts`). Only what the
+user sees in the transcript counts (`visibleToUser`, the transcript's own rule,
+so never the extracted text of an attached file), without summaries, and it
+goes to the Decision provider with the message. Candidates past the 16-question limit of one Decision are evaluated
+in parallel batches. The evaluation budget is one second.
+
+The router fails open — a missing provider, an ambiguous multi-provider
+configuration (no route or default for `runtime.route-capabilities`), a
+timeout or a malformed verdict preloads nothing and warns
+`[capability-router] … status=fallback reason=<error name>`; recent turns
+that cannot be read warn `status=degraded` and the message routes alone.
+Every evaluated turn logs
+`[capability-router] request=… mode=on status=ok|none preloaded=[…] top=<name:score,…> threshold=<profile|n> candidates=<n> recentTurns=<n> latencyMs=<n>`
+(names and scores, never message text), so the threshold can be refitted from
+real traffic. `shadow` runs the same evaluation, with the threshold the turn
+would use, under `waitUntil` without awaiting it, logs
+`[capability-router-shadow] … top=… wouldPreload=[…] threshold=<profile|n> calibrationProfile=<profile id or ->`
+(the provisional calibration profile whose threshold decided the verdict, `-`
+on a warm turn, whose threshold no profile backs), and after the turn compares
 the prediction with what the turn actually loaded (`agree=<bool>`).
 
-**Operating guides.** A plugin's working rules (`OraclePlugin.operatingGuide`,
-plain markdown starting at a `###` heading) are never part of the manifest,
-the Tier-1 capability block or `list_capabilities`. The system prompt
-carries the guides of the plugins in use when the turn starts — loaded on
-the thread (the checkpointed `loadedPlugins`) or `always` visible — that
-are not `silent` and that the user's delegation can use. A one-turn router
-preload does not change the system prompt (it would enter it and leave it
-again on the next turn, breaking the prompt cache); `load_capability`
-returns the guide instead, for a plugin it loads now and for one the router
-only preloaded, at most once per turn however often the plugin is loaded.
-A plugin loaded mid-turn has its guide in the prompt from the next turn on.
+**Operating guides and usage.** A plugin's working rules
+(`OraclePlugin.operatingGuide`, plain markdown starting at a `###` heading) are
+never part of the manifest, the Tier-1 capability block or `list_capabilities`.
+Its usage is the manifest's `summary`, `whenToUse`, `whenNotToUse` and
+`examples`. The model has both when it first uses the tools, and the system
+message does not change for them on a warm turn
+(`src/core/operating-guides.ts`):
+
+- The system prompt carries the guides of `always` plugins, and those of the
+  plugins recorded in the graph's `promptGuides` channel. That record is set on
+  a cold turn to what is loaded then, the turn's preloads included, and held
+  until the next one. A thread from before the record counts as carrying what
+  it had loaded.
+- Usage, and a guide outside the prompt, go at the tail of the messages: in the
+  result of `load_capability` or of the gate's refusal, or, when nothing called
+  a load (a router preload, the editor context), in a note on the turn's
+  message holding what `load_capability` would have returned. The model reads
+  the note; everything that reads the person's own words takes it off again
+  (`userContent`, `turn_guide_note`). This holds on a cold turn too: only a
+  guide goes in the prompt, so a preload's usage is on the message either way.
+- The graph's `capabilityUsage` channel records which plugins the thread's
+  messages carry, so a turn knows without reading them. A load adds to it, a
+  cold turn drops what it unloaded, and a summary replaces it with what the
+  messages it kept still carry (their `capability_usage` kwarg); the next turn
+  sends the rest again in a note. The context guard does not prune or stub a
+  load result while its plugin is loaded, so after a cold turn a guide can
+  stand both in the prompt and in its load result.
+
+Between a summary that fires mid-turn and the next turn the model can be left
+without what it was given in that turn's history; the note restores it on the
+next turn.
+
+**Capability expiry.** A loaded plugin's tools and guide go out with every
+model call. On a turn that opens after `CONTEXT_CACHE_COLD_MS` of quiet, the
+object reads the thread's messages and drops the plugins none of the last
+`CONTEXT_PLUGIN_IDLE_TURNS` turns touched, from the tool list, the guides and
+what handlers see as loaded, and writes the same change to the channel
+(`src/core/capability-expiry.ts`). A warm thread never loses a plugin: any
+change to the tool list or the system prompt drops the provider's whole cached
+prefix, which costs more than the plugin's tools cost at the cached price. The
+gate's refusal tells the model to load it again. A preload is idle like any
+other plugin: on a thread with at least `CONTEXT_PLUGIN_IDLE_TURNS` finished
+turns, a wrong one leaves on the next cold turn if none of the last turns used
+it, however recently it loaded. A resumed attempt keeps what the run started
+with, and the editor stays while its context is active.
+
+A cold turn is a turn on a new thread or one that opens at least
+`CONTEXT_CACHE_COLD_MS` after the thread's last checkpoint. The context guard's
+stale line reads the time between two turn openings instead, so after a very
+long turn the two can disagree; it never affects a loaded plugin's load result.
 
 ### `MatrixGatewayDO` — one per oracle
 
@@ -715,8 +891,9 @@ Future improvements, in the order they pay off:
 4. **Shorter loaded time per turn.** The model wait is billed as loaded
    time. Long tool chains belong in sub-agents, and after-turn work (titles,
    history indexing) should not extend the tail. The summary is written by
-   the turn's own model (the `summarizer` role), at 60% of its window, so on
-   a large window it runs rarely but each call reads a large history.
+   the turn's own model (the `summarizer` role), at 60% of its window and
+   at most 200,000 tokens, so on a large window it runs rarely but each call
+   reads a large history.
 5. **Resident task holders.** A recurring task keeps its user's working copy
    resident; once task users are a large share of storage, a lighter
    representation for idle-but-scheduled users (the R2 tier again, or a
@@ -799,6 +976,18 @@ and an object stops hibernating or a request dies with an opaque error.
   180 s, memory 420 s, Firecrawl 120 s. Every upstream call also races our
   own always-cleared timer (`src/plugins/mcp-call-timeout.ts`), which
   closes the client when it fires.
+- **Nothing that needs a request at module scope.** Global scope forbids I/O,
+  timers and random values, and workerd before 1.20260825 (wrangler before
+  4.126) also refused `new AbortController()`, whatever the compatibility date.
+  The Workers test pool evaluates modules inside a request, so `pnpm test`
+  passes either way; only a real boot (`wrangler dev`, the e2e drills) shows it.
+- **A tool result reaches the model once.** `@langchain/mcp-adapters` answers
+  a tool that returns `structuredContent` with one block holding the text and
+  the structured value, which LangChain stringifies for the model. Every plugin
+  tool's result passes `withoutStructuredCopy` (`src/core/mcp-result.ts`,
+  applied in `wrapPluginTool`), which keeps the text when the structured value
+  is a copy of it, and both when it is not. Code that calls an MCP tool itself
+  (`readSandboxResult`) still gets the block.
 - **Never store the global `fetch`.** workerd rejects `fetch` called with a
   foreign `this` ("Illegal invocation"). Wrap it:
   `(input, init) => globalThis.fetch(input, init)`. matrix-js-sdk clients
@@ -829,9 +1018,9 @@ and an object stops hibernating or a request dies with an opaque error.
   evicted first).
 
 - **An `AbortSignal` cannot cross a Durable Object RPC.** A deadline the
-  other object must honour travels as a number (`timeoutMs`), and a caller
-  that reads a stream stops the far side by cancelling the stream (the
-  Matrix media downloads do both).
+  other object must honour travels as a number (`timeoutMs`, as the
+  gateway's `eventMediaInfo` lookup takes it), and a caller that reads a
+  stream stops the far side by cancelling the stream.
 
 ### What the shell relies on from `@ixo/ucan`
 
@@ -880,6 +1069,30 @@ depend on:
   for up to 60 s, and a verdict already cached stays valid until that
   invocation expires (at most `UCAN_AUTH_MAX_TTL_SECONDS`) or, for a
   delegation, for at most 3 minutes.
+
+## Tool definition size
+
+A bound tool's name, description and schema are paid on every model call of
+the session, so a definition says how to choose and call the tool and nothing
+else. Four tools repeating one schema pay for it four times, so a tool whose
+handler parses its input strictly itself may bind `modelFacingSchema(schema)`
+(`src/plugins/compact-schema.ts`): the same properties, required keys, types,
+enums, constants and nesting, without limits and patterns, and without
+descriptions on request. Three rules keep that safe:
+
+- The bound schema declares every field. A provider drops a field its schema
+  does not declare, so a loose `{ kind, args }` object is not an alternative.
+- A strict schema stays strict and a `z.object` stays one that ignores unknown
+  keys: the bound schema is built from the input side of the JSON Schema.
+- The handler's refusal names the field: input the bound schema lets through
+  reaches it. The Flow Builder (`validation_failed`), `request_hub_action`
+  (the kind's whole protocol schema, then `parseOperation`), `prepare_action`
+  and `create_task` / `update_task` all parse the full schema first.
+
+MCP tools are never rewritten here: a tool's text belongs to the server that
+publishes it (the Memory Engine's are in `memory-engine-ts/src/mcp/`, the
+sandbox's in `ai-sandbox`). `src/plugins/tool-budget.test.ts`,
+`flows.plugin.test.ts` and `ixo-chain.plugin.test.ts` hold the sizes.
 
 ## Tasks
 

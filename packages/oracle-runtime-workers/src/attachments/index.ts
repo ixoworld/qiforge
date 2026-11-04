@@ -73,7 +73,12 @@ export {
   MIN_CHARS_PER_PAGE,
   type PdfTextResult,
 } from './pdf-text';
-export { routeAttachment, type AttachmentStrategy } from './route';
+export { resizeForModel, RESIZE_JPEG_QUALITY, RESIZE_MAX_EDGE } from './resize';
+export {
+  NATIVE_DOCUMENT_MAX_BYTES,
+  routeAttachment,
+  type AttachmentStrategy,
+} from './route';
 export {
   buildAnalysisMarkdown,
   uploadToSandbox,
@@ -94,21 +99,17 @@ export {
   type AttachmentInput,
 } from './types';
 export {
-  applyAttachmentRetention,
-  ATTACHMENT_PAYLOAD_TURNS,
   ATTACHMENT_PLACEHOLDER_PREFIX,
   ATTACHMENT_VIEW_SOURCE,
   attachmentMetas,
   attachmentRef,
   buildPlaceholderText,
   hasInlinePayload,
-  INLINE_PAYLOAD_NEEDLE,
   isAttachmentPlaceholderText,
   isAttachmentViewMessage,
   isInlinePayloadBlock,
   offloadInlinePayloads,
   VIEW_ATTACHMENT_TOOL_NAME,
-  type AttachmentRetentionResult,
 } from './retention';
 export {
   createAttachmentViewSurface,

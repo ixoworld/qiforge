@@ -7,6 +7,7 @@ import {
 } from '@langchain/core/messages';
 import { type AgentMiddleware, summarizationMiddleware } from 'langchain';
 import type { Logger } from '../../plugin-api/types';
+import { usageCarriedBy } from '../operating-guides';
 import type { TurnBudget } from '../turn-budget';
 import {
   carriedCallsOfTurn,
@@ -273,6 +274,14 @@ export const createSummarizationMiddleware = (
       options.logger?.log(
         `[summarization] condensed the history: ${state.messages.length} messages → a summary + ${messages.length - 2} kept`,
       );
+      // A plugin's usage goes with the messages that carried it, and the next
+      // turn sends it again (operating-guides.ts).
+      return {
+        ...update,
+        capabilityUsage: {
+          replace: messages.filter(isBaseMessageLike).flatMap(usageCarriedBy),
+        },
+      };
     }
     return update;
   };

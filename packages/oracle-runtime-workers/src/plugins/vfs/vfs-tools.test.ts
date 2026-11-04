@@ -105,6 +105,43 @@ function toolNamed(tools: PluginTool[], name: string): PluginTool {
   return t;
 }
 
+describe('a filesystem the user granted but no bearer could be made for', () => {
+  it('answers the generic sentence and logs what failed', async () => {
+    const warnings: string[] = [];
+    const ucan: UcanAdapter = {
+      ...createUnsignedUcanAdapter(),
+      hasSigningKey: () => true,
+      getServiceDelegation: async () => ({
+        error: 'store-error',
+        detail: 'store timed out',
+      }),
+    };
+    const ctx = makeRuntimeContext(
+      {
+        logger: {
+          log: () => undefined,
+          warn: (message: string) => warnings.push(message),
+          error: () => undefined,
+        },
+      },
+      { ambient: { ucan, config: {} } },
+    );
+    const vfs = makeVfs([]);
+    const tools = createVfsTools({
+      cfg,
+      fetchImpl: vfs.fetchImpl,
+      retryDelayMs: 0,
+    });
+    const out = await toolNamed(tools, 'vfs_search').handler(
+      { q: 'budget', path: '/' },
+      ctx,
+    );
+    expect(out).toBe("Couldn't get filesystem access right now.");
+    expect(vfs.calls).toEqual([]);
+    expect(warnings).toEqual(['[vfs] store-error: store timed out']);
+  });
+});
+
 describe('VFS tools never act on a file a wildcard path merely matches', () => {
   it('vfs_share("/private/*") publishes nothing', async () => {
     const vfs = makeVfs(PRIVATE_FILES);

@@ -1,3 +1,4 @@
+import { Command } from '@langchain/langgraph';
 import {
   AIMessage,
   type BaseMessage,
@@ -15,6 +16,7 @@ import {
 } from './middlewares';
 import { isCapabilityGateRefusal } from './middlewares/capability-gate';
 import { SUMMARY_PREFIX } from './middlewares/summarization';
+import { isErrorResult } from './middlewares/tool-marks';
 import { repetitionCapsFromEnv } from './middlewares/tool-repetition-guard';
 import {
   turnCarryKwargs,
@@ -23,10 +25,52 @@ import {
 
 type Visibility = NonNullable<PluginManifest['visibility']>;
 
+/** The gate's load text, stubbed: `CapabilityLoader.describeForGate` has its own tests. */
+const describeLoad = (plugin: string) => ({
+  text: `usage of ${plugin}`,
+  additional_kwargs: {},
+});
+
+/** What a refusal that also loads a capability carries. */
+function gateLoad(result: unknown): {
+  loadedPlugins: string[];
+  refusal: ToolMessage;
+} {
+  expect(result).toBeInstanceOf(Command);
+  const { loadedPlugins, messages } = (result as Command).update as {
+    loadedPlugins: string[];
+    messages: ToolMessage[];
+  };
+  const refusal = messages[0];
+  if (!refusal) throw new Error('the command carries no tool message');
+  return { loadedPlugins, refusal };
+}
+
+describe('isErrorResult', () => {
+  const failed = new ToolMessage({
+    content: 'no',
+    tool_call_id: 't',
+    status: 'error',
+  });
+  const ran = new ToolMessage({ content: 'ok', tool_call_id: 't' });
+
+  it('sees an error message alone or inside a command', () => {
+    expect(isErrorResult(failed)).toBe(true);
+    expect(isErrorResult(ran)).toBe(false);
+    expect(isErrorResult(new Command({ update: { messages: [failed] } }))).toBe(
+      true,
+    );
+    expect(isErrorResult(new Command({ update: { messages: [ran] } }))).toBe(
+      false,
+    );
+    expect(isErrorResult(new Command({ update: { other: 1 } }))).toBe(false);
+  });
+});
+
 describe('createCapabilityGateMiddleware', () => {
-  function setup(loadedPlugins: string[], preloadedPlugins?: Set<string>) {
+  function setup(loadedPlugins: string[]) {
     const mw = createCapabilityGateMiddleware({
-      preloadedPlugins,
+      describeLoad,
       pluginByToolName: new Map([
         ['always_tool', 'always_plugin'],
         ['silent_tool', 'silent_plugin'],
@@ -78,8 +122,8 @@ describe('createCapabilityGateMiddleware', () => {
     expect(passed()).toContain('call_weather_planner_agent');
   });
 
-  it('admits a preloaded plugin with an empty state.loadedPlugins, and keeps hiding the rest', async () => {
-    const { invoke, passed } = setup([], new Set(['on_demand_plugin']));
+  it('admits one loaded plugin and keeps hiding the rest', async () => {
+    const { invoke, passed } = setup(['on_demand_plugin']);
     await invoke();
     expect(passed()).toEqual([
       'list_capabilities',
@@ -92,10 +136,10 @@ describe('createCapabilityGateMiddleware', () => {
   });
 
   describe('tool calls', () => {
-    function gate(preloadedPlugins?: Set<string>) {
+    function gate() {
       const warn = vi.fn();
       const mw = createCapabilityGateMiddleware({
-        preloadedPlugins,
+        describeLoad,
         pluginByToolName: new Map([
           ['always_tool', 'always_plugin'],
           ['silent_tool', 'silent_plugin'],
@@ -133,34 +177,33 @@ describe('createCapabilityGateMiddleware', () => {
       return { call, warn };
     }
 
-    it('refuses a call to an on-demand tool or sub-agent whose plugin is not loaded, without running it', async () => {
+    it('refuses a call to an on-demand tool or sub-agent whose plugin is not loaded, without running it, and loads the plugin', async () => {
       const { call, warn } = gate();
-      for (const name of ['on_demand_tool', 'call_weather_planner_agent']) {
+      for (const [name, plugin] of [
+        ['on_demand_tool', 'on_demand_plugin'],
+        ['call_weather_planner_agent', 'weather'],
+      ] as const) {
         const { result, ran } = await call(name);
         expect(ran).toBe(false);
-        expect(result).toBeInstanceOf(ToolMessage);
-        const refusal = result as ToolMessage;
+        const { loadedPlugins, refusal } = gateLoad(result);
+        expect(loadedPlugins).toEqual([plugin]);
         expect(refusal.status).toBe('error');
         expect(refusal.tool_call_id).toBe('tc-1');
         expect(refusal.name).toBe(name);
+        expect(isCapabilityGateRefusal(refusal)).toBe(true);
         expect(String(refusal.content)).toContain('was not run');
-        expect(String(refusal.content)).toContain('load_capability');
+        expect(String(refusal.content)).toContain(`usage of ${plugin}`);
       }
       expect(warn).toHaveBeenCalledTimes(2);
       expect(String(warn.mock.calls[0]?.[0])).toContain(
-        "refused a call to on_demand_tool: capability 'on_demand_plugin' is not loaded",
+        "refused a call to on_demand_tool and loaded capability 'on_demand_plugin'",
       );
     });
 
-    it('runs the call once the plugin is loaded in state or preloaded for the turn', async () => {
+    it('runs the call once the plugin is loaded in state', async () => {
       expect(
         (await gate().call('on_demand_tool', ['on_demand_plugin'])).ran,
       ).toBe(true);
-      const preloaded = gate(new Set(['weather']));
-      expect((await preloaded.call('call_weather_planner_agent')).ran).toBe(
-        true,
-      );
-      expect((await preloaded.call('on_demand_tool')).ran).toBe(false);
     });
 
     it('never stands in the way of always, silent, meta or unknown tools', async () => {
@@ -182,8 +225,7 @@ describe('createCapabilityGateMiddleware', () => {
     function gate() {
       const warn = vi.fn();
       const mw = createCapabilityGateMiddleware({
-        // Loaded AND preloaded: neither admits a plugin the user may not use.
-        preloadedPlugins: new Set(['files']),
+        describeLoad,
         unmetRequirements: new Map([
           ['files', VFS_REQUIREMENT],
           ['notes', VFS_REQUIREMENT],
@@ -206,7 +248,7 @@ describe('createCapabilityGateMiddleware', () => {
       return { wrapModel, wrapTool, warn };
     }
 
-    it('hides their tools whatever the visibility, loaded or preloaded', async () => {
+    it('hides their tools whatever the visibility, loaded or not', async () => {
       const { wrapModel } = gate();
       const handler = vi.fn().mockResolvedValue({ ok: true });
       await wrapModel(
@@ -258,7 +300,7 @@ describe('createCapabilityGateMiddleware', () => {
 describe('createCapabilityGateMiddleware — loads that no longer hold, withheld tools', () => {
   function gate() {
     const mw = createCapabilityGateMiddleware({
-      preloadedPlugins: new Set(['ops']),
+      describeLoad,
       pluginByToolName: new Map([
         ['probe_run', 'probe'],
         ['ops_reset', 'ops'],
@@ -308,12 +350,11 @@ describe('createCapabilityGateMiddleware — loads that no longer hold, withheld
     // restored from before the load): hidden and refused again.
     const after = await callTool('probe_run', []);
     expect(after.ran).toBe(false);
-    expect(after.result).toBeInstanceOf(ToolMessage);
-    expect(isCapabilityGateRefusal(after.result as ToolMessage)).toBe(true);
+    expect(isCapabilityGateRefusal(gateLoad(after.result).refusal)).toBe(true);
     expect(await exposed([])).toEqual([]);
   });
 
-  it('never runs or shows a withheld tool, loaded and preloaded or not, and does not name its capability', async () => {
+  it('never runs or shows a withheld tool, loaded or not, and does not name its capability', async () => {
     const { callTool, exposed } = gate();
     for (const loaded of [[], ['ops']]) {
       const { ran, result } = await callTool('ops_reset', loaded);
@@ -415,6 +456,7 @@ describe('createToolRepetitionGuardMiddleware', () => {
 
   it('lets through the same call after a capability-gate refusal (the tool never ran)', async () => {
     const gate = createCapabilityGateMiddleware({
+      describeLoad,
       pluginByToolName: new Map([['probe_run', 'probe']]),
       visibilityByToolName: new Map<string, Visibility>([
         ['probe_run', 'on-demand'],
@@ -423,13 +465,15 @@ describe('createToolRepetitionGuardMiddleware', () => {
     const gateWrap = gate.wrapToolCall;
     const guardWrap = createToolRepetitionGuardMiddleware().wrapToolCall;
     if (!gateWrap || !guardWrap) throw new Error('wrapToolCall missing');
-    const refusal = (await gateWrap(
-      makeRequest({
-        toolCall: { name: 'probe_run', args: {}, id: 'tc-prior' },
-        tool: { name: 'probe_run' },
-      }) as never,
-      vi.fn() as never,
-    )) as ToolMessage;
+    const { refusal } = gateLoad(
+      await gateWrap(
+        makeRequest({
+          toolCall: { name: 'probe_run', args: {}, id: 'tc-prior' },
+          tool: { name: 'probe_run' },
+        }) as never,
+        vi.fn() as never,
+      ),
+    );
     expect(refusal.status).toBe('error');
 
     const handler = vi.fn().mockResolvedValue('ran');

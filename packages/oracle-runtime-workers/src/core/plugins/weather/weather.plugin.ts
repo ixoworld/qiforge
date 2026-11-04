@@ -87,6 +87,7 @@ const manifest: PluginManifest = {
   ],
   category: 'data',
   visibility: 'on-demand',
+  brief: 'current weather and forecasts',
   stability: 'experimental',
 };
 

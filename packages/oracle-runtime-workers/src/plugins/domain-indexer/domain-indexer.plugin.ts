@@ -45,14 +45,14 @@ function resolveDomainIndexerUrl(config: MergedConfig): string {
 const manifest: PluginManifest = {
   title: 'Domain Indexer',
   summary:
-    'Domain analysis and entity lookup across the IXO ecosystem — organizations, projects, DAOs, DIDs.',
+    'Search the IXO ecosystem by name or topic: organizations, projects, DAOs and their domain cards.',
   whenToUse: [
-    'User asks "what is X?" or "tell me about X" for an organization, project, DAO, or DID.',
+    'User asks "what is X?" or "tell me about X" for an organization, project or DAO by name.',
     'User needs the summary, overview, or FAQ of an IXO entity.',
-    'Looking up a domain card by its DID.',
     'Discovering entities by topic, category, or keyword.',
   ],
   whenNotToUse: [
+    'One exact DID: read the chain first (`chain_lookup` kind `entity`).',
     'General web search unrelated to IXO entities (use Firecrawl).',
     'Personal memory or past-conversation recall (use Memory).',
     'Page editing or workspace pages (use Editor) — pages are NOT entities.',
@@ -75,6 +75,7 @@ const manifest: PluginManifest = {
   // via `load_capability` when the conversation actually needs it, keeping
   // the sub-agent schema out of every unrelated chat turn.
   visibility: 'on-demand',
+  brief: 'search organisations, projects and DAOs by name or topic',
   stability: 'stable',
 };
 

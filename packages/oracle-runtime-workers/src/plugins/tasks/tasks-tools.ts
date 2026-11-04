@@ -9,6 +9,7 @@
  * model always gets an actionable message.
  */
 import { z } from 'zod';
+import { modelFacingSchema } from '../compact-schema';
 import { tool } from '../../plugin-api/tool-helper';
 import type {
   OracleTaskRecord,
@@ -32,14 +33,11 @@ const taskIdSchema = z.object({
 });
 
 const APPROVAL_FIELD_DESCRIPTION =
-  "How each run behaves. 'never' (default) just does the work and delivers " +
-  "the result. 'before-action' is for runs the user should sign off on first " +
-  '(a tweet, a message, a ticket, an email, a publish): when such a task ' +
-  'fires it does NOT execute — it posts an approval request into the ' +
-  "user's oracle room and waits. The user approves or declines by replying " +
-  'there; record the decision with `resolve_task_approval` — approval ' +
-  'starts the run in the background (its result is posted to the room when ' +
-  'it finishes), a decline drops it.';
+  "'never' (default): do the work and deliver the result. 'before-action': for " +
+  'runs the user should sign off on first (a tweet, a message, a ticket, an ' +
+  'email, a publish): each fire posts an approval request into their oracle ' +
+  'room and waits; they reply there and you record it with ' +
+  '`resolve_task_approval`.';
 
 const taskInputShape = {
   title: z.string().min(1).max(120),
@@ -47,7 +45,7 @@ const taskInputShape = {
     .string()
     .min(1)
     .describe(
-      'Markdown instructions the run executes. Scheduled runs are BACKGROUND sessions with NO memory of this conversation — put every ID, URL, and name the run needs into this text, never assume the run "knows" anything discussed here.',
+      'Markdown instructions for a background run with NO memory of this conversation: every ID, URL and name it needs goes here.',
     ),
   // Flat at the tool boundary (a `kind` enum + optional per-kind fields),
   // converted to the store's discriminated union on parse — see
@@ -61,11 +59,8 @@ const taskInputShape = {
     .enum(['auto', 'yes', 'no'])
     .default('auto')
     .describe(
-      "Whether the task gets its own '[Task] <title>' room where each run's result " +
-        "(and, for 'before-action' tasks, each approval request) is posted. 'auto' " +
-        'creates one for frequent (sub-daily) cron tasks, long intents and ongoing ' +
-        'monitor/watch/track tasks; otherwise results go to the main oracle room. ' +
-        'Pass yes/no only when the user asked for it.',
+      "Whether results and approval requests get their own '[Task] <title>' room " +
+        "instead of the main oracle room. 'auto' decides; yes/no only when the user asked.",
     ),
 };
 
@@ -179,7 +174,7 @@ function previewTask(): PluginTool {
       name: 'preview_task',
       effect: 'read',
       description:
-        'Validate a candidate task spec and return its next run times WITHOUT creating anything. ALWAYS call this before create_task and show the user the result. IMPORTANT: scheduled runs are fresh background sessions with NO memory of this conversation — put every ID, URL, and name the run needs into the intent text.',
+        'Validate a candidate task spec and return its next run times WITHOUT creating anything. ALWAYS call this before create_task and show the user the result.',
       schema: previewInput,
     },
   );
@@ -209,8 +204,8 @@ function createTask(): PluginTool {
     {
       name: 'create_task',
       description:
-        'Schedule a previewed task. Call this ONLY after the user has seen the preview_task output and confirmed in a NEW message — never in the same turn as preview_task. TRIGGER CHOICE: "in 10 minutes", "tomorrow at 5pm" = kind "once" (compute `at` from now) — cron is ONLY for genuinely recurring schedules; `*/10 * * * *` means every-10-minutes-forever, not once-in-10-minutes. Set `approval` to "before-action" when a run would send/post/publish/create anything on the user\'s behalf: each fire then posts an approval request into their room and runs only once they approve. Runs are FRESH background sessions with no memory of this conversation — every ID/URL/name the run needs must be in the intent.',
-      schema: createInput,
+        'Schedule a previewed task, with the same fields as preview_task. Call this ONLY after the user has seen the preview_task output and confirmed in a NEW message, never in the same turn as preview_task. Set `approval` to "before-action" when a run would send, post, publish or create anything on the user\'s behalf.',
+      schema: modelFacingSchema(createInput, { descriptions: false }),
     },
   );
 }
@@ -311,8 +306,8 @@ function updateTask(): PluginTool {
     {
       name: 'update_task',
       description:
-        'Patch a task — title, schedule, approval mode, or intent (what the task does). Changing the intent changes what every future run executes, so show the user the revised intent and get their confirmation first. Changing the schedule reschedules the next run automatically.',
-      schema: updateInput,
+        'Patch a task: title, schedule, approval or intent, as in preview_task. A new intent changes what every future run executes: show it to the user and get their confirmation first. A new schedule reschedules the next run.',
+      schema: modelFacingSchema(updateInput, { descriptions: false }),
     },
   );
 }

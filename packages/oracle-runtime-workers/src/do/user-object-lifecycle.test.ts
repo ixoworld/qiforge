@@ -2,7 +2,14 @@ import { env, runInDurableObject } from 'cloudflare:test';
 import { emptyCheckpoint } from '@langchain/langgraph-checkpoint';
 import { describe, expect, it, vi } from 'vitest';
 import { createRuntimeCore } from '../core';
-import { makeEnv } from '../core/test-fixtures';
+import {
+  makeEnv,
+  makeManifest,
+  makePlugin,
+  makeTool,
+} from '../core/test-fixtures';
+import { USAGE_CARRIED_KWARG } from '../core/operating-guides';
+import { visibleText } from './transcript';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin';
 import {
   bytesOfStream,
@@ -41,7 +48,15 @@ import { renderTurnTimeNote } from '../core/prompt-composer';
 import { TURN_TIME_NOTE_KWARG } from '../core/turn-time-note';
 import { RunBuffer } from './run-buffer';
 import { storedRunRequest } from './run-request';
-import type { RunSummary, SessionSummary, TurnRequest } from './contracts';
+import type {
+  BotCredentials,
+  EventMediaInfo,
+  RunSummary,
+  SessionSummary,
+  TurnRequest,
+} from './contracts';
+import { createAttachmentEncryptor } from '@ixo/matrix-bot-workers-sdk';
+import { ChannelAttachmentLinkStore } from '../attachments';
 import { installTimerTracker, pendingTimers } from './debug-timers';
 /**
  * The user object's lifecycle over a real Durable Object's storage: boot and
@@ -63,6 +78,7 @@ declare global {
 }
 
 const USER_DID = 'did:ixo:lifecycle';
+const HOMESERVER = 'https://hs.test';
 const DAY_MS = 24 * 60 * 60_000;
 
 /** The user's file upstream, as a VFS would hold it. */
@@ -129,18 +145,28 @@ function fakeGateway() {
       ): Promise<string | null> => null,
     ),
     sendText: vi.fn(async () => '$event'),
-    sendEvent: vi.fn(async () => '$event'),
-    /** Media that never finishes arriving. */
-    downloadMxcMediaStream: vi.fn(
-      async (_mxc: string, _opts?: { timeoutMs?: number }) =>
-        new ReadableStream<Uint8Array>({ pull: () => undefined }),
+    sendEvent: vi.fn(
+      async (
+        _roomId: string,
+        _type: string,
+        _content: string,
+        _opts?: { txnId?: string; priority?: 'interactive' | 'background' },
+      ) => '$event',
     ),
-    downloadEventMediaStream: vi.fn(
+    botCredentials: vi.fn(
+      async (_opts?: { rejected?: string }): Promise<BotCredentials> => ({
+        baseUrl: HOMESERVER,
+        userId: '@oracle:hs.test',
+        accessToken: 'plugin-token',
+        deviceId: 'PLUGINS',
+      }),
+    ),
+    eventMediaInfo: vi.fn(
       async (
         _roomId: string,
         _eventId: string,
         _opts?: { timeoutMs?: number },
-      ): Promise<{ stream: ReadableStream<Uint8Array> } | null> => null,
+      ): Promise<EventMediaInfo | null> => null,
     ),
   };
 }
@@ -806,6 +832,90 @@ describe('delegations', () => {
     });
   });
 
+  /** A dirty copy whose due upload fails for want of a delegation. */
+  async function waitingForDelegation(h: UserObjectHarness): Promise<number> {
+    await verifiedCopy(h);
+    await h.writeTurn('pending');
+    await h.call('markDirty');
+    h.store.save.mockImplementationOnce(async () => {
+      throw new VfsNoDelegationError(USER_DID, 'no-delegation');
+    });
+    // `markDirty` arms the daily deadline in the background: let it land
+    // before the deadline is brought forward to now.
+    await vi.waitFor(async () =>
+      expect(await h.storage.get('meta:flushAt')).toEqual(expect.any(Number)),
+    );
+    await h.call('scheduleFlushRetry', Date.now());
+    await h.storage.put('meta:housekeepingAt', Date.now());
+    await h.fireAlarm();
+    expect(h.store.save).toHaveBeenCalledTimes(2);
+    return h.store.save.mock.calls.length;
+  }
+
+  it('a flush without a delegation waits for one instead of retrying every 10 minutes', async () => {
+    await withObject('delegation-missing-waits', {}, async (h) => {
+      const saves = await waitingForDelegation(h);
+
+      expect(
+        await h.storage.get<{ reason: string; since: number }>(
+          'meta:flushWaitsForDelegation',
+        ),
+      ).toMatchObject({
+        reason: expect.stringContaining('has not deposited a delegation'),
+        since: expect.any(Number),
+      });
+      expect(await h.storage.get('meta:flushAt')).toBeUndefined();
+      expect(await h.storage.get('meta:flushFailures')).toBeUndefined();
+      expect(h.field('dirty')).toBe(true);
+      // No 10-minute retry: the next wake is the idle horizon, days away.
+      expect(await h.storage.getAlarm()).toBeGreaterThan(Date.now() + DAY_MS);
+      // A wake for anything else does not try the upload again.
+      await h.fireAlarm();
+      expect(h.store.save).toHaveBeenCalledTimes(saves);
+      expect(
+        (await h.call('storageStatus')) as Record<string, unknown>,
+      ).toMatchObject({
+        flushWaitsForDelegation: {
+          reason: expect.stringContaining('has not deposited a delegation'),
+        },
+      });
+    });
+  });
+
+  it('a request carrying a delegation uploads the copy that waited for one', async () => {
+    await withObject('delegation-waiting-request', {}, async (h) => {
+      const saves = await waitingForDelegation(h);
+
+      await h.call('ready', as('fresh-grant'));
+      await h.settle();
+      await vi.waitFor(() =>
+        expect(h.store.save).toHaveBeenCalledTimes(saves + 1),
+      );
+      await Promise.resolve(h.field('flushInFlight')).catch(() => undefined);
+      expect(
+        await h.storage.get('meta:flushWaitsForDelegation'),
+      ).toBeUndefined();
+      expect(h.field('dirty')).toBe(false);
+    });
+  });
+
+  it('a deposited delegation (POST /delegation) uploads the copy that waited for one', async () => {
+    await withObject('delegation-waiting-deposit', {}, async (h) => {
+      const saves = await waitingForDelegation(h);
+
+      await h.call('setDelegation', USER_DID, 'deposited-grant');
+      await h.settle();
+      await vi.waitFor(() =>
+        expect(h.store.save).toHaveBeenCalledTimes(saves + 1),
+      );
+      await Promise.resolve(h.field('flushInFlight')).catch(() => undefined);
+      expect(
+        await h.storage.get('meta:flushWaitsForDelegation'),
+      ).toBeUndefined();
+      expect(h.field('dirty')).toBe(false);
+    });
+  });
+
   it('stores a delegation once, not on every request that carries it', async () => {
     await withObject('delegation-stored-once', {}, async (h) => {
       await h.ready();
@@ -1296,9 +1406,9 @@ describe('turn preparation wiring', () => {
     });
   });
 
-  it("derives the context budget from the main model's window alone and hands the router lazy, capability-aware inputs", async () => {
+  it("derives the context budget from the main model's window alone", async () => {
     await withObject('turn-summary-window', {}, async (h) => {
-      const { resolve, router } = await bootedForTurns(h);
+      const { resolve } = await bootedForTurns(h);
       const prepared = await h.call(
         'prepareTurn',
         portalTurn,
@@ -1311,9 +1421,6 @@ describe('turn preparation wiring', () => {
         DEFAULT_MODEL_ID,
       ]);
       expect(OPENROUTER_MODEL_MAP.routing).not.toBe(DEFAULT_MODEL_ID);
-      const input = router.mock.calls[0]?.[0];
-      expect(typeof input?.hidden).toBe('function');
-      expect(typeof input?.hasCapability).toBe('function');
       await disposeTurn(h, prepared);
     });
   });
@@ -1338,6 +1445,155 @@ describe('turn preparation wiring', () => {
       expect(prompts[0]).toContain('User: Plan my week');
       expect(prompts[0]).not.toContain('Current time');
     });
+  });
+});
+
+describe('capability preloads on a prepared turn', () => {
+  const GUIDE = '### Probe mode\n\nCheck twice.';
+  const probe = () =>
+    makePlugin({
+      name: 'probe',
+      manifest: makeManifest({ title: 'Probe', visibility: 'on-demand' }),
+      operatingGuide: GUIDE,
+      getTools: () => [makeTool('probe_run')],
+    });
+  const env = { CAPABILITY_ROUTER: 'on' };
+
+  function routeTo(h: UserObjectHarness, plugins: string[]) {
+    const router = vi.fn(
+      async (_turn: {
+        threshold?: number;
+        candidates: readonly { pluginName: string }[];
+      }) => new Set(plugins),
+    );
+    Reflect.set(h.host, 'capabilityRouter', router);
+    return router;
+  }
+
+  /** The thread as a finished turn left it. */
+  async function seedThread(
+    h: UserObjectHarness,
+    channels: Record<string, unknown>,
+    at: Date,
+  ) {
+    await h.saver().put(
+      { configurable: { thread_id: portalTurn.sessionId, checkpoint_ns: '' } },
+      {
+        ...emptyCheckpoint(),
+        ts: at.toISOString(),
+        channel_values: channels,
+      },
+      { source: 'loop', step: 1, parents: {} },
+    );
+  }
+
+  const input = (prepared: unknown): Record<string, unknown> => {
+    const value: unknown =
+      typeof prepared === 'object' && prepared !== null
+        ? Reflect.get(prepared, 'stateInput')
+        : undefined;
+    if (typeof value !== 'object' || value === null)
+      throw new Error('no input');
+    return { ...value };
+  };
+
+  it('on a new thread: uses the cold threshold and writes the load and the prompt guides, no note', async () => {
+    await withObject('preload-new', { env, plugins: [probe()] }, async (h) => {
+      await bootedForTurns(h);
+      const router = routeTo(h, ['probe']);
+      const prepared = await h.call(
+        'prepareTurn',
+        portalTurn,
+        { message: portalTurn.message },
+        attemptRun(),
+      );
+
+      expect(router.mock.calls[0]?.[0].threshold).toBeUndefined();
+      expect(
+        router.mock.calls[0]?.[0].candidates.map((c) => c.pluginName),
+      ).toEqual(['probe']);
+      expect(input(prepared)).toMatchObject({
+        loadedPlugins: ['probe'],
+        promptGuides: ['probe'],
+        capabilityUsage: ['probe'],
+      });
+      expect(String(inputMessage(prepared).content)).not.toContain(
+        'Check twice',
+      );
+      await disposeTurn(h, prepared);
+    });
+  });
+
+  it('on a warm thread: asks for the warm threshold and puts the guide on the message, off the transcript', async () => {
+    await withObject('preload-warm', { env, plugins: [probe()] }, async (h) => {
+      await bootedForTurns(h);
+      await seedThread(
+        h,
+        { promptGuides: [], capabilityUsage: [] },
+        new Date(),
+      );
+      const router = routeTo(h, ['probe']);
+      const prepared = await h.call(
+        'prepareTurn',
+        portalTurn,
+        { message: portalTurn.message },
+        attemptRun(),
+      );
+
+      expect(router.mock.calls[0]?.[0].threshold).toBe(0.8);
+      const fields = input(prepared);
+      expect(fields.loadedPlugins).toEqual(['probe']);
+      expect(fields).not.toHaveProperty('promptGuides');
+      const message = inputMessage(prepared);
+      expect(String(message.content)).toContain('Check twice');
+      expect(message.additional_kwargs[USAGE_CARRIED_KWARG]).toEqual(['probe']);
+      expect(visibleText(message)).toBe(portalTurn.message);
+      await disposeTurn(h, prepared);
+    });
+  });
+
+  it('on a thread quiet past the cache: is a cold turn, the guide in the prompt and off the message', async () => {
+    await withObject('preload-cold', { env, plugins: [probe()] }, async (h) => {
+      await bootedForTurns(h);
+      await seedThread(
+        h,
+        { promptGuides: [] },
+        new Date(Date.now() - 3 * 60 * 60 * 1000),
+      );
+      const router = routeTo(h, ['probe']);
+      const prepared = await h.call(
+        'prepareTurn',
+        portalTurn,
+        { message: portalTurn.message },
+        attemptRun(),
+      );
+
+      expect(router.mock.calls[0]?.[0].threshold).toBeUndefined();
+      expect(input(prepared).promptGuides).toEqual(['probe']);
+      expect(String(inputMessage(prepared).content)).not.toContain(
+        'Check twice',
+      );
+      await disposeTurn(h, prepared);
+    });
+  });
+
+  it('a resumed attempt does not route: it keeps what the run started with', async () => {
+    await withObject(
+      'preload-resumed',
+      { env, plugins: [probe()] },
+      async (h) => {
+        await bootedForTurns(h);
+        const router = routeTo(h, ['probe']);
+        const prepared = await h.call(
+          'prepareTurn',
+          portalTurn,
+          { message: portalTurn.message },
+          { ...attemptRun(), resumed: true },
+        );
+        expect(router).not.toHaveBeenCalled();
+        await disposeTurn(h, prepared);
+      },
+    );
   });
 });
 
@@ -1446,75 +1702,431 @@ describe('alarm and boot wiring', () => {
     return { stream, cancelled };
   }
 
-  async function mediaMethod(
-    h: { call(name: string): Promise<unknown> },
-    name: 'downloadMxc' | 'downloadEvent',
-  ): Promise<{ source: object; method: unknown }> {
+  async function mediaSource(h: {
+    call(name: string): Promise<unknown>;
+  }): Promise<{
+    downloadMxc: (
+      mxc: string,
+      maxBytes: number,
+      signal?: AbortSignal,
+    ) => Promise<Uint8Array>;
+    downloadEvent: (
+      roomId: string,
+      eventId: string,
+      maxBytes: number,
+      signal?: AbortSignal,
+    ) => Promise<{ bytes: Uint8Array } | null>;
+  }> {
     const source = await h.call('matrixMediaSource');
-    if (typeof source !== 'object' || source === null)
-      throw new Error('no media source');
-    return { source, method: Reflect.get(source, name) };
+    const pick = (name: string) => {
+      const method: unknown =
+        typeof source === 'object' && source !== null
+          ? Reflect.get(source, name)
+          : undefined;
+      if (typeof method !== 'function') throw new Error(`no ${name}`);
+      return (...args: unknown[]) => Reflect.apply(method, source, args);
+    };
+    const downloadMxc = pick('downloadMxc');
+    const downloadEvent = pick('downloadEvent');
+    return {
+      downloadMxc: async (...args) => {
+        const bytes: unknown = await downloadMxc(...args);
+        if (!(bytes instanceof Uint8Array)) throw new Error('no bytes');
+        return bytes;
+      },
+      downloadEvent: async (...args) => {
+        const media: unknown = await downloadEvent(...args);
+        if (media === null) return null;
+        const bytes: unknown =
+          typeof media === 'object' ? Reflect.get(media, 'bytes') : undefined;
+        if (!(bytes instanceof Uint8Array)) throw new Error('no bytes');
+        return { bytes };
+      },
+    };
   }
 
-  it("stops reading Matrix media when the turn's signal aborts and cancels the gateway stream", async () => {
+  /** Requests to the homeserver, answered by `answer`. */
+  function homeserverFetch(
+    answer: (url: URL, init?: RequestInit) => Response | Promise<Response>,
+  ) {
+    const requests: Array<{ url: URL; token: string | null }> = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      requests.push({
+        url,
+        token: new Headers(init?.headers).get('authorization'),
+      });
+      return answer(url, init);
+    });
+    return requests;
+  }
+
+  it('reads Matrix media from the homeserver itself on the plugin token, and cancels it when the turn aborts', async () => {
     await withObject('media-signal', {}, async (h) => {
       await h.ready();
       const media = stalledMedia();
-      h.gateway.downloadMxcMediaStream.mockImplementationOnce(
-        async () => media.stream,
-      );
-      const { source, method } = await mediaMethod(h, 'downloadMxc');
-      if (typeof method !== 'function') throw new Error('no downloadMxc');
+      const requests = homeserverFetch(() => new Response(media.stream));
+      const source = await mediaSource(h);
       const abort = new AbortController();
-      const reading = Reflect.apply(method, source, [
+      const reading = source.downloadMxc(
         'mxc://example/media',
         1024,
         abort.signal,
-      ]);
+      );
+      await vi.waitFor(() => expect(requests).toHaveLength(1));
       const stop = new Error('turn stopped');
-      // Abort only once the read is waiting on the stalled stream.
-      await vi.waitFor(() =>
-        expect(h.gateway.downloadMxcMediaStream).toHaveBeenCalled(),
-      );
       abort.abort(stop);
-      await expect(reading).rejects.toThrow();
-      // Only the deadline crosses the RPC; the abort arrives as a cancel.
-      expect(h.gateway.downloadMxcMediaStream).toHaveBeenCalledWith(
-        'mxc://example/media',
-        { timeoutMs: 60_000 },
+      await expect(reading).rejects.toThrow('turn stopped');
+      expect(requests[0]?.url.href).toBe(
+        `${HOMESERVER}/_matrix/client/v1/media/download/example/media?allow_redirect=true`,
       );
+      expect(requests[0]?.token).toBe('Bearer plugin-token');
       expect(media.cancelled).toEqual([stop]);
     });
   });
 
-  it('bounds an event media download by the deadline and cancels it on abort', async () => {
-    await withObject('media-event-signal', {}, async (h) => {
+  it('asks the gateway only for the event, downloads and decrypts the media here (legacy endpoint on 404)', async () => {
+    await withObject('media-event-direct', {}, async (h) => {
       await h.ready();
-      const media = stalledMedia();
-      h.gateway.downloadEventMediaStream.mockImplementationOnce(async () => ({
-        stream: media.stream,
-      }));
-      const { source, method } = await mediaMethod(h, 'downloadEvent');
-      if (typeof method !== 'function') throw new Error('no downloadEvent');
-      const abort = new AbortController();
-      const reading = Reflect.apply(method, source, [
-        '!room:example',
-        '$event',
-        1024,
-        abort.signal,
-      ]);
-      await vi.waitFor(() =>
-        expect(h.gateway.downloadEventMediaStream).toHaveBeenCalled(),
+      const plain = new TextEncoder().encode('the person sent this file');
+      const encryptor = createAttachmentEncryptor();
+      const cipher = new Uint8Array(
+        await new Response(
+          new Response(plain).body!.pipeThrough(encryptor.transform),
+        ).arrayBuffer(),
       );
-      const stop = new Error('turn stopped');
-      abort.abort(stop);
-      await expect(reading).rejects.toThrow();
-      expect(h.gateway.downloadEventMediaStream).toHaveBeenCalledWith(
+      h.gateway.eventMediaInfo.mockImplementationOnce(async () => ({
+        mxc: 'mxc://example/file',
+        file: await encryptor.info,
+        mimetype: 'text/plain',
+      }));
+      const requests = homeserverFetch((url) =>
+        url.pathname.startsWith('/_matrix/client/v1/')
+          ? new Response('', { status: 404 })
+          : new Response(cipher),
+      );
+      const source = await mediaSource(h);
+      const media = await source.downloadEvent('!room:example', '$event', 1024);
+      expect(media?.bytes).toEqual(plain);
+      expect(h.gateway.eventMediaInfo).toHaveBeenCalledWith(
         '!room:example',
         '$event',
         { timeoutMs: 60_000 },
       );
-      expect(media.cancelled).toEqual([stop]);
+      expect(requests.map((r) => r.url.pathname)).toEqual([
+        '/_matrix/client/v1/media/download/example/file',
+        '/_matrix/media/v3/download/example/file',
+      ]);
+    });
+  });
+
+  it('on a 401 asks the gateway for fresh credentials naming the rejected token, once, and tries again', async () => {
+    await withObject('media-401', {}, async (h) => {
+      await h.ready();
+      h.gateway.botCredentials
+        .mockImplementationOnce(async () => ({
+          baseUrl: HOMESERVER,
+          userId: '@oracle:hs.test',
+          accessToken: 'old-token',
+          deviceId: 'PLUGINS',
+        }))
+        .mockImplementationOnce(async () => ({
+          baseUrl: HOMESERVER,
+          userId: '@oracle:hs.test',
+          accessToken: 'new-token',
+          deviceId: 'PLUGINS',
+        }));
+      const requests = homeserverFetch((_url, init) =>
+        new Headers(init?.headers).get('authorization') === 'Bearer old-token'
+          ? new Response('{"errcode":"M_UNKNOWN_TOKEN"}', { status: 401 })
+          : new Response(new Uint8Array([1, 2, 3])),
+      );
+      const source = await mediaSource(h);
+      expect(await source.downloadMxc('mxc://example/m', 1024)).toEqual(
+        new Uint8Array([1, 2, 3]),
+      );
+      expect(requests.map((r) => r.token)).toEqual([
+        'Bearer old-token',
+        'Bearer new-token',
+      ]);
+      expect(h.gateway.botCredentials.mock.calls).toEqual([
+        [{}],
+        [{ rejected: 'old-token' }],
+      ]);
+      // The fresh token is cached: the next read asks the gateway nothing.
+      await source.downloadMxc('mxc://example/m', 1024);
+      expect(h.gateway.botCredentials).toHaveBeenCalledTimes(2);
+    });
+  });
+});
+
+describe('channel files in the session thread', () => {
+  const GATEWAY = 'https://channels.test';
+  const ROOM = '!room:hs.test';
+  const SESSION = '$session';
+
+  /** `size` bytes that sniff as a JPEG. */
+  function jpeg(size: number, seed: number): Uint8Array {
+    const out = new Uint8Array(size).fill(seed);
+    out.set([0xff, 0xd8, 0xff, 0xe0]);
+    return out;
+  }
+
+  async function channelPhoto(bytes: Uint8Array, name: string) {
+    const digest = Array.from(
+      new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
+      (b) => b.toString(16).padStart(2, '0'),
+    ).join('');
+    return {
+      url: `${GATEWAY}/media/chb_one/${name}?exp=1893456000&kid=k1&sig=c2ln`,
+      filename: `${name}.jpg`,
+      mimetype: 'image/jpeg',
+      size: bytes.length,
+      sha256: digest,
+      kind: 'image' as const,
+    };
+  }
+
+  function channelRequest(
+    attachments: Awaited<ReturnType<typeof channelPhoto>>[],
+  ): TurnRequest {
+    return {
+      identity: { userDid: USER_DID },
+      sessionId: SESSION,
+      roomId: ROOM,
+      message: 'caption',
+      client: 'channel',
+      requestId: 'req-1',
+      channel: {
+        provider: 'whatsapp',
+        bindingId: 'chb_one',
+        remoteMessageRef: `hmac:${'a'.repeat(64)}`,
+        attachments,
+      },
+    };
+  }
+
+  /** The gateway's links and the homeserver's upload endpoint. */
+  function network(bodies: Map<string, () => Promise<Uint8Array>>) {
+    const uploads: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.origin === GATEWAY) {
+        const body = bodies.get(`${url.origin}${url.pathname}`);
+        return body
+          ? new Response(await body())
+          : new Response('gone', { status: 404 });
+      }
+      await new Response(init?.body).arrayBuffer();
+      uploads.push(url.pathname);
+      return Response.json({ content_uri: `mxc://hs.test/u${uploads.length}` });
+    });
+    return uploads;
+  }
+
+  const ENV = { CHANNEL_SERVICE_DID: 'did:web:channels.test' };
+
+  function encryptedRoom(h: UserObjectHarness): void {
+    h.gateway.getRoomStateEvent.mockImplementation(async (_room, type) =>
+      type === 'm.room.encryption'
+        ? JSON.stringify({ algorithm: 'm.megolm.v1.aes-sha2' })
+        : null,
+    );
+  }
+
+  function linkStore(h: UserObjectHarness): ChannelAttachmentLinkStore {
+    const store = h.field('channelAttachmentLinks');
+    if (!(store instanceof ChannelAttachmentLinkStore))
+      throw new Error('no link store');
+    return store;
+  }
+
+  async function post(
+    h: UserObjectHarness,
+    req: TurnRequest,
+    opts: { signal?: AbortSignal; resumed?: boolean } = {},
+  ): Promise<Map<string, Promise<{ bytes: Uint8Array } | null>>> {
+    const copies: unknown = await h.call(
+      'postChannelFilesToThread',
+      req,
+      ROOM,
+      opts.signal ?? new AbortController().signal,
+      opts.resumed ?? false,
+    );
+    if (!(copies instanceof Map)) throw new Error('no copies');
+    return copies;
+  }
+
+  it("hands the turn its copies at once, then posts the files after the person's text, in message order, in the background", async () => {
+    await withObject('thread-files-order', { env: ENV }, async (h) => {
+      await h.ready();
+      encryptedRoom(h);
+      const first = jpeg(600, 1);
+      const second = jpeg(400, 2);
+      const [a, b] = [
+        await channelPhoto(first, 'first'),
+        await channelPhoto(second, 'second'),
+      ];
+      let releaseFirst: () => void = () => undefined;
+      const firstHeld = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      const uploads = network(
+        new Map([
+          [
+            a.url.split('?')[0]!,
+            async () => {
+              // The first file arrives after the second.
+              await firstHeld;
+              return first;
+            },
+          ],
+          [b.url.split('?')[0]!, async () => second],
+        ]),
+      );
+      let sent = 0;
+      h.gateway.sendEvent.mockImplementation(async () => `$sent-${++sent}`);
+      const req = channelRequest([a, b]);
+      const refs = [...(await post(h, req)).keys()];
+      await linkStore(h).put(SESSION, [
+        { ref: refs[0]!, url: a.url, sha256: a.sha256, bindingId: 'chb_one' },
+        { ref: refs[1]!, url: b.url, sha256: b.sha256, bindingId: 'chb_one' },
+      ]);
+      const copies = await post(h, { ...req, requestId: 'req-2' });
+      // The copy of the second file comes while the first is still held.
+      expect((await copies.get(refs[1]!))?.bytes).toEqual(second);
+      releaseFirst();
+      expect((await copies.get(refs[0]!))?.bytes).toEqual(first);
+      await vi.waitFor(() => expect(uploads).toHaveLength(4));
+      // Nothing is sent before the mirror pass queues the person's text.
+      expect(h.gateway.sendEvent).not.toHaveBeenCalled();
+      await h.call(
+        'replayToRoom',
+        { ...req, requestId: 'req-2' },
+        'caption',
+        'user',
+      );
+      await h.call('replayToRoom', req, 'caption', 'user');
+      await h.settle();
+      const calls = h.gateway.sendEvent.mock.calls;
+      const bodies = calls.map(([, , content]) => {
+        const body: unknown = JSON.parse(content).body;
+        return String(body);
+      });
+      expect(bodies).toEqual([
+        '**You:**\ncaption',
+        'first.jpg',
+        'second.jpg',
+        '**You:**\ncaption',
+        'first.jpg',
+        'second.jpg',
+      ]);
+      expect(
+        calls.every(([, , , opts]) => opts?.priority === 'background'),
+      ).toBe(true);
+      const txnIds = calls.map(([, , , opts]) => opts?.txnId ?? '');
+      expect(txnIds.every((id) => /^channel-[0-9a-f]{64}$/.test(id))).toBe(
+        true,
+      );
+      expect(new Set(txnIds).size).toBe(6);
+      // The room copy is recorded with the link.
+      expect(await linkStore(h).eventIdOf(SESSION, refs[0]!)).toMatch(
+        /^\$sent-/,
+      );
+    });
+  });
+
+  it('posts nothing when the plugin device cannot be had, or the room is not encrypted: the copies come back empty', async () => {
+    const photo = await channelPhoto(jpeg(100, 3), 'p');
+    const cases: Array<[string, (h: UserObjectHarness) => void]> = [
+      [
+        'thread-files-no-device',
+        (h) => {
+          encryptedRoom(h);
+          h.gateway.botCredentials.mockRejectedValueOnce(
+            new Error('login failed'),
+          );
+        },
+      ],
+      [
+        'thread-files-plain-room',
+        (h) => {
+          h.gateway.getRoomStateEvent.mockImplementation(async () => null);
+        },
+      ],
+    ];
+    for (const [name, arrange] of cases)
+      await withObject(name, { env: ENV }, async (h) => {
+        await h.ready();
+        const uploads = network(
+          new Map([[photo.url.split('?')[0]!, async () => jpeg(100, 3)]]),
+        );
+        arrange(h);
+        const copies = await post(h, channelRequest([photo]));
+        for (const copy of copies.values()) expect(await copy).toBeNull();
+        await h.call(
+          'replayToRoom',
+          channelRequest([photo]),
+          'caption',
+          'user',
+        );
+        await h.settle();
+        expect(uploads).toEqual([]);
+        // Only the text mirror went out.
+        expect(h.gateway.sendEvent).toHaveBeenCalledOnce();
+      });
+  });
+
+  it('gives up on a gateway that never answers the setup once the turn stops, and posts nothing on a resumed attempt', async () => {
+    await withObject('thread-files-setup', { env: ENV }, async (h) => {
+      await h.ready();
+      encryptedRoom(h);
+      const photo = await channelPhoto(jpeg(100, 4), 'q');
+      network(new Map());
+      h.gateway.botCredentials.mockImplementationOnce(
+        () => new Promise<BotCredentials>(() => undefined),
+      );
+      const run = new AbortController();
+      const copies = await post(h, channelRequest([photo]), {
+        signal: run.signal,
+      });
+      run.abort(new Error('turn stopped'));
+      for (const copy of copies.values()) expect(await copy).toBeNull();
+
+      h.gateway.botCredentials.mockClear();
+      expect(
+        (await post(h, channelRequest([photo]), { resumed: true })).size,
+      ).toBe(0);
+      expect(h.gateway.botCredentials).not.toHaveBeenCalled();
+    });
+  });
+
+  it('recall refuses bytes that are not an image, and an image over its byte limit', async () => {
+    await withObject('recall-loader', {}, async (h) => {
+      await h.ready();
+      const loader: unknown = await h.call('recallImageLoader', {
+        sessionId: SESSION,
+        roomId: ROOM,
+        channelLinks: [],
+      });
+      if (typeof loader !== 'function') throw new Error('no loader');
+      vi.spyOn(globalThis, 'fetch').mockImplementation(
+        async () =>
+          new Response(new TextEncoder().encode('%PDF-1.4 not an image')),
+      );
+      const meta = {
+        filename: 'photo.jpg',
+        mimetype: 'image/jpeg',
+        mxcUri: 'mxc://example/pdf',
+        category: 'image',
+      };
+      const signal = new AbortController().signal;
+      await expect(
+        Reflect.apply(loader, undefined, [meta, { signal, maxBytes: 1024 }]),
+      ).rejects.toThrow('not an image');
+      await expect(
+        Reflect.apply(loader, undefined, [meta, { signal, maxBytes: 4 }]),
+      ).resolves.toBeNull();
     });
   });
 });

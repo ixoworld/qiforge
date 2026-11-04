@@ -1,3 +1,4 @@
+export type { DomainBriefDetail } from './document';
 export type {
   DocumentRequest,
   DomainAnchor,

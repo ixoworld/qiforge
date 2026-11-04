@@ -33,9 +33,7 @@ const manifest: PluginManifest = {
     'User asks "what skills are available?" or "what can you do?".',
     'User asks the agent to find a skill for a specific task ("a skill for invoices", "is there a skill for KYC?").',
   ],
-  whenNotToUse: [
-    'Executing a skill — this runtime only lists and searches the registry.',
-  ],
+  whenNotToUse: ['Running a skill: that takes the `sandbox` capability.'],
   examples: [
     {
       user: 'Do you have a skill that can generate an invoice?',
@@ -46,6 +44,9 @@ const manifest: PluginManifest = {
   tags: ['skills', 'capsules', 'registry', 'ucan'],
   category: 'data',
   visibility: 'always',
+  brief: 'browse every skill, without a search term',
+  // `search_skills` stays bound; listing the whole registry is rare.
+  onDemandTools: ['list_skills'],
   stability: 'stable',
 };
 

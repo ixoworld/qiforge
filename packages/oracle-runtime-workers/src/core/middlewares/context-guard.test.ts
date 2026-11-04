@@ -1,9 +1,15 @@
-import { AIMessage, HumanMessage, ToolMessage } from '@langchain/core/messages';
+import {
+  AIMessage,
+  HumanMessage,
+  ToolMessage,
+  type BaseMessage,
+} from '@langchain/core/messages';
 import { tool } from '@langchain/core/tools';
 import { convertToOpenAITool } from '@langchain/core/utils/function_calling';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { contextBudgetFor } from '../context-budget';
+import { USAGE_CARRIED_KWARG } from '../operating-guides';
 import {
   type ContextGuardEvent,
   ContextOverflowError,
@@ -12,6 +18,8 @@ import {
   PRUNE_HARD,
   PRUNE_SOFT,
   pruneToolResults,
+  staleResultCutoff,
+  trimStaleResults,
 } from './context-guard';
 
 vi.mock('@langchain/core/utils/function_calling', async (importOriginal) => {
@@ -101,6 +109,104 @@ describe('pruneToolResults', () => {
       'identical to a later fetch result',
     );
     expect(String(out[10]!.content)).toBe(same); // newest full copy kept
+  });
+});
+
+describe('stale results', () => {
+  const MINUTE = 60_000;
+  const COLD = 15 * MINUTE;
+  /** A turn opened `minutes` after the thread's start. */
+  const at = (i: number, minutes: number, chars = 2000) => {
+    const [human, ...rest] = turn(i, chars);
+    return [
+      new HumanMessage({
+        id: human!.id,
+        content: human!.content,
+        additional_kwargs: {
+          timestamp: new Date(minutes * MINUTE).toISOString(),
+        },
+      }),
+      ...rest,
+    ];
+  };
+  const stubbed = (messages: BaseMessage[]) =>
+    messages
+      .filter((m) => ToolMessage.isInstance(m))
+      .filter((m) => m.additional_kwargs.pruned === 'stale')
+      .map((m) => m.id);
+  const cutoff = (messages: BaseMessage[], keep = 2) =>
+    staleResultCutoff(messages, keep, COLD);
+
+  it('leaves a warm thread alone, however long', () => {
+    const history = [0, 1, 2, 3, 4, 5].flatMap((i) => at(i, i));
+    expect(cutoff(history)).toBe(0);
+  });
+
+  it('moves the line only on a cold turn and holds it until the next one', () => {
+    const history = [at(0, 0), at(1, 1), at(2, 2), at(3, 60)].flat();
+    // Turn 3 opened cold: turns 1 and 2 stay whole, turn 0 goes.
+    const line = cutoff(history);
+    expect(line).toBe(4);
+    // The warm turns after it keep the same line, so the prefix holds.
+    expect(cutoff([...history, ...at(4, 61)])).toBe(line);
+    expect(cutoff([...history, ...at(4, 61), ...at(5, 62)])).toBe(line);
+    // The next cold turn moves it.
+    expect(cutoff([...history, ...at(4, 61), ...at(5, 120)])).toBe(12);
+  });
+
+  it('needs the kept turns behind a cold turn, and reads the time off the messages only', () => {
+    expect(cutoff([at(0, 0), at(1, 60)].flat())).toBe(0);
+    expect(cutoff([at(0, 0), at(1, 1), at(2, 60)].flat())).toBe(0);
+    // No timestamp, no evidence the cache went cold.
+    const undated = [0, 1, 2, 3].flatMap((i) => turn(i, 2000));
+    expect(cutoff(undated)).toBe(0);
+    expect(cutoff([at(0, 0), at(1, 1), at(2, 60)].flat(), 0)).toBe(0);
+  });
+
+  it('stubs what is old and large, says how to read it back, and leaves the input alone', () => {
+    const history = [at(0, 0), at(1, 0, 100), at(2, 1), at(3, 60)].flat();
+    const line = cutoff(history);
+    const { messages, pruned } = trimStaleResults(history, line, {
+      demoteMinChars: 600,
+      readResultChars: 16_000,
+    });
+    expect(pruned).toBe(1);
+    expect(stubbed(messages)).toEqual(['t0']);
+    expect(String(messages[2]?.content)).toBe(
+      '[fetch result from an earlier turn (2002 characters) removed from context; read_result({ id: "c0", length: 16000 }) reads it back]',
+    );
+    expect(String(history[2]?.content)).toHaveLength(2002);
+    // Same bytes on every call: the stub is part of the cached prefix.
+    expect(
+      trimStaleResults(history, line, {
+        demoteMinChars: 600,
+        readResultChars: 16_000,
+      }).messages[2]?.content,
+    ).toBe(messages[2]?.content);
+  });
+
+  it('points a capped result at its saved copy, and says nothing of read_result when it is not bound', () => {
+    const [human, call, , reply] = at(0, 0);
+    const capped = new ToolMessage({
+      id: 't0',
+      tool_call_id: 'c0',
+      name: 'fetch',
+      content: 'r'.repeat(2000),
+      additional_kwargs: {
+        capped: { id: 'f'.repeat(64), size: 9000, shown: 1 },
+      },
+    });
+    const history = [human!, call!, capped, reply!];
+    const options = { demoteMinChars: 600, readResultChars: 16_000 };
+    expect(
+      String(trimStaleResults(history, 4, options).messages[2]?.content),
+    ).toContain(`read_result({ id: "${'f'.repeat(64)}"`);
+    expect(
+      String(
+        trimStaleResults(history, 4, { demoteMinChars: 600 }).messages[2]
+          ?.content,
+      ),
+    ).toContain('call the tool again if you need it');
   });
 });
 
@@ -309,6 +415,67 @@ describe('createContextGuardMiddleware', () => {
       /nothing more could be trimmed/,
     );
     expect(handler).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the load result of a loaded plugin', () => {
+  const big = 'x'.repeat(2_000);
+  const load = () =>
+    new ToolMessage({
+      id: 'load',
+      content: big,
+      tool_call_id: 'load',
+      name: 'load_capability',
+      additional_kwargs: { [USAGE_CARRIED_KWARG]: ['flows'] },
+    });
+
+  async function pruned(state: { loadedPlugins?: string[] }) {
+    const budget = contextBudgetFor({
+      model: 'm',
+      tokens: 32_000,
+      origin: 'catalog',
+    });
+    const guard = createContextGuardMiddleware({
+      budget: { ...budget, pruneAtTokens: 1 },
+      logger: silent,
+    });
+    const handler = vi.fn(async () => new AIMessage('ok'));
+    const filler = Array.from(
+      { length: 12 },
+      (_, i) => new AIMessage({ id: `f${i}`, content: 'x' }),
+    );
+    const wrap = guard.wrapModelCall;
+    if (!wrap) throw new Error('wrapModelCall missing');
+    const fn =
+      typeof wrap === 'function' ? wrap : (wrap as { hook: typeof wrap }).hook;
+    await (fn as (r: never, h: never) => Promise<unknown>)(
+      {
+        messages: [load(), ...filler],
+        systemMessage: { content: 'sys' },
+        tools: [],
+        state,
+      } as never,
+      handler as never,
+    );
+    const sent = (handler.mock.calls[0] as unknown[])[0] as {
+      messages: BaseMessage[];
+    };
+    return sent.messages[0]?.additional_kwargs.pruned !== undefined;
+  }
+
+  it('survives pruning while the plugin is loaded: it is how the model knows its rules', async () => {
+    expect(await pruned({ loadedPlugins: ['flows'] })).toBe(false);
+  });
+
+  it('goes once the plugin is unloaded', async () => {
+    expect(await pruned({ loadedPlugins: [] })).toBe(true);
+  });
+
+  it('survives stale trimming through the same rule', () => {
+    expect(
+      trimStaleResults([load()], 1, { demoteMinChars: 10, keep: () => true })
+        .pruned,
+    ).toBe(0);
   });
 });
 

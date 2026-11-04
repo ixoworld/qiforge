@@ -27,8 +27,9 @@ export const CHANNEL_REF_PREFIX = 'channel:';
 /**
  * The gateway's per-file bound for a video or a document
  * (`maxLargeMediaBytes`, 50 MiB); photos are at most 16 MB there. A file
- * above `MAX_FILE_SIZE` is archived to the sandbox but never handed to a
- * model (see the pipeline).
+ * above `MAX_FILE_SIZE` is posted to the session thread (`room-media.ts`)
+ * but never read by the turn: no model is handed it and the sandbox
+ * archive refuses it (see the pipeline).
  */
 export const CHANNEL_MAX_FILE_BYTES = 52_428_800;
 
@@ -94,7 +95,8 @@ export function isGatewayMediaUrl(
   );
 }
 
-function hex(bytes: ArrayBuffer): string {
+/** Lowercase hex of a digest. */
+export function hex(bytes: ArrayBuffer): string {
   return Array.from(new Uint8Array(bytes), (byte) =>
     byte.toString(16).padStart(2, '0'),
   ).join('');
@@ -163,15 +165,23 @@ export interface ChannelMediaSource {
       timeoutMs?: number;
     },
   ): Promise<{ bytes: Uint8Array; contentType?: string }>;
+  /**
+   * The media event the file was posted as in the session thread
+   * (`room-media.ts`), when one is recorded: the room copy that serves the
+   * file once its link has expired or the gateway no longer has it.
+   */
+  roomEventOf?(ref: string): Promise<string | undefined>;
 }
 
 /**
  * A `ChannelMediaSource` over `resolve` (the turn's files, then the
- * session's stored links) for the gateways in `origins`.
+ * session's stored links) for the gateways in `origins`; `roomEventOf`
+ * names the room copy of a file, when the owner keeps one.
  */
 export function createChannelMediaSource(input: {
   resolve: (ref: string) => Promise<ChannelMediaLink | undefined>;
   origins: readonly string[];
+  roomEventOf?: (ref: string) => Promise<string | undefined>;
 }): ChannelMediaSource {
   return {
     load: async (ref, opts) => {
@@ -182,6 +192,7 @@ export function createChannelMediaSource(input: {
         );
       return downloadChannelFile(link, { ...opts, origins: input.origins });
     },
+    ...(input.roomEventOf ? { roomEventOf: input.roomEventOf } : {}),
   };
 }
 

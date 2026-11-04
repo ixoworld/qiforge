@@ -1211,7 +1211,7 @@ async function main(): Promise<void> {
     );
 
     await step(
-      'attachments (retention): an image older than 2 user turns is offloaded; view_attachment fetches it again; transcript keeps the metadata',
+      'attachments (not stored): an image past the 2-turn recall window comes back only through view_attachment; transcript keeps the metadata',
       async () => {
         const green = makePng(48, 48, [20, 200, 40]);
         const img = await mx.uploadContent(new Blob([green]), {
@@ -1242,9 +1242,10 @@ async function main(): Promise<void> {
           /green/i,
           `image colour not recognised: "${first.text.slice(0, 200)}"`,
         );
-        // Two plain user turns push the image turn out of the retention
-        // window (ATTACHMENT_PAYLOAD_TURNS = 2): its payload is rewritten to a
-        // placeholder when the second one completes.
+        // The image bytes were never stored: every later turn loads the
+        // placeholder. Two plain user turns push the image turn out of the
+        // recall window (the newest 2 user turns), so the next question has
+        // to fetch it again through `view_attachment`.
         for (const prompt of [
           'Reply with exactly: OK',
           'Reply with exactly: OK again',

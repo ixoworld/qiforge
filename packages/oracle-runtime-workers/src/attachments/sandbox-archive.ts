@@ -5,6 +5,11 @@
  * to `<SANDBOX_MCP_URL without /mcp>/artifacts/upload`, authenticated with
  * the same `Authorization: Bearer <ucan>` + `X-Auth-Type: ucan` the sandbox
  * MCP client sends.
+ *
+ * The endpoint parses the whole multipart body (`Request.formData()`) and
+ * refuses a file over 25 MB with `413`, so the pipeline never reads a file
+ * over `MAX_FILE_SIZE` only to archive it, and a streamed body would buy
+ * nothing: every archived file is one the turn already holds in memory.
  */
 import { sanitizeSandboxPath } from './sanitize';
 
@@ -55,11 +60,17 @@ export async function uploadToSandbox(
     );
   }
   const raw: unknown = await response.json();
-  const result = raw as { path?: string; url?: string; previewUrl?: string };
+  const field = (name: string): string | undefined => {
+    const value: unknown =
+      typeof raw === 'object' && raw !== null ? Reflect.get(raw, name) : null;
+    return typeof value === 'string' && value ? value : undefined;
+  };
+  const url = field('url');
+  const previewUrl = field('previewUrl');
   return {
-    path: typeof result.path === 'string' ? result.path : safePath,
-    ...(result.url ? { url: result.url } : {}),
-    ...(result.previewUrl ? { previewUrl: result.previewUrl } : {}),
+    path: field('path') ?? safePath,
+    ...(url ? { url } : {}),
+    ...(previewUrl ? { previewUrl } : {}),
   };
 }
 

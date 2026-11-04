@@ -61,7 +61,10 @@ signature. A resumed tool call returns its original card.
 
 ## Evidence before the model
 
-`prepare_action` (`src/plugins/action-proposals/`) runs deterministic checks
+The tool binds `PrepareActionSchema` without its limits and patterns; the
+handler parses the full schema and its `clarification_required` names the
+field it refuses. `prepare_action` (`src/plugins/action-proposals/`) then runs
+deterministic checks
 over the user's own words (the last eight human messages, the runtime's
 turn-time note stripped) before asking the `companion.action-intent` Decision
 anything:

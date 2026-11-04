@@ -28,7 +28,14 @@ import {
   TURN_TIME_NOTE_KWARG,
   withTurnTimeNote,
 } from '../core/turn-time-note';
-import { CHANNEL_REPLY_NOTE_KWARG } from '../channels/replies';
+import {
+  CHANNEL_DELIVERY_NOTICE_KWARG,
+  CHANNEL_REPLY_NOTE_KWARG,
+} from '../channels/replies';
+import {
+  TURN_GUIDE_NOTE_KWARG,
+  USAGE_CARRIED_KWARG,
+} from '../core/operating-guides';
 import {
   type CarriedToolCall,
   SUMMARY_PREFIX,
@@ -207,6 +214,56 @@ describe('SqliteSaver message rows', () => {
     });
   });
 
+  it('a thread loaded back from its rows is re-keyed to the next checkpoint without re-encoding a message', async () => {
+    await runInDurableObject(stub('saver-loaded'), async (_i, state) => {
+      const db = await DoSqliteDatabase.open(state, 'loaded.db');
+      const writer = new SqliteSaver(db);
+      await writer.setup();
+      const thread: BaseMessage[] = [];
+      for (let i = 0; i < 40; i++) {
+        const body = `turn ${i}: ${'reply text '.repeat(80)}`;
+        thread.push(i % 2 ? ai(`a-${i}`, body) : human(`h-${i}`, body));
+      }
+      await put(writer, 'thread', thread, 0);
+      const before = await rowids(db, 'thread');
+
+      // A fresh saver (a new turn's object) loads the checkpoint the next
+      // put extends, as LangGraph does.
+      const reader = new SqliteSaver(db);
+      const tuple = await reader.getTuple(config('thread'));
+      const value = tuple?.checkpoint.channel_values['messages'];
+      const loaded: BaseMessage[] = Array.isArray(value) ? value : [];
+      expect(loaded).toHaveLength(thread.length);
+
+      const baseline = await countGzips(async () => {
+        await put(reader, 'control-loaded', [], 0);
+      });
+      let nextId = '';
+      const gzips = await countGzips(async () => {
+        nextId = await put(
+          reader,
+          'thread',
+          [...loaded, human('h-new', 'one more message')],
+          1,
+        );
+      });
+      // Only the new message is serialized and compressed.
+      expect(gzips - baseline).toBe(1);
+      const keys = await db.exec<{ checkpoint_id: string; n: number }>(
+        "SELECT checkpoint_id, COUNT(*) AS n FROM messages WHERE thread_id = 'thread' GROUP BY checkpoint_id",
+      );
+      expect(keys).toEqual([{ checkpoint_id: nextId, n: thread.length + 1 }]);
+      const after = await rowids(db, 'thread');
+      for (const [id, rowid] of Object.entries(before))
+        expect(after[id]).toBe(rowid);
+      expect(
+        (await stateMessages(reader, 'thread')).map((m) => m.content),
+      ).toEqual([...thread.map((m) => m.content), 'one more message']);
+      expect(await integrityOk(db)).toBe(true);
+      await db.close();
+    });
+  });
+
   it('persists a changed message object again (in-place edits are never served from the cache)', async () => {
     await runInDurableObject(stub('saver-mutated'), async (_i, state) => {
       const db = await DoSqliteDatabase.open(state, 'mut.db');
@@ -220,6 +277,31 @@ describe('SqliteSaver message rows', () => {
       ]);
       const listed = await saver.listThreadMessages('t');
       expect(listed.map((x) => x.content)).toEqual([m.content]);
+      await db.close();
+    });
+  });
+
+  it('lists the newest human and AI rows with content, bounded by the limit', async () => {
+    await runInDurableObject(stub('saver-recent'), async (_i, state) => {
+      const db = await DoSqliteDatabase.open(state, 'recent.db');
+      const saver = new SqliteSaver(db);
+      await put(saver, 't', [
+        human('m-1', 'first'),
+        new AIMessage({ id: 'm-2', content: 'answer' }),
+        new AIMessage({
+          id: 'm-3',
+          content: '',
+          tool_calls: [{ id: 'c1', name: 'lookup', args: {} }],
+        }),
+        new ToolMessage({ id: 'm-4', tool_call_id: 'c1', content: 'result' }),
+        human('m-5', 'second'),
+      ]);
+      await put(saver, 'other', [human('o-1', 'another thread')]);
+
+      const recent = await saver.listRecentThreadMessages('t', 2);
+
+      expect(recent.map((m) => m.id)).toEqual(['m-5', 'm-2']);
+      expect(await saver.listRecentThreadMessages('empty', 2)).toEqual([]);
       await db.close();
     });
   });
@@ -564,7 +646,7 @@ describe('migration 002 (unused message indexes)', () => {
       const versions = await db.exec<{ version: number }>(
         'SELECT version FROM schema_migrations ORDER BY version',
       );
-      expect(versions.map((v) => v.version)).toEqual([1, 2]);
+      expect(versions.map((v) => v.version)).toEqual([1, 2, 3]);
       expect(await integrityOk(db)).toBe(true);
       await db.close();
     });
@@ -682,6 +764,23 @@ describe('the turn time note kwarg', () => {
 
   it('keeps the quoted-reply note and the channel provenance, dropping malformed ones', () => {
     const base = { timestamp: '2026-01-01T00:00:00.000Z' };
+    expect(
+      cleanAdditionalKwargs(
+        {
+          ...base,
+          [TURN_GUIDE_NOTE_KWARG]: '[From the runtime …]',
+          [USAGE_CARRIED_KWARG]: ['flows', 7],
+        },
+        false,
+        'O',
+      ),
+    ).toEqual({
+      msgFromMatrixRoom: false,
+      oracleName: 'O',
+      ...base,
+      [TURN_GUIDE_NOTE_KWARG]: '[From the runtime …]',
+      [USAGE_CARRIED_KWARG]: ['flows'],
+    });
     const origin = { v: 1, transport: 'whatsapp' };
     const reply = { kind: 'known', requestId: 'wa:prior', author: 'oracle' };
     expect(
@@ -689,6 +788,7 @@ describe('the turn time note kwarg', () => {
         {
           ...base,
           [CHANNEL_REPLY_NOTE_KWARG]: '[WhatsApp reply: …]',
+          [CHANNEL_DELIVERY_NOTICE_KWARG]: '[Delivery notice …]',
           'org.ixo.qi.origin': origin,
           'org.ixo.qi.reply': reply,
         },
@@ -700,6 +800,7 @@ describe('the turn time note kwarg', () => {
       oracleName: 'O',
       ...base,
       [CHANNEL_REPLY_NOTE_KWARG]: '[WhatsApp reply: …]',
+      [CHANNEL_DELIVERY_NOTICE_KWARG]: '[Delivery notice …]',
       'org.ixo.qi.origin': origin,
       'org.ixo.qi.reply': reply,
     });
@@ -708,6 +809,7 @@ describe('the turn time note kwarg', () => {
         {
           ...base,
           [CHANNEL_REPLY_NOTE_KWARG]: 7,
+          [CHANNEL_DELIVERY_NOTICE_KWARG]: { kind: 'file_blocked' },
           'org.ixo.qi.origin': 'whatsapp',
           'org.ixo.qi.reply': null,
         },

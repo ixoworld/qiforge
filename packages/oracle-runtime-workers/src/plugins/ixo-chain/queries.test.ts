@@ -61,6 +61,7 @@ describe('requestField', () => {
   it('reads claims by the indexed agent address, newest first, with a page cursor', () => {
     const plan = field({
       kind: 'claims',
+      agent: ADDRESS,
       collectionId: '8250',
       first: 5,
       after: 'WyJuYXR1cmFsIiwxXQ==',
@@ -161,9 +162,14 @@ describe('requestField', () => {
     );
     expect(detailOf({ kind: 'transaction', hash: 'abc' })).toMatch(/hash/);
     expect(detailOf({ kind: 'claims', after: 'a b' })).toMatch(/after/);
-    expect(detailOf({ kind: 'claims', collectionId: '1"' })).toMatch(
-      /collectionId/,
+    expect(
+      detailOf({ kind: 'claims', collectionId: '999', first: 20 }),
+    ).toMatch(
+      /^claims lists one agent's claims\. For collection 999 as a whole .* use claim_collection with id "999"/,
     );
+    expect(
+      detailOf({ kind: 'claims', agent: ADDRESS, collectionId: '1"' }),
+    ).toMatch(/collectionId/);
     expect(detailOf({ kind: 'entities', type: 'dao" }' })).toMatch(/type/);
     expect(detailOf({ kind: 'token_balances', address: 'cosmos1abc' })).toMatch(
       /ixo1/,

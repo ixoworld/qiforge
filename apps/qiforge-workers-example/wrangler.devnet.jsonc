@@ -45,6 +45,8 @@
   "r2_buckets": [
     { "binding": "TIER_BUCKET", "bucket_name": "mike-devnet-oracle-tier" },
   ],
+  // Cloudflare Images: downscales images for the model (see wrangler.jsonc).
+  // "images": { "binding": "IMAGES" },
   "durable_objects": {
     "bindings": [
       { "name": "USER_ORACLE", "class_name": "UserOracleDO" },

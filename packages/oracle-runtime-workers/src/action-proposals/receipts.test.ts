@@ -79,6 +79,7 @@ async function harness(state: DurableObjectState) {
       markDirty: vi.fn(),
       mirror: new RoomMirror({
         sendText: send,
+        sendEvent: vi.fn(),
         keepAlive: () => undefined,
         log: () => undefined,
         warn: () => undefined,

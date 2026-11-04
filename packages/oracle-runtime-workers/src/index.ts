@@ -60,6 +60,7 @@ export {
 } from './do/user-oracle-do';
 export type {
   DocumentRequest,
+  DomainBriefDetail,
   DomainCapsuleInspection,
   DomainContextOptions,
   DomainContextPins,

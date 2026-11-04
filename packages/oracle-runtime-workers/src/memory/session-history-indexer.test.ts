@@ -6,9 +6,17 @@
  * backoff, the per-session lock and its follow-up pass, and the quiet-period
  * debounce.
  */
+import {
+  AIMessage,
+  HumanMessage,
+  ToolMessage,
+  type BaseMessage,
+} from '@langchain/core/messages';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Logger } from '../plugin-api/types';
+import { MEMORY_SEARCH_MCP_NAME } from '../plugins/memory/memory-tools';
 import {
+  conversationReader,
   pageOfMessages,
   SessionHistoryIndexer,
   transformMessagesToMemoryEngineFormat,
@@ -157,7 +165,6 @@ describe('transformMessagesToMemoryEngineFormat', () => {
     expect(out.map((m) => [m.role_type, m.role, m.name])).toEqual([
       ['user', 'Zed', 'Zed'],
       ['assistant', 'Orin', 'Orin'],
-      ['assistant', 'Orin', 'Orin'],
       ['system', 'System', 'System'],
       ['user', 'Zed', 'Zed'],
     ]);
@@ -184,10 +191,10 @@ describe('SessionHistoryIndexer', () => {
     const body = JSON.parse(String(h.calls[0]!.init.body)) as {
       messages: Array<{ content: string; role_type: string; name: string }>;
     };
-    // The empty tool-call-only AI turn is dropped; the rest keep order.
+    // The empty tool-call-only AI turn and the tool reply are dropped; the
+    // rest keep order.
     expect(body.messages.map((m) => [m.role_type, m.name, m.content])).toEqual([
       ['user', 'Zed', 'I live in Lisbon'],
-      ['assistant', 'Orin', 'weather: 24C'],
       ['assistant', 'Orin', 'Sunny in Lisbon today.'],
     ]);
     expect(h.minted).toEqual([
@@ -603,5 +610,98 @@ describe('SessionHistoryIndexer', () => {
     // One upload: the follow-up pass found nothing new.
     expect(h.calls).toHaveLength(1);
     expect(h.indexer.inFlightCount).toBe(0);
+  });
+});
+
+describe('conversationReader', () => {
+  const read = (messages: BaseMessage[]) => {
+    const reader = conversationReader();
+    return messages
+      .map(reader)
+      .filter((m) => !m.notConversation)
+      .map((m) => m.content);
+  };
+  const call = (name: string) =>
+    new AIMessage({
+      content: 'Checking.',
+      tool_calls: [{ id: 'c1', name, args: {} }],
+    });
+  const toolResult = (content: string) =>
+    new ToolMessage({ content, tool_call_id: 'c1' });
+
+  it('keeps what the user said and the reply, and neither the tool step nor its result', () => {
+    expect(
+      read([
+        new HumanMessage('I moved to Lisbon'),
+        call('chain_lookup'),
+        toolResult('{"ok":true}'),
+        new AIMessage('Noted, welcome to Lisbon.'),
+      ]),
+    ).toEqual(['I moved to Lisbon', 'Noted, welcome to Lisbon.']);
+  });
+
+  it('never sends back a reply to a turn that read memory, and resumes on the next turn', () => {
+    expect(
+      read([
+        new HumanMessage('Does my sister live near the sea?'),
+        call(MEMORY_SEARCH_MCP_NAME),
+        toolResult('{"nodes":[]}'),
+        new AIMessage('Yes, she lives by the sea.'),
+        new HumanMessage('Thanks'),
+        new AIMessage('You are welcome.'),
+      ]),
+    ).toEqual([
+      'Does my sister live near the sea?',
+      'Thanks',
+      'You are welcome.',
+    ]);
+  });
+
+  it('leaves out tool-shaped assistant text, extracted file text and failed replies, not a user who pastes JSON', () => {
+    expect(
+      read([
+        new HumanMessage('{"my":"config"}'),
+        new AIMessage('{"nodes":[{"uuid":"1"}]}'),
+        new AIMessage({
+          content: 'Salary: 90,000',
+          additional_kwargs: {
+            attachment: { filename: 'a.pdf', mimetype: 'application/pdf' },
+          },
+        }),
+        new AIMessage({
+          content: 'boom',
+          additional_kwargs: { isError: true },
+        }),
+        new AIMessage('[a real reply, in brackets]'),
+      ]),
+    ).toEqual(['{"my":"config"}', '[a real reply, in brackets]']);
+  });
+
+  it("reads the person's own words, without the notes the model got", () => {
+    const note = 'Current time: Monday';
+    expect(
+      read([
+        new HumanMessage({
+          content: `${note}\n\nhello`,
+          additional_kwargs: { turn_time_note: note },
+        }),
+      ]),
+    ).toEqual(['hello']);
+  });
+});
+
+describe('what reaches the engine', () => {
+  it('sends neither tool results nor flagged messages, and the watermark still counts them', async () => {
+    const h = harness({
+      messages: [
+        { type: 'human', content: 'I live in Lisbon' },
+        { type: 'tool', content: '{"nodes":[]}' },
+        { type: 'ai', content: 'From memory.', notConversation: true },
+        { type: 'ai', content: 'Sunny today.' },
+      ],
+    });
+    expect(await h.indexer.process('s1')).toBe('processed');
+    expect(h.bodies()).toEqual([['I live in Lisbon', 'Sunny today.']]);
+    expect(h.processed.at(-1)?.[1]).toBe(4);
   });
 });

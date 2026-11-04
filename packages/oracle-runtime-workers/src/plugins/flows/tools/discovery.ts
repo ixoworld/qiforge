@@ -27,10 +27,7 @@ const describeActionSchema = z.object({
 });
 
 const referenceableSchema = z.object({
-  flowRef: z
-    .string()
-    .optional()
-    .describe('Which flow. Omit to use the flow that is currently open.'),
+  flowRef: z.string().optional().describe('Default: the open flow.'),
   stepId: z
     .string()
     .min(1)

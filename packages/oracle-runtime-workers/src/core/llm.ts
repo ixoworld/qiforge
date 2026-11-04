@@ -11,6 +11,7 @@ import {
 import {
   LLM_BYO_STREAM_IDLE_TIMEOUT_MS_DEFAULT,
   LLM_HEADERS_TIMEOUT_MS_DEFAULT,
+  LLM_MAX_OUTPUT_TOKENS_DEFAULT,
   LLM_STREAM_IDLE_TIMEOUT_MS_DEFAULT,
   LLM_STREAM_RETRIES_DEFAULT,
   LLM_STREAM_RETRIES_MAX,
@@ -618,6 +619,8 @@ export interface LlmEnv {
   LLM_STREAM_RETRIES?: number;
   /** The turn deadline the stall retries are clamped to. */
   TURN_TIMEOUT_MS?: number;
+  /** Most tokens one call may generate; 0 = the model's own limit. */
+  LLM_MAX_OUTPUT_TOKENS?: number;
 }
 
 /** The liveness-related env keys, as validated config (numbers) or raw Worker env (strings). */
@@ -638,6 +641,19 @@ function wholeNumber(value: unknown, min: number): number | undefined {
         ? Number(value)
         : Number.NaN;
   return Number.isInteger(n) && n >= min ? n : undefined;
+}
+
+/**
+ * The `maxTokens` field every platform model gets: `LLM_MAX_OUTPUT_TOKENS`
+ * (default `LLM_MAX_OUTPUT_TOKENS_DEFAULT`), none when it is 0. Reasoning
+ * counts against it, and a caller's own `maxTokens` wins.
+ */
+function outputCapModelFields(env: { LLM_MAX_OUTPUT_TOKENS?: unknown }): {
+  maxTokens?: number;
+} {
+  const cap =
+    wholeNumber(env.LLM_MAX_OUTPUT_TOKENS, 0) ?? LLM_MAX_OUTPUT_TOKENS_DEFAULT;
+  return cap > 0 ? { maxTokens: cap } : {};
 }
 
 /**
@@ -704,7 +720,16 @@ export function llmEnvFromWorkerEnv(env: Record<string, unknown>): LlmEnv {
     LLM_PROVIDER: str('LLM_PROVIDER') === 'nebius' ? 'nebius' : 'openrouter',
     NEBIUS_API_KEY: str('NEBIUS_API_KEY'),
     ...platformStreamLivenessEnv(env),
+    ...outputCapEnv(env),
   };
+}
+
+/** `LLM_MAX_OUTPUT_TOKENS` of `env` as a number (unset when absent or invalid). */
+export function outputCapEnv(env: {
+  LLM_MAX_OUTPUT_TOKENS?: unknown;
+}): Pick<LlmEnv, 'LLM_MAX_OUTPUT_TOKENS'> {
+  const cap = wholeNumber(env.LLM_MAX_OUTPUT_TOKENS, 0);
+  return cap !== undefined ? { LLM_MAX_OUTPUT_TOKENS: cap } : {};
 }
 
 /** The platform lane's liveness keys of `env`, as numbers (unset when absent or invalid). */
@@ -789,6 +814,7 @@ export function createLlmAdapter(
   const liveness = streamLivenessFromEnv(env, 'platform');
   const mainEffort = env.MAIN_REASONING_EFFORT ?? 'medium';
   const headers = openRouterAttributionHeaders(env.ORACLE_NAME);
+  const outputCap = outputCapModelFields(env);
 
   const modelForRole = (role: ModelRole): string => {
     if (role === 'main' || role === 'summarizer') return defaultModelId;
@@ -843,6 +869,7 @@ export function createLlmAdapter(
       temperature: 0.8,
       maxRetries: 2,
       ...livenessModelFields(liveness),
+      ...outputCap,
       apiKey: env.OPEN_ROUTER_API_KEY,
       ...rest,
       model,
@@ -901,6 +928,7 @@ function createNebiusAdapter(
   const modelForRole = (role: ModelRole): string =>
     NEBIUS_MODEL_MAP[role as ProviderModelRole] ?? NEBIUS_MODEL_MAP.subagent;
   const liveness = streamLivenessFromEnv(env, 'platform');
+  const outputCap = outputCapModelFields(env);
 
   const get = (role: ModelRole, params?: ChatOpenAIFields): BaseChatModel => {
     const {
@@ -921,6 +949,7 @@ function createNebiusAdapter(
       temperature: role === 'guard' ? 0 : 0.8,
       maxRetries: 2,
       ...livenessModelFields(liveness),
+      ...outputCap,
       apiKey,
       __includeRawResponse: true,
       ...rest,
@@ -1079,6 +1108,50 @@ export function redactSignedLinks(
   return json.startsWith('{') ? values : {};
 }
 
+/** Newest messages a traced graph/middleware/tool run keeps of the thread state. */
+export const TRACE_STATE_TAIL_MESSAGES = 4;
+
+/**
+ * Collapse the thread state a traced graph, node or middleware run carries
+ * (`{ messages: [...whole thread], ...}`) to its newest
+ * `TRACE_STATE_TAIL_MESSAGES` messages plus a count of what was left out.
+ * Every such run of a turn carries the whole history, and the client
+ * serializes each one for upload: on a long thread a tool turn shipped tens
+ * of full copies of it from the user object's isolate. A chat model's run is
+ * left whole — its inputs are `{ messages: [[...]] }` (one list per prompt),
+ * the prompt the model really read, which is what a trace is for.
+ */
+export function collapseTracedState(
+  values: Record<string, unknown>,
+): Record<string, unknown> {
+  const messages = values.messages;
+  if (
+    !Array.isArray(messages) ||
+    messages.length <= TRACE_STATE_TAIL_MESSAGES ||
+    messages.some((entry) => Array.isArray(entry))
+  )
+    return values;
+  return {
+    ...values,
+    messages: messages.slice(-TRACE_STATE_TAIL_MESSAGES),
+    messagesOmitted: messages.length - TRACE_STATE_TAIL_MESSAGES,
+  };
+}
+
+/** What a trace keeps of a run's inputs or outputs: collapsed state, signed links redacted. */
+function traceValues(values: Record<string, unknown>): Record<string, unknown> {
+  return redactSignedLinks(collapseTracedState(values));
+}
+
+/**
+ * Upload batch size of the tracing client. The library default (24 MiB)
+ * assumes a server process; a user object shares a 128 MB isolate with the
+ * turn it traces, and a batch is serialized as a whole before it is sent,
+ * so its size is the transient cost of an upload. Smaller batches drop
+ * nothing: the queue is left at the library default, so no run is dropped.
+ */
+const TRACE_BATCH_BYTES = 4 * 1024 * 1024;
+
 /**
  * One `langsmith` Client per (apiKey, endpoint) per isolate. Tracer instances
  * are per-turn and cheap; the client owns the batched upload queue, so
@@ -1093,7 +1166,9 @@ function langsmithClientFor(apiKey: string, endpoint?: string): Client {
     client = new Client({
       apiKey,
       ...(endpoint && { apiUrl: endpoint }),
-      anonymizer: redactSignedLinks,
+      hideInputs: traceValues,
+      hideOutputs: traceValues,
+      batchSizeBytesLimit: TRACE_BATCH_BYTES,
     });
     langsmithClients.set(key, client);
   }

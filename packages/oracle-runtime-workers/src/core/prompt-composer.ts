@@ -67,7 +67,7 @@ export interface ComposePromptInput {
    * by loaded capabilities. Empty string renders no section.
    */
   customInstructions: string;
-  /** Operational-mode block — typically a multi-line string. */
+  /** Operational-mode block (`hooks.operationalMode`). Empty renders no section. */
   operationalMode: string;
   /**
    * Whether the discovery meta-tools (`search_skills`, `list_capabilities`,
@@ -78,8 +78,8 @@ export interface ComposePromptInput {
   capabilityDiscovery?: boolean;
   /**
    * Browser tools the client declared for this turn (`state.browserTools`),
-   * by name, plus whether they are already callable: `bound` is true when the
-   * portal plugin is `always` visible or has been loaded on this thread.
+   * by name, plus whether they are always callable: `bound` is true when the
+   * portal plugin is `always` visible.
    * Omit (or pass empty `names`) on non-Portal turns — nothing renders.
    */
   browserTools?: { names: string[]; bound: boolean };
@@ -135,11 +135,40 @@ export const CONTEXT_SECTION_LABELS: Record<ContextSlot, string> = {
 };
 
 // ── Memory-context rendering ────────────────────────────────────────────────
-// Guardrail caps for the block. Cross-bucket dedup does the real shrinking;
-// these only fire on pathological inputs so one entity/section can't dominate.
+// Guardrail caps for the block. Cross-bucket dedup does the first shrinking;
+// the budget then decides what goes in (`fitContextLines`).
 const COMPACT_ENTITY_SUMMARY_CAP = 700;
 const COMPACT_BLOCK_BUDGET = 2000;
 const COMPACT_OVERFLOW_NOTE = '_(More remembered — ask me to recall.)_';
+
+/** The lines of one memory bucket, by kind. */
+interface SlotLines {
+  entities: string[];
+  facts: string[];
+  episodes: string[];
+  communities: string[];
+}
+
+/** How a bucket reads, kind by kind. */
+const KIND_LABELS: ReadonlyArray<[keyof SlotLines, string]> = [
+  ['entities', '_Key entities:_'],
+  ['facts', '_Facts:_'],
+  ['episodes', '_Episodes (raw):_'],
+  ['communities', '_Topic clusters:_'],
+];
+
+/**
+ * Who gets the budget first. A fact says one thing in one line. A raw episode
+ * is what a fact was extracted from, or a question that was never one, so it
+ * only takes room nothing else wants: the answer follows the block, and a
+ * fact behind the episodes of earlier buckets is a fact the model never reads.
+ */
+const KIND_PRIORITY: ReadonlyArray<keyof SlotLines> = [
+  'facts',
+  'entities',
+  'communities',
+  'episodes',
+];
 
 /**
  * Normalize a line for duplicate detection: lowercase, strip surrounding
@@ -186,92 +215,117 @@ function capAtBoundary(text: string, max: number): string {
 }
 
 /**
- * Render one memory-context bucket. Dedups entities (by name) and facts (by
- * normalized text) against a `seen` set shared across every bucket, using the
- * richest summary collected for each entity.
+ * One bucket's lines. Dedups entities (by name) and facts (by normalized text)
+ * against a `seen` set shared across every bucket, using the richest summary
+ * collected for each entity. Facts are looked at first, in every bucket, so a
+ * fact is never lost to the line of an entity that may not fit.
  */
-function formatContextSectionCompact(
+function collectFacts(
+  data: MemoryContextSection | undefined,
+  seen: Set<string>,
+): string[] {
+  const lines: string[] = [];
+  for (const f of data?.facts ?? []) {
+    const text = f.fact?.trim();
+    if (!text) continue;
+    const key = normalizeForDedup(text);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    lines.push(`- ${text}`);
+  }
+  return lines;
+}
+
+function collectOthers(
   data: MemoryContextSection | undefined,
   seen: Set<string>,
   richestSummary: Map<string, string>,
-): string | null {
-  if (!data) return null;
-  const { entities, facts, episodes, communities } = data;
-  const lines: string[] = [];
+): Omit<SlotLines, 'facts'> {
+  const entities: string[] = [];
+  for (const e of data?.entities ?? []) {
+    const nameKey = `entity:${normalizeForDedup(e.name)}`;
+    if (seen.has(nameKey)) continue;
+    seen.add(nameKey);
+    const labels = (e.labels ?? []).filter((l) => l !== 'Entity').join('/');
+    const tag = labels ? ` (${labels})` : '';
+    const rawSummary = richestSummary.get(normalizeForDedup(e.name)) ?? '';
+    const summaryParts = rawSummary ? dedupSummaryLines(rawSummary, seen) : [];
+    const summary = summaryParts.length
+      ? capAtBoundary(summaryParts.join('; '), COMPACT_ENTITY_SUMMARY_CAP)
+      : '';
+    entities.push(
+      summary ? `- **${e.name}**${tag}: ${summary}` : `- **${e.name}**${tag}`,
+    );
+  }
 
-  if (entities?.length) {
-    const entityLines: string[] = [];
-    for (const e of entities) {
-      const nameKey = `entity:${normalizeForDedup(e.name)}`;
-      if (seen.has(nameKey)) continue;
-      seen.add(nameKey);
-      const labels = (e.labels ?? []).filter((l) => l !== 'Entity').join('/');
-      const tag = labels ? ` (${labels})` : '';
-      const rawSummary = richestSummary.get(normalizeForDedup(e.name)) ?? '';
-      const summaryParts = rawSummary
-        ? dedupSummaryLines(rawSummary, seen)
-        : [];
-      const summary = summaryParts.length
-        ? capAtBoundary(summaryParts.join('; '), COMPACT_ENTITY_SUMMARY_CAP)
-        : '';
-      entityLines.push(
-        summary ? `- **${e.name}**${tag}: ${summary}` : `- **${e.name}**${tag}`,
+  const episodes: string[] = [];
+  for (const ep of data?.episodes ?? []) {
+    const content = ep.content?.trim();
+    if (!content) continue;
+    const key = normalizeForDedup(content);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const date = ep.created_at?.slice(0, 10) ?? '';
+    episodes.push(date ? `- *${date}* — ${content}` : `- ${content}`);
+  }
+
+  const communities: string[] = [];
+  for (const c of data?.communities ?? []) {
+    const nameKey = `community:${normalizeForDedup(c.name)}`;
+    if (seen.has(nameKey)) continue;
+    seen.add(nameKey);
+    const summary = c.summary?.trim();
+    communities.push(
+      summary ? `- **${c.name}**: ${summary}` : `- **${c.name}**`,
+    );
+  }
+  return { entities, episodes, communities };
+}
+
+/** The block as the model reads it, empty buckets and kinds left out. */
+function renderContextSlots(
+  slots: ReadonlyMap<ContextSlot, SlotLines>,
+): string {
+  const sections: string[] = [];
+  for (const [key, lines] of slots) {
+    const kinds = KIND_LABELS.filter(([kind]) => lines[kind].length > 0).map(
+      ([kind, label]) => [label, ...lines[kind]].join('\n'),
+    );
+    if (kinds.length > 0)
+      sections.push(
+        `**${CONTEXT_SECTION_LABELS[key]}**\n${kinds.join('\n\n')}`,
       );
-    }
-    if (entityLines.length) lines.push('_Key entities:_', ...entityLines);
   }
+  return sections.join('\n\n');
+}
 
-  if (facts?.length) {
-    const factLines: string[] = [];
-    for (const f of facts) {
-      const text = f.fact?.trim();
-      if (!text) continue;
-      const key = normalizeForDedup(text);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      factLines.push(`- ${text}`);
-    }
-    if (factLines.length) {
-      if (lines.length) lines.push('');
-      lines.push('_Facts:_', ...factLines);
-    }
-  }
-
-  if (episodes?.length) {
-    const epLines: string[] = [];
-    for (const ep of episodes) {
-      const content = ep.content?.trim();
-      if (!content) continue;
-      const key = normalizeForDedup(content);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const date = ep.created_at?.slice(0, 10) ?? '';
-      epLines.push(date ? `- *${date}* — ${content}` : `- ${content}`);
-    }
-    if (epLines.length) {
-      if (lines.length) lines.push('');
-      lines.push('_Episodes (raw):_', ...epLines);
+/**
+ * Fills the budget kind by kind in `KIND_PRIORITY` order, and within a kind one
+ * line from every bucket in turn, so no bucket waits behind an earlier one's
+ * list. A line that does not fit is passed over for a shorter one after it.
+ * The same input always keeps the same lines: the block sits in the system
+ * prompt, which has to stay byte-identical between turns.
+ */
+function fitContextLines(
+  slots: ReadonlyMap<ContextSlot, SlotLines>,
+): ReadonlyMap<ContextSlot, SlotLines> {
+  const kept = new Map<ContextSlot, SlotLines>();
+  for (const key of slots.keys())
+    kept.set(key, { entities: [], facts: [], episodes: [], communities: [] });
+  for (const kind of KIND_PRIORITY) {
+    const longest = Math.max(...[...slots.values()].map((s) => s[kind].length));
+    for (let line = 0; line < longest; line += 1) {
+      for (const [key, lines] of slots) {
+        const candidate = lines[kind][line];
+        const target = kept.get(key)?.[kind];
+        if (candidate === undefined || !target) continue;
+        target.push(candidate);
+        if (renderContextSlots(kept).length > COMPACT_BLOCK_BUDGET)
+          target.pop();
+      }
     }
   }
-
-  if (communities?.length) {
-    const commLines: string[] = [];
-    for (const c of communities) {
-      const nameKey = `community:${normalizeForDedup(c.name)}`;
-      if (seen.has(nameKey)) continue;
-      seen.add(nameKey);
-      const summary = c.summary?.trim();
-      commLines.push(
-        summary ? `- **${c.name}**: ${summary}` : `- **${c.name}**`,
-      );
-    }
-    if (commLines.length) {
-      if (lines.length) lines.push('');
-      lines.push('_Topic clusters:_', ...commLines);
-    }
-  }
-
-  return lines.length ? lines.join('\n') : null;
+  return kept;
 }
 
 /**
@@ -296,28 +350,31 @@ function collectRichestSummaries(typed: TypedUserContext): Map<string, string> {
 
 /**
  * Render the memory-context block — empty string when nothing is populated.
- * Cross-bucket dedup + guardrail budgeting are always applied.
+ * Cross-bucket dedup is always applied; past the budget, `fitContextLines`
+ * decides what stays and the note says that more is remembered.
  */
 function buildContextBlock(userContext: UserContextData | undefined): string {
   if (!userContext) return '';
   const typed = userContext as TypedUserContext;
+  const keys = Object.keys(CONTEXT_SECTION_LABELS) as ContextSlot[];
 
   const seen = new Set<string>();
+  const facts = new Map(
+    keys.map((key) => [key, collectFacts(typed[key], seen)]),
+  );
   const richestSummary = collectRichestSummaries(typed);
-  const sections: string[] = [];
-  for (const key of Object.keys(CONTEXT_SECTION_LABELS) as ContextSlot[]) {
-    const formatted = formatContextSectionCompact(
-      typed[key],
-      seen,
-      richestSummary,
-    );
-    if (formatted) {
-      sections.push(`**${CONTEXT_SECTION_LABELS[key]}**\n${formatted}`);
-    }
-  }
-  const block = sections.join('\n\n');
+  const slots = new Map<ContextSlot, SlotLines>(
+    keys.map((key) => [
+      key,
+      {
+        facts: facts.get(key) ?? [],
+        ...collectOthers(typed[key], seen, richestSummary),
+      },
+    ]),
+  );
+  const block = renderContextSlots(slots);
   if (block.length <= COMPACT_BLOCK_BUDGET) return block;
-  return `${capAtBoundary(block, COMPACT_BLOCK_BUDGET)}\n\n${COMPACT_OVERFLOW_NOTE}`;
+  return `${renderContextSlots(fitContextLines(slots))}\n\n${COMPACT_OVERFLOW_NOTE}`;
 }
 
 /** Render user preferences as a bullet list for the prompt. */
@@ -371,8 +428,8 @@ export const PORTAL_CAPABILITY = 'portal';
 /**
  * Render the per-turn "Browser tools this turn" section. Empty string when the
  * client declared no browser tools, so non-Portal turns pay nothing for it.
- * The load line appears only while the tools sit behind the capability gate
- * (portal is `on-demand` and not yet in `loadedPlugins`).
+ * The load line depends on the plugin's visibility and not on whether the
+ * thread loaded it: a loaded capability must not change the system prompt.
  */
 function buildBrowserToolsBlock(
   browserTools: ComposePromptInput['browserTools'],
@@ -385,28 +442,42 @@ function buildBrowserToolsBlock(
   ];
   if (!browserTools.bound) {
     lines.push(
-      `They are bound behind the \`${PORTAL_CAPABILITY}\` capability — call \`load_capability({ names: ['${PORTAL_CAPABILITY}'] })\` once before using them.`,
+      `Unless they are in your tool list, call \`load_capability({ names: ['${PORTAL_CAPABILITY}'] })\` once before using them.`,
     );
   }
   return lines.join('\n');
 }
 
 /**
- * The discovery mandate. Rendered on every turn whose surface can actually
- * grow — i.e. wherever the meta-tools are bound.
+ * How to reach what is not in the tool list. Rendered on every turn whose
+ * surface can actually grow, i.e. wherever the meta-tools are bound. The
+ * catalogue in the capability block names what can be loaded, so reaching
+ * something takes one `load_capability`, and work the bound tools cover takes
+ * no discovery at all.
  */
-const DISCOVERY_PRINCIPLE = `- **Search first, build second.** Before doing any non-trivial task, you MUST run discovery before producing the answer yourself. Capabilities live in three lanes, each found differently:
-  1. **Packaged skills** — call \`search_skills\` against the user's request whenever a skill could plausibly do the job (generating a file, document, report, or page; calculations; lookups; multi-step workflows).
-  2. **Server-side plugins and third-party integrations** (memory, sandbox, email, calendar, web, files, external services) — call \`list_capabilities\` to scan loaded + on-demand plugins, then call \`load_capability({ names: [...] })\` ONCE with everything you need — it accepts an array, so never make multiple \`load_capability\` calls in the same turn.
-  3. **Browser tools** — the \`[Portal]\`-prefixed tools already in your tool list. They run on the user's screen inside the Portal: navigate, open a URL or page, create pages/rooms, fill forms, grant access, change what the user sees. Use them for anything that happens on the user's side. They NEVER appear in \`search_skills\` or \`list_capabilities\` results — check your tool list (and the "Browser tools this turn" section when present) directly.
-  Do this proactively — even when the task wording doesn't literally match a capability's \`whenToUse\`. Tell the user in ONE short sentence what you're checking ("Checking the skills registry for an invoice generator…") before the search call, not after. If something fits, use it (load + run). If nothing fits after the search, say so in one short sentence and only THEN build from scratch. Reusing a vetted capability is almost always better than reinventing it; silently skipping discovery is the worst failure mode.`;
+const DISCOVERY_PRINCIPLE = `- **Use your tool list first.** Tools already in it are ready: call them directly and never load them. Answer directly when the request needs no tool. When it needs something your tools cannot do, or a tool failed, reach it, in this order:
+  1. **Capabilities** — pick from "On-demand capabilities" and call \`load_capability\` once with everything you need. Do this rather than guess or say you cannot: remembered or assumed data is no substitute for a capability that has the real answer or can do the job.
+  2. **Skills** — before generating a file, document, report or page, or starting a packaged workflow, call \`search_skills\`. Running a skill takes the \`sandbox\` capability. If nothing fits, build it yourself.
+  3. **Browser tools** — the \`[Portal]\`-prefixed tools act on the user's screen inside the Portal: navigate, open a page, create pages or rooms, fill forms, grant access. They never appear in \`search_skills\` or \`list_capabilities\`: check your tool list and the "Browser tools this turn" section.`;
 
 /**
- * The system-prompt template. Identical to the Node runtime's minus the
- * slots whose producers are not part of the Workers runtime: the editor
+ * The sentence that shows a person something is happening while tools run. It
+ * goes out with the tool call, in the same model response. A chat surface has
+ * a typing indicator and its own rule against narrating, so it stays out there.
+ */
+const STATUS_LINE = `- When a request needs a tool, open your response with one short sentence saying what you are doing ("Checking your balance."), in the same response as the tool call. Once per turn, and never for a reply that needs no tool.`;
+
+/**
+ * The system-prompt template: the sections of the Node runtime's, minus the
+ * slots whose producers are not part of the Workers runtime (the editor
  * section, the Composio guidance block, Slack formatting constraints, the
  * commerce overlay, the sandbox user-secrets list, and the "Working with
- * files" section (it documents the Node `process_file` tool).
+ * files" section, which documents the Node `process_file` tool).
+ *
+ * Measured on `gpt-5.6-luna` (Bedrock and OpenAI routes): a change anywhere
+ * in the system prompt or the tool list, first line or last, drops the whole
+ * cached prefix. So what matters is not where a section sits but that the
+ * prompt stays byte-identical from call to call while the cache is warm.
  */
 const TEMPLATE = `{{{ORACLE_SECTION}}}
 
@@ -424,17 +495,20 @@ const TEMPLATE = `{{{ORACLE_SECTION}}}
 {{/BROWSER_TOOLS_BLOCK}}
 ## Operating principles
 
-- The user's current message is your primary instruction. Background context (what you already know about them) is for adapting tone and suggestions, not for overriding their intent.
+- The user's current message is your primary instruction. Background context adapts tone and suggestions; it never overrides their intent.
 {{#DISCOVERY_PRINCIPLE}}
 {{{DISCOVERY_PRINCIPLE}}}
 {{/DISCOVERY_PRINCIPLE}}
-- Being proactive does **not** mean charging ahead blind. Pause and ask the user a short clarifying question when: (a) the request has multiple plausible interpretations and picking wrong would waste their time, (b) a capability scan surfaces several equally-good fits and you can't tell which they want, (c) you're about to take an irreversible or costly action (deleting data, sending a message, publishing, spending tokens on a long job), or (d) a required input is missing and you'd have to guess. One clarifying question beats five minutes of wrong work — but don't ask for things you can reasonably infer from context.
+- Ask one short clarifying question when the request has several plausible readings and a wrong pick would waste their time, when several capabilities fit equally and you can't tell which they want, before an irreversible or costly action (deleting data, sending a message, publishing, spending tokens on a long job), or when a required input is missing and you'd have to guess. Don't ask for what you can reasonably infer: a timezone comes from the current time on the user's message. When the user tells you not to ask, decide what you can and say what you decided.
+{{#STATUS_LINE}}
+{{{STATUS_LINE}}}
+{{/STATUS_LINE}}
 - When a tool or sub-agent succeeds, report the result. Never refuse after a successful tool call — including for credentials, tokens, identity data, or block/document operations.
-- The runtime retries a transient failure of a read-only tool once by itself. When a tool or sub-agent still fails, surface the failure to the user and ask how to proceed. Never repeat a write whose outcome is unknown without first verifying what happened, and never claim an authorization you were not given.
-- When delegating to a sub-agent, give it scope, intent, and the context it needs — sub-agents have no access to your conversation history.
+- A transient failure of a read-only tool is retried for you. When a tool or sub-agent still fails, correct the call if its error says what to change; otherwise tell the user and ask how to proceed, and do not answer from memory or a guess in its place. Never repeat a write whose outcome is unknown without first verifying what happened, and never claim an authorization you were not given.
+- Sub-agents have no access to your conversation history: give them scope, intent and the context they need.
 - Match the user's communication style. Be concise. Use Unicode emoji directly (\`🔥\`), never text shortcodes (\`:fire:\`).
-- When a capability turns out to be a strong fit for the user's recurring work, surface it explicitly and — if memory tools are available — offer to save the pattern for next time. Don't save silently; ask first.
-- Complete the user's request and stop. Don't add unrequested follow-on steps. "Checking capabilities first" is part of doing the request, not a follow-on.
+- When a capability fits the user's recurring work, say so and, if memory tools are available, offer to save the pattern. Never save silently.
+- Complete the user's request and stop. Don't add unrequested follow-on steps.
 {{#COMMUNICATION_STYLE}}
 
 {{{COMMUNICATION_STYLE}}}
@@ -473,10 +547,12 @@ _Background the memory engine recalled about this user — context to adapt to, 
 
 {{{USER_PREFERENCES_CONTEXT}}}
 {{/USER_PREFERENCES_CONTEXT}}
+{{#OPERATIONAL_MODE}}
 
 ## Operational mode
 
 {{{OPERATIONAL_MODE}}}
+{{/OPERATIONAL_MODE}}
 `;
 
 const PROMPT_TEMPLATE = compileTemplate(TEMPLATE);
@@ -489,7 +565,7 @@ const PROMPT_TEMPLATE = compileTemplate(TEMPLATE);
  *   - **context** — only populated memory sub-sections render; empty ones skipped.
  *   - **user identity** — after the date and current entity: the user's DID
  *     and IXO account address, and the oracle's own DIDs.
- *   - **operational mode** — host hook or the runtime default.
+ *   - **operational mode** — host hook; none by default.
  *
  * Synchronous (the Node version was async only because LangChain's
  * `PromptTemplate.format` is); kept `Promise`-returning for call-site parity.
@@ -519,6 +595,7 @@ export async function composePrompt(
     CUSTOM_INSTRUCTIONS: input.customInstructions,
     COMMUNICATION_STYLE: communicationStyle,
     SURFACE_BLOCK: input.surfaceBlock ?? '',
+    STATUS_LINE: input.surfaceBlock ? '' : STATUS_LINE,
     CONTEXT_BLOCK: buildContextBlock(input.userContext),
     TIME_CONTEXT: input.timeContext,
     CURRENT_ENTITY_DID: input.currentEntityDid,

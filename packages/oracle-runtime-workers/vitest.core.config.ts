@@ -24,6 +24,9 @@ export default defineConfig({
       'src/llm/**/*.test.ts',
       'src/attachments/**/*.test.ts',
     ],
+    // Streams a file through `crypto.DigestStream` and `FixedLengthStream`,
+    // which only workerd has; runs in the Workers pool (`vitest.config.ts`).
+    exclude: ['src/attachments/room-media.test.ts', '**/node_modules/**'],
     testTimeout: 30_000,
     hookTimeout: 30_000,
   },

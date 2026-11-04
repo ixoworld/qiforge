@@ -99,11 +99,12 @@ export const MainAgentGraphState = Annotation.Root({
 
   /**
    * Names of plugins the agent has loaded for this thread via
-   * `load_capability`. Set-union reducer: plugins are added, never removed.
+   * `load_capability`. The channel the graph runs on, with its reducer, is
+   * declared by the capability gate (`capabilityGateState`); an idle plugin
+   * leaves it on a cold turn (`capability-expiry.ts`).
    */
   loadedPlugins: Annotation<string[]>({
-    reducer: (current, update) =>
-      Array.from(new Set([...(current ?? []), ...(update ?? [])])),
+    reducer: (_, update) => update,
     default: () => [],
   }),
 });

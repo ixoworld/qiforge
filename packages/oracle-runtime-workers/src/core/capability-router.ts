@@ -1,29 +1,36 @@
 import {
   AmbiguousDecisionProviderError,
+  CAPABILITY_PRELOAD_BATCH_SIZE,
+  CAPABILITY_PRELOAD_WARM_THRESHOLD,
   CAPABILITY_ROUTER_MODES,
   CAPABILITY_ROUTE_DECISION_NAME,
   DecisionProviderUnavailableError,
-  capabilityRouteDecision,
-  decideCapabilityRoute,
+  capabilityPreloadDecision,
+  decideCapabilityPreload,
   toRoutableCapabilities,
+  type CapabilityPreloadVerdict,
   type CapabilityRouterMode,
+  type DecisionEvaluateOptions,
   type DecisionEvaluator,
   type DecisionTraceOptions,
   type RoutableCapability,
 } from '@ixo/common/ai/decisions';
-import type { Logger } from '../plugin-api/types';
-import { unmetRequirements } from './manifest';
+import type { Logger, PluginManifest } from '../plugin-api/types';
 import type { RegisteredManifest } from './registries';
 
 /**
- * Predicts, before the first model call of a turn, which on-demand plugin the
- * user's message needs and preloads that plugin's tools for the turn, so the
- * model does not spend a round trip on `load_capability`.
+ * Predicts, before the first model call of a turn, every plugin the user's
+ * message needs from what is left to load, so the model does not spend a
+ * round trip on `load_capability`. A plugin it misses is still one
+ * `load_capability` away.
  *
- * The preload is one-turn state only: it is admitted by the capability gate
- * and visible as loaded to tool handlers, but never written to the graph's
- * `loadedPlugins` channel. The router fails open — any evaluation failure
- * preloads nothing and the turn proceeds exactly as without a router.
+ * A preload is a normal load: the turn writes it to the graph's
+ * `loadedPlugins` channel and it stays until a cold turn unloads it, so the
+ * tool list changes once. It costs the cache miss a `load_capability` would,
+ * without the extra call. On a turn the provider's cache has lost anyway it
+ * costs no miss at all, which is why a warm turn asks for a higher score
+ * (`CAPABILITY_ROUTER_WARM_THRESHOLD`). The router fails open — any evaluation
+ * failure preloads nothing and the turn proceeds exactly as without a router.
  */
 export interface CapabilityRouterOptions {
   evaluator: DecisionEvaluator;
@@ -38,26 +45,23 @@ export interface CapabilityRouterOptions {
 
 export interface CapabilityRouteTurn {
   mode: CapabilityRouterMode;
-  /** Every registered manifest; the router picks the routable candidates. */
-  manifests: readonly RegisteredManifest[];
-  /** Plugins the thread has already loaded (the checkpointed channel). */
-  loaded: ReadonlySet<string>;
   /**
-   * Plugins the user's delegation leaves with nothing to use (all of their
-   * tools admin-plane and not granted): never offered to the router. A
-   * function is called only when the router actually evaluates (not when
-   * it is off, or the message is empty), so the host does not compute the
-   * set for nothing.
+   * What a `load_capability` could load right now (`createMainAgent` works
+   * this out from the turn's own tools): the plugins with an on-demand tool
+   * the thread has not loaded, `always` ones with `onDemandTools` included,
+   * that the user's delegation may use.
    */
-  hidden?: ReadonlySet<string> | (() => Promise<ReadonlySet<string>>);
-  /**
-   * The user's delegation, as `ctx.ucan.hasCapability`: a plugin whose
-   * `manifest.requires` it does not grant is never offered (the gate would
-   * refuse every one of its tools). Omitted, `requires` is not checked.
-   */
-  hasCapability?: (resource: string, action: string) => boolean;
+  candidates: readonly RegisteredManifest[];
+  /** The score a preload needs; the calibration profile's when omitted. */
+  threshold?: number;
   /** The user's message text for this turn. */
   text: string;
+  /**
+   * The thread's latest visible turns, oldest first, so a follow-up such as
+   * "send half to Bob" can be routed. Called only when the router evaluates;
+   * when it fails the router evaluates the message alone.
+   */
+  recentTurns?: () => Promise<readonly string[]>;
   requestId: string;
   /** The turn's abort signal; only an awaited (`on`) evaluation is bound to it. */
   signal?: AbortSignal;
@@ -85,35 +89,43 @@ export function capabilityRouterMode(value: unknown): CapabilityRouterMode {
   return CAPABILITY_ROUTER_MODES.find((mode) => mode === value) ?? 'off';
 }
 
+/** The score a preload needs this turn: the operator's, else the default. */
+export function preloadThreshold(
+  cold: boolean,
+  env: {
+    CAPABILITY_ROUTER_COLD_THRESHOLD?: unknown;
+    CAPABILITY_ROUTER_WARM_THRESHOLD?: unknown;
+  },
+): { threshold?: number } {
+  const set = cold
+    ? env.CAPABILITY_ROUTER_COLD_THRESHOLD
+    : env.CAPABILITY_ROUTER_WARM_THRESHOLD;
+  if (typeof set === 'number') return { threshold: set };
+  return cold ? {} : { threshold: CAPABILITY_PRELOAD_WARM_THRESHOLD };
+}
+
 /**
- * The manifests the router may choose from: effectively on-demand plugins the
- * thread has not loaded yet. `always` plugins are already bound and `silent`
- * ones are never surfaced, so predicting them is pointless; a `hidden` one
- * (no tool the user's delegation reaches), or one whose `requires` the
- * delegation (`hasCapability`) does not grant, is not even named to the
- * router.
+ * What the router reads about a plugin: its summary and the `whenToUse` lines
+ * the manifest already carries. The summary alone often leaves out what a
+ * plugin does ("retire tokens", "cancel a reminder"), and a yes/no question
+ * then scores far below the preload threshold.
  */
+function routingSummary(manifest: PluginManifest): string {
+  return manifest.whenToUse.length > 0
+    ? `${manifest.summary} Use when: ${manifest.whenToUse.join(' ')}`
+    : manifest.summary;
+}
+
+/** The Decision's view of the candidates. */
 export function routableCandidates(
-  manifests: readonly RegisteredManifest[],
-  loaded: ReadonlySet<string>,
-  hidden: ReadonlySet<string> = NOTHING,
-  hasCapability?: (resource: string, action: string) => boolean,
+  candidates: readonly RegisteredManifest[],
 ): RoutableCapability[] {
   return toRoutableCapabilities(
-    manifests
-      .filter(
-        ({ pluginName, manifest }) =>
-          (manifest.visibility ?? 'on-demand') === 'on-demand' &&
-          !loaded.has(pluginName) &&
-          !hidden.has(pluginName) &&
-          (hasCapability === undefined ||
-            unmetRequirements(manifest, hasCapability).length === 0),
-      )
-      .map(({ pluginName, manifest }) => ({
-        name: pluginName,
-        title: manifest.title,
-        summary: manifest.summary,
-      })),
+    candidates.map(({ pluginName, manifest }) => ({
+      name: pluginName,
+      title: manifest.title,
+      summary: routingSummary(manifest),
+    })),
   );
 }
 
@@ -142,6 +154,23 @@ function errorName(error: unknown): string {
 
 function list(names: readonly string[]): string {
   return `[${names.join(', ')}]`;
+}
+
+/** The likeliest candidates, for refitting the threshold from real traffic. */
+function topScores(verdict: CapabilityPreloadVerdict): string {
+  return verdict.scores
+    .slice(0, 3)
+    .map(({ name, probability }) => `${name}:${probability.toFixed(2)}`)
+    .join(',');
+}
+
+/** Splits candidates into lists one Decision request can carry. */
+function batches<T>(items: readonly T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let start = 0; start < items.length; start += size) {
+    chunks.push(items.slice(start, start + size));
+  }
+  return chunks;
 }
 
 export function createCapabilityRouter(
@@ -183,47 +212,51 @@ export function createCapabilityRouter(
 
   return async (turn) => {
     if (turn.mode === 'off') return NOTHING;
+    // No score reaches it: nothing to spend a Decision on.
+    if ((turn.threshold ?? 0) > 1) return NOTHING;
     const text = turn.text.trim();
     if (!text) return NOTHING;
-    let hidden: ReadonlySet<string> | undefined;
-    try {
-      hidden =
-        typeof turn.hidden === 'function' ? await turn.hidden() : turn.hidden;
-    } catch (error) {
-      // Fail open like any other router failure: no preload this turn.
-      logger.warn(
-        `[capability-router] request=${turn.requestId} mode=${turn.mode} status=fallback reason=${errorName(error)} (hidden plugins unavailable)`,
-      );
-      return NOTHING;
-    }
-    const capabilities = routableCandidates(
-      turn.manifests,
-      turn.loaded,
-      hidden,
-      turn.hasCapability,
-    );
+    const capabilities = routableCandidates(turn.candidates);
     if (capabilities.length === 0) return NOTHING;
 
-    // The turn is prepared from a checkpoint read without its messages, so
-    // the router sees the current message only; `recentTurns` stays empty.
-    const input = { text, recentTurns: [], capabilities };
     const { requestId } = turn;
+    let recentTurns: string[] = [];
+    const evaluateAll = async (options?: DecisionEvaluateOptions) => {
+      try {
+        recentTurns = [...((await turn.recentTurns?.()) ?? [])];
+      } catch (error) {
+        logger.warn(
+          `[capability-router] request=${requestId} mode=${turn.mode} status=degraded reason=${errorName(error)} (recent turns unavailable)`,
+        );
+      }
+      return Promise.all(
+        batches(capabilities, CAPABILITY_PRELOAD_BATCH_SIZE).map((batch) =>
+          evaluator.evaluate(
+            capabilityPreloadDecision,
+            { text, recentTurns, capabilities: batch },
+            options,
+          ),
+        ),
+      );
+    };
 
     if (turn.mode === 'shadow') {
       const started = now();
       background(
-        evaluator
-          .evaluate(capabilityRouteDecision, input, turn.trace)
-          .then((evaluation) => {
-            const verdict = decideCapabilityRoute(evaluation, capabilities);
+        evaluateAll(turn.trace)
+          .then((evaluations) => {
+            const verdict = decideCapabilityPreload(
+              evaluations,
+              capabilities,
+              turn.threshold,
+            );
             logger.log(
               `[capability-router-shadow] request=${requestId} status=ok ` +
-                `needsCapability=${verdict.needsCapability.toFixed(2)} ` +
-                `capability=${verdict.capability ?? '-'} ` +
-                `capabilityConfidence=${verdict.capabilityConfidence?.toFixed(2) ?? '-'} ` +
-                `wouldPreload=${list(verdict.preload)} reason=${verdict.reason} ` +
+                `top=${topScores(verdict)} ` +
+                `wouldPreload=${list(verdict.preload)} ` +
+                `threshold=${turn.threshold ?? 'profile'} ` +
                 `calibrationProfile=${verdict.calibrationProfileRef ?? '-'} ` +
-                `latencyMs=${now() - started} provider=${evaluation.provider} model=${evaluation.model}`,
+                `latencyMs=${now() - started} provider=${evaluations[0]?.provider} model=${evaluations[0]?.model}`,
             );
             turn.onShadowVerdict?.(verdict.preload);
           })
@@ -240,25 +273,23 @@ export function createCapabilityRouter(
       return NOTHING;
     }
 
+    const started = now();
     try {
-      const evaluation = await evaluator.evaluate(
-        capabilityRouteDecision,
-        input,
-        {
-          ...turn.trace,
-          ...(turn.signal && { signal: turn.signal }),
-        },
+      const evaluations = await evaluateAll({
+        ...turn.trace,
+        ...(turn.signal && { signal: turn.signal }),
+      });
+      const verdict = decideCapabilityPreload(
+        evaluations,
+        capabilities,
+        turn.threshold,
       );
-      const verdict = decideCapabilityRoute(evaluation, capabilities);
-      if (verdict.preload.length === 0) {
-        logger.debug?.(
-          `[capability-router] request=${requestId} mode=on status=none reason=${verdict.reason} candidates=${capabilities.length}`,
-        );
-        return NOTHING;
-      }
       logger.log(
-        `[capability-router] request=${requestId} preloaded=${list(verdict.preload)} candidates=${capabilities.length}`,
+        `[capability-router] request=${requestId} mode=on status=${verdict.preload.length > 0 ? 'ok' : 'none'} ` +
+          `preloaded=${list(verdict.preload)} top=${topScores(verdict)} threshold=${turn.threshold ?? 'profile'} ` +
+          `candidates=${capabilities.length} recentTurns=${recentTurns.length} latencyMs=${now() - started}`,
       );
+      if (verdict.preload.length === 0) return NOTHING;
       return new Set(verdict.preload);
     } catch (error) {
       if (unavailable(error)) {

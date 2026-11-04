@@ -85,9 +85,10 @@ export interface IngestDeps {
    */
   userServerName(userDid: string): string | null;
   /**
-   * The bot's Matrix user id. Its first occurrence in a message is rewritten
-   * to `(USER MENTIONED YOU @AI_AGENT)` before the agent sees it, as the Node
-   * bridge does; omit to leave messages as sent.
+   * The bot's Matrix user id. Its own messages are dropped (`'own'`), and its
+   * first occurrence in a message is rewritten to `(USER MENTIONED YOU
+   * @AI_AGENT)` before the agent sees it, as the Node bridge does; omit to
+   * leave messages as sent.
    */
   botUserId?: string;
   debounceMs?: number;
@@ -210,6 +211,7 @@ export type OfferOutcome =
   | 'queued'
   | 'unverified'
   | 'empty'
+  | 'own'
   | 'unmapped'
   | 'foreign';
 
@@ -229,6 +231,13 @@ export class IngestPipeline {
    * for none); omitted, `canonicalAlias` is asked.
    */
   offer(msg: InboundMessage, alias?: string | null): OfferOutcome {
+    // The oracle's own events — its room mirrors and the channel files it
+    // posts in a session thread — are never a turn. The bot SDK already
+    // drops them before `onMessage`; this holds on every path that offers a
+    // message here (inbox replays included), and keeps a DID-shaped bot
+    // account from being attributed to itself.
+    if (this.deps.botUserId !== undefined && msg.sender === this.deps.botUserId)
+      return 'own';
     if (!msg.body.trim() && !msg.attachment) return 'empty';
     const attribution = attributeUser({
       alias: alias === undefined ? this.deps.canonicalAlias(msg.roomId) : alias,

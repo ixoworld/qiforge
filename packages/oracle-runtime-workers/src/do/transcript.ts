@@ -1,4 +1,4 @@
-import { userContent } from '../channels/replies';
+import { isDeliveryNoticeMessage, userContent } from '../channels/replies';
 /**
  * Transcript → client DTO. Port of `@ixo/common`'s
  * `transformGraphStateMessageToListMessageResponse` so `GET /messages/:id`
@@ -111,7 +111,7 @@ export function contentToText(content: BaseMessage['content']): string {
         if (typeof part === 'string') return part;
         if (part && typeof part === 'object' && 'text' in part) {
           const text = (part as { text?: unknown }).text;
-          // The retention placeholder is model-facing only; the transcript
+          // The attachment placeholder is model-facing only; the transcript
           // keeps listing the attachment from its metadata.
           return typeof text === 'string' && !isAttachmentPlaceholderText(text)
             ? text
@@ -138,6 +138,45 @@ export function visibleContent(message: BaseMessage): BaseMessage['content'] {
 /** `visibleContent` as text (titles, mirrors, indexing). */
 export function visibleText(message: BaseMessage): string {
   return contentToText(visibleContent(message));
+}
+
+/**
+ * Whether a stored message is one the user sees in the transcript. System and
+ * tool messages never are, nor a failed reply, nor anything the runtime wrote
+ * for the model about an attachment: the extracted text of a file (an AI
+ * message with an `attachment`) and `view_attachment` re-attaching a payload,
+ * nor a chat gateway's delivery notice.
+ */
+export function visibleToUser(message: BaseMessage): boolean {
+  if (message.type === 'system' || message.type === 'tool') return false;
+  const kw = (message.additional_kwargs ?? {}) as Record<string, unknown>;
+  if (kw.isError) return false;
+  if (message.type === 'ai' && Boolean(kw.attachment)) return false;
+  // A chat gateway's delivery notice: the model's, never a user message.
+  return !isAttachmentViewMessage(message) && !isDeliveryNoticeMessage(message);
+}
+
+/**
+ * The latest turns as the user saw them, oldest first and each as
+ * `user: …` or `assistant: …` cut to `maxChars`, from messages listed newest
+ * first. Only what `visibleToUser` lets through, without summaries and rows
+ * with no visible text.
+ */
+export function recentTurnTexts(
+  newestFirst: readonly BaseMessage[],
+  limit: number,
+  maxChars: number,
+): string[] {
+  const turns: string[] = [];
+  for (const message of newestFirst) {
+    if (turns.length === limit) break;
+    if (isSummarizationMessage(message) || !visibleToUser(message)) continue;
+    const text = visibleText(message).trim();
+    if (!text) continue;
+    const speaker = message.type === 'human' ? 'user' : 'assistant';
+    turns.push(`${speaker}: ${text.slice(0, maxChars)}`);
+  }
+  return turns.reverse();
 }
 
 /**
@@ -171,16 +210,8 @@ export async function transformTranscript(
   for (const message of messages) {
     const toolMsg = message.type === 'tool' ? (message as ToolMessage) : null;
     const kw = (message.additional_kwargs ?? {}) as Record<string, unknown>;
-    const isExtractionContext = message.type === 'ai' && Boolean(kw.attachment);
 
-    if (
-      message.type !== 'system' &&
-      message.type !== 'tool' &&
-      !kw.isError &&
-      !isExtractionContext &&
-      // `view_attachment` re-attaching an offloaded payload — model-facing.
-      !isAttachmentViewMessage(message)
-    ) {
+    if (visibleToUser(message)) {
       const reasoning = reasoningToText(kw.reasoning);
       const attachments =
         message.type === 'human'
@@ -333,9 +364,17 @@ export class TranscriptCursorError extends Error {
   }
 }
 
-/** A turn starts at a user message; the summarizer's bookkeeping row is not one. */
+/**
+ * A turn starts at a user message; the summarizer's bookkeeping row is not
+ * one, nor is a delivery notice (hidden, so its reply pages with the turn
+ * before it, where the Portal shows it).
+ */
 function startsTurn(row: ThreadMessageRow): boolean {
-  return row.message.type === 'human' && !isSummarizationMessage(row.message);
+  return (
+    row.message.type === 'human' &&
+    !isSummarizationMessage(row.message) &&
+    !isDeliveryNoticeMessage(row.message)
+  );
 }
 
 /** `GET /sessions/:id/messages` query → options, or the 400 to answer with. */

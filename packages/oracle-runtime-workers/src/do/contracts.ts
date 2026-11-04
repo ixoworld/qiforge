@@ -10,6 +10,7 @@ import type {
   ChannelAttachment,
   ChannelControlInput,
   ChannelControlOutcome,
+  ChannelFileNotice,
   ChannelReplyContext,
   ChannelReplyReference,
 } from '../channels/contract';
@@ -256,6 +257,13 @@ export interface OracleWorkerEnv {
    * `"ai": { "binding": "AI" }` in the wrangler config.
    */
   AI?: Ai;
+  /**
+   * Cloudflare Images binding. Optional: images sent natively to a model are
+   * downscaled to a 1568 px long edge as JPEG first (`attachments/resize.ts`); the
+   * sandbox keeps the original. Absent = images go as they are. Declare it
+   * with `"images": { "binding": "IMAGES" }` in the wrangler config.
+   */
+  IMAGES?: ImagesBinding;
 
   // --- llm ----------------------------------------------------------------
   OPEN_ROUTER_API_KEY: string;
@@ -272,6 +280,8 @@ export interface OracleWorkerEnv {
   LLM_STREAM_IDLE_TIMEOUT_MS?: string;
   LLM_BYO_STREAM_IDLE_TIMEOUT_MS?: string;
   LLM_STREAM_RETRIES?: string;
+  /** Most tokens one platform model call may generate, reasoning included (default 16384; 0 = the model's limit). */
+  LLM_MAX_OUTPUT_TOKENS?: string;
   /** LangGraph steps one turn may take before `GraphRecursionError` (default 600; Node hard-codes 200). */
   TURN_RECURSION_LIMIT?: string;
   /** Turn budget: tool attempts (default 120) and deadline in ms (600000). */
@@ -296,7 +306,12 @@ export interface OracleWorkerEnv {
   MODEL_CONTEXT_TOKENS?: string;
   MODEL_CONTEXT_OVERRIDES?: string;
   CONTEXT_SUMMARIZE_FRACTION?: string;
+  CONTEXT_SUMMARIZE_MAX_TOKENS?: string;
   CONTEXT_PRUNE_FRACTION?: string;
+  CONTEXT_PRUNE_MAX_TOKENS?: string;
+  CONTEXT_STALE_RESULT_TURNS?: string;
+  CONTEXT_CACHE_COLD_MS?: string;
+  CONTEXT_PLUGIN_IDLE_TURNS?: string;
   CONTEXT_RESULT_CAP_FRACTION?: string;
   CONTEXT_RESULT_CAP_MAX_CHARS?: string;
   CONTEXT_REQUEST_FRACTION?: string;
@@ -328,9 +343,14 @@ export interface OracleWorkerEnv {
   /**
    * Capability router (needs a `DECISION_PROVIDER`). `off` (default) never
    * evaluates; `shadow` evaluates and logs the verdict without preloading;
-   * `on` preloads the predicted on-demand plugin's tools for the turn.
+   * `on` loads the predicted plugins on the thread before the first model
+   * call.
    */
   CAPABILITY_ROUTER?: CapabilityRouterMode;
+  /** The score a preload needs on a warm turn (default 0.8; above 1, never). */
+  CAPABILITY_ROUTER_WARM_THRESHOLD?: string;
+  /** The score a preload needs on a cold turn (default 0.7). */
+  CAPABILITY_ROUTER_COLD_THRESHOLD?: string;
   /** Applies exclusively to authenticated channel admission; Portal/Matrix turns never route. */
   CHANNEL_SEMANTIC_ROUTING?: 'off' | 'shadow' | 'on';
   CHANNEL_SEMANTIC_ROUTING_BINDINGS?: string;
@@ -413,6 +433,12 @@ export interface TurnRequest {
     routingClarification?: string;
     /** Files the person sent with this message, as the gateway serves them. */
     attachments?: ChannelAttachment[];
+    /**
+     * The gateway's delivery notice this turn carries instead of a message
+     * from the person (`message` is empty): the model reads it as a note
+     * that is not the user's, and nothing shows it as a user message.
+     */
+    notice?: ChannelFileNotice;
   };
   executionProfile?: TaskExecutionProfile;
   identity: TurnIdentity;
@@ -726,6 +752,8 @@ export interface StorageStatus {
   uploadedGeneration?: number;
   lastChecksum?: string;
   flushFailures: number;
+  /** Set while the owner copy waits for a delegation instead of retrying (reason, since). */
+  flushWaitsForDelegation: { reason: string; since: number } | null;
   lastVacuumAt?: number;
   /** True once the user's legacy Matrix copy has been removed or found absent. */
   legacyCleared?: boolean;
@@ -1005,10 +1033,9 @@ export interface CreateRoomOptions {
 }
 
 /**
- * Deadline for one gateway media download, from opening it to the last byte
- * (the gateway's default applies when omitted). Only the timeout crosses the
- * RPC: an `AbortSignal` cannot, so the caller stops a transfer early by
- * cancelling the returned stream.
+ * Deadline for one gateway media event lookup (`eventMediaInfo`; the
+ * gateway's default applies when omitted). Only the timeout crosses the RPC:
+ * an `AbortSignal` cannot.
  */
 export interface MediaDownloadDeadline {
   timeoutMs?: number;
@@ -1023,22 +1050,20 @@ export interface MediaDownloadDeadline {
  */
 export interface MatrixGatewayObject extends Rpc.DurableObjectBranded {
   /**
-   * A media event's content as a stream, AS STORED: in an E2EE room the
-   * ciphertext plus the `EncryptedFile` fields to pipe through the SDK's
-   * `createAttachmentDecryptor` on the caller's side (a stream that errors
-   * on the far side of an RPC only surfaces here as a disconnect, so the
-   * hash check belongs to the consumer). Null when unknown or redacted.
+   * Where the media of event `eventId` in `roomId` lives, as small JSON: the
+   * gateway fetches and decrypts the EVENT (only it holds the room keys),
+   * never the media. The caller downloads `mxc` from the homeserver itself
+   * (`openHomeserverMedia`, with the plugin device's token) and decrypts it
+   * with `file` (`createAttachmentDecryptor`), so no media byte crosses the
+   * shared gateway object. Bounded by `opts.timeoutMs` (default the media
+   * download deadline). Null when the event is unknown, redacted or carries
+   * no media.
    */
-  downloadEventMediaStream(
+  eventMediaInfo(
     roomId: string,
     eventId: string,
     opts?: MediaDownloadDeadline,
-  ): Promise<MediaStream | null>;
-  /** Authenticated media download of an `mxc://` URI, as a stream. */
-  downloadMxcMediaStream(
-    mxc: string,
-    opts?: MediaDownloadDeadline,
-  ): Promise<ReadableStream<Uint8Array>>;
+  ): Promise<EventMediaInfo | null>;
   /** Forcibly reset the gateway object like a platform host drain (debug routes only). The call itself rejects. */
   debugAbortObject(): Promise<void>;
   /** Stop the bot (operator/debug; `ensureStarted`/cron brings it back). */
@@ -1065,11 +1090,16 @@ export interface MatrixGatewayObject extends Rpc.DurableObjectBranded {
   listOutbox(): Promise<OutboxRow[]>;
   /**
    * Credentials of the oracle's second, crypto-less device for plugins that
-   * run their own Matrix client (editor, flows). Logged in once with the
-   * account password, kept in the gateway's storage, re-logged in with the
-   * same device id if the homeserver ever rejects the token.
+   * run their own Matrix client (editor, flows) and for the user objects'
+   * own media transfers (channel file uploads, Matrix media downloads).
+   * Logged in once with the account password, kept in the gateway's
+   * storage; concurrent first calls share one login. A caller whose
+   * request the homeserver answered 401 passes the token it used as
+   * `rejected`: when that is still the cached token, the cache is dropped and
+   * the stored token re-validated (`whoami`), else the device is logged in
+   * again with the same device id — once, for every caller waiting.
    */
-  botCredentials(): Promise<BotCredentials>;
+  botCredentials(opts?: { rejected?: string }): Promise<BotCredentials>;
   status(): Promise<GatewayStatus>;
   /** Send a text message (encrypted when the room is). Returns the event id. */
   sendText(
@@ -1098,12 +1128,18 @@ export interface MatrixGatewayObject extends Rpc.DurableObjectBranded {
    * event id. `txnId` pins the transaction id, as for `sendText`: the
    * homeserver deduplicates by it per device, so a send retried after a lost
    * response returns the original event instead of posting a second one.
+   * `priority: 'background'` (channel text mirrors, channel file events)
+   * goes through the gateway's small background lane, so such sends never
+   * hold more than a few of the send path's places ahead of a reply
+   * (`interactive`, the default). Content carrying an attachment key
+   * (`file.key`) is refused for a room the gateway does not see as
+   * end-to-end encrypted.
    */
   sendEvent(
     roomId: string,
     type: string,
     content: JsonString,
-    opts?: { txnId?: string },
+    opts?: { txnId?: string; priority?: 'interactive' | 'background' },
   ): Promise<string>;
   /** Resolve the canonical user↔oracle room for a user DID (alias lookup, cached). */
   resolveUserRoom(
@@ -1128,7 +1164,7 @@ export interface MatrixGatewayObject extends Rpc.DurableObjectBranded {
   ): Promise<{ eventId: string }>;
   /**
    * The latest snapshot for `storageKey` as a stream, as stored (see
-   * `downloadEventMediaStream`), or null when none exists.
+   * `MediaStream`), or null when none exists.
    */
   downloadUserSnapshotStream(
     userDid: string,
@@ -1223,7 +1259,6 @@ export interface OutboxRow {
   enqueuedAt: number;
 }
 
-/** `MatrixBotDO.status()` plus the gateway's own turn bookkeeping. */
 /**
  * Media handed across the Durable Object boundary as a stream, as stored on
  * the homeserver: `file` is present when the event carried an encrypted
@@ -1239,6 +1274,19 @@ export interface MediaStream {
   filename?: string;
 }
 
+/**
+ * Where a media event's file lives (`MatrixGatewayObject.eventMediaInfo`):
+ * its `mxc://` URI and, for an encrypted attachment, the `EncryptedFile`
+ * fields to decrypt it with. `size` is the sender's `info.size` when set.
+ */
+export interface EventMediaInfo {
+  mxc: string;
+  file?: EncryptedFileInfo;
+  mimetype?: string;
+  filename?: string;
+  size?: number;
+}
+
 /** `MediaStream` of a user's snapshot, plus the media event that carries it. */
 export interface SnapshotStream extends MediaStream {
   eventId: string;
@@ -1252,6 +1300,7 @@ export interface GroupRoomInfo {
   groupLane: boolean;
 }
 
+/** `MatrixBotDO.status()` plus the gateway's own turn bookkeeping. */
 export interface GatewayStatus extends BotStatus {
   turns: { inFlight: number; waiting: number };
   /** Channel memory of group rooms: messages awaiting compaction, summary chunks, pinned facts. */

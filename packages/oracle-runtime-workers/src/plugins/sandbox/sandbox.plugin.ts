@@ -51,10 +51,20 @@ const siblingEnvSchema = z.object({
   SKILLS_CAPSULES_BASE_URL: z.string().url().optional(),
 });
 
+// In the guide and not in the summary: an `always` host would pay for it in
+// the capability block on top of the tool descriptions, and a preload delivers
+// a guide but not the manifest.
+const OPERATING_GUIDE = [
+  '### Sandbox',
+  '- `sandbox_run` writes anywhere through the shell, `/tmp` included. `sandbox_write_file` writes raw bytes under `/workspace/data/` only: paths like `/tmp/...` or `/workspace/tmp/...` are rejected.',
+  "- A file at a path the user names belongs in their library (`vfs`), not here. Report the path you really wrote: `/workspace/data/...` is the box, not the user's `/...`.",
+  '- The box is a scratch disk, not your file store. Files under `/workspace/data/` are pushed up to durable storage after each call, but nothing comes back down automatically and the box is wiped after a few idle minutes. Any file not created in the current call must be fetched with `load_artifact` before you can read it.',
+].join('\n');
+
 const manifest: PluginManifest = {
   title: 'Sandbox',
   summary:
-    'Per-user Linux box for code execution. `sandbox_run` runs shell/python (writes anywhere via shell — incl. `/tmp` for scratch). `sandbox_write_file` writes raw bytes BUT only under `/workspace/data/` — paths like `/tmp/...` or `/workspace/tmp/...` are rejected; use `sandbox_run` for those. STORAGE: the box is a scratch disk, not your file store. Files under `/workspace/data/` are pushed UP to durable storage after each call, but NOTHING comes back DOWN automatically and the box is wiped after a few idle minutes. Any file not created in the current call must be fetched with `load_artifact` before you can read it.',
+    'Per-user Linux box: `sandbox_run` runs shell or python, `sandbox_write_file` writes under `/workspace/data/`.',
   whenToUse: [
     "Execute a skill — call `sandbox_run` with `cid` so user + oracle secrets are injected; the skill folder mounts read-only at `/workspace/skills/<skill-name>/` (use the absolute paths from `load_skill`'s `skillFiles`).",
     'Read a skill file (SKILL.md, scripts, configs) — call `sandbox_run` with `cid` and shell: `cat /workspace/skills/<skill-name>/SKILL.md`, `ls /workspace/skills/<skill-name>/`, `grep -r "<pattern>" /workspace/skills/<skill-name>/`, or `sed -n "1,80p" <file>` for a line range. There is no dedicated `read_skill` tool.',
@@ -67,6 +77,7 @@ const manifest: PluginManifest = {
     'Always check the result envelope: `success === true` AND `exitCode === 0` before trusting `output`. On failure, READ the `error` text and change your approach — do not retry the same call with the same args.',
   ],
   whenNotToUse: [
+    'Saving a file at a path the user names: that is their library, use `vfs`.',
     'The value is already inline in chat — just use it; opening the sandbox to echo it back wastes a turn.',
     'Fetching a URL the user just mentioned — prefer `process_file`, which archives it as an artifact (pull it into the box with `load_artifact` when you need to read it).',
     'A long human-readable page (blog, article, news) — use the Firecrawl agent.',
@@ -139,7 +150,12 @@ const manifest: PluginManifest = {
       },
     },
   ],
-  visibility: 'always',
+  // Every tool loads together: running code, its files and artifacts and the
+  // skill lifecycle (`load_skill` included) depend on one another. A host
+  // that wants it on every turn sets `visibility: 'always'` through
+  // `manifestOverrides`.
+  visibility: 'on-demand',
+  brief: 'run code; run or publish skills; generate charts and reports',
   stability: 'stable',
   category: 'core',
   tags: ['sandbox', 'execution', 'workspace', 'artifacts'],
@@ -249,6 +265,7 @@ export class SandboxPlugin extends OraclePlugin {
   readonly name = SandboxPlugin.NAME;
   readonly version = '1.0.0';
   readonly manifest = manifest;
+  override readonly operatingGuide = OPERATING_GUIDE;
   override readonly configSchema = configSchema;
   override readonly autoDetectHint = 'SANDBOX_MCP_URL';
 
