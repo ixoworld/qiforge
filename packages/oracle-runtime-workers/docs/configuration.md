@@ -415,6 +415,15 @@ without its origin and RPC, or with an unsafe URL.
 | `ACTION_PROPOSALS_RPC_DEVNET`, `_TESTNET`, `_MAINNET` | Chain RPC base URL per network for verification: `https`, no credentials, query or fragment (a `/rpc/` path is fine). Devnet or testnet required when enabled; mainnet cards are refused by policy.                    |
 | `ACTION_TOPIC_PROPOSALS_ENABLED`                      | `'true'` adds the topic cards ([topic-action-proposals](topic-action-proposals.md)): discussion drafts and claim-access grants, their claims and step permits. Default `'false'`; requires `ACTION_PROPOSALS_ENABLED`. |
 
+### asks.world
+
+The bundled asks plugin ([asks](asks.md)) is off unless `ASKS_TOKEN_KEY`
+(secret) and `ORACLE_PUBLIC_URL` are set and `NETWORK` is `mainnet`,
+`testnet` or `devnet`, which picks the connector. `ASKS_WHATSAPP_RETURN_URL`
+and `ASKS_ALLOWED_DIDS` are optional. The oracle script also binds
+`ASKS_CONNECTIONS` to `AsksConnectionDO`, adds its migration and re-exports
+the class.
+
 ### Chain tools
 
 The bundled ixo-chain plugin ([chain-tools](chain-tools.md)): read-only

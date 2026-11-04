@@ -15,11 +15,16 @@ export { HubActionsPlugin } from './hub-actions/hub-actions.plugin';
  * `createOracleWorker({ plugins })` — plugins whose env keys are absent are
  * skipped by their `autoDetect`.
  *
+ * asks.world (`AsksPlugin`) self-gates on `ASKS_TOKEN_KEY`, `ORACLE_PUBLIC_URL`
+ * and `NETWORK`; the host also binds and exports `AsksConnectionDO`
+ * (`docs/asks.md`).
+ *
  * Shipped but opt-in (not in the bundle): `IxoTransactionPlugin`, which asks
  * the user's Portal wallet to sign chain transactions; an oracle adds
  * `new IxoTransactionPlugin()` itself.
  */
 import type { OraclePlugin } from '../plugin-api/oracle-plugin';
+import { AsksPlugin } from './asks';
 import { ComposioPlugin } from './composio';
 import { EditorPlugin } from './editor';
 import { TasksPlugin } from './tasks'; // pre-constructed object (defineOraclePlugin)
@@ -35,6 +40,7 @@ import { AttachmentsPlugin } from './attachments';
 import { MatrixGroupChatsPlugin } from './matrix-group-chats';
 import { PodCreatorPlugin } from './pod-creator';
 
+export * from './asks';
 export * from './composio';
 export * from './editor';
 export * from './flows';
@@ -64,6 +70,7 @@ export const aguiPlugin = new AGUIPlugin();
 export const attachmentsPlugin = new AttachmentsPlugin();
 export const matrixGroupChatsPlugin = new MatrixGroupChatsPlugin();
 export const podCreatorPlugin = new PodCreatorPlugin();
+export const asksPlugin = new AsksPlugin();
 /** TasksPlugin is already an object (defineOraclePlugin), not a class. */
 export const tasksPlugin = TasksPlugin;
 
@@ -90,4 +97,5 @@ export const BUNDLED_WORKERS_PLUGINS = [
   attachmentsPlugin,
   matrixGroupChatsPlugin,
   podCreatorPlugin,
+  asksPlugin,
 ] as const satisfies readonly OraclePlugin[];
