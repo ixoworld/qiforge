@@ -33,8 +33,9 @@ import {
 const manifest: PluginManifest = {
   title: 'Portal',
   summary:
-    "Browser-side actions on the user's Portal UI — opens URLs, manipulates the DOM, runs FE-defined browser tools.",
+    "The user's Portal UI: action cards (prepare a bid or claim on an open Flow step, questions, approvals), open forms, Topics, domains, pages, navigation and local datasets — tools the Portal declares for this request.",
   whenToUse: [
+    'User asks to prepare, fill in or submit a bid or a claim: call `list_action_cards`, then `prepare_action_card`.',
     'User asks for an action the Portal FE exposes as a browser tool (declared in `state.browserTools`).',
     "A task needs a browser-side capability the server can't do alone — open a URL in the user's tab, click a Portal button, fill a form.",
   ],

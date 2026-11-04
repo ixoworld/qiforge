@@ -692,6 +692,18 @@ describe('createToolRepetitionGuardMiddleware', () => {
       };
     };
 
+    it('stops a turn that alternates between discovery tools instead of acting', async () => {
+      const { wrap } = guard();
+      const history: BaseMessage[] = [new HumanMessage('could we work on the claim?')];
+      for (let i = 0; i < 3; i += 1) history.push(...ran('list_capabilities', {}), ...ran('list_skills', {}));
+      const blocked = await call(wrap, 'load_capability', { name: 'portal' }, history);
+      expect(blocked.ran).toBe(false);
+      expect(String(blocked.result.content)).toContain('Stop searching');
+      // Acting with an available tool still runs, and a new turn may search again.
+      expect((await call(wrap, 'get_status', {}, history)).ran).toBe(true);
+      expect((await call(wrap, 'list_skills', {}, [...history, new HumanMessage('try again')])).ran).toBe(true);
+    });
+
     it('runs an identical write once per turn and quotes the earlier outcome', async () => {
       const { wrap, warn } = guard();
       const args = { to: 'alice', text: 'hi' };

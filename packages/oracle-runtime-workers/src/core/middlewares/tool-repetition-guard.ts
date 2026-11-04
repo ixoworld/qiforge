@@ -20,6 +20,16 @@ export interface RepetitionCaps {
 
 export const DEFAULT_REPETITION_CAPS: RepetitionCaps = { reads: 5, writes: 1 };
 
+/** Tools that only find other tools; a model alternating between them never trips the identical-call cap. */
+export const DISCOVERY_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'list_capabilities',
+  'load_capability',
+  'list_skills',
+  'search_skills',
+]);
+/** Discovery calls a turn may make, whatever their arguments. */
+export const MAX_DISCOVERY_CALLS = 6;
+
 /**
  * Parse `TURN_MAX_IDENTICAL_READS` / `TURN_MAX_IDENTICAL_WRITES`; anything
  * that is not a positive number keeps its default (as `turnLimitsFromEnv`).
@@ -109,6 +119,28 @@ export const createToolRepetitionGuardMiddleware = (
       const opening = turnStart(messages);
       const start = Math.max(opening, messages.length - lookback, 0);
       const argsById = toolCallArgsById(messages, start);
+
+      if (DISCOVERY_TOOL_NAMES.has(toolName)) {
+        let discovered = 0;
+        for (let i = opening; i < messages.length; i++) {
+          const msg = messages[i];
+          if (msg instanceof ToolMessage && DISCOVERY_TOOL_NAMES.has(msg.name ?? '')) discovered += 1;
+        }
+        if (discovered >= MAX_DISCOVERY_CALLS) {
+          logger.warn(`Repetition guard: ${toolName} refused after ${discovered} discovery calls this turn`);
+          return new ToolMessage({
+            content: [
+              `You have already searched capabilities and skills ${discovered} times in this turn, so \`${toolName}\` was NOT run.`,
+              '',
+              'Stop searching. Act with the tools you already have: read their descriptions and call the one that fits the request,',
+              'or tell the user what you could not find and ask them what they want.',
+            ].join('\n'),
+            tool_call_id: toolCall.id ?? '',
+            name: toolName,
+            status: 'error',
+          });
+        }
+      }
       // The turn's calls a mid-turn summary condensed away (oldest first):
       // only while the lookback still reaches the summary.
       const openingMessage = messages[opening];
