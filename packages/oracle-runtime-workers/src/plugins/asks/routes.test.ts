@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { AsksConnection, AsksWorkerEnv } from './connection';
-import { handleCallback, handleClientDocument, handleStart } from './routes';
+import {
+  CHECK,
+  CROSS,
+  handleCallback,
+  handleClientDocument,
+  handleStart,
+} from './routes';
 import { deriveKeys, objectNameOf } from './oauth';
 import {
   accountAnswer,
@@ -21,12 +27,8 @@ function setup(account = () => accountAnswer()) {
   const net = recordingFetch((call) =>
     call.url.endsWith('/oauth/revoke') ? json({}) : tokenAnswer(1),
   );
-  const { connection } = connectionWith(
-    net.fetcher,
-    { now: 0 },
-    undefined,
-    account,
-  );
+  const clock = { now: 0 };
+  const { connection } = connectionWith(net.fetcher, clock, undefined, account);
   const objects = new Map<string, AsksConnection>([[NAME, connection]]);
   const env: AsksWorkerEnv = {
     NETWORK: 'devnet',
@@ -39,7 +41,7 @@ function setup(account = () => accountAnswer()) {
       get: (id: string) => objects.get(id),
     } as unknown as NonNullable<AsksWorkerEnv['ASKS_CONNECTIONS']>,
   };
-  return { env, connection, net };
+  return { env, connection, net, clock };
 }
 
 const callback = (query: Record<string, string>) =>
@@ -91,7 +93,7 @@ describe('routes', () => {
       env,
     );
     expect(forged.status).toBe(200);
-    expect(await forged.text()).toContain('asks is not connected');
+    expect(await forged.text()).toContain('This link won’t work');
   });
 
   it('callback refuses an answer from another issuer (RFC 9207) without trading the code', async () => {
@@ -124,11 +126,14 @@ describe('routes', () => {
     );
     const html = await page.text();
     expect(page.headers.get('content-type')).toContain('text/html');
-    expect(html).toContain('asks is connected');
-    expect(html).toContain('Back to WhatsApp');
+    expect(html).toContain('You’re connected');
     expect(html).toContain(
-      'href="https://wa.me/12019082266?text=I%27m%20connected"',
+      'Personal Agent (Devnet) is now linked to your asks.world account.',
     );
+    expect(html).toContain(
+      '<a class="button" href="https://wa.me/12019082266?text=I%27m%20connected">Back to WhatsApp</a>',
+    );
+    expect(html).toContain(`<path d="${CHECK}"/>`);
     expect(await connection.status()).toEqual({
       connected: true,
       pending: false,
@@ -148,19 +153,21 @@ describe('routes', () => {
         env,
       )
     ).text();
-    expect(portal).toContain('Go back to your chat');
-    expect(portal).not.toContain('Back to WhatsApp');
+    expect(portal).toContain(
+      '<p class="next">Go back to your chat and carry on.</p>',
+    );
+    expect(portal).not.toContain('class="button"');
   });
 
   it('callback refuses a sign-in with another asks account, or one asks cannot confirm', async () => {
     for (const [account, words] of [
       [
         () => accountAnswer(OTHER_ADDRESS),
-        'belongs to a different asks account than the one using this chat. Nothing was linked.',
+        'That’s a different account</h1>\n<p class="line">You signed in with a different asks.world account from the one Personal Agent (Devnet) uses. Nothing was linked.',
       ],
       [
         () => json({}, 502),
-        'We couldn&#39;t confirm your asks account just now. Nothing was linked. Try again from your chat.',
+        'asks.world didn’t answer just now. Nothing was linked.</p>\n<p class="next">Try again from your chat.</p>',
       ],
     ] as const) {
       const { env, connection } = setup(account);
@@ -174,7 +181,8 @@ describe('routes', () => {
         )
       ).text();
       expect(html).toContain(words);
-      expect(html).not.toContain('Back to WhatsApp');
+      expect(html).not.toContain('class="button"');
+      expect(html).toContain(`<path d="${CROSS}"/>`);
       expect((await connection.status()).connected).toBe(false);
     }
   });
@@ -185,7 +193,7 @@ describe('routes', () => {
       setup().env,
     );
     expect(page.status).toBe(200);
-    expect(await page.text()).toContain('asks is not connected');
+    expect(await page.text()).toContain('This link won’t work');
   });
 
   it('callback with an error says so and keeps nothing', async () => {
@@ -201,7 +209,82 @@ describe('routes', () => {
       }),
       env,
     );
-    expect(await page.text()).toContain('not finished');
+    expect(await page.text()).toContain('Sign-in wasn’t finished');
     expect((await connection.status()).connected).toBe(false);
+  });
+
+  it('callback names an expired or used link, and a reply with no code', async () => {
+    const { env, connection, clock } = setup();
+    const begin = async () =>
+      (await connection.begin(PERSON_DID, 'chat')).link.split('/').pop()!;
+    const answer = async (state: string, code = 'c') =>
+      (
+        await handleCallback(
+          callback({
+            ...(code ? { code } : {}),
+            state,
+            iss: 'https://dev.asks.world',
+          }),
+          env,
+        )
+      ).text();
+
+    const late = await begin();
+    clock.now += 16 * 60_000;
+    expect(await answer(late)).toContain(
+      'This link has expired</h1>\n<p class="line">The sign-in took longer than 15 minutes.',
+    );
+
+    const once = await begin();
+    await answer(once);
+    expect(await answer(once)).toContain('This link was already used</h1>');
+
+    const noCode = await answer(await begin(), '');
+    expect(noCode).toContain(
+      'Something went wrong</h1>\n<p class="line">asks.world sent no sign-in code.',
+    );
+    for (const html of [noCode, await answer(once)]) {
+      expect(html).toContain(
+        '<p class="next">Ask in your chat for a new sign-in link.</p>',
+      );
+      expect(html).toContain(`<path d="${CROSS}"/>`);
+      expect(html).not.toContain('class="button"');
+    }
+  });
+
+  it('start names an expired link', async () => {
+    const { env, connection, clock } = setup();
+    const { link } = await connection.begin(PERSON_DID, 'whatsapp');
+    clock.now += 16 * 60_000;
+    expect(await (await handleStart(new Request(link), env)).text()).toContain(
+      'This link has expired</h1>\n<p class="line">Sign-in links last 15 minutes.',
+    );
+  });
+
+  it('escapes the oracle name and the return link, and keeps the strict headers', async () => {
+    const { env, connection } = setup();
+    const state = (await connection.begin(PERSON_DID, 'whatsapp')).link
+      .split('/')
+      .pop()!;
+    const response = await handleCallback(
+      callback({ code: 'c', state, iss: 'https://dev.asks.world' }),
+      {
+        ...env,
+        ORACLE_NAME: '<b>Bot</b>',
+        ASKS_WHATSAPP_RETURN_URL: 'https://wa.me/1?text="><script>',
+      },
+    );
+    const html = await response.text();
+    expect(html).not.toContain('<b>');
+    expect(html).not.toContain('<script>');
+    expect(html).toContain(
+      '<span class="who">&#60;b&#62;Bot&#60;/b&#62;</span>',
+    );
+    expect(html).toContain(
+      'href="https://wa.me/1?text=&#34;&#62;&#60;script&#62;"',
+    );
+    expect(response.headers.get('content-security-policy')).toBe(
+      "default-src 'none'; style-src 'unsafe-inline'",
+    );
   });
 });
