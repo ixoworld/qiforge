@@ -527,6 +527,11 @@ endpoint is still alpha, so the OpenRouter adapter pins a specific Jev model
 version by default rather than tracking `latest`; Cloudflare uses the
 account's `typesafe/jev` model.
 
+When the OpenRouter request fails (no answer, a non-2xx status or an
+unreadable answer), the adapter asks `microsoft/microsoft-decision-1` once with
+the same request; an abort is never retried. `fallbackModel: null` on
+`OpenRouterJevDecisionAdapter` turns this off.
+
 ### Jev mapping
 
 All Jev adapters share one wire layer (`packages/common/src/ai/decisions/jev/`)

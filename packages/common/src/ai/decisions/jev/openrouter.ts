@@ -15,6 +15,10 @@ import {
 
 const OPENROUTER_API_BASE = 'https://openrouter.ai';
 
+/** Asked when the main model's request fails; a different vendor and host from Jev. */
+export const OPENROUTER_FALLBACK_DECISION_MODEL =
+  'microsoft/microsoft-decision-1';
+
 export interface OpenRouterJevAdapterOptions {
   apiKey: string;
   model?: string;
@@ -22,6 +26,12 @@ export interface OpenRouterJevAdapterOptions {
   fetch?: typeof globalThis.fetch;
   /** Extra request headers, e.g. OpenRouter's `HTTP-Referer` / `X-Title`. */
   headers?: Record<string, string>;
+  /**
+   * Model asked once more with the same request when the first model's
+   * request fails (no answer, a non-2xx status, or an unreadable answer).
+   * Defaults to {@link OPENROUTER_FALLBACK_DECISION_MODEL}; `null` turns it off.
+   */
+  fallbackModel?: string | null;
 }
 
 /** Runs Jev through OpenRouter's decisions endpoint. */
@@ -34,6 +44,7 @@ export class OpenRouterJevDecisionAdapter implements DecisionAdapter {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly extraHeaders: Record<string, string>;
+  private readonly fallbackModel: string | null;
 
   constructor(options: OpenRouterJevAdapterOptions) {
     if (!options.apiKey.trim()) {
@@ -53,9 +64,36 @@ export class OpenRouterJevDecisionAdapter implements DecisionAdapter {
     this.baseUrl = (options.baseUrl ?? OPENROUTER_API_BASE).replace(/\/$/, '');
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.extraHeaders = { ...options.headers };
+    const fallback =
+      options.fallbackModel === undefined
+        ? OPENROUTER_FALLBACK_DECISION_MODEL
+        : options.fallbackModel?.trim() || null;
+    this.fallbackModel = fallback === this.model ? null : fallback;
   }
 
   async evaluate(
+    request: DecisionRequest,
+    options?: DecisionProviderOptions,
+  ): Promise<DecisionProviderResult> {
+    try {
+      return await this.evaluateWith(
+        this.model,
+        this.capabilities.modelPinning,
+        request,
+        options,
+      );
+    } catch (error) {
+      // An abort is rethrown as is, never retried.
+      if (this.fallbackModel === null || !(error instanceof JevDecisionError)) {
+        throw error;
+      }
+      return this.evaluateWith(this.fallbackModel, 'unknown', request, options);
+    }
+  }
+
+  private async evaluateWith(
+    model: string,
+    modelPinning: DecisionProviderCapabilities['modelPinning'],
     request: DecisionRequest,
     options?: DecisionProviderOptions,
   ): Promise<DecisionProviderResult> {
@@ -69,7 +107,7 @@ export class OpenRouterJevDecisionAdapter implements DecisionAdapter {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model: this.model,
+          model,
           state: request.state,
           questions: toJevQuestions(request),
         }),
@@ -112,9 +150,9 @@ export class OpenRouterJevDecisionAdapter implements DecisionAdapter {
       provenance: {
         method: { kind: 'provider-native' },
         ...systemOneInferenceProvenance(
-          this.model,
+          model,
           result.modelVersion,
-          this.capabilities.modelPinning,
+          modelPinning,
         ),
       },
     };

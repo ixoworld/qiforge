@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { DecisionRequest } from '../types.js';
-import { OpenRouterJevDecisionAdapter } from './openrouter.js';
+import {
+  OPENROUTER_FALLBACK_DECISION_MODEL,
+  OpenRouterJevDecisionAdapter,
+} from './openrouter.js';
 import { JevDecisionError } from './wire.js';
 
 const request: DecisionRequest = {
@@ -213,6 +216,131 @@ describe('OpenRouterJevDecisionAdapter', () => {
       name: 'JevDecisionError',
       provider: 'openrouter',
       cause: failure,
+    });
+  });
+
+  describe('fallback model', () => {
+    const answer = (model: string) =>
+      jsonResponse({
+        model,
+        answers: {
+          work: { type: 'noul', noul: 0.7 },
+          service: {
+            type: 'choice',
+            choice: 'tax',
+            confidence: 0.6,
+            probabilities: { tax: 0.6, none: 0.4 },
+          },
+        },
+      });
+    const requestedModels = (
+      fetchMock: ReturnType<typeof vi.fn<typeof fetch>>,
+    ) =>
+      fetchMock.mock.calls.map(
+        ([, init]) =>
+          (JSON.parse(String(init?.body)) as { model: string }).model,
+      );
+
+    it('asks the Microsoft model once when the Jev request fails', async () => {
+      const fetchMock = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(jsonResponse({ error: { code: 503 } }, 503))
+        .mockResolvedValueOnce(
+          answer('microsoft/microsoft-decision-1-20261009'),
+        );
+      const adapter = new OpenRouterJevDecisionAdapter({
+        apiKey: 'or-key',
+        fetch: fetchMock,
+      });
+
+      const result = await adapter.evaluate(request);
+
+      expect(requestedModels(fetchMock)).toEqual([
+        'typesafe/jev-1.13',
+        OPENROUTER_FALLBACK_DECISION_MODEL,
+      ]);
+      expect(result.answers.work).toEqual({
+        kind: 'boolean',
+        probabilityTrue: 0.7,
+      });
+      expect(result.provenance).toMatchObject({
+        requestedModel: 'microsoft/microsoft-decision-1',
+        returnedModel: 'microsoft/microsoft-decision-1-20261009',
+        modelPinning: 'unknown',
+      });
+    });
+
+    it('falls back on a transport failure and an unreadable answer too', async () => {
+      for (const failure of [
+        async () => {
+          throw new Error('ECONNRESET');
+        },
+        async () => jsonResponse({ answers: { work: { type: 'freeform' } } }),
+      ]) {
+        const fetchMock = vi
+          .fn<typeof fetch>()
+          .mockImplementationOnce(failure)
+          .mockResolvedValueOnce(answer('microsoft/microsoft-decision-1'));
+        const adapter = new OpenRouterJevDecisionAdapter({
+          apiKey: 'or-key',
+          fetch: fetchMock,
+        });
+        await expect(adapter.evaluate(request)).resolves.toBeDefined();
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+      }
+    });
+
+    it('does not ask the fallback after a success or an abort', async () => {
+      const ok = vi.fn<typeof fetch>(async () => answer('typesafe/jev-1.13'));
+      await new OpenRouterJevDecisionAdapter({
+        apiKey: 'or-key',
+        fetch: ok,
+      }).evaluate(request);
+      expect(ok).toHaveBeenCalledTimes(1);
+
+      const controller = new AbortController();
+      const aborted = new DOMException('Aborted', 'AbortError');
+      const aborting = vi.fn<typeof fetch>(async () => {
+        controller.abort();
+        throw aborted;
+      });
+      await expect(
+        new OpenRouterJevDecisionAdapter({
+          apiKey: 'or-key',
+          fetch: aborting,
+        }).evaluate(request, { signal: controller.signal }),
+      ).rejects.toBe(aborted);
+      expect(aborting).toHaveBeenCalledTimes(1);
+    });
+
+    it('throws when the fallback fails as well', async () => {
+      const fetchMock = vi.fn<typeof fetch>(async () =>
+        jsonResponse({ error: { code: 502 } }, 502),
+      );
+      const adapter = new OpenRouterJevDecisionAdapter({
+        apiKey: 'or-key',
+        fetch: fetchMock,
+      });
+      await expect(adapter.evaluate(request)).rejects.toMatchObject({
+        name: 'JevDecisionError',
+        status: 502,
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('is off with `fallbackModel: null`', async () => {
+      const fetchMock = vi.fn<typeof fetch>(async () =>
+        jsonResponse({ error: { code: 503 } }, 503),
+      );
+      const adapter = new OpenRouterJevDecisionAdapter({
+        apiKey: 'or-key',
+        fetch: fetchMock,
+        fallbackModel: null,
+      });
+      await expect(adapter.evaluate(request)).rejects.toBeInstanceOf(
+        JevDecisionError,
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
   });
 });
