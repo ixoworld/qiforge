@@ -1,5 +1,12 @@
 # @ixo/oracles-client-sdk
 
+## 1.9.1
+
+### Patch Changes
+
+- Updated dependencies [[`86d7813`](https://github.com/ixoworld/qiforge/commit/86d7813cc08706f2f4471fc869b3ea46de6e6c1e)]:
+  - @ixo/action-interactions@0.1.1
+
 ## 1.9.0
 
 ### Minor Changes

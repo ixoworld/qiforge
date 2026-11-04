@@ -1,5 +1,11 @@
 # @ixo/action-interactions
 
+## 0.1.1
+
+### Patch Changes
+
+- [#471](https://github.com/ixoworld/qiforge/pull/471) [`86d7813`](https://github.com/ixoworld/qiforge/commit/86d7813cc08706f2f4471fc869b3ea46de6e6c1e) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - First release published from CI with npm trusted publishing (0.1.0 was published by hand to create the package).
+
 ## 0.1.0
 
 ### Minor Changes
