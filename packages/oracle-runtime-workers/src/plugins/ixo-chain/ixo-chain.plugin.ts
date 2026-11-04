@@ -23,7 +23,7 @@ import {
   type Source,
 } from './http';
 import { KINDS, kindByName, kindNames } from './kinds/registry';
-import type { KindDef } from './kinds/types';
+import { argKeys, type KindDef } from './kinds/types';
 import {
   chainLookup,
   cutRow,
@@ -426,11 +426,11 @@ const manifest: PluginManifest = {
     {
       user: 'Did I get paid for my claims in collection 8250?',
       thought:
-        "The user's claims there (evaluation and payment status) and the collection's payment terms, in one lookup.",
+        "The user's claims there (agent: their own address; evaluation and payment status) and the collection's payment terms, in one lookup.",
       tool: 'chain_lookup',
       args: {
         requests: [
-          { kind: 'claims', args: { collectionId: '8250' } },
+          { kind: 'claims', args: { agent: 'ixo1…', collectionId: '8250' } },
           { kind: 'claim_collection', args: { id: '8250' } },
         ],
       },
@@ -452,10 +452,11 @@ const manifest: PluginManifest = {
   // Hosts that want it on every turn set `visibility: 'always'` through
   // `manifestOverrides`.
   visibility: 'on-demand',
+  brief: 'read the IXO chain: balances, entities, claims, tokens',
   stability: 'beta',
 };
 
-/** Read-only and transfer rule; also in the tool descriptions, as a capability-router preload shows no operating guide. */
+/** Read-only and transfer rule; also in the tool descriptions, so each tool reads correctly on its own. */
 const READ_ONLY_RULE =
   "Read-only. For a transfer use this turn's transfer tools; on a channel read `hub_action_options` first (the Hub applies the account's limits).";
 /** Chain text is written by anyone; also in the `chain_lookup` description. */
@@ -477,6 +478,29 @@ const LOOKUP_UNITS_RULE =
  */
 const NAMES_RULE =
   'Call people and things by their `names` entry; give an address or DID only when asked; beside a `selfChosen` name the user did not pick, also give the short address (first 12 … last 6 characters).';
+
+/**
+ * What the list of arguments alone would mislead on: `claims` with a
+ * `collectionId` reads as the collection's claims, but it stays one agent's.
+ */
+const ARG_NOTES: Record<string, string> = {
+  claims: ' [default: user]',
+  claim_collection: ' [totals]',
+};
+
+/**
+ * Every kind's arguments besides `address` and `first`, from the kinds' own
+ * schemas: known without a `describe_chain_kinds` round trip, and they cannot
+ * drift.
+ */
+export const KIND_ARGS = KINDS.flatMap((kind) => {
+  const keys = argKeys(kind.args).keys.filter(
+    (key) => key !== 'address' && key !== 'first',
+  );
+  return keys.length
+    ? [`${kind.name}(${keys.join(',')})${ARG_NOTES[kind.name] ?? ''}`]
+    : [];
+}).join(' ');
 
 /** Says the overview is broad and costly; its units, text and names rules are `chain_lookup`'s, bound beside it. */
 const OVERVIEW_DESCRIPTION = [
@@ -543,7 +567,7 @@ export class IxoChainPlugin extends OraclePlugin {
         name: 'chain_lookup',
         description: [
           'IXO chain data: 1–8 `requests` `{ kind, args }`, each answered on its own (`ok`, or `reason` + `retryable`).',
-          "`describe_chain_kinds` gives a kind's `args`; account args: ixo1… or did:ixo:ixo1… (default: the user); lists: `first` 1–20.",
+          `\`args\`: account args take ixo1… or did:ixo:ixo1… (default: the user); \`address\` on most kinds, \`first\` 1–20 on lists; others: ${KIND_ARGS}. \`describe_chain_kinds\` explains a kind.`,
           '`source`: `chain` live, `blocksync` indexed (seconds behind).',
           LOOKUP_UNITS_RULE,
           NETWORK_RULE,

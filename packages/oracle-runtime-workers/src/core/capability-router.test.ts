@@ -1,8 +1,11 @@
 import {
   AmbiguousDecisionProviderError,
+  CAPABILITY_PRELOAD_BATCH_SIZE,
+  CAPABILITY_PRELOAD_CALIBRATION_PROFILE,
+  CAPABILITY_PRELOAD_WARM_THRESHOLD,
+  CAPABILITY_ROUTE_DECISION_NAME,
   DecisionProviderUnavailableError,
-  capabilityRouteDecision,
-  noCapabilityOption,
+  capabilityPreloadDecision,
   type DecisionAnswer,
   type DecisionEvaluation,
   type DecisionEvaluator,
@@ -12,22 +15,17 @@ import type { Logger } from '../plugin-api/types';
 import {
   capabilityRouterMode,
   createCapabilityRouter,
+  preloadThreshold,
   routableCandidates,
   shadowAgreement,
   type CapabilityRouteTurn,
 } from './capability-router';
-import { createRegistries, type RegisteredManifest } from './registries';
-import { delegationHasCapability } from './runtime-context';
-import {
-  makeBuildCtx,
-  makeManifest,
-  makePlugin,
-  makeTool,
-} from './test-fixtures';
-import { bootHiddenPlugins } from './tool-access';
+import type { RegisteredManifest } from './registries';
+import { makeManifest } from './test-fixtures';
 
 const MESSAGE = 'Will it rain in Cairo tomorrow?';
 
+/** What the build found left to load (`createMainAgent`). */
 const manifests: RegisteredManifest[] = [
   {
     pluginName: 'weather',
@@ -46,53 +44,38 @@ const manifests: RegisteredManifest[] = [
       visibility: undefined,
     }),
   },
-  {
-    pluginName: 'memory',
-    manifest: makeManifest({
-      title: 'Memory',
-      summary: 'Recall.',
-      visibility: 'on-demand',
-    }),
-  },
-  {
-    pluginName: 'skills',
-    manifest: makeManifest({ title: 'Skills', summary: 'Skills registry.' }),
-  },
-  {
-    pluginName: 'telemetry',
-    manifest: makeManifest({
-      title: 'Telemetry',
-      summary: 'Silent bookkeeping.',
-      visibility: 'silent',
-    }),
-  },
 ];
 
-/** `weather` and `payments` remain: `memory` is loaded, `skills` is always, `telemetry` silent. */
-const loaded: ReadonlySet<string> = new Set(['memory']);
-const CANDIDATE_NAMES = ['weather', 'payments'];
-
 function evaluation(
-  probabilityTrue: number,
-  value: string,
-  confidence: number,
+  capabilities: ReadonlyArray<{ name: string }>,
+  scores: Record<string, number>,
 ): DecisionEvaluation {
-  const answers: Record<string, DecisionAnswer> = {
-    needsCapability: { kind: 'boolean', probabilityTrue },
-    capability: {
-      kind: 'choice',
-      value,
-      confidence,
-      probabilities: { [value]: confidence },
-    },
-  };
+  const answers: Record<string, DecisionAnswer> = Object.fromEntries(
+    capabilities.map(({ name }) => [
+      name,
+      { kind: 'boolean', probabilityTrue: scores[name] ?? 0 },
+    ]),
+  );
   return {
-    decision: { name: capabilityRouteDecision.name, version: '1.0.0' },
+    decision: {
+      name: capabilityPreloadDecision.name,
+      version: capabilityPreloadDecision.version,
+    },
     provider: 'stub',
     model: 'stub-model',
     answers,
     latencyMs: 7,
     evaluatedAt: '2026-09-22T00:00:00.000Z',
+  };
+}
+
+/** An evaluator body answering every offered candidate: `scores`, else 0. */
+function scored(scores: Record<string, number>) {
+  return async (...args: unknown[]): Promise<DecisionEvaluation> => {
+    const { capabilities } = args[1] as {
+      capabilities: Array<{ name: string }>;
+    };
+    return evaluation(capabilities, scores);
   };
 }
 
@@ -121,8 +104,7 @@ function turn(
 ): CapabilityRouteTurn {
   return {
     mode: 'on',
-    manifests,
-    loaded,
+    candidates: manifests,
     text: MESSAGE,
     requestId: 'req-1',
     ...overrides,
@@ -139,193 +121,60 @@ describe('capabilityRouterMode', () => {
   });
 });
 
+describe('preloadThreshold', () => {
+  it('asks a warm turn for more, and leaves a cold turn to the calibration profile', () => {
+    expect(preloadThreshold(false, {})).toEqual({
+      threshold: CAPABILITY_PRELOAD_WARM_THRESHOLD,
+    });
+    expect(preloadThreshold(true, {})).toEqual({});
+  });
+
+  it('takes the operator value for the kind of turn', () => {
+    const env = {
+      CAPABILITY_ROUTER_COLD_THRESHOLD: 0.5,
+      CAPABILITY_ROUTER_WARM_THRESHOLD: 1.1,
+    };
+    expect(preloadThreshold(true, env)).toEqual({ threshold: 0.5 });
+    expect(preloadThreshold(false, env)).toEqual({ threshold: 1.1 });
+  });
+});
+
 describe('routableCandidates', () => {
-  it('keeps effectively on-demand plugins the thread has not loaded', () => {
-    expect(routableCandidates(manifests, loaded)).toEqual([
+  it('describes a plugin by its summary and whenToUse lines', () => {
+    const [candidate] = routableCandidates([
       {
-        name: 'weather',
-        title: 'Weather',
-        summary: 'Forecasts and conditions.',
-      },
-      { name: 'payments', title: 'Payments', summary: 'Charge for services.' },
-    ]);
-    expect(
-      routableCandidates(
-        manifests,
-        new Set([...loaded, 'weather', 'payments']),
-      ),
-    ).toEqual([]);
-  });
-
-  it('never names a plugin whose tools are all admin tools the delegation does not grant', async () => {
-    const registries = createRegistries();
-    const payments = makePlugin({
-      name: 'payments',
-      manifest: makeManifest({ title: 'Payments', visibility: 'on-demand' }),
-      getTools: () => [makeTool('refund', { plane: 'admin' })],
-    });
-    registries.tools.register(payments);
-    registries.subAgents.register(payments);
-    const hidden = (
-      capabilities: Array<{ resource: string; action: string }>,
-    ) =>
-      bootHiddenPlugins({
-        registries,
-        buildCtx: makeBuildCtx(),
-        has: (resource, action) =>
-          delegationHasCapability({ capabilities }, resource, action),
-      });
-
-    const denied = await hidden([]);
-    expect(denied).toEqual(new Set(['payments']));
-    expect(
-      routableCandidates(manifests, loaded, denied).map((c) => c.name),
-    ).toEqual(['weather']);
-
-    const granted = await hidden([
-      {
-        resource: 'ixo:qiforge:admin-tool/payments/refund',
-        action: 'admin-tool/invoke',
+        pluginName: 'tokens',
+        manifest: makeManifest({
+          title: 'Tokens',
+          summary: 'Moves tokens.',
+          whenToUse: ['The user asks to send.', 'The user asks to retire.'],
+          visibility: 'on-demand',
+        }),
       },
     ]);
-    expect(
-      routableCandidates(manifests, loaded, granted).map((c) => c.name),
-    ).toEqual(CANDIDATE_NAMES);
+    expect(candidate?.summary).toBe(
+      'Moves tokens. Use when: The user asks to send. The user asks to retire.',
+    );
   });
-});
 
-describe('routableCandidates — manifest requirements', () => {
-  const REQUIRES = [{ resource: 'ixo:filesystem', action: 'fs/read' }];
-  const withFiles: RegisteredManifest[] = [
-    ...manifests,
-    {
-      pluginName: 'files',
-      manifest: makeManifest({
-        title: 'Files',
-        summary: 'Personal files.',
-        visibility: 'on-demand',
-        requires: REQUIRES,
-      }),
-    },
-  ];
-  const has =
-    (capabilities: Array<{ resource: string; action: string }>) =>
-    (resource: string, action: string) =>
-      delegationHasCapability({ capabilities }, resource, action);
-
-  it('never names a plugin whose requires the delegation does not grant', () => {
-    expect(
-      routableCandidates(withFiles, loaded, undefined, has([])).map(
-        (c) => c.name,
-      ),
-    ).toEqual(CANDIDATE_NAMES);
-    expect(
-      routableCandidates(
-        withFiles,
-        loaded,
-        undefined,
-        has([{ resource: 'ixo:filesystem', action: '*' }]),
-      ).map((c) => c.name),
-    ).toEqual([...CANDIDATE_NAMES, 'files']);
-    // Without a delegation check the requirements are not looked at.
-    expect(routableCandidates(withFiles, loaded).map((c) => c.name)).toEqual([
-      ...CANDIDATE_NAMES,
-      'files',
+  it('keeps the summary alone when a manifest has no whenToUse lines', () => {
+    const [candidate] = routableCandidates([
+      {
+        pluginName: 'tokens',
+        manifest: makeManifest({
+          summary: 'Moves tokens.',
+          whenToUse: [],
+          visibility: 'on-demand',
+        }),
+      },
     ]);
-  });
-
-  it('does not spend the evaluation on a plugin the delegation cannot use', async () => {
-    const evaluator = evaluatorOf(async () => evaluation(1, 'files', 1));
-    const route = createCapabilityRouter({ evaluator, logger: loggerSpy() });
-    const preloaded = await route(
-      turn({ manifests: withFiles, hasCapability: has([]) }),
-    );
-    const offered = (
-      evaluator.evaluate.mock.calls[0]?.[1] as {
-        capabilities: Array<{ name: string }>;
-      }
-    ).capabilities.map((c) => c.name);
-    expect(offered).not.toContain('files');
-    // The model named a plugin that was not offered: nothing is preloaded.
-    expect(preloaded.size).toBe(0);
-  });
-});
-
-describe('createCapabilityRouter — hidden plugins', () => {
-  it('computes a lazy hidden set only when it evaluates', async () => {
-    const evaluator = evaluatorOf(async () => evaluation(1, 'weather', 1));
-    const route = createCapabilityRouter({ evaluator, logger: loggerSpy() });
-    const hidden = vi.fn(async () => new Set(['payments']));
-
-    await route(turn({ mode: 'off', hidden }));
-    await route(turn({ text: '   ', hidden }));
-    expect(hidden).not.toHaveBeenCalled();
-
-    await route(turn({ hidden }));
-    expect(hidden).toHaveBeenCalledTimes(1);
-    const offered = (
-      evaluator.evaluate.mock.calls[0]?.[1] as {
-        capabilities: Array<{ name: string }>;
-      }
-    ).capabilities.map((c) => c.name);
-    expect(offered).toEqual(['weather']);
-  });
-
-  it('runs no boot sub-agent factory when the router is off', async () => {
-    const registries = createRegistries();
-    const factory = vi.fn(() => [makeTool('plan_trip')]);
-    const planner = makePlugin({
-      name: 'planner',
-      manifest: makeManifest({ title: 'Planner', visibility: 'on-demand' }),
-      getSubAgents: () => [
-        {
-          name: 'Trip Planner',
-          description: 'plans',
-          systemPrompt: 'plan',
-          tools: factory,
-        },
-      ],
-    });
-    registries.tools.register(planner);
-    registries.subAgents.register(planner);
-    const route = createCapabilityRouter({
-      evaluator: evaluatorOf(async () => evaluation(1, 'weather', 1)),
-      logger: loggerSpy(),
-    });
-    const hidden = () =>
-      bootHiddenPlugins({
-        registries,
-        buildCtx: makeBuildCtx(),
-        has: () => true,
-      });
-    await route(turn({ mode: 'off', hidden }));
-    expect(factory).not.toHaveBeenCalled();
-    await route(turn({ hidden }));
-    expect(factory).toHaveBeenCalledTimes(1);
-  });
-
-  it('a hidden set that cannot be computed preloads nothing, with a warning', async () => {
-    const evaluator = evaluatorOf(async () => evaluation(1, 'weather', 1));
-    const logger = loggerSpy();
-    const route = createCapabilityRouter({ evaluator, logger });
-    const preloaded = await route(
-      turn({
-        hidden: async () => {
-          throw new Error('getTools exploded');
-        },
-      }),
-    );
-    expect(preloaded.size).toBe(0);
-    expect(evaluator.evaluate).not.toHaveBeenCalled();
-    expect(String(logger.warn.mock.calls[0]?.[0])).toContain(
-      'status=fallback reason=Error',
-    );
+    expect(candidate?.summary).toBe('Moves tokens.');
   });
 });
 
 describe('createCapabilityRouter', () => {
   it('off: never evaluates', async () => {
-    const evaluator = evaluatorOf(async () => evaluation(1, 'weather', 1));
+    const evaluator = evaluatorOf(scored({ weather: 1 }));
     const route = createCapabilityRouter({ evaluator, logger: loggerSpy() });
 
     expect(await route(turn({ mode: 'off' }))).toEqual(new Set());
@@ -333,63 +182,205 @@ describe('createCapabilityRouter', () => {
   });
 
   it('skips when nothing is routable or the message is blank', async () => {
-    const evaluator = evaluatorOf(async () => evaluation(1, 'weather', 1));
+    const evaluator = evaluatorOf(scored({ weather: 1 }));
     const route = createCapabilityRouter({ evaluator, logger: loggerSpy() });
 
-    expect(
-      await route(turn({ loaded: new Set(['memory', 'weather', 'payments']) })),
-    ).toEqual(new Set());
+    expect(await route(turn({ candidates: [] }))).toEqual(new Set());
     expect(await route(turn({ text: '   ' }))).toEqual(new Set());
     expect(evaluator.evaluate).not.toHaveBeenCalled();
   });
 
-  it('on: a strong verdict preloads the routed plugin for the turn', async () => {
-    const evaluator = evaluatorOf(async () =>
-      evaluation(0.92, 'weather', 0.88),
+  it('on: preloads every plugin at or above the threshold, likeliest first in the log', async () => {
+    const threshold = CAPABILITY_PRELOAD_CALIBRATION_PROFILE.threshold;
+    const evaluator = evaluatorOf(
+      scored({ payments: threshold, weather: 0.92 }),
     );
     const logger = loggerSpy();
     const signal = new AbortController().signal;
-    const route = createCapabilityRouter({ evaluator, logger });
+    let clock = 1_000;
+    const route = createCapabilityRouter({
+      evaluator,
+      logger,
+      now: () => {
+        clock += 40;
+        return clock;
+      },
+    });
 
-    expect(await route(turn({ signal }))).toEqual(new Set(['weather']));
+    expect(await route(turn({ signal }))).toEqual(
+      new Set(['weather', 'payments']),
+    );
 
     expect(evaluator.evaluate).toHaveBeenCalledTimes(1);
     const [definition, input, options] = evaluator.evaluate.mock.calls[0] ?? [];
-    expect(definition).toBe(capabilityRouteDecision);
+    expect(definition).toBe(capabilityPreloadDecision);
     expect(input).toEqual({
       text: MESSAGE,
       recentTurns: [],
-      capabilities: routableCandidates(manifests, loaded),
+      capabilities: routableCandidates(manifests),
     });
     expect(options).toEqual({ signal });
     expect(logger.log).toHaveBeenCalledWith(
-      '[capability-router] request=req-1 preloaded=[weather] candidates=2',
+      `[capability-router] request=req-1 mode=on status=ok preloaded=[weather, payments] top=weather:0.92,payments:${threshold.toFixed(2)} threshold=profile candidates=2 recentTurns=0 latencyMs=40`,
     );
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  it('on: preloads nothing on low confidence, the none option or an unknown capability', async () => {
-    const none = noCapabilityOption(CANDIDATE_NAMES);
-    const verdicts = [
-      evaluation(0.4, 'weather', 0.95),
-      evaluation(0.95, 'weather', 0.5),
-      evaluation(0.95, none, 0.9),
-      evaluation(0.95, 'memory', 0.9),
-    ];
-    const evaluator = evaluatorOf(async () => {
-      const next = verdicts.shift();
-      if (!next) throw new Error('script exhausted');
-      return next;
+  it('on: preloads nothing just below the threshold, and logs the scores for refitting', async () => {
+    const below = CAPABILITY_PRELOAD_CALIBRATION_PROFILE.threshold - 0.01;
+    const evaluator = evaluatorOf(scored({ weather: below }));
+    const logger = loggerSpy();
+    const route = createCapabilityRouter({
+      evaluator,
+      logger,
+      now: () => 1_000,
+    });
+
+    expect(await route(turn())).toEqual(new Set());
+
+    expect(logger.log).toHaveBeenCalledWith(
+      `[capability-router] request=req-1 mode=on status=none preloaded=[] top=weather:${below.toFixed(2)},payments:0.00 threshold=profile candidates=2 recentTurns=0 latencyMs=0`,
+    );
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('on: a warm turn asks for the threshold it is given', async () => {
+    const evaluator = evaluatorOf(scored({ payments: 0.79, weather: 0.8 }));
+    const logger = loggerSpy();
+    const route = createCapabilityRouter({
+      evaluator,
+      logger,
+      now: () => 1_000,
+    });
+
+    expect(await route(turn({ threshold: 0.8 }))).toEqual(new Set(['weather']));
+    expect(logger.log).toHaveBeenCalledWith(
+      '[capability-router] request=req-1 mode=on status=ok preloaded=[weather] top=weather:0.80,payments:0.79 threshold=0.8 candidates=2 recentTurns=0 latencyMs=0',
+    );
+  });
+
+  it('does not evaluate at a threshold no score can reach', async () => {
+    const evaluator = evaluatorOf(scored({ weather: 1 }));
+    const route = createCapabilityRouter({ evaluator, logger: loggerSpy() });
+
+    expect(await route(turn({ threshold: 1.1 }))).toEqual(new Set());
+    expect(evaluator.evaluate).not.toHaveBeenCalled();
+  });
+
+  it('on: a verdict missing a candidate preloads nothing, with a warning', async () => {
+    const evaluator = evaluatorOf(async () =>
+      evaluation([{ name: 'weather' }], { weather: 1 }),
+    );
+    const logger = loggerSpy();
+    const route = createCapabilityRouter({ evaluator, logger });
+
+    expect(await route(turn())).toEqual(new Set());
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[capability-router] request=req-1 mode=on status=fallback reason=Error',
+    );
+  });
+
+  it('on: evaluates candidates past the question limit in batches and merges them', async () => {
+    const count = CAPABILITY_PRELOAD_BATCH_SIZE + 2;
+    const many: RegisteredManifest[] = Array.from(
+      { length: count },
+      (_, index) => ({
+        pluginName: `plugin-${index}`,
+        manifest: makeManifest({
+          title: `Plugin ${index}`,
+          summary: `Does thing ${index}.`,
+          visibility: 'on-demand',
+        }),
+      }),
+    );
+    const last = `plugin-${count - 1}`;
+    const evaluator = evaluatorOf(scored({ 'plugin-0': 0.9, [last]: 0.8 }));
+    const route = createCapabilityRouter({ evaluator, logger: loggerSpy() });
+
+    expect(await route(turn({ candidates: many }))).toEqual(
+      new Set(['plugin-0', last]),
+    );
+
+    const sizes = evaluator.evaluate.mock.calls.map(
+      (call) => (call[1] as { capabilities: unknown[] }).capabilities.length,
+    );
+    expect(sizes).toEqual([CAPABILITY_PRELOAD_BATCH_SIZE, 2]);
+  });
+
+  it('on: one failed batch preloads nothing', async () => {
+    const many: RegisteredManifest[] = Array.from(
+      { length: CAPABILITY_PRELOAD_BATCH_SIZE + 1 },
+      (_, index) => ({
+        pluginName: `plugin-${index}`,
+        manifest: makeManifest({ visibility: 'on-demand' }),
+      }),
+    );
+    const answer = scored({ 'plugin-0': 0.9 });
+    let calls = 0;
+    const evaluator = evaluatorOf(async (...args) => {
+      calls += 1;
+      if (calls === 2) throw new Error('second batch failed');
+      return answer(...args);
     });
     const logger = loggerSpy();
     const route = createCapabilityRouter({ evaluator, logger });
 
-    for (let i = 0; i < 4; i += 1) {
-      expect(await route(turn())).toEqual(new Set());
-    }
-    expect(evaluator.evaluate).toHaveBeenCalledTimes(4);
-    expect(logger.log).not.toHaveBeenCalled();
-    expect(logger.warn).not.toHaveBeenCalled();
+    expect(await route(turn({ candidates: many }))).toEqual(new Set());
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('on: routes on the recent turns it is given, read only when it evaluates', async () => {
+    const evaluator = evaluatorOf(scored({ weather: 0.9 }));
+    const logger = loggerSpy();
+    const route = createCapabilityRouter({
+      evaluator,
+      logger,
+      now: () => 1_000,
+    });
+    const recentTurns = vi.fn(async () => [
+      'user: rain in Cairo?',
+      'assistant: Light rain.',
+    ]);
+
+    await route(turn({ mode: 'off', recentTurns }));
+    await route(turn({ text: '   ', recentTurns }));
+    await route(turn({ candidates: [], recentTurns }));
+    expect(recentTurns).not.toHaveBeenCalled();
+
+    await route(turn({ text: 'and tomorrow?', recentTurns }));
+
+    expect(recentTurns).toHaveBeenCalledTimes(1);
+    expect(evaluator.evaluate.mock.lastCall?.[1]).toMatchObject({
+      text: 'and tomorrow?',
+      recentTurns: ['user: rain in Cairo?', 'assistant: Light rain.'],
+    });
+    expect(logger.log.mock.lastCall?.[0]).toContain('recentTurns=2');
+  });
+
+  it('on: recent turns that cannot be read leave the message to route alone', async () => {
+    const failure = new Error(`disk error near "${MESSAGE}"`);
+    const evaluator = evaluatorOf(scored({ weather: 0.9 }));
+    const logger = loggerSpy();
+    const route = createCapabilityRouter({ evaluator, logger });
+
+    expect(
+      await route(
+        turn({
+          recentTurns: async () => {
+            throw failure;
+          },
+        }),
+      ),
+    ).toEqual(new Set(['weather']));
+
+    expect(evaluator.evaluate.mock.calls[0]?.[1]).toMatchObject({
+      recentTurns: [],
+    });
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[capability-router] request=req-1 mode=on status=degraded reason=Error (recent turns unavailable)',
+    );
+    expect(String(logger.warn.mock.calls[0]?.[0])).not.toContain('Cairo');
   });
 
   it('on: any evaluation failure falls back to no preload with one warning that never carries the message', async () => {
@@ -433,7 +424,7 @@ describe('createCapabilityRouter', () => {
 
   it('on: an ambiguous provider configuration fails open like a missing provider', async () => {
     const evaluator = evaluatorOf(async () => {
-      throw new AmbiguousDecisionProviderError(capabilityRouteDecision.name, [
+      throw new AmbiguousDecisionProviderError(CAPABILITY_ROUTE_DECISION_NAME, [
         'a',
         'b',
       ]);
@@ -457,13 +448,13 @@ describe('createCapabilityRouter', () => {
     };
     const signal = new AbortController().signal;
 
-    const live = evaluatorOf(async () => evaluation(0.92, 'weather', 0.88));
+    const live = evaluatorOf(scored({ weather: 0.92 }));
     await createCapabilityRouter({ evaluator: live, logger: loggerSpy() })(
       turn({ signal, trace }),
     );
     expect(live.evaluate.mock.calls[0]?.[2]).toEqual({ ...trace, signal });
 
-    const shadow = evaluatorOf(async () => evaluation(0.92, 'weather', 0.88));
+    const shadow = evaluatorOf(scored({ weather: 0.92 }));
     await createCapabilityRouter({
       evaluator: shadow,
       logger: loggerSpy(),
@@ -493,10 +484,30 @@ describe('createCapabilityRouter', () => {
     expect(logger.log).not.toHaveBeenCalled();
   });
 
+  it('shadow: a slow recent-turns read does not hold the turn', async () => {
+    const evaluator = evaluatorOf(scored({ weather: 0.9 }));
+    const background = vi.fn();
+    const route = createCapabilityRouter({
+      evaluator,
+      logger: loggerSpy(),
+      background,
+    });
+
+    expect(
+      await route(
+        turn({
+          mode: 'shadow',
+          recentTurns: () => new Promise<string[]>(() => {}),
+        }),
+      ),
+    ).toEqual(new Set());
+
+    expect(background).toHaveBeenCalledTimes(1);
+    expect(evaluator.evaluate).not.toHaveBeenCalled();
+  });
+
   it('shadow: logs the verdict when it lands and hands the prediction to the host', async () => {
-    const evaluator = evaluatorOf(async () =>
-      evaluation(0.92, 'weather', 0.88),
-    );
+    const evaluator = evaluatorOf(scored({ weather: 0.92 }));
     const logger = loggerSpy();
     let pending: Promise<unknown> | undefined;
     let clock = 1_000;
@@ -519,10 +530,9 @@ describe('createCapabilityRouter', () => {
     await pending;
 
     expect(logger.log).toHaveBeenCalledWith(
-      '[capability-router-shadow] request=req-1 status=ok needsCapability=0.92 ' +
-        'capability=weather capabilityConfidence=0.88 wouldPreload=[weather] ' +
-        'reason=preload ' +
-        'calibrationProfile=ixo:calibration:runtime.route-capabilities:provisional-v1 ' +
+      '[capability-router-shadow] request=req-1 status=ok ' +
+        'top=weather:0.92,payments:0.00 wouldPreload=[weather] threshold=profile ' +
+        `calibrationProfile=${CAPABILITY_PRELOAD_CALIBRATION_PROFILE.id} ` +
         'latencyMs=40 provider=stub model=stub-model',
     );
     expect(onShadowVerdict).toHaveBeenCalledWith(['weather']);

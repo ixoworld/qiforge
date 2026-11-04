@@ -41,6 +41,10 @@ export function noCapabilityOption(names: string[]): string {
   return candidate;
 }
 
+/**
+ * The single-choice route the Node runtime uses. The Workers runtime uses
+ * `capabilityPreloadDecision`, which keeps this Decision's name.
+ */
 export const capabilityRouteDecision = defineDecision({
   name: CAPABILITY_ROUTE_DECISION_NAME,
   version: '1.0.0',
@@ -107,14 +111,28 @@ export const capabilityRouteDecision = defineDecision({
  * - `off`: the router is never evaluated.
  * - `shadow`: the router is evaluated and its verdict logged, but nothing is
  *   preloaded. Use this to measure accuracy before switching it on.
- * - `on`: the verdict preloads the routed capability for the turn.
+ * - `on`: the verdict loads the routed capabilities before the first model call.
  */
 export const CAPABILITY_ROUTER_MODES = ['off', 'shadow', 'on'] as const;
 export type CapabilityRouterMode = (typeof CAPABILITY_ROUTER_MODES)[number];
 
+/** A blank value in a config file means unset, as for the `CONTEXT_*` knobs. */
+const optionalThreshold = z.preprocess(
+  (value) =>
+    typeof value === 'string' && value.trim() === '' ? undefined : value,
+  z.coerce.number().min(0).optional(),
+);
+
 /** Env field every runtime spreads into its base env schema. */
 export const capabilityRouterEnvShape = {
   CAPABILITY_ROUTER: z.enum(CAPABILITY_ROUTER_MODES).default('off'),
+  /**
+   * The preload threshold of a turn the provider's cache still holds. Above
+   * 1 nothing preloads on such a turn.
+   */
+  CAPABILITY_ROUTER_WARM_THRESHOLD: optionalThreshold,
+  /** The same for a cold turn; unset, the calibration profile's. */
+  CAPABILITY_ROUTER_COLD_THRESHOLD: optionalThreshold,
 };
 
 /**
@@ -234,4 +252,144 @@ export function toRoutableCapabilities(
     routable.push({ name, title, summary });
   }
   return routable;
+}
+
+/**
+ * Questions one preload evaluation may carry: `validateDecisionRequest` takes
+ * at most 16, so the host evaluates larger candidate lists in batches.
+ */
+export const CAPABILITY_PRELOAD_BATCH_SIZE = 16;
+
+/**
+ * Multi-label form of the route: one yes/no question per candidate, so a
+ * message that needs two capabilities preloads both, and a message that needs
+ * none scores low everywhere without a separate "needs a tool?" question. A
+ * single choice cannot do this: it puts its mass on one option, and it loses
+ * recall when two candidates read alike.
+ *
+ * Each question insists on a direct ask because a yes/no question has no rival
+ * options: the looser "would the assistant need X?" fires on most candidates.
+ * Candidates travel in the questions, not the state, so the call does not send
+ * them twice. The route's Decision name is kept, so an existing
+ * `decisionProviderPolicy` route still selects its provider.
+ */
+export const capabilityPreloadDecision = defineDecision({
+  name: CAPABILITY_ROUTE_DECISION_NAME,
+  version: '2.0.0',
+  description:
+    'Predict every on-demand capability a user message needs so their tools can be preloaded before the first model call.',
+  // On the critical path of every turn. A provider call answers in about
+  // 350 ms; past this budget a missed preload costs less than the wait, and
+  // the model can still load what it needs with `load_capability`.
+  timeoutMs: 1_000,
+  inputSchema: z.object({
+    text: z.string().min(1),
+    recentTurns: z.array(z.string()).max(6).default([]),
+    capabilities: z
+      .array(routableCapabilitySchema)
+      .min(1)
+      .max(CAPABILITY_PRELOAD_BATCH_SIZE),
+  }),
+  project(input) {
+    return {
+      state: { message: input.text, recent: input.recentTurns },
+      questions: Object.fromEntries(
+        input.capabilities.map((capability) => [
+          capability.name,
+          {
+            kind: 'boolean' as const,
+            instructions: `Does the user's latest message directly ask for something only "${capability.title}" can do? ${capability.summary} Answer false when another capability fits better or plain conversation is enough.`,
+          },
+        ]),
+      ),
+    };
+  },
+});
+
+/**
+ * Lowest probability that preloads a capability. A missed preload costs one
+ * `load_capability` round trip, a wrong one the capability's tools and usage
+ * for the rest of the session, about even at a precision of 0.5 to 0.6. A
+ * wrong one also steers: its usage note sits on the user's message, and the
+ * model reaches for the tools it was handed before the ones it already had.
+ * Fitted on `typesafe/jev-1.13` with each candidate described by its manifest
+ * `summary` plus `whenToUse`; thin descriptions score far lower, so it does not
+ * carry over to them. Over two full lab runs (372 turns) scores from 0.6 to 0.7
+ * were used 10 times in 43, from 0.7 to 0.8 10 in 19, from 0.8 to 0.9 25 in 30
+ * and above 0.9 83 in 83. The top scores are logged so it can be refitted from
+ * real traffic. Provisional until then.
+ */
+export const CAPABILITY_PRELOAD_CALIBRATION_PROFILE = {
+  id: 'ixo:calibration:runtime.route-capabilities:multi-label-provisional-v3',
+  version: '3.0.0',
+  status: 'provisional',
+  providerArtifactRef: 'typesafe/jev-1.13',
+  decisionName: CAPABILITY_ROUTE_DECISION_NAME,
+  decisionVersion: capabilityPreloadDecision.version,
+  primitive: 'boolean',
+  questionId: '*',
+  threshold: 0.7,
+  validFrom: '2026-11-02T00:00:00.000Z',
+} satisfies DecisionCalibrationProfile;
+
+/**
+ * The bar on a warm turn. A preload changes the tool list, so on a warm turn a
+ * wrong one costs a full cache miss, about 11 times the one cached round trip
+ * a right one saves (a right one pays the same miss as `load_capability`): it
+ * earns its place at a precision of about 0.9. On the bakeoff's 166 messages
+ * 0.8 gave precision 0.91 to 0.93 at recall 0.82 to 0.93, and 0.94 at recall
+ * 0.70 on the first full lab run. On a cold turn the prefix is being paid for anyway, so a wrong preload
+ * costs only its tools and `threshold` applies. Provisional, as that profile.
+ */
+export const CAPABILITY_PRELOAD_WARM_THRESHOLD = 0.8;
+
+export interface CapabilityPreloadVerdict {
+  /** Capability names to load before the first model call, most likely first. */
+  preload: string[];
+  /** The router's probability for every candidate, most likely first. */
+  scores: Array<{ name: string; probability: number }>;
+  /**
+   * The calibration profile whose threshold decided this verdict. Omitted
+   * when the caller passed its own `threshold`, which no profile backs.
+   */
+  calibrationProfileRef?: string;
+}
+
+/**
+ * Deterministic policy over preload evaluations, one per batch. Never throws
+ * on well-formed evaluations; a missing or non-boolean answer throws a plain
+ * `Error`, which callers treat as "preload nothing".
+ */
+export function decideCapabilityPreload(
+  evaluations: readonly DecisionEvaluation[],
+  capabilities: readonly RoutableCapability[],
+  threshold?: number,
+): CapabilityPreloadVerdict {
+  const answers = new Map(
+    evaluations.flatMap((evaluation) => Object.entries(evaluation.answers)),
+  );
+  const scores = capabilities
+    .map(({ name }) => {
+      const answer = answers.get(name);
+      if (answer?.kind !== 'boolean') {
+        throw new Error(
+          `Capability preload evaluation is missing a boolean answer for "${name}".`,
+        );
+      }
+      return { name, probability: answer.probabilityTrue };
+    })
+    .sort((a, b) => b.probability - a.probability);
+  return {
+    preload: scores
+      .filter(
+        ({ probability }) =>
+          probability >=
+          (threshold ?? CAPABILITY_PRELOAD_CALIBRATION_PROFILE.threshold),
+      )
+      .map(({ name }) => name),
+    scores,
+    ...(threshold === undefined
+      ? { calibrationProfileRef: CAPABILITY_PRELOAD_CALIBRATION_PROFILE.id }
+      : {}),
+  };
 }

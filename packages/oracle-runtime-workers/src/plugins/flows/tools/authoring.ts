@@ -65,10 +65,7 @@ const flowSpecTitleSchema = z.string().min(1).max(MAX_NAME_CHARS);
 const flowSpecGoalSchema = z.string().max(MAX_DESCRIPTION_CHARS);
 
 const base = {
-  flowRef: z
-    .string()
-    .optional()
-    .describe('Which flow. Omit to use the flow that is currently open.'),
+  flowRef: z.string().optional().describe('Default: the open flow.'),
 };
 const ok = { ok: true } as const;
 
@@ -141,7 +138,8 @@ function buildValidateFlowTool(): PluginTool {
       name: 'validate_flow',
       description:
         'Check whether a flow is valid without saving it. Returns the exact problems (unknown action, duplicate step id, ' +
-        'a non-event-capable auto-trigger, a trigger cycle, etc.) so they can be fixed before creating the flow.',
+        'a non-event-capable auto-trigger, a trigger cycle, etc.) so they can be fixed before creating the flow. ' +
+        '`flow` as in create_template.',
       schema: validateSchema,
     },
   );
@@ -415,7 +413,7 @@ function buildAddStepTool(matrixClient: MatrixClient | undefined): PluginTool {
       name: 'add_step',
       description:
         'Add one step to an existing flow without disturbing the others: the title, owner and step order stay as they are. ' +
-        'Optionally place it at a position. A step id that already exists is refused.',
+        'A step id that already exists is refused. `step` as in create_template. `position`: a 0-based index, {after: id} or {before: id}; default: append.',
       schema: addStepSchema,
     },
   );
@@ -611,7 +609,7 @@ export function buildAuthoringTools(
         name: 'update_step',
         description:
           "Update any subset of a step's settings in one call (phase, execution boundary, required skills, inputs, conditions, schedule, assignee, confirmation, " +
-          'trigger, onEvent). onEvent takes precedence over trigger when both are given; set trigger to "manual" to ' +
+          'trigger, onEvent). `patch` fields as in create_template\'s step. onEvent takes precedence over trigger when both are given; set trigger to "manual" to ' +
           'clear an onEvent auto-trigger. Set phase or semanticGate to null to clear it.',
         schema: updateStepSchema,
       },

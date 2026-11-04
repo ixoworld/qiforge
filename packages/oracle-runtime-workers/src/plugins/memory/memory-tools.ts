@@ -30,10 +30,10 @@ export const MEMORY_CLEAR_MCP_NAME = 'memory-engine__clear';
  * knowledge from chat without a per-oracle code change: the Memory Engine
  * itself checks on chain that the caller is a member (controller, owner,
  * Matrix admin or DAO member) of the oracle's domain entity and refuses
- * everyone else, so listing the tool for every user
- * costs one tool description and grants nothing. Forks that want a different
- * surface (drop `clear`, add `delete_edge`) pass an explicit list via plugin
- * options.
+ * everyone else, so offering the tool to every user grants nothing. Forks
+ * that want a different surface (drop `clear`, add `delete_edge`) pass an
+ * explicit list via plugin options. Everything but search and add stays
+ * behind `load_capability` (the plugin manifest's `onDemandTools`).
  */
 export const DEFAULT_MEMORY_TOOLS = [
   MEMORY_SEARCH_MCP_NAME,

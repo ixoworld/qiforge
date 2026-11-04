@@ -12,10 +12,18 @@ import {
   createDefaultMemoryMcpFactory,
   DEFAULT_MEMORY_TOOLS,
   fetchMemoryTools,
+  MEMORY_ADD_ORACLE_KNOWLEDGE_MCP_NAME,
+  MEMORY_CLEAR_MCP_NAME,
+  MEMORY_DELETE_EDGE_MCP_NAME,
+  MEMORY_DELETE_EPISODE_MCP_NAME,
   type MemoryMcpFactory,
 } from './memory-tools';
 import { oracleEntityDidSchema } from './memory-entity';
-import { createOracleDocumentTools } from './oracle-document-tools';
+import {
+  ADD_ORACLE_DOCUMENT_TOOL_NAME,
+  createOracleDocumentTools,
+  DELETE_ORACLE_DOCUMENT_TOOL_NAME,
+} from './oracle-document-tools';
 
 const configSchema = z.object({
   MEMORY_MCP_URL: z.string().url('MEMORY_MCP_URL must be a valid HTTP(S) URL.'),
@@ -51,6 +59,24 @@ const manifest: PluginManifest = {
   tags: ['memory', 'recall', 'artifacts', 'personalization'],
   category: 'memory',
   visibility: 'always',
+  brief: 'add or delete oracle documents, knowledge; delete memories',
+  // Recall and saving are bound on every call. A message about memory says
+  // "Memory" to the router, and only the rare admin work needs the rest: on
+  // the first full lab run none of its 31 preloads was used.
+  routable: false,
+  // Search and add stay bound: they serve ordinary conversation. So does
+  // `list_oracle_documents`: with the domain's document index in the prompt,
+  // a catalogue line alone did not get a model to look past that index. These
+  // serve a controller curating the oracle, or a user asking to forget, and
+  // carry most of the plugin's tool text.
+  onDemandTools: [
+    MEMORY_ADD_ORACLE_KNOWLEDGE_MCP_NAME,
+    MEMORY_DELETE_EPISODE_MCP_NAME,
+    MEMORY_DELETE_EDGE_MCP_NAME,
+    MEMORY_CLEAR_MCP_NAME,
+    ADD_ORACLE_DOCUMENT_TOOL_NAME,
+    DELETE_ORACLE_DOCUMENT_TOOL_NAME,
+  ],
   stability: 'stable',
   requires: [MEMORY_CAPABILITY],
 };

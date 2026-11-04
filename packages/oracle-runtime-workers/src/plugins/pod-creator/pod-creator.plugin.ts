@@ -58,6 +58,7 @@ const manifest: PluginManifest = {
   tags: ['pod', 'domain', 'design', 'orchestration', 'on-chain'],
   category: 'automation',
   visibility: 'on-demand',
+  brief: 'design and create an IXO POD end to end',
   stability: 'experimental',
 };
 

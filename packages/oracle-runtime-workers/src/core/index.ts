@@ -29,6 +29,7 @@ import { baseEnvSchema, composeEnvSchema, validateEnv } from './env';
 import {
   createLlmAdapter,
   openRouterAttributionHeaders,
+  outputCapEnv,
   platformStreamLivenessEnv,
   type OpenRouterLlmAdapter,
 } from './llm';
@@ -172,6 +173,7 @@ export {
 export type {
   ManifestValidationResult,
   PluginManifestOverride,
+  CatalogueEntry,
   Tier1Entry,
   Tier1Input,
   Tier1Output,
@@ -181,6 +183,7 @@ export {
   buildListCapabilitiesTool,
   buildLoadCapabilityTool,
   buildMetaTools,
+  createCapabilityLoader,
 } from './meta-tools';
 export type { BuildMetaToolsOptions } from './meta-tools';
 
@@ -696,6 +699,7 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
         | undefined,
       ORACLE_NAME: String(validated.config.ORACLE_NAME),
       ...platformStreamLivenessEnv(validated.config),
+      ...outputCapEnv(validated.config),
     },
     logger,
   );

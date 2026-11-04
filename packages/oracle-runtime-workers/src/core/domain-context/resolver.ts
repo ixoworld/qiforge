@@ -25,6 +25,7 @@
 import type { DomainDocument } from '@ixo/domain.md/workers';
 import { z } from 'zod';
 import { estimateTokensApprox } from '../manifest';
+import type { DomainBriefDetail } from './document';
 import { briefBody, record } from './document';
 import { boundFindings } from './findings';
 import { decode, INDEX_MAX_BYTES, verifyBytes } from './integrity';
@@ -109,7 +110,7 @@ interface ParsedIndex {
   findings: string[];
   unresolvedChecks: string[];
   document?: DomainDocument;
-  brief?: { json: string; tokens: number };
+  briefs?: Partial<Record<DomainBriefDetail, { json: string; tokens: number }>>;
   /** Keyed by `<did>\n<manifest cid>`; only deterministic outcomes are kept. */
   capsules: LruMap<string, CapsuleResult>;
 }
@@ -320,20 +321,22 @@ export class DomainContextResolver {
 
   /**
    * The serialized brief of a verified snapshot and its token estimate,
-   * computed once per index CID.
+   * computed once per index CID and detail.
    */
   brief(
     snapshot: DomainSnapshot,
+    detail: DomainBriefDetail = 'compact',
   ): { json: string; tokens: number } | undefined {
     if (!snapshot.document) return undefined;
     const entry = snapshot.anchor
       ? this.parsed.get(snapshot.anchor.cid)
       : undefined;
-    if (entry?.brief && entry.document === snapshot.document)
-      return entry.brief;
-    const json = JSON.stringify(briefBody(snapshot.document));
+    const cached = entry?.briefs?.[detail];
+    if (cached && entry?.document === snapshot.document) return cached;
+    const json = JSON.stringify(briefBody(snapshot.document, detail));
     const brief = { json, tokens: estimateTokensApprox(json) };
-    if (entry && entry.document === snapshot.document) entry.brief = brief;
+    if (entry && entry.document === snapshot.document)
+      entry.briefs = { ...entry.briefs, [detail]: brief };
     return brief;
   }
 

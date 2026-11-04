@@ -18,10 +18,7 @@ import {
 } from '../input-policy';
 
 const describeSchema = z.object({
-  flowRef: z
-    .string()
-    .optional()
-    .describe('Which flow. Omit to use the flow that is currently open.'),
+  flowRef: z.string().optional().describe('Default: the open flow.'),
   stepId: stepIdSchema.describe('The form step to describe.'),
 });
 
@@ -59,10 +56,7 @@ const questionSchema = z.object({
 });
 
 const setFormSchemaSchema = z.object({
-  flowRef: z
-    .string()
-    .optional()
-    .describe('Which flow. Omit to use the flow that is currently open.'),
+  flowRef: z.string().optional().describe('Default: the open flow.'),
   stepId: z
     .string()
     .min(1)

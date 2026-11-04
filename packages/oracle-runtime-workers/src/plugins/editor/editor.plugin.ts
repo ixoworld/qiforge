@@ -72,6 +72,10 @@ const manifest: PluginManifest = {
   category: 'data',
   // On-demand so ordinary chats carry no editor Tier-1 entry or gated tools.
   visibility: 'on-demand',
+  brief: "read and edit the user's open editor document",
+  // An open document loads it (the editor context); without one there is
+  // nothing for its tools to read.
+  routable: false,
   stability: 'stable',
 };
 

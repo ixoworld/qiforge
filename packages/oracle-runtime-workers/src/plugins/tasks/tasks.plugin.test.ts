@@ -3,6 +3,7 @@
  * gate's deterministic reply classification, and the plugin wiring.
  */
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import { makeBuildCtx, makeRuntimeContext } from '../../core/test-fixtures';
 import type {
   OracleTaskInput,
@@ -201,6 +202,25 @@ describe('task tools', () => {
     expect(result.schedule).toBe('cron `0 7 * * *` (UTC)');
     expect(String(result.note)).toMatch(/oracle chat room/);
     expect(surface.records.size).toBe(1);
+  });
+
+  it('binds create_task and update_task without the words preview_task carries, with the same fields', () => {
+    const tools = createTaskTools();
+    const bound = (name: string) =>
+      JSON.stringify(
+        z.toJSONSchema(tools.find((t) => t.name === name)!.schema, {
+          io: 'input',
+        }),
+      );
+    expect(bound('preview_task')).toContain('NO memory of this conversation');
+    expect(bound('create_task')).not.toContain('description');
+    expect(bound('update_task')).not.toContain('description');
+    for (const name of ['create_task', 'update_task']) {
+      // The flat schedule every provider honours, never a oneOf.
+      expect(bound(name)).toContain('"enum":["once","cron","interval"]');
+      expect(bound(name)).not.toContain('oneOf');
+    }
+    expect(bound('create_task')).toContain('"before-action"');
   });
 
   it('create_task surfaces validation errors instead of throwing', async () => {

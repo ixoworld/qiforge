@@ -53,6 +53,7 @@ const manifest: PluginManifest = {
   tags: ['portal', 'browser', 'ui'],
   category: 'ui',
   visibility: 'on-demand',
+  brief: "act in the user's Portal through browser tools",
   stability: 'stable',
 };
 

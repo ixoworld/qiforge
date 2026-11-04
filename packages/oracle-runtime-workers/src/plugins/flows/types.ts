@@ -98,18 +98,11 @@ export const stepInputsSchema = z
 export const conditionSchema = z.object({
   source: z
     .enum(['configured_input', 'runtime_output'])
-    .describe(
-      'Read authored inputs or successful runtime output. Required for newly authored conditions.',
-    ),
-  fromStep: stepIdSchema.describe(
-    'Id of the upstream step whose value is checked.',
-  ),
-  field: nameSchema.describe('Field on the upstream step to inspect.'),
-  is: z.enum(CONDITION_OPERATORS).describe('Comparison operator.'),
-  value: z
-    .unknown()
-    .optional()
-    .describe('Value to compare against (omit for isEmpty/isNotEmpty).'),
+    .describe('Read authored inputs or successful runtime output.'),
+  fromStep: stepIdSchema.describe('The upstream step.'),
+  field: nameSchema.describe('Its field to inspect.'),
+  is: z.enum(CONDITION_OPERATORS),
+  value: z.unknown().optional().describe('Omit for isEmpty/isNotEmpty.'),
 });
 
 export const semanticGateSchema = z
@@ -128,20 +121,18 @@ export const hookSchema = z.object({
 });
 
 export const dueSchema = z.object({
-  at: nameSchema.optional().describe('Absolute due date (ISO 8601).'),
+  at: nameSchema.optional().describe('Absolute (ISO 8601).'),
   within: nameSchema
     .optional()
-    .describe(
-      'Duration from when the step becomes active (ISO 8601 duration).',
-    ),
+    .describe('ISO 8601 duration from when the step becomes active.'),
   afterCommitment: nameSchema
     .optional()
-    .describe('Duration from commitment (ISO 8601 duration).'),
+    .describe('ISO 8601 duration from commitment.'),
 });
 
 export const onEventSchema = z.object({
-  fromStep: stepIdSchema.describe('Upstream step that emits the event.'),
-  event: nameSchema.describe('Event name the upstream step emits.'),
+  fromStep: stepIdSchema.describe('The upstream step.'),
+  event: nameSchema.describe('The event it emits.'),
 });
 
 /**
@@ -150,38 +141,34 @@ export const onEventSchema = z.object({
  * is only attached on read (see FlowStepRead).
  */
 export const flowStepSchema = z.object({
-  id: stepIdSchema.describe(
-    'Stable, human-readable step id, e.g. "load-batches".',
-  ),
+  id: stepIdSchema.describe('Stable and readable, e.g. "load-batches".'),
   action: nameSchema
     .min(1)
-    .describe('Action name from list_actions (e.g. "qi/email.send").'),
+    .describe('From list_actions, e.g. "qi/email.send".'),
   title: nameSchema.optional(),
   description: descriptionSchema.optional(),
   phase: nameSchema
     .min(1)
     .optional()
-    .describe(
-      'Stable semantic group for this step, such as "discovery" or "deployment".',
-    ),
+    .describe('Stable semantic group, e.g. "discovery".'),
   execution: z
     .enum(['human-only', 'agent-capable'])
     .optional()
     .describe(
-      'Whether only a person may run this step or a suitably skilled, authorised Flow Agent may run it.',
+      'Only a person may run it, or also a suitably skilled, authorised Flow Agent.',
     ),
 
   inputs: stepInputsSchema
     .optional()
     .describe(
-      'Inputs for the action. A value may be a reference to an upstream output, written as "{{step-id.output.field}}". ' +
-        'Never put a PIN, mnemonic, password, token or API key here: the portal collects those when the user runs the step.',
+      'A value may reference upstream output: "{{step-id.output.field}}". ' +
+        'Never a PIN, mnemonic, password, token or API key: the portal collects those at run time.',
     ),
   form: z
     .record(z.string(), z.unknown())
     .optional()
     .describe(
-      'For human form steps: pre-filled answers keyed by question name. Pre-fill only — the user submits in the portal.',
+      'Form steps: pre-filled answers by question name; the user submits in the portal.',
     ),
 
   after: z
@@ -189,13 +176,11 @@ export const flowStepSchema = z.object({
     .max(MAX_FLOW_STEPS)
     .optional()
     .describe(
-      'Order this step after the named steps. Pair with an input reference for a real data dependency. This is ordering only, not an auto-trigger.',
+      'Ordering only, not an auto-trigger; pair with an input reference for a data dependency.',
     ),
   runWhen: conditionSchema
     .optional()
-    .describe(
-      'Gate this step on an upstream configured input or runtime output.',
-    ),
+    .describe('Gate on an upstream configured input or runtime output.'),
   conditions: z
     .array(conditionSchema)
     .max(
@@ -203,7 +188,7 @@ export const flowStepSchema = z.object({
       `A step may have at most ${MAX_CONDITIONS_PER_STEP} conditions.`,
     )
     .optional()
-    .describe('Multiple activation gates (all must pass).'),
+    .describe('Several gates, all must pass.'),
   semanticGate: semanticGateSchema
     .optional()
     .describe(
@@ -212,24 +197,23 @@ export const flowStepSchema = z.object({
   onEvent: onEventSchema
     .optional()
     .describe(
-      'Advanced: auto-trigger this step when an upstream step emits an event. Only valid for event-capable upstream actions; validate_flow enforces this.',
+      'Advanced: run when an upstream step emits an event; event-capable actions only.',
     ),
 
   trigger: z
     .enum(['manual', 'flow-start'])
     .optional()
-    .describe('When the step runs. Default "manual".'),
+    .describe('Default "manual".'),
   due: dueSchema.optional(),
 
   assignTo: didSchema
     .optional()
     .describe(
-      'The DID assigned to this step. Assigning AUTHORISES that DID to run the step (it is written to the ' +
-        "step's authorised actors) — only assign a DID the user named and confirmed.",
+      'Assigning AUTHORISES this DID to run the step: only a DID the user named and confirmed.',
     ),
   commitTo: nameSchema
     .optional()
-    .describe('Commitment window (ISO 8601 duration).'),
+    .describe('Commitment window, ISO 8601 duration.'),
 
   on: z
     .record(z.string(), z.array(hookSchema))
@@ -243,12 +227,12 @@ export const flowStepSchema = z.object({
     )
     .optional()
     .describe(
-      'Governed skill ids required for agent-capable execution. The first is used for Flow Agent matching.',
+      'Governed skill ids for agent-capable execution; the first matches the Flow Agent.',
     ),
   requireConfirmation: z
     .boolean()
     .optional()
-    .describe('Hint the portal to force a confirmation before this step runs.'),
+    .describe('The portal confirms before this step runs.'),
 });
 
 /**
@@ -266,12 +250,7 @@ export const sizedFlowStepSchema = flowStepSchema.refine(
  */
 export const flowSpecSchema = z
   .object({
-    ref: z
-      .string()
-      .optional()
-      .describe(
-        'Opaque flow handle. Omit when creating; the plugin assigns it.',
-      ),
+    ref: z.string().optional().describe('Omit when creating.'),
     title: nameSchema.min(1),
     goal: descriptionSchema.optional(),
     steps: z

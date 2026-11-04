@@ -19,7 +19,12 @@ import type {
   FlowCapability,
   TriggerSpec,
 } from '@ixo/editor/core';
-import { canToType, getActionByCan, typeToCan } from '@ixo/editor/core';
+import {
+  canToType,
+  getAction,
+  getActionByCan,
+  typeToCan,
+} from '@ixo/editor/core';
 import { FlowError } from './errors';
 import { rewriteRefTokens, wholeRef } from './ref-syntax';
 import type { Condition, FlowSpecInput, FlowStep } from './types';
@@ -93,18 +98,24 @@ function rewriteEmbeddedRefs(
   return rewriteRefTokens(text, mapRef);
 }
 
-/** Resolve a friendly action name (registry `type`) to its `can` ability string. */
+/**
+ * Resolve a friendly action name (registry `type`) to its `can` ability
+ * string. The editor's type-to-can table does not cover every action its
+ * registry lists (`qi/form.submit` among them), so the action's own
+ * definition answers when the table does not: an action `list_actions`
+ * offers always resolves.
+ */
 export function actionToCan(action: string): string {
-  const can = typeToCan(action);
+  const can = typeToCan(action) ?? getAction(action)?.can;
   if (can) return can;
   // Tolerate an action that is already a `can` string.
   if (getActionByCan(action)) return action;
   throw new FlowError('unknown_action', `Unknown action "${action}".`);
 }
 
-/** Resolve a `can` ability string back to the friendly action name (registry `type`). */
+/** Resolve a `can` ability string back to the friendly action name (registry `type`), by the table, then the registry. */
 export function canToAction(can: string): string {
-  return canToType(can) ?? can;
+  return canToType(can) ?? getActionByCan(can)?.type ?? can;
 }
 
 /** A `{ $ref: string }` runtime reference — the only shape the engine resolves. */

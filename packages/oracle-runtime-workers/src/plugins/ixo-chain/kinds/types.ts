@@ -9,7 +9,7 @@
  * {@link defineKind}: `chain_lookup`'s tool schema only names the kind, so
  * the catalogue does not cost context on every turn.
  */
-import type { z } from 'zod';
+import { z } from 'zod';
 import type { UserIdentity } from '../../../core/user-identity';
 import type { TokenDisplay } from '../denoms';
 import type { ChainCall, Failure, Outcome, Source } from '../http';
@@ -109,8 +109,37 @@ export interface KindDef {
   plan(rawArgs: unknown, ctx: KindContext): KindPlan | KindInvalid;
 }
 
-/** The argument problems as one sentence naming what the kind expects. */
-function invalidArgs(name: string, error: z.ZodError): KindInvalid {
+/** The names a kind's arguments take, in schema order, with the required ones. */
+export function argKeys(args: z.ZodType): {
+  keys: string[];
+  required: string[];
+} {
+  const { properties = {}, required = [] } = z.toJSONSchema(args, {
+    io: 'input',
+    unrepresentable: 'any',
+  });
+  return { keys: Object.keys(properties), required };
+}
+
+/** A kind's valid keys as a clause of its refusal. */
+function validKeys(args: z.ZodType): string {
+  const { keys, required } = argKeys(args);
+  if (!keys.length) return 'This kind takes no args.';
+  const list = keys
+    .map((key) => (required.includes(key) ? `${key} (required)` : key))
+    .join(', ');
+  return `Its args: ${list}.`;
+}
+
+/**
+ * The argument problems as one sentence, with the kind's valid keys, so the
+ * model can correct the request without describing the kind first.
+ */
+function invalidArgs(
+  name: string,
+  error: z.ZodError,
+  args: z.ZodType,
+): KindInvalid {
   const issues = error.issues
     .slice(0, 3)
     .map((issue) =>
@@ -120,7 +149,7 @@ function invalidArgs(name: string, error: z.ZodError): KindInvalid {
     )
     .join('; ');
   return {
-    invalid: `Invalid args for kind "${name}" (${issues}). Call describe_chain_kinds with ["${name}"] for its arguments.`,
+    invalid: `Invalid args for kind "${name}" (${issues}). ${validKeys(args)} describe_chain_kinds with ["${name}"] explains them.`,
   };
 }
 
@@ -150,7 +179,7 @@ export function defineKind<S extends z.ZodType>(spec: {
       const parsed = spec.args.safeParse(rawArgs ?? {});
       return parsed.success
         ? spec.plan(parsed.data, ctx)
-        : invalidArgs(spec.name, parsed.error);
+        : invalidArgs(spec.name, parsed.error, spec.args);
     },
   };
 }

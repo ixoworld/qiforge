@@ -8,8 +8,8 @@ export { HubActionsPlugin } from './hub-actions/hub-actions.plugin';
  * plugins. Each is gated the same way as on Node: `autoDetect` on its env
  * key where one exists (memory / sandbox / firecrawl / composio), always-on
  * otherwise (domain-indexer; ixo-chain unless `IXO_CHAIN_TOOLS=off`; vfs
- * self-gates on `ctx.ucan.hasSigningKey()`; pod-creator and ixo-chain are
- * on-demand and stay hidden until `load_capability`).
+ * self-gates on `ctx.ucan.hasSigningKey()`; sandbox, vfs, pod-creator and
+ * ixo-chain are on-demand and stay hidden until `load_capability`).
  *
  * A host opts in by spreading `BUNDLED_WORKERS_PLUGINS` into
  * `createOracleWorker({ plugins })` — plugins whose env keys are absent are

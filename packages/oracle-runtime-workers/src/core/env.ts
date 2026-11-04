@@ -63,6 +63,14 @@ export const LLM_STREAM_IDLE_TIMEOUT_MS_DEFAULT = 90_000;
 export const LLM_BYO_STREAM_IDLE_TIMEOUT_MS_DEFAULT = 300_000;
 export const LLM_STREAM_RETRIES_DEFAULT = 1;
 export const LLM_STREAM_RETRIES_MAX = 5;
+/**
+ * Most tokens one platform model call may generate, reasoning included
+ * (`LLM_MAX_OUTPUT_TOKENS`; 0 = the model's own limit). Without a cap a call
+ * that loops runs to the model's limit: 65,536 tokens for
+ * `openai/gpt-5.6-luna`, a whole turn's budget and about 8 cents. The longest
+ * normal call in two lab runs (706 calls) was 1,201 tokens.
+ */
+export const LLM_MAX_OUTPUT_TOKENS_DEFAULT = 16_384;
 /** The turn's wall-clock deadline when `TURN_TIMEOUT_MS` is unset. */
 export const TURN_TIMEOUT_MS_DEFAULT = 600_000;
 /** How long a frontend call waits unsent for a browser when `FRONTEND_PARK_TIMEOUT_MS` is unset. */
@@ -239,6 +247,15 @@ export const baseEnvSchema = z.object({
     .max(LLM_STREAM_RETRIES_MAX)
     .default(LLM_STREAM_RETRIES_DEFAULT),
   /**
+   * Most tokens one platform model call may generate (see
+   * `LLM_MAX_OUTPUT_TOKENS_DEFAULT`); 0 leaves it to the model.
+   */
+  LLM_MAX_OUTPUT_TOKENS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .default(LLM_MAX_OUTPUT_TOKENS_DEFAULT),
+  /**
    * LangGraph `recursionLimit` for one turn — the super-steps (a model call,
    * a batch of tool calls, a middleware hook) a turn may take before it fails
    * with `GraphRecursionError`. Default 600 (the Node runtime hard-codes 200);
@@ -303,8 +320,10 @@ export const baseEnvSchema = z.object({
   // needed when the binding is not declared.
   ...decisionProviderEnvShape,
   // `CAPABILITY_ROUTER` (`off` | `shadow` | `on`, default `off`): the first
-  // runtime consumer of Decisions. It predicts the on-demand plugin a message
-  // needs and preloads it for the turn; it needs a `DECISION_PROVIDER`.
+  // runtime consumer of Decisions. It predicts the plugins a message needs and
+  // loads them before the first model call; it needs a `DECISION_PROVIDER`.
+  // `CAPABILITY_ROUTER_WARM_THRESHOLD`: the score a preload needs on a warm
+  // turn, where a wrong one costs a full cache miss.
   ...capabilityRouterEnvShape,
   ...channelRoutingEnvShape,
 

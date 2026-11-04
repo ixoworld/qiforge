@@ -48,6 +48,7 @@ const manifest: PluginManifest = {
   tags: ['web', 'search', 'scrape', 'firecrawl'],
   category: 'data',
   visibility: 'on-demand',
+  brief: 'search the web; scrape and read web pages',
   stability: 'stable',
 };
 

@@ -611,7 +611,7 @@ operator sees:
 - **The window.** On every turn:
 
   ```
-  [context] model=openai/gpt-5.6-luna window=1050000 (catalog) summarizeAt=630000 pruneAt=367500 resultCap=200000c requestCap=989500 reserve=8000 summaryInput=985500
+  [context] model=openai/gpt-5.6-luna window=1050000 (catalog) summarizeAt=200000 pruneAt=100000 staleTurns=2 coldMs=2100000 pluginIdle=3 resultCap=64000c requestCap=989500 reserve=8000 summaryInput=985500
   ```
 
   `origin` (in brackets) is the source that answered, first hit wins:
@@ -652,12 +652,12 @@ operator sees:
   provider) instead of its base64, which made one resized photo look like
   ~128k tokens (`src/core/context-budget.ts`). Native document blocks still
   count by size.
-- **Summarization** fires at 60% of the main model's window whatever its
-  size (tokens, chars/4; never above the request cap nor above what the
-  summarizer reads), keeps the last 10
+- **Summarization** fires at 60% of the main model's window (tokens,
+  chars/4; at most `CONTEXT_SUMMARIZE_MAX_TOKENS`, 200,000; never above the
+  request cap nor above what the summarizer reads), keeps the last 10
   messages, and no longer counts messages (set `CONTEXT_SUMMARIZE_MESSAGES`
   to add that trigger back). A 1,050,000-token window summarizes at
-  630,000, a 128k one at 76,800. The summary is written by the turn's own
+  200,000, a 128k one at 76,800. The summary is written by the turn's own
   model (the `summarizer` role: the same model id and lane as `main` — the
   platform default, a per-request choice, or the BYO model on the user's
   own key; on OpenRouter at `medium` reasoning effort), so no second, smaller window
@@ -669,9 +669,10 @@ operator sees:
   (the 32k drill pin summarizes at 18,400 instead of 19,200; a low
   `MODEL_CONTEXT_TOKENS` or a window learned small from a provider error
   behaves the same) or with a raised `CONTEXT_SUMMARIZE_FRACTION`; every
-  window in the built-in table (128k and up) gets the plain 60%.
+  window in the built-in table (128k and up) gets the plain 60% under the
+  ceiling.
 - **Spend envelope.** There is no per-turn token limit any more. On a
-  1,050,000-token window a single request can reach about 630,000 input
+  1,050,000-token window a single request can reach about 200,000 input
   tokens before the history is summarized (and up to the request cap,
   989,500, while one turn grows past the trigger). The only per-turn
   bounds left are `TURN_MAX_TOOL_CALLS` (120 tool attempts) and
@@ -692,7 +693,7 @@ full history for the rest of this turn`); it never replaces the
   turn carries the turn's earlier tool calls, so the repetition guard still
   refuses an identical write after it.
 - **Capped tool results.** A result above 12% of the window (×4 chars, at
-  most 200,000 chars — `CONTEXT_RESULT_CAP_MAX_CHARS`) is stored whole and
+  most 64,000 chars — `CONTEXT_RESULT_CAP_MAX_CHARS`) is stored whole and
   the model sees the first 40% and last 60% of the visible budget with a
   footer naming the saved id; `read_result` pages it back by
   byte range. `[result-cap] <tool>: N chars > cap …; saved as … (sqlite|r2)`.
@@ -711,10 +712,26 @@ full history for the rest of this turn`); it never replaces the
   end on UTF-8 character boundaries; `offset`, `length` and `next` say
   where a page really ended. Optionally add an R2 lifecycle rule on the
   `results/` prefix as a belt on top of the sweep.
-- **Pruning under pressure.** Above 35% of the window, tool results outside
-  the kept tail become one-line placeholders (a capped one keeps its
-  handle) and results identical to a later one become back-references —
-  on the request only, never in the checkpoint or the transcript.
+- **Stale results.** On a cold turn (one that opens at least
+  `CONTEXT_CACHE_COLD_MS` after the turn before it) tool results older than
+  the last `CONTEXT_STALE_RESULT_TURNS` finished turns become one-line stubs,
+  on the request only: the checkpoint and the transcript keep them whole, and
+  `read_result` reads one back from the thread by its tool call id (a capped
+  result by its saved id). The line stays put until the next cold turn, and
+  it is computed from the messages alone, so every call of a warm stretch and
+  a resumed attempt send the same bytes. A warm thread is never trimmed: on
+  the Bedrock route of `gpt-5.6-luna` rewriting one old message drops the
+  whole cached prefix, on the OpenAI route everything after it, and a miss
+  costs 12.5 times a cached read.
+  `[context] stale results: trimmed N tool result(s), ~A → ~B tokens` once per
+  turn; each counts in `prunes` and `prunedResults`, not in `hardPrunes`.
+- **Pruning under pressure.** Above 35% of the window (at most
+  `CONTEXT_PRUNE_MAX_TOKENS`, 100,000), tool results outside the kept tail
+  become one-line placeholders (a capped one keeps its handle) and results
+  identical to a later one become back-references — on the request only,
+  never in the checkpoint or the transcript. The tail moves with every
+  message, so past this point every call is a cache miss: it is a size
+  guard, not a saving.
   `[context] over the prune threshold: pruned N tool result(s), ~A → ~B tokens`.
 - **Refusal and recovery.** A request still above 95% of the window (minus
   the reply reserve) after a hard prune fails with "The conversation no
@@ -1886,6 +1903,11 @@ The constants named here are listed in
   refused with 403 after a skipped join joins and retries once.
 - **Flows.** Flow writes go through the same guard and report the same
   three codes (`needs_access`, `error`, `write_not_saved`).
+  The tools bind their schemas without limits and patterns, and only
+  `create_template` carries a step's field descriptions (all 27 are bound
+  together); each handler parses the strict schema first, so a size limit, a
+  step id with a space or a secret literal comes back as `validation_failed`
+  with the schema's message.
   `create_template` refuses a room that already holds a flow
   (`validation_failed`) and points at the edit tools. `add_step` keeps the
   flow's title, owner and step order and refuses a step id that already

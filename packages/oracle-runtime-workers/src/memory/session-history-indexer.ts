@@ -27,8 +27,13 @@
  *    transcript's last chance).
  *  - Speakers get real identities (the user's preferred name / the oracle's
  *    preferred or configured name) so Graphiti's extractor does not pin
- *    facts to literal "user"/"assistant" nodes. Tool replies fold into the
- *    assistant role (the engine has no tool role).
+ *    facts to literal "user"/"assistant" nodes.
+ *  - Only the conversation is sent: what the user said and the oracle's
+ *    replies (`conversationReader`). The engine makes every message an episode
+ *    of evidence, so a tool result, a status line before a tool call, or a
+ *    reply that repeats what a memory search just returned would come back
+ *    as a fact, and push real ones out of the capped user-context block. Those
+ *    messages still count towards the watermark.
  *  - Auth is the oracle's two-hop UCAN invocation minted from the user's
  *    delegation (`ixo:memory` / `memory/*`) — no delegation, no indexing.
  *  - Endpoint: `POST <MEMORY_ENGINE_URL>/messages` with `x-room-id`, as
@@ -45,13 +50,18 @@
  * Not ported: Node also asks Matrix for the user's display name when no
  * preferred name is set; here the fallback is the literal "Me" straight away.
  */
+import { AIMessage, type BaseMessage } from '@langchain/core/messages';
+import { visibleText, visibleToUser } from '../do/transcript';
 import type { Logger } from '../plugin-api/types';
 import { MEMORY_ENTITY_HEADER } from '../plugins/memory/memory-entity';
+import { MEMORY_SEARCH_MCP_NAME } from '../plugins/memory/memory-tools';
 
 export interface HistoryMessage {
   /** LangChain message type: `human` | `ai` | `tool` | `system`. */
   type: string;
   content: string;
+  /** Counted by the watermark but not sent (`conversationReader`). */
+  notConversation?: boolean;
 }
 
 export interface MemoryEngineMessage {
@@ -230,6 +240,47 @@ interface QuietWait {
   resolve: () => void;
 }
 
+/** Text that parses as a JSON object or list: a tool's output, not a reply. */
+function isJsonDocument(text: string): boolean {
+  const start = text.trimStart()[0];
+  if (start !== '{' && start !== '[') return false;
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Reads a transcript in order, one reader per read, and turns each message
+ * into what the indexer takes. A turn's memory search is seen before its reply,
+ * so that reply is known to repeat what memory returned, which must not go
+ * back in as new evidence. A read that starts in the middle of a turn has not
+ * seen the search; a pass normally starts at a turn's end.
+ */
+export function conversationReader(): (message: BaseMessage) => HistoryMessage {
+  let readMemory = false;
+  return (message) => {
+    const content = visibleText(message);
+    const calls = AIMessage.isInstance(message)
+      ? (message.tool_calls ?? [])
+      : [];
+    if (message.type === 'human') readMemory = false;
+    if (calls.some((call) => call.name === MEMORY_SEARCH_MCP_NAME))
+      readMemory = true;
+    const conversation =
+      visibleToUser(message) &&
+      (message.type === 'human' ||
+        (calls.length === 0 && !readMemory && !isJsonDocument(content)));
+    return {
+      type: message.type,
+      content,
+      ...(conversation ? {} : { notConversation: true }),
+    };
+  };
+}
+
 /** Node's `transformMessagesToMemoryEngineFormat`, verbatim in mapping. */
 export function transformMessagesToMemoryEngineFormat(
   messages: readonly HistoryMessage[],
@@ -237,7 +288,12 @@ export function transformMessagesToMemoryEngineFormat(
   userSpeakerLabel: string,
   oracleSpeakerLabel: string,
 ): MemoryEngineMessage[] {
-  return messages.map((message) => {
+  // The engine rejects empty episodes, and has no tool role.
+  const conversation = messages.filter(
+    (m) =>
+      m.type !== 'tool' && !m.notConversation && m.content.trim().length > 0,
+  );
+  return conversation.map((message) => {
     let role_type: MemoryEngineMessage['role_type'];
     let label: string;
     switch (message.type) {
@@ -252,12 +308,6 @@ export function transformMessagesToMemoryEngineFormat(
       case 'system':
         role_type = 'system';
         label = 'System';
-        break;
-      case 'tool':
-        // The engine has no tool role — tool replies are the oracle
-        // reporting back, so they share the oracle speaker label.
-        role_type = 'assistant';
-        label = oracleSpeakerLabel;
         break;
       default:
         role_type = 'user';
@@ -564,11 +614,7 @@ export class SessionHistoryIndexer {
     try {
       while (chunk.length > 0) {
         const transformed = transformMessagesToMemoryEngineFormat(
-          // Tool-call-only AI turns carry no text; the engine has nothing to
-          // extract from them and rejects empty episodes.
-          chunk
-            .map((entry) => entry.message)
-            .filter((m) => m.content.trim().length > 0),
+          chunk.map((entry) => entry.message),
           session.title ?? '',
           labels.user,
           labels.oracle,

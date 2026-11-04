@@ -28,6 +28,7 @@ import type {
 } from '../../plugin-api/types';
 import { ixoAddressOf } from '../../core/user-identity';
 import { toolNotRunMessage } from '../../core/tool-not-run';
+import { compactJsonSchema } from '../compact-schema';
 import {
   CHAIN_TX_CATALOG,
   CHAIN_TX_GENERAL_RULES,
@@ -80,8 +81,22 @@ export const requestOperationJsonSchema = {
     (branch) => !RUNTIME_BUILT_KINDS.includes(String(branchKind(branch))),
   ),
 };
-const operationSchema = z.fromJSONSchema(requestOperationJsonSchema);
-const requestSchema = z.strictObject({ operation: operationSchema });
+/**
+ * What the tool binds: each kind's fields, required keys and types, without
+ * the protocol's limits and patterns, over a third of its characters. The
+ * handler checks a call against {@link strictOperations}, then
+ * `parseOperation`.
+ */
+const requestSchema = z.strictObject({
+  operation: z.fromJSONSchema(compactJsonSchema(requestOperationJsonSchema)),
+});
+/** Each requestable kind's whole protocol schema, for a refusal naming the field. */
+const strictOperations = new Map(
+  requestOperationJsonSchema.oneOf.map((branch) => [
+    String(branchKind(branch)),
+    z.fromJSONSchema(branch),
+  ]),
+);
 const statusSchema = z.strictObject({
   actionId: z.string().regex(/^[A-Za-z0-9_-]{32}$/),
 });
@@ -641,6 +656,16 @@ async function requestHubAction(
   const parsed = requestSchema.safeParse(input);
   if (!parsed.success)
     return { status: 'unavailable', reason: 'An operation is required.' };
+  const limits = strictOperations
+    .get(String(kind))
+    ?.safeParse(parsed.data.operation);
+  if (limits && !limits.success)
+    return {
+      status: 'unavailable',
+      reason: `The requested operation is unsupported or incomplete (${limits.error.issues
+        .map((issue) => `${pathText(issue.path)}: ${issue.message}`)
+        .join('; ')}).`,
+    };
   if (ctx.config.HUB_ACTIONS_ENABLED !== 'true' || !ctx.hubActions)
     return {
       status: 'unavailable',
@@ -1179,6 +1204,7 @@ const manifest: PluginManifest = {
   tags: ['actions', 'channels'],
   category: 'integration',
   visibility: 'on-demand',
+  brief: 'prepare chain transactions to sign in Auth Hub',
   stability: 'experimental',
 };
 
@@ -1227,7 +1253,7 @@ export class HubActionsPlugin extends OraclePlugin {
       {
         name: 'hub_action_options',
         description:
-          "Read this authenticated owner’s confirmed Gmail and Calendar connections, requestable documents, action resources and bank tokens (`transfer.tokens`: denom, symbol, decimals, verified, balance in base units). Use each returned service, identifier and label before preparing a related Hub review. A Gmail profile connection does not authorize sending. For a token that is not verified, name its full denom and say it is unverified; its amounts are base units. ownerDid is the authenticated user's DID and ownerAddress their IXO account address.",
+          "Read the owner’s confirmed Gmail and Calendar connections, requestable documents, action resources and bank tokens (`transfer.tokens`: denom, symbol, decimals, verified, balance in base units). Use each returned service, identifier and label to prepare a related Hub review. A Gmail profile connection does not authorize sending. For a token that is not verified, name its full denom and say it is unverified; its amounts are base units. ownerDid is the authenticated user's DID and ownerAddress their IXO account address.",
         schema: discoverSchema,
         effect: 'read',
         handler: hubActionOptions,
@@ -1235,7 +1261,7 @@ export class HubActionsPlugin extends OraclePlugin {
       {
         name: 'request_hub_action',
         description:
-          'Prepare a supported operation for the authenticated channel owner to review in Auth Hub. Never approves, signs, or executes. For email, propose one plain-text message to one recipient using a confirmed Gmail send connection. Supply only the operation candidate; the runtime supplies identity and turn binding. Coin sends and other chain transactions have their own tool (request_chain_transaction). Never prepare a replacement email after an unknown send without the user checking Gmail’s Sent folder and asking again.',
+          'Prepare a supported operation for the authenticated channel owner to review in Auth Hub. Never approves, signs, or executes. For email, propose one plain-text message to one recipient using a confirmed Gmail send connection. Supply only the operation candidate; the runtime supplies identity and turn binding. Coin sends and other chain transactions have their own tool (request_chain_transaction). Never prepare a replacement email after an unknown send without the user checking Gmail’s Sent folder and asking again. Limits are checked on the call; `startsAt` and `endsAt` are ISO 8601 with an offset, a saved `filename` ends in .txt, a form field `id` is lower_snake_case.',
         schema: requestSchema,
         effect: 'write',
         handler: requestHubAction,

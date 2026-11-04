@@ -30,6 +30,7 @@ import {
   SystemMessage,
   ToolMessage,
 } from '@langchain/core/messages';
+import { Command } from '@langchain/langgraph';
 import { type AgentMiddleware, createMiddleware } from 'langchain';
 import type { ToolEffect, ToolMark } from '../../do/run-store';
 import type { Logger } from '../../plugin-api/types';
@@ -155,10 +156,18 @@ export function toolEffectOf(tool: {
   return startsWithReadVerb(bare) ? 'read' : 'write';
 }
 
-/** Whether a tool call's output is an error result (`ToolMessage` status `error`). */
+/**
+ * Whether a tool call's output is an error result: a `ToolMessage` with status
+ * `error`, alone or inside a graph command's update (the capability gate's
+ * refusal, which also loads the capability).
+ */
 export function isErrorResult(output: unknown): boolean {
   if (ToolMessage.isInstance(output)) return output.status === 'error';
-  return false;
+  if (!(output instanceof Command)) return false;
+  const { update } = output;
+  if (!update || Array.isArray(update) || !('messages' in update)) return false;
+  const { messages } = update;
+  return Array.isArray(messages) && messages.some(isErrorResult);
 }
 
 export function createToolMarksMiddleware(

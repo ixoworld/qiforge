@@ -26,9 +26,12 @@ default off.
    every provenance entry says so (`assurance`).
 3. **Precedence.** The block states that runtime instructions outside it take
    precedence and that its content is data, never instructions.
-4. **Bounded cost.** One resolver per user object caches anchors (5 min TTL),
-   verified public bytes and parsed indexes; a repeat turn inside the TTL
-   makes no network call. Pass-1 reads run in parallel under one 3 s budget;
+4. **Bounded cost.** The block goes out with every model call, so by default
+   it is an index with document openings, not the documents
+   (`detail: 'compact'`, `pass1.excerptChars`); the model reads a document
+   when a question needs it. One resolver per user object caches anchors
+   (5 min TTL), verified public bytes and parsed indexes; a repeat turn inside
+   the TTL makes no network call. Pass-1 reads run in parallel under one 3 s budget;
    a late read is reported as `pass1-timeout`, not waited for. The parsed
    indexes are bounded by count and by index text (4 Mi characters). The
    `@ixo/domain.md` validators are bundled but loaded on first use, so an

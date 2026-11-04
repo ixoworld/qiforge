@@ -186,9 +186,15 @@ import {
   DEFAULT_MODEL_ID,
 } from '../core/llm';
 import { renderTurnTimeNote } from '../core/prompt-composer';
+import type { RegisteredManifest } from '../core/registries';
+import {
+  TURN_GUIDE_NOTE_KWARG,
+  USAGE_CARRIED_KWARG,
+} from '../core/operating-guides';
 import { TURN_TIME_NOTE_KWARG, withTurnTimeNote } from '../core/turn-time-note';
 import {
   capabilityRouterMode,
+  preloadThreshold,
   createCapabilityRouter,
   shadowAgreement,
   type CapabilityRouter,
@@ -203,7 +209,6 @@ import type {
   RequestAdmissionResult,
   RequestDisposition,
 } from '../plugin-api/request-admission';
-import { bootHiddenPlugins } from '../core/tool-access';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { AmbientServices, LlmAdapter } from '../core/runtime-context';
 import { chatGptBackendFromEnv } from '../llm/byo-client';
@@ -220,6 +225,8 @@ import { parseJwk } from '../secrets/jwe';
 import { WorkersSecretsService } from '../secrets/secrets-service';
 import { createSecretsAdapter } from './secrets-adapter';
 import {
+  EDITOR_PLUGIN_NAME,
+  editorContextActive,
   metadataBuildState,
   metadataGraphInput,
   parseTurnMetadata,
@@ -348,6 +355,7 @@ import {
   pageOfMessages,
   SessionHistoryIndexer,
   type HistoryEntry,
+  conversationReader,
   type HistoryMessage,
   type HistoryPage,
   type IndexableSession,
@@ -455,6 +463,7 @@ import {
   contentToText,
   isSummarizationMessage,
   pageThreadTranscript,
+  recentTurnTexts,
   TranscriptCursorError,
   transformTranscript,
   type TranscriptPageOptions,
@@ -570,6 +579,15 @@ type UserContextSettle = (
   onSlow: () => void,
   signal: AbortSignal,
 ) => Promise<UserContextData | undefined>;
+
+/**
+ * What the capability router sees of the thread: enough to route a follow-up
+ * (two exchanges, each turn cut short), read from a bounded number of rows so
+ * a long thread costs nothing extra.
+ */
+const ROUTER_RECENT_TURNS = 4;
+const ROUTER_RECENT_TURN_CHARS = 300;
+const ROUTER_RECENT_ROWS = 12;
 
 /** How long a first turn waits on the user-context prefetch before saying so. */
 const USER_CONTEXT_PROGRESS_GRACE_MS = 300;
@@ -4787,7 +4805,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             !isAttachmentViewMessage(m) &&
             !isDeliveryNoticeMessage(m),
         )
-        .map((m) => ({ type: m.type, content: visibleText(m) }));
+        .map(conversationReader());
     }
 
     /**
@@ -4810,6 +4828,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       }
       const pageRows = Math.max(1, limit);
       const entries: HistoryEntry[] = [];
+      const read = conversationReader();
       for (;;) {
         const rows = await saver.listThreadMessageRows(sessionId, {
           direction: 'newer',
@@ -4826,7 +4845,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           )
             continue;
           entries.push({
-            message: { type: m.type, content: visibleText(m) },
+            message: read(m),
             cursor: row.messageId,
           });
         }
@@ -5021,6 +5040,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       prior: unknown;
       client: TurnRequest['client'];
       roomKind: TurnRequest['roomKind'];
+      /** The provider's cache has expired, so the prompt may change. */
+      coldTurn: boolean;
     }): UserContextSettle | null {
       // A first contact that fetches nothing still prints the one
       // first-contact line (see the settle step below), with its reason, so
@@ -5075,9 +5096,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         // room answer — but only one already in the cache: an upload that
         // just invalidated the room must not make the next message wait for
         // a gather. On a miss the thread keeps its context and the
-        // (single-flight) refresh warms the cache for a later turn.
+        // (single-flight) refresh warms the cache for a later turn. The
+        // answer sits in the system prompt, so it waits for a cold turn: a
+        // change there re-reads the whole request at the uncached price.
         const warm =
-          input.client === 'channel'
+          input.client === 'channel' && input.coldTurn
             ? fetcher.readCached(input.roomId)
             : undefined;
         keepGathering();
@@ -7178,13 +7201,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       sessionId: string,
     ): Promise<SessionContextStatus | null> {
       if (!(await this.sessions!.getSession(sessionId))) return null;
-      const tuple = await this.saver!.getTuple({
-        configurable: { thread_id: sessionId },
-      });
-      const channel: unknown = tuple?.checkpoint.channel_values.messages;
-      const context: BaseMessage[] = Array.isArray(channel)
-        ? channel.filter(isBaseMessage)
-        : [];
+      const context = await this.contextMessages(sessionId);
       const thread = await this.saver!.listThreadMessages(sessionId);
       const stats = await this.ctx.storage.get<SessionContextCounters>(
         contextStatsKey(sessionId),
@@ -7202,6 +7219,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         }),
         ...(stats ?? EMPTY_CONTEXT_COUNTERS),
       };
+    }
+
+    /** The messages the session's model calls start from (a summary, then the kept tail, once condensed). */
+    private async contextMessages(sessionId: string): Promise<BaseMessage[]> {
+      const tuple = await this.saver!.getTuple({
+        configurable: { thread_id: sessionId },
+      });
+      const channel: unknown = tuple?.checkpoint.channel_values.messages;
+      return Array.isArray(channel) ? channel.filter(isBaseMessage) : [];
     }
 
     /** Fold a guard event into the session's stored counters (ordered, never throws). */
@@ -7222,7 +7248,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           switch (event.kind) {
             case 'prune':
               next.prunes += 1;
-              if (event.stage !== 'soft') next.hardPrunes += 1;
+              if (event.stage === 'hard' || event.stage === 'overflow')
+                next.hardPrunes += 1;
               next.prunedResults += event.pruned;
               break;
             case 'overflow-retry':
@@ -7721,6 +7748,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         configurable: { thread_id: req.sessionId },
       });
       const priorState = existing?.checkpoint.channel_values ?? {};
+      // A new thread, or quiet for longer than the provider's cache lives:
+      // this turn pays a miss whatever it sends, so it is the one to change
+      // the prefix on.
+      const coldTurn =
+        !existing ||
+        turnAt.getTime() - Date.parse(existing.checkpoint.ts) >=
+          contextBudget.cacheColdMs;
       // What the memory engine knows about the user, for the prompt's
       // context block: started now so the round-trip overlaps the rest of
       // the build, settled right before the agent is built.
@@ -7734,6 +7768,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             prior: priorState.userContext,
             client: req.client,
             roomKind: req.roomKind,
+            coldTurn,
           });
 
       // A Matrix turn with no usable delegation: ask the web app to open its
@@ -7862,11 +7897,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         suppliedContextOnly ? {} : priorState,
       );
 
-      // Capability router: predict the on-demand plugin this message needs
-      // and preload it for THIS turn only. `on` is awaited here, ahead of the
-      // first model call; `shadow` returns at once and logs its verdict when
-      // it lands. The preload never enters `stateInput` — the checkpointed
-      // `loadedPlugins` channel is written by `load_capability` alone.
       const priorLoaded: ReadonlySet<string> = new Set(
         priorMeta.loadedPlugins ?? [],
       );
@@ -7885,45 +7915,49 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             client: req.client,
             env: langsmithEnvFromWorkerEnv(this.env),
           });
-      const preloadedPlugins =
-        !suppliedContextOnly && this.capabilityRouter
-          ? await this.capabilityRouter({
-              mode: capabilityRouterMode(core.validatedEnv.CAPABILITY_ROUTER),
-              manifests: core.registries.manifests.collect(),
-              loaded: priorLoaded,
-              hidden: () =>
-                bootHiddenPlugins({
-                  registries: core.registries,
-                  buildCtx: core.buildCtx(),
-                  has: (resource, action) =>
-                    ambient.ucan.hasCapability(
-                      ucanDelegation,
-                      resource,
-                      action,
+      // Capability router: from what is left to load this turn (the build
+      // works that out from the turn's tools), the plugins this message needs.
+      // `on` is awaited in the build, ahead of the first model call, and the
+      // plugins load on the thread like any other; `shadow` returns at once
+      // and logs its verdict when it lands. A resumed attempt keeps what the
+      // run started with.
+      const router = this.capabilityRouter;
+      const routeCapabilities =
+        !suppliedContextOnly && !run.resumed && router
+          ? (candidates: readonly RegisteredManifest[]) =>
+              router({
+                mode: capabilityRouterMode(core.validatedEnv.CAPABILITY_ROUTER),
+                candidates,
+                ...preloadThreshold(coldTurn, core.validatedEnv),
+                text: body.message,
+                recentTurns: async () =>
+                  recentTurnTexts(
+                    await saver.listRecentThreadMessages(
+                      req.sessionId,
+                      ROUTER_RECENT_ROWS,
                     ),
-                }),
-              hasCapability: (resource, action) =>
-                ambient.ucan.hasCapability(ucanDelegation, resource, action),
-              text: body.message,
-              requestId: req.requestId,
-              signal: abortController.signal,
-              trace: {
-                ...(tracing.callbacks && { callbacks: tracing.callbacks }),
-                // `thread_id` matches the graph run's, so LangSmith's thread
-                // view groups the router span with the turn.
-                metadata: {
-                  ...tracing.metadata,
-                  thread_id: req.sessionId,
-                  request_id: req.requestId,
+                    ROUTER_RECENT_TURNS,
+                    ROUTER_RECENT_TURN_CHARS,
+                  ),
+                requestId: req.requestId,
+                signal: abortController.signal,
+                trace: {
+                  ...(tracing.callbacks && { callbacks: tracing.callbacks }),
+                  // `thread_id` matches the graph run's, so LangSmith's thread
+                  // view groups the router span with the turn.
+                  metadata: {
+                    ...tracing.metadata,
+                    thread_id: req.sessionId,
+                    request_id: req.requestId,
+                  },
                 },
-              },
-              onShadowVerdict: (wouldPreload) =>
-                this.shadowRoutes.set(req.sessionId, {
-                  requestId: req.requestId,
-                  priorLoaded,
-                  wouldPreload,
-                }),
-            })
+                onShadowVerdict: (wouldPreload) =>
+                  this.shadowRoutes.set(req.sessionId, {
+                    requestId: req.requestId,
+                    priorLoaded,
+                    wouldPreload,
+                  }),
+              })
           : undefined;
 
       // Host page-context / safety-guardrail hooks, resolved against this
@@ -8094,13 +8128,44 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           )
         : undefined;
 
+      // On a cold turn the thread's history shows which capabilities it has
+      // moved on from. The messages are read only then, and only for a
+      // thread with something to unload; the editor stays while its context
+      // is active, and a resumed attempt keeps what the run started with.
+      const unloadable = (priorMeta.loadedPlugins ?? []).filter(
+        (plugin) =>
+          plugin !== EDITOR_PLUGIN_NAME ||
+          !editorContextActive(meta, priorMeta),
+      );
+      const capabilityExpiry =
+        coldTurn &&
+        !run.resumed &&
+        contextBudget.pluginIdleTurns > 0 &&
+        unloadable.length > 0
+          ? {
+              loaded: unloadable,
+              maxIdleTurns: contextBudget.pluginIdleTurns,
+              messages: await this.contextMessages(req.sessionId),
+            }
+          : undefined;
+
       const built = await createMainAgent({
         executionProfile: req.executionProfile,
+        ...(capabilityExpiry ? { capabilityExpiry } : {}),
         registries: core.registries,
         identity: core.identity,
         config: core.validatedEnv,
         availablePlugins: core.availablePlugins,
-        preloadedPlugins,
+        ...(routeCapabilities ? { routeCapabilities } : {}),
+        promptCache: {
+          cold: coldTurn && !run.resumed,
+          ...(priorMeta.promptGuides
+            ? { promptGuides: priorMeta.promptGuides }
+            : {}),
+          ...(priorMeta.capabilityUsage
+            ? { capabilityUsage: priorMeta.capabilityUsage }
+            : {}),
+        },
         byoProvider: byoTurn?.provider,
         contextBudget,
         turnBudget: budget,
@@ -8224,7 +8289,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         checkpointer: saver,
         abortSignal: abortController.signal,
       });
-      const { agent, context } = built;
+      const { agent, context, guideNote } = built;
       for (const [name, effect] of built.toolEffects)
         toolEffects.set(name, effect);
       for (const [name, surface] of built.toolSurfaces)
@@ -8277,9 +8342,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const referenced = replyNote
         ? withTurnTimeNote(noticed, replyNote)
         : noticed;
-      const content = timeNote
-        ? withTurnTimeNote(referenced, timeNote)
+      const guided = guideNote
+        ? withTurnTimeNote(referenced, guideNote.text)
         : referenced;
+      const content = timeNote ? withTurnTimeNote(guided, timeNote) : guided;
       const human = new HumanMessage({
         content,
         additional_kwargs: {
@@ -8288,6 +8354,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           ...(replyNote ? { [CHANNEL_REPLY_NOTE_KWARG]: replyNote } : {}),
           ...(noticeNote
             ? { [CHANNEL_DELIVERY_NOTICE_KWARG]: noticeNote }
+            : {}),
+          ...(guideNote
+            ? {
+                [TURN_GUIDE_NOTE_KWARG]: guideNote.text,
+                [USAGE_CARRIED_KWARG]: guideNote.plugins,
+              }
             : {}),
           oracleName: core.identity.name,
           msgFromMatrixRoom: req.client === 'matrix',
@@ -8319,6 +8391,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         // every slot present; later turns write nothing and keep it.
         ...(userContext ? { userContext } : {}),
         ...metadataGraphInput(meta, priorMeta),
+        ...built.stateUpdate,
         ...surface.input,
       };
       const config = {

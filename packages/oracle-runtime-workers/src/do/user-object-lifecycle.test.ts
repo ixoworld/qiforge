@@ -2,7 +2,14 @@ import { env, runInDurableObject } from 'cloudflare:test';
 import { emptyCheckpoint } from '@langchain/langgraph-checkpoint';
 import { describe, expect, it, vi } from 'vitest';
 import { createRuntimeCore } from '../core';
-import { makeEnv } from '../core/test-fixtures';
+import {
+  makeEnv,
+  makeManifest,
+  makePlugin,
+  makeTool,
+} from '../core/test-fixtures';
+import { USAGE_CARRIED_KWARG } from '../core/operating-guides';
+import { visibleText } from './transcript';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin';
 import {
   bytesOfStream,
@@ -1399,9 +1406,9 @@ describe('turn preparation wiring', () => {
     });
   });
 
-  it("derives the context budget from the main model's window alone and hands the router lazy, capability-aware inputs", async () => {
+  it("derives the context budget from the main model's window alone", async () => {
     await withObject('turn-summary-window', {}, async (h) => {
-      const { resolve, router } = await bootedForTurns(h);
+      const { resolve } = await bootedForTurns(h);
       const prepared = await h.call(
         'prepareTurn',
         portalTurn,
@@ -1414,9 +1421,6 @@ describe('turn preparation wiring', () => {
         DEFAULT_MODEL_ID,
       ]);
       expect(OPENROUTER_MODEL_MAP.routing).not.toBe(DEFAULT_MODEL_ID);
-      const input = router.mock.calls[0]?.[0];
-      expect(typeof input?.hidden).toBe('function');
-      expect(typeof input?.hasCapability).toBe('function');
       await disposeTurn(h, prepared);
     });
   });
@@ -1441,6 +1445,155 @@ describe('turn preparation wiring', () => {
       expect(prompts[0]).toContain('User: Plan my week');
       expect(prompts[0]).not.toContain('Current time');
     });
+  });
+});
+
+describe('capability preloads on a prepared turn', () => {
+  const GUIDE = '### Probe mode\n\nCheck twice.';
+  const probe = () =>
+    makePlugin({
+      name: 'probe',
+      manifest: makeManifest({ title: 'Probe', visibility: 'on-demand' }),
+      operatingGuide: GUIDE,
+      getTools: () => [makeTool('probe_run')],
+    });
+  const env = { CAPABILITY_ROUTER: 'on' };
+
+  function routeTo(h: UserObjectHarness, plugins: string[]) {
+    const router = vi.fn(
+      async (_turn: {
+        threshold?: number;
+        candidates: readonly { pluginName: string }[];
+      }) => new Set(plugins),
+    );
+    Reflect.set(h.host, 'capabilityRouter', router);
+    return router;
+  }
+
+  /** The thread as a finished turn left it. */
+  async function seedThread(
+    h: UserObjectHarness,
+    channels: Record<string, unknown>,
+    at: Date,
+  ) {
+    await h.saver().put(
+      { configurable: { thread_id: portalTurn.sessionId, checkpoint_ns: '' } },
+      {
+        ...emptyCheckpoint(),
+        ts: at.toISOString(),
+        channel_values: channels,
+      },
+      { source: 'loop', step: 1, parents: {} },
+    );
+  }
+
+  const input = (prepared: unknown): Record<string, unknown> => {
+    const value: unknown =
+      typeof prepared === 'object' && prepared !== null
+        ? Reflect.get(prepared, 'stateInput')
+        : undefined;
+    if (typeof value !== 'object' || value === null)
+      throw new Error('no input');
+    return { ...value };
+  };
+
+  it('on a new thread: uses the cold threshold and writes the load and the prompt guides, no note', async () => {
+    await withObject('preload-new', { env, plugins: [probe()] }, async (h) => {
+      await bootedForTurns(h);
+      const router = routeTo(h, ['probe']);
+      const prepared = await h.call(
+        'prepareTurn',
+        portalTurn,
+        { message: portalTurn.message },
+        attemptRun(),
+      );
+
+      expect(router.mock.calls[0]?.[0].threshold).toBeUndefined();
+      expect(
+        router.mock.calls[0]?.[0].candidates.map((c) => c.pluginName),
+      ).toEqual(['probe']);
+      expect(input(prepared)).toMatchObject({
+        loadedPlugins: ['probe'],
+        promptGuides: ['probe'],
+        capabilityUsage: ['probe'],
+      });
+      expect(String(inputMessage(prepared).content)).not.toContain(
+        'Check twice',
+      );
+      await disposeTurn(h, prepared);
+    });
+  });
+
+  it('on a warm thread: asks for the warm threshold and puts the guide on the message, off the transcript', async () => {
+    await withObject('preload-warm', { env, plugins: [probe()] }, async (h) => {
+      await bootedForTurns(h);
+      await seedThread(
+        h,
+        { promptGuides: [], capabilityUsage: [] },
+        new Date(),
+      );
+      const router = routeTo(h, ['probe']);
+      const prepared = await h.call(
+        'prepareTurn',
+        portalTurn,
+        { message: portalTurn.message },
+        attemptRun(),
+      );
+
+      expect(router.mock.calls[0]?.[0].threshold).toBe(0.8);
+      const fields = input(prepared);
+      expect(fields.loadedPlugins).toEqual(['probe']);
+      expect(fields).not.toHaveProperty('promptGuides');
+      const message = inputMessage(prepared);
+      expect(String(message.content)).toContain('Check twice');
+      expect(message.additional_kwargs[USAGE_CARRIED_KWARG]).toEqual(['probe']);
+      expect(visibleText(message)).toBe(portalTurn.message);
+      await disposeTurn(h, prepared);
+    });
+  });
+
+  it('on a thread quiet past the cache: is a cold turn, the guide in the prompt and off the message', async () => {
+    await withObject('preload-cold', { env, plugins: [probe()] }, async (h) => {
+      await bootedForTurns(h);
+      await seedThread(
+        h,
+        { promptGuides: [] },
+        new Date(Date.now() - 3 * 60 * 60 * 1000),
+      );
+      const router = routeTo(h, ['probe']);
+      const prepared = await h.call(
+        'prepareTurn',
+        portalTurn,
+        { message: portalTurn.message },
+        attemptRun(),
+      );
+
+      expect(router.mock.calls[0]?.[0].threshold).toBeUndefined();
+      expect(input(prepared).promptGuides).toEqual(['probe']);
+      expect(String(inputMessage(prepared).content)).not.toContain(
+        'Check twice',
+      );
+      await disposeTurn(h, prepared);
+    });
+  });
+
+  it('a resumed attempt does not route: it keeps what the run started with', async () => {
+    await withObject(
+      'preload-resumed',
+      { env, plugins: [probe()] },
+      async (h) => {
+        await bootedForTurns(h);
+        const router = routeTo(h, ['probe']);
+        const prepared = await h.call(
+          'prepareTurn',
+          portalTurn,
+          { message: portalTurn.message },
+          { ...attemptRun(), resumed: true },
+        );
+        expect(router).not.toHaveBeenCalled();
+        await disposeTurn(h, prepared);
+      },
+    );
   });
 });
 

@@ -90,21 +90,31 @@ export function turnCarryOf(
 }
 
 /**
- * Index of the message that opens the current turn: the latest human
- * message other than the ones the runtime writes itself, or a summary that
- * carries the calls of a turn it condensed mid-way. 0 when there is none.
+ * A turn opens at a human message other than the ones the runtime writes
+ * itself, or at a summary that carries the calls of a turn it condensed
+ * mid-way.
  */
+function opensTurn(message: BaseMessage | undefined): boolean {
+  if (!message || !HumanMessage.isInstance(message)) return false;
+  if (isSummarizationMessage(message))
+    return turnCarryOf(message) !== undefined;
+  return !isAttachmentViewMessage(message);
+}
+
+/** Index of the message that opens the current turn; 0 when there is none. */
 export function turnStart(messages: readonly BaseMessage[]): number {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i];
-    if (!message || !HumanMessage.isInstance(message)) continue;
-    if (isSummarizationMessage(message)) {
-      if (turnCarryOf(message) !== undefined) return i;
-      continue;
-    }
-    if (!isAttachmentViewMessage(message)) return i;
-  }
+  for (let i = messages.length - 1; i >= 0; i--)
+    if (opensTurn(messages[i])) return i;
   return 0;
+}
+
+/** The indexes of every turn-opening message, oldest first. */
+export function turnOpenings(messages: readonly BaseMessage[]): number[] {
+  const openings: number[] = [];
+  messages.forEach((message, index) => {
+    if (opensTurn(message)) openings.push(index);
+  });
+  return openings;
 }
 
 function resultText(message: ToolMessage): string {

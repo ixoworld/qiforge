@@ -661,6 +661,7 @@ const manifest: PluginManifest = {
   category: 'data',
   // Yoma's assistant sets `visibility: 'always'` through `manifestOverrides`.
   visibility: 'on-demand',
+  brief: 'Yoma programmes and jobs; apply, log work, check payment',
   stability: 'beta',
 };
 

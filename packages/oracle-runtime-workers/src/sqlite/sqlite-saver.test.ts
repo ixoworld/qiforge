@@ -33,6 +33,10 @@ import {
   CHANNEL_REPLY_NOTE_KWARG,
 } from '../channels/replies';
 import {
+  TURN_GUIDE_NOTE_KWARG,
+  USAGE_CARRIED_KWARG,
+} from '../core/operating-guides';
+import {
   type CarriedToolCall,
   SUMMARY_PREFIX,
   turnCarryKwargs,
@@ -273,6 +277,31 @@ describe('SqliteSaver message rows', () => {
       ]);
       const listed = await saver.listThreadMessages('t');
       expect(listed.map((x) => x.content)).toEqual([m.content]);
+      await db.close();
+    });
+  });
+
+  it('lists the newest human and AI rows with content, bounded by the limit', async () => {
+    await runInDurableObject(stub('saver-recent'), async (_i, state) => {
+      const db = await DoSqliteDatabase.open(state, 'recent.db');
+      const saver = new SqliteSaver(db);
+      await put(saver, 't', [
+        human('m-1', 'first'),
+        new AIMessage({ id: 'm-2', content: 'answer' }),
+        new AIMessage({
+          id: 'm-3',
+          content: '',
+          tool_calls: [{ id: 'c1', name: 'lookup', args: {} }],
+        }),
+        new ToolMessage({ id: 'm-4', tool_call_id: 'c1', content: 'result' }),
+        human('m-5', 'second'),
+      ]);
+      await put(saver, 'other', [human('o-1', 'another thread')]);
+
+      const recent = await saver.listRecentThreadMessages('t', 2);
+
+      expect(recent.map((m) => m.id)).toEqual(['m-5', 'm-2']);
+      expect(await saver.listRecentThreadMessages('empty', 2)).toEqual([]);
       await db.close();
     });
   });
@@ -735,6 +764,23 @@ describe('the turn time note kwarg', () => {
 
   it('keeps the quoted-reply note and the channel provenance, dropping malformed ones', () => {
     const base = { timestamp: '2026-01-01T00:00:00.000Z' };
+    expect(
+      cleanAdditionalKwargs(
+        {
+          ...base,
+          [TURN_GUIDE_NOTE_KWARG]: '[From the runtime …]',
+          [USAGE_CARRIED_KWARG]: ['flows', 7],
+        },
+        false,
+        'O',
+      ),
+    ).toEqual({
+      msgFromMatrixRoom: false,
+      oracleName: 'O',
+      ...base,
+      [TURN_GUIDE_NOTE_KWARG]: '[From the runtime …]',
+      [USAGE_CARRIED_KWARG]: ['flows'],
+    });
     const origin = { v: 1, transport: 'whatsapp' };
     const reply = { kind: 'known', requestId: 'wa:prior', author: 'oracle' };
     expect(

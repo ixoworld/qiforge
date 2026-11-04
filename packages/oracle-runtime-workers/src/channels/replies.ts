@@ -1,4 +1,5 @@
 import type { BaseMessage, MessageContent } from '@langchain/core/messages';
+import { TURN_GUIDE_NOTE_KWARG } from '../core/operating-guides';
 import {
   stripTurnTimeNote,
   TURN_TIME_NOTE_KWARG,
@@ -9,7 +10,7 @@ import type { ChannelFileNotice, ChannelReplyContext } from './contract';
  * `additional_kwargs` key holding the exact quoted-reply note a channel
  * message was sent with, so readers can take it off the stored content again
  * (see `userContent`). The note sits between the time note and what the
- * person typed: `time note \n\n reply note \n\n message`.
+ * person typed: `time note \n\n guide note \n\n reply note \n\n message`.
  */
 export const CHANNEL_REPLY_NOTE_KWARG = 'channel_reply_note';
 
@@ -84,8 +85,8 @@ export function isDeliveryNoticeMessage(message: BaseMessage): boolean {
 }
 
 /**
- * The content as the person sent it: without the runtime's time note,
- * without the quoted-reply note and without a delivery notice. Every reader
+ * The content as the person sent it: without the runtime's time and guide
+ * notes, without the quoted-reply note and without a delivery notice. Every reader
  * that treats a human message as the person's own words (the transcript,
  * memory indexing, the evidence a proposal is checked against) goes through
  * here, so quoted text or a gateway's notice is never taken for something
@@ -97,7 +98,10 @@ export function userContent(
 ): MessageContent {
   return stripTurnTimeNote(
     stripTurnTimeNote(
-      stripTurnTimeNote(content, kwargs?.[TURN_TIME_NOTE_KWARG]),
+      stripTurnTimeNote(
+        stripTurnTimeNote(content, kwargs?.[TURN_TIME_NOTE_KWARG]),
+        kwargs?.[TURN_GUIDE_NOTE_KWARG],
+      ),
       kwargs?.[CHANNEL_REPLY_NOTE_KWARG],
     ),
     kwargs?.[CHANNEL_DELIVERY_NOTICE_KWARG],

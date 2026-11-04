@@ -6,8 +6,10 @@ import {
   buildListCapabilitiesTool,
   buildLoadCapabilityTool,
   buildMetaTools,
+  createCapabilityLoader,
   type MetaToolAccess,
 } from './meta-tools';
+import { USAGE_CARRIED_KWARG } from './operating-guides';
 import {
   ManifestRegistry,
   ToolRegistry,
@@ -33,9 +35,11 @@ interface Listing {
   unavailable?: { missing: { resource: string; action: string }[] };
 }
 
-interface LoadResult extends PluginManifest {
+interface LoadResult extends Partial<PluginManifest> {
+  name: string;
   alreadyAvailable: boolean;
-  tools: { name: string; description: string }[];
+  tools: string[];
+  note?: string;
   refused?: {
     missing: { resource: string; action: string }[];
     reason: string;
@@ -127,8 +131,8 @@ describe('buildMetaTools', () => {
 
 describe('list_capabilities', () => {
   it('lists always + on-demand (not silent) as JSON with loaded flags', async () => {
-    const { manifests } = await buildRegistries();
-    const tool = buildListCapabilitiesTool(manifests, OPEN);
+    const { manifests, tools } = await buildRegistries();
+    const tool = buildListCapabilitiesTool(manifests, tools, OPEN);
 
     const raw = await tool.handler(
       {},
@@ -181,14 +185,21 @@ describe('load_capability', () => {
     const payload = JSON.parse(
       String(update.messages[0]?.content),
     ) as LoadResult[];
-    expect(payload.map((p) => `${p.title}:${p.alreadyAvailable}`)).toEqual([
-      'Weather:false',
-      'Memory:true',
+    expect(payload.map((p) => `${p.name}:${p.alreadyAvailable}`)).toEqual([
+      'weather:false',
+      'memory:true',
     ]);
-    expect(payload[0]?.tools.map((t) => t.name)).toEqual([
+    // Names only: the definitions reach the model in its tool list.
+    expect(payload[0]?.tools).toEqual([
       'get_current_weather',
       'get_weather_forecast',
     ]);
+    expect(payload[0]?.summary).toBeDefined();
+    expect(String(update.messages[0]?.content)).not.toContain('Forecast.');
+    // Nothing a load changes nothing for carries the plugin's manifest.
+    expect(payload[1]?.note).toContain('already in your tool list');
+    expect(payload[1]).not.toHaveProperty('summary');
+    expect(payload[1]).not.toHaveProperty('whenToUse');
   });
 
   it('returns the result array as JSON text when everything was already available', async () => {
@@ -200,18 +211,46 @@ describe('load_capability', () => {
     );
     expect(typeof result).toBe('string');
     const parsed = JSON.parse(result as string) as LoadResult[];
-    expect(parsed[0]?.alreadyAvailable).toBe(true);
+    expect(parsed).toEqual([
+      {
+        name: 'weather',
+        alreadyAvailable: true,
+        tools: ['get_current_weather', 'get_weather_forecast'],
+        note: 'Nothing to load: these tools are already in your tool list. Call them directly.',
+      },
+    ]);
   });
 
-  it('rejects unknown and silent capabilities, and concurrent calls per session', async () => {
+  it('answers a second load in one turn as a no-op: the context does not show the first yet', async () => {
     const { manifests, tools } = await buildRegistries();
     const load = buildLoadCapabilityTool(manifests, tools, OPEN);
-    await expect(
-      load.handler({ names: ['nope'] }, makeRuntimeContext()),
-    ).rejects.toThrow(/list_capabilities/);
-    await expect(
-      load.handler({ names: ['tracing'] }, makeRuntimeContext()),
-    ).rejects.toThrow(/internal/);
+    const ctx = makeRuntimeContext({
+      loadedPlugins: new Set<string>(),
+      toolCallId: 'call-1',
+    });
+    expect(await load.handler({ names: ['weather'] }, ctx)).toBeInstanceOf(
+      Command,
+    );
+    const again = await load.handler({ names: ['weather'] }, ctx);
+    expect(typeof again).toBe('string');
+    expect((JSON.parse(again as string) as LoadResult[])[0]).toMatchObject({
+      alreadyAvailable: true,
+    });
+  });
+
+  it('refuses unknown and silent capabilities by name, and concurrent calls per session', async () => {
+    const { manifests, tools } = await buildRegistries();
+    const load = buildLoadCapabilityTool(manifests, tools, OPEN);
+    const reasons = async (name: string) =>
+      (
+        JSON.parse(
+          String(await load.handler({ names: [name] }, makeRuntimeContext())),
+        ) as LoadResult[]
+      ).map((entry) => entry.refused?.reason);
+    expect((await reasons('nope'))[0]).toContain(
+      'Loadable capabilities: weather, memory.',
+    );
+    expect((await reasons('tracing'))[0]).toMatch(/internal/);
 
     const ctx = makeRuntimeContext();
     const release = acquireToolLock(`${ctx.session.id}:load_capability`);
@@ -222,6 +261,68 @@ describe('load_capability', () => {
     } finally {
       release();
     }
+  });
+});
+
+describe('an always plugin with on-demand tools', () => {
+  async function registries() {
+    const manifests = new ManifestRegistry();
+    const tools = new ToolRegistry();
+    const notes = makePlugin({
+      name: 'notes',
+      manifest: makeManifest({
+        title: 'Notes',
+        visibility: 'always',
+        onDemandTools: ['notes_delete'],
+      }),
+      getTools: () => [makeTool('notes_find'), makeTool('notes_delete')],
+    });
+    manifests.register(notes);
+    tools.register(notes);
+    await tools.collect(makeBuildCtx());
+    return { manifests, tools };
+  }
+
+  it('list_capabilities shows it not loaded until the thread loads it', async () => {
+    const { manifests, tools } = await registries();
+    const list = buildListCapabilitiesTool(manifests, tools, OPEN);
+    const loadedFlag = async (loaded: string[]) =>
+      (
+        JSON.parse(
+          (await list.handler(
+            {},
+            makeRuntimeContext({ loadedPlugins: new Set(loaded) }),
+          )) as string,
+        ) as Listing[]
+      )[0]?.loaded;
+    expect(await loadedFlag([])).toBe(false);
+    expect(await loadedFlag(['notes'])).toBe(true);
+  });
+
+  it('load_capability loads it, and a withheld tool does not count as something left to load', async () => {
+    const { manifests, tools } = await registries();
+    const result = await buildLoadCapabilityTool(
+      manifests,
+      tools,
+      OPEN,
+    ).handler(
+      { names: ['notes'] },
+      makeRuntimeContext({
+        loadedPlugins: new Set<string>(),
+        toolCallId: 'call-1',
+      }),
+    );
+    expect(result).toBeInstanceOf(Command);
+
+    const noop = await buildLoadCapabilityTool(manifests, tools, {
+      ...OPEN,
+      withheldToolNames: new Set(['notes_delete']),
+    }).handler(
+      { names: ['notes'] },
+      makeRuntimeContext({ loadedPlugins: new Set<string>() }),
+    );
+    expect(typeof noop).toBe('string');
+    expect(noop).not.toContain('notes_delete');
   });
 });
 
@@ -271,14 +372,14 @@ describe("plugins the user's authorization does not cover", () => {
       String(update.messages[0]?.content),
     ) as LoadResult[];
     expect(files).toMatchObject({
-      title: 'Files',
+      name: 'files',
       alreadyAvailable: false,
       tools: [],
       refused: { missing: REQUIRES },
     });
     expect(files?.refused?.reason).toContain('`fs/read` on `ixo:filesystem`');
     expect(weather?.refused).toBeUndefined();
-    expect(weather?.tools.map((t) => t.name)).toEqual(['get_current_weather']);
+    expect(weather?.tools).toEqual(['get_current_weather']);
   });
 
   it('load_capability refuses without a state update when nothing else was asked for', async () => {
@@ -292,13 +393,14 @@ describe("plugins the user's authorization does not cover", () => {
 
   it('load_capability loads the plugin once the delegation grants it, directly or through a parent grant', async () => {
     const { manifests, tools } = await registries();
-    const load = buildLoadCapabilityTool(manifests, tools, OPEN);
     for (const grant of [
       { resource: 'ixo:filesystem', action: 'fs/read' },
       { resource: 'ixo:filesystem', action: 'fs/*' },
       { resource: 'ixo:filesystem', action: '*' },
       { resource: '*', action: '*' },
     ]) {
+      // One build per turn: the tool remembers what its turn loaded.
+      const load = buildLoadCapabilityTool(manifests, tools, OPEN);
       const result = await load.handler(
         { names: ['files'] },
         grantedContext([grant]),
@@ -326,8 +428,8 @@ describe("plugins the user's authorization does not cover", () => {
   });
 
   it('list_capabilities marks the plugin unavailable and not loaded, even if an earlier turn loaded it', async () => {
-    const { manifests } = await registries();
-    const list = buildListCapabilitiesTool(manifests, OPEN);
+    const { manifests, tools } = await registries();
+    const list = buildListCapabilitiesTool(manifests, tools, OPEN);
     const out = JSON.parse(
       (await list.handler(
         {},
@@ -415,10 +517,10 @@ describe('admin-plane tools', () => {
   }
 
   it('list_capabilities hides a plugin whose tools are all ungranted admin tools, never as unavailable', async () => {
-    const { manifests, collected } = await setup();
+    const { manifests, tools, collected } = await setup();
     const { ctx, access } = turn(collected, []);
     const out = JSON.parse(
-      (await buildListCapabilitiesTool(manifests, access).handler(
+      (await buildListCapabilitiesTool(manifests, tools, access).handler(
         {},
         ctx,
       )) as string,
@@ -428,23 +530,34 @@ describe('admin-plane tools', () => {
 
     const granted = turn(collected, [admin('authority', 'grant_authority')]);
     const listed = JSON.parse(
-      (await buildListCapabilitiesTool(manifests, granted.access).handler(
-        {},
-        granted.ctx,
-      )) as string,
+      (await buildListCapabilitiesTool(
+        manifests,
+        tools,
+        granted.access,
+      ).handler({}, granted.ctx)) as string,
     ) as Listing[];
     expect(listed.map((e) => e.name).sort()).toEqual(['authority', 'keys']);
   });
 
-  it('load_capability refuses a hidden plugin as unknown and loads nothing', async () => {
+  it('load_capability refuses a hidden plugin as unknown, and the rest of the batch loads', async () => {
     const { manifests, tools, collected } = await setup();
     const { ctx, access } = turn(collected, []);
-    await expect(
-      buildLoadCapabilityTool(manifests, tools, access).handler(
-        { names: ['keys', 'authority'] },
-        ctx,
-      ),
-    ).rejects.toThrow('Capability "authority" does not exist');
+    const result = await buildLoadCapabilityTool(
+      manifests,
+      tools,
+      access,
+    ).handler({ names: ['keys', 'authority'] }, ctx);
+    const update = (result as Command).update as {
+      loadedPlugins: string[];
+      messages: ToolMessage[];
+    };
+    expect(update.loadedPlugins).toEqual(['keys']);
+    const entries = JSON.parse(
+      String(update.messages[0]?.content),
+    ) as LoadResult[];
+    expect(entries[1]?.refused?.reason).toContain(
+      'Capability "authority" does not exist',
+    );
   });
 
   it('load_capability loads a mixed plugin with only the granted descriptors and examples', async () => {
@@ -463,7 +576,7 @@ describe('admin-plane tools', () => {
     const [keys] = JSON.parse(
       String(update.messages[0]?.content),
     ) as LoadResult[];
-    expect(keys?.tools.map((t) => t.name)).toEqual(['list_keys']);
+    expect(keys?.tools).toEqual(['list_keys']);
     expect(keys?.examples?.map((e) => e.tool)).toEqual(['list_keys']);
 
     // A grant on the plugin's admin root covers its admin tools.
@@ -481,7 +594,7 @@ describe('admin-plane tools', () => {
           ?.content,
       ),
     ) as LoadResult[];
-    expect(all?.tools.map((t) => t.name)).toEqual(['list_keys', 'rotate_key']);
+    expect(all?.tools).toEqual(['list_keys', 'rotate_key']);
   });
 
   it('a refused plugin never shows an example naming a withheld tool either', async () => {
@@ -515,7 +628,6 @@ describe('admin-plane tools', () => {
     ).handler({ names: ['files'] }, ctx);
     const [refused] = JSON.parse(result as string) as LoadResult[];
     expect(refused?.refused).toBeDefined();
-    expect(refused?.examples?.map((e) => e.tool)).toEqual(['read_file']);
     expect(String(result)).not.toContain('purge_files');
   });
 });
@@ -560,7 +672,7 @@ describe("load_capability — the turn's own tools", () => {
       const [entry] = JSON.parse(
         String(update.messages[0]?.content),
       ) as LoadResult[];
-      return entry?.tools.map((t) => t.name);
+      return entry?.tools;
     };
     expect(await listed(a)).toEqual(['dyn_base', 'dyn_for_a']);
     expect(await listed(b)).toEqual(['dyn_base', 'dyn_for_b']);
@@ -568,6 +680,44 @@ describe("load_capability — the turn's own tools", () => {
     expect(registry.toolSummariesForPlugin('dyn').map((t) => t.name)).toEqual([
       'dyn_base',
     ]);
+  });
+});
+
+describe('createCapabilityLoader', () => {
+  it('reads a guide once whichever of the gate and load_capability loaded the plugin', async () => {
+    const manifests = new ManifestRegistry();
+    const tools = new ToolRegistry();
+    const guided = makePlugin({
+      name: 'guided',
+      manifest: makeManifest({ title: 'Guided', visibility: 'on-demand' }),
+      operatingGuide: '### Guided mode',
+      getTools: () => [makeTool('guided_run')],
+    });
+    manifests.register(guided);
+    tools.register(guided);
+    await tools.collect(makeBuildCtx());
+    const loader = createCapabilityLoader(manifests, tools, OPEN);
+    const load = buildLoadCapabilityTool(manifests, tools, OPEN, loader);
+
+    const gateLoad = loader.describeForGate('guided');
+    const fromGate = JSON.parse(gateLoad.text) as {
+      operatingGuide?: string;
+      tools: string[];
+    };
+    expect(fromGate.operatingGuide).toBe('### Guided mode');
+    expect(fromGate.tools).toEqual(['guided_run']);
+    expect(gateLoad.additional_kwargs).toEqual({
+      [USAGE_CARRIED_KWARG]: ['guided'],
+    });
+
+    const after = JSON.parse(
+      (await load.handler(
+        { names: ['guided'] },
+        makeRuntimeContext({ loadedPlugins: new Set<string>() }),
+      )) as string,
+    ) as LoadResult[];
+    expect(after[0]).toMatchObject({ alreadyAvailable: true });
+    expect(after[0]).not.toHaveProperty('operatingGuide');
   });
 });
 
@@ -618,19 +768,52 @@ describe('load_capability — operating guides', () => {
     );
   }
 
-  it('returns the guide of a plugin the router only preloaded this turn', async () => {
-    const load = (await setup())({
-      ...OPEN,
-      preloadedOnly: new Set(['guided']),
-    });
-    // Preloaded: available to the turn, but its guide is not in the prompt.
+  it('answers a plugin the thread already loaded as a no-op, the router included', async () => {
+    const load = (await setup())();
     const result = await load.handler(
       { names: ['guided'] },
       grantedContext([], ['guided']),
     );
-    expect(guidesOf(result)).toEqual([
-      '### Guided mode\n\nConfirm before building.',
+    expect(guidesOf(result)).toEqual([undefined]);
+    expect(JSON.parse(String(result))).toEqual([
+      expect.objectContaining({ alreadyAvailable: true }),
     ]);
+  });
+
+  it('loads the rest of a batch past an unknown name, and a retry of a refused name changes nothing', async () => {
+    const load = (await setup())();
+    const result = await load.handler(
+      { names: ['guided', 'no-such-capability'] },
+      grantedContext([]),
+    );
+    const update = (result as Command).update as {
+      loadedPlugins: string[];
+      capabilityUsage: string[];
+      messages: ToolMessage[];
+    };
+    expect(update.loadedPlugins).toEqual(['guided']);
+    expect(update.capabilityUsage).toEqual(['guided']);
+    expect(guidesOf(result)[0]).toBeDefined();
+    const entries = JSON.parse(
+      String(update.messages[0]?.content),
+    ) as LoadResult[];
+    expect(entries[1]?.refused?.reason).toContain('does not exist');
+    expect(entries[1]?.tools).toEqual([]);
+  });
+
+  it('records nothing for a batch that loads nothing, so the guide is still there for a real load', async () => {
+    const load = (await setup())();
+    const refused = await load.handler(
+      { names: ['no-such-capability'] },
+      grantedContext([]),
+    );
+    expect(refused).not.toBeInstanceOf(Command);
+    const loaded = await load.handler(
+      { names: ['guided'] },
+      grantedContext([]),
+    );
+    expect(loaded).toBeInstanceOf(Command);
+    expect(guidesOf(loaded)[0]).toBeDefined();
   });
 
   it('returns a guide once per turn, however often the plugin is loaded', async () => {
@@ -652,6 +835,9 @@ describe('load_capability — operating guides', () => {
       grantedContext([]),
     );
     const update = (result as Command).update as { messages: ToolMessage[] };
+    expect(update.messages[0]?.additional_kwargs).toEqual({
+      [USAGE_CARRIED_KWARG]: ['guided', 'plain'],
+    });
     const [guided, locked, plain] = JSON.parse(
       String(update.messages[0]?.content),
     ) as Array<LoadResult & { operatingGuide?: string }>;
@@ -685,10 +871,11 @@ describe('load_capability — operating guides', () => {
       }),
     );
     const out = String(
-      await buildListCapabilitiesTool(manifests, OPEN).handler(
-        {},
-        makeRuntimeContext({ loadedPlugins: new Set(['guided']) }),
-      ),
+      await buildListCapabilitiesTool(
+        manifests,
+        new ToolRegistry(),
+        OPEN,
+      ).handler({}, makeRuntimeContext({ loadedPlugins: new Set(['guided']) })),
     );
     expect(out).not.toContain('Guided mode');
   });

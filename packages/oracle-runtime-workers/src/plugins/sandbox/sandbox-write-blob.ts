@@ -7,25 +7,13 @@ import type { SandboxMcpTool } from './sandbox.plugin';
 const sandboxWriteBlobSchema = z.object({
   blobId: z
     .string()
-    .describe(
-      'The blobId returned by the tool that produced the value (e.g. mint_invocation). Format: `blob_<16 hex chars>`.',
-    ),
+    .describe('`blob_<16 hex chars>`, from the tool that made the value.'),
   path: z
     .string()
-    .describe(
-      'Destination path in the sandbox, e.g. `/workspace/data/<skill>/ucan_token`. Must be under /workspace/data/.',
-    ),
+    .describe('Under /workspace/data/, e.g. `/workspace/data/<skill>/token`.'),
 });
 
-const SANDBOX_WRITE_BLOB_DESCRIPTION = `Write a server-stored blob to a file in the sandbox without ever paste-relaying the value through the LLM.
-
-Use this whenever a tool returns a \`blobId\` (e.g. \`mint_invocation\`'s response). Pass the blobId + the destination path; the runtime looks the value up server-side and calls sandbox_write_file with its content. The long opaque value (base64 CARs, JWTs, etc.) never enters the LLM context — eliminates string-corruption-in-relay as a failure mode.
-
-Inputs:
-  - blobId: short hex identifier returned by the producing tool (format \`blob_<16 hex chars>\`).
-  - path: destination path in the sandbox. Must be under \`/workspace/data/\` (the sandbox enforces this; writes elsewhere are rejected).
-
-Returns: \`{ success: true, path, bytesWritten }\` on success, \`{ success: false, error }\` on failure. Common errors: blob not found (re-mint and retry — for invocations this can happen on a multi-replica deployment if the lookup lands on a different process), invalid blobId format, path outside /workspace/data/.`;
+const SANDBOX_WRITE_BLOB_DESCRIPTION = `Write a server-stored value to a sandbox file without passing it through you, so a long opaque value (base64 CAR, JWT) cannot be corrupted. Use it whenever a tool returns a \`blobId\` (e.g. \`mint_invocation\`). Returns \`{ success, path, bytesWritten }\` or \`{ success: false, error }\`; on "blob not found", mint it again and retry.`;
 
 export interface CreateSandboxWriteBlobToolParams {
   /** Upstream MCP `sandbox_write_file` tool — looked up once per request from

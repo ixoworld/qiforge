@@ -180,6 +180,11 @@ describe('prepareDomainContext: prompt block', () => {
     expect(lines[2]).toMatch(
       /^The oracle domain and its DIDs are this oracle's, never the user's \(the user is named under "Who you are talking to"\)\. /,
     );
+    // ... and closes by keeping the domain's documents apart from the
+    // oracle's knowledge base, which the index does not list.
+    expect(lines[2]).toMatch(
+      /The documents it names are the domain's own reference documents, not this oracle's knowledge base: .+ memory tools, at the oracle knowledge level\.$/,
+    );
     expect(lines.at(-1)).toBe(DOMAIN_CONTEXT_CLOSE);
     expect(prompt.split(DOMAIN_CONTEXT_OPEN)).toHaveLength(2);
     expect(prompt.split(DOMAIN_CONTEXT_CLOSE)).toHaveLength(2);
@@ -233,6 +238,102 @@ describe('prepareDomainContext: prompt block', () => {
     );
   });
 
+  it('carries the always-load keys at compact detail and everything at full', async () => {
+    const oracleDoc = await linkedDocument('guide', 'Guidance');
+    await network({ [ORACLE]: withPass1([oracleDoc], domainFor(ORACLE)) }, [
+      oracleDoc,
+    ]);
+    const briefAt = async (options: DomainContextOptions) => {
+      const { prompt } = await prepare(new DomainContextResolver(), {
+        subjectDid: null,
+        options,
+      });
+      return blockLines(prompt).find((line) => 'brief' in line);
+    };
+    const compact = await briefAt(OPTIONS);
+    const full = await briefAt({ ...OPTIONS, detail: 'full' });
+    expect(JSON.stringify(compact).length).toBeLessThan(
+      JSON.stringify(full).length,
+    );
+    const brief = record(compact?.brief);
+    expect(Object.keys(brief)).toEqual([
+      'domain',
+      'constitution',
+      'source_of_truth',
+      'agent_default_mode',
+      'controllers',
+      'rights',
+      'privacy',
+      'critical_do_not',
+      'documents',
+    ]);
+    expect(record(brief.constitution).norms).toBeUndefined();
+    expect(record(brief.constitution).subject_profile).toBeUndefined();
+    expect(record(brief.domain).network).toBeUndefined();
+    expect(brief.critical_do_not).toEqual(record(full?.brief).critical_do_not);
+    expect(brief.agent_default_mode).toEqual(
+      record(full?.brief).agent_default_mode,
+    );
+    // Every document stays findable, with no URI or CID in the index.
+    expect(brief.documents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'guide', pass: 1 }),
+      ]),
+    );
+    expect(JSON.stringify(brief)).not.toContain(oracleDoc.cid);
+  });
+
+  it('keeps what every domain reports out of the compact block, not out of the provenance', async () => {
+    await network({ [ORACLE]: domainFor(ORACLE) });
+    const result = await prepare(new DomainContextResolver(), {
+      subjectDid: null,
+    });
+    const constant = (code: string) =>
+      code.startsWith('unresolved:') ||
+      code === 'runtime-external-checks-required';
+    const findings = result.provenance[0]?.findings ?? [];
+    expect(findings.some(constant)).toBe(true);
+    const [line] = blockLines(result.prompt);
+    expect(line?.findings).toEqual(findings.filter((c) => !constant(c)));
+    expect(line?.documentsRead).toBeUndefined();
+  });
+
+  it('marks a private or restricted document in the compact index', async () => {
+    const open = await linkedDocument('open', 'Open');
+    const restricted = await linkedDocument('restricted', 'Restricted');
+    const index = withFrontmatter(
+      (front) => {
+        const list = record(front.documents).entries;
+        if (!Array.isArray(list)) throw new Error('no entries');
+        for (const entry of list) {
+          if (entry.id === 'open')
+            entry.agent_use = { read: true, cite: true, summarize: true };
+          if (entry.id === 'restricted')
+            entry.access_policy = 'controller_only';
+        }
+      },
+      withPass1([open, restricted], domainFor(ORACLE)),
+    );
+    await network({ [ORACLE]: index }, [open, restricted]);
+    const { prompt } = await prepare(new DomainContextResolver(), {
+      subjectDid: null,
+    });
+    const rows = record(blockLines(prompt)[0]?.brief).documents;
+    if (!Array.isArray(rows)) throw new Error('no document rows');
+    const row = (id: string) => rows.find((entry) => entry.id === id);
+    expect(row('open')).toEqual({
+      id: 'open',
+      ...(row('open')?.name ? { name: row('open').name } : {}),
+      role: row('open')?.role,
+      pass: 1,
+      ...(row('open')?.tasks ? { tasks: row('open').tasks } : {}),
+    });
+    expect(row('restricted')).toMatchObject({
+      access_policy: 'controller_only',
+      agent_use: { read: true, cite: true, summarize: false },
+    });
+  });
+
   it('omits an over-budget brief with a finding instead of truncating it', async () => {
     await network({ [ORACLE]: domainFor(ORACLE) });
     const result = await prepare(new DomainContextResolver(), {
@@ -269,7 +370,9 @@ describe('prepareDomainContext: prompt block', () => {
         ],
       };
     });
-    const result = await prepare(new DomainContextResolver());
+    const result = await prepare(new DomainContextResolver(), {
+      options: { ...OPTIONS, detail: 'full' },
+    });
     const [oracle] = result.provenance;
     expect(oracle?.status).toBe('invalid');
     expect(oracle?.findings).toHaveLength(MAX_FINDINGS);
@@ -401,9 +504,34 @@ describe('prepareDomainContext: pass 1', () => {
     return { net, oracleDoc, subjectDoc };
   }
 
-  it('includes bounded excerpts with CID and permissions, oracle first', async () => {
-    const { oracleDoc, subjectDoc } = await twoDomainsWithDocuments();
+  it('shows an excerpt its permissions only when they restrict it', async () => {
+    const { subjectDoc } = await twoDomainsWithDocuments();
     const result = await prepare(new DomainContextResolver());
+    const pass1 = blockLines(result.prompt).find(
+      (line) => 'pass1Documents' in line,
+    );
+    expect(pass1?.pass1Documents).toEqual([
+      {
+        domain: ORACLE,
+        documentId: 'oracle-guide',
+        permissions: { read: true, cite: true, summarize: false },
+        text: 'Constitutional operating guidance',
+        nextOffset: null,
+      },
+      expect.objectContaining({ domain: SUBJECT, documentId: subjectDoc.id }),
+    ]);
+    expect(pass1?.pass1Documents).toEqual(
+      expect.not.arrayContaining([
+        expect.objectContaining({ cid: expect.anything() }),
+      ]),
+    );
+  });
+
+  it('includes bounded excerpts with CID and permissions, oracle first, at full detail', async () => {
+    const { oracleDoc, subjectDoc } = await twoDomainsWithDocuments();
+    const result = await prepare(new DomainContextResolver(), {
+      options: { ...OPTIONS, detail: 'full' },
+    });
     const pass1 = blockLines(result.prompt).find(
       (line) => 'pass1Documents' in line,
     );
@@ -465,7 +593,7 @@ describe('prepareDomainContext: pass 1', () => {
     ]);
     const result = await prepare(new DomainContextResolver(), {
       subjectDid: null,
-      options: { ...OPTIONS, pass1: { maxTokens: 1000 } },
+      options: { ...OPTIONS, pass1: { maxTokens: 1000, excerptChars: 4000 } },
     });
     const pass1 = blockLines(result.prompt).find(
       (line) => 'pass1Documents' in line,
@@ -481,15 +609,50 @@ describe('prepareDomainContext: pass 1', () => {
   it('pages a long document in the excerpt and tells the model where to continue', async () => {
     const long = await linkedDocument('long', 'y'.repeat(5000));
     await network({ [ORACLE]: withPass1([long], domainFor(ORACLE)) }, [long]);
-    const result = await prepare(new DomainContextResolver(), {
-      subjectDid: null,
-    });
-    const pass1 = blockLines(result.prompt).find(
-      (line) => 'pass1Documents' in line,
-    );
-    expect(pass1?.pass1Documents).toEqual([
+    const excerptOf = async (options: DomainContextOptions) => {
+      const result = await prepare(new DomainContextResolver(), {
+        subjectDid: null,
+        options,
+      });
+      return blockLines(result.prompt).find((line) => 'pass1Documents' in line)
+        ?.pass1Documents;
+    };
+    expect(await excerptOf(OPTIONS)).toEqual([
+      expect.objectContaining({ text: 'y'.repeat(1200), nextOffset: 1200 }),
+    ]);
+    expect(await excerptOf({ ...OPTIONS, detail: 'full' })).toEqual([
       expect.objectContaining({ text: 'y'.repeat(4000), nextOffset: 4000 }),
     ]);
+    expect(
+      await excerptOf({ ...OPTIONS, pass1: { excerptChars: 300 } }),
+    ).toEqual([
+      expect.objectContaining({ text: 'y'.repeat(300), nextOffset: 300 }),
+    ]);
+  });
+
+  it('reads no document before the first model call at excerptChars 0, and lists them all', async () => {
+    const long = await linkedDocument('long', 'y'.repeat(5000));
+    const net = await network(
+      { [ORACLE]: withPass1([long], domainFor(ORACLE)) },
+      [long],
+    );
+    const result = await prepare(new DomainContextResolver(), {
+      subjectDid: null,
+      options: { ...OPTIONS, pass1: { excerptChars: 0 } },
+    });
+    expect(net.reads).not.toContain(long.uri);
+    expect(result.prompt).toContain('"pass1Documents":[]');
+    expect(result.provenance[0]?.findings).toContain(
+      'additional-pass1-documents-require-read',
+    );
+    const [oracle] = blockLines(result.prompt);
+    expect(JSON.stringify(oracle?.brief)).toContain('"id":"long"');
+    await expect(
+      invoke(result.tools, 'read_domain_document', {
+        domain: ORACLE,
+        documentId: 'long',
+      }),
+    ).resolves.toContain('yyyy');
   });
 
   it('reads at most maxDocuments per domain', async () => {
