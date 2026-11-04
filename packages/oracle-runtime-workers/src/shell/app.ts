@@ -258,6 +258,8 @@ export function rateLimitKey(
   scope:
     | 'user'
     | 'card-read'
+    | 'card-write'
+    | 'card-dispatch'
     | 'poll'
     | 'channel'
     | 'channel-control'
@@ -727,19 +729,26 @@ export function createShell(
     const auth = c.get('auth') as AuthResult | undefined;
     if (!auth) return next();
     // The chat lists' status poll, the card routes (Portal's review page) and
-    // action-card reads each have their own bucket: polling a card or the run
-    // list while chatting must not push turns into 429, and cards on screen
-    // never use up the budget for chat turns and claim submissions.
+    // action-card reads, writes and dispatch checks each have their own bucket:
+    // polling or typing in a card while chatting must not push turns into 429,
+    // and neither chat nor card edits can use up the dispatch check, whose 429
+    // the Portal treats as "could not ask" and lets the submission through.
     const isGet = c.req.method === 'GET';
     const path = c.req.path;
+    const card = path.startsWith('/action-interactions');
     const scope =
       isGet && path === '/runs/active'
         ? 'poll'
         : path.startsWith('/action-proposals/')
           ? 'action'
-          : isGet && path.startsWith('/action-interactions')
+          : card && isGet
             ? 'card-read'
-            : 'user';
+            : path === '/action-interactions/dispatch' ||
+                path === '/action-interactions/claim-dispatch'
+              ? 'card-dispatch'
+              : card
+                ? 'card-write'
+                : 'user';
     const { success } = await limiter.limit({
       key: rateLimitKey(c.env, scope, auth.userDid),
     });

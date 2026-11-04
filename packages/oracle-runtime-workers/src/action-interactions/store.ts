@@ -55,9 +55,9 @@ const LIST_MAX_BYTES = 8 * 1024 * 1024;
 /** The newest records one reference list returns. */
 const REFERENCE_LIST_LIMIT = 1000;
 /**
- * Drafts one chat may hold before retention removes some. A question owner
- * is keyed by its request id, so without a cap a runaway agent could write
- * drafts as fast as the rate limit allows.
+ * Cards one chat may create within one draft lifetime (`TTL_MS`). A question
+ * owner is keyed by its request id, so without a cap a runaway agent could
+ * write drafts as fast as the rate limit allows.
  */
 const SESSION_DRAFT_LIMIT = 200;
 /** Records retention handles per prepare, so a prepare never pays for a backlog. */
@@ -814,15 +814,19 @@ export class ActionInteractionStore {
           // dispatch, so a fresh draft takes its place.
           await this.supersede(tx, existing);
         }
-        const inSession = await tx.list<string>({
-          prefix: `${SESSION_PREFIX}${await sha256Hex(input.sessionId)}:`,
+        // Only cards created within one draft lifetime count: kept records of
+        // sent claims and expired cards awaiting retention never lock a chat.
+        const sessionPrefix = `${SESSION_PREFIX}${await sha256Hex(input.sessionId)}:`;
+        const recent = await tx.list<string>({
+          prefix: sessionPrefix,
+          start: `${sessionPrefix}${sortable(this.now() - TTL_MS)}`,
           limit: SESSION_DRAFT_LIMIT,
         });
-        if (inSession.size >= SESSION_DRAFT_LIMIT)
+        if (recent.size >= SESSION_DRAFT_LIMIT)
           throw new ActionInteractionError(
             409,
             'too_many_drafts',
-            `This chat already holds ${SESSION_DRAFT_LIMIT} Agent cards; start a new chat`,
+            `This chat created ${SESSION_DRAFT_LIMIT} Agent cards in the last week; start a new chat`,
           );
         record = InteractionSchema.parse({
           version: 1,

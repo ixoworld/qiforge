@@ -3254,8 +3254,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
     // ── RPC surface (contracts.ts UserOracleObject) ───────────────────────
 
-    private async interactionStore(identity: TurnIdentity, sessionId: string) {
-      await this.ready(identity);
+    private async interactionStore(
+      identity: TurnIdentity,
+      sessionId: string,
+      options: { recordAccess?: boolean } = {},
+    ) {
+      await this.ready(identity, options);
       if (
         this.userDid !== identity.userDid ||
         !(await this.sessions?.getSession(sessionId))
@@ -3273,7 +3277,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       taskId: string,
     ) {
       return interactionOutcome(async () => {
-        await this.interactionStore(identity, sessionId);
+        // The task scheduler needs a booted object, but an open task card polls every 15 s:
+        // the poll is not activity, so it never keeps an idle object from being evicted.
+        await this.interactionStore(identity, sessionId, { recordAccess: false });
         const task = await this.taskScheduler?.surface.get(taskId);
         if (!task)
           throw new ActionInteractionError(404, 'not_found', 'Task not found');

@@ -21,9 +21,12 @@ and every refusal of these routes (including a body over 96 KiB, or over
 `{code, message}`. The shell's shared authentication (401) and rate limit (429)
 answer `{statusCode, message}`; the client turns those into the codes
 `unauthorized` and `rate_limited`.
-Card reads (`GET`) are rate-limited in their own per-user bucket
-(`<oracle>|card-read|<user>` on the same binding), so cards left open on screen
-never use up the budget of chat turns and claim submissions.
+Card routes use three per-user buckets of their own on the same binding, apart
+from chat turns (`<oracle>|<bucket>|<user>`): `card-read` for reads (`GET`),
+`card-dispatch` for the two dispatch checks, and `card-write` for every other
+card request. Cards left open or edited on screen never use up the budget of
+chat turns, and neither chat nor card edits can use up the dispatch check: the
+Portal treats its 429 as "could not ask" and lets the submission through.
 
 | Request                                      | Purpose                                                                            |
 | -------------------------------------------- | ---------------------------------------------------------------------------------- |
@@ -133,7 +136,9 @@ closed list (`status`, `cancelReason`, an owner `kind`) is a contract version
 change. A record this version cannot read is answered with 409
 `record_unreadable` (never a 500, which the Portal would treat as "could not
 ask"), is left out of session lists, and is kept untouched by retention.
-A chat holds at most 200 drafts (409 `too_many_drafts`).
+A chat creates at most 200 cards within one draft lifetime of 7 days (409
+`too_many_drafts`); older cards, including kept records of sent claims, do not
+count.
 
 Storage is the user object's key-value store, with three indexes so no request
 scans every record: one per session (lists read at most 50 keys and fetch the
@@ -148,7 +153,10 @@ chat applies the same rules to its drafts at once. Values plus the user-edit
 list are limited to 64 KiB of UTF-8. The per-step form marks and dispatch
 tombstones are a few bytes each and are kept. Card reads and the dispatch
 check never boot the user object or count as activity, so open cards neither
-import an evicted owner copy nor keep an idle object alive. When an idle
+import an evicted owner copy nor keep an idle object alive. A task card's read
+is the one exception: its summary comes from the task scheduler, so it boots
+the object, but it still never counts as activity, so an open task card cannot
+keep an idle object from being evicted. When an idle
 object's working copy is evicted, its alarm stays armed for the next draft
 retention (marked in storage, cleared by any boot) and that wake prunes on the
 bare object without importing the owner copy.

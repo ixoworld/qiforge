@@ -273,7 +273,7 @@ describe('interaction HTTP authority and structural boundary', () => {
     }
   });
 
-  it('meters card reads in their own bucket, separate from turns and submissions', async () => {
+  it('meters card reads, card writes and dispatch checks in their own buckets, separate from turns', async () => {
     const f = fixture();
     const keys: string[] = [];
     const bindings = {
@@ -296,9 +296,21 @@ describe('interaction HTTP authority and structural boundary', () => {
       { method: 'POST', headers, body: '{}' },
       bindings,
     );
+    await f.app.request(
+      '/action-interactions/dispatch',
+      { method: 'POST', headers, body: '{}' },
+      bindings,
+    );
+    await f.app.request(
+      '/action-interactions',
+      { method: 'POST', headers, body: '{}' },
+      bindings,
+    );
     expect(keys).toEqual([
       `${oracle.did}|card-read|${user.did}`,
-      `${oracle.did}|user|${user.did}`,
+      `${oracle.did}|card-dispatch|${user.did}`,
+      `${oracle.did}|card-dispatch|${user.did}`,
+      `${oracle.did}|card-write|${user.did}`,
     ]);
   });
 });

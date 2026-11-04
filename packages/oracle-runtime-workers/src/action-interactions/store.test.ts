@@ -1040,7 +1040,7 @@ describe('private interaction drafts on Workers', () => {
     expect(await stub.keys()).toContain(`interaction:${draft.id}`);
   });
 
-  it('caps the drafts one chat holds and reports when retention is next due', async () => {
+  it('caps the cards one chat creates in a week and reports when retention is next due', async () => {
     const stub = env.ACTION_INTERACTIONS_TEST.getByName('cap');
     expect(await stub.nextRetentionAt(alice)).toBeNull();
     const question = (n: number): PrepareInteraction => ({
@@ -1069,6 +1069,11 @@ describe('private interaction drafts on Workers', () => {
         kind: 'prepare',
         input: { ...question(201), sessionId: '$fresh' },
       }),
+    ).toMatchObject({ ok: true });
+    // A week later the old cards are still kept for retention, but they no longer lock the chat.
+    await stub.advance(8 * 24 * 60 * 60 * 1000);
+    expect(
+      await command(stub, alice, { kind: 'prepare', input: question(202) }),
     ).toMatchObject({ ok: true });
   });
 });
