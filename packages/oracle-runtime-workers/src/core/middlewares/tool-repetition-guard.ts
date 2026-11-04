@@ -166,7 +166,11 @@ export const createToolRepetitionGuardMiddleware = (
           call.name === toolName && canonicalArgsKey(call.args) === argsKey,
       );
 
-      const failedInTurn = (priorError: string): ToolMessage => {
+      const failedInTurn = (failure: string): ToolMessage => {
+        // A refusal of this guard is not quoted inside the next one, or each repeat nests every earlier one.
+        const priorError = /was NOT (called|run) again|was NOT run\b/.test(failure)
+          ? `This guard already refused it: \`${toolName}\` reached its limit in this turn.`
+          : failure;
         logger.warn(
           `Repetition guard: short-circuiting duplicate failed call to ${toolName}`,
           { toolName, priorError },

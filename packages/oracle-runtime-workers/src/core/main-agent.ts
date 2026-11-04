@@ -756,7 +756,9 @@ export async function createMainAgent(
     createCapabilityGateMiddleware({
       pluginByToolName,
       visibilityByToolName,
-      preloadedPlugins: turnPreloads,
+      // The thread's checkpointed loads too: the gate's live graph state can lack a plugin the
+      // thread already loaded, and load_capability then reports it available while its tools stay hidden.
+      preloadedPlugins: new Set([...(turnPreloads ?? []), ...threadLoaded]),
       unmetRequirements,
       withheldToolNames: toolAccess.withheldToolNames,
       logger: ambient.logger,
