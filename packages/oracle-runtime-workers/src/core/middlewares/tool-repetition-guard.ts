@@ -21,6 +21,28 @@ export interface RepetitionCaps {
 export const DEFAULT_REPETITION_CAPS: RepetitionCaps = { reads: 5, writes: 1 };
 
 /**
+ * Tools that only find other tools; a model alternating between them never trips the identical-call cap.
+ * `load_capability` is not one: it is how a gated tool becomes callable.
+ */
+export const DISCOVERY_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'list_capabilities',
+  'list_skills',
+  'search_skills',
+]);
+
+function discoveryCallsInTurn(messages: readonly BaseMessage[]): number {
+  let count = 0;
+  for (let i = turnStart(messages); i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg instanceof ToolMessage && DISCOVERY_TOOL_NAMES.has(msg.name ?? ''))
+      count += 1;
+  }
+  return count;
+}
+/** Discovery calls a turn may make, whatever their arguments. */
+export const MAX_DISCOVERY_CALLS = 6;
+
+/**
  * Parse `TURN_MAX_IDENTICAL_READS` / `TURN_MAX_IDENTICAL_WRITES`; anything
  * that is not a positive number keeps its default (as `turnLimitsFromEnv`).
  */
@@ -99,6 +121,18 @@ export const createToolRepetitionGuardMiddleware = (
 
   return createMiddleware({
     name: 'ToolRepetitionGuardMiddleware',
+    // A model can keep calling a refused tool forever; once the turn spent its searches, it no longer sees them.
+    wrapModelCall: (request, handler) => {
+      if (
+        discoveryCallsInTurn(request.state.messages ?? []) < MAX_DISCOVERY_CALLS
+      )
+        return handler(request);
+      const tools = request.tools.filter(
+        (t) =>
+          !(typeof t.name === 'string' && DISCOVERY_TOOL_NAMES.has(t.name)),
+      );
+      return handler({ ...request, tools });
+    },
     wrapToolCall: async (toolCallRequest, handler) => {
       const { toolCall, state } = toolCallRequest;
       const toolName = toolCall.name ?? toolCallRequest.tool?.name;
@@ -109,6 +143,26 @@ export const createToolRepetitionGuardMiddleware = (
       const opening = turnStart(messages);
       const start = Math.max(opening, messages.length - lookback, 0);
       const argsById = toolCallArgsById(messages, start);
+
+      if (DISCOVERY_TOOL_NAMES.has(toolName)) {
+        const discovered = discoveryCallsInTurn(messages);
+        if (discovered >= MAX_DISCOVERY_CALLS) {
+          logger.warn(
+            `Repetition guard: ${toolName} refused after ${discovered} discovery calls this turn`,
+          );
+          return new ToolMessage({
+            content: [
+              `You have already searched capabilities and skills ${discovered} times in this turn, so \`${toolName}\` was NOT run.`,
+              '',
+              'Stop searching. Act with the tools you already have: read their descriptions and call the one that fits the request,',
+              'or tell the user what you could not find and ask them what they want.',
+            ].join('\n'),
+            tool_call_id: toolCall.id ?? '',
+            name: toolName,
+            status: 'error',
+          });
+        }
+      }
       // The turn's calls a mid-turn summary condensed away (oldest first):
       // only while the lookback still reaches the summary.
       const openingMessage = messages[opening];
@@ -121,7 +175,13 @@ export const createToolRepetitionGuardMiddleware = (
           call.name === toolName && canonicalArgsKey(call.args) === argsKey,
       );
 
-      const failedInTurn = (priorError: string): ToolMessage => {
+      const failedInTurn = (failure: string): ToolMessage => {
+        // A refusal of this guard is not quoted inside the next one, or each repeat nests every earlier one.
+        const priorError = /was NOT (called|run) again|was NOT run\b/.test(
+          failure,
+        )
+          ? `This guard already refused it: \`${toolName}\` reached its limit in this turn.`
+          : failure;
         logger.warn(
           `Repetition guard: short-circuiting duplicate failed call to ${toolName}`,
           { toolName, priorError },

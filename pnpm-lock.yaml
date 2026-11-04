@@ -191,6 +191,19 @@ importers:
         specifier: 13.6.32
         version: 13.6.32
 
+  packages/action-interactions:
+    dependencies:
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/debug@4.1.13)(@types/node@26.2.0)(happy-dom@19.0.2)(jiti@2.7.0)(jsdom@25.0.1)(lightningcss@1.33.0)(terser@5.50.0)(tsx@4.22.4)(yaml@2.9.0)
+
   packages/common:
     dependencies:
       '@cosmjs/proto-signing':
@@ -679,6 +692,9 @@ importers:
       '@cosmjs/stargate':
         specifier: 0.39.0
         version: 0.39.0
+      '@ixo/action-interactions':
+        specifier: workspace:*
+        version: link:../action-interactions
       '@ixo/action-protocol':
         specifier: 0.9.1
         version: 0.9.1
@@ -957,6 +973,9 @@ importers:
 
   packages/oracles-client-sdk:
     dependencies:
+      '@ixo/action-interactions':
+        specifier: workspace:*
+        version: link:../action-interactions
       '@ixo/oracles-chain-client':
         specifier: workspace:*
         version: link:../oracles-chain-client
@@ -4517,7 +4536,6 @@ packages:
   '@opentelemetry/sdk-trace-base@2.7.0':
     resolution: {integrity: sha512-Yg9zEXJB50DLVLpsKPk7NmNqlPlS+OvqhJGh0A8oawIOTPOwlm4eXs9BMJV7L79lvEwI+dWtAj+YjTyddV336A==}
     engines: {node: ^18.19.0 || >=20.6.0}
-    deprecated: Use @opentelemetry/sdk-trace package
     peerDependencies:
       '@opentelemetry/api': '>=1.3.0 <1.10.0'
 
@@ -11302,9 +11320,6 @@ packages:
   survey-core@2.3.11:
     resolution: {integrity: sha512-Wymt5zZl4BXqIPRuvMc6whoYBTC1tRgv0GcPTYDeOZgUoKP/aD3Q6LCd2m1uU26iIT+EGBY1lfhM1HAFjoa4Vw==}
 
-  survey-core@2.5.38:
-    resolution: {integrity: sha512-uI/5ocM08K3LKCa6M1njs8YbRuuF/4vxfAFwyo0RaImoAVdGKkayxt2gNqapTOb0qwYX6OFdDTkEqSMgjYsW8g==}
-
   survey-creator-core@2.5.38:
     resolution: {integrity: sha512-2TovVZovembd3letX6phne/PbOtrv1k5fyge8Kn49bdARITeU05F10y0YgqhFJyj4M3Yd/ZH3vPVvE4kD6tk5w==}
     engines: {node: '>=0.10.0'}
@@ -15835,10 +15850,10 @@ snapshots:
       maplibre-gl: 2.4.0
       react: 18.3.1
       react-dom: 18.3.1(react@18.3.1)
-      survey-core: 2.5.38
-      survey-creator-core: 2.5.38(survey-core@2.5.38)
-      survey-creator-react: 2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.5.38)(survey-creator-core@2.5.38(survey-core@2.5.38))(survey-react-ui@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.5.38))
-      survey-react-ui: 2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.5.38)
+      survey-core: 2.3.11
+      survey-creator-core: 2.5.38(survey-core@2.3.11)
+      survey-creator-react: 2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.3.11)(survey-creator-core@2.5.38(survey-core@2.3.11))(survey-react-ui@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.3.11))
+      survey-react-ui: 2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.3.11)
       unl-core: 3.0.1
       unl-map-js: 0.1.7
     transitivePeerDependencies:
@@ -25328,25 +25343,23 @@ snapshots:
 
   survey-core@2.3.11: {}
 
-  survey-core@2.5.38: {}
-
-  survey-creator-core@2.5.38(survey-core@2.5.38):
+  survey-creator-core@2.5.38(survey-core@2.3.11):
     dependencies:
-      survey-core: 2.5.38
+      survey-core: 2.3.11
 
-  survey-creator-react@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.5.38)(survey-creator-core@2.5.38(survey-core@2.5.38))(survey-react-ui@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.5.38)):
+  survey-creator-react@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.3.11)(survey-creator-core@2.5.38(survey-core@2.3.11))(survey-react-ui@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.3.11)):
     dependencies:
       react: 18.3.1
       react-dom: 18.3.1(react@18.3.1)
-      survey-core: 2.5.38
-      survey-creator-core: 2.5.38(survey-core@2.5.38)
-      survey-react-ui: 2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.5.38)
+      survey-core: 2.3.11
+      survey-creator-core: 2.5.38(survey-core@2.3.11)
+      survey-react-ui: 2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.3.11)
 
-  survey-react-ui@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.5.38):
+  survey-react-ui@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.3.11):
     dependencies:
       react: 18.3.1
       react-dom: 18.3.1(react@18.3.1)
-      survey-core: 2.5.38
+      survey-core: 2.3.11
 
   swagger-ui-dist@5.32.13:
     dependencies:
