@@ -3279,7 +3279,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return interactionOutcome(async () => {
         // The task scheduler needs a booted object, but an open task card polls every 15 s:
         // the poll is not activity, so it never keeps an idle object from being evicted.
-        await this.interactionStore(identity, sessionId, { recordAccess: false });
+        await this.interactionStore(identity, sessionId, {
+          recordAccess: false,
+        });
         const task = await this.taskScheduler?.surface.get(taskId);
         if (!task)
           throw new ActionInteractionError(404, 'not_found', 'Task not found');

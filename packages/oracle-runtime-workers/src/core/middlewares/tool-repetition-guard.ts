@@ -34,7 +34,8 @@ function discoveryCallsInTurn(messages: readonly BaseMessage[]): number {
   let count = 0;
   for (let i = turnStart(messages); i < messages.length; i++) {
     const msg = messages[i];
-    if (msg instanceof ToolMessage && DISCOVERY_TOOL_NAMES.has(msg.name ?? '')) count += 1;
+    if (msg instanceof ToolMessage && DISCOVERY_TOOL_NAMES.has(msg.name ?? ''))
+      count += 1;
   }
   return count;
 }
@@ -122,8 +123,14 @@ export const createToolRepetitionGuardMiddleware = (
     name: 'ToolRepetitionGuardMiddleware',
     // A model can keep calling a refused tool forever; once the turn spent its searches, it no longer sees them.
     wrapModelCall: (request, handler) => {
-      if (discoveryCallsInTurn(request.state.messages ?? []) < MAX_DISCOVERY_CALLS) return handler(request);
-      const tools = request.tools.filter((t) => !(typeof t.name === 'string' && DISCOVERY_TOOL_NAMES.has(t.name)));
+      if (
+        discoveryCallsInTurn(request.state.messages ?? []) < MAX_DISCOVERY_CALLS
+      )
+        return handler(request);
+      const tools = request.tools.filter(
+        (t) =>
+          !(typeof t.name === 'string' && DISCOVERY_TOOL_NAMES.has(t.name)),
+      );
       return handler({ ...request, tools });
     },
     wrapToolCall: async (toolCallRequest, handler) => {
@@ -140,7 +147,9 @@ export const createToolRepetitionGuardMiddleware = (
       if (DISCOVERY_TOOL_NAMES.has(toolName)) {
         const discovered = discoveryCallsInTurn(messages);
         if (discovered >= MAX_DISCOVERY_CALLS) {
-          logger.warn(`Repetition guard: ${toolName} refused after ${discovered} discovery calls this turn`);
+          logger.warn(
+            `Repetition guard: ${toolName} refused after ${discovered} discovery calls this turn`,
+          );
           return new ToolMessage({
             content: [
               `You have already searched capabilities and skills ${discovered} times in this turn, so \`${toolName}\` was NOT run.`,
@@ -168,7 +177,9 @@ export const createToolRepetitionGuardMiddleware = (
 
       const failedInTurn = (failure: string): ToolMessage => {
         // A refusal of this guard is not quoted inside the next one, or each repeat nests every earlier one.
-        const priorError = /was NOT (called|run) again|was NOT run\b/.test(failure)
+        const priorError = /was NOT (called|run) again|was NOT run\b/.test(
+          failure,
+        )
           ? `This guard already refused it: \`${toolName}\` reached its limit in this turn.`
           : failure;
         logger.warn(
