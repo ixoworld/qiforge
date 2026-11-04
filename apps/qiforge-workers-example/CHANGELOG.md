@@ -1,5 +1,12 @@
 # qiforge-workers-example
 
+## 0.0.40
+
+### Patch Changes
+
+- Updated dependencies [[`d9d488a`](https://github.com/ixoworld/qiforge/commit/d9d488acdddce680af7ce159b1744c5fbcdda3b6), [`d9d488a`](https://github.com/ixoworld/qiforge/commit/d9d488acdddce680af7ce159b1744c5fbcdda3b6), [`d9d488a`](https://github.com/ixoworld/qiforge/commit/d9d488acdddce680af7ce159b1744c5fbcdda3b6), [`09bec29`](https://github.com/ixoworld/qiforge/commit/09bec29e08b3a5969f494a7702a7c88d84bf1b36), [`d9d488a`](https://github.com/ixoworld/qiforge/commit/d9d488acdddce680af7ce159b1744c5fbcdda3b6), [`d9d488a`](https://github.com/ixoworld/qiforge/commit/d9d488acdddce680af7ce159b1744c5fbcdda3b6)]:
+  - @ixo/oracle-runtime-workers@0.39.0
+
 ## 0.0.39
 
 ### Patch Changes

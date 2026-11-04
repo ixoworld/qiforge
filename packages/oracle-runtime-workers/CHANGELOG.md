@@ -1,5 +1,37 @@
 # @ixo/oracle-runtime-workers
 
+## 0.39.0
+
+### Minor Changes
+
+- [#468](https://github.com/ixoworld/qiforge/pull/468) [`d9d488a`](https://github.com/ixoworld/qiforge/commit/d9d488acdddce680af7ce159b1744c5fbcdda3b6) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - The capability router preloads every plugin a message needs, and a preload is now a normal load on the thread. It asks one yes/no question per candidate over the message and the thread's latest turns, describes plugins by `summary` plus `whenToUse`, uses a one-second budget, and logs the top scores of every evaluated turn. The message's recent turns, as the user sees them in the transcript, now go to the Decision provider. The tool list changes once and stays until a cold turn unloads the plugin. It runs inside the build, so it is offered exactly what `load_capability` could load this turn, `always` plugins with `onDemandTools` included. A turn the provider's cache still holds asks for a higher score (`CAPABILITY_ROUTER_WARM_THRESHOLD`, default 0.8), since a wrong preload there costs a full cache miss; a cold turn asks for 0.7 (`CAPABILITY_ROUTER_COLD_THRESHOLD`). `manifest.routable: false` keeps a plugin away from the router; `memory` and `editor` set it.
+
+- [#468](https://github.com/ixoworld/qiforge/pull/468) [`d9d488a`](https://github.com/ixoworld/qiforge/commit/d9d488acdddce680af7ce159b1744c5fbcdda3b6) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Much cheaper turns. The prompt and the first call shrink, and the prefix changes only when it has to, because any change to the tool list or the system message costs a full cache miss.
+
+  - **Selective discovery.** Every plugin with something to load is named in a one-line catalogue (`manifest.brief`), so reaching one takes one `load_capability`. `sandbox` and all of `vfs` are on-demand now; `manifest.onDemandTools` holds tools back inside an `always` plugin, and `memory`, `skills` and `user-preferences` use it. Hosts undo any of it with `manifestOverrides`.
+  - **The cold-turn rule.** Idle plugins (`CONTEXT_PLUGIN_IDLE_TURNS`), stale tool results (`CONTEXT_STALE_RESULT_TURNS`) and the operating guides in the system prompt only change on a new thread or after `CONTEXT_CACHE_COLD_MS` of quiet.
+  - **Operating guides and usage.** A plugin's usage and guide reach the model at the tail of the messages, in the load result or as a note on the turn's message, and a guide enters the system prompt on the next cold turn. The thread records what its messages carry, so a summary only costs a note. The sandbox's storage rules moved from its `summary` to a guide.
+  - **Cleaner memory.** The history indexer sends only the conversation: what the user said and the oracle's replies. Tool results, status lines before a tool call, extracted file text, JSON-shaped assistant text and the reply to a turn that read memory no longer become evidence.
+  - **Facts first in the memory block.** Past its cap the user-context block keeps every bucket's facts before entities, topic clusters and raw episodes, instead of cutting the text after the early buckets.
+  - **One copy of every MCP result.** A result sent with a structured copy of its text is sent once.
+  - **Domain context.** `detail: 'compact'` by default, with `pass1.excerptChars` for the excerpts.
+  - **Fixes.** `load_capability` no longer fails a whole batch on an unknown name; it refuses that name and loads the rest. `read_result` reads the newest result of a reused call id. `loadedPlugins` kept only the last value because `createAgent` ignored the reducer on `MainAgentGraphState`; the browser-tool section of the prompt changed when the portal capability loaded; `new AbortController()` at module scope stopped `wrangler dev` on workerd before 1.20260825.
+
+  `MainAgentArgs.preloadedPlugins` is replaced by `routeCapabilities`, `MainAgentBuildResult` gains `stateUpdate` and `guideNote`, and `CapabilityRouteTurn` takes `candidates`.
+
+- [#468](https://github.com/ixoworld/qiforge/pull/468) [`d9d488a`](https://github.com/ixoworld/qiforge/commit/d9d488acdddce680af7ce159b1744c5fbcdda3b6) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Platform model calls are capped at 16,384 output tokens, reasoning included (`LLM_MAX_OUTPUT_TOKENS`; 0 leaves it to the model). A call that loops no longer runs to the model's own limit, which for `openai/gpt-5.6-luna` is 65,536 tokens and about 8 cents. BYO lanes are not capped.
+
+### Patch Changes
+
+- [#468](https://github.com/ixoworld/qiforge/pull/468) [`d9d488a`](https://github.com/ixoworld/qiforge/commit/d9d488acdddce680af7ce159b1744c5fbcdda3b6) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - The Flow Builder resolves every action `list_actions` offers. `@ixo/editor`'s type-to-ability table leaves out 13 of its own registry's actions (`qi/form.submit`, the oracle deploy steps, the carbon and collection actions and others), so `validate_flow` and `create_template` refused them as unknown; the action's registry definition now answers when the table does not, in both directions.
+
+- [#466](https://github.com/ixoworld/qiforge/pull/466) [`09bec29`](https://github.com/ixoworld/qiforge/commit/09bec29e08b3a5969f494a7702a7c88d84bf1b36) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Image blocks count a flat 3,300 tokens in every request-size estimate instead of their base64 at chars/4. One resized phone photo looked like ~128k tokens, so on a model with a smaller window the context guard could refuse a turn with a photo. Native document blocks still count by size.
+
+- [#468](https://github.com/ixoworld/qiforge/pull/468) [`d9d488a`](https://github.com/ixoworld/qiforge/commit/d9d488acdddce680af7ce159b1744c5fbcdda3b6) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Smaller tool definitions with the same behaviour: `chain_lookup` names its kinds' arguments and a refusal lists a kind's valid keys, so a guessed key is fixed without another call; the Flow Builder, `request_hub_action`, `prepare_action` and the task tools bind their schemas without limits and repeated descriptions while their handlers keep parsing the strict ones; the oracle document, preferences, skills and `sandbox_write_blob` texts are shorter.
+
+- Updated dependencies [[`d9d488a`](https://github.com/ixoworld/qiforge/commit/d9d488acdddce680af7ce159b1744c5fbcdda3b6), [`c038de5`](https://github.com/ixoworld/qiforge/commit/c038de5836ca44568162240087b6eea1d1d9cb18)]:
+  - @ixo/common@1.8.0
+
 ## 0.38.0
 
 ### Minor Changes
