@@ -537,6 +537,23 @@ export class SqliteSaver extends BaseCheckpointSaver {
   }
 
   /**
+   * The thread's newest human and AI rows with stored content, newest first.
+   * `limit` bounds the rows decoded, so the read stays O(limit) in a long
+   * thread, unlike `listThreadMessages`.
+   */
+  async listRecentThreadMessages(
+    threadId: string,
+    limit: number,
+  ): Promise<BaseMessage[]> {
+    await this.setup();
+    const rows = await this.db.exec<MessageRow>(
+      `SELECT message FROM messages WHERE thread_id = ? AND message_type IN ('human', 'ai') AND message_content <> '' ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+      [threadId, limit],
+    );
+    return Promise.all(rows.map((row) => this.loadMessage(row.message)));
+  }
+
+  /**
    * Where a transcript row sits in the listing order (`created_at`, then
    * `rowid`), or null when the thread has no row with that message id. A
    * paging cursor names a message id and is resolved through this at query

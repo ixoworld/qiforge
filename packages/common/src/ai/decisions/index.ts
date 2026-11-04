@@ -113,17 +113,23 @@ export type {
 } from './jev/index.js';
 
 export {
+  CAPABILITY_PRELOAD_BATCH_SIZE,
+  CAPABILITY_PRELOAD_CALIBRATION_PROFILE,
+  CAPABILITY_PRELOAD_WARM_THRESHOLD,
   CAPABILITY_ROUTE_CALIBRATION_PROFILE,
   CAPABILITY_ROUTE_DECISION_NAME,
   CAPABILITY_ROUTE_MIN_CONFIDENCE,
   CAPABILITY_ROUTER_MODES,
+  capabilityPreloadDecision,
   capabilityRouteDecision,
   capabilityRouterEnvShape,
+  decideCapabilityPreload,
   decideCapabilityRoute,
   noCapabilityOption,
   toRoutableCapabilities,
 } from './capability-router.js';
 export type {
+  CapabilityPreloadVerdict,
   CapabilityRouteVerdict,
   CapabilityRouterMode,
   RoutableCapability,

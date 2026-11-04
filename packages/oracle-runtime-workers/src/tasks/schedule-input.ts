@@ -14,32 +14,15 @@ import { z } from 'zod';
 import type { OracleTaskSchedule } from '../plugin-api/types';
 
 const SCHEDULE_DESCRIPTION =
-  'When the task fires. kind "once" needs `at` (ISO timestamp, computed from the current time — ALWAYS use it for one-time requests such as "in 10 minutes" or "tomorrow at 5pm"); kind "cron" needs `cron` (+ optional IANA `timezone`) and is ONLY for genuinely recurring intents — `*/10 * * * *` means every 10 minutes forever, not once in 10 minutes; kind "interval" needs `everySeconds`. Leave the other kinds\' fields out.';
+  'kind "once" needs `at`, computed from the current time: ALWAYS for one-time requests such as "in 10 minutes" or "tomorrow at 5pm". kind "cron" needs `cron` and is ONLY for genuinely recurring intents: `*/10 * * * *` means every 10 minutes forever, not once in 10 minutes. kind "interval" needs `everySeconds`. Leave the other kinds\' fields out.';
 
 export const ScheduleInputSchema = z
   .object({
     kind: z.enum(['once', 'cron', 'interval']),
-    at: z
-      .string()
-      .min(1)
-      .optional()
-      .describe('ISO timestamp — kind "once" only.'),
-    cron: z
-      .string()
-      .min(1)
-      .optional()
-      .describe('Cron expression (5 fields) — kind "cron" only.'),
-    timezone: z
-      .string()
-      .min(1)
-      .optional()
-      .describe('IANA timezone for the cron expression — kind "cron" only.'),
-    everySeconds: z
-      .number()
-      .int()
-      .positive()
-      .optional()
-      .describe('Seconds between runs — kind "interval" only.'),
+    at: z.string().min(1).optional().describe('ISO timestamp.'),
+    cron: z.string().min(1).optional().describe('5 fields.'),
+    timezone: z.string().min(1).optional().describe('IANA, for `cron`.'),
+    everySeconds: z.number().int().positive().optional(),
   })
   .describe(SCHEDULE_DESCRIPTION);
 

@@ -7,6 +7,7 @@ import { z } from 'zod';
 
 const documentEntry = z.object({
   id: z.string(),
+  name: z.string().optional(),
   uri: z.string().nullable(),
   cid: z.string().nullable(),
   required_for_tasks: z.array(z.string()).optional(),
@@ -52,12 +53,83 @@ export function isPrivateEntry(entry: DomainDocumentEntry): boolean {
 }
 
 /**
+ * How much of a domain the prompt carries on every call.
+ *
+ * - `compact`: the frontmatter keys `domain.md` §3 lists as "always load",
+ *   without the id lists and vocabulary URIs behind them, and a one-row-per-
+ *   document index. Everything else stays one `read_domain_document` away.
+ * - `full`: the whole brief, with the permissions of every document.
+ */
+export type DomainBriefDetail = 'compact' | 'full';
+
+/** One row of the compact index; permissions only where they are not the open default. */
+function compactEntry(entry: DomainDocumentEntry): Record<string, unknown> {
+  const { read, cite, summarize } = entry.agent_use;
+  return {
+    id: entry.id,
+    ...(entry.name ? { name: entry.name } : {}),
+    role: entry.role,
+    pass: entry.disclosure_pass,
+    ...(entry.required_for_tasks?.length
+      ? { tasks: entry.required_for_tasks }
+      : {}),
+    ...(isPrivateEntry(entry)
+      ? {
+          access_policy: entry.access_policy,
+          sensitivity: entry.sensitivity,
+        }
+      : {}),
+    ...(read && cite && summarize ? {} : { agent_use: entry.agent_use }),
+  };
+}
+
+/** The compact brief: what §3 of the specification has an agent always load. */
+function compactBrief(document: DomainDocument): Record<string, unknown> {
+  const front = document.frontmatter;
+  const domain = record(front.domain);
+  const constitution = record(front.constitution);
+  const source = record(front.source_of_truth);
+  const execution = record(constitution.execution);
+  return {
+    domain: {
+      id: domain.id,
+      type: domain.type,
+      status: domain.status,
+      purpose: domain.purpose,
+      operating_boundary: domain.operating_boundary,
+    },
+    constitution: {
+      status: constitution.status,
+      legal_effect: record(constitution.legal_effect).status,
+      execution_mode: execution.mode,
+      failure_policy: execution.failure_policy,
+      ai_mode: record(constitution.constitutional_ai).mode,
+    },
+    source_of_truth: {
+      iid_document: source.iid_document,
+      conflict_resolution_order: source.conflict_resolution_order,
+    },
+    agent_default_mode: front.agent_default_mode,
+    controllers: record(front.controllers).summary,
+    rights: record(front.rights).agent_baseline,
+    privacy: { default_policy: record(front.privacy).default_policy },
+    critical_do_not: front.critical_do_not,
+    documents: entries(document).map(compactEntry),
+  };
+}
+
+/**
  * The parts of the frontmatter the model needs to orient itself: purpose and
  * boundary, constitution, sources of truth, default agent mode, controllers,
  * baseline rights, privacy, the critical don'ts and the document index
- * (without URIs or CIDs). Serialized once per CID by the resolver.
+ * (without URIs or CIDs), at `detail`. Serialized once per CID and detail by
+ * the resolver.
  */
-export function briefBody(document: DomainDocument): Record<string, unknown> {
+export function briefBody(
+  document: DomainDocument,
+  detail: DomainBriefDetail = 'compact',
+): Record<string, unknown> {
+  if (detail === 'compact') return compactBrief(document);
   const front = document.frontmatter;
   return {
     domain: front.domain,

@@ -38,10 +38,13 @@ runtime since then exist only here; they are listed under
   runtime constructs `DecisionRuntime` with a single adapter and gets the
   shared applicability and provenance behaviour, but not the host options. The capability router (`CAPABILITY_ROUTER=off|shadow|on`,
   `src/core/capability-router.ts`) is the first runtime consumer of Decisions
-  on both runtimes, with identical semantics: the shared
-  `capabilityRouteDecision` predicts the on-demand plugin a message needs,
-  `on` preloads it for that turn only (never into `loadedPlugins`), `shadow`
-  logs what it would have preloaded, and every failure preloads nothing.
+  on both runtimes. On both, `shadow` logs what it would have preloaded and
+  every failure preloads nothing. They differ in the prediction and the
+  preload: Node's `capabilityRouteDecision` picks one plugin from the message
+  alone and preloads it for that turn only; Workers' `capabilityPreloadDecision`
+  picks every plugin a message needs, from the message and the thread's latest
+  turns, and a preload is a load on the thread, with a higher bar on a turn the
+  provider's cache still holds.
 - **Room threads are sessions**: a bare room message roots a thread, the
   reply is posted inside it, and the thread root's event id IS the session
   id (`src/matrix/ingest.ts`, `src/matrix/reply-chain.ts`) — Node's
@@ -341,7 +344,9 @@ runtime since then exist only here; they are listed under
   itself, which LangChain renders as JSON-schema `oneOf` + `const`; Gemini
   models answer that shape with a bare timestamp string, so every task
   creation failed on the default platform model. The store, the spec
-  frontmatter and the scheduler are unchanged.
+  frontmatter and the scheduler are unchanged. `preview_task` carries the
+  field descriptions; `create_task` and `update_task` bind the same fields
+  without them, and their handlers parse the full schema.
 - **Internal model calls stay off the wire.** The summarization
   middleware's model and a sub-agent's inner turn stream through the same
   `streamEvents` pipe as the reply; the SSE stream drops model events

@@ -71,6 +71,63 @@ describe('FlowsPlugin', () => {
   });
 });
 
+describe('FlowsPlugin: what the tools bind', () => {
+  const sizeOf = (tool: PluginTool) =>
+    JSON.stringify(z.toJSONSchema(tool.schema)).length +
+    tool.description.length;
+
+  it('keeps all 27 definitions small and the step words on create_template alone', async () => {
+    const tools = await new FlowsPlugin().getRequestTools(makeRuntimeContext());
+    const total = tools.reduce((sum, tool) => sum + sizeOf(tool), 0);
+    expect(total).toBeLessThanOrEqual(28_000);
+    const text = (name: string) =>
+      JSON.stringify(
+        z.toJSONSchema(tools.find((t) => t.name === name)!.schema),
+      );
+    for (const name of ['validate_flow', 'add_step', 'update_step']) {
+      expect(text(name)).not.toContain('"description":"Never');
+      expect(text(name)).not.toContain('AUTHORISES');
+      expect(text(name)).toContain('"semanticGate"');
+      expect(text(name)).toContain('"requireConfirmation"');
+    }
+    expect(text('create_template')).toContain('AUTHORISES');
+    for (const tool of tools) {
+      expect(JSON.stringify(z.toJSONSchema(tool.schema))).not.toContain(
+        'maxLength',
+      );
+    }
+  });
+
+  it('still refuses in the handler what only the strict schema catches', async () => {
+    const ctx = makeRuntimeContext();
+    const tools = await new FlowsPlugin().getRequestTools(ctx);
+    const validate = tools.find((t) => t.name === 'validate_flow')!;
+    const flow = {
+      title: 'Spaced id',
+      steps: [{ id: 'has a space', action: 'qi/email.send' }],
+    };
+    expect(validate.schema.safeParse({ flow }).success).toBe(true);
+    expect(await validate.handler({ flow }, ctx)).toMatchObject({
+      ok: false,
+      error: {
+        code: 'validation_failed',
+        message: expect.stringContaining('spaces or braces'),
+      },
+    });
+    const secret = {
+      title: 'Secret',
+      steps: [
+        { id: 'pay', action: 'qi/email.send', inputs: { pin: '123456' } },
+      ],
+    };
+    expect(validate.schema.safeParse({ flow: secret }).success).toBe(true);
+    expect(await validate.handler({ flow: secret }, ctx)).toMatchObject({
+      ok: false,
+      error: { code: 'validation_failed' },
+    });
+  });
+});
+
 describe('FlowsPlugin: leak guard (§9)', () => {
   // Field names must never expose the editor's primitives. Prose is checked for
   // the unambiguous internal tokens only (block/can/with appear in plain English).

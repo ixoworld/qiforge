@@ -1,3 +1,4 @@
+import { ToolMessage } from '@langchain/core/messages';
 import { Command } from '@langchain/langgraph';
 import { describe, expect, it, vi } from 'vitest';
 import { tool as pluginTool } from '../plugin-api/tool-helper';
@@ -33,6 +34,49 @@ const commandTool = pluginTool(
   async () => new Command({ update: { loadedPlugins: ['weather'] } }),
   { name: 'cmd', description: 'returns a graph command', schema: z.object({}) },
 );
+
+describe('wrapPluginTool and MCP results', () => {
+  const payload = { facts: [{ fact: 'a "quoted" fact' }], total: 1 };
+  const text = JSON.stringify(payload);
+  const toolReturning = (output: unknown) =>
+    wrapPluginTool(
+      pluginTool(async () => output, {
+        name: 'mcp',
+        description: 'an MCP result',
+        schema: z.object({}),
+      }),
+      {
+        ambient: createNoopAmbient(),
+        state: { messages: [] },
+        fallbackContext,
+      },
+    );
+
+  it('gives the model one copy of a result the adapter sent with its structured copy', async () => {
+    const message: unknown = await toolReturning({
+      type: 'text',
+      source_type: 'text',
+      text,
+      structuredContent: payload,
+    }).invoke({ id: 'c1', name: 'mcp', args: {}, type: 'tool_call' }, {
+      context: fallbackContext,
+    } as never);
+    expect(message).toBeInstanceOf(ToolMessage);
+    expect((message as ToolMessage).content).toBe(text);
+  });
+
+  it('leaves a result alone when the text is not a copy of the structured value', async () => {
+    const block = {
+      type: 'text',
+      text: 'Found 1 fact',
+      structuredContent: payload,
+    };
+    const output = await toolReturning(block).invoke({}, {
+      context: fallbackContext,
+    } as never);
+    expect(output).toEqual(block);
+  });
+});
 
 describe('wrapPluginTool result cap', () => {
   const store = {

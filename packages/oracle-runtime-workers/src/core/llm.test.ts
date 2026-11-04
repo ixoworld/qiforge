@@ -11,6 +11,7 @@ import {
   BYO_ROLE_MODELS,
 } from '../llm/byo-catalog';
 import { createByoChatModel } from '../llm/byo-client';
+import { LLM_MAX_OUTPUT_TOKENS_DEFAULT } from './env';
 import {
   catalogCandidates,
   MAX_CONTEXT_TOKENS,
@@ -25,6 +26,7 @@ import {
   BUILTIN_CONTEXT_WINDOWS,
   createLlmAdapter,
   llmEnvFromWorkerEnv,
+  outputCapEnv,
   redactSignedLinks,
   resolveLangsmithTracing,
   streamLivenessFromEnv,
@@ -163,6 +165,69 @@ describe('summarizer role', () => {
     const summarizer = adapter.get('summarizer');
     if (!(summarizer instanceof ChatOpenAI)) throw new Error('unreachable');
     expect(summarizer.model).toBe(NEBIUS_MODEL_MAP.main);
+  });
+});
+
+describe('output cap', () => {
+  /** The `max_tokens` a Chat Completions request from this model would carry. */
+  const wireMaxTokens = (model: ChatOpenAI): number | null | undefined => {
+    const params = model.invocationParams({});
+    return 'max_tokens' in params ? params.max_tokens : undefined;
+  };
+
+  it('caps every platform call at LLM_MAX_OUTPUT_TOKENS, sent as max_tokens', () => {
+    const adapter = createLlmAdapter({
+      OPEN_ROUTER_API_KEY: 'k',
+      DEFAULT_MODEL: 'openai/gpt-5.6-luna',
+    });
+    for (const role of ['main', 'summarizer', 'subagent'] as const) {
+      const model = adapter.get(role);
+      if (!(model instanceof ChatOpenAI)) throw new Error('unreachable');
+      expect(model.maxTokens).toBe(LLM_MAX_OUTPUT_TOKENS_DEFAULT);
+    }
+    const main = adapter.get('main');
+    if (!(main instanceof ChatOpenAI)) throw new Error('unreachable');
+    expect(wireMaxTokens(main)).toBe(LLM_MAX_OUTPUT_TOKENS_DEFAULT);
+
+    const nebius = createLlmAdapter({
+      OPEN_ROUTER_API_KEY: '',
+      LLM_PROVIDER: 'nebius',
+      NEBIUS_API_KEY: 'n',
+      LLM_MAX_OUTPUT_TOKENS: 4096,
+    }).get('main');
+    if (!(nebius instanceof ChatOpenAI)) throw new Error('unreachable');
+    expect(nebius.maxTokens).toBe(4096);
+  });
+
+  it('leaves the limit to the model at 0, and lets a caller set its own', () => {
+    const uncapped = createLlmAdapter({
+      OPEN_ROUTER_API_KEY: 'k',
+      LLM_MAX_OUTPUT_TOKENS: 0,
+    }).get('main');
+    if (!(uncapped instanceof ChatOpenAI)) throw new Error('unreachable');
+    expect(uncapped.maxTokens).toBeUndefined();
+    expect(wireMaxTokens(uncapped)).toBeUndefined();
+
+    const own = createLlmAdapter({ OPEN_ROUTER_API_KEY: 'k' }).get('main', {
+      maxTokens: 500,
+    });
+    if (!(own instanceof ChatOpenAI)) throw new Error('unreachable');
+    expect(own.maxTokens).toBe(500);
+  });
+
+  it('reads the cap from raw Worker env and validated config alike', () => {
+    expect(
+      llmEnvFromWorkerEnv({ LLM_MAX_OUTPUT_TOKENS: '2048' })
+        .LLM_MAX_OUTPUT_TOKENS,
+    ).toBe(2048);
+    expect(
+      llmEnvFromWorkerEnv({ LLM_MAX_OUTPUT_TOKENS: 'lots' })
+        .LLM_MAX_OUTPUT_TOKENS,
+    ).toBeUndefined();
+    expect(outputCapEnv({ LLM_MAX_OUTPUT_TOKENS: 0 })).toEqual({
+      LLM_MAX_OUTPUT_TOKENS: 0,
+    });
+    expect(outputCapEnv({})).toEqual({});
   });
 });
 

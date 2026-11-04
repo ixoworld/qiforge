@@ -1,14 +1,53 @@
 import { ToolMessage } from '@langchain/core/messages';
+import { Command, ReducedValue, StateSchema } from '@langchain/langgraph';
 import { type AgentMiddleware, createMiddleware } from 'langchain';
 import { z } from 'zod';
 import type { Logger, PluginManifest } from '../../plugin-api/types';
 import { describeRequirements, type CapabilityRequirement } from '../manifest';
+import type { GateLoadResult } from '../meta-tools';
 import { NOOP_LOGGER } from '../utils';
 
 type Visibility = NonNullable<PluginManifest['visibility']>;
 
 /** `response_metadata` key the gate sets on its refusals (never sent to a provider). */
 const REFUSED = 'capabilityGateRefused';
+
+const pluginSetUpdate = z
+  .union([z.array(z.string()), z.object({ replace: z.array(z.string()) })])
+  .optional();
+
+/**
+ * What a write to a channel of plugin names does to it: a list adds to the set
+ * (`load_capability`, the editor context; two loads in one model step both
+ * land), `{ replace }` sets it (a turn that unloads idle plugins, a summary).
+ */
+function nextPluginSet(
+  current: string[] | undefined,
+  update: z.infer<typeof pluginSetUpdate>,
+): string[] | undefined {
+  if (update === undefined) return current;
+  if (!Array.isArray(update)) return update.replace;
+  return Array.from(new Set([...(current ?? []), ...update]));
+}
+
+/**
+ * The graph channels of the loaded plugins, of the plugins whose usage the
+ * thread's messages carry, and of the plugins whose operating guides the
+ * system prompt carries (`operating-guides.ts`; last value wins). `createAgent`
+ * builds its channels from the middlewares' state schemas: a reducer declared
+ * anywhere else never runs.
+ */
+const capabilityGateState = new StateSchema({
+  loadedPlugins: new ReducedValue(z.array(z.string()).optional(), {
+    inputSchema: pluginSetUpdate,
+    reducer: nextPluginSet,
+  }),
+  capabilityUsage: new ReducedValue(z.array(z.string()).optional(), {
+    inputSchema: pluginSetUpdate,
+    reducer: nextPluginSet,
+  }),
+  promptGuides: z.array(z.string()).optional(),
+});
 
 /**
  * A ToolMessage the gate produced instead of running the tool. The tool never
@@ -33,14 +72,9 @@ export interface CapabilityGateMiddlewareOptions {
    */
   visibilityByToolName: Map<string, Visibility>;
   /**
-   * Plugins the capability router preloaded for this turn. Their on-demand
-   * tools pass the gate as if loaded, without touching `state.loadedPlugins`.
-   */
-  preloadedPlugins?: ReadonlySet<string>;
-  /**
    * Plugin name → the `manifest.requires` capabilities the user's delegation
    * does not grant. Such a plugin's tools are hidden and refused whatever
-   * their visibility, loaded or preloaded.
+   * their visibility, loaded or not.
    */
   unmetRequirements?: ReadonlyMap<string, readonly CapabilityRequirement[]>;
   /**
@@ -50,6 +84,12 @@ export interface CapabilityGateMiddlewareOptions {
    * cannot make it available.
    */
   withheldToolNames?: ReadonlySet<string>;
+  /**
+   * What the model should read about `plugin` once a hidden tool call loaded
+   * it (`CapabilityLoader.describeForGate`): usage, tool names, its operating
+   * guide. Called once per such call.
+   */
+  describeLoad: (plugin: string) => GateLoadResult;
   /** Optional logger; defaults to a no-op. */
   logger?: Logger;
 }
@@ -74,13 +114,18 @@ export interface CapabilityGateMiddlewareOptions {
  *
  * This is capability discovery, not authorization: any non-silent plugin can
  * be loaded with `load_capability`. What the gate guarantees is that an
- * on-demand tool runs only after that load (or the turn's preload) is
- * visible in the thread.
+ * on-demand tool runs only after that load (or the router's, in the turn's
+ * graph input) is visible in the thread.
+ *
+ * A call to a hidden tool still never runs, whatever its effect: the model
+ * has not seen the tool's schema, so its arguments are a guess. Instead the
+ * gate loads the capability on that call, so the refusal costs one step, the
+ * call again with the schema now in view, not a `load_capability` step too.
  */
 export const createCapabilityGateMiddleware = (
   options: CapabilityGateMiddlewareOptions,
 ): AgentMiddleware => {
-  const { pluginByToolName, visibilityByToolName, preloadedPlugins } = options;
+  const { pluginByToolName, visibilityByToolName } = options;
   const logger = options.logger ?? NOOP_LOGGER;
 
   /** What the user's authorization lacks for `toolName`'s plugin, or null. */
@@ -102,16 +147,12 @@ export const createCapabilityGateMiddleware = (
     if (!plugin) return null;
     const viz = visibilityByToolName.get(toolName) ?? 'on-demand';
     if (viz === 'always' || viz === 'silent') return null;
-    if (loaded.has(plugin) || preloadedPlugins?.has(plugin) === true)
-      return null;
-    return plugin;
+    return loaded.has(plugin) ? null : plugin;
   };
 
   return createMiddleware({
     name: 'CapabilityGateMiddleware',
-    stateSchema: z.object({
-      loadedPlugins: z.array(z.string()).optional(),
-    }),
+    stateSchema: capabilityGateState,
     // No `contextSchema`: the gate reads only `state.loadedPlugins`, and
     // declaring one would make LangChain reject every invocation that omits
     // `context` — the tool wrapper already carries the request context.
@@ -132,10 +173,7 @@ export const createCapabilityGateMiddleware = (
 
       if (filtered.length !== request.tools.length) {
         logger.log(
-          `[CapabilityGateMiddleware] exposed ${filtered.length}/${request.tools.length} tools; loadedPlugins=${Array.from(loaded).join(',') || '∅'}` +
-            (preloadedPlugins?.size
-              ? ` preloadedPlugins=${Array.from(preloadedPlugins).join(',')}`
-              : ''),
+          `[CapabilityGateMiddleware] exposed ${filtered.length}/${request.tools.length} tools; loadedPlugins=${Array.from(loaded).join(',') || '∅'}`,
         );
       }
 
@@ -178,16 +216,27 @@ export const createCapabilityGateMiddleware = (
       );
       if (plugin === null) return handler(request);
       logger.warn(
-        `[CapabilityGateMiddleware] refused a call to ${name}: capability '${plugin}' is not loaded in this thread`,
+        `[CapabilityGateMiddleware] refused a call to ${name} and loaded capability '${plugin}'`,
       );
-      return new ToolMessage({
-        content:
-          `Tool "${name}" is not available: it belongs to the "${plugin}" capability, which is not loaded in this conversation, so the call was not run. ` +
-          `If the user's request needs it, call load_capability with names ["${plugin}"] first, then call the tool again.`,
-        tool_call_id: request.toolCall.id ?? '',
-        name,
-        status: 'error',
-        response_metadata: { [REFUSED]: true },
+      const load = options.describeLoad(plugin);
+      return new Command({
+        update: {
+          loadedPlugins: [plugin],
+          capabilityUsage: [plugin],
+          messages: [
+            new ToolMessage({
+              content:
+                `Tool "${name}" was not run: it belongs to the "${plugin}" capability, which was not loaded. ` +
+                `It is loaded now, so the tool is in your tool list from your next step. If the user's request needs it, check the arguments against its schema and call it again.\n\n` +
+                load.text,
+              tool_call_id: request.toolCall.id ?? '',
+              name,
+              status: 'error',
+              additional_kwargs: load.additional_kwargs,
+              response_metadata: { [REFUSED]: true },
+            }),
+          ],
+        },
       });
     },
   });

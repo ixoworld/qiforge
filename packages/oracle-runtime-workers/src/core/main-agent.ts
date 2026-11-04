@@ -17,14 +17,26 @@ import type {
 } from '../plugin-api/types';
 import type { MainAgentArgs, MainAgentBuildResult } from './main-agent-types';
 import {
+  effectiveToolVisibility,
   renderTier1,
   unmetRequirements as unmetManifestRequirements,
   type CapabilityRequirement,
+  type CatalogueEntry,
   type Tier1Entry,
 } from './manifest';
-import { buildMetaTools, META_TOOL_NAMES } from './meta-tools';
-import { buildReadResultTool, READ_RESULT_TOOL_NAME } from './read-result-tool';
+import { idlePlugins } from './capability-expiry';
+import {
+  buildMetaTools,
+  createCapabilityLoader,
+  META_TOOL_NAMES,
+} from './meta-tools';
+import {
+  buildReadResultTool,
+  READ_RESULT_TOOL_NAME,
+  readResultMaxChars,
+} from './read-result-tool';
 import { describeBudget } from './context-budget';
+import { planCapabilityContext, renderGuideNote } from './operating-guides';
 import { createContextGuardMiddleware } from './middlewares/context-guard';
 import { repetitionCapsFromEnv } from './middlewares/tool-repetition-guard';
 import {
@@ -63,7 +75,6 @@ import {
   dropShadowingRequestEntries,
   formatByPlugin,
   turnToolSummaries,
-  type ManifestRegistry,
 } from './registries';
 import {
   buildPluginContext,
@@ -90,12 +101,6 @@ import { ixoAddressOf, renderUserIdentity } from './user-identity';
 
 const PLUGIN_LOGGER_COMPONENT = 'main-agent';
 
-const DEFAULT_OPERATIONAL_MODE = [
-  '**General conversation mode**',
-  '',
-  'Default to conversation mode, using available capabilities for recall, search, and task delegation.',
-].join('\n');
-
 type CollectedTool = { pluginName: string; tool: PluginTool };
 
 /** The validated env values the user-identity section names. */
@@ -105,31 +110,16 @@ const identityConfigSchema = z.object({
   ORACLE_ENTITY_DID: z.string().min(1).optional(),
 });
 
-/** Map plugin name → effective `manifest.visibility` (default `on-demand`). */
-function visibilityIndex(
-  manifests: ManifestRegistry,
-): Map<string, NonNullable<PluginManifest['visibility']>> {
-  const out = new Map<string, NonNullable<PluginManifest['visibility']>>();
-  for (const { pluginName, manifest } of manifests.collect()) {
-    out.set(pluginName, manifest.visibility ?? 'on-demand');
-  }
-  return out;
-}
-
-/**
- * Filter collected tools by their effective visibility — per-tool override
- * wins; otherwise the plugin's manifest visibility decides.
- */
+/** Filter collected tools by their effective visibility. */
 function selectByVisibility(
   tools: CollectedTool[],
-  manifestViz: Map<string, NonNullable<PluginManifest['visibility']>>,
+  manifestOf: Map<string, PluginManifest>,
   visibility: NonNullable<PluginManifest['visibility']>,
 ): CollectedTool[] {
-  return tools.filter(({ pluginName, tool }) => {
-    const effective =
-      tool.visibility ?? manifestViz.get(pluginName) ?? 'on-demand';
-    return effective === visibility;
-  });
+  return tools.filter(
+    ({ pluginName, tool }) =>
+      effectiveToolVisibility(tool, manifestOf.get(pluginName)) === visibility,
+  );
 }
 
 /**
@@ -173,7 +163,7 @@ export async function createMainAgent(
     ambient,
     state,
     availablePlugins,
-    preloadedPlugins,
+    routeCapabilities,
     checkpointer,
     abortSignal,
     byoProvider,
@@ -249,6 +239,7 @@ export async function createMainAgent(
       toolSurfaces: new Map(),
       subAgentToolNames: new Set(),
       context: { user: requestCtx.user, session: requestCtx.session },
+      stateUpdate: {},
     };
   }
 
@@ -267,14 +258,12 @@ export async function createMainAgent(
     state.loadedPlugins,
   );
 
-  // What the turn treats as loaded: the thread's checkpointed plugins plus the
-  // router's one-turn preload. Only the RuntimeContext and the gate see this
-  // union; the graph state keeps the checkpointed list alone.
-  const threadLoaded: ReadonlySet<string> = new Set(state.loadedPlugins ?? []);
-  const loadedSet = new Set<string>([
-    ...threadLoaded,
-    ...(preloadedPlugins ?? []),
-  ]);
+  // What the thread loaded when the turn starts. Tools and sub-agents are
+  // collected first: what is left to load depends on them. A cold turn then
+  // drops plugins from this set and the router adds to it, below; it is one
+  // set from there on, also what tool handlers see as loaded.
+  const priorLoaded: ReadonlySet<string> = new Set(state.loadedPlugins ?? []);
+  const loadedSet = new Set<string>(priorLoaded);
   // Carry the prior request state (browserTools, agActions, …) into the
   // per-request RuntimeContext and the tool-wrapper closures, but NOT the
   // message history: keeping the full `messages` array here would pin the
@@ -411,22 +400,6 @@ export async function createMainAgent(
     const missing = unmetManifestRequirements(manifest, hasCapability);
     if (missing.length > 0) unmetRequirements.set(pluginName, missing);
   }
-  // The router predicts before the tools are collected (see
-  // `routableCandidates`): its preload of a plugin left with nothing, or of
-  // one whose requirements the delegation does not meet, is void, for the
-  // gate and for what handlers see as loaded.
-  const turnPreloads = preloadedPlugins
-    ? new Set(
-        [...preloadedPlugins].filter(
-          (pluginName) =>
-            !toolAccess.hiddenPlugins.has(pluginName) &&
-            !unmetRequirements.has(pluginName),
-        ),
-      )
-    : undefined;
-  for (const pluginName of preloadedPlugins ?? [])
-    if (!turnPreloads?.has(pluginName) && !threadLoaded.has(pluginName))
-      loadedSet.delete(pluginName);
 
   // The per-turn tool-surface line. Request tools are named in full (there
   // are only a handful and they are the ones that vary turn to turn); the
@@ -440,7 +413,9 @@ export async function createMainAgent(
   ambient.logger.debug?.(
     `[main-agent] full tool surface: ${formatByPlugin(allTools) || '∅'}`,
   );
-  const manifestViz = visibilityIndex(registries.manifests);
+  const manifestOf = new Map(
+    manifestEntries.map(({ pluginName, manifest }) => [pluginName, manifest]),
+  );
   if (unmetRequirements.size > 0)
     ambient.logger.log(
       `[main-agent] not usable by ${requestCtx.user.did} (authorization lacks what they require): ${[...unmetRequirements.keys()].join(', ')}`,
@@ -452,27 +427,152 @@ export async function createMainAgent(
     ]),
   );
 
-  const eagerTools = selectByVisibility(allTools, manifestViz, 'always');
+  // Lookups used by `CapabilityGateMiddleware` to gate on-demand plugins
+  // and sub-agents per model call. Meta-tools omitted from the map are
+  // pass-through.
+  const pluginByToolName = new Map<string, string>();
+  const visibilityByToolName = new Map<
+    string,
+    NonNullable<PluginManifest['visibility']>
+  >();
+  for (const { pluginName, tool } of allTools) {
+    pluginByToolName.set(tool.name, pluginName);
+    visibilityByToolName.set(
+      tool.name,
+      effectiveToolVisibility(tool, manifestOf.get(pluginName)),
+    );
+  }
+  for (const { pluginName, subAgent } of subAgentEntries) {
+    const toolName = computeSubAgentToolName(subAgent.name);
+    pluginByToolName.set(toolName, pluginName);
+    visibilityByToolName.set(
+      toolName,
+      effectiveToolVisibility({ name: toolName }, manifestOf.get(pluginName)),
+    );
+  }
+
+  // This turn's own collection (the shared registry holds no request tools),
+  // already cut to what the delegation reaches. A sub-agent counts: to the
+  // model its `call_*` tool is what a plugin like firecrawl offers.
+  const turnSummaries = turnToolSummaries([
+    ...toolAccess.tools,
+    ...subAgentEntries.map(({ pluginName, subAgent }) => ({
+      pluginName,
+      tool: {
+        name: computeSubAgentToolName(subAgent.name),
+        description: subAgent.description,
+      },
+    })),
+  ]);
+  // Shared by `load_capability` and the capability gate's load on a hidden
+  // call, so one turn reads a plugin's guide once whichever loaded it.
+  const capabilityLoader = createCapabilityLoader(
+    registries.manifests,
+    turnSummaries,
+    toolAccess,
+  );
+
+  // A cold turn drops the capabilities the thread has moved on from, from the
+  // gate, the prompt and what handlers see as loaded. The caller writes the
+  // same change to the graph (capability-expiry.ts).
+  const expiredPlugins = args.capabilityExpiry
+    ? idlePlugins({
+        messages: args.capabilityExpiry.messages,
+        loaded: args.capabilityExpiry.loaded,
+        pluginOf: (toolName) => pluginByToolName.get(toolName),
+        maxIdleTurns: args.capabilityExpiry.maxIdleTurns,
+      })
+    : [];
+  for (const pluginName of expiredPlugins) loadedSet.delete(pluginName);
+  if (expiredPlugins.length > 0)
+    ambient.logger.log(
+      `[main-agent] unloaded idle capabilities: ${expiredPlugins.join(', ')}`,
+    );
+
+  // One line per capability with something left to load this turn: named by
+  // the turn's own tools, so a plugin with nothing to offer this turn (no
+  // browser tools declared, no editor open) stays out; one the user's
+  // authorization lacks stays in, and `load_capability` says what is missing.
+  const gatedPlugins = new Set(
+    [...visibilityByToolName]
+      .filter(([, visibility]) => visibility === 'on-demand')
+      .flatMap(([toolName]) => pluginByToolName.get(toolName) ?? []),
+  );
+  const catalogue: CatalogueEntry[] = manifestEntries
+    .filter(
+      ({ pluginName, manifest }) =>
+        manifest.visibility !== 'silent' &&
+        !toolAccess.hiddenPlugins.has(pluginName) &&
+        (gatedPlugins.has(pluginName) || unmetRequirements.has(pluginName)),
+    )
+    .map((entry) => ({
+      ...entry,
+      unavailable: unmetRequirements.has(entry.pluginName),
+    }));
+
+  // The router chooses from what a `load_capability` could load right now, so
+  // what it returns needs no further check. A preload is such a load, made
+  // before the first model call: the tool list changes once, then stays.
+  const routable = catalogue.filter(
+    ({ pluginName, manifest, unavailable }) =>
+      manifest.routable !== false && !unavailable && !loadedSet.has(pluginName),
+  );
+  const routed =
+    routable.length > 0 ? await routeCapabilities?.(routable) : undefined;
+  const preloaded = routable
+    .map(({ pluginName }) => pluginName)
+    .filter((pluginName) => routed?.has(pluginName));
+  for (const pluginName of preloaded) loadedSet.add(pluginName);
+
+  // Where each plugin's guide and usage go this turn. A plugin the model loads
+  // during the turn gets both with the load result, whatever is decided here.
+  const usablePlugin = (pluginName: string): boolean =>
+    manifestOf.get(pluginName) !== undefined &&
+    manifestOf.get(pluginName)?.visibility !== 'silent' &&
+    !unmetRequirements.has(pluginName) &&
+    !toolAccess.hiddenPlugins.has(pluginName);
+  const capabilityPlan = planCapabilityContext({
+    guides: registries.manifests
+      .operatingGuides()
+      .filter(({ pluginName }) => usablePlugin(pluginName)),
+    loaded: loadedSet,
+    priorLoaded,
+    usable: usablePlugin,
+    alwaysVisible: (pluginName) =>
+      manifestOf.get(pluginName)?.visibility === 'always',
+    ...(args.promptCache ? { cache: args.promptCache } : {}),
+  });
+  const guidesInPrompt = new Set(
+    capabilityPlan.inPrompt.map(({ pluginName }) => pluginName),
+  );
+  const notedLoads = capabilityPlan.onMessage.flatMap((pluginName) => {
+    const manifest = manifestOf.get(pluginName);
+    return manifest
+      ? [
+          capabilityLoader.describe(
+            pluginName,
+            manifest,
+            guidesInPrompt.has(pluginName),
+          ),
+        ]
+      : [];
+  });
+
+  const eagerTools = selectByVisibility(allTools, manifestOf, 'always');
   // Bind ALL on-demand tools at compile time — gating happens per model call
   // in `CapabilityGateMiddleware` based on the live `loadedPlugins` state.
   // This lets `load_capability` take effect on the very next LLM call inside
   // the same run, instead of waiting for the next request to rebuild.
-  const onDemandTools = selectByVisibility(allTools, manifestViz, 'on-demand');
-  const silentTools = selectByVisibility(allTools, manifestViz, 'silent');
+  const onDemandTools = selectByVisibility(allTools, manifestOf, 'on-demand');
+  const silentTools = selectByVisibility(allTools, manifestOf, 'silent');
 
   // ── 4. Wrap tools (meta + plugin) so handlers receive a RuntimeContext ──
   const metaTools = [
     ...buildMetaTools({
       manifestRegistry: registries.manifests,
-      // This turn's own collection (the shared registry holds no request
-      // tools), already cut to what the delegation reaches.
-      toolRegistry: turnToolSummaries(toolAccess.tools),
-      toolAccess: {
-        ...toolAccess,
-        preloadedOnly: new Set(
-          [...(turnPreloads ?? [])].filter((name) => !threadLoaded.has(name)),
-        ),
-      },
+      toolRegistry: turnSummaries,
+      toolAccess,
+      loader: capabilityLoader,
     }),
     // Pages through tool results the result cap saved whole (result-cap.ts);
     // its chunks stay well under the cap so a page is never capped itself.
@@ -480,12 +580,8 @@ export async function createMainAgent(
       ? [
           buildReadResultTool({
             read: hooks.readResult,
-            maxChars: Math.min(
-              16_000,
-              Math.max(
-                512,
-                Math.floor((contextBudget?.resultCapChars ?? 32_000) / 2),
-              ),
+            maxChars: readResultMaxChars(
+              contextBudget?.resultCapChars ?? 32_000,
             ),
           }),
         ]
@@ -648,29 +744,6 @@ export async function createMainAgent(
     ...domainTools,
   ];
 
-  // Lookups used by `CapabilityGateMiddleware` to gate on-demand plugins
-  // and sub-agents per model call. Meta-tools omitted from the map are
-  // pass-through.
-  const pluginByToolName = new Map<string, string>();
-  const visibilityByToolName = new Map<
-    string,
-    NonNullable<PluginManifest['visibility']>
-  >();
-  for (const { pluginName, tool } of allTools) {
-    pluginByToolName.set(tool.name, pluginName);
-    const effective =
-      tool.visibility ?? manifestViz.get(pluginName) ?? 'on-demand';
-    visibilityByToolName.set(tool.name, effective);
-  }
-  for (const { pluginName, subAgent } of subAgentEntries) {
-    const toolName = computeSubAgentToolName(subAgent.name);
-    pluginByToolName.set(toolName, pluginName);
-    visibilityByToolName.set(
-      toolName,
-      manifestViz.get(pluginName) ?? 'on-demand',
-    );
-  }
-
   // ── 6. Middleware stack — always-on + plugin contributions ──────────────
   const pluginMiddlewares = [
     ...registries.middlewares.collect(buildCtx),
@@ -757,9 +830,9 @@ export async function createMainAgent(
     createCapabilityGateMiddleware({
       pluginByToolName,
       visibilityByToolName,
-      preloadedPlugins: turnPreloads,
       unmetRequirements,
       withheldToolNames: toolAccess.withheldToolNames,
+      describeLoad: capabilityLoader.describeForGate,
       logger: ambient.logger,
     }),
     userContextStateMiddleware(),
@@ -842,6 +915,13 @@ export async function createMainAgent(
               ? { onOverflow: hooks.onContextOverflow }
               : {}),
             ...(hooks?.onContextEvent ? { onEvent: hooks.onContextEvent } : {}),
+            ...(hooks?.readResult
+              ? {
+                  readResultChars: readResultMaxChars(
+                    contextBudget.resultCapChars,
+                  ),
+                }
+              : {}),
             logger: ambient.logger,
           }),
         ]
@@ -882,7 +962,7 @@ export async function createMainAgent(
       pluginName,
       manifest: withoutWithheldExamples(manifest, toolAccess.withheldToolNames),
     }));
-  const tier1 = renderTier1({ manifests: eagerEntries });
+  const tier1 = renderTier1({ manifests: eagerEntries, catalogue });
   for (const warning of tier1.warnings) ambient.logger.warn(warning);
 
   const customInstructions = identity.prompt?.customInstructions?.trim() ?? '';
@@ -899,35 +979,15 @@ export async function createMainAgent(
           origin === 'request' && pluginName === PORTAL_CAPABILITY,
       )
       .map(({ tool }) => tool.name),
-    bound:
-      manifestViz.get(PORTAL_CAPABILITY) === 'always' ||
-      loadedSet.has(PORTAL_CAPABILITY),
+    bound: manifestOf.get(PORTAL_CAPABILITY)?.visibility === 'always',
   };
-
-  // Operating guides of the plugins in use when the turn starts — loaded on
-  // the thread or `always` visible — and usable by this delegation. A router
-  // preload lasts one turn: its guide would enter the prompt and leave it
-  // again on the next turn, so it comes with `load_capability` instead, as
-  // does the guide of a plugin loaded mid-turn (here from the next turn on).
-  const operatingGuides = registries.manifests
-    .operatingGuides()
-    .filter(({ pluginName }) => {
-      const visibility = manifestViz.get(pluginName) ?? 'on-demand';
-      return (
-        visibility !== 'silent' &&
-        (visibility === 'always' || threadLoaded.has(pluginName)) &&
-        !unmetRequirements.has(pluginName) &&
-        !toolAccess.hiddenPlugins.has(pluginName)
-      );
-    })
-    .map(({ guide }) => guide);
 
   const composedPrompt = await composePrompt({
     identity,
     capabilityBlock: tier1.block,
     browserTools,
     customInstructions,
-    operationalMode: hooks?.operationalMode ?? DEFAULT_OPERATIONAL_MODE,
+    operationalMode: hooks?.operationalMode ?? '',
     userPreferencesContext: formatUserPreferences(state.userPreferences),
     userContext: state.userContext,
     // The day only: the prompt must stay byte-identical across the turns
@@ -948,7 +1008,7 @@ export async function createMainAgent(
           tool.name === SEND_FILE_TOOL && !unmetRequirements.has(pluginName),
       ),
     ),
-    operatingGuides,
+    operatingGuides: capabilityPlan.inPrompt.map(({ guide }) => guide),
   });
   // The domain block goes last: it frames its documents as retrieved data
   // that never outranks the instructions above it.
@@ -992,6 +1052,34 @@ export async function createMainAgent(
     toolSurfaces,
     subAgentToolNames: new Set(subAgentTools.map((t) => t.name)),
     context: runConfig.context,
+    stateUpdate: {
+      // Every loaded plugin, so a write here also carries what the caller's
+      // own write to the channel carries (the editor context).
+      ...(expiredPlugins.length > 0
+        ? { loadedPlugins: { replace: [...loadedSet] } }
+        : preloaded.length > 0
+          ? { loadedPlugins: [...loadedSet] }
+          : {}),
+      ...(capabilityPlan.promptGuides
+        ? { promptGuides: capabilityPlan.promptGuides }
+        : {}),
+      // A channel's first value is stored as written, past its reducer.
+      ...(capabilityPlan.capabilityUsage
+        ? {
+            capabilityUsage: args.promptCache?.capabilityUsage
+              ? { replace: capabilityPlan.capabilityUsage }
+              : capabilityPlan.capabilityUsage,
+          }
+        : {}),
+    },
+    ...(notedLoads.length > 0
+      ? {
+          guideNote: {
+            plugins: notedLoads.map(({ name }) => name),
+            text: renderGuideNote(notedLoads),
+          },
+        }
+      : {}),
     ...(domain
       ? {
           domainContext: {

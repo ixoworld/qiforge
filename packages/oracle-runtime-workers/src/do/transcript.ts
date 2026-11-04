@@ -141,6 +141,45 @@ export function visibleText(message: BaseMessage): string {
 }
 
 /**
+ * Whether a stored message is one the user sees in the transcript. System and
+ * tool messages never are, nor a failed reply, nor anything the runtime wrote
+ * for the model about an attachment: the extracted text of a file (an AI
+ * message with an `attachment`) and `view_attachment` re-attaching a payload,
+ * nor a chat gateway's delivery notice.
+ */
+export function visibleToUser(message: BaseMessage): boolean {
+  if (message.type === 'system' || message.type === 'tool') return false;
+  const kw = (message.additional_kwargs ?? {}) as Record<string, unknown>;
+  if (kw.isError) return false;
+  if (message.type === 'ai' && Boolean(kw.attachment)) return false;
+  // A chat gateway's delivery notice: the model's, never a user message.
+  return !isAttachmentViewMessage(message) && !isDeliveryNoticeMessage(message);
+}
+
+/**
+ * The latest turns as the user saw them, oldest first and each as
+ * `user: …` or `assistant: …` cut to `maxChars`, from messages listed newest
+ * first. Only what `visibleToUser` lets through, without summaries and rows
+ * with no visible text.
+ */
+export function recentTurnTexts(
+  newestFirst: readonly BaseMessage[],
+  limit: number,
+  maxChars: number,
+): string[] {
+  const turns: string[] = [];
+  for (const message of newestFirst) {
+    if (turns.length === limit) break;
+    if (isSummarizationMessage(message) || !visibleToUser(message)) continue;
+    const text = visibleText(message).trim();
+    if (!text) continue;
+    const speaker = message.type === 'human' ? 'user' : 'assistant';
+    turns.push(`${speaker}: ${text.slice(0, maxChars)}`);
+  }
+  return turns.reverse();
+}
+
+/**
  * The summarization middleware's bookkeeping message — never shown to users.
  * LangChain 1.4 writes it as a HUMAN message tagged
  * `additional_kwargs.lc_source: 'summarization'` whose text starts with the
@@ -171,18 +210,8 @@ export async function transformTranscript(
   for (const message of messages) {
     const toolMsg = message.type === 'tool' ? (message as ToolMessage) : null;
     const kw = (message.additional_kwargs ?? {}) as Record<string, unknown>;
-    const isExtractionContext = message.type === 'ai' && Boolean(kw.attachment);
 
-    if (
-      message.type !== 'system' &&
-      message.type !== 'tool' &&
-      !kw.isError &&
-      !isExtractionContext &&
-      // `view_attachment` re-attaching an offloaded payload — model-facing.
-      !isAttachmentViewMessage(message) &&
-      // A chat gateway's delivery notice — the model's, never a user message.
-      !isDeliveryNoticeMessage(message)
-    ) {
+    if (visibleToUser(message)) {
       const reasoning = reasoningToText(kw.reasoning);
       const attachments =
         message.type === 'human'

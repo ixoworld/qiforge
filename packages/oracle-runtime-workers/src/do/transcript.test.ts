@@ -27,6 +27,8 @@ import {
   contentToText,
   pageThreadTranscript,
   parseTranscriptPageQuery,
+  recentTurnTexts,
+  visibleToUser,
   TRANSCRIPT_PAGE_DEFAULT,
   TRANSCRIPT_PAGE_MAX,
   TranscriptCursorError,
@@ -35,6 +37,7 @@ import {
   visibleContent,
   visibleText,
 } from './transcript';
+import { TURN_GUIDE_NOTE_KWARG } from '../core/operating-guides';
 import { TURN_TIME_NOTE_KWARG, withTurnTimeNote } from '../core/turn-time-note';
 import { SUMMARY_PREFIX } from '../core/middlewares/summarization';
 
@@ -99,6 +102,76 @@ describe('transcript + attachment retention', () => {
       ['human', 'look again'],
       ['ai', 'still red'],
     ]);
+  });
+});
+
+describe('recentTurnTexts', () => {
+  it('returns the latest turns oldest first, labelled and cut short', () => {
+    const newestFirst = [
+      new AIMessage({ id: 'a2', content: 'x'.repeat(50) }),
+      new HumanMessage({ id: 'h2', content: 'second question' }),
+      new AIMessage({ id: 'a1', content: 'first answer' }),
+      new HumanMessage({ id: 'h1', content: 'first question' }),
+    ];
+    expect(recentTurnTexts(newestFirst, 3, 10)).toEqual([
+      'assistant: first answ',
+      'user: second que',
+      `assistant: ${'x'.repeat(10)}`,
+    ]);
+  });
+
+  it('never hands on the text of an attached file, or anything else the transcript hides', () => {
+    const meta = { filename: 'contract.pdf', mimetype: 'application/pdf' };
+    const newestFirst = [
+      new AIMessage({
+        id: 'extracted',
+        content: 'Salary: 90,000. Account 1234.',
+        additional_kwargs: { attachment: meta },
+      }),
+      new AIMessage({
+        id: 'failed',
+        content: 'stack trace with a token',
+        additional_kwargs: { isError: true },
+      }),
+      new HumanMessage({ id: 'h1', content: 'summarise this file' }),
+    ];
+    expect(recentTurnTexts(newestFirst, 4, 300)).toEqual([
+      'user: summarise this file',
+    ]);
+    // The rule is the transcript's own.
+    for (const message of newestFirst.slice(0, 2))
+      expect(visibleToUser(message)).toBe(false);
+    expect(
+      visibleToUser(new ToolMessage({ content: 'x', tool_call_id: 't' })),
+    ).toBe(false);
+  });
+
+  it('leaves out summaries, attachment views and rows with no visible text', () => {
+    const newestFirst = [
+      new HumanMessage({
+        id: 'v1',
+        content: [{ type: 'text', text: 'Re-attached "red.png"' }],
+        additional_kwargs: { lc_source: ATTACHMENT_VIEW_SOURCE },
+      }),
+      new AIMessage({ id: 'tool-call', content: '' }),
+      new HumanMessage({
+        id: 's1',
+        content: `${SUMMARY_PREFIX}\n\nprivate running summary`,
+        additional_kwargs: { lc_source: 'summarization' },
+      }),
+      new HumanMessage({ id: 'h1', content: 'look again' }),
+    ];
+    expect(recentTurnTexts(newestFirst, 4, 300)).toEqual(['user: look again']);
+  });
+
+  it('shows the person the text they saw, without the turn-time note', () => {
+    const note = 'Current time: 2026-10-03 09:15 (Africa/Johannesburg)';
+    const message = new HumanMessage({
+      id: 'h1',
+      content: withTurnTimeNote('hello', note),
+      additional_kwargs: { [TURN_TIME_NOTE_KWARG]: note },
+    });
+    expect(recentTurnTexts([message], 4, 300)).toEqual(['user: hello']);
   });
 });
 
@@ -915,4 +988,21 @@ describe('a chat gateway delivery notice', () => {
       'Removed the external reference; sending it again.',
     ]);
   });
+});
+
+it('shows a person their own message, without the time and guide notes the model read', async () => {
+  const time = 'Current time: Monday, 2026-10-05 09:00 (UTC)';
+  const guide = '[From the runtime, not the user: …]\n\n### Flows';
+  const content = withTurnTimeNote(withTurnTimeNote('Build it', guide), time);
+  const result = await transformTranscript([
+    new HumanMessage({
+      id: 'guided',
+      content,
+      additional_kwargs: {
+        [TURN_TIME_NOTE_KWARG]: time,
+        [TURN_GUIDE_NOTE_KWARG]: guide,
+      },
+    }),
+  ]);
+  expect(result.messages[0]?.content).toBe('Build it');
 });

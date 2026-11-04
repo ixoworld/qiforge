@@ -12,6 +12,10 @@
  * and LangGraph `Send` objects. `stringify` is fast-safe-stringify's
  * circular-safe variant, typed.
  */
+import {
+  TURN_GUIDE_NOTE_KWARG,
+  USAGE_CARRIED_KWARG,
+} from '../core/operating-guides';
 import { TURN_TIME_NOTE_KWARG } from '../core/turn-time-note';
 import {
   CHANNEL_DELIVERY_NOTICE_KWARG,
@@ -382,6 +386,14 @@ export function cleanAdditionalKwargs(
   const deliveryNotice = additionalKwargs[CHANNEL_DELIVERY_NOTICE_KWARG];
   if (typeof deliveryNotice === 'string')
     cleaned[CHANNEL_DELIVERY_NOTICE_KWARG] = deliveryNotice;
+  const guideNote = additionalKwargs[TURN_GUIDE_NOTE_KWARG];
+  if (typeof guideNote === 'string') cleaned[TURN_GUIDE_NOTE_KWARG] = guideNote;
+  // Kept for the context guard and the summary (core/operating-guides.ts).
+  const usage = additionalKwargs[USAGE_CARRIED_KWARG];
+  if (Array.isArray(usage))
+    cleaned[USAGE_CARRIED_KWARG] = usage.filter(
+      (name): name is string => typeof name === 'string',
+    );
   // Channel provenance, read back typed by the transcript (ChannelOrigin,
   // ChannelReplyReference); anything malformed is dropped there.
   for (const key of ['org.ixo.qi.origin', 'org.ixo.qi.reply'] as const)

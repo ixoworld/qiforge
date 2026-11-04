@@ -1208,7 +1208,13 @@ describe('user-context prefetch in a user-object turn', () => {
   it('indexes a channel session once it goes quiet, and later channel turns adopt only a warm room cache', async () => {
     await withObject(
       'user-context-continuous-channel',
-      { env: { CHANNEL_HISTORY_INDEX_DEBOUNCE_MS: 1500 } },
+      // Every turn counts as cold here: the warm thread is the next test.
+      {
+        env: {
+          CHANNEL_HISTORY_INDEX_DEBOUNCE_MS: 1500,
+          CONTEXT_CACHE_COLD_MS: '0',
+        },
+      },
       async (o) => {
         const turn = (requestId: string) =>
           o.turn('s-channel', requestId, { channel: true });
@@ -1264,6 +1270,28 @@ describe('user-context prefetch in a user-object turn', () => {
         await o.drain();
         expect(o.engine.uploads).toHaveLength(2);
         expect(o.engine.uploads[1]).toHaveLength(4);
+      },
+    );
+  });
+
+  it('keeps a warm channel thread on its context, so the prompt and the provider cache hold', async () => {
+    await withObject(
+      'user-context-warm-channel',
+      { env: { CHANNEL_HISTORY_INDEX_DEBOUNCE_MS: 1500 } },
+      async (o) => {
+        const turn = (requestId: string) =>
+          o.turn('s-channel', requestId, { channel: true });
+        const first = await turn('channel-r1');
+        await o.drain();
+        expect(await o.status('s-channel')).toMatchObject({ cached: false });
+
+        // The room has a newer answer in its cache by the next turn.
+        o.engine.facts = { goals: LEARNING };
+        await turn('channel-r2');
+        while (!(await o.status('s-channel'))['cached']) await sleep(10);
+        const warm = await turn('channel-r3');
+        expect(warm.system).toBe(first.system);
+        expect(warm.system).not.toContain(LEARNING);
       },
     );
   });

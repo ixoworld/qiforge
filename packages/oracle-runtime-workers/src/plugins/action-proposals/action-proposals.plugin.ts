@@ -10,6 +10,7 @@ import {
   type ActionReference,
 } from '@ixo/ixo-transaction/action-proposals';
 import { z } from 'zod';
+import { modelFacingSchema } from '../compact-schema';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin';
 import { tool } from '../../plugin-api/tool-helper';
 import type {
@@ -131,7 +132,9 @@ export async function prepareAction(
   const parsed = PrepareActionSchema.safeParse(input);
   if (!parsed.success)
     return clarify(
-      'Provide the exact supported action, network, recipient and amount.',
+      `Provide the exact supported action, network, recipient and amount (${parsed.error.issues
+        .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+        .join('; ')}).`,
     );
   if (ctx.config.ACTION_PROPOSALS_ENABLED !== 'true' || !ctx.actionProposals)
     return clarify('Action proposals are not enabled for this companion.');
@@ -459,6 +462,7 @@ const manifest: PluginManifest = {
   tags: ['actions', 'wallet', 'channels'],
   category: 'integration',
   visibility: 'on-demand',
+  brief: 'transfers, discussions and grants to sign in Portal',
   stability: 'experimental',
 };
 export class ActionProposalsPlugin extends OraclePlugin {
@@ -478,7 +482,8 @@ export class ActionProposalsPlugin extends OraclePlugin {
         name: 'prepare_action',
         description:
           'Prepare a validated transfer, draft discussion or topic claim-access grant for explicit owner review. Never executes. Use exact supported inputs from current-session user evidence and authenticated current-room/owner bindings. Other topic kinds and unverified identities require clarification.',
-        schema: PrepareActionSchema,
+        // The handler parses PrepareActionSchema and names what it refuses.
+        schema: modelFacingSchema(PrepareActionSchema),
         effect: 'write',
       }),
     ];

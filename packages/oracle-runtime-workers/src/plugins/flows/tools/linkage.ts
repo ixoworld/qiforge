@@ -10,10 +10,7 @@ import { toToolError } from '../errors';
 import { withFlowDoc } from '../flow-doc';
 import { checkLink, compatibleActions, requirements } from '../linkage';
 
-const flowRef = z
-  .string()
-  .optional()
-  .describe('Which flow. Omit to use the flow that is currently open.');
+const flowRef = z.string().optional().describe('Default: the open flow.');
 
 const checkLinkSchema = z.object({
   flowRef,

@@ -271,6 +271,8 @@ export interface OracleWorkerEnv {
   LLM_STREAM_IDLE_TIMEOUT_MS?: string;
   LLM_BYO_STREAM_IDLE_TIMEOUT_MS?: string;
   LLM_STREAM_RETRIES?: string;
+  /** Most tokens one platform model call may generate, reasoning included (default 16384; 0 = the model's limit). */
+  LLM_MAX_OUTPUT_TOKENS?: string;
   /** LangGraph steps one turn may take before `GraphRecursionError` (default 600; Node hard-codes 200). */
   TURN_RECURSION_LIMIT?: string;
   /** Turn budget: tool attempts (default 120) and deadline in ms (600000). */
@@ -295,7 +297,12 @@ export interface OracleWorkerEnv {
   MODEL_CONTEXT_TOKENS?: string;
   MODEL_CONTEXT_OVERRIDES?: string;
   CONTEXT_SUMMARIZE_FRACTION?: string;
+  CONTEXT_SUMMARIZE_MAX_TOKENS?: string;
   CONTEXT_PRUNE_FRACTION?: string;
+  CONTEXT_PRUNE_MAX_TOKENS?: string;
+  CONTEXT_STALE_RESULT_TURNS?: string;
+  CONTEXT_CACHE_COLD_MS?: string;
+  CONTEXT_PLUGIN_IDLE_TURNS?: string;
   CONTEXT_RESULT_CAP_FRACTION?: string;
   CONTEXT_RESULT_CAP_MAX_CHARS?: string;
   CONTEXT_REQUEST_FRACTION?: string;
@@ -327,9 +334,14 @@ export interface OracleWorkerEnv {
   /**
    * Capability router (needs a `DECISION_PROVIDER`). `off` (default) never
    * evaluates; `shadow` evaluates and logs the verdict without preloading;
-   * `on` preloads the predicted on-demand plugin's tools for the turn.
+   * `on` loads the predicted plugins on the thread before the first model
+   * call.
    */
   CAPABILITY_ROUTER?: CapabilityRouterMode;
+  /** The score a preload needs on a warm turn (default 0.8; above 1, never). */
+  CAPABILITY_ROUTER_WARM_THRESHOLD?: string;
+  /** The score a preload needs on a cold turn (default 0.7). */
+  CAPABILITY_ROUTER_COLD_THRESHOLD?: string;
   /** Applies exclusively to authenticated channel admission; Portal/Matrix turns never route. */
   CHANNEL_SEMANTIC_ROUTING?: 'off' | 'shadow' | 'on';
   CHANNEL_SEMANTIC_ROUTING_BINDINGS?: string;

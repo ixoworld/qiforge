@@ -69,11 +69,19 @@ describe('contextKnobs bounds', () => {
 describe('contextBudgetFor', () => {
   const at = (tokens: number) =>
     contextBudgetFor({ model: 'm', tokens, origin: 'catalog' });
+  /** The fractions alone: no ceiling in tokens. */
+  const uncapped = {
+    ...DEFAULT_CONTEXT_KNOBS,
+    summarizeMaxTokens: Number.MAX_SAFE_INTEGER,
+    pruneMaxTokens: Number.MAX_SAFE_INTEGER,
+  };
+  const fractionsAt = (tokens: number) =>
+    contextBudgetFor({ model: 'm', tokens, origin: 'catalog' }, uncapped);
 
   it('scales every limit with the window', () => {
     const small = at(32_000);
     const mid = at(128_000);
-    const big = at(1_000_000);
+    const big = fractionsAt(1_000_000);
     expect(small).toMatchObject({
       windowTokens: 32_000,
       outputReserveTokens: 8_000,
@@ -95,7 +103,7 @@ describe('contextBudgetFor', () => {
       requestCapTokens: 942_000,
       summarizeAtTokens: 600_000,
       pruneAtTokens: 350_000,
-      resultCapChars: 200_000,
+      resultCapChars: 64_000,
     });
     expect(big.summaryInputTokens).toBe(938_000);
     expect(
@@ -111,7 +119,47 @@ describe('contextBudgetFor', () => {
     // Below the floor the default stays.
     expect(
       contextKnobs({ CONTEXT_RESULT_CAP_MAX_CHARS: '10' }).resultCapMaxChars,
-    ).toBe(200_000);
+    ).toBe(64_000);
+  });
+
+  it('holds the thresholds to what a request should cost, whatever the window', () => {
+    // A long-context price doubles at 272k prompt tokens on this model.
+    expect(at(1_050_000)).toMatchObject({
+      summarizeAtTokens: 200_000,
+      pruneAtTokens: 100_000,
+      resultCapChars: 64_000,
+    });
+    // Below the ceilings the fractions decide, as before.
+    expect(at(128_000)).toMatchObject({
+      summarizeAtTokens: 76_800,
+      pruneAtTokens: 44_800,
+    });
+    const knobs = contextKnobs({
+      CONTEXT_SUMMARIZE_MAX_TOKENS: '300000',
+      CONTEXT_PRUNE_MAX_TOKENS: '150000',
+      CONTEXT_STALE_RESULT_TURNS: '0',
+      CONTEXT_CACHE_COLD_MS: '0',
+      CONTEXT_PLUGIN_IDLE_TURNS: '5',
+    });
+    expect(knobs).toMatchObject({
+      summarizeMaxTokens: 300_000,
+      pruneMaxTokens: 150_000,
+      staleResultTurns: 0,
+      cacheColdMs: 0,
+      pluginIdleTurns: 5,
+    });
+    expect(
+      contextBudgetFor(
+        { model: 'm', tokens: 1_050_000, origin: 'catalog' },
+        knobs,
+      ),
+    ).toMatchObject({
+      summarizeAtTokens: 300_000,
+      pruneAtTokens: 150_000,
+      staleResultTurns: 0,
+      cacheColdMs: 0,
+      pluginIdleTurns: 5,
+    });
   });
 
   it('keeps the reply reserve from eating a tiny window and keeps the thresholds ordered', () => {
@@ -138,7 +186,7 @@ describe('contextBudgetFor', () => {
 
   it("summarizes at 60% of the main model's window, whatever its size", () => {
     // The mainnet default model: 1,050,000 tokens.
-    const large = at(1_050_000);
+    const large = fractionsAt(1_050_000);
     expect(large).toMatchObject({
       windowTokens: 1_050_000,
       outputReserveTokens: 8_000,
@@ -148,7 +196,7 @@ describe('contextBudgetFor', () => {
       summaryInputTokens: 985_500,
     });
     expect(describeBudget(large)).toBe(
-      'model=m window=1050000 (catalog) summarizeAt=630000 pruneAt=367500 resultCap=200000c requestCap=989500 reserve=8000 summaryInput=985500',
+      'model=m window=1050000 (catalog) summarizeAt=630000 pruneAt=367500 staleTurns=2 coldMs=2100000 pluginIdle=3 resultCap=64000c requestCap=989500 reserve=8000 summaryInput=985500',
     );
     const small = at(64_000);
     expect(small).toMatchObject({
@@ -158,7 +206,9 @@ describe('contextBudgetFor', () => {
       summaryInputTokens: 48_800,
     });
     for (const window of [64_000, 131_072, 400_000, 1_050_000])
-      expect(at(window).summarizeAtTokens).toBe(Math.floor(window * 0.6));
+      expect(fractionsAt(window).summarizeAtTokens).toBe(
+        Math.floor(window * 0.6),
+      );
   });
 
   it('never starts summarizing above what the summarizer may read', () => {
@@ -176,7 +226,7 @@ describe('contextBudgetFor', () => {
     for (const window of windows) {
       const b = contextBudgetFor(
         { model: 'm', tokens: window, origin: 'catalog' },
-        { ...DEFAULT_CONTEXT_KNOBS, summarizeFraction: 1 },
+        { ...uncapped, summarizeFraction: 1 },
       );
       expect(b.summarizeAtTokens).toBe(b.summaryInputTokens);
     }
@@ -199,7 +249,9 @@ describe('contextBudgetFor', () => {
     });
     // From ~34.3k up the plain fraction applies.
     for (const window of [34_300, 35_000, 64_000, 128_000, 1_050_000])
-      expect(at(window).summarizeAtTokens).toBe(Math.floor(window * 0.6));
+      expect(fractionsAt(window).summarizeAtTokens).toBe(
+        Math.floor(window * 0.6),
+      );
     // The summarizer's input floor holds for the smallest windows.
     expect(at(4_000).summaryInputTokens).toBe(1_000);
   });

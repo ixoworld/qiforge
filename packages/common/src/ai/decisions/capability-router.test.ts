@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import {
+  CAPABILITY_PRELOAD_BATCH_SIZE,
+  CAPABILITY_PRELOAD_CALIBRATION_PROFILE,
+  CAPABILITY_PRELOAD_WARM_THRESHOLD,
   CAPABILITY_ROUTE_CALIBRATION_PROFILE,
   CAPABILITY_ROUTE_DECISION_NAME,
   CAPABILITY_ROUTE_MIN_CONFIDENCE,
+  capabilityPreloadDecision,
   capabilityRouteDecision,
   capabilityRouterEnvShape,
+  decideCapabilityPreload,
   decideCapabilityRoute,
   noCapabilityOption,
   toRoutableCapabilities,
@@ -307,6 +313,165 @@ describe('decideCapabilityRoute', () => {
         capabilities,
       ),
     ).toThrow(/capability/);
+  });
+});
+
+describe('capabilityPreloadDecision', () => {
+  it('asks one boolean per candidate and sends only the message and recent turns as state', () => {
+    const request = capabilityPreloadDecision.prepare({
+      text: 'Will it rain in Cairo tomorrow?',
+      recentTurns: ['user: hi', 'assistant: hello'],
+      capabilities,
+    });
+
+    expect(request.state).toEqual({
+      message: 'Will it rain in Cairo tomorrow?',
+      recent: ['user: hi', 'assistant: hello'],
+    });
+    expect(Object.keys(request.questions)).toEqual(['weather', 'payments']);
+    expect(request.questions.weather).toEqual({
+      kind: 'boolean',
+      instructions: expect.stringContaining(
+        '"Weather" can do? Forecasts and conditions.',
+      ),
+    });
+  });
+
+  it('keeps the route name, so a provider route still applies, under a new version', () => {
+    expect(capabilityPreloadDecision.name).toBe(CAPABILITY_ROUTE_DECISION_NAME);
+    expect(capabilityPreloadDecision.version).not.toBe(
+      capabilityRouteDecision.version,
+    );
+  });
+
+  it('refuses more candidates than one request can ask about', () => {
+    const many = Array.from(
+      { length: CAPABILITY_PRELOAD_BATCH_SIZE + 1 },
+      (_, index) => ({
+        name: `plugin-${index}`,
+        title: 'Plugin',
+        summary: 'Does a thing.',
+      }),
+    );
+    expect(() =>
+      capabilityPreloadDecision.prepare({ text: 'Hi', capabilities: many }),
+    ).toThrow();
+    expect(
+      Object.keys(
+        capabilityPreloadDecision.prepare({
+          text: 'Hi',
+          capabilities: many.slice(0, CAPABILITY_PRELOAD_BATCH_SIZE),
+        }).questions,
+      ),
+    ).toHaveLength(CAPABILITY_PRELOAD_BATCH_SIZE);
+  });
+
+  it('fails open quickly', () => {
+    expect(capabilityPreloadDecision.timeoutMs).toBeLessThanOrEqual(1_000);
+  });
+});
+
+describe('decideCapabilityPreload', () => {
+  const threshold = CAPABILITY_PRELOAD_CALIBRATION_PROFILE.threshold;
+  const booleans = (scores: Record<string, number>) =>
+    evaluationWith(
+      Object.fromEntries(
+        Object.entries(scores).map(([name, probabilityTrue]) => [
+          name,
+          { kind: 'boolean', probabilityTrue },
+        ]),
+      ),
+    );
+
+  it('preloads every capability at or above the threshold, most likely first', () => {
+    const verdict = decideCapabilityPreload(
+      [booleans({ weather: threshold, payments: 0.9 })],
+      capabilities,
+    );
+    expect(verdict.preload).toEqual(['payments', 'weather']);
+    expect(verdict.calibrationProfileRef).toBe(
+      CAPABILITY_PRELOAD_CALIBRATION_PROFILE.id,
+    );
+  });
+
+  it('takes the bar a warm turn asks for, which no calibration profile backs', () => {
+    const verdict = decideCapabilityPreload(
+      [booleans({ weather: 0.79, payments: 0.8 })],
+      capabilities,
+      CAPABILITY_PRELOAD_WARM_THRESHOLD,
+    );
+    expect(verdict.preload).toEqual(['payments']);
+    expect(verdict.calibrationProfileRef).toBeUndefined();
+  });
+
+  it('reads the warm threshold from the environment as a number, unset by default', () => {
+    const schema = z.object(capabilityRouterEnvShape);
+    expect(
+      schema.parse({ CAPABILITY_ROUTER_WARM_THRESHOLD: '1.5' })
+        .CAPABILITY_ROUTER_WARM_THRESHOLD,
+    ).toBe(1.5);
+    expect(schema.parse({}).CAPABILITY_ROUTER_WARM_THRESHOLD).toBeUndefined();
+    // A blank value in a config file means unset, not "preload everything".
+    for (const blank of ['', '  '])
+      expect(
+        schema.parse({ CAPABILITY_ROUTER_WARM_THRESHOLD: blank })
+          .CAPABILITY_ROUTER_WARM_THRESHOLD,
+      ).toBeUndefined();
+    expect(
+      schema.safeParse({ CAPABILITY_ROUTER_WARM_THRESHOLD: 'high' }).success,
+    ).toBe(false);
+  });
+
+  it('preloads nothing just below the threshold but still reports the scores', () => {
+    const verdict = decideCapabilityPreload(
+      [booleans({ weather: threshold - 0.01, payments: 0.1 })],
+      capabilities,
+    );
+    expect(verdict.preload).toEqual([]);
+    expect(verdict.scores).toEqual([
+      { name: 'weather', probability: threshold - 0.01 },
+      { name: 'payments', probability: 0.1 },
+    ]);
+  });
+
+  it('merges batches', () => {
+    expect(
+      decideCapabilityPreload(
+        [booleans({ weather: 0.9 }), booleans({ payments: 0.8 })],
+        capabilities,
+      ).preload,
+    ).toEqual(['weather', 'payments']);
+  });
+
+  it('throws when a candidate has no boolean answer', () => {
+    expect(() =>
+      decideCapabilityPreload([booleans({ weather: 0.9 })], capabilities),
+    ).toThrow('"payments"');
+    expect(() =>
+      decideCapabilityPreload(
+        [
+          evaluationWith({
+            weather: { kind: 'boolean', probabilityTrue: 0.9 },
+            payments: {
+              kind: 'choice',
+              value: 'a',
+              confidence: 1,
+              probabilities: { a: 1 },
+            },
+          }),
+        ],
+        capabilities,
+      ),
+    ).toThrow('"payments"');
+  });
+
+  it('marks the threshold provisional and names what it was fitted against', () => {
+    expect(CAPABILITY_PRELOAD_CALIBRATION_PROFILE).toMatchObject({
+      status: 'provisional',
+      decisionName: CAPABILITY_ROUTE_DECISION_NAME,
+      decisionVersion: capabilityPreloadDecision.version,
+      providerArtifactRef: 'typesafe/jev-1.13',
+    });
   });
 });
 

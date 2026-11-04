@@ -274,10 +274,13 @@ describe('tone length', () => {
 describe('UserPreferencesPlugin', () => {
   const plugin = new UserPreferencesPlugin();
 
-  it('exposes set_user_preferences as an always-visible core capability', () => {
+  it('keeps its prompt entry on every turn and set_user_preferences behind a load', () => {
     const tools = plugin.getTools(makeBuildCtx());
     expect(tools.map((t) => t.name)).toEqual([SET_USER_PREFERENCES_TOOL_NAME]);
     expect(plugin.manifest.visibility).toBe('always');
+    expect(plugin.manifest.onDemandTools).toEqual([
+      SET_USER_PREFERENCES_TOOL_NAME,
+    ]);
     expect(plugin.manifest.category).toBe('core');
   });
 

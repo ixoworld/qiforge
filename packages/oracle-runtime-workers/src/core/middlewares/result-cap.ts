@@ -128,7 +128,7 @@ export function truncateHeadTail(
   return `${text.slice(0, head)}\n\n… [${text.length - head - tail} characters omitted] …\n\n${text.slice(text.length - tail)}${capFooter(meta, head, tail)}`;
 }
 
-function contentToText(content: unknown): string {
+export function contentToText(content: unknown): string {
   if (typeof content === 'string') return content;
   try {
     return JSON.stringify(content) ?? '';

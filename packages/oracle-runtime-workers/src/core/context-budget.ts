@@ -12,11 +12,22 @@
  *   - `pruneAtTokens`      — above this, old tool results are demoted to
  *                            one-liners in the request (no model call, no
  *                            state change) before the model sees them;
+ *   - `staleResultTurns`   — on a turn that opens after `cacheColdMs` of
+ *                            quiet, tool results older than this many turns
+ *                            leave the request (`read_result` reads them
+ *                            back). Whatever the window: this is about what
+ *                            a call costs, not about what fits;
  *   - `resultCapChars`     — a tool result larger than this is stored whole
  *                            and the model sees head + tail + a handle;
  *   - `requestCapTokens`   — a request that is still larger than this after
  *                            pruning is refused instead of sent to fail;
  *   - `outputReserveTokens`— the room left for the reply.
+ *
+ * A large window says nothing about what a request should cost, so the
+ * fractions are bounded in tokens too (`summarizeMaxTokens`, `pruneMaxTokens`,
+ * `resultCapMaxChars`): a million-token window would otherwise never condense
+ * a thread that long ago stopped being worth re-sending, and would pass the
+ * 272k-token point where providers such as OpenAI double the price.
  *
  * Token counts are chars/4 estimates (`estimateTokensApprox`), never billing.
  */
@@ -30,12 +41,34 @@ export const CHARS_PER_TOKEN = 4;
 export interface ContextKnobs {
   /** Fraction of the window at which the history is summarized (default 0.6). */
   summarizeFraction: number;
+  /** Ceiling on the summarize threshold in tokens, whatever the window (default 200,000). */
+  summarizeMaxTokens: number;
   /** Fraction of the window above which old tool results are pruned per request (default 0.35). */
   pruneFraction: number;
+  /** Ceiling on the prune threshold in tokens, whatever the window (default 100,000). */
+  pruneMaxTokens: number;
+  /**
+   * Finished turns whose tool results stay whole when a cold turn trims the
+   * older ones out of the request (default 2; 0 never trims).
+   */
+  staleResultTurns: number;
+  /**
+   * Quiet time after which a turn counts as cold: the provider's prompt
+   * cache is gone, so changing the prefix costs nothing. Default 2,100,000
+   * (35 minutes): on `gpt-5.6-luna`, Bedrock and OpenAI routes alike, a prefix
+   * left idle for 20 minutes still hit and one left for 35 missed. 0 makes
+   * every turn cold.
+   */
+  cacheColdMs: number;
+  /**
+   * Turns an on-demand capability stays loaded without being used (default
+   * 3). It is unloaded on the first cold turn after that; 0 never unloads.
+   */
+  pluginIdleTurns: number;
   /** Fraction of the window one tool result may occupy before it is capped (default 0.12). */
   resultCapFraction: number;
   /**
-   * Ceiling on the result cap in chars (default 200,000 ≈ 50k tokens): a
+   * Ceiling on the result cap in chars (default 64,000 ≈ 16k tokens): a
    * million-token window does not make a half-megabyte tool result a good
    * idea — the rest stays reachable through `read_result`.
    */
@@ -52,9 +85,14 @@ export interface ContextKnobs {
 
 export const DEFAULT_CONTEXT_KNOBS: ContextKnobs = {
   summarizeFraction: 0.6,
+  summarizeMaxTokens: 200_000,
   pruneFraction: 0.35,
+  pruneMaxTokens: 100_000,
+  staleResultTurns: 2,
+  cacheColdMs: 2_100_000,
+  pluginIdleTurns: 3,
   resultCapFraction: 0.12,
-  resultCapMaxChars: 200_000,
+  resultCapMaxChars: 64_000,
   requestFraction: 0.95,
   outputReserveTokens: 8_000,
   keepMessages: 10,
@@ -66,6 +104,9 @@ export interface ContextBudget {
   origin: ContextWindowResolution['origin'];
   summarizeAtTokens: number;
   pruneAtTokens: number;
+  staleResultTurns: number;
+  cacheColdMs: number;
+  pluginIdleTurns: number;
   resultCapChars: number;
   requestCapTokens: number;
   outputReserveTokens: number;
@@ -118,10 +159,37 @@ export function contextKnobs(
       'CONTEXT_SUMMARIZE_FRACTION',
       DEFAULT_CONTEXT_KNOBS.summarizeFraction,
     ),
+    summarizeMaxTokens:
+      int(
+        'CONTEXT_SUMMARIZE_MAX_TOKENS',
+        DEFAULT_CONTEXT_KNOBS.summarizeMaxTokens,
+        1_000,
+      ) ?? DEFAULT_CONTEXT_KNOBS.summarizeMaxTokens,
     pruneFraction: fraction(
       'CONTEXT_PRUNE_FRACTION',
       DEFAULT_CONTEXT_KNOBS.pruneFraction,
     ),
+    pruneMaxTokens:
+      int(
+        'CONTEXT_PRUNE_MAX_TOKENS',
+        DEFAULT_CONTEXT_KNOBS.pruneMaxTokens,
+        1_000,
+      ) ?? DEFAULT_CONTEXT_KNOBS.pruneMaxTokens,
+    staleResultTurns:
+      int(
+        'CONTEXT_STALE_RESULT_TURNS',
+        DEFAULT_CONTEXT_KNOBS.staleResultTurns,
+        0,
+      ) ?? DEFAULT_CONTEXT_KNOBS.staleResultTurns,
+    cacheColdMs:
+      int('CONTEXT_CACHE_COLD_MS', DEFAULT_CONTEXT_KNOBS.cacheColdMs, 0) ??
+      DEFAULT_CONTEXT_KNOBS.cacheColdMs,
+    pluginIdleTurns:
+      int(
+        'CONTEXT_PLUGIN_IDLE_TURNS',
+        DEFAULT_CONTEXT_KNOBS.pluginIdleTurns,
+        0,
+      ) ?? DEFAULT_CONTEXT_KNOBS.pluginIdleTurns,
     resultCapFraction: fraction(
       'CONTEXT_RESULT_CAP_FRACTION',
       DEFAULT_CONTEXT_KNOBS.resultCapFraction,
@@ -199,11 +267,13 @@ export function contextBudgetFor(
   );
   const summarizeAtTokens = Math.min(
     Math.floor(window * knobs.summarizeFraction),
+    knobs.summarizeMaxTokens,
     requestCapTokens,
     summaryInputTokens,
   );
   const pruneAtTokens = Math.min(
     Math.floor(window * knobs.pruneFraction),
+    knobs.pruneMaxTokens,
     summarizeAtTokens,
   );
   return {
@@ -212,6 +282,9 @@ export function contextBudgetFor(
     origin: resolution.origin,
     summarizeAtTokens,
     pruneAtTokens,
+    staleResultTurns: knobs.staleResultTurns,
+    cacheColdMs: knobs.cacheColdMs,
+    pluginIdleTurns: knobs.pluginIdleTurns,
     resultCapChars: Math.min(
       Math.floor(window * knobs.resultCapFraction) * CHARS_PER_TOKEN,
       knobs.resultCapMaxChars,
@@ -321,5 +394,5 @@ export function messageToolCallTokens(
 }
 
 export function describeBudget(b: ContextBudget): string {
-  return `model=${b.model} window=${b.windowTokens} (${b.origin}) summarizeAt=${b.summarizeAtTokens} pruneAt=${b.pruneAtTokens} resultCap=${b.resultCapChars}c requestCap=${b.requestCapTokens} reserve=${b.outputReserveTokens} summaryInput=${b.summaryInputTokens}`;
+  return `model=${b.model} window=${b.windowTokens} (${b.origin}) summarizeAt=${b.summarizeAtTokens} pruneAt=${b.pruneAtTokens} staleTurns=${b.staleResultTurns} coldMs=${b.cacheColdMs} pluginIdle=${b.pluginIdleTurns} resultCap=${b.resultCapChars}c requestCap=${b.requestCapTokens} reserve=${b.outputReserveTokens} summaryInput=${b.summaryInputTokens}`;
 }

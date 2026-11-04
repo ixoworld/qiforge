@@ -50,6 +50,7 @@ const manifest: PluginManifest = {
   tags: ['agui', 'ui', 'portal', 'copilot'],
   category: 'ui',
   visibility: 'on-demand',
+  brief: 'show interactive tables, charts and forms',
   stability: 'stable',
 };
 

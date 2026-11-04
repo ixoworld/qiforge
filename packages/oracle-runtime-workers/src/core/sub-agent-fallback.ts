@@ -143,6 +143,7 @@ function defaultToAgentSpec(
   return {
     name: subAgent.name,
     description: subAgent.description,
+    ...(subAgent.failureHint ? { failureHint: subAgent.failureHint } : {}),
     systemPrompt,
     tools,
     model,

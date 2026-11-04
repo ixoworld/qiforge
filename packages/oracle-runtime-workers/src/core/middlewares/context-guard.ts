@@ -1,18 +1,30 @@
 /**
  * Keeps every model request inside the model's window.
  *
- * Three layers, all on the request only (graph state and the transcript are
+ * Four layers, all on the request only (graph state and the transcript are
  * never rewritten here):
  *
- *   1. **Pressure pruning.** Above `pruneAtTokens` (35% of the window), tool
- *      results outside the kept tail are demoted to one-line placeholders
- *      (a capped result keeps its `read_result` handle) and results whose
- *      text is identical to a later one are replaced by a back-reference.
- *      No model call, no storage — Hermes' deterministic passes.
- *   2. **The hard cap.** A request still above `requestCapTokens` after a
+ *   1. **Stale results.** On a turn that opens after `cacheColdMs` of quiet,
+ *      tool results older than the last `staleResultTurns` finished turns
+ *      become one-line stubs naming how to read them back. Rewriting an old
+ *      message costs a cache miss on every byte after it, and on some routes
+ *      on the whole request, so the line only moves when the provider's
+ *      cache has expired anyway: between two cold turns it stays put and the
+ *      request keeps its prefix, call after call. The line is computed from
+ *      the messages alone, so a resumed attempt draws the same one.
+ *   2. **Pressure pruning.** Above `pruneAtTokens`, tool results outside the
+ *      kept tail are demoted to one-line placeholders (a capped result keeps
+ *      its `read_result` handle) and results whose text is identical to a
+ *      later one are replaced by a back-reference. No model call, no
+ *      storage — Hermes' deterministic passes. The tail moves with every
+ *      message, so past this threshold the cache is given up for size.
+ *
+ * Neither of the first two touches the load result of a plugin that is still
+ * loaded: it is how the model knows the plugin's rules (`operating-guides.ts`).
+ *   3. **The hard cap.** A request still above `requestCapTokens` after a
  *      harder prune is refused with a clear error instead of being sent to
  *      fail at the provider.
- *   3. **Overflow recovery.** When the provider rejects the request anyway,
+ *   4. **Overflow recovery.** When the provider rejects the request anyway,
  *      the limit it names is learned (the window is lowered for good), the
  *      request is pruned hard, and it is retried once — only when the prune
  *      made it strictly smaller; an unchanged request is never sent twice.
@@ -34,8 +46,10 @@ import {
   type ContextBudget,
 } from '../context-budget';
 import { isContextOverflowError } from '../context-window';
+import { usageCarriedBy } from '../operating-guides';
 import { NOOP_LOGGER } from '../utils';
 import { cappedMetaOf } from './result-cap';
+import { turnOpenings } from './turn-boundary';
 
 export class ContextOverflowError extends Error {
   readonly retryable = false;
@@ -57,7 +71,7 @@ export class ContextOverflowError extends Error {
 export type ContextGuardEvent =
   | {
       kind: 'prune';
-      stage: 'soft' | 'hard' | 'overflow';
+      stage: 'stale' | 'soft' | 'hard' | 'overflow';
       pruned: number;
       beforeTokens: number;
       afterTokens: number;
@@ -74,6 +88,11 @@ export interface ContextGuardOptions {
   onOverflow?: (error: unknown) => Promise<number | undefined>;
   /** Observes every prune, overflow retry and refusal (never throws into the turn). */
   onEvent?: (event: ContextGuardEvent) => void;
+  /**
+   * The longest chunk `read_result` returns, when the tool is bound this
+   * turn: a stale-result stub then says how to read the result back.
+   */
+  readResultChars?: number;
   logger?: Logger;
 }
 
@@ -98,15 +117,10 @@ function textOf(content: unknown): string {
 
 function placeholder(
   message: ToolMessage,
-  text: string,
-  reason: 'pruned' | 'duplicate',
+  reason: 'pruned' | 'duplicate' | 'stale',
+  body: string,
 ): ToolMessage {
   const name = message.name ?? 'tool';
-  const meta = cappedMetaOf(message);
-  const body =
-    reason === 'duplicate'
-      ? `[${name} result: identical to a later ${name} result, omitted]`
-      : `[${name} result (${text.length} characters) pruned from context${meta?.id ? `; the full result is saved as ${meta.id} — read_result({ id: "${meta.id}" }) reads it` : ''}]`;
   return new ToolMessage({
     ...(message.id ? { id: message.id } : {}),
     tool_call_id: message.tool_call_id,
@@ -117,6 +131,79 @@ function placeholder(
   });
 }
 
+function prunedBody(message: ToolMessage, text: string): string {
+  const name = message.name ?? 'tool';
+  const meta = cappedMetaOf(message);
+  return `[${name} result (${text.length} characters) pruned from context${meta?.id ? `; the full result is saved as ${meta.id} — read_result({ id: "${meta.id}" }) reads it` : ''}]`;
+}
+
+/** When the message that opens a turn was sent; `NaN` for one that does not say. */
+function sentAt(message: BaseMessage | undefined): number {
+  const timestamp = message?.additional_kwargs?.timestamp;
+  return typeof timestamp === 'string' ? Date.parse(timestamp) : Number.NaN;
+}
+
+/**
+ * Index before which tool results are stale: the start of the turns kept
+ * whole on the latest cold turn. 0 when no cold turn has that many turns
+ * behind it. A turn is cold when it opens at least `coldGapMs` after the one
+ * before it. Pure over the messages: until the next cold turn every call
+ * finds the same index, so the request's prefix does not change.
+ */
+export function staleResultCutoff(
+  messages: readonly BaseMessage[],
+  keepTurns: number,
+  coldGapMs: number,
+): number {
+  if (keepTurns <= 0) return 0;
+  const openings = turnOpenings(messages);
+  for (let turn = openings.length - 1; turn >= Math.max(keepTurns, 1); turn--) {
+    const opening = openings[turn];
+    const previous = openings[turn - 1];
+    if (opening === undefined || previous === undefined) continue;
+    if (sentAt(messages[opening]) - sentAt(messages[previous]) >= coldGapMs)
+      return openings[turn - keepTurns] ?? 0;
+  }
+  return 0;
+}
+
+/**
+ * Tool results before `cutoff` → stubs. Pure: new message objects with the
+ * same ids and the same text on every call, the input untouched.
+ */
+export function trimStaleResults(
+  messages: BaseMessage[],
+  cutoff: number,
+  options: {
+    demoteMinChars: number;
+    readResultChars?: number;
+    keep?: (message: ToolMessage) => boolean;
+  },
+): { messages: BaseMessage[]; pruned: number } {
+  if (cutoff <= 0) return { messages, pruned: 0 };
+  const out = [...messages];
+  let pruned = 0;
+  for (let i = 0; i < cutoff; i += 1) {
+    const m = messages[i];
+    if (!m || !ToolMessage.isInstance(m) || options.keep?.(m)) continue;
+    const text = textOf(m.content);
+    if (text.length <= options.demoteMinChars) continue;
+    const name = m.name ?? 'tool';
+    const id = cappedMetaOf(m)?.id ?? m.tool_call_id;
+    const how =
+      options.readResultChars === undefined
+        ? 'call the tool again if you need it'
+        : `read_result({ id: "${id}", length: ${options.readResultChars} }) reads it back`;
+    out[i] = placeholder(
+      m,
+      'stale',
+      `[${name} result from an earlier turn (${text.length} characters) removed from context; ${how}]`,
+    );
+    pruned += 1;
+  }
+  return { messages: out, pruned };
+}
+
 /**
  * Old tool results → one-liners; duplicates → back-references. The last
  * `keepTail` messages are returned as they are. Pure: new message objects
@@ -125,6 +212,7 @@ function placeholder(
 export function pruneToolResults(
   messages: BaseMessage[],
   options: PruneOptions,
+  keep?: (message: ToolMessage) => boolean,
 ): { messages: BaseMessage[]; pruned: number } {
   const cutoff = Math.max(0, messages.length - options.keepTail);
   const out = [...messages];
@@ -134,20 +222,25 @@ export function pruneToolResults(
   const seenLater = new Set<string>();
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const m = messages[i]!;
-    if (!ToolMessage.isInstance(m)) continue;
+    if (!ToolMessage.isInstance(m) || keep?.(m)) continue;
     const text = textOf(m.content);
     if (i >= cutoff) {
       if (text.length >= 40) seenLater.add(text);
       continue;
     }
     if (text.length >= 40 && seenLater.has(text)) {
-      out[i] = placeholder(m, text, 'duplicate');
+      const name = m.name ?? 'tool';
+      out[i] = placeholder(
+        m,
+        'duplicate',
+        `[${name} result: identical to a later ${name} result, omitted]`,
+      );
       pruned += 1;
       continue;
     }
     if (text.length >= 40) seenLater.add(text);
     if (text.length > options.demoteMinChars) {
-      out[i] = placeholder(m, text, 'pruned');
+      out[i] = placeholder(m, 'pruned', prunedBody(m, text));
       pruned += 1;
     }
   }
@@ -213,6 +306,8 @@ export function createContextGuardMiddleware(
 ): AgentMiddleware {
   const logger = options.logger ?? NOOP_LOGGER;
   const { budget } = options;
+  // The guard lives for one turn and the stale line for many calls: one event.
+  let staleReported = false;
   const emit = (event: ContextGuardEvent): void => {
     try {
       options.onEvent?.(event);
@@ -231,15 +326,53 @@ export function createContextGuardMiddleware(
       const schemaTokens = schemaTokensOf(request.tools ?? []);
       const size = (messages: BaseMessage[]) =>
         estimateRequestTokens({ systemTokens, schemaTokens, messages });
-      let messages = request.messages;
+      const keep = (message: ToolMessage): boolean => {
+        const carried = usageCarriedBy(message);
+        if (carried.length === 0) return false;
+        const loaded: unknown = request.state.loadedPlugins;
+        return (
+          Array.isArray(loaded) &&
+          carried.some((plugin) => loaded.includes(plugin))
+        );
+      };
+      const stale = trimStaleResults(
+        request.messages,
+        staleResultCutoff(
+          request.messages,
+          budget.staleResultTurns,
+          budget.cacheColdMs,
+        ),
+        {
+          demoteMinChars: PRUNE_SOFT.demoteMinChars,
+          keep,
+          ...(options.readResultChars !== undefined
+            ? { readResultChars: options.readResultChars }
+            : {}),
+        },
+      );
+      let messages = stale.messages;
       let tokens = size(messages);
+      if (stale.pruned > 0 && !staleReported) {
+        staleReported = true;
+        const before = size(request.messages);
+        logger.log(
+          `[context] stale results: trimmed ${stale.pruned} tool result(s), ~${before} → ~${tokens} tokens`,
+        );
+        emit({
+          kind: 'prune',
+          stage: 'stale',
+          pruned: stale.pruned,
+          beforeTokens: before,
+          afterTokens: tokens,
+        });
+      }
       const shrink = (
         opts: PruneOptions,
         stage: 'soft' | 'hard' | 'overflow',
         why: string,
       ): void => {
         const before = tokens;
-        const result = pruneToolResults(messages, opts);
+        const result = pruneToolResults(messages, opts, keep);
         messages = result.messages;
         tokens = size(messages);
         if (result.pruned > 0) {

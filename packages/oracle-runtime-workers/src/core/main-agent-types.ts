@@ -6,7 +6,10 @@ import type { ResultCapConfig } from './middlewares/result-cap';
 import type { ReadResultOutcome } from '../do/result-store';
 import type { AgentMiddleware } from 'langchain';
 import type { TurnBudget } from './turn-budget';
+import type { PromptCacheState } from './operating-guides';
+import type { RegisteredManifest } from './registries';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import type { BaseMessage } from '@langchain/core/messages';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import type { ReactAgent } from 'langchain';
 import { z } from 'zod';
@@ -164,11 +167,32 @@ export interface MainAgentArgs {
   state: Partial<TMainAgentGraphState>;
   availablePlugins: ReadonlySet<string>;
   /**
-   * Plugins the capability router chose for this turn. The gate admits their
-   * tools and tool handlers see them as loaded, but they are never written
-   * to the graph's `loadedPlugins` channel: the preload lasts one turn.
+   * The capability router, for a turn it may preload on: given what is left
+   * to load this turn, the plugins to load before the first model call. A
+   * preload is a normal load: it comes back in
+   * `MainAgentBuildResult.stateUpdate` for the caller's graph input and stays
+   * until a cold turn unloads it (`capability-expiry.ts`).
    */
-  preloadedPlugins?: ReadonlySet<string>;
+  routeCapabilities?: (
+    candidates: readonly RegisteredManifest[],
+  ) => Promise<ReadonlySet<string>>;
+  /**
+   * What the thread records about its prompt and whether the prompt may
+   * change, which decides where operating guides and usage go
+   * (`operating-guides.ts`). Omitted, every turn counts as cold.
+   */
+  promptCache?: PromptCacheState;
+  /**
+   * Set on a cold turn: the loaded plugins that may leave the thread and the
+   * finished turns that show which ones it has moved on from
+   * (`capability-expiry.ts`). The ones that leave are out of
+   * `MainAgentBuildResult.stateUpdate`, for the caller's graph input.
+   */
+  capabilityExpiry?: {
+    loaded: readonly string[];
+    maxIdleTurns: number;
+    messages: readonly BaseMessage[];
+  };
   /**
    * Checkpointer for the user's thread state. On Workers the Durable Object
    * owns it (SQLite over DO storage) and passes it in per turn; omit for a
@@ -246,6 +270,23 @@ export interface MainAgentBuildResult {
   toolSurfaces: Map<string, 'frontend'>;
   /** Names of the sub-agent dispatch tools (`call_*_agent`): scheduled in their own lane. */
   subAgentToolNames: ReadonlySet<string>;
+  /**
+   * What the caller writes to the graph with the turn's input: `loadedPlugins`
+   * when the turn preloaded or unloaded a plugin, `promptGuides` when the set
+   * of guides in the system prompt was (re)decided, `capabilityUsage` when
+   * what the thread carries changed.
+   */
+  stateUpdate: {
+    loadedPlugins?: string[] | { replace: string[] };
+    promptGuides?: string[];
+    capabilityUsage?: string[] | { replace: string[] };
+  };
+  /**
+   * Usage and operating guides of loaded plugins the thread does not carry:
+   * the caller puts `text` on the turn's message and records `plugins` on it
+   * (`operating-guides.ts`).
+   */
+  guideNote?: { plugins: string[]; text: string };
   /**
    * The request's `{ user, session }` channel. Tools already fall back to it,
    * but pass it as `context` in the `invoke` / `stream` config so LangChain

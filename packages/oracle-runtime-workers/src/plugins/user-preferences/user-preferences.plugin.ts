@@ -79,7 +79,11 @@ const manifest: PluginManifest = {
       args: { tone: 'concise' },
     },
   ],
+  // The Tier-1 entry stays, so the prompt says when a preference must be
+  // saved; only the tool waits for a load.
   visibility: 'always',
+  brief: 'save lasting reply preferences: name, language, tone',
+  onDemandTools: [SET_USER_PREFERENCES_TOOL_NAME],
   stability: 'stable',
   category: 'core',
 };

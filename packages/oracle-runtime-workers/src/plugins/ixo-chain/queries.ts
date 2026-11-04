@@ -69,7 +69,9 @@ export const CORE_ARGS = {
     collectionId: z
       .string()
       .optional()
-      .describe('Only claims in this collection, e.g. "8250".'),
+      .describe(
+        'Only this agent\'s claims in this collection, e.g. "8250"; needs `agent`.',
+      ),
     first: firstArg,
     after: z
       .string()
@@ -290,6 +292,13 @@ export function requestField(
 ): FieldPlan {
   switch (request.kind) {
     case 'claims': {
+      // A collection alone would quietly mean "the user's claims in it",
+      // which a question about the collection never asks: whose claims is
+      // said, or the collection's own counts are read instead.
+      if (request.collectionId !== undefined && request.agent === undefined)
+        return invalid(
+          `claims lists one agent's claims. For collection ${request.collectionId} as a whole (count, approved, rejected), use claim_collection with id "${request.collectionId}"; for one agent's claims in it, pass agent too (the user's own address for theirs).`,
+        );
       const agent = accountOf(request.agent, identity, 'agent');
       if (!agent.ok) return invalid(agent.detail);
       if (

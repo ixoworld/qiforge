@@ -59,6 +59,46 @@ describe('template renderer', () => {
   });
 });
 
+describe('renderTier1 catalogue', () => {
+  const manifest = {
+    title: 'X',
+    summary:
+      'Something long enough that a clip has to stop at a word boundary.',
+    whenToUse: ['Always.'],
+  };
+
+  it('renders one sorted line per entry, under what the model does with it', () => {
+    const { block } = renderTier1({
+      manifests: [],
+      catalogue: [
+        { pluginName: 'zeta', manifest: { ...manifest, brief: 'last' } },
+        {
+          pluginName: 'alpha',
+          manifest: { ...manifest, brief: 'first' },
+          unavailable: true,
+        },
+      ],
+    });
+    expect(block).toContain('## On-demand capabilities');
+    expect(block).toContain('`load_capability({ names: [...] })`');
+    expect(block).toContain('needs no loading');
+    expect(block).toContain(
+      '- alpha: first (not authorized by this user)\n- zeta: last',
+    );
+    expect(block).not.toContain('## Available Capabilities');
+  });
+
+  it('clips the summary of a plugin with no brief at a word boundary', () => {
+    const { block } = renderTier1({
+      manifests: [],
+      catalogue: [{ pluginName: 'fork', manifest }],
+    });
+    expect(block).toContain(
+      '- fork: Something long enough that a clip has to stop at a word…',
+    );
+  });
+});
+
 describe('composePrompt', () => {
   it('matches the reference rendering for a fully-populated prompt', async () => {
     const tier1 = renderTier1({
@@ -129,13 +169,11 @@ describe('composePrompt', () => {
       ),
     ).toBe(true);
     expect(prompt).toContain('## Operating principles');
-    expect(prompt).toContain('**Search first, build second.**');
-    // Three lanes: packaged skills, server-side plugins, browser tools.
+    expect(prompt).toContain('**Use your tool list first.**');
+    // Three lanes: capabilities, packaged skills, browser tools.
+    expect(prompt).toContain('`[Portal]`-prefixed tools act on');
     expect(prompt).toContain(
-      '`[Portal]`-prefixed tools already in your tool list',
-    );
-    expect(prompt).toContain(
-      'NEVER appear in `search_skills` or `list_capabilities` results',
+      'They never appear in `search_skills` or `list_capabilities`',
     );
     expect(prompt).toContain('"Browser tools this turn" section');
     expect(prompt).not.toContain('## Browser tools this turn');
@@ -153,13 +191,131 @@ describe('composePrompt', () => {
     ).toBe(true);
   });
 
+  it('renders no operational mode section without one', async () => {
+    const prompt = await composePrompt(baseInput({ operationalMode: '' }));
+    expect(prompt).not.toContain('## Operational mode');
+    expect(prompt.endsWith('\n')).toBe(true);
+  });
+
+  it('keeps a failed tool from being answered around', async () => {
+    expect(await composePrompt(baseInput())).toContain(
+      'When a tool or sub-agent still fails, correct the call if its error says what to change; otherwise tell the user and ask how to proceed, and do not answer from memory or a guess in its place.',
+    );
+  });
+
+  it('asks for a status sentence with the tool call, except on a chat surface', async () => {
+    const line = 'open your response with one short sentence';
+    expect(await composePrompt(baseInput())).toContain(line);
+    expect(
+      await composePrompt(baseInput({ surfaceBlock: '## Where …' })),
+    ).not.toContain(line);
+  });
+
   it('drops the discovery mandate when the meta-tools are not bound', async () => {
     const prompt = await composePrompt(
       baseInput({ capabilityDiscovery: false }),
     );
-    expect(prompt).not.toContain('Search first, build second');
+    expect(prompt).not.toContain('Use your tool list first');
     expect(prompt).not.toContain('load_capability');
-    expect(prompt).toContain('Being proactive does **not** mean');
+    expect(prompt).toContain('Ask one short clarifying question');
+  });
+
+  describe('a memory context over the budget', () => {
+    const CONTEXT_START = '## What you know about the user';
+    const blockOf = (prompt: string) =>
+      prompt.slice(
+        prompt.indexOf(CONTEXT_START),
+        prompt.indexOf('**Current date:**'),
+      );
+    const episodes = (bucket: string, count: number) =>
+      Array.from({ length: count }, (_, i) => ({
+        content: `[Me] Me: ${bucket} question ${i} ${'x'.repeat(380)}`,
+        created_at: '2026-11-01T00:00:00Z',
+      }));
+
+    it('keeps a fact of a late bucket over the long raw episodes of the early ones', async () => {
+      const block = blockOf(
+        await composePrompt(
+          baseInput({
+            userContext: {
+              identity: section({ episodes: episodes('identity', 3) }),
+              work: section({ episodes: episodes('work', 5) }),
+              goals: section({ episodes: episodes('goals', 3) }),
+              interests: section({ episodes: episodes('interests', 3) }),
+              relationships: section({
+                facts: [{ fact: 'Sam has a sister who lives in Porto.' }],
+              }),
+            },
+          }),
+        ),
+      );
+      expect(block).toContain('- Sam has a sister who lives in Porto.');
+      expect(block).toContain('**Relationships & social**');
+      // What room is left still goes to episodes, and the note says so.
+      expect(block).toContain('_Episodes (raw):_');
+      expect(block).toContain('_(More remembered — ask me to recall.)_');
+      expect(block).toContain('_Background the memory engine recalled');
+      // The framing line and heading are outside the budget.
+      expect(
+        block
+          .slice(block.indexOf('**'))
+          .replace('_(More remembered — ask me to recall.)_', '')
+          .trim().length,
+      ).toBeLessThanOrEqual(2_000);
+    });
+
+    it('shares the room between the buckets when facts alone overflow it', async () => {
+      const facts = (bucket: string) => ({
+        facts: Array.from({ length: 12 }, (_, i) => ({
+          fact: `${bucket} fact ${i} ${'y'.repeat(120)}`,
+        })),
+      });
+      const block = blockOf(
+        await composePrompt(
+          baseInput({
+            userContext: {
+              identity: section(facts('identity')),
+              work: section(facts('work')),
+              relationships: section(facts('relationships')),
+              recent: section(facts('recent')),
+            },
+          }),
+        ),
+      );
+      for (const bucket of ['identity', 'work', 'relationships', 'recent'])
+        expect(block).toContain(`${bucket} fact 0 `);
+    });
+
+    it('gives entities the room before episodes, and passes a line that does not fit', async () => {
+      const block = blockOf(
+        await composePrompt(
+          baseInput({
+            userContext: {
+              identity: section({
+                episodes: episodes('identity', 6),
+                entities: [{ name: 'Porto', summary: 'A city in Portugal.' }],
+              }),
+              recent: section({ facts: [{ fact: 'z'.repeat(2_100) }] }),
+              goals: section({ facts: [{ fact: 'Learn Portuguese.' }] }),
+            },
+          }),
+        ),
+      );
+      expect(block).toContain('**Porto**');
+      expect(block).toContain('- Learn Portuguese.');
+      expect(block).not.toContain('zzz');
+    });
+
+    it('gives the same block for the same input, so the prompt stays identical', async () => {
+      const input = () =>
+        baseInput({
+          userContext: {
+            identity: section({ episodes: episodes('identity', 6) }),
+            work: section({ facts: [{ fact: 'Works at IXO.' }] }),
+          },
+        });
+      expect(await composePrompt(input())).toBe(await composePrompt(input()));
+    });
   });
 
   it('dedups memory context across buckets and keeps the richest summary', async () => {
@@ -220,7 +376,7 @@ describe('composePrompt — browser tools this turn', () => {
       "The Portal exposed these browser-side tools for this turn (they act on the user's screen): open_url, create_page_room",
     );
     expect(prompt).toContain(
-      "They are bound behind the `portal` capability — call `load_capability({ names: ['portal'] })` once before using them.",
+      "Unless they are in your tool list, call `load_capability({ names: ['portal'] })` once before using them.",
     );
     // Placed after the capability block and before the operating principles.
     expect(prompt.indexOf('- **memory** — Recall.')).toBeLessThan(
@@ -231,7 +387,7 @@ describe('composePrompt — browser tools this turn', () => {
     );
   });
 
-  it('omits the load line when the portal capability is already bound', async () => {
+  it('omits the load line when the portal capability is always bound', async () => {
     const prompt = await composePrompt(
       baseInput({
         browserTools: { names: ['open_url'], bound: true },
@@ -240,7 +396,7 @@ describe('composePrompt — browser tools this turn', () => {
 
     expect(prompt).toContain('## Browser tools this turn');
     expect(prompt).toContain("(they act on the user's screen): open_url\n");
-    expect(prompt).not.toContain('bound behind the `portal` capability');
+    expect(prompt).not.toContain("load_capability({ names: ['portal'] })");
   });
 
   it('renders nothing when no browser tools were exposed', async () => {
@@ -251,7 +407,7 @@ describe('composePrompt — browser tools this turn', () => {
 
     for (const prompt of [absent, empty]) {
       expect(prompt).not.toContain('## Browser tools this turn');
-      expect(prompt).not.toContain('bound behind the `portal` capability');
+      expect(prompt).not.toContain("load_capability({ names: ['portal'] })");
     }
     expect(empty).toBe(absent);
   });

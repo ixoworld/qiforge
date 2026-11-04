@@ -7,6 +7,7 @@ import {
 import { FakeListChatModel } from '@langchain/core/utils/testing';
 import { countTokensApproximately } from 'langchain';
 import { describe, expect, it, vi } from 'vitest';
+import { USAGE_CARRIED_KWARG } from '../operating-guides';
 import {
   countMessageTokensApproximately,
   createSummarizationMiddleware,
@@ -219,6 +220,34 @@ describe('createSummarizationMiddleware — failures and mid-turn summaries', ()
     );
     // The summary now opens the turn.
     expect(turnStart(after)).toBe(after.indexOf(summary));
+  });
+
+  it('records which plugins the kept messages still carry the usage of', async () => {
+    const mw = createSummarizationMiddleware({
+      model: new FakeListChatModel({ responses: ['the gist'] }),
+      triggerMessages: 6,
+      keepMessages: 2,
+    });
+    const load = (id: string, plugin: string) =>
+      new ToolMessage({
+        id,
+        content: 'usage',
+        tool_call_id: id,
+        additional_kwargs: { [USAGE_CARRIED_KWARG]: [plugin] },
+      });
+    const update = await beforeModel(mw, [
+      load('condensed', 'flows'),
+      ...longThread(4),
+      new AIMessage({
+        id: 'caller',
+        content: '',
+        tool_calls: [{ id: 'kept', name: 'load_capability', args: {} }],
+      }),
+      load('kept', 'sandbox'),
+    ]);
+    expect(update).toMatchObject({
+      capabilityUsage: { replace: ['sandbox'] },
+    });
   });
 
   it('carries nothing when the whole current turn is kept', async () => {

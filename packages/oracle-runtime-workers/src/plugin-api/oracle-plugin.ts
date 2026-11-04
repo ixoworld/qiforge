@@ -63,11 +63,10 @@ export abstract class OraclePlugin {
    * plugin's working rules, as plain text (markdown, starting at a `###`
    * heading). Never part of the manifest, the Tier-1 capability block or
    * `list_capabilities`, so it costs nothing on turns that do not use the
-   * plugin. `load_capability` returns it (once per turn) when it loads the
-   * plugin or the capability router preloaded it for the turn, and the
-   * system prompt carries it on every turn that starts with the plugin
-   * loaded on the thread (or `always` visible) and usable by the user's
-   * delegation.
+   * plugin. The model has it when it first uses the plugin's tools: in the
+   * load result or on the turn's message when the plugin loads on a warm
+   * turn, in the system prompt from the next cold turn on, and always there
+   * for an `always` plugin the user's delegation can use.
    */
   readonly operatingGuide?: string;
 

@@ -11,6 +11,7 @@ import {
 import {
   LLM_BYO_STREAM_IDLE_TIMEOUT_MS_DEFAULT,
   LLM_HEADERS_TIMEOUT_MS_DEFAULT,
+  LLM_MAX_OUTPUT_TOKENS_DEFAULT,
   LLM_STREAM_IDLE_TIMEOUT_MS_DEFAULT,
   LLM_STREAM_RETRIES_DEFAULT,
   LLM_STREAM_RETRIES_MAX,
@@ -618,6 +619,8 @@ export interface LlmEnv {
   LLM_STREAM_RETRIES?: number;
   /** The turn deadline the stall retries are clamped to. */
   TURN_TIMEOUT_MS?: number;
+  /** Most tokens one call may generate; 0 = the model's own limit. */
+  LLM_MAX_OUTPUT_TOKENS?: number;
 }
 
 /** The liveness-related env keys, as validated config (numbers) or raw Worker env (strings). */
@@ -638,6 +641,19 @@ function wholeNumber(value: unknown, min: number): number | undefined {
         ? Number(value)
         : Number.NaN;
   return Number.isInteger(n) && n >= min ? n : undefined;
+}
+
+/**
+ * The `maxTokens` field every platform model gets: `LLM_MAX_OUTPUT_TOKENS`
+ * (default `LLM_MAX_OUTPUT_TOKENS_DEFAULT`), none when it is 0. Reasoning
+ * counts against it, and a caller's own `maxTokens` wins.
+ */
+function outputCapModelFields(env: { LLM_MAX_OUTPUT_TOKENS?: unknown }): {
+  maxTokens?: number;
+} {
+  const cap =
+    wholeNumber(env.LLM_MAX_OUTPUT_TOKENS, 0) ?? LLM_MAX_OUTPUT_TOKENS_DEFAULT;
+  return cap > 0 ? { maxTokens: cap } : {};
 }
 
 /**
@@ -704,7 +720,16 @@ export function llmEnvFromWorkerEnv(env: Record<string, unknown>): LlmEnv {
     LLM_PROVIDER: str('LLM_PROVIDER') === 'nebius' ? 'nebius' : 'openrouter',
     NEBIUS_API_KEY: str('NEBIUS_API_KEY'),
     ...platformStreamLivenessEnv(env),
+    ...outputCapEnv(env),
   };
+}
+
+/** `LLM_MAX_OUTPUT_TOKENS` of `env` as a number (unset when absent or invalid). */
+export function outputCapEnv(env: {
+  LLM_MAX_OUTPUT_TOKENS?: unknown;
+}): Pick<LlmEnv, 'LLM_MAX_OUTPUT_TOKENS'> {
+  const cap = wholeNumber(env.LLM_MAX_OUTPUT_TOKENS, 0);
+  return cap !== undefined ? { LLM_MAX_OUTPUT_TOKENS: cap } : {};
 }
 
 /** The platform lane's liveness keys of `env`, as numbers (unset when absent or invalid). */
@@ -789,6 +814,7 @@ export function createLlmAdapter(
   const liveness = streamLivenessFromEnv(env, 'platform');
   const mainEffort = env.MAIN_REASONING_EFFORT ?? 'medium';
   const headers = openRouterAttributionHeaders(env.ORACLE_NAME);
+  const outputCap = outputCapModelFields(env);
 
   const modelForRole = (role: ModelRole): string => {
     if (role === 'main' || role === 'summarizer') return defaultModelId;
@@ -843,6 +869,7 @@ export function createLlmAdapter(
       temperature: 0.8,
       maxRetries: 2,
       ...livenessModelFields(liveness),
+      ...outputCap,
       apiKey: env.OPEN_ROUTER_API_KEY,
       ...rest,
       model,
@@ -901,6 +928,7 @@ function createNebiusAdapter(
   const modelForRole = (role: ModelRole): string =>
     NEBIUS_MODEL_MAP[role as ProviderModelRole] ?? NEBIUS_MODEL_MAP.subagent;
   const liveness = streamLivenessFromEnv(env, 'platform');
+  const outputCap = outputCapModelFields(env);
 
   const get = (role: ModelRole, params?: ChatOpenAIFields): BaseChatModel => {
     const {
@@ -921,6 +949,7 @@ function createNebiusAdapter(
       temperature: role === 'guard' ? 0 : 0.8,
       maxRetries: 2,
       ...livenessModelFields(liveness),
+      ...outputCap,
       apiKey,
       __includeRawResponse: true,
       ...rest,

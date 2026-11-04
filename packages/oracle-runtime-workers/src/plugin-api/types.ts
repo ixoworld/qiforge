@@ -473,14 +473,38 @@ export interface PluginManifest {
   /**
    * Discovery and loading mode:
    *  - `always`    — tools bound to agent at boot; listed in Tier-1 prompt.
-   *  - `on-demand` — tools NOT bound; manifest discoverable via
-   *                  `list_capabilities`; agent calls `load_capability(name)`
-   *                  to load.
+   *  - `on-demand` — tools NOT bound; named in the prompt's on-demand
+   *                  catalogue; agent calls `load_capability(name)` to load.
    *  - `silent`    — invisible to agent; runs as middleware-only.
    *
    * Default: `on-demand`.
    */
   visibility?: 'always' | 'on-demand' | 'silent';
+
+  /**
+   * A few words (at most 60 characters) on what `load_capability` adds: the
+   * line the system prompt's on-demand catalogue shows for this plugin, so
+   * the model can pick it without a `list_capabilities` round trip. Falls
+   * back to a clipped `summary`.
+   */
+  brief?: string;
+
+  /**
+   * Tools this plugin keeps out of the model's tool list until
+   * `load_capability` names the plugin, while its other tools (and, for an
+   * `always` plugin, its Tier-1 entry) stay in place. Names are matched at
+   * request time, so MCP-sourced tools can be listed. A tool's own
+   * `visibility` wins over this list. A host keeps every tool bound with
+   * `manifestOverrides: { name: { onDemandTools: [] } }`.
+   */
+  onDemandTools?: readonly string[];
+  /**
+   * `false` keeps the plugin away from the capability router: it stays in the
+   * catalogue and `load_capability` loads it, but no message preloads it. For
+   * a plugin whose name attracts messages its gated tools do not serve, or
+   * one the host loads itself when it applies.
+   */
+  routable?: boolean;
 
   /** Stability hint surfaced to the agent (`experimental` → warning footnote). */
   stability?: 'stable' | 'beta' | 'experimental';
@@ -1297,6 +1321,11 @@ export interface PluginSubAgent {
   forwardTools?: boolean | string[];
   /** Called after sub-agent completes; can emit follow-up events. */
   onComplete?: (result: string, ctx: RuntimeContext) => Promise<void>;
+  /**
+   * Added to the error the model reads when the sub-agent could not run, so a
+   * capability that is not loaded can still be the way forward.
+   */
+  failureHint?: string;
 }
 
 /**

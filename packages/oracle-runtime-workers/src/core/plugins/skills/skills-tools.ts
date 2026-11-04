@@ -55,46 +55,21 @@ export interface MergedSkill {
   createdAt?: string;
 }
 
-const LIST_DESCRIPTION = `List available skills from the IXO skills registry — the caller's **published** private skills first, then public registry skills.
+const LIST_DESCRIPTION = `List skills: the caller's published private skills first, then the public IXO registry. Each entry has title, description, path (absolute sandbox path of the skill folder), source ("private" | "public") and cid. load_skill and sandbox_run take the cid; never use it as a file path.`;
 
-Each entry includes:
-- title: skill name
-- description: skill description
-- path: absolute sandbox path to the skill folder
-- source: "private" (your published skill) or "public" (registry)
-- cid: required by load_skill and by sandbox_run (when the run depends on the skill). Never use a CID as a file path.`;
-
-const SEARCH_DESCRIPTION = `Search the caller's published skills and the public IXO registry by query.
-
-Matching published (private) skills come first, then public registry results. Each entry includes title, description, path, source ("private" | "public"), and cid.`;
+const SEARCH_DESCRIPTION = `Search the caller's published skills, then the public IXO registry. Entries as in list_skills. Running a skill takes load_skill and sandbox_run, from the sandbox capability.`;
 
 const listSchema = z.object({
-  limit: z
-    .number()
-    .min(1)
-    .max(100)
-    .optional()
-    .describe('Optional: number of skills to return (1-100, default: 20).'),
-  offset: z
-    .number()
-    .min(0)
-    .optional()
-    .describe('Optional: pagination offset (default: 0).'),
+  limit: z.number().min(1).max(100).optional().describe('Default 20.'),
+  offset: z.number().min(0).optional(),
 });
 
 const searchSchema = z.object({
   q: z
     .string()
     .min(1, 'Search query is required')
-    .describe(
-      'Search query (e.g. "pptx", "invoice", "presentation", "docx"). Required.',
-    ),
-  limit: z
-    .number()
-    .min(1)
-    .max(50)
-    .optional()
-    .describe('Optional: max results to return (1-50, default: 10).'),
+    .describe('E.g. "pptx", "invoice".'),
+  limit: z.number().min(1).max(50).optional().describe('Default 10.'),
 });
 
 function normalizeRegistryCapsule(capsule: Capsule): MergedSkill {
