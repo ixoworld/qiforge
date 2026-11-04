@@ -239,7 +239,7 @@ export function isAsksUploadAddress(address: string, mcpUrl: string): boolean {
 
 /**
  * A tool's text with every upload address line taken out. The address is
- * kept only when `trusted` (submit_work's own answer) and on asks' hosts:
+ * kept only when `trusted` (submit_work's or set_my_page's own answer) and on asks' hosts:
  * text from the board can carry a look-alike line.
  */
 export function hideUploadAddress(
@@ -259,7 +259,7 @@ export function hideUploadAddress(
   const minutes = Number(/works for (\d+) minutes?/.exec(text)?.[1] ?? 60);
   const note =
     draft && address
-      ? `Files the person sent in this chat (photos, PDFs) can go with this answer before they open the link: call asks_attach_files with draft "${draft}". Otherwise they add them on the page.`
+      ? `Files the person sent in this chat (photos, PDFs) can go with this draft before they open the link: call asks_attach_files with draft "${draft}". Otherwise they add them on the page.`
       : 'Files from this chat cannot go with this answer; the person adds them on the page.';
   let noted = false;
   const lines = text.split('\n').flatMap((line) => {
@@ -448,7 +448,8 @@ function connectorTool(
       const result = await session.call(def.name, args);
       let kept: ReturnType<typeof hideUploadAddress>['kept'] = null;
       const trusted =
-        def.name === `${PREFIX}submit_work`
+        // set_my_page hands out the same upload address for a pro page photo.
+        def.name === `${PREFIX}submit_work` || def.name === `${PREFIX}set_my_page`
           ? { mcpUrl: turn.mcpUrl }
           : undefined;
       const shown = mapText(result, (text) => {
@@ -581,12 +582,12 @@ function attachTool(turn: AsksTurn): PluginTool {
   return {
     name: 'asks_attach_files',
     description:
-      "Attach files the person sent in this chat (PNG, JPG, WebP or PDF, up to 5 MB each, 10 at most) to an answer drafted with submit_work, before they open its link. Pass the draft (ad_…) and the files' channel references (channel:…); for a report or a form, name each file with the file id the answer expects (e.g. a finding's evidence id). The person checks them on the page and sends from there.",
+      "Attach files the person sent in this chat (PNG, JPG, WebP or PDF, up to 5 MB each, 10 at most) to an answer drafted with submit_work, or the photo for their pro page from set_my_page, before they open its link. Pass the draft (ad_…) and the files' channel references (channel:…); for a report or a form, name each file with the file id the answer expects (e.g. a finding's evidence id). The person checks them on the page and sends from there.",
     schema: z.object({
       draft: z
         .string()
         .regex(/^ad_[A-Za-z0-9_-]{22}$/)
-        .describe('The answer draft submit_work gave (ad_…).'),
+        .describe('The draft submit_work or set_my_page gave (ad_…).'),
       files: z
         .array(
           z.object({
