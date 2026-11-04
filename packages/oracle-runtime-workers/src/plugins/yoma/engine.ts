@@ -198,6 +198,8 @@ export interface FormProgressState {
   data: Record<string, unknown>;
   /** Paths of optional questions the person chose to skip. */
   skipped: string[];
+  /** Every optional question still to come is skipped ("skip all the optional ones"). */
+  skipOptional?: boolean;
   /** Repeating sections the person said were finished. */
   closedSections: string[];
 }
@@ -529,13 +531,15 @@ function sectionPrompt(
   };
 }
 
-/** Whether a question still waits for an answer: empty, and not skipped (a skipped question that has become required is asked again). */
+/** Whether a question still waits for an answer: empty, and not skipped, one by one or all optional ones at once (a skipped question that has become required is asked again). */
 function waiting(
   model: Model,
   view: FormQuestion,
   skipped: readonly string[],
+  skipOptional = false,
 ): boolean {
-  if (skipped.includes(view.path) && !view.required) return false;
+  if (!view.required && (skipOptional || skipped.includes(view.path)))
+    return false;
   return questionAt(model, view.path)?.isEmpty() ?? false;
 }
 
@@ -551,7 +555,7 @@ export function nextStep(
 ): FormStep {
   for (const step of walk(model)) {
     if (step.kind === 'question') {
-      if (waiting(model, step.view, state.skipped))
+      if (waiting(model, step.view, state.skipped, state.skipOptional))
         return { kind: 'question', question: step.view };
       continue;
     }
@@ -564,12 +568,15 @@ export function nextStep(
 export function progressOf(
   model: Model,
   skipped: string[],
+  skipOptional = false,
 ): { answered: number; total: number } {
   const views = visibleQuestions(model).filter(
     (view) => view.input !== 'web-only',
   );
   return {
-    answered: views.filter((view) => !waiting(model, view, skipped)).length,
+    answered: views.filter(
+      (view) => !waiting(model, view, skipped, skipOptional),
+    ).length,
     total: views.length,
   };
 }
@@ -751,6 +758,28 @@ export type Typed = { ok: true; value: unknown } | { ok: false; say: string };
 
 const pad = (n: number) => String(n).padStart(2, '0');
 
+const WEEKDAYS = [
+  'Sunday',
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+  'Saturday',
+];
+
+/**
+ * Today as the model needs it to turn "yesterday" or "last Friday" into a
+ * calendar date: `Monday 2026-11-02 (UTC)`.
+ */
+export function todayLine(now = new Date()): string {
+  return `${WEEKDAYS[now.getUTCDay()]} ${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())} (UTC)`;
+}
+
+/** What to do with a date the person gave in their own words: the model works it out, never asks for a format. */
+const DATE_FROM_WORDS = (now: Date) =>
+  `Work out the calendar date from their words ("yesterday", "last Friday", "30 Oct"; today is ${todayLine(now)}) and send it as value YYYY-MM-DD. Ask again in plain words only when their words fit more than one date. Never ask them to type a format.`;
+
 /** A real calendar date `YYYY-MM-DD` (`-`, `/` or `.` between the parts), or undefined. */
 function calendarDate(text: string): string | undefined {
   const match = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/.exec(text);
@@ -791,6 +820,7 @@ export function typedAnswer(
   view: FormQuestion,
   reply: string,
   value: string | number | undefined,
+  now = new Date(),
 ): Typed {
   const raw = value ?? reply;
   const text = typeof raw === 'string' ? raw.trim() : String(raw);
@@ -818,7 +848,7 @@ export function typedAnswer(
       const date = calendarDate(text);
       return date
         ? { ok: true, value: date }
-        : { ok: false, say: 'This needs a date, as YYYY-MM-DD (2026-10-30).' };
+        : { ok: false, say: DATE_FROM_WORDS(now) };
     }
     case 'datetime': {
       const match = /^(.+?)[T\s](\d{1,2}):(\d{2})(?::\d{2})?$/.exec(text);
@@ -829,7 +859,7 @@ export function typedAnswer(
         ? { ok: true, value: `${date}T${pad(hours)}:${pad(minutes)}` }
         : {
             ok: false,
-            say: 'This needs a date and a time, as YYYY-MM-DD HH:mm (2026-10-30 14:30).',
+            say: `${DATE_FROM_WORDS(now)} Add the time as value YYYY-MM-DD HH:mm; ask what time only if they gave none.`,
           };
     }
     case 'email':

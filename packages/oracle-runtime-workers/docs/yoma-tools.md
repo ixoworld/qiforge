@@ -42,7 +42,9 @@ Blocksync from `BLOCKSYNC_GRAPHQL_URL`, chain REST from ixo-chain's
 
 `yoma_form` is a single object, not a union: a bare top-level `oneOf` breaks
 some providers' tool schemas (`node-parity.md`). The handler checks the
-fields each action needs (`answer`: `field`, `reply`; `skip`: `field`;
+fields each action needs (`answer`: `field`, `reply`; `skip`: `field`, or
+`allOptional: true` to skip every optional question still to come, kept on
+the draft;
 `section`: `section`, `addAnother`; `discard`: `confirmed`) and answers a
 missing one with `invalid_input` naming it. `submit` sends only with
 `confirmed: true`, and the plugin checks the consent itself: it records
@@ -200,12 +202,15 @@ is ignored.
    items, before what follows it, and the section is held to its minimum
    (`minPanelCount`, or one when required) by `review`, `submit` and
    `section` with `addAnother: false`. A skipped question that becomes
-   required is asked again, and `review`/`submit` always list a missing
-   required answer. Typed answers are checked before the form sees them
+   required is asked again (one skipped with `allOptional` too), and
+   `review`/`submit` always list a missing required answer. Typed answers are checked before the form sees them
    (survey-core takes `abc` for a date and drops it for a number without an
    error): dates `YYYY-MM-DD` (`-`, `/` or `.`), `datetime-local` as
    `YYYY-MM-DD HH:mm`, numbers with a decimal comma (`1,5`) but not the
    ambiguous `1,500`, ratings on the form's own scale, emails, links, phones.
+   A date is asked in plain words: the question and a refused date give the
+   model today's date (UTC) so it works out `value` from "yesterday" or
+   "last Friday" itself, and the person is never asked to type a format.
    Questions chat cannot ask (signatures) answer `web_only` with the job's
    Jambo link.
 
