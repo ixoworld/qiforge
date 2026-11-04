@@ -696,12 +696,28 @@ describe('createToolRepetitionGuardMiddleware', () => {
       const { wrap } = guard();
       const history: BaseMessage[] = [new HumanMessage('could we work on the claim?')];
       for (let i = 0; i < 3; i += 1) history.push(...ran('list_capabilities', {}), ...ran('list_skills', {}));
-      const blocked = await call(wrap, 'load_capability', { name: 'portal' }, history);
+      const blocked = await call(wrap, 'search_skills', { query: 'claim' }, history);
       expect(blocked.ran).toBe(false);
       expect(String(blocked.result.content)).toContain('Stop searching');
-      // Acting with an available tool still runs, and a new turn may search again.
+      // Loading a capability and acting with an available tool still run, and a new turn may search again.
+      expect((await call(wrap, 'load_capability', { name: 'portal' }, history)).ran).toBe(true);
       expect((await call(wrap, 'get_status', {}, history)).ran).toBe(true);
       expect((await call(wrap, 'list_skills', {}, [...history, new HumanMessage('try again')])).ran).toBe(true);
+    });
+
+    it('hides the discovery tools from the model once the turn spent its searches', async () => {
+      const modelWrap = createToolRepetitionGuardMiddleware().wrapModelCall;
+      if (!modelWrap) throw new Error('wrapModelCall missing');
+      const tools = ['list_capabilities', 'list_skills', 'load_capability', 'list_action_cards'].map((name) => ({ name }));
+      const seen = (messages: BaseMessage[]) => {
+        const handler = vi.fn().mockResolvedValue(new AIMessage('done'));
+        void modelWrap({ tools, state: { messages } } as never, handler as never);
+        return (handler.mock.calls[0]?.[0] as { tools: { name: string }[] }).tools.map((t) => t.name);
+      };
+      const history: BaseMessage[] = [new HumanMessage('prepare my claim')];
+      expect(seen(history)).toEqual(['list_capabilities', 'list_skills', 'load_capability', 'list_action_cards']);
+      for (let i = 0; i < 3; i += 1) history.push(...ran('list_capabilities', {}), ...ran('list_skills', {}));
+      expect(seen(history)).toEqual(['load_capability', 'list_action_cards']);
     });
 
     it('runs an identical write once per turn and quotes the earlier outcome', async () => {

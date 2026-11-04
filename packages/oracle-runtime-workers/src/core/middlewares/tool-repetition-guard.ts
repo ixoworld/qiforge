@@ -20,13 +20,24 @@ export interface RepetitionCaps {
 
 export const DEFAULT_REPETITION_CAPS: RepetitionCaps = { reads: 5, writes: 1 };
 
-/** Tools that only find other tools; a model alternating between them never trips the identical-call cap. */
+/**
+ * Tools that only find other tools; a model alternating between them never trips the identical-call cap.
+ * `load_capability` is not one: it is how a gated tool becomes callable.
+ */
 export const DISCOVERY_TOOL_NAMES: ReadonlySet<string> = new Set([
   'list_capabilities',
-  'load_capability',
   'list_skills',
   'search_skills',
 ]);
+
+function discoveryCallsInTurn(messages: readonly BaseMessage[]): number {
+  let count = 0;
+  for (let i = turnStart(messages); i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg instanceof ToolMessage && DISCOVERY_TOOL_NAMES.has(msg.name ?? '')) count += 1;
+  }
+  return count;
+}
 /** Discovery calls a turn may make, whatever their arguments. */
 export const MAX_DISCOVERY_CALLS = 6;
 
@@ -109,6 +120,12 @@ export const createToolRepetitionGuardMiddleware = (
 
   return createMiddleware({
     name: 'ToolRepetitionGuardMiddleware',
+    // A model can keep calling a refused tool forever; once the turn spent its searches, it no longer sees them.
+    wrapModelCall: (request, handler) => {
+      if (discoveryCallsInTurn(request.state.messages ?? []) < MAX_DISCOVERY_CALLS) return handler(request);
+      const tools = request.tools.filter((t) => !(typeof t.name === 'string' && DISCOVERY_TOOL_NAMES.has(t.name)));
+      return handler({ ...request, tools });
+    },
     wrapToolCall: async (toolCallRequest, handler) => {
       const { toolCall, state } = toolCallRequest;
       const toolName = toolCall.name ?? toolCallRequest.tool?.name;
@@ -121,11 +138,7 @@ export const createToolRepetitionGuardMiddleware = (
       const argsById = toolCallArgsById(messages, start);
 
       if (DISCOVERY_TOOL_NAMES.has(toolName)) {
-        let discovered = 0;
-        for (let i = opening; i < messages.length; i++) {
-          const msg = messages[i];
-          if (msg instanceof ToolMessage && DISCOVERY_TOOL_NAMES.has(msg.name ?? '')) discovered += 1;
-        }
+        const discovered = discoveryCallsInTurn(messages);
         if (discovered >= MAX_DISCOVERY_CALLS) {
           logger.warn(`Repetition guard: ${toolName} refused after ${discovered} discovery calls this turn`);
           return new ToolMessage({
