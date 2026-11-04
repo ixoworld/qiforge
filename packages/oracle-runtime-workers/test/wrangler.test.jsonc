@@ -27,6 +27,10 @@
   ],
   "durable_objects": {
     "bindings": [
+      {
+        "name": "ACTION_INTERACTIONS_TEST",
+        "class_name": "ActionInteractionsTestDO",
+      },
       { "name": "ACTION_PROPOSAL_TEST", "class_name": "ActionProposalTestDO" },
       { "name": "HUB_ACTION_TEST", "class_name": "HubActionTestDO" },
       { "name": "CHANNEL_TURNS_TEST", "class_name": "ChannelTurnsTestDO" },
@@ -51,5 +55,6 @@
     { "tag": "v7", "new_sqlite_classes": ["ActionProposalTestDO"] },
     { "tag": "v6", "new_sqlite_classes": ["FeedbackTestDO"] },
     { "tag": "v8", "new_sqlite_classes": ["HubActionTestDO"] },
+    { "tag": "v9", "new_sqlite_classes": ["ActionInteractionsTestDO"] },
   ],
 }

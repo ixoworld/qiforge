@@ -76,7 +76,8 @@
     "@ixo/impactxclient-sdk": "^3.0.0",
     "protobufjs": "^7.6.5",
     "@ixo/topic-protocol": "1.0.0-rc.8",
-    "survey-core": "2.3.11"
+    "survey-core": "2.3.11",
+    "@ixo/action-interactions": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",

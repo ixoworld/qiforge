@@ -1,4 +1,12 @@
 import type {
+  CheckClaimDispatch,
+  CheckDispatch,
+} from '@ixo/action-interactions';
+import type {
+  InteractionCommand,
+  InteractionOutcome,
+} from '../action-interactions/store';
+import type {
   ChannelAttachment,
   ChannelControlInput,
   ChannelControlOutcome,
@@ -63,6 +71,7 @@ import type { DomainContextProvenance } from '../core/domain-context';
 
 /** Bindings every oracle Worker must declare (see the example `wrangler.jsonc`). */
 export interface OracleWorkerEnv {
+  ACTION_INTERACTIONS_ENABLED?: string;
   TOPIC_DELIVERABLES_ENABLED?: string;
   ACTION_PROPOSALS_RPC_TESTNET?: string;
   ACTION_PROPOSALS_RPC_DEVNET?: string;
@@ -782,6 +791,29 @@ export interface StorageStatus {
  * piped straight to the client.
  */
 export interface UserOracleObject extends Rpc.DurableObjectBranded {
+  readActionInteractionTask(
+    identity: TurnIdentity,
+    sessionId: string,
+    taskId: string,
+  ): Promise<InteractionOutcome<string>>;
+  checkDispatch(
+    identity: TurnIdentity,
+    input: CheckDispatch,
+  ): Promise<InteractionOutcome<string>>;
+  checkClaimDispatch(
+    identity: TurnIdentity,
+    input: CheckClaimDispatch,
+  ): Promise<InteractionOutcome<string>>;
+  actionInteraction(
+    identity: TurnIdentity,
+    command: InteractionCommand,
+  ): Promise<InteractionOutcome<string>>;
+  readActionInteraction(
+    identity: TurnIdentity,
+    sessionId: string,
+    id?: string,
+    references?: boolean,
+  ): Promise<InteractionOutcome<string>>;
   recordHubActionOutcome(outcome: ActionOutcomeV1): Promise<void>;
   topicDeliverable(
     identity: TurnIdentity,

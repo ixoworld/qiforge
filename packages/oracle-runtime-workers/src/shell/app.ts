@@ -1,4 +1,15 @@
 import {
+  ActionInteractionError,
+  CheckClaimDispatchSchema,
+  CheckDispatchSchema,
+} from '@ixo/action-interactions';
+import { ZodError } from 'zod';
+import {
+  interactionStatus,
+  parseInteractionCommand,
+  parseInteractionRead,
+} from '../action-interactions/routes';
+import {
   ActionProposalWireSchema,
   TopicReceiptReferencesSchema,
   BeginTopicStepSchema,
@@ -246,6 +257,9 @@ export function rateLimitKey(
   env: Pick<OracleWorkerEnv, 'ORACLE_DID'>,
   scope:
     | 'user'
+    | 'card-read'
+    | 'card-write'
+    | 'card-dispatch'
     | 'poll'
     | 'channel'
     | 'channel-control'
@@ -422,6 +436,32 @@ export function createShell(
       status: 'ok',
       timestamp: new Date().toISOString(),
       frontendTools: FRONTEND_BRIDGE,
+      ...(c.env.ACTION_INTERACTIONS_ENABLED === 'true'
+        ? {
+            actionInteractions: {
+              version: 1,
+              owners: [
+                'flow-claim',
+                'flow-claim-block',
+                'flow-bid',
+                'owner-reference',
+                'approval',
+                'task',
+                'question',
+                'artifact',
+              ],
+              operations: [
+                'prepare',
+                'read',
+                'update',
+                'reserve',
+                'observe',
+                'dispatch',
+                'read-task',
+              ],
+            },
+          }
+        : {}),
     }),
   );
   // A liveness probe: the gateway's in-memory flag, no storage read. The
@@ -688,15 +728,27 @@ export function createShell(
     if (!limiter) return next();
     const auth = c.get('auth') as AuthResult | undefined;
     if (!auth) return next();
-    // The chat lists' status poll and the card routes (Portal's review
-    // page) each have their own bucket: polling a card or the run list
-    // while chatting must not push turns into 429.
+    // The chat lists' status poll, the card routes (Portal's review page) and
+    // action-card reads, writes and dispatch checks each have their own bucket:
+    // polling or typing in a card while chatting must not push turns into 429,
+    // and neither chat nor card edits can use up the dispatch check, whose 429
+    // the Portal treats as "could not ask" and lets the submission through.
+    const isGet = c.req.method === 'GET';
+    const path = c.req.path;
+    const card = path.startsWith('/action-interactions');
     const scope =
-      c.req.method === 'GET' && c.req.path === '/runs/active'
+      isGet && path === '/runs/active'
         ? 'poll'
-        : c.req.path.startsWith('/action-proposals/')
+        : path.startsWith('/action-proposals/')
           ? 'action'
-          : 'user';
+          : card && isGet
+            ? 'card-read'
+            : path === '/action-interactions/dispatch' ||
+                path === '/action-interactions/claim-dispatch'
+              ? 'card-dispatch'
+              : card
+                ? 'card-write'
+                : 'user';
     const { success } = await limiter.limit({
       key: rateLimitKey(c.env, scope, auth.userDid),
     });
@@ -711,6 +763,189 @@ export function createShell(
       );
     return next();
   });
+
+  // These routes own private proposals, never action execution. No route is a
+  // model tool; host reservation requires the authenticated signed invocation.
+  app.use('/action-interactions*', async (c, next) => {
+    if (
+      c.env.ACTION_INTERACTIONS_ENABLED !== 'true' &&
+      c.req.path !== '/action-interactions/claim-dispatch' &&
+      c.req.path !== '/action-interactions/dispatch'
+    )
+      return c.json(
+        { code: 'unavailable', message: 'Action interactions are disabled' },
+        404,
+      );
+    if (c.get('auth')?.via !== 'invocation')
+      return c.json(
+        {
+          code: 'invocation_required',
+          message: 'A signed invocation is required',
+        },
+        401,
+      );
+    return next();
+  });
+  const interactionBodyLimit = (maxSize: number) =>
+    bodyLimit({
+      maxSize,
+      onError: (c) =>
+        c.json({ code: 'too_large', message: 'Request is too large' }, 413),
+    });
+  const smallInteractionBody = interactionBodyLimit(96 * 1024);
+  // Only a prepare can carry a domain-write approval (up to 2 MiB).
+  const preparedInteractionBody = interactionBodyLimit(2 * 1024 * 1024);
+  app.use('/action-interactions*', (c, next) =>
+    c.req.method === 'POST' && c.req.path === '/action-interactions'
+      ? preparedInteractionBody(c, next)
+      : smallInteractionBody(c, next),
+  );
+  app.get('/action-interactions/tasks/:taskId', async (c) => {
+    const sessionId = c.req.query('sessionId');
+    if (!sessionId)
+      return c.json(
+        { code: 'invalid_request', message: 'sessionId is required' },
+        400,
+      );
+    const identity = identityOf(c.get('auth'), c.req.raw.headers);
+    const result = await userStub(
+      c.env,
+      identity.userDid,
+    ).readActionInteractionTask(identity, sessionId, c.req.param('taskId'));
+    if (result.ok)
+      return new Response(result.value, {
+        headers: {
+          'content-type': 'application/json',
+          'cache-control': 'no-store',
+        },
+      });
+    return c.json({ code: result.code, message: result.message }, 404);
+  });
+  app.post('/action-interactions/dispatch', async (c) => {
+    const parsed = CheckDispatchSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success)
+      return c.json(
+        { code: 'invalid_request', message: 'Invalid dispatch binding' },
+        400,
+      );
+    const identity = identityOf(c.get('auth'), c.req.raw.headers);
+    const result = await userStub(c.env, identity.userDid).checkDispatch(
+      identity,
+      parsed.data,
+    );
+    if (result.ok)
+      return new Response(result.value, {
+        headers: {
+          'content-type': 'application/json',
+          'cache-control': 'no-store',
+        },
+      });
+    return c.json(
+      { code: result.code, message: result.message },
+      result.status === 403 ? 403 : 409,
+    );
+  });
+  app.post('/action-interactions/claim-dispatch', async (c) => {
+    const parsed = CheckClaimDispatchSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success)
+      return c.json(
+        { code: 'invalid_request', message: 'Invalid claim dispatch binding' },
+        400,
+      );
+    const identity = identityOf(c.get('auth'), c.req.raw.headers);
+    const result = await userStub(c.env, identity.userDid).checkClaimDispatch(
+      identity,
+      parsed.data,
+    );
+    if (result.ok)
+      return new Response(result.value, {
+        headers: {
+          'content-type': 'application/json',
+          'cache-control': 'no-store',
+        },
+      });
+    return c.json(
+      { code: result.code, message: result.message },
+      result.status === 403 ? 403 : 409,
+    );
+  });
+  app.on(
+    ['GET', 'POST', 'PATCH'],
+    [
+      '/action-interactions',
+      '/action-interactions/:id',
+      '/action-interactions/:id/:operation',
+    ],
+    async (c) => {
+      try {
+        // Every request is parsed before a user object is addressed.
+        const identity = identityOf(c.get('auth'), c.req.raw.headers);
+        if (c.req.method === 'GET') {
+          const read = parseInteractionRead(
+            c.req.query('sessionId'),
+            c.req.param('id'),
+            c.req.param('operation'),
+          );
+          const result = await userStub(
+            c.env,
+            identity.userDid,
+          ).readActionInteraction(
+            identity,
+            read.sessionId,
+            read.id,
+            c.req.query('view') === 'references',
+          );
+          if (result.ok)
+            return new Response(result.value, {
+              headers: {
+                'content-type': 'application/json',
+                'cache-control': 'no-store',
+              },
+            });
+          return c.json(
+            { code: result.code, message: result.message },
+            interactionStatus(result.status),
+          );
+        }
+        const command = await parseInteractionCommand(
+          c.req.raw,
+          c.req.param('id'),
+          c.req.param('operation'),
+        );
+        const result = await userStub(
+          c.env,
+          identity.userDid,
+        ).actionInteraction(identity, command);
+        if (result.ok)
+          return new Response(result.value, {
+            headers: {
+              'content-type': 'application/json',
+              'cache-control': 'no-store',
+            },
+          });
+        return c.json(
+          { code: result.code, message: result.message },
+          interactionStatus(result.status),
+        );
+      } catch (error) {
+        if (error instanceof ZodError)
+          return c.json(
+            { code: 'invalid_request', message: 'Invalid interaction request' },
+            400,
+          );
+        if (error instanceof ActionInteractionError)
+          return c.json(
+            { code: error.code, message: error.message },
+            interactionStatus(error.status),
+          );
+        throw error;
+      }
+    },
+  );
 
   // What the owner object answers a proposal command with: the card; a
   // conflict (the card or the authority it was sealed on changed: the Portal
