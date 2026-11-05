@@ -10,3 +10,4 @@ Action card lifetimes come from a policy table per owner kind, owned by the runt
 - The weekly cap of 200 cards per chat counts kinds with and without an action window apart, so a chat full of charts can still prepare a claim.
 - A claim step takes many claims. A reported claim no longer closes the step: the ordinary form may submit again, and a prepare with the new `repeat` field starts another card (`/health` lists the `repeat` operation). Without `repeat`, the step returns its submitted card in its own chat and 409 `repeat_required` elsewhere. Bids stay one per role.
 - The Portal plugin's guidance covers every card the person sees, answers, reviews or signs.
+- Asking the person (`ask_question_card`, or `ask_user_question` where a chat has no cards) is bound on every turn that declares it, instead of waiting for the Portal capability to load; every other browser tool stays on demand.

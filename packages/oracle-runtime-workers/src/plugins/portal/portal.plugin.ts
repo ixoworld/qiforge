@@ -68,6 +68,13 @@ const HUMAN_DECISION_TOOLS = new Set([
 ]);
 
 /**
+ * How the Agent asks the person something: bound on every turn that declares
+ * it, so a question never turns into prose because the Portal capability was
+ * not loaded. A chat declares one of them, never both.
+ */
+const ASKING_TOOLS = new Set(['ask_user_question', 'ask_question_card']);
+
+/**
  * The Portal's Topic write tool. Its commands can take a while to settle in
  * the browser (several Matrix writes), so it gets a longer window before the
  * call is reported as an unknown outcome.
@@ -213,6 +220,9 @@ export function buildBrowserTool(
       // frontend lane, so a parked call (or a question to the user) holds
       // no slot another chat needs.
       surface: 'frontend',
+      ...(ASKING_TOOLS.has(descriptor.name)
+        ? { visibility: 'always' as const }
+        : {}),
       // A question to the user is a write whatever the client declares:
       // it is never asked twice after a restart once it was sent. Any
       // other tool keeps the effect its declaration names, if any.
