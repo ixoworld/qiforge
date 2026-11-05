@@ -363,6 +363,6 @@ describe('asks_attach_files', () => {
       network(PNG, { check: () => json({}, 503) }),
     );
     expect(answer).toMatch(/^Attached 1 of 2 files\./);
-    expect(answer).toContain('asks could not check the files just now');
+    expect(answer).toContain('Asks could not check the files just now');
   });
 });
