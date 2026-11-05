@@ -241,12 +241,12 @@ export async function sendFile(input: {
   if (!ext)
     return {
       ok: false,
-      why: `asks takes PNG, JPG, WebP or PDF files; this one is ${file.mimetype}.`,
+      why: `Asks takes PNG, JPG, WebP or PDF files; this one is ${file.mimetype}.`,
     };
   if (file.size > MAX_UPLOAD_BYTES)
     return {
       ok: false,
-      why: 'asks takes files up to 5 MB; this one is bigger.',
+      why: 'Asks takes files up to 5 MB; this one is bigger.',
     };
   let source: URL;
   try {

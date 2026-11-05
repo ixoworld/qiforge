@@ -449,7 +449,8 @@ function connectorTool(
       let kept: ReturnType<typeof hideUploadAddress>['kept'] = null;
       const trusted =
         // set_my_page hands out the same upload address for a pro page photo.
-        def.name === `${PREFIX}submit_work` || def.name === `${PREFIX}set_my_page`
+        def.name === `${PREFIX}submit_work` ||
+        def.name === `${PREFIX}set_my_page`
           ? { mcpUrl: turn.mcpUrl }
           : undefined;
       const shown = mapText(result, (text) => {
@@ -521,7 +522,7 @@ function connectTool(turn: AsksTurn): PluginTool {
   return {
     name: 'asks_connect',
     description:
-      'Start the one-time asks.world sign-in (Google, on asks.world). Gives a link to send the person; they sign in there and come back. Use when asks is not connected or a tool says the sign-in ended.',
+      'Start the one-time asks.world sign-in (Google, on asks.world). Gives a link to send the person; they sign in there and come back. Use when Asks is not connected or a tool says the sign-in ended.',
     schema: z.object({}),
     handler: async () => {
       const now = await turn.conn.status();
@@ -537,7 +538,7 @@ function connectTool(turn: AsksTurn): PluginTool {
       return [
         'Send the person this link in your final message, on its own line:',
         link,
-        'They sign in with Google on asks.world with the same account they use here; it is for them only, works once and lasts 15 minutes. A sign-in with another account is refused. Ask them to tell you when it says "asks is connected". Do not call other asks tools until then.',
+        'They sign in with Google on asks.world with the same account they use here; it is for them only, works once and lasts 15 minutes. A sign-in with another account is refused. Ask them to tell you when it says "You’re connected". Do not call other asks tools until then.',
       ].join('\n');
     },
   };
@@ -655,7 +656,7 @@ function attachTool(turn: AsksTurn): PluginTool {
           ? `Still missing for this answer (${check.missing.length}): ${check.missing.join(', ')}.`
           : '',
         check?.ok === false
-          ? 'asks could not check the files just now; the answer page shows what arrived.'
+          ? 'Asks could not check the files just now; the answer page shows what arrived.'
           : '',
         attached > 0
           ? 'The person sees them on the answer page and sends from there.'

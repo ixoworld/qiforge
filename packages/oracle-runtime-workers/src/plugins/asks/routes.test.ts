@@ -128,7 +128,7 @@ describe('routes', () => {
     expect(page.headers.get('content-type')).toContain('text/html');
     expect(html).toContain('You’re connected');
     expect(html).toContain(
-      'Personal Agent (Devnet) is now linked to your asks.world account.',
+      'Personal Agent (Devnet) is now linked to your Asks account.',
     );
     expect(html).toContain(
       '<a class="button" href="https://wa.me/12019082266?text=I%27m%20connected">Back to WhatsApp</a>',
@@ -163,11 +163,11 @@ describe('routes', () => {
     for (const [account, words] of [
       [
         () => accountAnswer(OTHER_ADDRESS),
-        'That’s a different account</h1>\n<p class="line">You signed in with a different asks.world account from the one Personal Agent (Devnet) uses. Nothing was linked.',
+        'That’s a different account</h1>\n<p class="line">You signed in with a different Asks account from the one Personal Agent (Devnet) uses. Nothing was linked.',
       ],
       [
         () => json({}, 502),
-        'asks.world didn’t answer just now. Nothing was linked.</p>\n<p class="next">Try again from your chat.</p>',
+        'Asks didn’t answer just now. Nothing was linked.</p>\n<p class="next">Try again from your chat.</p>',
       ],
     ] as const) {
       const { env, connection } = setup(account);
@@ -241,7 +241,7 @@ describe('routes', () => {
 
     const noCode = await answer(await begin(), '');
     expect(noCode).toContain(
-      'Something went wrong</h1>\n<p class="line">asks.world sent no sign-in code.',
+      'Something went wrong</h1>\n<p class="line">Asks sent no sign-in code.',
     );
     for (const html of [noCode, await answer(once)]) {
       expect(html).toContain(

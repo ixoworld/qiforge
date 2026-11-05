@@ -91,7 +91,7 @@ export function page(oracle: string, text: PageText): Response {
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="light dark"><meta name="robots" content="noindex">
 <meta name="theme-color" content="#f4f5f6" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#0b0c0d" media="(prefers-color-scheme: dark)">
-<title>${escape(text.title)} · asks.world</title>
+<title>${escape(text.title)} · Asks</title>
 <style>${STYLE}</style></head>
 <body class="${text.ok ? 'ok' : 'no'}"><main><section class="card" aria-labelledby="title">
 <svg class="mark" viewBox="0 0 56 56" aria-hidden="true"><circle cx="28" cy="28" r="28"/><path d="${text.ok ? CHECK : CROSS}"/></svg>
@@ -99,7 +99,7 @@ export function page(oracle: string, text: PageText): Response {
 <p class="line">${escape(text.line)}</p>
 ${action}
 </section>
-<footer class="pair"><span class="who">${escape(oracle)}</span><span class="link" aria-hidden="true"></span><span class="asks">${ASKS_MARK}asks.world</span></footer>
+<footer class="pair"><span class="who">${escape(oracle)}</span><span class="link" aria-hidden="true"></span><span class="asks">${ASKS_MARK}Asks</span></footer>
 </main></body></html>`;
   return new Response(html, {
     status: 200,
@@ -193,8 +193,7 @@ export async function handleCallback(
       'You can start again from your chat.',
     );
   const code = params.get('code');
-  if (!code)
-    return failed(env, SOMETHING_WRONG, 'asks.world sent no sign-in code.');
+  if (!code) return failed(env, SOMETHING_WRONG, 'Asks sent no sign-in code.');
   const done = await connection.complete(state, code);
   const oracle = oracleNameOf(env);
   if (!done.ok) {
@@ -202,14 +201,14 @@ export async function handleCallback(
       return failed(
         env,
         'That’s a different account',
-        `You signed in with a different asks.world account from the one ${oracle} uses. Nothing was linked.`,
+        `You signed in with a different Asks account from the one ${oracle} uses. Nothing was linked.`,
         'Ask in your chat for a new link, and sign in with the same account.',
       );
     if (done.reason === 'unconfirmed')
       return failed(
         env,
         'We couldn’t check your account',
-        'asks.world didn’t answer just now. Nothing was linked.',
+        'Asks didn’t answer just now. Nothing was linked.',
         'Try again from your chat.',
       );
     return done.reason === 'expired'
@@ -219,13 +218,13 @@ export async function handleCallback(
         : failed(
             env,
             SOMETHING_WRONG,
-            'asks.world didn’t accept the sign-in. Nothing was linked.',
+            'Asks didn’t accept the sign-in. Nothing was linked.',
           );
   }
   const connected = {
     ok: true,
     title: 'You’re connected',
-    line: `${oracle} is now linked to your asks.world account.`,
+    line: `${oracle} is now linked to your Asks account.`,
   };
   const back = env.ASKS_WHATSAPP_RETURN_URL;
   return done.surface === 'whatsapp' && back
