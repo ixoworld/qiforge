@@ -2,6 +2,7 @@ import {
   ActionInteractionError,
   canonicalJson,
   interactionValuesDigest,
+  NO_ACTION_WINDOW,
   InteractionSchema,
   InteractionReferenceSchema,
   type Interaction,
@@ -35,6 +36,8 @@ const MANUAL_PREFIX = 'interaction-manual:';
 const CHUNK_COUNT_PREFIX = 'interaction-chunks:';
 /** `<id>:<index>` → one chunk of such a record's serialized values. */
 const CHUNK_PREFIX = 'interaction-value:';
+/** `<cap group>:<sha256(sessionId)>:<createdAt>:<id>` → id: the cards one chat created, per cap group. */
+const COUNT_PREFIX = 'interaction-count:';
 /**
  * Replays of edits only need the newest requests: an older retry fails the
  * revision compare-and-swap instead, which never applies an edit twice.
@@ -45,8 +48,8 @@ const MAX_RECORD_BYTES = 64 * 1024;
 /** A domain-write approval carries a file batch; 16 KiB stays free for the record's metadata. */
 const MAX_DOMAIN_WRITE_BYTES = 2 * 1024 * 1024 - 16 * 1024;
 const DAY_MS = 24 * 60 * 60 * 1000;
-const TTL_MS = 7 * DAY_MS;
-/** How long an expired record stays readable before retention removes its values. */
+const WEEK_MS = 7 * DAY_MS;
+/** How long a record stays readable after its action window, before retention removes its values. */
 const RETAIN_MS = 30 * DAY_MS;
 /** The newest records one session list returns. */
 const LIST_LIMIT = 50;
@@ -55,9 +58,10 @@ const LIST_MAX_BYTES = 8 * 1024 * 1024;
 /** The newest records one reference list returns. */
 const REFERENCE_LIST_LIMIT = 1000;
 /**
- * Cards one chat may create within one draft lifetime (`TTL_MS`). A question
- * owner is keyed by its request id, so without a cap a runaway agent could
- * write drafts as fast as the rate limit allows.
+ * Cards one chat may create within a week. Kinds with and without an action
+ * window are counted apart, so a chat full of charts can still prepare a
+ * claim. A question owner is keyed by its request id, so without a cap a
+ * runaway agent could write cards as fast as the rate limit allows.
  */
 const SESSION_DRAFT_LIMIT = 200;
 /** Records retention handles per prepare, so a prepare never pays for a backlog. */
@@ -66,6 +70,79 @@ const PRUNE_BATCH = 16;
 const STORAGE_BATCH = 128;
 
 type Storage = Pick<DurableObjectStorage, 'get' | 'put' | 'delete' | 'list'>;
+
+/**
+ * How long each owner kind lives. The runtime owns this table: a client can
+ * never choose a longer life. A new kind, a long-living one included, is one
+ * row.
+ * - `actionWindowMs`: how long the card can be answered or signed, or `null`
+ *   when it stays open for as long as its chat (`NO_ACTION_WINDOW`).
+ * - `keep`: `chat` keeps the record until its chat is deleted; `window` lets
+ *   retention remove its values 30 days after the window, keeping what stops
+ *   a duplicate.
+ * - `attachable`: the person can save it to their Library, so it always
+ *   lives with its chat.
+ * - `repeats`: the owner takes another operation after a reported one, when
+ *   the prepare asks for it (a Flow claim step takes many claims).
+ */
+type CardPolicy = { repeats: boolean } & (
+  | { actionWindowMs: number; keep: 'window'; attachable: false }
+  | { actionWindowMs: number | null; keep: 'chat'; attachable: boolean }
+);
+const CARD_POLICIES: Record<Interaction['owner']['kind'], CardPolicy> = {
+  'flow-claim': {
+    actionWindowMs: WEEK_MS,
+    keep: 'window',
+    attachable: false,
+    repeats: true,
+  },
+  'flow-claim-block': {
+    actionWindowMs: WEEK_MS,
+    keep: 'window',
+    attachable: false,
+    repeats: true,
+  },
+  'flow-bid': {
+    actionWindowMs: WEEK_MS,
+    keep: 'window',
+    attachable: false,
+    repeats: false,
+  },
+  approval: {
+    actionWindowMs: WEEK_MS,
+    keep: 'window',
+    attachable: false,
+    repeats: false,
+  },
+  question: {
+    actionWindowMs: null,
+    keep: 'chat',
+    attachable: false,
+    repeats: false,
+  },
+  artifact: {
+    actionWindowMs: null,
+    keep: 'chat',
+    attachable: true,
+    repeats: false,
+  },
+  task: {
+    actionWindowMs: null,
+    keep: 'chat',
+    attachable: false,
+    repeats: false,
+  },
+  'owner-reference': {
+    actionWindowMs: null,
+    keep: 'chat',
+    attachable: false,
+    repeats: false,
+  },
+};
+const cardPolicy = (owner: Pick<Interaction['owner'], 'kind'>) =>
+  CARD_POLICIES[owner.kind];
+const capGroup = (owner: Pick<Interaction['owner'], 'kind'>) =>
+  cardPolicy(owner).actionWindowMs === null ? 'no-window' : 'window';
 
 async function sha256Hex(text: string): Promise<string> {
   const hash = await crypto.subtle.digest(
@@ -81,6 +158,9 @@ const sortable = (value: number) =>
   Math.max(0, value).toString().padStart(16, '0');
 async function sessionIndexKey(record: Interaction): Promise<string> {
   return `${SESSION_PREFIX}${await sha256Hex(record.sessionId)}:${sortable(record.createdAt)}:${record.id}`;
+}
+async function countIndexKey(record: Interaction): Promise<string> {
+  return `${COUNT_PREFIX}${capGroup(record.owner)}:${await sha256Hex(record.sessionId)}:${sortable(record.createdAt)}:${record.id}`;
 }
 const expiryIndexKey = (record: Interaction) =>
   `${EXPIRY_PREFIX}${sortable(record.expiresAt)}:${record.id}`;
@@ -116,6 +196,13 @@ const unreadableRecord = () =>
     409,
     'record_unreadable',
     'This Companion draft cannot be read; check the claims list before submitting',
+  );
+/** A claim step with a filed claim takes another only when the prepare asks for it. */
+const repeatRequired = () =>
+  new ActionInteractionError(
+    409,
+    'repeat_required',
+    'This claim step already has a submitted claim in this run; prepare it with repeat to file another',
   );
 type RecentRequest = { requestId: string; fingerprint: string };
 const manualMarkerKey = (ownerKey: string) =>
@@ -222,14 +309,18 @@ function extendsReceipt(
  * Where an owner's existing record stands for a new card or a manual
  * submission of the same step:
  * - `blocked`: its operation reached the executor (the one-use dispatch key
- *   was consumed) or the host reported it observed. A second submission
- *   could duplicate the claim, so nothing replaces it.
+ *   was consumed) or the host reported it observed, and the kind does not
+ *   repeat or the outcome is not final. A second submission could duplicate
+ *   the claim, so nothing replaces it.
+ * - `done`: a reported result of a kind that repeats. The record stays as
+ *   it is; the ordinary form may submit again, and a card only when its
+ *   prepare asks to repeat.
  * - `live`: an unexpired draft, or a reservation the host is dispatching
  *   right now. It belongs to the card that owns it.
  * - `stale`: cancelled, expired, or a reservation that never reached the
  *   executor. Safe to supersede: its dispatch check can no longer pass.
  */
-type OwnerState = 'blocked' | 'live' | 'stale';
+type OwnerState = 'blocked' | 'done' | 'live' | 'stale';
 
 /** Personal drafts only. Execution and verified receipts remain owned by Flow. */
 export class ActionInteractionStore {
@@ -269,20 +360,23 @@ export class ActionInteractionStore {
         // that may already have reached the executor; any other draft for
         // this step is superseded, so its own dispatch check can no longer
         // pass and the step is never locked by an abandoned card. The
-        // marker stops a card prepared later from filing the same claim.
+        // marker stops a card prepared later from filing the same claim,
+        // unless that prepare asks to repeat a kind that repeats.
         if (id && !record)
           throw new ActionInteractionError(
             409,
             'review_required',
             'This claim step has an unreadable Companion draft',
           );
-        if (record && (await this.ownerState(tx, record)) === 'blocked')
+        const state = record && (await this.ownerState(tx, record));
+        if (state === 'blocked')
           throw new ActionInteractionError(
             409,
             'dispatch_consumed',
             'A Companion submission for this claim step already reached the claim service; check the claims list before submitting again',
           );
-        if (record) await this.supersede(tx, record);
+        // A submitted claim stays as it is; another claim is a new one.
+        if (record && state !== 'done') await this.supersede(tx, record);
         await tx.put(manualKey, this.now());
         return { allowed: true, managed: false };
       }
@@ -394,10 +488,11 @@ export class ActionInteractionStore {
 
   /**
    * Retention for records past `expiresAt + RETAIN_MS`, a bounded batch per
-   * call. Superseded or abandoned drafts disappear with their owner key,
-   * indexes and request tombstones. A record whose operation reached the
-   * executor keeps its owner key, reservation and dispatch tombstone forever
-   * (they are what stops a duplicate claim), but loses its draft values.
+   * call. Only kinds that `keep` their record for their `window` are queued.
+   * Superseded or abandoned drafts disappear with their owner key, indexes
+   * and request tombstones. A record whose operation reached the executor
+   * keeps its owner key, reservation and dispatch tombstone forever (they are
+   * what stops a duplicate claim), but loses its draft values.
    */
   async prune(): Promise<number> {
     const due = await this.storage.list<string>({
@@ -407,7 +502,13 @@ export class ActionInteractionStore {
     });
     if (due.size === 0) return 0;
     await this.storage.transaction(async (tx) => {
-      for (const [expiryKey, id] of due) await this.forget(tx, id, expiryKey);
+      for (const [expiryKey, id] of due) {
+        const record = await this.recordFrom(tx, id).catch(() => undefined);
+        // Queued before its kind lived with its chat: it leaves the queue.
+        if (record && cardPolicy(record.owner).keep === 'chat')
+          await tx.delete(expiryKey);
+        else await this.forget(tx, id, expiryKey);
+      }
     });
     return due.size;
   }
@@ -449,8 +550,9 @@ export class ActionInteractionStore {
 
   /**
    * Removes a record and everything that points at it, except what stops a
-   * duplicate claim: a dispatched record keeps its owner key, reservation and
-   * dispatch tombstone, and only loses its values and user-edit list.
+   * duplicate claim: a record whose operation reached the executor keeps its
+   * owner key, reservation and dispatch tombstone, and only loses its values
+   * and user-edit list.
    */
   private async forget(tx: Storage, id: string, expiryKey?: string) {
     // Only prepare requests are indexed per record (edits keep their
@@ -485,7 +587,9 @@ export class ActionInteractionStore {
       throw error;
     }
     const chunks = record ? await this.chunkKeys(tx, id) : [];
-    if (record && (await this.ownerState(tx, record)) === 'blocked') {
+    if (record) doomed.push(await countIndexKey(record));
+    const state = record && (await this.ownerState(tx, record));
+    if (record && (state === 'blocked' || state === 'done')) {
       if (
         Object.keys(record.values).length ||
         record.updatedByUser.length ||
@@ -521,6 +625,8 @@ export class ActionInteractionStore {
     storage: Pick<DurableObjectStorage, 'get'>,
     record: Interaction,
   ): Promise<OwnerState> {
+    if (record.status === 'observed' && cardPolicy(record.owner).repeats)
+      return 'done';
     if (record.status === 'observed' || record.status === 'partial')
       return 'blocked';
     if (record.reservation && (await this.dispatched(storage, record)))
@@ -744,12 +850,15 @@ export class ActionInteractionStore {
             'Approval values must contain exactly one request object',
           );
         const ownerKey = await ownerStorageKey(input.owner, input.sessionId);
-        if (
+        const policy = cardPolicy(input.owner);
+        // Only a kind that repeats can be asked for another operation.
+        const repeat = policy.repeats && input.repeat === true;
+        const filedByForm =
           (input.owner.kind === 'flow-claim' ||
             input.owner.kind === 'flow-claim-block' ||
             input.owner.kind === 'flow-bid') &&
-          (await tx.get<number>(manualMarkerKey(ownerKey))) !== undefined
-        )
+          (await tx.get<number>(manualMarkerKey(ownerKey))) !== undefined;
+        if (filedByForm && !policy.repeats)
           // The ordinary form already passed its dispatch check for this
           // step; a card could file the same claim a second time.
           throw new ActionInteractionError(
@@ -779,6 +888,7 @@ export class ActionInteractionStore {
           const state = await this.ownerState(tx, existing);
           const inFlight = state === 'live' && existing.status === 'reserved';
           if (
+            (state === 'done' && !repeat) ||
             state === 'blocked' ||
             inFlight ||
             (state === 'live' && !sameSession)
@@ -787,6 +897,7 @@ export class ActionInteractionStore {
               await remember(tx, existing.id);
               return { interaction: existing, replayed: true };
             }
+            if (state === 'done') throw repeatRequired();
             if (state === 'blocked')
               throw new ActionInteractionError(
                 409,
@@ -811,15 +922,19 @@ export class ActionInteractionStore {
           }
           // A stale draft, or this chat's own draft for a form whose
           // collection or schema has since changed: it can no longer
-          // dispatch, so a fresh draft takes its place.
-          await this.supersede(tx, existing);
+          // dispatch, so a fresh draft takes its place. A submitted claim
+          // asked to repeat stays as it is.
+          if (state !== 'done') await this.supersede(tx, existing);
         }
-        // Only cards created within one draft lifetime count: kept records of
-        // sent claims and expired cards awaiting retention never lock a chat.
-        const sessionPrefix = `${SESSION_PREFIX}${await sha256Hex(input.sessionId)}:`;
+        // A claim filed from the form: another one is a new claim.
+        if (filedByForm && !repeat) throw repeatRequired();
+        // Only cards created within the last week count, apart for kinds with
+        // and without an action window: kept records of sent claims and
+        // expired cards awaiting retention never lock a chat.
+        const counted = `${COUNT_PREFIX}${capGroup(input.owner)}:${await sha256Hex(input.sessionId)}:`;
         const recent = await tx.list<string>({
-          prefix: sessionPrefix,
-          start: `${sessionPrefix}${sortable(this.now() - TTL_MS)}`,
+          prefix: counted,
+          start: `${counted}${sortable(this.now() - WEEK_MS)}`,
           limit: SESSION_DRAFT_LIMIT,
         });
         if (recent.size >= SESSION_DRAFT_LIMIT)
@@ -839,12 +954,19 @@ export class ActionInteractionStore {
           updatedByUser: [],
           status: 'draft',
           createdAt: this.now(),
-          expiresAt: this.now() + TTL_MS,
+          expiresAt:
+            policy.actionWindowMs === null
+              ? NO_ACTION_WINDOW
+              : this.now() + policy.actionWindowMs,
         });
         await tx.put({
           [ownerKey]: record.id,
           [await sessionIndexKey(record)]: record.id,
-          [expiryIndexKey(record)]: record.id,
+          [await countIndexKey(record)]: record.id,
+          // A kind that lives with its chat never waits for retention.
+          ...(policy.keep === 'window'
+            ? { [expiryIndexKey(record)]: record.id }
+            : {}),
         });
       } else {
         record = await this.readFrom(tx, command.id, command.input.sessionId);

@@ -33,9 +33,9 @@ import {
 const manifest: PluginManifest = {
   title: 'Portal',
   summary:
-    "The user's Portal UI: action cards (bids, claims, questions, approvals), forms, Topics, domains, pages, navigation.",
+    "The user's Portal UI: action cards (everything the person sees, answers, reviews or signs), forms, Topics, domains, pages, navigation.",
   whenToUse: [
-    'User asks to prepare or submit a bid or claim: call `list_action_cards`, then `prepare_action_card`.',
+    'What the person sees, answers, reviews or signs is an action card: call `list_action_cards`, then `prepare_action_card`. Only when the Portal declares no card tools, ask with `ask_user_question`.',
     'User asks for an action the Portal FE exposes as a browser tool (declared in `state.browserTools`).',
     "A task needs a browser-side capability the server can't do alone — open a URL in the user's tab, click a Portal button, fill a form.",
   ],
