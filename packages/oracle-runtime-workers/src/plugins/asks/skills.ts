@@ -2,14 +2,14 @@
  * The asks skills, read at runtime from the released ixo-plugins repo so a
  * newly published skill needs no oracle release: mainnet reads
  * `plugins/asks/skills/<name>/SKILL.md`, testnet and devnet
- * `plugins/asks-testnet/...` (practice money). The names come from the
- * folder listing.
+ * `plugins/asks-testnet/...` (practice money). The names come from
+ * `plugins/<folder>/skills/index.json`.
  *
  * Never on a turn's path: `skills()` answers from memory, then the Workers
  * cache (across isolate restarts), then the bundled copy, and refreshes in
  * the background once the copy is an hour old, with `If-None-Match` so an
- * unchanged file costs a 304 (which GitHub does not count against its rate
- * limit). Any failure keeps what is there.
+ * unchanged file costs a 304. Everything is read from
+ * raw.githubusercontent.com. Any failure keeps what is there.
  *
  * The bundled copy (`skills.bundled.json`) was taken from ixo-plugins `main`;
  * refresh it by re-reading the same two folders when the skills change a lot.
@@ -158,25 +158,18 @@ export class AsksSkills {
   private async pull(): Promise<void> {
     const { folder } = this.deps;
     const before = this.snapshot ?? bundledSnapshot(folder);
+    // Not GitHub's API: unauthenticated, it answers 403 on Cloudflare's shared IPs.
     const list = await this.deps.fetch(
-      `https://api.github.com/repos/${REPO}/contents/plugins/${folder}/skills?ref=${BRANCH}`,
-      {
-        headers: {
-          accept: 'application/vnd.github+json',
-          'user-agent': 'ixo-oracle',
-          ...(before.listEtag ? { 'if-none-match': before.listEtag } : {}),
-        },
-      },
+      `https://raw.githubusercontent.com/${REPO}/${BRANCH}/plugins/${folder}/skills/index.json`,
+      { headers: before.listEtag ? { 'if-none-match': before.listEtag } : {} },
     );
     let names: string[];
     if (list.status === 304) names = Object.keys(before.files);
     else if (list.ok) {
-      const entries =
-        await list.json<Array<{ name?: unknown; type?: unknown }>>();
-      names = entries.flatMap((one) =>
-        one.type === 'dir' && typeof one.name === 'string' ? [one.name] : [],
-      );
-    } else throw new Error(`listing answered ${list.status}`);
+      const index = await list.json<unknown>();
+      if (!Array.isArray(index)) throw new Error('index.json is not a list');
+      names = index.filter((name): name is string => typeof name === 'string');
+    } else throw new Error(`index.json answered ${list.status}`);
     names = names.filter((name) => SKILL_NAME.test(name)).slice(0, MAX_SKILLS);
 
     const files: SkillSnapshot['files'] = {};
