@@ -62,6 +62,8 @@ export { MatrixGatewayDO } from './matrix/gateway-do';
 export { SequenceManagerDO } from '@ixo/impactxclient-sdk/cloudflare';
 /** Claim message builders for plugins that sign through `ctx.chain`. */
 export { claimIntentExec, submitClaimExec, type Coin } from './chain';
+/** asks.world sign-ins, one per person; a host re-exports it under this name (`docs/asks.md`). */
+export { AsksConnectionDO } from './plugins/asks/connection-do';
 export {
   createUserOracleDO,
   type OracleWorkerHooks,

@@ -1,5 +1,31 @@
 # @ixo/oracle-runtime-workers
 
+## 0.41.0
+
+### Minor Changes
+
+- [#474](https://github.com/ixoworld/qiforge/pull/474) [`88085bb`](https://github.com/ixoworld/qiforge/commit/88085bbf2043fe889b499e6415bfde7442a3f848) Thanks [@youssefhany-ixo](https://github.com/youssefhany-ixo)! - asks.world plugin (`AsksPlugin`), moved from IXO Companion without changing its behaviour, and added to `BUNDLED_WORKERS_PLUGINS`. It is off unless `ASKS_TOKEN_KEY` and `ORACLE_PUBLIC_URL` are set. `NETWORK` picks the connector (mainnet `asks.world`, testnet `test.asks.world`, devnet `dev.asks.world`); when `NETWORK` is missing or unknown, the plugin stays off and logs why. `ASKS_WHATSAPP_RETURN_URL` and `ASKS_ALLOWED_DIDS` are optional. Each person's sign-in lives in `AsksConnectionDO`, which the package now exports. An oracle that turns the plugin on binds it as `ASKS_CONNECTIONS`, adds a `new_sqlite_classes` migration and re-exports the class from its worker entry. The sign-in routes are under `/asks/oauth/*`, without auth. The client name asks shows comes from `ORACLE_NAME`. See `docs/asks.md`.
+
+## 0.40.1
+
+### Patch Changes
+
+- Updated dependencies [[`86d7813`](https://github.com/ixoworld/qiforge/commit/86d7813cc08706f2f4471fc869b3ea46de6e6c1e)]:
+  - @ixo/action-interactions@0.1.1
+  - @ixo/ixo-transaction@0.2.0
+
+## 0.40.0
+
+### Minor Changes
+
+- [#377](https://github.com/ixoworld/qiforge/pull/377) [`5d9690f`](https://github.com/ixoworld/qiforge/commit/5d9690f40aeba01cccdd30397b891ace1cf7f3e6) Thanks [@ig-shaun](https://github.com/ig-shaun)! - Add private, revision-bound Companion action interaction drafts. `@ixo/action-interactions` is the portable wire contract and client (published as compiled JavaScript; stored records and responses parse leniently, requests strictly). The Workers runtime stores drafts per user behind `ACTION_INTERACTIONS_ENABLED`, reserves one reviewed claim operation and checks every claim dispatch without booting the user object. A manual form submission supersedes a card whose operation never reached the claim service and closes the step to new cards; a host can report `not-submitted` to release a step the executor refused before sending; an undispatched reservation can be cancelled. Drafts are indexed per session, removed with a deleted chat, and retained for 30 days after expiry (pruned on new drafts and on the housekeeping alarm). Card reads use their own rate-limit bucket. The client SDK re-exports the contract at `@ixo/oracles-client-sdk/action-interactions`.
+
+### Patch Changes
+
+- Updated dependencies [[`5d9690f`](https://github.com/ixoworld/qiforge/commit/5d9690f40aeba01cccdd30397b891ace1cf7f3e6)]:
+  - @ixo/action-interactions@0.1.0
+  - @ixo/ixo-transaction@0.2.0
+
 ## 0.39.0
 
 ### Minor Changes
