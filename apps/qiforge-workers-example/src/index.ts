@@ -12,6 +12,7 @@ import {
   SkillsPlugin,
   FlowsPlugin,
   IxoTransactionPlugin,
+  OraclePaymentsPlugin,
   BUNDLED_WORKERS_PLUGINS,
 } from '@ixo/oracle-runtime-workers';
 import { config } from './config';
@@ -31,6 +32,8 @@ const oracle = createOracleWorker({
     new SkillsPlugin(),
     new FlowsPlugin(),
     new IxoTransactionPlugin(),
+    // Sells AGENT_CARD_JSON's services over chat; inert without it.
+    new OraclePaymentsPlugin(),
     new DrillPlugin(),
     ...BUNDLED_WORKERS_PLUGINS,
   ],
@@ -54,6 +57,7 @@ const oracle = createOracleWorker({
 // gateway class is served by `src/gateway.ts` instead and the export here is
 // simply unbound.
 export const { UserOracleDO, MatrixGatewayDO } = oracle;
+export { SequenceManagerDO } from '@ixo/oracle-runtime-workers';
 
 export default {
   fetch: oracle.fetch,
