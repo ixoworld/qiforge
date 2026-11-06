@@ -470,8 +470,13 @@ function connectorTool(
   };
 }
 
-/** The connector's tools for this turn: cached definitions, a lazy client. `null`: signed out. */
-async function connectorTools(turn: AsksTurn): Promise<PluginTool[] | null> {
+/**
+ * The connector's tools for this turn: cached definitions, a lazy client.
+ * `null`: signed out. `'loading'`: none cached yet, being fetched for the next message.
+ */
+async function connectorTools(
+  turn: AsksTurn,
+): Promise<PluginTool[] | null | 'loading'> {
   const { mcpUrl } = turn;
   const cached = defsCache.get(mcpUrl);
   const list = async (token: string) => {
@@ -479,8 +484,30 @@ async function connectorTools(turn: AsksTurn): Promise<PluginTool[] | null> {
     defsCache.set(mcpUrl, { defs: fresh, expiresAt: turn.now() + DEFS_TTL_MS });
     return fresh;
   };
+  const refresh = (background: (work: Promise<unknown>) => void) => {
+    if (defsRefreshing.has(mcpUrl)) return;
+    defsRefreshing.add(mcpUrl);
+    const work = turn.conn
+      .token()
+      .then(async (read) => {
+        if (read.ok) await list(read.access);
+        else if (read.reason !== 'unreachable') await markSeen(turn, null);
+      })
+      .catch((error: unknown) =>
+        turn.ctx.logger.warn(
+          `[asks] could not list asks tools: ${String(error)}`,
+        ),
+      )
+      .finally(() => defsRefreshing.delete(mcpUrl));
+    background(work);
+  };
   let defs = cached?.defs;
   if (!defs) {
+    // Never hold a turn on asks.world: the full list is there from the next message.
+    if (turn.ctx.background) {
+      refresh(turn.ctx.background);
+      return 'loading';
+    }
     const read = await turn.conn.token();
     if (!read.ok) {
       if (read.reason === 'unreachable')
@@ -489,19 +516,9 @@ async function connectorTools(turn: AsksTurn): Promise<PluginTool[] | null> {
       return null;
     }
     defs = await list(read.access);
-  } else if (
-    cached &&
-    cached.expiresAt <= turn.now() &&
-    !defsRefreshing.has(mcpUrl)
-  ) {
+  } else if (cached && cached.expiresAt <= turn.now() && turn.ctx.background) {
     // Stale definitions keep serving while they refresh in the background.
-    defsRefreshing.add(mcpUrl);
-    const work = turn.conn
-      .token()
-      .then((read) => (read.ok ? list(read.access) : undefined))
-      .catch(() => undefined)
-      .finally(() => defsRefreshing.delete(mcpUrl));
-    turn.ctx.background?.(work);
+    refresh(turn.ctx.background);
   }
   const session = new AsksSession(turn);
   return defs.map((def) => connectorTool(turn, session, def));
@@ -710,5 +727,13 @@ export async function asksTools(turn: AsksTurn): Promise<PluginTool[]> {
     return [];
   });
   if (remote === null) return base;
+  if (remote === 'loading') {
+    const status = base[1]!;
+    base[1] = {
+      ...status,
+      description: `${status.description} asks.world's other actions are still loading and are there from the next message: never say asks cannot do something.`,
+    };
+    return [...base, disconnectTool(turn), attachTool(turn)];
+  }
   return [...base, disconnectTool(turn), attachTool(turn), ...remote];
 }

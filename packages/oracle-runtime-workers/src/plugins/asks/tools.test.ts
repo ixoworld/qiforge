@@ -313,6 +313,50 @@ describe('asks tools', () => {
     ]);
   });
 
+  it('nothing cached: answers at once with its own tools and lists asks in the background', async () => {
+    const { conn } = fakeConnection();
+    const work: Array<Promise<unknown>> = [];
+    const ctx = fakeContext({
+      background: (one: Promise<unknown>) => work.push(one),
+    });
+    await ctx.kv!.set('asks/connection', 'state', { status: 'connected' });
+    const mcp = fakeMcp([mcpTool('my_status')]);
+    const first = await asksTools(turnWith(conn, mcp.connect, ctx));
+    expect(names(first)).toEqual([
+      'asks_connect',
+      'asks_status',
+      'asks_skill',
+      'asks_disconnect',
+      'asks_attach_files',
+    ]);
+    expect(first[1]!.description).toContain('still loading');
+    // A second turn while the list is on its way starts no second fetch.
+    await asksTools(turnWith(conn, mcp.connect, ctx));
+    expect(work).toHaveLength(1);
+    await Promise.all(work);
+    expect(mcp.tokens).toEqual(['asks_at_1']);
+    const next = await asksTools(turnWith(conn, mcp.connect, ctx));
+    expect(names(next)).toContain('asks__my_status');
+    expect(next[1]!.description).not.toContain('still loading');
+    expect(mcp.tokens).toHaveLength(1);
+  });
+
+  it('nothing cached and signed out at asks: the background fetch marks it signed out', async () => {
+    const { conn } = fakeConnection({
+      token: () => Promise.resolve({ ok: false as const, reason: 'ended' }),
+    });
+    const work: Array<Promise<unknown>> = [];
+    const ctx = fakeContext({
+      background: (one: Promise<unknown>) => work.push(one),
+    });
+    await ctx.kv!.set('asks/connection', 'state', { status: 'connected' });
+    const mcp = fakeMcp([mcpTool('my_status')]);
+    await asksTools(turnWith(conn, mcp.connect, ctx));
+    await Promise.all(work);
+    expect(await ctx.kv!.get('asks/connection', 'state')).toBeUndefined();
+    expect(mcp.tokens).toHaveLength(0);
+  });
+
   it('a pending sign-in asks the object; once connected the store remembers it', async () => {
     let asked = 0;
     const { conn } = fakeConnection({
