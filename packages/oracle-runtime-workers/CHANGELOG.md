@@ -1,5 +1,13 @@
 # @ixo/oracle-runtime-workers
 
+## 0.41.1
+
+### Patch Changes
+
+- [#478](https://github.com/ixoworld/qiforge/pull/478) [`70220f9`](https://github.com/ixoworld/qiforge/commit/70220f94e729eac71929ef6f7ec70d90e7f3eaf6) Thanks [@youssefhany-ixo](https://github.com/youssefhany-ixo)! - asks: the skills list now comes from `plugins/<folder>/skills/index.json` on raw.githubusercontent.com instead of GitHub's API, which answered 403 on Cloudflare's shared IPs, so new asks skills reached no oracle. Until that file is on ixo-plugins `main`, the plugin keeps its bundled skills, as before.
+
+- [#477](https://github.com/ixoworld/qiforge/pull/477) [`eb56a2d`](https://github.com/ixoworld/qiforge/commit/eb56a2dc37d5e9eeb397c8c57a3de944f7f6edc6) Thanks [@youssefhany-ixo](https://github.com/youssefhany-ixo)! - asks: a turn never waits for asks.world's tool list. With nothing cached yet, the plugin answers at once with its own asks tools, tells the model the rest are loading, and fetches the list in the background, so the full set is there from the next message. A sign-in that ended is still noticed in that background fetch. Hosts without `background` wait for the list as before.
+
 ## 0.41.0
 
 ### Minor Changes
