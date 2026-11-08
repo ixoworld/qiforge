@@ -79,7 +79,7 @@ describe('buildStageSubAgents', () => {
       'call_service_intent_scorer_agent',
     );
     expect(subs[0]?.model).toBe('subagent');
-    expect(subs[0]?.forwardTools).toBe(true);
+    expect(subs[0]?.forwardTools).toEqual(['submit_section']);
 
     const prompt = subs[0]?.systemPrompt;
     if (typeof prompt !== 'string') {

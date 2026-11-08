@@ -4,7 +4,9 @@ import {
   createDanglingToolCallRepairMiddleware,
   interruptedToolResult,
   repairDanglingToolCalls,
+  withoutForwarded,
 } from './dangling-tool-calls';
+import { FORWARDED_FROM_KEY } from '../subagent-as-tool';
 
 const call = (id: string, name = 'sandbox_run') => ({
   id,
@@ -104,6 +106,118 @@ describe('repairDanglingToolCalls', () => {
     ];
     expect(repairDanglingToolCalls(messages).repaired).toBe(0);
   });
+
+  /** What a sub-agent with `forwardTools` hands back: its forwarded pair, then the parent call's result. */
+  const forwarded = (parent: string, result: string) => [
+    new AIMessage({
+      content: '',
+      tool_calls: [call(`${parent}_inner`, 'submit_section')],
+    }),
+    new ToolMessage({
+      tool_call_id: `${parent}_inner`,
+      name: 'submit_section',
+      content: '{"submitted":"role","stage":"evaluate"}',
+    }),
+    new ToolMessage({ tool_call_id: parent, content: result }),
+  ];
+
+  it("moves a forwarding sub-agent's result up to its call instead of calling it interrupted", () => {
+    const messages = [
+      new HumanMessage('evaluate'),
+      new AIMessage({
+        content: '',
+        tool_calls: [call('p', 'call_risk_agent')],
+      }),
+      ...forwarded('p', 'PASS'),
+      new AIMessage('done'),
+    ];
+    const result = repairDanglingToolCalls(messages);
+    expect(result.repaired).toBe(0);
+    expect(result.regrouped).toBe(1);
+    expect(
+      result.messages.map((m) =>
+        ToolMessage.isInstance(m) ? `tool:${m.tool_call_id}` : m.type,
+      ),
+    ).toEqual(['human', 'ai', 'tool:p', 'ai', 'tool:p_inner', 'ai']);
+    expect(result.messages[2]?.content).toBe('PASS');
+    // Nothing interrupted is said about a call that returned.
+    expect(JSON.stringify(result.messages)).not.toContain('interrupted');
+  });
+
+  it('regroups every result of parallel forwarding calls, each after its own call', () => {
+    const messages = [
+      new HumanMessage('evaluate all'),
+      new AIMessage({
+        content: '',
+        tool_calls: [call('x', 'call_a_agent'), call('y', 'call_b_agent')],
+      }),
+      ...forwarded('x', 'A done'),
+      ...forwarded('y', 'B done'),
+      new AIMessage('both done'),
+    ];
+    const result = repairDanglingToolCalls(messages);
+    expect(result).toMatchObject({ repaired: 0, regrouped: 2 });
+    expect(
+      result.messages.map((m) =>
+        ToolMessage.isInstance(m) ? `tool:${m.tool_call_id}` : m.type,
+      ),
+    ).toEqual([
+      'human',
+      'ai',
+      'tool:x',
+      'tool:y',
+      'ai',
+      'tool:x_inner',
+      'ai',
+      'tool:y_inner',
+      'ai',
+    ]);
+  });
+
+  it('never takes a result from a later turn: that call is still interrupted', () => {
+    const messages = [
+      new HumanMessage('run it'),
+      new AIMessage({ content: '', tool_calls: [call('a')] }),
+      new HumanMessage('again'),
+      new AIMessage({ content: '', tool_calls: [call('a')] }),
+      new ToolMessage({ tool_call_id: 'a', name: 'sandbox_run', content: '1' }),
+    ];
+    const result = repairDanglingToolCalls(messages);
+    expect(result).toMatchObject({ repaired: 1, regrouped: 0 });
+    expect((result.messages[2] as ToolMessage).content).toBe(
+      interruptedToolResult('sandbox_run'),
+    );
+    expect((result.messages[5] as ToolMessage).content).toBe('1');
+  });
+});
+
+describe('withoutForwarded', () => {
+  it('leaves out the messages a sub-agent forwarded, and only those', () => {
+    const kept = [
+      new HumanMessage('evaluate'),
+      new AIMessage({ content: '', tool_calls: [call('p', 'call_x_agent')] }),
+      new ToolMessage({ tool_call_id: 'p', content: 'recorded' }),
+    ];
+    const marked = { [FORWARDED_FROM_KEY]: 'p' };
+    const messages = [
+      kept[0]!,
+      kept[1]!,
+      new AIMessage({
+        content: '',
+        tool_calls: [call('p_inner', 'submit_section')],
+        additional_kwargs: marked,
+      }),
+      new ToolMessage({
+        tool_call_id: 'p_inner',
+        content: 'ok',
+        additional_kwargs: marked,
+      }),
+      kept[2]!,
+    ];
+    expect(withoutForwarded(messages)).toEqual(kept);
+    // Nothing forwarded: the same array.
+    expect(withoutForwarded(kept)).toBe(kept);
+  });
 });
 
 describe('createDanglingToolCallRepairMiddleware', () => {
@@ -141,5 +255,50 @@ describe('createDanglingToolCallRepairMiddleware', () => {
     const sent = handler.mock.calls[0]?.[0].messages as ToolMessage[];
     expect(sent.map((m) => m.type)).toEqual(['human', 'ai', 'tool', 'human']);
     expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it("hands the model the parent call and its result, not a sub-agent's forwarded messages", async () => {
+    const marked = { [FORWARDED_FROM_KEY]: 'p' };
+    const { handler, invoke, warn } = setup([
+      new HumanMessage('evaluate'),
+      new AIMessage({ content: '', tool_calls: [call('p', 'call_x_agent')] }),
+      new AIMessage({
+        content: '',
+        tool_calls: [call('p_inner', 'submit_section')],
+        additional_kwargs: marked,
+      }),
+      new ToolMessage({
+        tool_call_id: 'p_inner',
+        content: 'ok',
+        additional_kwargs: marked,
+      }),
+      new ToolMessage({ tool_call_id: 'p', content: 'done' }),
+    ]);
+    await invoke();
+    const sent = handler.mock.calls[0]?.[0].messages as ToolMessage[];
+    expect(sent.map((m) => m.type)).toEqual(['human', 'ai', 'tool']);
+    expect(sent[2]?.content).toBe('done');
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('regroups a forwarded result without a warning (nothing was interrupted)', async () => {
+    const { handler, invoke, warn } = setup([
+      new HumanMessage('evaluate'),
+      new AIMessage({ content: '', tool_calls: [call('p', 'call_x_agent')] }),
+      new AIMessage({ content: '', tool_calls: [call('p_inner')] }),
+      new ToolMessage({ tool_call_id: 'p_inner', content: 'ok' }),
+      new ToolMessage({ tool_call_id: 'p', content: 'done' }),
+    ]);
+    await invoke();
+    const sent = handler.mock.calls[0]?.[0].messages as ToolMessage[];
+    expect(sent.map((m) => m.type)).toEqual([
+      'human',
+      'ai',
+      'tool',
+      'ai',
+      'tool',
+    ]);
+    expect(sent[2]?.tool_call_id).toBe('p');
+    expect(warn).not.toHaveBeenCalled();
   });
 });

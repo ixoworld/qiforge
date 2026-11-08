@@ -336,7 +336,19 @@ runtime since then exist only here; they are listed under
   session with `400 No tool output found for function call …`. The
   `DanglingToolCallRepair` middleware (main agent and sub-agents) answers
   each such call, for the model request only, with a result saying it was
-  interrupted; the checkpoint is untouched. Node has no equivalent.
+  interrupted; the checkpoint is untouched. A call whose result arrived
+  later in the turn is not interrupted: a sub-agent with `forwardTools`
+  hands back its forwarded messages before the parent call's own result
+  (with parallel calls, also before the other calls' results), and the
+  middleware moves that result up to its call instead. Before that, every
+  call of a forwarding sub-agent read as "interrupted … nothing from it was
+  recorded, call it again", and a model re-ran POD specialists that had
+  recorded their sections. The forwarded messages themselves (marked
+  `forwardedFrom` in `additional_kwargs`) are left out of the parent's model
+  requests: they are for the chat UI, and the parent reads the call's own
+  result. Shown to the model, a forwarded call read as one of its own (it
+  called a specialist's `submit_section` itself) and its arguments, a whole
+  POD section, were sent on every later model call. Node has no equivalent.
 - **Task schedule at the tool boundary.** `preview_task` / `create_task` /
   `update_task` take the schedule as one flat object (`kind` enum plus the
   optional per-kind fields) and convert it to the scheduler's discriminated

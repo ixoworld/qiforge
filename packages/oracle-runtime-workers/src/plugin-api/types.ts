@@ -1317,6 +1317,13 @@ export interface PluginSubAgent {
    *
    * Runtime-injected passthrough tools (e.g. memory CRUD) are never
    * forwarded — they're already on the main agent.
+   *
+   * Forwarded messages are for the chat: they stay in the thread (the UI
+   * and the transcript show them) but are left out of the parent's model
+   * requests. The parent model reads the sub-agent's final reply as the
+   * call's result (its last tool result when that reply is empty), so the
+   * sub-agent's reply must say what it did. Forward the calls the user
+   * should see (a write, its receipt), not large reads.
    */
   forwardTools?: boolean | string[];
   /** Called after sub-agent completes; can emit follow-up events. */

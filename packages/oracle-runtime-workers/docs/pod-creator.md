@@ -18,7 +18,17 @@ orchestration tools (`start_pod_design`, `get_blueprint`, `compute_readiness`,
 `design-pod-*` capsule, defined in `design-pod-roles.ts`) do the design work.
 `getRequestSubAgents` exposes only the current stage's specialists, so the
 pipeline order is enforced by construction; the runtime wraps each as
-`call_<role>_agent` (`core/subagent-as-tool.ts`).
+`call_<role>_agent` (`core/subagent-as-tool.ts`). A specialist forwards only
+its `submit_section` call into the chat (`forwardTools: ['submit_section']`):
+its `read_blueprint` reads (a full-section read is often over 60 KB) stay
+inside the specialist, so they never land in the conductor's thread to be
+capped and paged through with `read_result`. The forwarded call is for the
+chat only: the conductor's model requests leave it out (it would otherwise
+take `submit_section` for one of its own tools and resend the section on
+every call). A specialist that ends on an
+empty reply, as models often do right after `submit_section`, hands the
+conductor its last tool result instead (`{"submitted": <role>, "stage":
+<stage>}`), so the conductor can tell the section was recorded.
 
 The runtime calls every plugin's `getRequestSubAgents` on every turn of every
 user, whether or not the capability is loaded. So until `start_pod_design` has

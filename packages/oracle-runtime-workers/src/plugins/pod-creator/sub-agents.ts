@@ -153,7 +153,12 @@ async function buildSubAgent(
     systemPrompt: await resolvePrompt(role, rt, capsules),
     tools: roleTools(role, storeFor),
     model: 'subagent',
-    forwardTools: true,
+    // Only the write is forwarded (shown in the chat as the specialist's
+    // recorded section). Its `read_blueprint` reads stay inside the
+    // specialist: forwarded, each full-section read (often over 60 KB) landed
+    // in the main thread, was capped and saved, and the main model paged
+    // through it with read_result.
+    forwardTools: ['submit_section'],
   };
 }
 
