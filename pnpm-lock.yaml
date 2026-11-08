@@ -13,7 +13,7 @@ overrides:
   '@langchain/langgraph': 1.4.17
   '@langchain/langgraph-checkpoint': 1.1.5
   yjs: 13.6.32
-  '@langchain/langgraph-checkpoint-sqlite': 1.0.4
+  '@langchain/langgraph-checkpoint-sqlite': 1.1.0
   '@langchain/langgraph-checkpoint-validation': 1.1.1
   '@langchain/langgraph-supervisor': 1.0.3
   '@langchain/community': 1.1.29
@@ -243,8 +243,8 @@ importers:
         specifier: 1.1.5
         version: 1.1.5(@langchain/core@1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2))
       '@langchain/langgraph-checkpoint-sqlite':
-        specifier: 1.0.4
-        version: 1.0.4(@langchain/core@1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2))(@langchain/langgraph-checkpoint@1.1.5(@langchain/core@1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2)))
+        specifier: 1.1.0
+        version: 1.1.0(@langchain/core@1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2))(@langchain/langgraph-checkpoint@1.1.5(@langchain/core@1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2)))
       '@langchain/openai':
         specifier: 1.4.7
         version: 1.4.7(@langchain/core@1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2))(ws@8.18.2)
@@ -3971,8 +3971,8 @@ packages:
     resolution: {integrity: sha512-fQU6Guyb1pwc2fEplmA8FPbKfOMAofjnyJzExevro0FxEiuGHE18Ov/ZHmT9trWCDTZRI9eW1VIc6aChxV8pAQ==}
     engines: {node: '>=20'}
 
-  '@langchain/langgraph-checkpoint-sqlite@1.0.4':
-    resolution: {integrity: sha512-tcfDU6mwy9Su7BQKjGLTrWPL2CZzaGwb5XzEttqRRhcI3g4P6a/S7qFoJf6jcP/vP71bere7JRDZPTzahhHqog==}
+  '@langchain/langgraph-checkpoint-sqlite@1.1.0':
+    resolution: {integrity: sha512-bKoRJ3nSuWbFVXixDO/yngcAOvYvHSYMhUE8XiT6oW5nQRGaheTWVT2mNoMTp53o8IBT71sy6CdWxfmMg3jpkg==}
     engines: {node: '>=18'}
     peerDependencies:
       '@langchain/core': 1.1.48
@@ -11312,9 +11312,6 @@ packages:
   survey-core@2.3.11:
     resolution: {integrity: sha512-Wymt5zZl4BXqIPRuvMc6whoYBTC1tRgv0GcPTYDeOZgUoKP/aD3Q6LCd2m1uU26iIT+EGBY1lfhM1HAFjoa4Vw==}
 
-  survey-core@2.5.38:
-    resolution: {integrity: sha512-uI/5ocM08K3LKCa6M1njs8YbRuuF/4vxfAFwyo0RaImoAVdGKkayxt2gNqapTOb0qwYX6OFdDTkEqSMgjYsW8g==}
-
   survey-creator-core@2.5.38:
     resolution: {integrity: sha512-2TovVZovembd3letX6phne/PbOtrv1k5fyge8Kn49bdARITeU05F10y0YgqhFJyj4M3Yd/ZH3vPVvE4kD6tk5w==}
     engines: {node: '>=0.10.0'}
@@ -15845,10 +15842,10 @@ snapshots:
       maplibre-gl: 2.4.0
       react: 18.3.1
       react-dom: 18.3.1(react@18.3.1)
-      survey-core: 2.5.38
-      survey-creator-core: 2.5.38(survey-core@2.5.38)
-      survey-creator-react: 2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.5.38)(survey-creator-core@2.5.38(survey-core@2.5.38))(survey-react-ui@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.5.38))
-      survey-react-ui: 2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.5.38)
+      survey-core: 2.3.11
+      survey-creator-core: 2.5.38(survey-core@2.3.11)
+      survey-creator-react: 2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.3.11)(survey-creator-core@2.5.38(survey-core@2.3.11))(survey-react-ui@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.3.11))
+      survey-react-ui: 2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.3.11)
       unl-core: 3.0.1
       unl-map-js: 0.1.7
     transitivePeerDependencies:
@@ -16008,7 +16005,7 @@ snapshots:
       - openai
       - ws
 
-  '@langchain/langgraph-checkpoint-sqlite@1.0.4(@langchain/core@1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2))(@langchain/langgraph-checkpoint@1.1.5(@langchain/core@1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2)))':
+  '@langchain/langgraph-checkpoint-sqlite@1.1.0(@langchain/core@1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2))(@langchain/langgraph-checkpoint@1.1.5(@langchain/core@1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2)))':
     dependencies:
       '@langchain/core': 1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2)
       '@langchain/langgraph-checkpoint': 1.1.5(@langchain/core@1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2))
@@ -25338,25 +25335,23 @@ snapshots:
 
   survey-core@2.3.11: {}
 
-  survey-core@2.5.38: {}
-
-  survey-creator-core@2.5.38(survey-core@2.5.38):
+  survey-creator-core@2.5.38(survey-core@2.3.11):
     dependencies:
-      survey-core: 2.5.38
+      survey-core: 2.3.11
 
-  survey-creator-react@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.5.38)(survey-creator-core@2.5.38(survey-core@2.5.38))(survey-react-ui@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.5.38)):
+  survey-creator-react@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.3.11)(survey-creator-core@2.5.38(survey-core@2.3.11))(survey-react-ui@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.3.11)):
     dependencies:
       react: 18.3.1
       react-dom: 18.3.1(react@18.3.1)
-      survey-core: 2.5.38
-      survey-creator-core: 2.5.38(survey-core@2.5.38)
-      survey-react-ui: 2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.5.38)
+      survey-core: 2.3.11
+      survey-creator-core: 2.5.38(survey-core@2.3.11)
+      survey-react-ui: 2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.3.11)
 
-  survey-react-ui@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.5.38):
+  survey-react-ui@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.3.11):
     dependencies:
       react: 18.3.1
       react-dom: 18.3.1(react@18.3.1)
-      survey-core: 2.5.38
+      survey-core: 2.3.11
 
   swagger-ui-dist@5.32.13:
     dependencies:
