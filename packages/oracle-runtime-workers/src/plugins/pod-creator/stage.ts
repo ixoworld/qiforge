@@ -1,3 +1,4 @@
+import { computeSubAgentToolName } from '../../core/subagent-as-tool';
 import type {
   BlueprintSection,
   PodBlueprint,
@@ -115,6 +116,35 @@ export function computeReadiness(bp: PodBlueprint): Readiness {
     blockers,
     score: required === 0 ? 0 : satisfied / required,
   };
+}
+
+/**
+ * What the conductor does next, in plain words. A stage's specialists are
+ * offered per turn (the plugin's request-time sub-agent hook), so a stage
+ * reached during a turn has its specialists only from the user's next
+ * message: the model is told to stop and ask the user to continue rather
+ * than reach for another stage's specialist.
+ */
+export function nextStep(bp: PodBlueprint): string {
+  if (computeReadiness(bp).complete)
+    return 'The design passed the launch-readiness gate. Agree the POD name and a one- or two-sentence description with the user, then call prepare_pod_transaction.';
+  const stage = deriveStage(bp);
+  const specialists = SPECIALISTS_FOR_STAGE[stage]
+    .filter((roleId) => !sectionSatisfies(bp.sections[roleId]))
+    .map((roleId) => computeSubAgentToolName(roleId));
+  return (
+    `Next: the ${stage} stage, run by ${specialists.join(', ')}. ` +
+    'They are in your tool list from your next step, except in the turn that opened the design: then stop and ask the user to send a message (for example "continue") to run them. ' +
+    "Never use another stage's specialist for this stage."
+  );
+}
+
+/** Whether a stage comes after another in {@link STAGE_ORDER}. */
+export function isStageAfter(
+  stage: DesignPodStage,
+  other: DesignPodStage,
+): boolean {
+  return STAGE_ORDER.indexOf(stage) > STAGE_ORDER.indexOf(other);
 }
 
 /**

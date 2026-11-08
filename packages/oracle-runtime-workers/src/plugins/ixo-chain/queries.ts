@@ -222,6 +222,32 @@ export function isBech32(address: string, prefix: string): boolean {
 }
 
 /**
+ * The bytes a valid bech32 `address` with the prefix `prefix` carries (for
+ * an account, the 20-byte hash of its public key); null when
+ * {@link isBech32} refuses it.
+ */
+export function bech32Bytes(
+  address: string,
+  prefix: string,
+): Uint8Array | null {
+  if (!isBech32(address, prefix)) return null;
+  const data = address.slice(prefix.length + 1, -BECH32_CHECKSUM);
+  const bytes: number[] = [];
+  let buffer = 0;
+  let bits = 0;
+  for (const char of data) {
+    buffer = (buffer << 5) | BECH32_CHARSET.indexOf(char);
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      bytes.push((buffer >>> bits) & 0xff);
+    }
+  }
+  // The leftover bits are the zero padding isBech32 checked.
+  return Uint8Array.from(bytes);
+}
+
+/**
  * The account an account field names: the user's own address when the
  * field is omitted, else an `ixo1…` address or the address a
  * `did:ixo:ixo1…` DID names, its bech32 checksum verified (a mistyped

@@ -79,12 +79,25 @@ function networkOf(config: MergedConfig): Network {
 
 /** The REST base URL: `CHAIN_REST_URL` when set, else the network's default. */
 export function chainRestUrl(config: MergedConfig): string {
+  return chainRestUrlFor(networkOf(config), config);
+}
+
+/**
+ * The REST base URL for `network`: `CHAIN_REST_URL` when set (the
+ * operator's node for the oracle's network), else that network's default.
+ * For a caller that already knows its network rather than reading
+ * `NETWORK` itself.
+ */
+export function chainRestUrlFor(
+  network: Network,
+  config: MergedConfig,
+): string {
   const override = configSchema.shape.CHAIN_REST_URL.safeParse(
     config.CHAIN_REST_URL,
   );
   return override.success && override.data
     ? override.data
-    : CHAIN_REST_URLS[networkOf(config)];
+    : CHAIN_REST_URLS[network];
 }
 
 /** The names worker's origin: `IXO_NAMES_URL` when set, else the network's default. */

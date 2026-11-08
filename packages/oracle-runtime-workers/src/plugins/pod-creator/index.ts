@@ -37,10 +37,17 @@ export {
   type Readiness,
 } from './stage';
 export { createOrchestrationTools } from './orchestration-tools';
-export { buildStageSubAgents } from './sub-agents';
 export {
+  buildSpecialistSubAgents,
+  buildStageSubAgents,
+  createSpecialistStageMiddleware,
+} from './sub-agents';
+export {
+  MAX_POD_DESCRIPTION_LENGTH,
   SIGN_TRANSACTION_ACTION,
   createCreateTools,
+  type AddPodDomainCardResult,
+  type ConfirmPodCreationResult,
   type RequestPodSignatureResult,
 } from './create-tools';
 export {
@@ -48,17 +55,32 @@ export {
   notConfiguredChainGateway,
   podBatchProblem,
   type ChainGateway,
-  type CreatedPod,
+  type GatewayRefusal,
+  type GatewayResult,
+  type PendingDocument,
+  type PodConfirmation,
+  type PodProfile,
   type PreparedPodBatch,
+  type SentPodBatch,
 } from './chain-gateway';
+export {
+  createIxoChainGateway,
+  podProfileDocument,
+  type IxoChainGatewayDeps,
+} from './ixo-chain-gateway';
+export { podDomainCardDocument } from './domain-card';
 export {
   KvCreateSessionStore,
   type ApproveOutcome,
+  type CardClaim,
   type CreateSessionStore,
+  type CreateSessionView,
   type CreateSessionStoreFor,
 } from './create-session-store';
 export {
   DEFAULT_NETWORK,
+  POD_RELAYER_NODE_DIDS,
+  PORTAL_URLS,
   podCreatorConfigSchema,
   readPodCreatorConfig,
 } from './config';

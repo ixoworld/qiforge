@@ -12,7 +12,8 @@
  * user object is reset (`/debug/object/abort`) and after the working copy is
  * wiped and re-imported from the owner copy (`/debug/storage/reset`); and the
  * create path refuses to prepare a transaction before the launch gate passes.
- * Nothing is signed or broadcast: the example oracle has no chain gateway.
+ * Nothing is signed or broadcast: the run stops at the launch gate, before
+ * the chain gateway is reached.
  */
 import assert from 'node:assert/strict';
 import { ChatClient, type SSEEvent } from './lib/chat-client';
@@ -250,7 +251,7 @@ async function main(): Promise<void> {
         await refreshAuth();
         const r = await client.stream(
           sessionId,
-          'Call prepare_pod_transaction now and report exactly what it returned. Do not call any other tool.',
+          'Call prepare_pod_transaction now with the name "Solar Monitoring POD" and report exactly what it returned. Do not call any other tool.',
         );
         assert.equal(r.status, 200, r.text);
         const call = doneCalls(r.events, 'prepare_pod_transaction').at(-1);

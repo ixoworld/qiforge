@@ -16,6 +16,9 @@ export const THREAD = 'session-1';
 /** The default user of `makeRuntimeContext()`. */
 export const USER = 'did:ixo:user1';
 
+/** `prepare_pod_transaction` args: the name the user agreed in the design. */
+export const PREPARE_ARGS = { name: 'Solar Monitoring POD' };
+
 export function byName(tools: readonly PluginTool[], name: string): PluginTool {
   const found = tools.find((t) => t.name === name);
   if (!found) {

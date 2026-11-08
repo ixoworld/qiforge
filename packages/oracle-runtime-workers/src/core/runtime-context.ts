@@ -95,7 +95,7 @@ export interface MatrixAdapter {
   getRoomState(roomId: string): Promise<RoomStateSnapshot>;
   getEventById(roomId: string, eventId: string): Promise<MatrixEvent>;
   /** See `MatrixGatewayObject.botCredentials`. */
-  botCredentials(): Promise<BotCredentials>;
+  botCredentials(opts?: { rejected?: string }): Promise<BotCredentials>;
   /** Group rooms: room kind and channel memory (see `plugin-api/types.ts`). Hosts without a gateway omit them. */
   roomInfo?: RuntimeContext['matrix']['roomInfo'];
   channelMemory?: RuntimeContext['matrix']['channelMemory'];
@@ -497,7 +497,7 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
     matrix: {
       postToRoom: (roomId, content, opts) =>
         ambient.matrix.postToRoom(roomId, content, opts),
-      botCredentials: () => ambient.matrix.botCredentials(),
+      botCredentials: (opts) => ambient.matrix.botCredentials(opts),
       postEvent: (roomId, eventType, content, opts) =>
         ambient.matrix.postEvent(roomId, eventType, content, opts),
       getRoomState: (roomId) => ambient.matrix.getRoomState(roomId),
