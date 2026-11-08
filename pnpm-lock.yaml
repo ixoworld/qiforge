@@ -585,7 +585,7 @@ importers:
         version: 6.1.3(@nestjs/common@11.2.1(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.2.1)
       '@nestjs/swagger':
         specifier: ^11.4.2
-        version: 11.4.7(@nestjs/common@11.2.1(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.2.1)(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)
+        version: 11.4.8(@nestjs/common@11.2.1(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.2.1)(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)
       '@nestjs/throttler':
         specifier: ^6.5.0
         version: 6.5.0(@nestjs/common@11.2.1(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.2.1)(reflect-metadata@0.2.2)
@@ -4143,8 +4143,8 @@ packages:
     resolution: {integrity: sha512-P3v8849O/1+c1CYDQ1X6L1p6UpakYAav1L4wTNvwLA54n9wNpadpw8sLZoxhaG4ftlmNzxFztjRYwDvx56d11w==}
     engines: {node: '>= 18'}
 
-  '@microsoft/tsdoc@0.16.0':
-    resolution: {integrity: sha512-xgAyonlVVS+q7Vc7qLW0UrJU7rSFcETRWsqdXZtjzRU8dF+6CkozTK4V4y1LwOX7j8r/vHphjDeMeGI4tNGeGA==}
+  '@microsoft/tsdoc@0.17.1':
+    resolution: {integrity: sha512-VHyYyyoH63jFoO3shpw9Zfijk5v/9p/VrClW35z0/q6ooK7sSmxpzOkS4iZPxs3vO4XtBW4H38HRAKkAMIK7DA==}
 
   '@modelcontextprotocol/sdk@1.29.0':
     resolution: {integrity: sha512-zo37mZA9hJWpULgkRpowewez1y6ML5GsXJPY8FI0tBBCd77HEvza4jDqRKOXgHNn867PVGCyTdzqpz0izu5ZjQ==}
@@ -4375,8 +4375,8 @@ packages:
       '@nestjs/common': ^10.0.0 || ^11.0.0
       '@nestjs/core': ^10.0.0 || ^11.0.0
 
-  '@nestjs/swagger@11.4.7':
-    resolution: {integrity: sha512-QyDYnmfP4IRucgmtQxMqzgRBdWtjFoDp8eFvvgf92+3wdLCL+Q0xOFO1948j/ntW/Wi7qT2dyck6ka8ADzPWQQ==}
+  '@nestjs/swagger@11.4.8':
+    resolution: {integrity: sha512-5Vd4/dPvrWCSRTjrXsfoemir9Mva1Pg5hZiUQ80+9mDkxlJBpK2Lpn4OVfM4g+TJeQwIwNgSHC47B5em75Jn3g==}
     peerDependencies:
       '@fastify/static': ^8.0.0 || ^9.0.0 || ^10.0.0
       '@nestjs/common': ^11.0.1
@@ -6121,6 +6121,9 @@ packages:
 
   argparse@2.0.1:
     resolution: {integrity: sha512-8+9WqebbFzpX9OR+Wa6O29asIogeRMzcGtAINdpMHHyAg10f05aSFVBbcEqGf/PXw1EjAZ+q2/bEBg3DvurK3Q==}
+
+  argparse@3.0.4:
+    resolution: {integrity: sha512-fwWK3Zq22l4XJJjx5mcBHGikIk+hJqO+32dPm0Jur7+rtG5x1scOjSfdT9ZKeWHPpsya/l0HHK4tDImBkTrtvA==}
 
   aria-query@5.1.3:
     resolution: {integrity: sha512-R5iJ5lkuHybztUfuOAznmboyjWq8O6sqNqtK7CLOqdydi54VNbORp49mb14KbWgG1QD3JFO9hJdZ+y4KutfdOQ==}
@@ -8771,8 +8774,8 @@ packages:
     resolution: {integrity: sha512-CY6crGq313MX8GkwvB7tzgp99vjQxY1++5y10/BKN/GUfHqWaOGQMNZkBvqSzsZKWk/ijwHlWzzkLulsGHhjWQ==}
     hasBin: true
 
-  js-yaml@5.3.0:
-    resolution: {integrity: sha512-muutsYr+e2+d3rTgUGslq5rxbBlUy3cJ61IsHag2QNDQV+7zXWjkUpmALIajhrlLlrgRUiymj6U3zUr/TMK84Q==}
+  js-yaml@5.5.0:
+    resolution: {integrity: sha512-paNr4LFIFPjeeSmwNYdrb8FafLLG/Cr2Af3GjbsHJ5CxIjH4r0c2emlmRdAtpPAieP1gRVzk6buBbVP5gBMGAg==}
     hasBin: true
 
   jsbn@0.1.1:
@@ -11312,9 +11315,6 @@ packages:
   survey-core@2.3.11:
     resolution: {integrity: sha512-Wymt5zZl4BXqIPRuvMc6whoYBTC1tRgv0GcPTYDeOZgUoKP/aD3Q6LCd2m1uU26iIT+EGBY1lfhM1HAFjoa4Vw==}
 
-  survey-core@2.5.38:
-    resolution: {integrity: sha512-uI/5ocM08K3LKCa6M1njs8YbRuuF/4vxfAFwyo0RaImoAVdGKkayxt2gNqapTOb0qwYX6OFdDTkEqSMgjYsW8g==}
-
   survey-creator-core@2.5.38:
     resolution: {integrity: sha512-2TovVZovembd3letX6phne/PbOtrv1k5fyge8Kn49bdARITeU05F10y0YgqhFJyj4M3Yd/ZH3vPVvE4kD6tk5w==}
     engines: {node: '>=0.10.0'}
@@ -11346,8 +11346,8 @@ packages:
       react-dom: ^16.5.0 || ^17.0.1 || ^18.1.0 || ^19.0.0
       survey-core: 2.5.38
 
-  swagger-ui-dist@5.32.13:
-    resolution: {integrity: sha512-qQobzb3DeC2LeK0j3E8812Ef4aIq1y9flJxvZkimkqUC/w4u7wS+yCc+VakqGJLweUUBrI24effhwo8OsAvNAw==}
+  swagger-ui-dist@5.34.1:
+    resolution: {integrity: sha512-VSr8fXfI93obYaQicLJbLUKGRxDojj/SfRJDDLCioGTUBj4BK/Nj4eE9jCeCAnJxVLi7iS+08PbiZLyrQKBkJQ==}
 
   swap-case@2.0.2:
     resolution: {integrity: sha512-kc6S2YS/2yXbtkSMunBtKdah4VFETZ8Oh6ONSmSd9bRxhqTrtARUCBUiWXH3xVPpvR7tz2CSnkuXVE42EcGnMw==}
@@ -15845,10 +15845,10 @@ snapshots:
       maplibre-gl: 2.4.0
       react: 18.3.1
       react-dom: 18.3.1(react@18.3.1)
-      survey-core: 2.5.38
-      survey-creator-core: 2.5.38(survey-core@2.5.38)
-      survey-creator-react: 2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.5.38)(survey-creator-core@2.5.38(survey-core@2.5.38))(survey-react-ui@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.5.38))
-      survey-react-ui: 2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.5.38)
+      survey-core: 2.3.11
+      survey-creator-core: 2.5.38(survey-core@2.3.11)
+      survey-creator-react: 2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.3.11)(survey-creator-core@2.5.38(survey-core@2.3.11))(survey-react-ui@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.3.11))
+      survey-react-ui: 2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.3.11)
       unl-core: 3.0.1
       unl-map-js: 0.1.7
     transitivePeerDependencies:
@@ -16245,7 +16245,7 @@ snapshots:
 
   '@matrix-org/matrix-sdk-crypto-wasm@18.6.0': {}
 
-  '@microsoft/tsdoc@0.16.0': {}
+  '@microsoft/tsdoc@0.17.1': {}
 
   '@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)':
     dependencies:
@@ -16480,17 +16480,17 @@ snapshots:
       '@nestjs/core': 11.2.1(@nestjs/common@11.2.1(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/platform-express@11.2.1)(@nestjs/websockets@11.2.1)(reflect-metadata@0.2.2)(rxjs@7.8.2)
       cron: 4.4.0
 
-  '@nestjs/swagger@11.4.7(@nestjs/common@11.2.1(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.2.1)(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)':
+  '@nestjs/swagger@11.4.8(@nestjs/common@11.2.1(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.2.1)(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)':
     dependencies:
-      '@microsoft/tsdoc': 0.16.0
+      '@microsoft/tsdoc': 0.17.1
       '@nestjs/common': 11.2.1(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2)
       '@nestjs/core': 11.2.1(@nestjs/common@11.2.1(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/platform-express@11.2.1)(@nestjs/websockets@11.2.1)(reflect-metadata@0.2.2)(rxjs@7.8.2)
       '@nestjs/mapped-types': 2.1.1(@nestjs/common@11.2.1(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)
-      js-yaml: 5.3.0
+      js-yaml: 5.5.0
       lodash: 4.18.1
       path-to-regexp: 8.4.2
       reflect-metadata: 0.2.2
-      swagger-ui-dist: 5.32.13
+      swagger-ui-dist: 5.34.1
     optionalDependencies:
       class-transformer: 0.5.1
       class-validator: 0.14.4
@@ -18794,6 +18794,8 @@ snapshots:
       sprintf-js: 1.0.3
 
   argparse@2.0.1: {}
+
+  argparse@3.0.4: {}
 
   aria-query@5.1.3:
     dependencies:
@@ -22114,9 +22116,9 @@ snapshots:
     dependencies:
       argparse: 2.0.1
 
-  js-yaml@5.3.0:
+  js-yaml@5.5.0:
     dependencies:
-      argparse: 2.0.1
+      argparse: 3.0.4
 
   jsbn@0.1.1: {}
 
@@ -25338,27 +25340,25 @@ snapshots:
 
   survey-core@2.3.11: {}
 
-  survey-core@2.5.38: {}
-
-  survey-creator-core@2.5.38(survey-core@2.5.38):
+  survey-creator-core@2.5.38(survey-core@2.3.11):
     dependencies:
-      survey-core: 2.5.38
+      survey-core: 2.3.11
 
-  survey-creator-react@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.5.38)(survey-creator-core@2.5.38(survey-core@2.5.38))(survey-react-ui@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.5.38)):
+  survey-creator-react@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.3.11)(survey-creator-core@2.5.38(survey-core@2.3.11))(survey-react-ui@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.3.11)):
     dependencies:
       react: 18.3.1
       react-dom: 18.3.1(react@18.3.1)
-      survey-core: 2.5.38
-      survey-creator-core: 2.5.38(survey-core@2.5.38)
-      survey-react-ui: 2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.5.38)
+      survey-core: 2.3.11
+      survey-creator-core: 2.5.38(survey-core@2.3.11)
+      survey-react-ui: 2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.3.11)
 
-  survey-react-ui@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.5.38):
+  survey-react-ui@2.5.38(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(survey-core@2.3.11):
     dependencies:
       react: 18.3.1
       react-dom: 18.3.1(react@18.3.1)
-      survey-core: 2.5.38
+      survey-core: 2.3.11
 
-  swagger-ui-dist@5.32.13:
+  swagger-ui-dist@5.34.1:
     dependencies:
       '@scarf/scarf': 1.4.0
 
