@@ -317,6 +317,19 @@ Deploy this runtime before the matching gateway. No additional Auth Hub grant or
 `request_chain_transaction` and `hub_action_status` tools plus read-only
 `hub_action_capabilities`, `hub_action_options` and
 `describe_chain_messages`.
+Only a channel turn is offered the tools that prepare an action
+(`hub_action_capabilities`, `hub_action_options`, `request_hub_action`,
+`describe_chain_messages` and `request_chain_transaction`, all request-time
+tools, `getRequestTools`): Auth Hub binds every review to the turn's channel
+binding, so on a Portal, Matrix or other turn they could only refuse, and a
+model offered them read the refusal as an Auth Hub outage. Those turns get
+`hub_action_status` alone (a boot-time tool: an action prepared in a channel
+chat is followed from the Portal too, where the conversation is mirrored),
+whose description tells the model that Hub actions are prepared only in a
+channel chat and never to call their absence an outage. The handlers still
+refuse off a channel turn, in words (`NOT_A_CHANNEL_CHAT_REASON`: Auth Hub was
+not contacted, nothing was prepared, ask in the channel chat; or
+`HUB_ACTIONS_OFF_REASON`), never a bare `{status: 'unavailable'}`.
 Discover capabilities first: Auth Hub returns enabled kinds, exact registered
 form field descriptors, transfer limits, the chain-transaction message types
 (`chainTx`) and the configured network. The request tool
@@ -644,9 +657,11 @@ request-time tool (`getRequestTools`): each turn it is built from
 `availableTypes` (below), so its description and schema name only the
 types this account may use, a message of another type is refused before
 any Hub call, and a turn that cannot use chain transactions gets no such
-tool (`describe_chain_messages` then answers `availableTypes: []`): not a
-channel turn, Hub actions off, chain transactions off for the account, or
-capabilities that cannot be read; never a guess at the whole catalogue. The
+tool: not a channel turn or Hub actions off (then none of the tools that
+prepare an action, see above), or, on a channel turn, chain transactions
+off for the account or capabilities that cannot be read
+(`describe_chain_messages` then answers `availableTypes: []`); never a guess
+at the whole catalogue. The
 tool is built once per (types, described types) pair and cached (at most
 32 pairs per isolate, least recently used dropped).
 The capabilities behind it are a turn read of the owner object
