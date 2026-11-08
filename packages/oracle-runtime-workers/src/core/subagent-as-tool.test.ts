@@ -1,4 +1,4 @@
-import { ToolMessage } from '@langchain/core/messages';
+import { AIMessage, HumanMessage, ToolMessage } from '@langchain/core/messages';
 import { FakeListChatModel } from '@langchain/core/utils/testing';
 import { tool } from '@langchain/core/tools';
 import type { AgentMiddleware } from 'langchain';
@@ -6,7 +6,11 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import {
   createSubagentAsTool,
+  filterForwardedMessages,
+  FORWARDED_FROM_KEY,
   scopeToolCallIds,
+  SUBAGENT_FALLBACK_RESULT_CHARS,
+  subAgentResultText,
   type AgentSpec,
 } from './subagent-as-tool';
 
@@ -159,5 +163,97 @@ describe('createSubagentAsTool', () => {
     // A middleware without a tool hook is passed through as it is.
     const plain: AgentMiddleware = { name: 'Plain' };
     expect(scopeToolCallIds(plain, 'p1')).toBe(plain);
+  });
+});
+
+describe('subAgentResultText', () => {
+  it("is the sub-agent's final reply when it has one", () => {
+    expect(
+      subAgentResultText(
+        [new HumanMessage('task'), new AIMessage('PASS, recorded')],
+        'risk',
+      ),
+    ).toBe('PASS, recorded');
+  });
+
+  it('is its last tool result, labelled, when it ended on an empty reply', () => {
+    const messages = [
+      new HumanMessage('task'),
+      new AIMessage({
+        content: '',
+        tool_calls: [
+          { id: 's1', name: 'submit_section', args: {}, type: 'tool_call' },
+        ],
+      }),
+      new ToolMessage({
+        tool_call_id: 's1',
+        name: 'submit_section',
+        content: '{"submitted":"risk","stage":"evaluate"}',
+      }),
+      new AIMessage(''),
+    ];
+    expect(subAgentResultText(messages, 'risk')).toBe(
+      'risk finished without a reply. Its last tool call (submit_section) returned: {"submitted":"risk","stage":"evaluate"}',
+    );
+  });
+
+  it(`cuts a long last tool result to ${SUBAGENT_FALLBACK_RESULT_CHARS} characters`, () => {
+    const text = subAgentResultText(
+      [
+        new ToolMessage({
+          tool_call_id: 'r',
+          name: 'read',
+          content: 'y'.repeat(10_000),
+        }),
+        new AIMessage(''),
+      ],
+      'reader',
+    );
+    expect(text.endsWith('y'.repeat(SUBAGENT_FALLBACK_RESULT_CHARS))).toBe(
+      true,
+    );
+    expect(text).not.toContain('y'.repeat(SUBAGENT_FALLBACK_RESULT_CHARS + 1));
+  });
+
+  it('says so when there is neither a reply nor a tool result', () => {
+    expect(subAgentResultText([new AIMessage('')], 'idle')).toBe(
+      'idle finished without a reply.',
+    );
+  });
+});
+
+describe('filterForwardedMessages', () => {
+  it('marks every forwarded message with the parent call it came from', () => {
+    const forwarded = filterForwardedMessages(
+      [
+        new HumanMessage('task'),
+        new AIMessage({
+          content: '',
+          tool_calls: [
+            { id: 's1', name: 'submit_section', args: {}, type: 'tool_call' },
+            { id: 'r1', name: 'read_blueprint', args: {}, type: 'tool_call' },
+          ],
+        }),
+        new ToolMessage({
+          tool_call_id: 's1',
+          name: 'submit_section',
+          content: 'ok',
+        }),
+        new ToolMessage({
+          tool_call_id: 'r1',
+          name: 'read_blueprint',
+          content: 'big',
+        }),
+      ],
+      new Set(['submit_section']),
+      'parent-1',
+    );
+    expect(
+      forwarded.map((m) => [m.type, m.additional_kwargs[FORWARDED_FROM_KEY]]),
+    ).toEqual([
+      ['ai', 'parent-1'],
+      ['tool', 'parent-1'],
+    ]);
+    expect((forwarded[1] as ToolMessage).tool_call_id).toBe('parent-1_s1');
   });
 });

@@ -1292,6 +1292,12 @@ describe('createMainAgent', () => {
         m.type === 'ai' && (m as AIMessage).tool_calls?.[0]?.id === 'p1_s1',
     );
     expect(forwardedAi).toHaveLength(1);
+    // The parent's next model call reads p1's own result, moved up to its
+    // call, never the "interrupted" stand-in the dangling-call repair gives a
+    // call without one (the fake model's reply echoes every message it read).
+    const reply = result.messages.at(-1);
+    expect(reply?.type).toBe('ai');
+    expect(String(reply?.content)).not.toContain('was interrupted');
 
     // The shared-state accessor another plugin would read is populated from
     // the sub-agent's tool run. Inner tools see the request's session id

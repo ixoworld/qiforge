@@ -697,6 +697,16 @@ full history for the rest of this turn`); it never replaces the
   the model sees the first 40% and last 60% of the visible budget with a
   footer naming the saved id; `read_result` pages it back by
   byte range. `[result-cap] <tool>: N chars > cap …; saved as … (sqlite|r2)`.
+  The footer says to read a part only when the task needs it, and never to
+  read a result back to check that a call worked; `read_result`'s own
+  description says the same. A turn may make at most six reads
+  (`READ_RESULT_CALLS_PER_TURN`, counted on the model's own calls, so a
+  batch of parallel reads counts each one); a later read is not run and its
+  result says why. A read is at least 2,000 characters
+  (`READ_RESULT_MIN_CHARS`) and by default the largest chunk (at most
+  16,000). Before these limits, a model that distrusted its sub-agents'
+  results paged through an 87,000-character saved result 300 characters at
+  a time: 48 reads and about 2 million tokens in one turn.
   Results under 1 MB live in `tool_results` in the object's SQLite; larger
   ones in the tier bucket as `<object id>/results/<id>`. Rows expire after
   24 h (swept at boot), and identical results share one row.
