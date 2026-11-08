@@ -151,6 +151,8 @@ export interface ChainCall {
   deadline: number;
   signal: AbortSignal;
   fetch: typeof fetch;
+  /** How the call waits before a retry; {@link sleep} unless a test injects its own clock. */
+  sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
 
 /**
@@ -192,7 +194,7 @@ export type Outcome<T> =
   | { ok: false; failure: Failure };
 
 /** The turn's abort reason as an error (a non-error reason becomes an `AbortError`). */
-function abortReason(signal: AbortSignal): Error {
+export function abortReason(signal: AbortSignal): Error {
   return signal.reason instanceof Error
     ? signal.reason
     : new DOMException('Aborted', 'AbortError');
@@ -288,7 +290,7 @@ export class ReadsInFlight<T> {
 }
 
 /** Resolves after `ms`; rejects with the turn's abort reason if it ends first. */
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
+export function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
       reject(abortReason(signal));
@@ -394,7 +396,7 @@ export async function withRetry<T>(
       : { ok: false, failure: first.failure };
   if (!first.retry || Date.now() + wait + MIN_ATTEMPT_MS > call.deadline)
     return giveUp();
-  await sleep(wait, call.signal);
+  await (call.sleep ?? sleep)(wait, call.signal);
   const second = await attempt();
   recordHealth(read.upstream, second);
   if (second.ok) {
@@ -518,7 +520,9 @@ const outOfBudget = (note: string): Attempt<never> => ({
  * The body of an error answer as text, or undefined when it is longer than
  * {@link ERROR_BODY_MAX_BYTES} (the rest is not read).
  */
-async function errorBodyOf(response: Response): Promise<string | undefined> {
+export async function errorBodyOf(
+  response: Response,
+): Promise<string | undefined> {
   const reader = response.body?.getReader();
   if (!reader) return '';
   const decoder = new TextDecoder();

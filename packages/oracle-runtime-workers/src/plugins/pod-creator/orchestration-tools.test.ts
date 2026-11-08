@@ -208,4 +208,41 @@ describe('orchestration tools', () => {
       await sessions.approve(USER, ctx.session.id, 'blob_a', 'req-later'),
     ).toBe('approved');
   });
+
+  it('tells the conductor the next stage, its specialists and that they are offered from its next step (from the next message only in the turn that opened the design)', async () => {
+    const { store, tools } = setup();
+    const ctx = makeRuntimeContext();
+    const nextShape = z.object({ nextStep: z.string() });
+    const started = nextShape.parse(
+      await byName(tools, 'start_pod_design').handler({ brief: 'Solar' }, ctx),
+    );
+    expect(started.nextStep).toBe(
+      'Next: the qualify stage, run by call_service_intent_scorer_agent. ' +
+        'They are in your tool list from your next step, except in the turn that opened the design: then stop and ask the user to send a message (for example "continue") to run them. ' +
+        "Never use another stage's specialist for this stage.",
+    );
+    await seedRoles(store, ctx.session.id, [
+      'service_intent_scorer',
+      'service_architect',
+    ]);
+    for (const name of ['compute_readiness', 'get_blueprint']) {
+      const out = nextShape.parse(await byName(tools, name).handler({}, ctx));
+      // Only the architect specialists not recorded yet.
+      expect(out.nextStep).toMatch(
+        /^Next: the architect stage, run by call_claims_architect_agent, call_ucan_rights_architect_agent\. /,
+      );
+    }
+    await seedRoles(store, ctx.session.id, ALL_ROLE_IDS);
+    expect(
+      nextShape.parse(await byName(tools, 'compute_readiness').handler({}, ctx))
+        .nextStep,
+    ).toMatch(/passed the launch-readiness gate.*prepare_pod_transaction/);
+  });
+
+  it('start_pod_design restarts a design only when the user asks to start over', () => {
+    const { tools } = setup();
+    expect(byName(tools, 'start_pod_design').description).toMatch(
+      /restart=true only when the user asks to start over/,
+    );
+  });
 });

@@ -14,7 +14,7 @@ import { createDomainIndexerTools } from './domain-indexer-tools';
  * the core `NETWORK` env var. Operators can override with the optional
  * `DOMAIN_INDEXER_URL` env var (useful for local/staging deployments).
  */
-const DOMAIN_INDEXER_URLS = {
+export const DOMAIN_INDEXER_URLS = {
   mainnet: 'https://domain-indexer.ixo.earth',
   testnet: 'https://domain-indexer.testnet.ixo.earth',
   devnet: 'https://domain-indexer.devnet.ixo.earth',
