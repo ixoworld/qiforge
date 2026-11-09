@@ -1,5 +1,11 @@
 # @ixo/oracle-runtime-workers
 
+## 0.46.1
+
+### Patch Changes
+
+- [#509](https://github.com/ixoworld/qiforge/pull/509) [`ad7457c`](https://github.com/ixoworld/qiforge/commit/ad7457c3ed8d8f8e5e7f0f11a92967dfef56e591) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - credentials: accept the Hub's `stopping` item state and unknown states without throwing
+
 ## 0.46.0
 
 ### Minor Changes
