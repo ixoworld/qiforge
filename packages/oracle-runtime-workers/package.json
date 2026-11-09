@@ -1,6 +1,6 @@
 {
   "name": "@ixo/oracle-runtime-workers",
-  "version": "0.44.0",
+  "version": "0.45.0",
   "description": "QiForge oracle runtime for Cloudflare Workers — Durable Object per user (SQLite in WASM over DO storage), Matrix E2EE gateway Durable Object, Hono HTTP/SSE shell.",
   "private": false,
   "publishConfig": {
@@ -38,7 +38,8 @@
     "!src/**/fixtures/",
     "!src/**/test-do.ts",
     "!src/core/test-fixtures.ts",
-    "!src/plugins/pod-creator/test-fixtures.ts"
+    "!src/plugins/pod-creator/test-fixtures.ts",
+    "!src/plugins/credentials/test-fixtures.ts"
   ],
   "dependencies": {
     "@ixo/action-protocol": "0.9.1",
@@ -48,6 +49,7 @@
     "@cosmjs/proto-signing": "0.39.0",
     "@cosmjs/stargate": "0.39.0",
     "@ixo/common": "workspace:*",
+    "@ixo/credentials-kit": "0.1.1",
     "@ixo/domain.md": "^0.3.1",
     "@ixo/editor": "6.0.1",
     "@ixo/impactxclient-sdk": "3.0.0",

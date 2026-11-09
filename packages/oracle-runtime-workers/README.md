@@ -114,6 +114,7 @@ lifetime are in [operations](docs/operations.md).
 | [channels](docs/channels.md)                             | The IXO Channels ingress: authorization, retries, Reply Plans, Matrix continuity                                        |
 | [frontend-bridge](docs/frontend-bridge.md)               | Browser tools and AG-UI actions over the socket: one invocation, one socket, unknown outcomes                           |
 | [pod-creator](docs/pod-creator.md)                       | The POD Creator plugin: roles, state in `ctx.kv`, the create path and its launch gate                                   |
+| [credentials](src/plugins/credentials/README.md)         | The credentials plugin: credential checks, the Hub's two permission cards, Self identity-check links; WhatsApp only     |
 | [ixo-transaction](docs/ixo-transaction.md)               | The opt-in wallet-signing plugin: chain ids, signing outcomes, the mainnet receipt rule                                 |
 | [action-proposals](docs/action-proposals.md)             | Action cards: a transfer prepared from chat, signed in the Portal, verified on chain, receipted                         |
 | [topic-action-proposals](docs/topic-action-proposals.md) | Topic cards: discussion drafts and claim-access grants as multi-step journals with one-use permits                      |

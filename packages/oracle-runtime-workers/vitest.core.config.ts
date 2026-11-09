@@ -18,7 +18,7 @@ export default defineConfig({
     include: [
       'src/core/**/*.test.ts',
       'src/plugins/*.test.ts',
-      'src/plugins/!(editor|flows|ixo-transaction|pod-creator)/**/*.test.ts',
+      'src/plugins/!(editor|flows|ixo-transaction|pod-creator|credentials)/**/*.test.ts',
       'src/secrets/**/*.test.ts',
       'src/memory/**/*.test.ts',
       'src/llm/**/*.test.ts',

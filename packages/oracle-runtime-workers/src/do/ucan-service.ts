@@ -17,14 +17,50 @@ import {
   signerFromMnemonic,
   type SupportedDID,
 } from '@ixo/ucan';
+import { base58btc } from 'multiformats/bases/base58';
 import {
   abilityCovers,
   delegationHasCapability,
   resourceCovers,
 } from '../core/runtime-context';
-import type { RuntimeContext, UcanDelegation } from '../plugin-api/types';
+import type {
+  RuntimeContext,
+  UcanDelegation,
+  UcanMintOptions,
+} from '../plugin-api/types';
 
 type MintResult = { invocation: string } | { error: string };
+
+/** The facts of one invocation: the caller's binding facts, then a fresh nonce. */
+function invocationFacts(
+  facts: UcanMintOptions['facts'],
+): Record<string, unknown>[] {
+  for (const fact of facts ?? [])
+    if (fact === null || typeof fact !== 'object' || Array.isArray(fact))
+      throw new TypeError('Every invocation fact must be a plain object');
+  return [...(facts ?? []), { nonce: crypto.randomUUID() }];
+}
+
+/** The multicodec prefix of an Ed25519 public key in a `did:key`. */
+const ED25519_PUB_PREFIX = [0xed, 0x01] as const;
+
+/** The only JWS types the oracle's key signs (never a UCAN's). */
+const SIGNABLE_JWS_TYPES: ReadonlySet<string> = new Set([
+  'oauth-authz-req+jwt',
+]);
+
+function base64urlBytes(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary)
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
+
+function base64urlJson(value: unknown): string {
+  return base64urlBytes(new TextEncoder().encode(JSON.stringify(value)));
+}
 type ServiceDelegationResult =
   | { token: string; with: string }
   | { error: 'no-delegation' | 'store-error'; detail?: string };
@@ -290,7 +326,7 @@ export class WorkersUcanService {
     delegationCar: string,
     serviceUrlOrDid: string,
     capability: { can: string; with: string; nb?: Record<string, unknown> },
-    options: { maxTtlSeconds?: number } = {},
+    options: UcanMintOptions = {},
   ): Promise<MintResult> {
     if (!this.opts.signingMnemonic)
       return {
@@ -361,7 +397,7 @@ export class WorkersUcanService {
         },
         proofs: [delegation],
         expiration,
-        facts: [{ nonce: crypto.randomUUID() }],
+        facts: invocationFacts(options.facts),
       });
       return { invocation: await serializeInvocation(invocation) };
     } catch (error) {
@@ -372,19 +408,23 @@ export class WorkersUcanService {
   }
 
   async mintSelfSignedInvocation(
-    serviceUrl: string,
+    serviceUrlOrDid: string,
     capability: { can: string; with: string },
-    options: { maxTtlSeconds?: number } = {},
+    options: UcanMintOptions = {},
   ): Promise<MintResult> {
     if (!this.opts.signingMnemonic)
       return {
         error:
           'Oracle has no signing key configured — set ORACLE_SIGNING_MNEMONIC',
       };
-    const serviceDid = await this.resolveServiceDid(serviceUrl);
+    // A caller that knows the service's DID (a did:web it derived from the
+    // service's host) passes it directly, as for delegated invocations.
+    const serviceDid = serviceUrlOrDid.startsWith('did:')
+      ? serviceUrlOrDid
+      : await this.resolveServiceDid(serviceUrlOrDid);
     if (!serviceDid)
       return {
-        error: `Could not resolve worker DID via ${serviceUrl}/.well-known/did.json`,
+        error: `Could not resolve worker DID via ${serviceUrlOrDid}/.well-known/did.json`,
       };
     try {
       const { signer } = await signerFromMnemonic(
@@ -401,12 +441,91 @@ export class WorkersUcanService {
         },
         proofs: [],
         expiration: nowSeconds + (options.maxTtlSeconds ?? 120),
-        facts: [{ nonce: crypto.randomUUID() }],
+        facts: invocationFacts(options.facts),
       });
       return { invocation: await serializeInvocation(invocation) };
     } catch (error) {
       return {
         error: `Failed to mint invocation: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  /** The oracle's signer (one derivation per call; the phrase never leaves). */
+  private async oracleSigner() {
+    if (!this.opts.signingMnemonic) return null;
+    return (await signerFromMnemonic(this.opts.signingMnemonic)).signer;
+  }
+
+  /**
+   * The raw 32-byte Ed25519 public key the oracle signs with (the key on its
+   * DID document), or null without a signing key. Public: plugins use it to
+   * find the key's verification method id.
+   */
+  async oraclePublicKey(): Promise<Uint8Array | null> {
+    const signer = await this.oracleSigner();
+    if (!signer) return null;
+    // `did:key:z…` = base58btc of the Ed25519 multicodec prefix + the key.
+    const multikey = base58btc.decode(
+      signer.toDIDKey().slice('did:key:'.length),
+    );
+    if (
+      multikey.length !== 34 ||
+      multikey[0] !== ED25519_PUB_PREFIX[0] ||
+      multikey[1] !== ED25519_PUB_PREFIX[1]
+    )
+      return null;
+    return multikey.slice(2);
+  }
+
+  /**
+   * A compact JWS signed with the oracle's own key, for the one kind of
+   * object the runtime signs besides UCANs: an OpenID4VP request object
+   * (`typ` `oauth-authz-req+jwt`). The runtime builds the protected header
+   * itself (`{ alg: 'EdDSA', typ, kid }`) and refuses every other `typ`, a
+   * `kid` that is not a DID URL of the oracle's DID and a payload that is not
+   * a plain JSON object: the signed bytes always begin with that header, so
+   * they can never be a UCAN (a delegation or an invocation) in the oracle's
+   * name.
+   */
+  async signJws(input: {
+    typ: string;
+    kid: string;
+    payload: Record<string, unknown>;
+  }): Promise<{ jws: string } | { error: string }> {
+    if (!SIGNABLE_JWS_TYPES.has(input.typ))
+      return { error: `The runtime does not sign a JWS of typ ${input.typ}` };
+    if (
+      typeof input.kid !== 'string' ||
+      input.kid.length > 512 ||
+      !input.kid.startsWith(`${this.opts.oracleDid}#`)
+    )
+      return { error: "The kid must name a key of the oracle's own DID" };
+    const payload: unknown = input.payload;
+    if (
+      payload === null ||
+      typeof payload !== 'object' ||
+      Array.isArray(payload)
+    )
+      return { error: 'The payload must be a JSON object' };
+    try {
+      const signer = await this.oracleSigner();
+      if (!signer)
+        return {
+          error:
+            'Oracle has no signing key configured — set ORACLE_SIGNING_MNEMONIC',
+        };
+      const header = { alg: 'EdDSA', typ: input.typ, kid: input.kid };
+      const signingInput = `${base64urlJson(header)}.${base64urlJson(payload)}`;
+      const signature = await signer.sign(
+        new TextEncoder().encode(signingInput),
+      );
+      return {
+        jws: `${signingInput}.${base64urlBytes(new Uint8Array(signature.raw))}`,
+      };
+    } catch (error) {
+      return {
+        error: `Failed to sign: ${error instanceof Error ? error.message : String(error)}`,
       };
     }
   }
@@ -547,6 +666,8 @@ export class WorkersUcanService {
         this.createInvocationFromDelegation(car, url, cap, o),
       mintSelfSignedInvocation: (url, cap, o) =>
         this.mintSelfSignedInvocation(url, cap, o),
+      signJws: (input) => this.signJws(input),
+      oraclePublicKey: () => this.oraclePublicKey(),
       getServiceDelegation: (did, o) => this.getServiceDelegation(did, o),
     };
   }

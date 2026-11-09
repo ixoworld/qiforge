@@ -267,7 +267,9 @@ export function rateLimitKey(
     | 'artifact'
     | 'socket'
     | 'status'
-    | 'start',
+    | 'start'
+    | 'credentials-response'
+    | 'credentials-check',
   subject: string,
 ): string {
   return `${env.ORACLE_DID}|${scope}|${subject}`;
@@ -275,15 +277,18 @@ export function rateLimitKey(
 
 /**
  * Whether an unauthenticated caller (keyed by its IP) is over its budget.
- * No binding or no client IP (local runs, tests): never limited.
+ * No binding or no client IP (local runs, tests): never limited. `limiter`
+ * is the shared `RATE_LIMIT` unless a route has its own (a route the Hub
+ * answers from shared egress addresses needs a larger budget).
  */
-async function ipOverLimit(
+export async function ipOverLimit(
   env: OracleWorkerEnv,
-  scope: 'artifact' | 'socket' | 'status' | 'start',
+  scope: 'artifact' | 'socket' | 'status' | 'start' | 'credentials-response',
   ip: string | undefined,
+  limiter: RateLimit | undefined = env.RATE_LIMIT,
 ): Promise<boolean> {
-  if (!ip || !env.RATE_LIMIT) return false;
-  const { success } = await env.RATE_LIMIT.limit({
+  if (!ip || !limiter) return false;
+  const { success } = await limiter.limit({
     key: rateLimitKey(env, scope, ip),
   });
   return !success;

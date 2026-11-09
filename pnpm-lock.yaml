@@ -701,6 +701,9 @@ importers:
       '@ixo/common':
         specifier: workspace:*
         version: link:../common
+      '@ixo/credentials-kit':
+        specifier: 0.1.1
+        version: 0.1.1
       '@ixo/domain.md':
         specifier: ^0.3.1
         version: 0.3.1
@@ -3452,6 +3455,10 @@ packages:
     resolution: {integrity: sha512-wXk0DhDkqE2PmSL9omvlf0wIHNcDIs5ObxTLmm+GZIqgd/6RRemCWtgKEN5oQwIjt5HkaZ5CuG4P6KJyEi4Gyg==}
     engines: {node: '>=20'}
 
+  '@ixo/credentials-kit@0.1.1':
+    resolution: {integrity: sha512-OmNVclcT4nXk4X8VLhhY7OQG1WOYfh43sRCCOxl5ykMrCZkL3H/qaFwS/vuIBICRAcGcvKc4hbjdXYxx743vYw==}
+    engines: {node: '>=22'}
+
   '@ixo/did-provider-x@0.1.1':
     resolution: {integrity: sha512-7Xs0iZ7AdNF+mIESFp2o/gzoeiIl9iT6GkG1YV5j5MhlKqBDwVZTY7rE7nsFhy14B3pkleq1iFmRBdjdJmMO6w==}
 
@@ -4450,6 +4457,10 @@ packages:
 
   '@noble/curves@2.2.0':
     resolution: {integrity: sha512-T/BoHgFXirb0ENSPBquzX0rcjXeM6Lo892a2jlYJkqk83LqZx0l1Of7DzlKJ6jkpvMrkHSnAcgb5JegL8SeIkQ==}
+    engines: {node: '>= 20.19.0'}
+
+  '@noble/curves@2.4.0':
+    resolution: {integrity: sha512-P4/62zrgfH33CneE3Dn4WhJVA22YUU0eR51wKIan4NVRvwsA0YnPTwWGpNbpuacSujmSFLvyzpyuR30+fbq2Ew==}
     engines: {node: '>= 20.19.0'}
 
   '@noble/ed25519@1.7.5':
@@ -15606,6 +15617,11 @@ snapshots:
 
   '@ixo/action-protocol@0.9.1': {}
 
+  '@ixo/credentials-kit@0.1.1':
+    dependencies:
+      '@noble/curves': 2.4.0
+      '@noble/hashes': 2.4.0
+
   '@ixo/did-provider-x@0.1.1':
     dependencies:
       '@babel/runtime': 7.29.7
@@ -16541,6 +16557,10 @@ snapshots:
   '@noble/curves@2.2.0':
     dependencies:
       '@noble/hashes': 2.2.0
+
+  '@noble/curves@2.4.0':
+    dependencies:
+      '@noble/hashes': 2.4.0
 
   '@noble/ed25519@1.7.5': {}
 
