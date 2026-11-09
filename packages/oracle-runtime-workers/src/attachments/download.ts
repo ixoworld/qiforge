@@ -168,7 +168,7 @@ export class HomeserverUnauthorizedError extends Error {
 }
 
 /** `mxc://<server>/<media id>`, the parts checked before they go into a URL. */
-const MXC_PATTERN = /^mxc:\/\/([A-Za-z0-9.:[\]-]+)\/([A-Za-z0-9_-]+)$/;
+export const MXC_PATTERN = /^mxc:\/\/([A-Za-z0-9.:[\]-]+)\/([A-Za-z0-9_-]+)$/;
 
 /**
  * Open the media behind `mxc` on the homeserver as the account behind

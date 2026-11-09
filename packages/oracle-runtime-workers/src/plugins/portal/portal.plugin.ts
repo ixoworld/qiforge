@@ -33,9 +33,9 @@ import {
 const manifest: PluginManifest = {
   title: 'Portal',
   summary:
-    "The user's Portal UI: action cards (bids, claims, questions, approvals), forms, Topics, domains, pages, navigation.",
+    "The user's Portal UI: action cards (everything the person sees, answers, reviews or signs), forms, Topics, domains, pages, navigation.",
   whenToUse: [
-    'User asks to prepare or submit a bid or claim: call `list_action_cards`, then `prepare_action_card`.',
+    'What the person sees, answers, reviews or signs is an action card: ask with `ask_question_card`; for a bid or claim call `list_action_cards`, then `prepare_action_card`. Only when the Portal declares no card tools, ask with `ask_user_question`.',
     'User asks for an action the Portal FE exposes as a browser tool (declared in `state.browserTools`).',
     "A task needs a browser-side capability the server can't do alone — open a URL in the user's tab, click a Portal button, fill a form.",
   ],
@@ -66,6 +66,13 @@ const HUMAN_DECISION_TOOLS = new Set([
   'write_domain_files',
   'publish_recipe_release',
 ]);
+
+/**
+ * How the Agent asks the person something: bound on every turn that declares
+ * it, so a question never turns into prose because the Portal capability was
+ * not loaded. A chat declares one of them, never both.
+ */
+const ASKING_TOOLS = new Set(['ask_user_question', 'ask_question_card']);
 
 /**
  * The Portal's Topic write tool. Its commands can take a while to settle in
@@ -213,6 +220,9 @@ export function buildBrowserTool(
       // frontend lane, so a parked call (or a question to the user) holds
       // no slot another chat needs.
       surface: 'frontend',
+      ...(ASKING_TOOLS.has(descriptor.name)
+        ? { visibility: 'always' as const }
+        : {}),
       // A question to the user is a write whatever the client declares:
       // it is never asked twice after a restart once it was sent. Any
       // other tool keeps the effect its declaration names, if any.

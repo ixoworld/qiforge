@@ -141,7 +141,6 @@ export function fakeContext(
       error: () => undefined,
       debug: () => undefined,
     },
-    background: (work: Promise<unknown>) => void work,
     ...extra,
   } as unknown as RuntimeContext;
 }

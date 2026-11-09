@@ -8,7 +8,8 @@ import type { RuntimeContext, UserKvSurface } from '../../plugin-api/types';
 import { KvBlueprintStore } from './blueprint-store';
 import type { CapsuleFetchContext } from './capsule-content-client';
 import { PodCreatorPlugin } from './pod-creator.plugin';
-import { byName, THREAD } from './test-fixtures';
+import { computeSubAgentToolName } from '../../core/subagent-as-tool';
+import { ALL_ROLE_IDS, byName, THREAD } from './test-fixtures';
 
 /** A request context whose host provides `ctx.kv`. */
 const ctxWithKv = (
@@ -70,11 +71,14 @@ describe('PodCreatorPlugin loads via createRuntimeCore', () => {
     expect(
       core.registries.tools.toolNamesForPlugin('pod-creator').sort(),
     ).toEqual([
+      'add_pod_domain_card',
       'approve_pod_transaction',
       'assemble_blueprint',
       'compute_readiness',
       'confirm_pod_creation',
+      'create_pod_group',
       'get_blueprint',
+      'link_pod_group',
       'prepare_pod_transaction',
       'request_pod_signature',
       'start_pod_design',
@@ -98,14 +102,14 @@ describe('PodCreatorPlugin getRequestSubAgents', () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it('exposes the current stage specialist with a registry-loaded prompt', async () => {
+  it('binds every specialist once a design is open, each with its registry-loaded prompt', async () => {
     const plugin = new PodCreatorPlugin({
       capsuleContentFetcher: async () => '# Intent\n\nScore the request.',
     });
     const subs = await plugin.getRequestSubAgents(
       ctxWithKv(await openDesign()),
     );
-    expect(subs.map((s) => s.name)).toEqual(['service_intent_scorer']);
+    expect(subs.map((s) => s.name)).toEqual(ALL_ROLE_IDS);
     const prompt = subs[0]?.systemPrompt;
     if (typeof prompt !== 'string') {
       throw new Error('expected a string systemPrompt');
@@ -118,7 +122,7 @@ describe('PodCreatorPlugin getRequestSubAgents', () => {
     const subs = await plugin.getRequestSubAgents(
       ctxWithKv(await openDesign()),
     );
-    expect(subs.map((s) => s.name)).toEqual(['service_intent_scorer']);
+    expect(subs.map((s) => s.name)).toEqual(ALL_ROLE_IDS);
     const prompt = subs[0]?.systemPrompt;
     if (typeof prompt !== 'string') {
       throw new Error('expected a string systemPrompt');
@@ -147,7 +151,7 @@ describe('PodCreatorPlugin getRequestSubAgents', () => {
     expect(seen[0]?.headers['X-IXO-Network']).toBe('devnet');
   });
 
-  it('advances the specialists as the design progresses, through the plugin tools and the host store', async () => {
+  it('advances the specialists shown to the model within the turn, through the plugin tools and the host store', async () => {
     const kv = createMemoryUserKv();
     const plugin = new PodCreatorPlugin({
       capsuleContentFetcher: async () => '# Role',
@@ -157,18 +161,57 @@ describe('PodCreatorPlugin getRequestSubAgents', () => {
       { brief: 'Solar POD' },
       ctxWithKv(kv),
     );
-    const [scorer] = await plugin.getRequestSubAgents(ctxWithKv(kv));
+    const subs = await plugin.getRequestSubAgents(ctxWithKv(kv));
+    const [stageMiddleware] = await plugin.getRequestMiddlewares(ctxWithKv(kv));
+    const wrapModelCall = stageMiddleware?.wrapModelCall;
+    const wrapToolCall = stageMiddleware?.wrapToolCall;
+    if (!wrapModelCall || !wrapToolCall)
+      throw new Error('expected the stage middleware');
+    /** The specialist tools the model is shown on its next model call. */
+    const shown = async (): Promise<string[]> => {
+      const handler = vi.fn(async () => ({ ok: true }));
+      await wrapModelCall(
+        {
+          tools: subs.map((sub) => ({
+            name: computeSubAgentToolName(sub.name),
+          })),
+          messages: [],
+          state: {},
+        } as never,
+        handler as never,
+      );
+      const sent = handler.mock.calls[0] as unknown as [
+        { tools: Array<{ name: string }> },
+      ];
+      return sent[0].tools.map((t) => t.name).sort();
+    };
+    expect(await shown()).toEqual(['call_service_intent_scorer_agent']);
+
+    // The conductor calls the scorer; inside, the scorer records its section.
+    const scorer = subs.find((sub) => sub.name === 'service_intent_scorer');
     const scorerTools = Array.isArray(scorer?.tools) ? scorer.tools : [];
-    await byName(scorerTools, 'submit_section').handler(
-      { content: { score: 0.9 } },
-      ctxWithKv(kv),
+    await wrapToolCall(
+      {
+        toolCall: {
+          id: 's1',
+          name: 'call_service_intent_scorer_agent',
+          args: { task: 'score' },
+        },
+        state: { messages: [] },
+      } as never,
+      (async () => {
+        await byName(scorerTools, 'submit_section').handler(
+          { content: { score: 0.9 } },
+          ctxWithKv(kv),
+        );
+        return { content: 'recorded' };
+      }) as never,
     );
 
-    const next = await plugin.getRequestSubAgents(ctxWithKv(kv));
-    expect(next.map((s) => s.name).sort()).toEqual([
-      'claims_architect',
-      'service_architect',
-      'ucan_rights_architect',
+    expect(await shown()).toEqual([
+      'call_claims_architect_agent',
+      'call_service_architect_agent',
+      'call_ucan_rights_architect_agent',
     ]);
     expect(await kv.get('pod-creator/blueprints', THREAD)).toMatchObject({
       brief: 'Solar POD',
@@ -187,5 +230,6 @@ describe('PodCreatorPlugin on a host without ctx.kv', () => {
     ).rejects.toThrow(/ctx\.kv/);
     // The per-turn hook stays silent: nothing to build, nothing to log.
     expect(await plugin.getRequestSubAgents(makeRuntimeContext())).toEqual([]);
+    expect(plugin.getRequestMiddlewares(makeRuntimeContext())).toEqual([]);
   });
 });

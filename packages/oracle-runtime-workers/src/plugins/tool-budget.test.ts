@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import type { PluginTool } from '../plugin-api/types';
 import { ActionProposalsPlugin } from './action-proposals/action-proposals.plugin';
-import { HubActionsPlugin } from './hub-actions/hub-actions.plugin';
+import {
+  HUB_ACTION_CHANNEL_TOOLS,
+  HUB_ACTION_STATUS_TOOL,
+} from './hub-actions/hub-actions.plugin';
 import { createOracleDocumentTools } from './memory/oracle-document-tools';
 import { createTaskTools } from './tasks/tasks-tools';
 import { createSetUserPreferencesTool } from './user-preferences/user-preferences-tool';
@@ -37,7 +40,8 @@ describe('tool definition budgets', () => {
   const tools = [
     ...createOracleDocumentTools(),
     createSetUserPreferencesTool(),
-    ...new HubActionsPlugin().getTools(),
+    ...HUB_ACTION_CHANNEL_TOOLS,
+    HUB_ACTION_STATUS_TOOL,
     ...new ActionProposalsPlugin().getTools(),
     ...createTaskTools(),
   ];

@@ -23,17 +23,17 @@ import { recordingFetch } from './testing';
 const skillText = (name: string, description: string) =>
   `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`;
 
-/** GitHub: a listing of `names`, each SKILL.md with an ETag; If-None-Match on a known ETag gets a 304. */
-function github(names: string[], down = false) {
+/** raw.githubusercontent.com: an index.json of `names` (or `index` as given), each SKILL.md with an ETag; If-None-Match on a known ETag gets a 304. */
+function github(names: string[], down = false, index?: Response) {
   return recordingFetch((call) => {
     if (down) throw new Error('getaddrinfo ENOTFOUND');
     const sent = new Headers(call.init?.headers).get('if-none-match');
-    if (call.url.startsWith('https://api.github.com/')) {
+    if (call.url.endsWith('/skills/index.json')) {
+      if (index) return index;
       if (sent === '"list-1"') return new Response(null, { status: 304 });
-      return new Response(
-        JSON.stringify(names.map((name) => ({ name, type: 'dir' }))),
-        { headers: { etag: '"list-1"' } },
-      );
+      return new Response(JSON.stringify(names), {
+        headers: { etag: '"list-1"' },
+      });
     }
     const name = /skills\/([^/]+)\/SKILL\.md$/.exec(call.url)?.[1] ?? '';
     if (sent === `"${name}-1"`) return new Response(null, { status: 304 });
@@ -89,11 +89,14 @@ describe('asks skills', () => {
       const net = github(['jobs']);
       await skillsNow(loader(net.fetcher, { now: 0 }, undefined, folder));
       expect(net.calls[0]!.url).toBe(
-        `https://api.github.com/repos/ixoworld/ixo-plugins/contents/plugins/${folder}/skills?ref=main`,
+        `https://raw.githubusercontent.com/ixoworld/ixo-plugins/main/plugins/${folder}/skills/index.json`,
       );
       expect(net.calls[1]!.url).toBe(
         `https://raw.githubusercontent.com/ixoworld/ixo-plugins/main/plugins/${folder}/skills/jobs/SKILL.md`,
       );
+      expect(
+        net.calls.some((call) => call.url.includes('api.github.com')),
+      ).toBe(false);
     }
   });
 
@@ -160,6 +163,21 @@ describe('asks skills', () => {
     clock.now = SKILLS_RETRY_MS;
     expect((await skillsNow(skills)).refreshed).toBe(true);
     expect(net.calls.length).toBeGreaterThan(calls);
+  });
+
+  it('a missing or broken index.json keeps the bundled copy', async () => {
+    for (const index of [
+      new Response('Not Found', { status: 404 }),
+      new Response(JSON.stringify({ skills: ['jobs'] })),
+    ]) {
+      const net = github(['jobs'], false, index);
+      const skills = loader(net.fetcher, { now: 0 });
+      const { list } = await skillsNow(skills);
+      expect(list.map((one) => one.name)).toEqual(
+        Object.keys(bundledSnapshot('asks-testnet').files).sort(),
+      );
+      expect(net.calls).toHaveLength(1);
+    }
   });
 
   it('reads the one-line description from the frontmatter', () => {

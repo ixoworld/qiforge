@@ -115,6 +115,18 @@ describe('Portal browser tools over the frontend bridge', () => {
       ).toBe('frontend');
   });
 
+  it('binds asking the person on every turn, and leaves every other browser tool on demand', () => {
+    for (const name of ['ask_user_question', 'ask_question_card'])
+      expect(
+        buildBrowserTool({ name, description: 'Ask', schema })?.visibility,
+      ).toBe('always');
+    for (const name of ['prepare_action_card', 'scroll_page'])
+      expect(
+        buildBrowserTool({ name, description: 'Browser action', schema })
+          ?.visibility,
+      ).toBeUndefined();
+  });
+
   it('keeps repeatable browser navigation and reads available', () => {
     for (const name of ['scroll_page', 'click', 'read_topic']) {
       expect(

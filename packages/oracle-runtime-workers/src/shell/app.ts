@@ -458,6 +458,7 @@ export function createShell(
                 'observe',
                 'dispatch',
                 'read-task',
+                'repeat',
               ],
             },
           }

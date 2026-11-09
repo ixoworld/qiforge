@@ -1,11 +1,20 @@
 import { z } from 'zod';
 
 import {
-  findMessageByTypeUrl,
+  findMessageByRoute,
+  findMessageForValue,
+  findMessagesByTypeUrl,
   type FieldSpec,
   type MessageSpec,
   type RiskLevel,
 } from './catalog.js';
+import {
+  DAODAO_EXECUTE_ACTIONS,
+  WASM_INSTANTIATE_TYPE_URL,
+  daoDaoProposalActions,
+  parseDaoDaoExecuteValue,
+  parseDaoDaoInstantiateValue,
+} from './daodao-schemas.js';
 import { resolveIntent, type IntentResult } from './intent.js';
 import {
   ITrxMsgSchema,
@@ -13,6 +22,7 @@ import {
   TransactionDraftSchema,
   schemaForFieldKind,
   type ITrxMsg,
+  type Network,
   type RiskConfirmation,
   type TransactionBatch,
   type TransactionDraft,
@@ -100,9 +110,25 @@ function isRisky(spec: MessageSpec): boolean {
 }
 
 /**
+ * A risk's text as compared when the user's acceptance is checked: the same
+ * words, with typographic quotes and apostrophes read as their plain forms,
+ * Unicode compatibility forms folded and runs of whitespace as one space. A
+ * model quoting `group's` for `group’s` quotes the risk; it never makes a
+ * different risk match.
+ */
+export function riskTextKey(risk: string): string {
+  return risk
+    .normalize('NFKC')
+    .replace(/[\u2018\u2019\u201A\u201B\u2032]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F\u2033]/g, '"')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
  * The risk gate: when the transaction is risky and the caller signs
  * (`requireRiskConfirmation`), every one of `risks` must be accepted word for
- * word and `confirmed` must be true.
+ * word (as `riskTextKey` compares them) and `confirmed` must be true.
  */
 function assertRiskGate(
   subject: string,
@@ -112,8 +138,10 @@ function assertRiskGate(
   options: ValidationOptions,
 ): void {
   if (!risky || !options.requireRiskConfirmation) return;
-  const accepted = new Set(confirmation?.acceptedRisks ?? []);
-  const missing = risks.filter((risk) => !accepted.has(risk));
+  const accepted = new Set(
+    (confirmation?.acceptedRisks ?? []).map(riskTextKey),
+  );
+  const missing = risks.filter((risk) => !accepted.has(riskTextKey(risk)));
   if (confirmation?.confirmed === true && missing.length === 0) return;
   throw new Error(
     `Risk confirmation required before signing ${subject}: the user must accept, word for word, ${missing
@@ -122,28 +150,99 @@ function assertRiskGate(
   );
 }
 
-function requireSpec(typeUrl: string): MessageSpec {
-  const spec = findMessageByTypeUrl(typeUrl);
-  if (!spec) {
+/** What a message is checked against beyond its own fields. */
+export type MessageValidationContext = {
+  /**
+   * The network the message is for. A DAO DAO group is refused without it:
+   * its code ids are the network's.
+   */
+  network?: Network;
+};
+
+function requireSpec(message: ITrxMsg): MessageSpec {
+  const spec = findMessageForValue(message);
+  if (spec) return spec;
+  if (findMessagesByTypeUrl(message.typeUrl).length > 0) {
     throw new Error(
-      `Unsupported message typeUrl ${typeUrl}: not in the IXO transaction catalog`,
+      `${message.typeUrl} here is only a DAO DAO step: msg must have exactly one of ${DAODAO_EXECUTE_ACTIONS.join(', ')}`,
     );
   }
-  return spec;
+  throw new Error(
+    `Unsupported message typeUrl ${message.typeUrl}: not in the IXO transaction catalog`,
+  );
+}
+
+/**
+ * The value of a message of the route, strictly parsed: exactly its fields,
+ * each of its kind; a DAO DAO route's value exactly its one shape.
+ */
+function parseValue(
+  spec: MessageSpec,
+  value: unknown,
+  context: MessageValidationContext,
+): Record<string, unknown> {
+  if (spec.module !== 'daodao') {
+    return buildValueSchema(spec.fields).parse(value);
+  }
+  if (spec.typeUrl === WASM_INSTANTIATE_TYPE_URL) {
+    return parseDaoDaoInstantiateValue(value, context.network);
+  }
+  const action = DAODAO_EXECUTE_ACTIONS.find((step) => step === spec.action);
+  if (action === undefined) {
+    throw new Error(`No DAO DAO shape for the route ${spec.action}`);
+  }
+  return parseDaoDaoExecuteValue(action, value, {
+    actionProblem: (message) => {
+      try {
+        validateMessage(message, context);
+        return undefined;
+      } catch (error) {
+        return describeValidationError(error);
+      }
+    },
+  });
+}
+
+/**
+ * The catalog entries whose risks a validated message carries: its own, then
+ * each action a DAO DAO proposal holds (the group's own account does them if
+ * it passes), so a proposal that would move the group's funds discloses that
+ * move's risks and level, not only the proposal's.
+ */
+function disclosedSpecs(spec: MessageSpec, message: ITrxMsg): MessageSpec[] {
+  return [spec, ...daoDaoProposalActions(message).map(requireSpec)];
+}
+
+const uniqueRisks = (specs: readonly MessageSpec[]): string[] => [
+  ...new Set(specs.flatMap((spec) => spec.risks)),
+];
+
+function validateWithSpec(
+  input: unknown,
+  context: MessageValidationContext,
+): { message: ITrxMsg; spec: MessageSpec } {
+  const message = ITrxMsgSchema.parse(input);
+  const spec = requireSpec(message);
+  return {
+    message: {
+      typeUrl: spec.typeUrl,
+      value: parseValue(spec, message.value, context),
+    },
+    spec,
+  };
 }
 
 /**
  * Strictly validate one proto-JSON message against the catalog: a known
- * typeUrl and exactly its fields, each of its kind. The Portal handler runs
- * this on every message it is asked to sign.
+ * typeUrl and exactly its fields, each of its kind (a DAO DAO message:
+ * exactly one of its shapes, a group with the network's code ids). The
+ * Portal handler runs this on every message it is asked to sign.
  */
-export function validateMessage(input: unknown): ITrxMsg {
-  const message = ITrxMsgSchema.parse(input);
-  const spec = requireSpec(message.typeUrl);
-  return {
-    typeUrl: spec.typeUrl,
-    value: buildValueSchema(spec.fields).parse(message.value),
-  };
+export function validateMessage(
+  input: unknown,
+  context: MessageValidationContext = {},
+): ITrxMsg {
+  return validateWithSpec(input, context).message;
 }
 
 const RISK_ORDER: readonly RiskLevel[] = ['low', 'medium', 'high', 'critical'];
@@ -169,11 +268,14 @@ export type ValidatedTransactionBatch = {
   /** The catalog route of each message, in the same order. */
   routes: BatchMessageRoute[];
   summary: string;
-  /** Every message's risks, each once, in message order. */
+  /**
+   * Every message's risks, each once, in message order; a DAO DAO proposal's
+   * own, then those of each action it holds.
+   */
   risks: string[];
-  /** The highest risk level of any message. */
+  /** The highest risk level of any message or proposal action. */
   riskLevel: RiskLevel;
-  /** True when any message is risky. */
+  /** True when any message or proposal action is risky. */
   requiresConfirmation: boolean;
   network: TransactionBatch['network'];
   memo?: string;
@@ -182,8 +284,9 @@ export type ValidatedTransactionBatch = {
 /**
  * Strictly validate a batch — several catalogued messages signed together in
  * one wallet transaction. Every message passes the same check as a single
- * message (`validateMessage`); the risks are every message's risks and the
- * level is the highest of them. Mainnet needs `allowMainnet`; a batch carries
+ * message (`validateMessage`); the risks are every message's risks (a DAO
+ * DAO proposal's include those of each action it holds) and the level is the
+ * highest of them. Mainnet needs `allowMainnet`; a batch carries
  * no testnet receipt (each caller owns its mainnet policy). With
  * `requireRiskConfirmation`, every risk must be accepted word for word.
  * Throws on the first failure.
@@ -198,10 +301,16 @@ export function validateTransactionBatch(
       'Mainnet transactions are disabled for this oracle: prepare the transaction on testnet instead',
     );
   }
-  const specs = batch.messages.map((message) => requireSpec(message.typeUrl));
-  const messages = batch.messages.map(validateMessage);
-  const risks = [...new Set(specs.flatMap((spec) => spec.risks))];
-  const requiresConfirmation = specs.some(isRisky);
+  const validated = batch.messages.map((message) =>
+    validateWithSpec(message, { network: batch.network }),
+  );
+  const specs = validated.map(({ spec }) => spec);
+  const messages = validated.map(({ message }) => message);
+  const disclosed = validated.flatMap(({ spec, message }) =>
+    disclosedSpecs(spec, message),
+  );
+  const risks = uniqueRisks(disclosed);
+  const requiresConfirmation = disclosed.some(isRisky);
   assertRiskGate(
     `the batch of ${messages.length} message${messages.length === 1 ? '' : 's'}`,
     requiresConfirmation,
@@ -219,7 +328,7 @@ export function validateTransactionBatch(
     })),
     summary: batch.summary,
     risks,
-    riskLevel: highestRiskLevel(specs.map((spec) => spec.riskLevel)),
+    riskLevel: highestRiskLevel(disclosed.map((spec) => spec.riskLevel)),
     requiresConfirmation,
     network: batch.network,
     memo: batch.memo,
@@ -238,8 +347,12 @@ export function validateTransactionDraft(
 ): ValidatedTransaction {
   const draft = TransactionDraftSchema.parse(input);
   const intent = resolveIntent(draft);
-  const spec = findMessageByTypeUrl(intent.typeUrl);
-  if (!spec) throw new Error(`Resolved unsupported typeUrl: ${intent.typeUrl}`);
+  const spec = findMessageByRoute(intent.module, intent.action);
+  if (!spec) {
+    throw new Error(
+      `Resolved unsupported route: /ixo ${intent.module} ${intent.action}`,
+    );
+  }
 
   assertTypeUrlConflict(draft.typeUrl, intent.typeUrl);
   assertMainnetGate(draft, options);
@@ -251,15 +364,29 @@ export function validateTransactionDraft(
     options,
   );
 
-  const value = buildValueSchema(spec.fields).parse(draft.value);
+  const value = parseValue(spec, draft.value, { network: draft.network });
   const message = ITrxMsgSchema.parse({ typeUrl: spec.typeUrl, value });
+  // A proposal's actions are known once its value is read: their risks join
+  // the gate too.
+  const disclosed = disclosedSpecs(spec, message);
+  const risks = uniqueRisks(disclosed);
+  const requiresConfirmation = disclosed.some(isRisky);
+  if (disclosed.length > 1) {
+    assertRiskGate(
+      spec.messageName,
+      requiresConfirmation,
+      risks,
+      draft.riskConfirmation,
+      options,
+    );
+  }
 
   return {
     intent,
     message,
-    risks: spec.risks,
-    riskLevel: spec.riskLevel,
-    requiresConfirmation: isRisky(spec),
+    risks,
+    riskLevel: highestRiskLevel(disclosed.map((s) => s.riskLevel)),
+    requiresConfirmation,
     network: draft.network,
     memo: draft.memo,
   };

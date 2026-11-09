@@ -1,3 +1,8 @@
+import {
+  WASM_EXECUTE_TYPE_URL,
+  WASM_INSTANTIATE_TYPE_URL,
+  daoDaoExecuteAction,
+} from './daodao-schemas.js';
 import type { FieldKind } from './schemas.js';
 
 export type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
@@ -675,6 +680,77 @@ export const MESSAGE_CATALOG: readonly MessageSpec[] = [
       ['Enables or disables smart-account authentication globally.'],
     ],
   ]),
+
+  // DAO DAO governance groups (contracts v2.0.3). Each route's value is
+  // checked exactly against its one shape (`daodao-schemas.ts`); the four
+  // execute routes share a typeUrl and are told apart by the one top-level
+  // key of `msg`, which is the route's action.
+  {
+    module: 'daodao',
+    action: 'create-group',
+    messageName: 'MsgInstantiateContract',
+    typeUrl: WASM_INSTANTIATE_TYPE_URL,
+    fields: [
+      req('sender', 'address'),
+      opt('admin', 'address'),
+      req('codeId', 'uint'),
+      req('label', 'string'),
+      req('msg', 'wasmMsg'),
+      opt('funds', 'coinArray'),
+    ],
+    riskLevel: 'high',
+    risks: [
+      'Creates a DAO DAO group: its members, each with one vote, and the number of yes votes a proposal needs decide what the group’s own account does. Check every member address and the threshold.',
+      'The wasm admin set on the group (the creating wallet unless none) can replace the group’s contract code without a vote.',
+    ],
+  },
+  ...(
+    [
+      [
+        'propose',
+        'medium',
+        [
+          'Publishes a proposal to the group. If it passes, a member can carry out its actions from the group’s own account; it cannot be withdrawn.',
+        ],
+      ],
+      [
+        'vote',
+        'medium',
+        [
+          'Casts your vote on a group proposal with your voting weight; the group decides whether it can be changed later.',
+        ],
+      ],
+      [
+        'execute',
+        'high',
+        [
+          'Carries out a passed group proposal: the group’s own account does every action in it. This cannot be undone.',
+        ],
+      ],
+      [
+        'close',
+        'medium',
+        [
+          'Closes a rejected group proposal for good: none of its actions will happen.',
+        ],
+      ],
+    ] as const
+  ).map(
+    ([action, riskLevel, risks]): MessageSpec => ({
+      module: 'daodao',
+      action,
+      messageName: 'MsgExecuteContract',
+      typeUrl: WASM_EXECUTE_TYPE_URL,
+      fields: [
+        req('sender', 'address'),
+        req('contract', 'address'),
+        req('msg', 'wasmMsg'),
+        opt('funds', 'coinArray'),
+      ],
+      riskLevel,
+      risks: [...risks],
+    }),
+  ),
 ] as const;
 
 export function findMessageByRoute(
@@ -686,15 +762,46 @@ export function findMessageByRoute(
   );
 }
 
-export function findMessageByTypeUrl(typeUrl: string): MessageSpec | undefined {
-  return MESSAGE_CATALOG.find((entry) => entry.typeUrl === typeUrl);
+/** Every catalog entry of a typeUrl (several for `MsgExecuteContract`). */
+export function findMessagesByTypeUrl(typeUrl: string): MessageSpec[] {
+  return MESSAGE_CATALOG.filter((entry) => entry.typeUrl === typeUrl);
 }
 
+/**
+ * The catalog entry of a typeUrl that only one entry has; undefined for an
+ * unknown typeUrl and for one several routes share (find those with
+ * `findMessageForValue` or by route).
+ */
+export function findMessageByTypeUrl(typeUrl: string): MessageSpec | undefined {
+  const entries = findMessagesByTypeUrl(typeUrl);
+  return entries.length === 1 ? entries[0] : undefined;
+}
+
+/**
+ * The catalog entry of a message: by its typeUrl, and for a typeUrl several
+ * routes share (the DAO DAO execute steps) by the one top-level key of its
+ * `msg`. Undefined when no entry fits.
+ */
+export function findMessageForValue(message: {
+  typeUrl: string;
+  value: Record<string, unknown>;
+}): MessageSpec | undefined {
+  const unique = findMessageByTypeUrl(message.typeUrl);
+  if (unique) return unique;
+  if (message.typeUrl !== WASM_EXECUTE_TYPE_URL) return undefined;
+  const action = daoDaoExecuteAction(message.value);
+  return action === undefined
+    ? undefined
+    : findMessageByRoute('daodao', action);
+}
+
+/** The entry of a Msg name only one route has (not `MsgExecuteContract`). */
 export function routeForMessageName(
   messageName: string,
 ): MessageSpec | undefined {
   const normalized = messageName.toLowerCase();
-  return MESSAGE_CATALOG.find(
+  const entries = MESSAGE_CATALOG.filter(
     (entry) => entry.messageName.toLowerCase() === normalized,
   );
+  return entries.length === 1 ? entries[0] : undefined;
 }

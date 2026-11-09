@@ -102,7 +102,7 @@ export function capFooter(
   tail: number,
 ): string {
   const where = meta.id
-    ? `The full result is saved as ${meta.id}: call read_result({ id: "${meta.id}", offset: 0 }) and follow \`next\` to read it in chunks.`
+    ? `The full result is saved as ${meta.id}; if your task needs a part that is not shown, read_result({ id: "${meta.id}", offset }) reads it. Do not read it all to check that the call worked.`
     : 'The full result could not be saved.';
   return `\n\n[Result truncated: showing the first ${head} and last ${tail} of ${meta.size} characters. ${where}]`;
 }

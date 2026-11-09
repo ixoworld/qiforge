@@ -1,3 +1,4 @@
+import type { AgentMiddleware } from 'langchain';
 import { z } from 'zod';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin';
 import type {
@@ -13,15 +14,20 @@ import {
   type CapsuleContentClientOptions,
   type CapsuleContentFetcher,
 } from './capsule-content-client';
-import { notConfiguredChainGateway, type ChainGateway } from './chain-gateway';
+import type { ChainGateway } from './chain-gateway';
 import { podCreatorConfigSchema } from './config';
 import {
   KvCreateSessionStore,
   type CreateSessionStore,
 } from './create-session-store';
 import { createCreateTools } from './create-tools';
+import { createGroupTools } from './group-tools';
+import { createIxoChainGateway } from './ixo-chain-gateway';
 import { createOrchestrationTools } from './orchestration-tools';
-import { buildStageSubAgents } from './sub-agents';
+import {
+  buildSpecialistSubAgents,
+  createSpecialistStageMiddleware,
+} from './sub-agents';
 
 /**
  * Sibling env read at request time to configure the capsule client. The
@@ -41,9 +47,11 @@ const manifest: PluginManifest = {
   whenToUse: [
     'User wants to create, design, or stand up a new POD (Programmable Organisational Domain) or service domain on IXO.',
     'User describes a service or organisation they want to launch and asks the oracle to turn it into a working POD.',
+    'User wants the POD created in this chat to get a governance group (DAO DAO multisig).',
   ],
   whenNotToUse: [
     'Operating or supporting an already-live POD — out of scope for now.',
+    'A governance group for a POD made earlier or elsewhere: link_dao_group (IXO Transaction).',
     'Generic on-chain entity creation unrelated to POD design.',
   ],
   examples: [
@@ -71,9 +79,10 @@ export interface PodCreatorPluginOptions {
    */
   capsuleContentFetcher?: CapsuleContentFetcher;
   /**
-   * Chain gateway for the create path. Injected by tests; the real IXO MCP
-   * server binding wires in here. When omitted, the create tools report
-   * on-chain creation as unavailable.
+   * Chain gateway for the create path. When omitted, the bundled
+   * `createIxoChainGateway()`: one `MsgCreateEntity` owned by the user and
+   * signed by their Portal wallet. Tests inject a fake; a fork may pass its
+   * own, or `notConfiguredChainGateway` to keep creation off.
    */
   chainGateway?: ChainGateway;
 }
@@ -102,10 +111,12 @@ function requireUserKv(ctx: RuntimeContext): UserKvSurface {
  * `CapsuleContentClient`.
  *
  * Exposes the conductor's orchestration tools (the blueprint lifecycle), the
- * stage-gated specialist sub-agents, and the on-chain create path — a
+ * stage-gated specialist sub-agents, the on-chain create path — a
  * propose → approve → commit handoff with single-use approvals, ending in the
- * blocking `sign_transaction` AG-UI round-trip. The chain encoding sits behind
- * an injectable gateway.
+ * blocking `sign_transaction` AG-UI round-trip — and what follows a created
+ * POD: its domain card and, when the user wants one, its governance group. Composing the batch and
+ * reading the broadcast transaction back sit behind an injectable gateway
+ * (the bundled one by default).
  *
  * Per-thread blueprints and create sessions are rows in the user's own
  * database (`ctx.kv`), so a design survives the user object being evicted and
@@ -137,7 +148,7 @@ export class PodCreatorPlugin extends OraclePlugin {
   constructor(options: PodCreatorPluginOptions = {}) {
     super();
     this.capsuleContentFetcher = options.capsuleContentFetcher;
-    this.chainGateway = options.chainGateway ?? notConfiguredChainGateway;
+    this.chainGateway = options.chainGateway ?? createIxoChainGateway();
   }
 
   override getTools(): PluginTool[] {
@@ -148,6 +159,7 @@ export class PodCreatorPlugin extends OraclePlugin {
         this.chainGateway,
         createSessionStoreFor,
       ),
+      ...createGroupTools(this.chainGateway, createSessionStoreFor),
     ];
   }
 
@@ -158,7 +170,21 @@ export class PodCreatorPlugin extends OraclePlugin {
     // on a host without the store there is no design to offer specialists
     // for, and the tools themselves report the missing store when called.
     if (!rt.kv) return [];
-    return buildStageSubAgents(rt, blueprintStoreFor, this.capsuleClient(rt));
+    return buildSpecialistSubAgents(
+      rt,
+      blueprintStoreFor,
+      this.capsuleClient(rt),
+    );
+  }
+
+  /**
+   * Every specialist is bound once a design exists; this shows the model only
+   * the current stage's, re-read before each model call, so a stage passed
+   * during a turn hands over within that turn.
+   */
+  override getRequestMiddlewares(rt: RuntimeContext): AgentMiddleware[] {
+    if (!rt.kv) return [];
+    return [createSpecialistStageMiddleware(rt, blueprintStoreFor)];
   }
 
   private capsuleClient(rt: RuntimeContext): CapsuleContentClient {

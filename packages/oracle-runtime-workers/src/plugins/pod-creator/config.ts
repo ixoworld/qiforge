@@ -5,6 +5,7 @@ import {
 } from '@ixo/ixo-transaction';
 import { z } from 'zod';
 import type { RuntimeContext } from '../../plugin-api/types';
+import { DOMAIN_INDEXER_URLS } from '../domain-indexer/domain-indexer.plugin';
 import {
   chainIdConfigSchema,
   chainIdsFromConfig,
@@ -17,6 +18,9 @@ import {
  * mainnet opt-in below is what keeps an unconfigured oracle off mainnet.
  */
 export const DEFAULT_NETWORK: Network = 'testnet';
+
+/** An IXO entity DID as the chain derives it. */
+const ENTITY_DID = /^did:ixo:entity:[0-9a-f]{32}$/;
 
 /**
  * Plugin-owned env vars. The capsules registry URL and `NETWORK` are read as
@@ -42,7 +46,41 @@ export const podCreatorConfigSchema = z.object({
     .default(false),
   /** The chain id each network's signing request names. */
   ...chainIdConfigSchema.shape,
+  /**
+   * The relayer node a created POD names, instead of the network's default
+   * ({@link POD_RELAYER_NODE_DIDS}).
+   */
+  POD_CREATOR_RELAYER_NODE_DID: z
+    .string()
+    .regex(ENTITY_DID, 'expected an entity DID: did:ixo:entity:<32 hex>')
+    .optional(),
+  /**
+   * The Portal a created POD is linked to, instead of the network's default
+   * ({@link PORTAL_URLS}).
+   */
+  POD_CREATOR_PORTAL_URL: z.url().optional(),
 });
+
+/**
+ * The relayer node each network's Portal names on the domains (and PODs) it
+ * creates: its `NEXT_PUBLIC_DAO_DID` (ixo-portal `lib/entity/createEntity.ts`),
+ * as read from the Portal's recent "Create domain:" transactions. The
+ * mainnet Portal lists only entities of this relayer that are verified.
+ * Not the oracles' relayer (`lib/oracle/networkConfig.ts`), which only
+ * oracle entities name.
+ */
+export const POD_RELAYER_NODE_DIDS: Readonly<Record<Network, string>> = {
+  mainnet: 'did:ixo:entity:47d9c64891e77cb8e588d33b83ab3042',
+  testnet: 'did:ixo:entity:3d079ebc0b332aad3305bb4a51c72edb',
+  devnet: 'did:ixo:entity:ac12c6f8f299071eb24f2a10591d7ab7',
+};
+
+/** The Portal each network's PODs are opened in. */
+export const PORTAL_URLS: Readonly<Record<Network, string>> = {
+  mainnet: 'https://portal.qi.space',
+  testnet: 'https://test.portal.qi.space',
+  devnet: 'https://dev.portal.qi.space',
+};
 
 /** Sibling env + plugin flags the tools read at request time. */
 const configReadSchema = z.object({
@@ -50,6 +88,7 @@ const configReadSchema = z.object({
   POD_CREATOR_ALLOW_MAINNET:
     podCreatorConfigSchema.shape.POD_CREATOR_ALLOW_MAINNET.optional(),
   ...chainIdConfigSchema.shape,
+  POD_CREATOR_PORTAL_URL: podCreatorConfigSchema.shape.POD_CREATOR_PORTAL_URL,
 });
 
 export interface PodCreatorConfig {
@@ -57,6 +96,28 @@ export interface PodCreatorConfig {
   mainnetAllowed: boolean;
   /** The chain id each network's signing request names. */
   chainIds: Readonly<Record<Network, string>>;
+  /** The Portal of `network`, without a trailing slash. */
+  portalUrl: string;
+}
+
+const withoutSlash = (url: string): string => url.replace(/\/+$/, '');
+
+/**
+ * The Portal a `network` entity is opened in, as the POD Creator links it:
+ * `POD_CREATOR_PORTAL_URL` when the merged config sets a valid one, else the
+ * network's ({@link PORTAL_URLS}); without a trailing slash.
+ */
+export function portalUrlFor(
+  network: Network,
+  config: RuntimeContext['config'],
+): string {
+  const override =
+    podCreatorConfigSchema.shape.POD_CREATOR_PORTAL_URL.safeParse(
+      config.POD_CREATOR_PORTAL_URL,
+    );
+  return withoutSlash(
+    (override.success ? override.data : undefined) ?? PORTAL_URLS[network],
+  );
 }
 
 /**
@@ -75,11 +136,48 @@ export function readPodCreatorConfig(ctx: RuntimeContext): PodCreatorConfig {
       network: DEFAULT_NETWORK,
       mainnetAllowed: false,
       chainIds: DEFAULT_CHAIN_IDS,
+      portalUrl: PORTAL_URLS[DEFAULT_NETWORK],
     };
   }
+  const network = parsed.data.NETWORK ?? DEFAULT_NETWORK;
   return {
-    network: parsed.data.NETWORK ?? DEFAULT_NETWORK,
+    network,
     mainnetAllowed: parsed.data.POD_CREATOR_ALLOW_MAINNET ?? false,
     chainIds: chainIdsFromConfig(parsed.data),
+    portalUrl: withoutSlash(
+      parsed.data.POD_CREATOR_PORTAL_URL ?? PORTAL_URLS[network],
+    ),
   };
+}
+
+const relayerReadSchema = z.object({
+  POD_CREATOR_RELAYER_NODE_DID:
+    podCreatorConfigSchema.shape.POD_CREATOR_RELAYER_NODE_DID,
+});
+
+/** The relayer node a POD created on `network` names: the operator's, else the network's Portal's. */
+export function relayerNodeDidFor(
+  ctx: RuntimeContext,
+  network: Network,
+): string {
+  const parsed = relayerReadSchema.safeParse(ctx.config);
+  return (
+    (parsed.success ? parsed.data.POD_CREATOR_RELAYER_NODE_DID : undefined) ??
+    POD_RELAYER_NODE_DIDS[network]
+  );
+}
+
+/** `DOMAIN_INDEXER_URL` is the domain-indexer plugin's; read here as a sibling. */
+const indexerReadSchema = z.object({ DOMAIN_INDEXER_URL: z.url().optional() });
+
+/** The domain indexer of `network`, without a trailing slash. */
+export function domainIndexerUrlFor(
+  ctx: RuntimeContext,
+  network: Network,
+): string {
+  const parsed = indexerReadSchema.safeParse(ctx.config);
+  return withoutSlash(
+    (parsed.success ? parsed.data.DOMAIN_INDEXER_URL : undefined) ??
+      DOMAIN_INDEXER_URLS[network],
+  );
 }

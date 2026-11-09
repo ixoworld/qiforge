@@ -836,8 +836,11 @@ export interface RuntimeContext<TConfig = MergedConfig> {
     /**
      * Credentials of the oracle's own crypto-less device for plugins that run
      * their own Matrix client (editor, flows). Minted and kept by the gateway.
+     * A caller whose request the homeserver answered 401 passes the token it
+     * used as `rejected`: the host then re-validates the device (or logs it
+     * in again) and answers with fresh credentials, so one retry can succeed.
      */
-    botCredentials: () => Promise<{
+    botCredentials: (opts?: { rejected?: string }) => Promise<{
       baseUrl: string;
       userId: string;
       accessToken: string;
@@ -1345,6 +1348,13 @@ export interface PluginSubAgent {
    *
    * Runtime-injected passthrough tools (e.g. memory CRUD) are never
    * forwarded — they're already on the main agent.
+   *
+   * Forwarded messages are for the chat: they stay in the thread (the UI
+   * and the transcript show them) but are left out of the parent's model
+   * requests. The parent model reads the sub-agent's final reply as the
+   * call's result (its last tool result when that reply is empty), so the
+   * sub-agent's reply must say what it did. Forward the calls the user
+   * should see (a write, its receipt), not large reads.
    */
   forwardTools?: boolean | string[];
   /** Called after sub-agent completes; can emit follow-up events. */

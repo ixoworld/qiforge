@@ -12,7 +12,12 @@ import { parseOutcome as parseOutcome041 } from '@ixo/action-protocol-041';
 import type { ChannelTurnResponse } from '../channels/contract';
 import { createRuntimeCore } from '../core';
 import { makeEnv, makeRuntimeContext } from '../core/test-fixtures';
-import { HubActionsPlugin } from '../plugins/hub-actions/hub-actions.plugin';
+import type { RuntimeContext } from '../plugin-api/types';
+import {
+  HubActionsPlugin,
+  HUB_ACTION_CHANNEL_TOOLS,
+  HUB_ACTION_STATUS_TOOL,
+} from '../plugins/hub-actions/hub-actions.plugin';
 import { chainTxOperation } from './request';
 import { RunStore } from '../do/run-store';
 import { storedRunRequest } from '../do/run-request';
@@ -21,6 +26,16 @@ import { createUserOracleDO } from '../do/user-oracle-do';
 import { DoSqliteDatabase } from '../sqlite/database';
 import { HUB_UPDATE_REQUIRED, HubActionClient } from './client';
 import { HubActionStore } from './store';
+
+/** Every Hub action tool definition, for calling a handler directly. */
+const HUB_ACTION_TOOLS = [...HUB_ACTION_CHANNEL_TOOLS, HUB_ACTION_STATUS_TOOL];
+
+/** The turn's request_chain_transaction, when the turn offers one. */
+async function chainTxToolOf(plugin: HubActionsPlugin, ctx: RuntimeContext) {
+  return (await plugin.getRequestTools(ctx)).find(
+    (tool) => tool.name === 'request_chain_transaction',
+  );
+}
 
 /**
  * The owner object's Hub wiring, driven through `createUserOracleDO`'s own
@@ -514,7 +529,6 @@ describe('Hub actions in the owner object', () => {
       expect(await h.store.outcomeAt(OWNER, pending.id, 3)).toBeNull();
       expect(await h.store.get(OWNER, pending.id)).not.toBeNull();
       // The tools say so in plain words instead of failing.
-      const plugin = new HubActionsPlugin();
       const ctx = makeRuntimeContext({
         config: { HUB_ACTIONS_ENABLED: 'true' },
         user: {
@@ -549,7 +563,7 @@ describe('Hub actions in the owner object', () => {
         },
       });
       const tool = (name: string) => {
-        const found = plugin.getTools().find((item) => item.name === name);
+        const found = HUB_ACTION_TOOLS.find((item) => item.name === name);
         if (!found) throw new Error(`${name} missing`);
         return found;
       };
@@ -611,7 +625,8 @@ describe('Hub actions in the owner object', () => {
       ).rejects.toThrow('This account cannot use cosmos.staking.undelegate');
       expect(h.hubState.posted).toHaveLength(posted);
       // The turn's tool offers the four.
-      const [tool] = await new HubActionsPlugin().getRequestTools(
+      const tool = await chainTxToolOf(
+        new HubActionsPlugin(),
         makeRuntimeContext({
           config: { HUB_ACTIONS_ENABLED: 'true' },
           session: {
@@ -767,9 +782,9 @@ describe('Hub actions in the owner object', () => {
       expect(relayed[1]!.receipt).toEqual(failure);
       expect(relayed[1]).toEqual(h.outcomes.get(failedRef.id));
       // hub_action_status: no detail, the Hub's words quoted as data.
-      const status = new HubActionsPlugin()
-        .getTools()
-        .find((item) => item.name === 'hub_action_status');
+      const status = HUB_ACTION_TOOLS.find(
+        (item) => item.name === 'hub_action_status',
+      );
       if (!status) throw new Error('status tool missing');
       const seen = await status.handler(
         { actionId: failedRef.id },
@@ -1898,7 +1913,7 @@ describe('Hub actions in the owner object', () => {
         },
       });
       // Offered per turn, from the account's capabilities.
-      const [tool] = await new HubActionsPlugin().getRequestTools(ctx);
+      const tool = await chainTxToolOf(new HubActionsPlugin(), ctx);
       if (tool?.name !== 'request_chain_transaction')
         throw new Error('chain transaction tool missing');
       expect(

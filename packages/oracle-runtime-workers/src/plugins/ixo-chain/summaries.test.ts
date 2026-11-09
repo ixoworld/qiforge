@@ -496,6 +496,50 @@ describe('shapeResult', () => {
     expect(JSON.stringify(linked)).not.toContain('proof');
   });
 
+  it("names an entity's governing DAO DAO group from its group link, in any case, as the Portal reads it", () => {
+    const CORE =
+      'ixo1q5zs2pg9q5zs2pg9q5zs2pg9q5zs2pg9q5zs2pg9q5zs2pg9q5zsrtecm8';
+    const OTHER =
+      'ixo1qcrqvpsxqcrqvpsxqcrqvpsxqcrqvpsxqcrqvpsxqcrqvpsxqcrqwa7lw0';
+    const entity = (linkedEntity: unknown[]) => {
+      const shaped = shapeResult(
+        { kind: 'entity', id: `did:ixo:entity:${'b'.repeat(32)}` },
+        { id: 'did:ixo:entity:b', type: 'pod', linkedEntity },
+      );
+      if (!shaped.ok) throw new Error('expected an entity');
+      return shaped.data;
+    };
+    // The Portal writes `Group` / `Governs`; other tools write lowercase.
+    expect(
+      entity([
+        { id: `{id}#${CORE}`, type: 'Group', relationship: 'Governs' },
+        { id: 'did:ixo:entity:c', type: 'dao', relationship: 'member' },
+      ]),
+    ).toMatchObject({ governingGroup: CORE });
+    expect(
+      entity([
+        {
+          id: `did:ixo:entity:b#${CORE}`,
+          type: 'group',
+          relationship: 'governs',
+        },
+      ]),
+    ).toMatchObject({ governingGroup: CORE });
+    // None, an unreadable address, a link that does not govern, or two
+    // different groups: no governing group is named.
+    for (const links of [
+      [],
+      [{ id: '{id}#ixo1notacontract', type: 'group', relationship: 'governs' }],
+      [{ id: CORE, type: 'group', relationship: 'governs' }],
+      [{ id: `{id}#${CORE}`, type: 'group', relationship: 'member' }],
+      [
+        { id: `{id}#${CORE}`, type: 'group', relationship: 'governs' },
+        { id: `{id}#${OTHER}`, type: 'group', relationship: 'governs' },
+      ],
+    ])
+      expect(entity(links)).not.toHaveProperty('governingGroup');
+  });
+
   it('lists entities with how they are ordered and what status means', () => {
     expect(
       shapeResult(

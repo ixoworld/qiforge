@@ -4,6 +4,8 @@ export {
   DEFERRED_MODULES,
   findMessageByRoute,
   findMessageByTypeUrl,
+  findMessageForValue,
+  findMessagesByTypeUrl,
   routeForMessageName,
 } from './catalog.js';
 export type { FieldSpec, MessageSpec, RiskLevel } from './catalog.js';
@@ -88,13 +90,56 @@ export type {
 } from './schemas.js';
 export {
   describeValidationError,
+  riskTextKey,
   validateMessage,
   validateTransactionBatch,
   validateTransactionDraft,
 } from './validate.js';
 export type {
   BatchMessageRoute,
+  MessageValidationContext,
   ValidatedTransaction,
   ValidatedTransactionBatch,
   ValidationOptions,
 } from './validate.js';
+export {
+  DESCRIBED_VALUE_MAX_CHARS,
+  describeDaoDaoProposalAction,
+  describeMessageValues,
+} from './describe.js';
+export {
+  buildDaoDaoGroupInstantiate,
+  buildDaoDaoGroupLinkMessages,
+  buildDaoDaoProposalMessage,
+  findDaoDaoCoreAddress,
+} from './daodao.js';
+export type {
+  DaoDaoGroupInstantiateInput,
+  DaoDaoProposalMessageInput,
+  TxEvent,
+} from './daodao.js';
+export {
+  DAODAO_CODE_IDS,
+  DAODAO_CONTRACTS,
+  DAODAO_DEFAULT_ALLOW_REVOTING,
+  DAODAO_EXECUTE_ACTIONS,
+  DAODAO_MAX_DESCRIPTION_LENGTH,
+  DAODAO_MAX_MEMBERS,
+  DAODAO_MAX_NAME_LENGTH,
+  DAODAO_MAX_PROPOSAL_ACTIONS,
+  DAODAO_MAX_RATIONALE_LENGTH,
+  DAODAO_MAX_TITLE_LENGTH,
+  DAODAO_PROPOSAL_ACTION_ACTORS,
+  DAODAO_VOTE_OPTIONS,
+  DAODAO_VOTING_PERIOD_SECONDS,
+  DaoDaoAccountAddressSchema,
+  DaoDaoContractAddressSchema,
+  WASM_EXECUTE_TYPE_URL,
+  WASM_INSTANTIATE_TYPE_URL,
+  daoDaoProposalActions,
+} from './daodao-schemas.js';
+export type {
+  DaoDaoContract,
+  DaoDaoExecuteAction,
+  DaoDaoVoteOption,
+} from './daodao-schemas.js';

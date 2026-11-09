@@ -903,6 +903,41 @@ function issuesOf(
   );
 }
 
+/** Why a Hub action tool did nothing: Hub actions are off for this oracle. */
+export const HUB_ACTIONS_OFF_REASON =
+  'Hub actions are not enabled for this oracle.';
+
+/**
+ * Why a Hub action tool did nothing on a Portal, Matrix or other non-channel
+ * turn. Auth Hub reviews are bound to a channel binding, so nothing can be
+ * prepared here; the reason says so in words the model can relay, so it
+ * never reads the refusal as an Auth Hub outage.
+ */
+export const NOT_A_CHANNEL_CHAT_REASON =
+  'Auth Hub actions can be prepared only in a channel chat with this oracle (such as WhatsApp), not in this chat. Auth Hub was not contacted and nothing was prepared or sent. In a Portal chat, coin sends, chain transactions and DAO DAO group proposals and votes are signed in the Portal wallet through the ixo-transaction capability instead; elsewhere, tell the person to ask in their channel chat.';
+
+/**
+ * The turn's channel binding and Hub client when Hub actions can be
+ * prepared on this turn, else the refusal that names why not.
+ */
+function channelTurnOf(ctx: RuntimeContext):
+  | {
+      channel: NonNullable<RuntimeContext['session']['channel']>;
+      hubActions: NonNullable<RuntimeContext['hubActions']>;
+    }
+  | { refusal: { status: 'unavailable'; reason: string } } {
+  if (ctx.config.HUB_ACTIONS_ENABLED !== 'true' || !ctx.hubActions)
+    return {
+      refusal: { status: 'unavailable', reason: HUB_ACTIONS_OFF_REASON },
+    };
+  const channel = ctx.session.channel;
+  if (ctx.session.client !== 'channel' || !channel)
+    return {
+      refusal: { status: 'unavailable', reason: NOT_A_CHANNEL_CHAT_REASON },
+    };
+  return { channel, hubActions: ctx.hubActions };
+}
+
 /**
  * The catalogue types this account may use: the Hub capabilities'
  * `chainTx.messageTypes`, which follow the protocol level the Hub speaks
@@ -916,16 +951,11 @@ function issuesOf(
 async function availableChainTxTypes(
   ctx: RuntimeContext,
 ): Promise<readonly ChainTxMessageType[]> {
-  if (
-    ctx.config.HUB_ACTIONS_ENABLED !== 'true' ||
-    ctx.session.client !== 'channel' ||
-    !ctx.session.channel ||
-    !ctx.hubActions
-  )
-    return [];
+  const turn = channelTurnOf(ctx);
+  if ('refusal' in turn) return [];
   let chainTx;
   try {
-    chainTx = (await ctx.hubActions.capabilities({ turn: true })).chainTx;
+    chainTx = (await turn.hubActions.capabilities({ turn: true })).chainTx;
   } catch (error) {
     ctx.logger.warn(
       `[hub-actions] capabilities unavailable, no chain transaction types this turn: ${error instanceof Error ? error.message : String(error)}`,
@@ -1101,12 +1131,16 @@ async function hubActionStatus(
   ctx: RuntimeContext,
 ): Promise<unknown> {
   const parsed = statusSchema.safeParse(input);
-  if (
-    !parsed.success ||
-    !ctx.hubActions ||
-    ctx.config.HUB_ACTIONS_ENABLED !== 'true'
-  )
-    return { status: 'unavailable' };
+  if (!parsed.success)
+    return {
+      status: 'unavailable',
+      reason:
+        'An actionId is required: the 32-character id of a Hub action prepared for this owner.',
+    };
+  // Not only a channel turn: an action prepared in a channel chat is read
+  // from the Portal too, where the channel's conversation is mirrored.
+  if (ctx.config.HUB_ACTIONS_ENABLED !== 'true' || !ctx.hubActions)
+    return { status: 'unavailable', reason: HUB_ACTIONS_OFF_REASON };
   try {
     const read = await ctx.hubActions.status(
       ctx.user.did,
@@ -1138,15 +1172,10 @@ async function hubActionCapabilities(
   _input: unknown,
   ctx: RuntimeContext,
 ): Promise<unknown> {
-  if (
-    ctx.config.HUB_ACTIONS_ENABLED !== 'true' ||
-    ctx.session.client !== 'channel' ||
-    !ctx.session.channel ||
-    !ctx.hubActions
-  )
-    return { status: 'unavailable' };
+  const turn = channelTurnOf(ctx);
+  if ('refusal' in turn) return turn.refusal;
   try {
-    return await ctx.hubActions.capabilities();
+    return await turn.hubActions.capabilities();
   } catch (error) {
     const refused = refusalOf(error);
     if (refused) return refused;
@@ -1158,17 +1187,12 @@ async function hubActionOptions(
   _input: unknown,
   ctx: RuntimeContext,
 ): Promise<unknown> {
-  const channel = ctx.session.channel;
-  if (
-    ctx.config.HUB_ACTIONS_ENABLED !== 'true' ||
-    ctx.session.client !== 'channel' ||
-    !channel ||
-    !ctx.hubActions
-  )
-    return { status: 'unavailable' };
+  const turn = channelTurnOf(ctx);
+  if ('refusal' in turn) return turn.refusal;
+  const { channel } = turn;
   let options;
   try {
-    options = await ctx.hubActions.options({
+    options = await turn.hubActions.options({
       ownerDid: ctx.user.did,
       provider: channel.provider,
       bindingId: channel.bindingId,
@@ -1183,6 +1207,60 @@ async function hubActionOptions(
   // account the listed balances belong to without a lookup.
   return { ...options, ownerAddress: ixoAddressOf(ctx.user.did) };
 }
+
+/**
+ * The tools that prepare a Hub action, offered only on a channel turn
+ * (`getRequestTools`): Auth Hub binds every review to the turn's channel
+ * binding, so on a Portal, Matrix or other turn they could only refuse, and
+ * a model offered them reads the refusal as an Auth Hub outage. Their
+ * handlers still refuse off a channel turn, with a reason. Built once.
+ */
+export const HUB_ACTION_CHANNEL_TOOLS: readonly PluginTool[] = [
+  {
+    name: 'hub_action_capabilities',
+    description:
+      "Read this authenticated oracle account's enabled operation kinds and exact registered form field schema before proposing a Hub action.",
+    schema: discoverSchema,
+    effect: 'read',
+    handler: hubActionCapabilities,
+  },
+  {
+    name: 'hub_action_options',
+    description:
+      "Read the owner’s confirmed Gmail and Calendar connections, requestable documents, action resources and bank tokens (`transfer.tokens`: denom, symbol, decimals, verified, balance in base units). Use each returned service, identifier and label to prepare a related Hub review. A Gmail profile connection does not authorize sending. For a token that is not verified, name its full denom and say it is unverified; its amounts are base units. ownerDid is the authenticated user's DID and ownerAddress their IXO account address.",
+    schema: discoverSchema,
+    effect: 'read',
+    handler: hubActionOptions,
+  },
+  {
+    name: 'request_hub_action',
+    description:
+      'Prepare a supported operation for the authenticated channel owner to review in Auth Hub. Never approves, signs, or executes. For email, propose one plain-text message to one recipient using a confirmed Gmail send connection. Supply only the operation candidate; the runtime supplies identity and turn binding. Coin sends and other chain transactions have their own tool (request_chain_transaction). Never prepare a replacement email after an unknown send without the user checking Gmail’s Sent folder and asking again. Limits are checked on the call; `startsAt` and `endsAt` are ISO 8601 with an offset, a saved `filename` ends in .txt, a form field `id` is lower_snake_case.',
+    schema: requestSchema,
+    effect: 'write',
+    handler: requestHubAction,
+  },
+  {
+    name: 'describe_chain_messages',
+    description: DESCRIBE_CHAIN_MESSAGES_TOOL_DESCRIPTION,
+    schema: describeChainMessagesSchema,
+    effect: 'read',
+    handler: describeChainMessages,
+  },
+];
+
+/**
+ * hub_action_status, offered on every turn: an action prepared in a channel
+ * chat is followed from the Portal too, where that conversation is mirrored.
+ */
+export const HUB_ACTION_STATUS_TOOL: PluginTool = {
+  name: 'hub_action_status',
+  description:
+    'Read the verified status of a Hub action already prepared for this owner. Never executes. A `cancelled` outcome was withdrawn before anything was sent, by the person or by Auth Hub (`meaning` says so): never say the person cancelled it. When `meaning` is present, it says what the outcome means for the person (for example a carried-out group proposal whose actions failed): follow it. Coin sends, chain transactions and other Hub actions are prepared only in a channel chat (such as WhatsApp): when this chat has no tool for one, tell the person to ask there, and never call it an Auth Hub outage.',
+  schema: statusSchema,
+  effect: 'read',
+  handler: hubActionStatus,
+};
 
 const manifest: PluginManifest = {
   title: 'Auth Hub action review',
@@ -1200,6 +1278,7 @@ const manifest: PluginManifest = {
   ],
   whenNotToUse: [
     'Signing, executing, or treating a resource open as acceptance.',
+    'A Portal chat: there, coin sends, chain transactions and DAO DAO group proposals and votes are signed in the Portal wallet through the ixo-transaction capability. Auth Hub actions are for channel chats (such as WhatsApp).',
   ],
   tags: ['actions', 'channels'],
   category: 'integration',
@@ -1224,63 +1303,26 @@ export class HubActionsPlugin extends OraclePlugin {
     );
   }
   /**
+   * The tools that prepare a Hub action, on a channel turn only (none on a
+   * Portal, Matrix or other turn, where Auth Hub cannot bind a review).
    * request_chain_transaction is built per turn: its schema names only the
    * message types this account may use (Auth Hub capabilities, cached by
    * the owner object), so 37 types do not reach a model that may use 4.
    */
   override async getRequestTools(ctx: RuntimeContext): Promise<PluginTool[]> {
+    if ('refusal' in channelTurnOf(ctx)) return [];
     const [available, described] = await Promise.all([
       chainTxTypesForTurn(ctx),
       describedChainTxTypes(ctx, ctx.history.messages),
     ]);
     const tool = chainTransactionTool(available, described);
-    return tool ? [tool] : [];
+    return [...HUB_ACTION_CHANNEL_TOOLS, ...(tool ? [tool] : [])];
   }
   /** Gives each model call the request tool with the fields described so far in the turn. */
   override getRequestMiddlewares(ctx: RuntimeContext): AgentMiddleware[] {
     return [chainTxFieldsMiddleware(ctx)];
   }
   override getTools(): PluginTool[] {
-    return [
-      {
-        name: 'hub_action_capabilities',
-        description:
-          "Read this authenticated oracle account's enabled operation kinds and exact registered form field schema before proposing a Hub action.",
-        schema: discoverSchema,
-        effect: 'read',
-        handler: hubActionCapabilities,
-      },
-      {
-        name: 'hub_action_options',
-        description:
-          "Read the owner’s confirmed Gmail and Calendar connections, requestable documents, action resources and bank tokens (`transfer.tokens`: denom, symbol, decimals, verified, balance in base units). Use each returned service, identifier and label to prepare a related Hub review. A Gmail profile connection does not authorize sending. For a token that is not verified, name its full denom and say it is unverified; its amounts are base units. ownerDid is the authenticated user's DID and ownerAddress their IXO account address.",
-        schema: discoverSchema,
-        effect: 'read',
-        handler: hubActionOptions,
-      },
-      {
-        name: 'request_hub_action',
-        description:
-          'Prepare a supported operation for the authenticated channel owner to review in Auth Hub. Never approves, signs, or executes. For email, propose one plain-text message to one recipient using a confirmed Gmail send connection. Supply only the operation candidate; the runtime supplies identity and turn binding. Coin sends and other chain transactions have their own tool (request_chain_transaction). Never prepare a replacement email after an unknown send without the user checking Gmail’s Sent folder and asking again. Limits are checked on the call; `startsAt` and `endsAt` are ISO 8601 with an offset, a saved `filename` ends in .txt, a form field `id` is lower_snake_case.',
-        schema: requestSchema,
-        effect: 'write',
-        handler: requestHubAction,
-      },
-      {
-        name: 'describe_chain_messages',
-        description: DESCRIBE_CHAIN_MESSAGES_TOOL_DESCRIPTION,
-        schema: describeChainMessagesSchema,
-        effect: 'read',
-        handler: describeChainMessages,
-      },
-      {
-        name: 'hub_action_status',
-        description:
-          'Read the verified status of a Hub action already prepared for this owner. Never executes. A `cancelled` outcome was withdrawn before anything was sent, by the person or by Auth Hub (`meaning` says so): never say the person cancelled it. When `meaning` is present, it says what the outcome means for the person (for example a carried-out group proposal whose actions failed): follow it.',
-        schema: statusSchema,
-        effect: 'read',
-        handler: hubActionStatus,
-      },
-    ];
+    return [HUB_ACTION_STATUS_TOOL];
   }
 }

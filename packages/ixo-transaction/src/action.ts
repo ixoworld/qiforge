@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { findMessageForValue } from './catalog.js';
 import {
   ITrxMsgSchema,
   MAX_BATCH_MESSAGES,
@@ -363,6 +364,32 @@ export function normalizeWalletSignResult(
   });
 }
 
+/**
+ * Why the intent does not name the route of each message, or undefined.
+ * Several DAO DAO routes share one typeUrl, so the typeUrl alone does not
+ * prove which step (and which risks) the user is shown.
+ */
+function intentRouteProblem(
+  args: SignTransactionActionArgs,
+  messages: readonly ITrxMsg[],
+): string | undefined {
+  const named =
+    args.intent.source === 'batch' ? args.intent.messages : [args.intent];
+  for (const [index, message] of messages.entries()) {
+    const spec = findMessageForValue(message);
+    const route = named[index];
+    if (
+      !spec ||
+      !route ||
+      route.module !== spec.module ||
+      route.action !== spec.action
+    ) {
+      return `Message ${index} is /ixo ${spec?.module} ${spec?.action}, but the request names ${route ? `/ixo ${route.module} ${route.action}` : 'no route'}; nothing was signed`;
+    }
+  }
+  return undefined;
+}
+
 export interface WalletSigningOptions {
   /** The chain id of the Portal's wallet, read from its own wallet config. */
   walletChainId: string;
@@ -389,7 +416,13 @@ export async function signIxoTransactionWithWallet(
         error: `Chain mismatch: the transaction is for ${args.chainId} (${args.network}) but this Portal wallet is on ${options.walletChainId}; nothing was signed`,
       };
     }
-    const messages = args.messages.map(validateMessage);
+    const messages = args.messages.map((message) =>
+      validateMessage(message, { network: args.network }),
+    );
+    const routeProblem = intentRouteProblem(args, messages);
+    if (routeProblem !== undefined) {
+      return { success: false, error: routeProblem };
+    }
     const result = await transactSignX(messages, args.memo);
     return normalizeWalletSignResult(result);
   } catch (error) {

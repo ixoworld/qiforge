@@ -8,6 +8,7 @@ import {
   createActionInteractionsClient,
   CheckDispatchSchema,
   OwnerReferenceLocatorSchema,
+  NO_ACTION_WINDOW,
 } from './index.js';
 
 describe('portable interaction contract', () => {
@@ -166,6 +167,27 @@ describe('portable interaction contract', () => {
         values: {},
       }).success,
     ).toBe(false);
+  });
+  it('lets a prepare ask to repeat its owner, and gives cards without a window a real date', () => {
+    const input = {
+      version: 1,
+      requestId: crypto.randomUUID(),
+      sessionId: '$session',
+      owner: { kind: 'question', requestId: 'q' },
+      values: {},
+    };
+    expect(
+      PrepareInteractionSchema.parse({ ...input, repeat: true }),
+    ).toMatchObject({ repeat: true });
+    expect(
+      PrepareInteractionSchema.safeParse({ ...input, repeat: 'yes' }).success,
+    ).toBe(false);
+    expect(
+      PrepareInteractionSchema.safeParse({ ...input, again: true }).success,
+    ).toBe(false);
+    expect(new Date(NO_ACTION_WINDOW).toISOString()).toBe(
+      '9999-12-31T23:59:59.999Z',
+    );
   });
   it('turns a non-JSON error page into a typed error and skips unreadable list items', async () => {
     const page = createActionInteractionsClient({

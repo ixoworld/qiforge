@@ -184,7 +184,8 @@ export function createMatrixAdapter(
       ),
     postEvent: (roomId, eventType, content, opts) =>
       gateway.sendEvent(roomId, eventType, JSON.stringify(content), opts ?? {}),
-    botCredentials: () => gateway.botCredentials(),
+    botCredentials: (opts?: { rejected?: string }) =>
+      gateway.botCredentials(opts?.rejected ? { rejected: opts.rejected } : {}),
     roomInfo: (roomId) => gateway.groupChatRoomInfo(roomId),
     channelMemory: {
       recall: async (roomId, limit) =>

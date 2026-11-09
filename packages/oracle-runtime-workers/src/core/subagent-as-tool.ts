@@ -97,6 +97,34 @@ const taskSchema = z.object({
     ),
 });
 
+/** Characters of a sub-agent's last tool result handed back when it ended without a reply. */
+export const SUBAGENT_FALLBACK_RESULT_CHARS = 2_000;
+
+/**
+ * What the parent reads as a sub-agent's result: its final reply, or, when
+ * the sub-agent ended on an empty one (a model that stops right after its
+ * last tool call, such as a POD specialist after `submit_section`), its last
+ * tool result, labelled as such and cut to
+ * {@link SUBAGENT_FALLBACK_RESULT_CHARS}. An empty result leaves the parent
+ * nothing to tell whether the work was done.
+ */
+export function subAgentResultText(
+  messages: BaseMessage[],
+  name: string,
+): string {
+  const text = lastMessageContent(messages).toString();
+  if (text.trim()) return text;
+  const lastTool = messages.findLast((message) =>
+    ToolMessage.isInstance(message),
+  );
+  if (!lastTool) return `${name} finished without a reply.`;
+  const result =
+    typeof lastTool.content === 'string'
+      ? lastTool.content
+      : JSON.stringify(lastTool.content);
+  return `${name} finished without a reply. Its last tool call${lastTool.name ? ` (${lastTool.name})` : ''} returned: ${result.slice(0, SUBAGENT_FALLBACK_RESULT_CHARS)}`;
+}
+
 function lastMessageContent(messages: BaseMessage[]): string {
   const last = messages.at(-1);
   if (!last?.content) return '';
@@ -120,6 +148,18 @@ function lastMessageContent(messages: BaseMessage[]): string {
  * LangChain-generated ids starting at 0, and two invocations in one chat
  * collide — the frontend uses these ids as React keys.
  */
+/**
+ * `additional_kwargs` key on every forwarded message: the parent call it came
+ * from. Forwarded messages are for the chat (the UI renders the sub-agent's
+ * calls); the parent model reads the call's own result instead, so the
+ * dangling-call middleware leaves them out of its requests
+ * (`withoutForwarded`). Without that, the parent model took a forwarded call
+ * for one of its own (it called a specialist's `submit_section` itself) and
+ * read each forwarded call's arguments, a whole POD section, on every model
+ * call of the thread.
+ */
+export const FORWARDED_FROM_KEY = 'forwardedFrom';
+
 export function filterForwardedMessages(
   messages: BaseMessage[],
   forwardTools: Set<string>,
@@ -140,7 +180,13 @@ export function filterForwardedMessages(
         oldToNewId.set(tc.id, newId);
         return { ...tc, id: newId };
       });
-      acc.push(new AIMessage({ content: '', tool_calls: rewritten }));
+      acc.push(
+        new AIMessage({
+          content: '',
+          tool_calls: rewritten,
+          additional_kwargs: { [FORWARDED_FROM_KEY]: idPrefix },
+        }),
+      );
     }
 
     if (msg.type === 'tool') {
@@ -152,6 +198,7 @@ export function filterForwardedMessages(
           content: toolMsg.content,
           tool_call_id: newId,
           ...(toolMsg.name ? { name: toolMsg.name } : {}),
+          additional_kwargs: { [FORWARDED_FROM_KEY]: idPrefix },
         }),
       );
     }
@@ -273,7 +320,7 @@ export function createSubagentAsTool(
     messages: BaseMessage[],
     toolCallId: string,
   ): string | Command => {
-    const text = lastMessageContent(messages).toString();
+    const text = subAgentResultText(messages, spec.name);
     if (forwardSet.size === 0) return text;
 
     const idPrefix = toolCallId || `run_${crypto.randomUUID().slice(0, 8)}`;

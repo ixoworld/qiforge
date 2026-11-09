@@ -16,15 +16,56 @@ The main agent is the **conductor**: it owns the blueprint lifecycle through the
 orchestration tools (`start_pod_design`, `get_blueprint`, `compute_readiness`,
 `assemble_blueprint`). Twelve **specialist sub-agents** (one per
 `design-pod-*` capsule, defined in `design-pod-roles.ts`) do the design work.
-`getRequestSubAgents` exposes only the current stage's specialists, so the
-pipeline order is enforced by construction; the runtime wraps each as
-`call_<role>_agent` (`core/subagent-as-tool.ts`).
+Once a design exists, `getRequestSubAgents` binds all twelve (the runtime
+wraps each as `call_<role>_agent`, `core/subagent-as-tool.ts`), and the
+plugin's request middleware (`createSpecialistStageMiddleware`) re-reads the
+blueprint before every model call and shows the model only the current
+stage's specialists; a call to another stage's specialist is refused with the
+next step instead of running. So the pipeline order is enforced, and a stage
+passed during a turn hands over to the next stage's specialists on the very
+next model call. (Bound per stage at turn start, as before, the next stage's
+specialists were missing for the rest of that turn: a model that called them
+got "no such tool" and went on telling the user they did not exist.)
+Because the whole pipeline can now run in one turn, the middleware (one
+instance per turn) holds two rules within a turn: a gate specialist
+(evaluate or gate stage) that recorded a fail in it is not shown or run again
+until the user's next message (nothing in the design changed, so a re-run
+only repeats the verdict), and `start_pod_design({ restart: true })` is
+refused once a specialist ran in it (a restart discards that work and is for
+a user who asks for one). Without them a devnet drill re-ran the three
+evaluate specialists twice after a fail, restarted the design unasked and
+rebuilt it, until the 10-minute turn deadline. A specialist forwards only
+its `submit_section` call into the chat (`forwardTools: ['submit_section']`):
+its `read_blueprint` reads (a full-section read is often over 60 KB) stay
+inside the specialist, so they never land in the conductor's thread to be
+capped and paged through with `read_result`. The forwarded call is for the
+chat only: the conductor's model requests leave it out (it would otherwise
+take `submit_section` for one of its own tools and resend the section on
+every call). A specialist that ends on an
+empty reply, as models often do right after `submit_section`, hands the
+conductor its last tool result instead (`{"submitted": <role>, "stage":
+<stage>, "message": …}`), so the conductor can tell the section was
+recorded; the message says not to call that specialist again and what comes
+next. A specialist whose stage is already behind the design (its section is
+recorded and the current stage is a later one) refuses to record again
+(`{ submitted: false, message: "The <stage> stage is already complete; …" }`)
+instead of overwriting; a failed gate verdict re-opens its own stage, so a
+re-run of that role is always accepted.
 
 The runtime calls every plugin's `getRequestSubAgents` on every turn of every
 user, whether or not the capability is loaded. So until `start_pod_design` has
 opened a blueprint in the thread the hook returns nothing after one local
-`ctx.kv` read — no registry request, no UCAN mint, no log line. The qualify
-specialist appears on the turn after `start_pod_design`.
+`ctx.kv` read — no registry request, no UCAN mint, no log line — and the
+qualify specialist appears on the turn after `start_pod_design`. The
+registry prompts are cached per capsule, so binding all twelve costs no
+request per turn. `start_pod_design`, `get_blueprint` and `compute_readiness`
+return a `nextStep` in plain words: the next stage, its specialists still to
+run, that they are in the tool list from the next step, and that only in the
+turn that opened the design the conductor stops and asks the user to send a
+message (for example "continue") — never using another stage's specialist
+for them. `start_pod_design({ restart: true })` is meant
+only for a user who asks to start over (its description says so; it is not
+blocked).
 
 Sections enter the blueprint **only** through a specialist's `submit_section`.
 The conductor has no write path (there is no `record_blueprint_section` tool,
@@ -76,12 +117,13 @@ one another's. A stored row that no longer matches the schema is reported
 (blueprint) or treated as no session (create session — the safe direction for
 an approval gate).
 
-| Store                        | Where                                     | Contents                                 | Bound (per user)         |
-| ---------------------------- | ----------------------------------------- | ---------------------------------------- | ------------------------ |
-| `KvBlueprintStore`           | `ctx.kv` `pod-creator/blueprints`         | one blueprint per thread                 | 500 entries / 24 h idle  |
-| `KvCreateSessionStore`       | `ctx.kv` `pod-creator/create-sessions`    | propose→approve state per (user, thread) | 1000 entries / 1 h idle  |
-| prepared batch               | `ctx.blobStore` (object storage, not SQL) | the batch's validated proto-JSON         | 1 h TTL                  |
-| `CapsuleContentClient` cache | plugin instance (isolate memory)          | SKILL.md per capsule name (public text)  | 64 / 6 h; failures 5 min |
+| Store                        | Where                                     | Contents                                                                                                                                                          | Bound (per user)         |
+| ---------------------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| `KvBlueprintStore`           | `ctx.kv` `pod-creator/blueprints`         | one blueprint per thread                                                                                                                                          | 500 entries / 24 h idle  |
+| `KvCreateSessionStore`       | `ctx.kv` `pod-creator/create-sessions`    | propose→approve state per (user, thread); what was sent for signing, the confirmed POD, its card step and its governance group (preview, creation, address, link) | 1000 entries / 1 h idle  |
+| prepared batch               | `ctx.blobStore` (object storage, not SQL) | the batch's validated proto-JSON, the profile, the documents still to publish                                                                                     | 1 h TTL                  |
+| public documents             | `ctx.kv` `pod-creator/public-documents`   | per homeserver + document SHA-256: the reserved (or uploaded) media                                                                                               | 100 entries / 1 h idle   |
+| `CapsuleContentClient` cache | plugin instance (isolate memory)          | SKILL.md per capsule name (public text)                                                                                                                           | 64 / 6 h; failures 5 min |
 
 On a host without `ctx.kv` every tool fails with a clear error rather than
 keeping a design silently in memory; the per-turn sub-agent hook contributes
@@ -90,8 +132,17 @@ nothing.
 ## The create path
 
 A propose → approve → commit handoff (`create-tools.ts` +
-`create-session-store.ts`). `prepare` has the gateway compose the batch as
-proto-JSON messages, validates every message against the
+`create-session-store.ts`). `prepare_pod_transaction({ name, description? })`
+takes the POD's name as the user agreed it in the design (plain text, 1–100
+characters, one line) and an optional description (at most 600 characters,
+so the summary can quote it whole); they become the POD's public profile.
+Both refuse control characters (the description keeps line breaks and tabs)
+and `\p{Cf}` (bidi overrides, zero-width), `\p{Zl}`, `\p{Zp}`, `\p{Co}` and
+`\p{Cn}`. The result and the batch summary the user approves show the exact
+name and description. An expected refusal of the gateway (no identity, the
+homeserver down, …) comes back as `{ prepared: false, retryable, message }`;
+nothing is stored then.
+`prepare` has the gateway compose the batch as proto-JSON messages, validates every message against the
 `@ixo/ixo-transaction` catalog (the check the Portal runs again before the
 wallet sees it) and that the batch is a POD batch (`podBatchProblem`: exactly
 one `MsgCreateEntity`, first, and only `POD_BATCH_TYPE_URLS`), and stashes it
@@ -104,9 +155,14 @@ a short `blobId`, the summary, the message names and every risk.
 stateDiagram-v2
     [*] --> Prepared: prepare_pod_transaction
     Prepared --> Approved: approve_pod_transaction (exact blobId, a later turn)
-    Approved --> Dispatched: request_pod_signature (spends approval)
-    Dispatched --> Approved: re-approve to dispatch again
-    Dispatched --> [*]: confirm_pod_creation (clears session)
+    Approved --> Approved: request_pod_signature, profile not published (approval kept)
+    Approved --> Sent: request_pod_signature (publishes the profile, spends approval, records the batch)
+    Sent --> Approved: re-approve to dispatch again
+    Sent --> Confirmed: confirm_pod_creation (the tx carries the sent batch)
+    Confirmed --> CardAdded: add_pod_domain_card (once per POD)
+    Confirmed --> GroupShown: create_pod_group without riskConfirmation
+    GroupShown --> GroupCreated: create_pod_group with riskConfirmation (a later turn, the same group)
+    GroupCreated --> GroupLinked: link_pod_group (once per POD)
     Prepared --> Prepared: re-prepare supersedes everything
     Prepared --> [*]: start_pod_design restart (clears session)
     Approved --> [*]: start_pod_design restart (clears session)
@@ -137,17 +193,177 @@ Safety properties, in order of enforcement:
    design no longer passes (restarted, expired, or a gate re-opened since the
    batch was prepared). `start_pod_design({ restart: true })` also clears the
    create session, so nothing prepared from a discarded design stays approvable.
-6. **Single-use approval** — `request_pod_signature` consumes the approval
+6. **Nothing public before approval** — `prepare` only _reserves_ the
+   profile's media id; `request_pod_signature` uploads the profile after the
+   approval and gate checks and before spending the approval. When the upload
+   fails the approval is kept and the result is `unavailable` (try again, or
+   prepare again when the reservation expired).
+7. **Single-use approval** — `request_pod_signature` consumes the approval
    right before dispatching, so a sign request can never be replayed; every
    dispatch needs a fresh approval (also across an object reset: the approval
    state is durable). When no Portal browser is connected nothing is sent and
-   the approval is kept.
-7. **Wallet signature** — the real human gate. The Portal re-validates every
+   the approval is kept. Spending it records the messages sent and the
+   profile in the create session.
+8. **Confirmation bound to the sent batch** — `confirm_pod_creation`
+   refuses when nothing was sent for signing in the thread, and the
+   transaction must carry exactly one `MsgCreateEntity` whose `{id}#pro`
+   proof is the one sent, owned by the user, with exactly one
+   `EntityCreatedEvent` and one ownership mint whose `owner` is the user's
+   address.
+9. **Wallet signature** — the real human gate. The Portal re-validates every
    message against the catalog and the user reviews and signs the batch in
    their own wallet; nothing reaches the chain without it. The oracle never
    encodes or signs: it hands the wallet exactly the messages the gateway
    composed (`create-tools.test.ts` › "the oracle never signs a POD creation"
    — auth minting by the gateway is allowed, signing or broadcasting is not).
+
+### The domain card
+
+After a confirmed POD, `add_pod_domain_card` (no arguments) adds the POD's
+public domain card the way the Portal does for a domain it creates (ixo-portal
+`lib/entity/domainCard.ts`, `hooks/useCreateEntity.ts`): a W3C
+VerifiableCredential of type `ixo:DomainCard` (`id: <pod>#dmn`, issuer the
+owner, `credentialSubject.id` the POD, the name and description of the sent
+batch; `domain-card.ts`), reserved and uploaded on the oracle's homeserver
+like the profile, then one `MsgAddLinkedResource { id: <pod>, linkedResource:
+{ id: "{id}#dmn", type: "domainCard", description: "Domain Card",
+mediaType: "application/json", serviceEndpoint, proof, encrypted: "false",
+right: "" }, signer: <address> }`, validated by the catalog, signed in the
+Portal. It is an update of an entity the user owns (catalog risk `medium`):
+the Portal's own consent prompt is the human gate, so there is no separate
+approve step, but it runs only after a POD of this thread was confirmed and
+at most once per POD (claimed while its request is out; released when
+nothing was signed: declined, wallet error, failed on chain, card not
+published; kept when the outcome is unknown). Once signed, the domain
+indexer is asked to index the POD now (`POST {indexer}/index { did }`, no
+credentials: only a forced re-index needs the indexer's admin key; devnet
+`https://domain-indexer.devnet.ixo.earth`, testnet
+`https://domain-indexer.testnet.ixo.earth`, mainnet
+`https://domain-indexer.ixo.earth`, or `DOMAIN_INDEXER_URL`); a failure is
+only logged, the indexer's chain poller indexes it later anyway.
+
+**Known limits — what the Portal adds that the oracle does not.** The POD's
+Matrix space is created by the Portal (the rooms bot) the first time the POD
+is opened there.
+
+### The governance group
+
+A confirmed POD can get the governance group its Decisions tab needs, as the
+Portal provisions one (ixo-portal `lib/pods/provisionPodGroup.ts`), in two
+wallet signatures (`group-tools.ts`). It is optional and the user's choice:
+the hand-offs after `confirm_pod_creation` and after the domain card ask the
+model to offer it — with the members and approval rule the design names when
+its sections specify a governance group, multisig, board or other deciding
+body, otherwise as a question — and never to create one unasked or with
+members the user did not give. The words the model gets, after confirm:
+"…and a governance group for the POD (create_pod_group, then link_pod_group:
+two wallet signatures), which the POD's Decisions tab needs. If the design
+names a governance group, multisig, board or other body that decides for the
+POD, offer to create it with those members and that approval rule; otherwise
+ask the user whether they want one. Ask too how long voting on a proposal
+lasts and whether members may change their votes (create_pod_group explains
+both and their defaults). Never create a group the user did not
+ask for, and never invent members: each member is an ixo1… address the user
+gives or confirms." (after "…which the POD's Decisions tab needs" it adds
+"; if the user already has a DAO DAO group for it, link_dao_group (IXO
+Transaction) links that one instead, with one signature"). The domain
+card's result ends "If the POD has no governance group yet, offer" the
+same.
+
+These two tools act on the POD of their own conversation only. A group for
+a POD made earlier, elsewhere or in the Portal, or an existing group, is the
+IXO Transaction plugin's `link_dao_group`
+([ixo-transaction](ixo-transaction.md#linking-a-group-to-an-entity)): it
+reads the entity and the group on chain, checks that the user can change
+the entity, and sends the same two messages (or the one still missing).
+`create_pod_group`'s description and the no-POD refusal point there.
+
+1. **`create_pod_group({ members, threshold, name?, votingPeriodSeconds?, allowRevoting?, riskConfirmation? })`** —
+   one `MsgInstantiateContract` of the network's `dao_core`
+   (`buildDaoDaoGroupInstantiate`): a cw4 group of the members (1 to
+   `MAX_POD_GROUP_MEMBERS` = 12 checksummed `ixo1…` accounts, one vote
+   each), single-choice proposals passed by `threshold` yes votes (1 to the
+   number of members), `votingPeriodSeconds` to vote (1 hour to 30 days,
+   default the Portal's 7 days) and `allowRevoting` (whether members may
+   change their vote, default the Portal's yes), the user's account as sender and
+   wasm admin, an empty description, `name` the POD's name unless given
+   (at most 64 characters; a longer POD name is refused with a request for a
+   group name). Validated by the catalog for the network before anything is
+   asked. The first call (no `riskConfirmation`) sends nothing and answers
+   `{ status: 'confirm', podDid, name, members, threshold,
+votingPeriodSeconds, allowRevoting, summary, linkSummary, risks, message }`:
+   the summary the wallet will show (the name, every member, the threshold,
+   how long voting lasts and the vote-change rule in plain words — "Votes can
+   be changed until it ends, so a proposal passes only then" or "It passes as
+   soon as it has them, and votes cannot be changed" —, whether the user is a
+   member) and the
+   risks of **both** signatures (the `create-group` route's and the link
+   pair's: `MsgAddLinkedEntity`, `MsgAddController`), recorded in the create
+   session as a digest of the POD, network and group with the request that
+   showed it. The call that signs must quote every risk, carry the same
+   group, and come from a later request (`same-request` / `not-previewed`
+   are refused), so the user has seen the members in the chat before the
+   wallet asks. It then claims the POD's one group (once per POD), sends the
+   batch, and on `signed` reads the transaction back by its hash
+   (`gateway.findPodGroup`, below) for the group's core address:
+   `{ status: 'created', podDid, name, txHash, coreAddress?, message }`;
+   without a readable address yet `coreAddress` is absent and
+   `link_pod_group` reads it again. `failed`, `rejected`, `error`,
+   `unavailable` release the claim (a new preview and confirmation are
+   needed); a `timeout` keeps it (outcome unknown: never sent again).
+   Twelve members with a 64-character name and the longest voting-time
+   wording fit the 1000-character summary. The tool's description tells the
+   model to ask the user both voting rules (or offer the defaults), with the
+   trade-off: with vote changes a proposal passes only when voting closes,
+   even with enough yes votes, so it is carried out only then; without, it
+   passes as soon as enough members vote yes, and no vote can be changed.
+   The rules are part of the previewed digest (other rules than shown are
+   `not-previewed`), and a group recorded before they existed reads with the
+   Portal's.
+2. **`link_pod_group({ txHash? })`** — `buildDaoDaoGroupLinkMessages`:
+   `MsgAddLinkedEntity { id: <pod>, linkedEntity: { id: "{id}#<core>",
+type: "group", relationship: "governs", service: "" } }` and
+   `MsgAddController { id: <pod>, controllerDid: "did:ixo:wasm:<core>" }`,
+   signed by the user's account (the Portal writes `Group` / `Governs`;
+   the Portal reads the relationship in any case, and the rooms bot admits
+   the members of a `did:ixo:wasm:` controller). No second chat
+   confirmation: the user accepted its risks with the group, and the wallet
+   shows it. When the address is not known it is read first, from the
+   recorded hash or, after a timeout or a wallet that returned no hash, the
+   `txHash` the user gives; `pending` / `unavailable` results say to call
+   again. Once per POD (claimed while out, released when nothing was
+   signed, kept on an unknown outcome); `{ status: 'linked', podDid,
+coreAddress, txHash?, decisionsUrl, message }` with the Portal's
+   Decisions tab, `<portal>/domain/<pod>/overview?tab=decisions`.
+
+Both refuse with `{ status: 'refused', retryable, message }` when no POD was
+confirmed in this conversation (a group is created only for the POD this
+conversation created, which the user owns), on mainnet without
+`POD_CREATOR_ALLOW_MAINNET`, without a chain gateway, or for a user whose
+DID is not an IXO account; nothing is sent then. Each step writes an audit
+line (`[pod-creator] group previewed / wallet signed / group <core>
+created / group link …` with user, thread and POD; never a secret).
+
+**`findPodGroup`** (bundled gateway) looks the transaction up the way
+confirm does (`/cosmos/tx/v1beta1/txs/{hash}`, polled within 20 s through
+404s and transient failures; a hash that is not 64 hex characters is
+refused without a request) and accepts it only when it carries exactly
+one `MsgInstantiateContract` from the user's account of the network's
+`dao_core` code id whose name, members (in any order, weight 1),
+threshold, voting time and vote-change rule are the ones sent — chain REST shows the top-level `msg` as JSON
+and each module's `msg` as base64 of its JSON — and takes the address of
+its `dao_core` `instantiate` event (`findDaoDaoCoreAddress`), and of its
+proposal module and intake when the transaction names exactly one of each.
+Anything else is `failed` and not retried. The lookup and the check are
+shared with the IXO Transaction plugin's `create_dao_group`
+(`lookupTransaction` in `ixo-chain/tx-lookup.ts`, `findDaoGroup` in
+`ixo-transaction/dao-group.ts`), as are the group's input bounds and its
+plain-words summary helpers.
+
+Proposals of the group, in the Portal chat, go through the IXO Transaction
+plugin's DAO DAO step tools ([ixo-transaction](ixo-transaction.md#dao-dao-proposal-steps),
+confirmed in a later message as `create_pod_group` is);
+`chain_lookup entity` shows a POD's `governingGroup`.
 
 Every step writes an audit line via `ctx.logger`
 (`[pod-creator] prepared/approved/signed/confirmed …` with user DID, thread,
@@ -155,10 +371,23 @@ blobId, network, txHash).
 
 Tool effects for durable runs (`core/middlewares/tool-marks.ts`): the pure
 reads (`get_blueprint`, `compute_readiness`, `assemble_blueprint`,
-`read_blueprint`) are `effect: 'read'` and may re-run after a reset; every
-other tool is a write and is never repeated — in particular a
-`request_pod_signature` cut off by a reset is reported as "outcome unknown",
-not dispatched to the wallet a second time.
+`read_blueprint`) and `confirm_pod_creation` are `effect: 'read'` and may
+re-run after a reset; every other tool is a write and is never repeated — in
+particular a `request_pod_signature` cut off by a reset is reported as
+"outcome unknown", not dispatched to the wallet a second time.
+
+`confirm_pod_creation` returns every expected outcome as a result, never a
+throw: `{ created: true, podDid, portalUrl, summary, message }` (the message
+asks the model to give the Portal link and offer the domain card), or
+`{ created: false, status, retryable, message }` with `status` `pending` (not
+on chain within its 20 s; same hash later), `unavailable` (chain REST down,
+`retryable: true`; an unreadable answer, `false`) or `failed` (failed on
+chain, not this conversation's batch, not a POD; do not retry). Being a
+read that returns, a `pending` call can be made again in the same turn (the
+repetition guard lets an identical read run up to 5 times,
+`TURN_MAX_IDENTICAL_READS`) and in later turns, and the read retry
+middleware (which retries a read once only when it throws) never doubles the
+20 s lookup.
 
 ### The `sign_transaction` round-trip
 
@@ -189,14 +418,14 @@ signal.
 - **Result:** `SignTransactionActionResultSchema` (or a raw wallet answer
   through `normalizeWalletSignResult`), reported as:
 
-| `status`      | When                                                                                                        | Approval     | Next                                                             |
-| ------------- | ----------------------------------------------------------------------------------------------------------- | ------------ | ---------------------------------------------------------------- |
-| `signed`      | Signed and included with code 0; `txHash`, `code`, `height` when the wallet gave them                       | spent        | `confirm_pod_creation({ txHash })`; without a hash, ask the user |
-| `failed`      | Included in a block with a non-zero code: nothing was created; `code`, `txHash`, `height` and the chain log | spent        | fix the cause, `prepare_pod_transaction` again                   |
-| `rejected`    | The call failed and the Portal's error says the user declined                                               | spent        | the user confirms again → approve → sign                         |
-| `error`       | Any other refusal (chain mismatch, a message the Portal refused, a wallet error)                            | spent        | as `rejected`                                                    |
-| `timeout`     | No answer: deadline, the Portal tab's socket gone, or the turn aborted after sending. `outcome: 'unknown'`  | spent        | do not send again; ask the user whether it went through          |
-| `unavailable` | No realtime channel or no Portal browser connected (nothing sent), or no `sign_transaction` handler         | kept / spent | open the chat in the Portal and call again                       |
+| `status`      | When                                                                                                                                       | Approval     | Next                                                             |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------ | ---------------------------------------------------------------- |
+| `signed`      | Signed and included with code 0; `txHash`, `code`, `height` when the wallet gave them                                                      | spent        | `confirm_pod_creation({ txHash })`; without a hash, ask the user |
+| `failed`      | Included in a block with a non-zero code: nothing was created; `code`, `txHash`, `height` and the chain log                                | spent        | fix the cause, `prepare_pod_transaction` again                   |
+| `rejected`    | The call failed and the Portal's error says the user declined                                                                              | spent        | the user confirms again → approve → sign                         |
+| `error`       | Any other refusal (chain mismatch, a message the Portal refused, a wallet error)                                                           | spent        | as `rejected`                                                    |
+| `timeout`     | No answer: deadline, the Portal tab's socket gone, or the turn aborted after sending. `outcome: 'unknown'`                                 | spent        | do not send again; ask the user whether it went through          |
+| `unavailable` | No realtime channel or no Portal browser connected, or the profile could not be published (nothing sent); or no `sign_transaction` handler | kept / spent | open the chat in the Portal / wait, and call again               |
 
 A `timeout` carries `outcome: 'unknown'` (the bridge's
 `FRONTEND_OUTCOME_UNKNOWN` answer), worded exactly as `sign_ixo_transaction`
@@ -216,61 +445,207 @@ the package root, so a fork constructs its own instance and passes it in
 - **`chainGateway`** — composes the POD batch and resolves a broadcast tx:
 
   ```ts
+  type GatewayResult<T> =
+    | ({ ok: true } & T)
+    | { ok: false; message: string; retryable: boolean };
+  interface PreparedPodBatch {
+    messages: ITrxMsg[];
+    summary: string;
+    estimatedCost?: string;
+    /** Documents the messages name, uploaded after approval. */
+    documents: PendingDocument[]; // { mxc, contentType, filename, text }
+  }
   interface ChainGateway {
     preparePodBatch(
-      input: { blueprint: ServicePodBlueprint; network: Network },
+      input: {
+        blueprint: ServicePodBlueprint;
+        network: Network;
+        profile: PodProfile;
+      },
       ctx: RuntimeContext,
-    ): Promise<{
-      messages: ITrxMsg[];
-      summary: string;
-      estimatedCost?: string;
-    }>;
+    ): Promise<GatewayResult<PreparedPodBatch>>;
+    publishDocuments(
+      input: { documents: readonly PendingDocument[] },
+      ctx: RuntimeContext,
+    ): Promise<GatewayResult<object>>;
     confirmPodCreation(
-      input: { txHash: string; network: Network },
+      input: { txHash: string; network: Network; sent: SentPodBatch },
       ctx: RuntimeContext,
-    ): Promise<{ podDid: string; summary: string }>;
+    ): Promise<
+      | { status: 'created'; podDid: string; summary: string }
+      | {
+          status: 'pending' | 'failed' | 'unavailable';
+          message: string;
+          retryable: boolean;
+        }
+    >;
+    prepareDomainCard(
+      input: { network: Network; podDid: string; profile: PodProfile },
+      ctx: RuntimeContext,
+    ): Promise<GatewayResult<PreparedPodBatch>>;
+    requestIndexing(
+      input: { network: Network; podDid: string },
+      ctx: RuntimeContext,
+    ): Promise<void>;
+    findPodGroup(
+      input: { txHash: string; network: Network; group: PodGroupSpec },
+      ctx: RuntimeContext,
+    ): Promise<
+      | { status: 'found'; coreAddress: string }
+      | { status: 'failed'; message: string; retryable: false }
+      | {
+          status: 'pending' | 'unavailable';
+          message: string;
+          retryable: boolean;
+        }
+    >;
   }
   ```
 
-  `messages` are proto-JSON `{ typeUrl, value }` (camelCase fields, integer
-  amounts as strings, bytes as base64) with exactly the fields of their
-  `@ixo/ixo-transaction` catalog entry, at most `MAX_BATCH_MESSAGES` (16),
-  `MsgCreateEntity` first and only `POD_BATCH_TYPE_URLS`:
-  `MsgCreateEntity`, `MsgCreateEntityAccount`, `MsgCreateCollection`,
-  `MsgCreateClaimAuthorization`, `MsgGrantEntityAccountAuthz` (whose
-  authorization is the catalog's allowlist: generic or bank-send, as
-  structured JSON). `summary` is at most 1000 characters. Never encoded
-  bytes: the Portal signs only messages it can show and re-validate. The
-  planned binding calls the IXO MCP server over the runtime's remote-MCP
-  pattern: resolve the server's `did:web`, mint a per-user `ixo:*` UCAN
-  invocation via `ctx.ucan`, send it as the `Authorization` header (see the
-  sandbox plugin). The bundled default (`notConfiguredChainGateway`) throws
-  "ChainGateway not configured" from both methods, and the tools report
-  on-chain creation as unavailable without calling it. The plugin itself
-  has no chain dependency (no `@ixo/oracles-chain-client`, no cosmjs): a
-  gateway implementation that needs one should import it lazily inside its
-  methods so the published runtime does not carry it.
+  Expected refusals are results; a throw is a programming error. A fork's
+  own gateway implements `findPodGroup` too (the group step reads the new
+  group's address through it); `notConfiguredChainGateway` throws there
+  like everywhere, and the group tools refuse without calling it.
 
-  **What a gateway has to get right.** The chain runs the messages of one
-  transaction in order and keeps none of them if one fails. Later messages
-  name what earlier ones create, and the chain assigns those values while the
-  transaction runs: the entity DID is `did:ixo:entity:` + the MD5 of
-  `<nft contract>/<entity create sequence>` (ixo-blockchain
-  `x/entity/keeper/msg_server.go`), the collection id is the claims module's
-  collection sequence, and the collection admin is the entity's `admin`
-  account. A gateway has to predict them from chain state at prepare time;
-  when another creation lands first, the transaction fails as a whole
-  (`failed`, fees spent, nothing created) and the user prepares again.
+  `messages` are proto-JSON `{ typeUrl, value }` (camelCase fields, integer
+  amounts as strings, bytes as base64, timestamps as RFC 3339 strings) with
+  exactly the fields of their `@ixo/ixo-transaction` catalog entry, at most
+  `MAX_BATCH_MESSAGES` (16), `MsgCreateEntity` first and only
+  `POD_BATCH_TYPE_URLS`. `summary` is at most 1000 characters. Never encoded
+  bytes: the Portal signs only messages it can show and re-validate.
+
+  **The bundled gateway** (`createIxoChainGateway()`,
+  `ixo-chain-gateway.ts`) is the default when no `chainGateway` is passed.
+  It creates the POD as **one** `MsgCreateEntity`, the message the Portal
+  builds when a user creates an entity there (ixo-portal
+  `lib/entity/createEntity.ts`). One message because the chain derives the
+  entity DID while the transaction runs (`did:ixo:entity:` + the MD5 of
+  `<nft contract>/<entity create sequence>`, ixo-blockchain
+  `x/entity/keeper/msg_server.go`): a later message in the same transaction
+  could name it only by predicting that sequence, and the whole transaction
+  fails when another creation lands first. A claim collection, entity
+  accounts and grants come afterwards, once the DID is known
+  (`MsgCreateClaimAuthorization` cannot be signed by the user at all: its
+  signer is the entity's admin module account).
+
+  `preparePodBatch` (one 20 s budget for every step):
+
+  1. **Owner** — `ctx.user.did` must be an IXO account DID
+     (`did:ixo:ixo1…`); the address is read off it. Anything else is refused
+     before any request.
+  2. **Identity document** — `GET {chain REST}/ixo/did/dids/{did}` must
+     exist and list the account the way the chain's ante handler checks the
+     signer of a `MsgCreateEntity` (ixo-blockchain `x/iid/ante/iidtx.go`,
+     `IidDocument.HasRelationship`): a verification method named under
+     `authentication` or `assertionMethod` whose `blockchainAccountID` is the
+     address, or whose key material (`publicKeyMultibase` as hex after its
+     one-character prefix, `publicKeyHex`, `publicKeyBase58`) is a 33-byte key
+     whose RIPEMD-160 of SHA-256 is the account. Missing ("Your identity … is
+     not on chain yet") or not listing it ("Your identity document does not
+     list your account …") is refused: the chain would refuse the
+     transaction.
+  3. **Owner key** — a secp256k1 key of the account in that document
+     (`EcdsaSecp256k1VerificationKey2019`, compressed), else the account's
+     own `pub_key` (`GET {chain REST}/cosmos/auth/v1beta1/accounts/{address}`,
+     a `BaseAccount` or the base account inside a vesting account) when it is
+     the account's. With none: "There is no public key on chain yet for your
+     account …".
+  4. **Profile** — `{ "@context", id: "ixo:entity#profile", type: "profile",
+orgName, name, image: "", logo: "", brand, location: "", description }`
+     (the Portal's shape), serialised once and **reserved** on the oracle's
+     homeserver with the plugin device (`matrix-media.ts`): Matrix's
+     asynchronous upload (client-server API v1.7) `POST
+     {homeserver}/_matrix/media/v1/create` answers a `content_uri` (and
+     `unused_expires_at`) with no content yet; `request_pod_signature` later
+     uploads the exact bytes with `PUT
+     {homeserver}/_matrix/media/v3/upload/{server}/{media id}`, where a 409
+     (`M_CANNOT_OVERWRITE_MEDIA`, the same bytes uploaded before) is a
+     success and a 404 (the reservation expired) asks for a new prepare. A
+     homeserver without `create` (404/405 or `M_UNRECOGNIZED`) gets the
+     profile uploaded at once (`POST /_matrix/media/v3/upload`), public
+     before approval. The same bytes reserved or uploaded for the user are
+     reused (`ctx.kv` `pod-creator/public-documents`, keyed by homeserver and
+     SHA-256; a reservation with less than an hour left is not). Every
+     homeserver request: 10 s bound and the prepare's deadline, the turn's
+     abort, a 16 KiB answer cap, no redirects; `botCredentials()` bounded the
+     same way (10 s); a 401 asks the host once for fresh credentials
+     (`botCredentials({ rejected: <token> })`) and retries. The linked
+     resource is the Portal's `{ id: "{id}#pro", type: "Settings",
+description: "Profile", mediaType: "application/json", serviceEndpoint,
+proof, encrypted: "false", right: "" }`, with `serviceEndpoint` the
+     public download URL the Portal's `mxcUrlToHttp` forms
+     (`{homeserver}/_matrix/media/v3/download/<server>/<media id>`) and
+     `proof` the hex SHA-256 of the exact bytes.
+  5. **Message** — `entityType: "pod"`, `entityStatus: 0`, `controller:
+[did]`, empty `context`, `service`, `accordedRight`, `linkedEntity`,
+     `linkedClaim`, the four verification methods
+     `customMessages.iid.createIidVerificationMethods` makes for the key
+     (`did` and `did#<base58>` with `publicKeyBase58`, `did#<hex>` with
+     `publicKeyMultibase: "F<hex>"`, `did#<address>` as
+     `CosmosAccountAddress`), the profile resource, `startDate` now and
+     `endDate` 100 × 365 days later, `ownerDid`, `ownerAddress` and the
+     relayer node the network's Portal names on the domains it creates (its
+     `NEXT_PUBLIC_DAO_DID`, ixo-portal `lib/entity/createEntity.ts`; the
+     mainnet Portal lists only entities of this relayer that are verified,
+     `lib/gql/addFilters.ts`): mainnet
+     `did:ixo:entity:47d9c64891e77cb8e588d33b83ab3042` (Qi.Space), testnet
+     `did:ixo:entity:3d079ebc0b332aad3305bb4a51c72edb`, devnet
+     `did:ixo:entity:ac12c6f8f299071eb24f2a10591d7ab7` (Shelves Relayer), or
+     `POD_CREATOR_RELAYER_NODE_DID`. Not the oracles' relayer
+     (`lib/oracle/networkConfig.ts`). Summary: `Create the POD on <network>,
+owned by you (<address>). Its public profile: name "<name>"; description
+"<description>".`
+
+  `confirmPodCreation`: the Portal wallet answers with the hash, code and
+  height (no events), so the gateway reads `GET {chain REST}/cosmos/tx/v1beta1/txs/{hash}`,
+  asking again every 2 s while the node answers 404 (not indexed yet) or a
+  retryable failure (429, 5xx, a network error or timeout), for at most 20 s
+  in all; past that it answers `pending` or `unavailable` with the time it
+  really looked. A non-retryable failure (an unreadable or oversized answer)
+  is `unavailable` with `retryable: false` at once. A non-zero `code` is
+  `failed` ("no POD was created", with the chain log). Otherwise the
+  transaction must carry the batch the conversation sent (exactly one
+  `MsgCreateEntity`, its `{id}#pro` proof the sent one, `owner_did` the
+  user), exactly one `ixo.entity.v1beta1.EntityCreatedEvent` (`entity` JSON
+  `.id`, `signer` the owner DID) and exactly one ownership NFT mint (`wasm`
+  `action: mint`, `token_id`) whose `owner` is the user's address (the
+  binding owner), and the `MsgCreateEntityResponse.entity_id` in the result
+  data (hex `TxMsgData`), when present, must agree; every type named must be
+  `pod`. Anything else is `failed`.
+
+  Every chain read goes through the ixo-chain plugin's `restJson` (8 s per
+  attempt, 512 KiB body cap, one retry on 429/5xx/network errors, the
+  user's chain read permits; an upstream that failed so is held back for
+  10 s, which the confirm poll waits out). The chain REST base URL is the network's
+  default (`CHAIN_REST_URLS`: devnet reads devnet) unless `CHAIN_REST_URL` is
+  set; the network passed in, not `NETWORK` re-read, picks it.
+
+  **Known limit — authenticated media.** The profile URL is the legacy
+  unauthenticated download path, as the Portal's. A homeserver that serves
+  new media only on the authenticated endpoint (Synapse
+  `enable_authenticated_media`) answers that URL with 404 for a profile
+  uploaded after the switch; readers then need the `mxc` through the
+  authenticated endpoint. Entities the Portal creates have the same limit.
+
+  A fork can pass its own gateway, or `notConfiguredChainGateway` (throws
+  "ChainGateway not configured" from every method) to keep on-chain creation
+  off: the tools then report it unavailable without calling the gateway.
 
 - **`capsuleContentFetcher`** — see above.
 
 Config: `POD_CREATOR_ALLOW_MAINNET` (plugin-owned, default `false`; the
-string `'true'` from a Worker var is accepted) and the chain ids
+string `'true'` from a Worker var is accepted),
+`POD_CREATOR_RELAYER_NODE_DID` (the relayer node a POD names; default the
+network's Portal relayer above), `POD_CREATOR_PORTAL_URL` (the Portal a
+confirmed POD is linked in, `<portal>/domain/<did>/overview`; default devnet
+`https://dev.portal.qi.space`, testnet `https://test.portal.qi.space`,
+mainnet `https://portal.qi.space`) and the chain ids
 `IXO_TRANSACTION_CHAIN_ID_DEVNET` / `_TESTNET` / `_MAINNET` (the
 ixo-transaction plugin's own schema objects, declared by both plugins, so
 one set of variables configures both and the boot reports no collision);
-`NETWORK` and `SKILLS_CAPSULES_BASE_URL` are read as siblings (owned by the
-base schema / skills plugin). The create path uses `NETWORK`; the capsule
+`NETWORK`, `SKILLS_CAPSULES_BASE_URL`, `CHAIN_REST_URL` and
+`DOMAIN_INDEXER_URL` are read as siblings (owned by the base schema, the
+skills, ixo-chain and domain-indexer plugins). The create path uses `NETWORK`; the capsule
 client falls back to `testnet` only when the config is unreadable.
 `request_pod_signature` refuses when either `NETWORK` or the stored batch's
 network is mainnet without the opt-in, before spending the approval.
@@ -300,7 +675,8 @@ network is mainnet without the opt-in, before spending the approval.
 ## Tests
 
 - `pnpm test` (workerd) — `src/plugins/pod-creator/*.test.ts` (bounded map,
-  blueprint store, create-session store, capsule client + registry fetcher,
+  blueprint store, create-session store (the group's preview, claim,
+  address and link included), capsule client + registry fetcher,
   stage, orchestration tools, sub-agents, create tools, plugin boot through
   `createRuntimeCore`). `request-pod-signature.test.ts` drives the create
   path through the plugin's own tools against a fake AG-UI bridge over the
@@ -311,11 +687,56 @@ network is mainnet without the opt-in, before spending the approval.
   abort after dispatch as an unknown outcome that keeps the write claim
   (`uncertainResultReason`); the approval kept when no browser is
   connected; the chain id per network and its shared overrides; the mainnet
-  gate at prepare and at signing; the not-configured gateway; and booting
+  gate at prepare and at signing; the bundled gateway as the default and the
+  not-configured one a fork can pass; and booting
   beside `IxoTransactionPlugin` without a key collision.
   `create-tools.test.ts` covers the gateway batch being refused at prepare
-  (outside the catalog, or not a POD batch) and the word-for-word risk
-  acceptance at approve. Also `src/sqlite/user-kv-store.test.ts`: `ctx.kv`
+  (outside the catalog, or not a POD batch), a gateway refusal reported as
+  a result, the required name, the refused characters and the 600-character
+  description, the profile handed to the gateway, the word-for-word risk
+  acceptance at approve, the profile published after the approval check and
+  before the wallet (nothing published without approval, the approval kept
+  when publishing fails), what the model sees for every confirm outcome
+  (`effect: 'read'`, the Portal link, nothing sent → refused), and the card
+  step (once per POD, released or kept by outcome, a wrong batch refused,
+  the mainnet gate), and the governance group hand-off after confirm and
+  after the card. `group-tools.test.ts` covers the group shown before it is
+  signed (the exact summary of both signatures and every risk), the
+  confirmation refused in the same turn, for another group or with a risk
+  missing, the refusals (no POD, mainnet, no gateway, a group the catalog
+  refuses, a POD name too long), the voting rules the user chose (in the
+  preview, the wallet's summary and the instantiate message; other rules
+  than shown refused; a voting time outside 1 hour to 30 days refused),
+  the largest group fitting the summary, the
+  two signatures with their exact messages and once per POD, an address
+  read later from the recorded hash, a timeout never sending the group
+  again and the user's hash linking it, a hash that is not this group, a
+  declined group needing a new confirmation and a declined link sent again
+  alone, and nothing claimed without a Portal tab. `ixo-chain-gateway.test.ts` drives the bundled gateway
+  against a fake chain REST, homeserver and indexer, on a faked clock (the
+  waits are injected, nothing waits for real): the profile document and its
+  reservation, the `MsgCreateEntity` passing `validateTransactionBatch` and
+  `podBatchProblem` and surviving the SDK's `fromJSON`, the REST base and
+  relayer per network and its override, the IID document missing or not
+  listing the account (and `assertionMethod` accepted), the key from the IID
+  document or the account, the one prepare budget, confirm polling through
+  404, 429, 5xx and network errors, `pending`/`unavailable` with the real
+  elapsed time, an unreadable or oversized answer, the turn's abort while
+  waiting, every binding refusal, the card and indexer calls, and
+  `findPodGroup` (the core address after polling, members in any order,
+  every transaction that is not the sent group — another voting time or
+  vote-change rule included —, a failed transaction or one
+  naming no group, `pending` within the budget, a user without an IXO
+  account).
+  `matrix-media.test.ts` covers the reservation and upload against Synapse's
+  answer shapes: reuse of the same bytes, the fallback without async
+  uploads, a 401 and fresh credentials, `botCredentials` failing or hanging,
+  a request that hangs, the spent budget, the turn's abort, 409 as success
+  and an expired reservation. `sub-agents.test.ts` and
+  `orchestration-tools.test.ts` cover a passed stage's specialist refusing
+  to record again, a failed gate re-recorded, `nextStep`, and the stage
+  middleware (only the current stage's specialists shown, the next stage's on
+  the next model call, another stage's call refused). Also `src/sqlite/user-kv-store.test.ts`: `ctx.kv`
   over real DO SQLite (TTL, LRU, atomic updates, eviction) and the plugin
   driven through its own tools and sub-agents across an eviction and across
   an owner-copy wipe + re-import.

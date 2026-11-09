@@ -5,6 +5,7 @@
  * owner-copy round trip — the two ways a user object loses its memory.
  */
 import { env, evictDurableObject, runInDurableObject } from 'cloudflare:test';
+import { computeSubAgentToolName } from '../core/subagent-as-tool';
 import { describe, expect, it } from 'vitest';
 import { makeRuntimeContext } from '../core/test-fixtures';
 import {
@@ -464,8 +465,9 @@ describe('pod-creator design state across a reset (plugin API over ctx.kv)', () 
       { brief: 'Community solar monitoring' },
       ctxOver(db),
     );
-    const [scorer] = await plugin.getRequestSubAgents(ctxOver(db));
-    expect(scorer?.name).toBe('service_intent_scorer');
+    const scorer = (await plugin.getRequestSubAgents(ctxOver(db))).find(
+      (sub) => sub.name === 'service_intent_scorer',
+    );
     const scorerTools = Array.isArray(scorer?.tools) ? scorer.tools : [];
     await tool(scorerTools, 'submit_section').handler(
       { content: { score: 0.82, fit: 'strong' } },
@@ -484,7 +486,31 @@ describe('pod-creator design state across a reset (plugin API over ctx.kv)', () 
       ctxOver(db),
     );
     const subs = await plugin.getRequestSubAgents(ctxOver(db));
-    return { blueprint, specialists: subs.map((s) => s.name).sort() };
+    // The specialists the model is shown: every one is bound, the plugin's
+    // stage middleware shows the current stage's.
+    const [stage] = await plugin.getRequestMiddlewares(ctxOver(db));
+    const wrapModelCall = stage?.wrapModelCall;
+    if (!wrapModelCall) throw new Error('expected the stage middleware');
+    let shown: string[] = [];
+    await wrapModelCall(
+      {
+        tools: subs.map((sub) => ({ name: computeSubAgentToolName(sub.name) })),
+        messages: [],
+        state: {},
+      } as never,
+      (async (request: { tools: Array<{ name: string }> }) => {
+        shown = subs
+          .filter((sub) =>
+            request.tools.some(
+              (t) => t.name === computeSubAgentToolName(sub.name),
+            ),
+          )
+          .map((sub) => sub.name)
+          .sort();
+        return { ok: true };
+      }) as never,
+    );
+    return { blueprint, specialists: shown };
   }
 
   const expected = {

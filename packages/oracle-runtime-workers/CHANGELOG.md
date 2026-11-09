@@ -1,5 +1,94 @@
 # @ixo/oracle-runtime-workers
 
+## 0.44.0
+
+### Minor Changes
+
+- [#503](https://github.com/ixoworld/qiforge/pull/503) [`6a05f6f`](https://github.com/ixoworld/qiforge/commit/6a05f6ff8536cec363b614ca035f428045b35788) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Create DAO DAO groups, give a POD a governance group, and act on group proposals from a Portal chat.
+
+  The IXO Transaction plugin is now in `BUNDLED_WORKERS_PLUGINS`, so every oracle that uses the bundle has it. Its tools appear only in Portal chats, where the user's wallet can sign; Matrix, WhatsApp and other channel chats do not see it, and chain steps there still go through Auth Hub. Mainnet signing stays off unless `IXO_TRANSACTION_ALLOW_MAINNET=true`. An oracle that added `new IxoTransactionPlugin()` itself can drop it (listed twice, one instance is loaded: the last).
+
+  New in that plugin: `create_dao_group` creates a DAO DAO group of its own (not tied to a POD) from the user's account, with one wallet signature. Asking the oracle to "create a DAO DAO group with members X and Y, threshold 1, 1-hour voting, no vote changes" now works: the oracle no longer has to write the contract message and its code ids itself. The user must be one of the members (a group its creator is not in is refused, since they could not propose or vote in it); up to 12 members, a threshold of 1 to the number of members, a name, an optional description, and the two voting rules (how long voting lasts, 1 hour to 30 days, default 7 days; whether votes can be changed, default yes), which the oracle asks about when the user did not say, explaining the difference. As with the proposal steps, the first call sends nothing and shows the exact group (name, every member, threshold, voting rules) and its risks, and the group is signed only once the user confirms in a later message. The same group is created once per conversation: asking for it again is refused while it is being signed, after it was created, and after the wallet's answer was lost until `chain_lookup daos` or its transaction hash shows what happened; once signed, the oracle reads the transaction back and returns the new group's address with its proposal list and intake, ready for the proposal tools. For a POD created in the same conversation, the oracle uses the POD Creator's `create_pod_group` instead, which also links the group to the POD.
+
+  Also new in that plugin: `link_dao_group` makes an existing DAO DAO group govern a POD (or any other entity) the user can change, after the fact: a POD made earlier, elsewhere or in the Portal, or a group just made with `create_dao_group` ("make my existing POD a DAO" is the two in turn). One wallet signature sends what the Portal sends for a POD's group: the group linked as the POD's governing group, and added as a controller of its identity, which gives it full control. Before showing it and again before signing, the oracle reads the chain: the user's account must be one the POD's identity lists for authentication (the chain refuses anyone else), the address must be a DAO DAO group (not another contract, not one of its modules), and a POD another group already governs is refused (replacing a group is a separate change, made in the Portal); a POD this group already governs is refused too, and after a partial link only the missing half is sent. The preview shows the group's name, its members and how its proposals pass, and says when the user is not a member (allowed: a board need not include the POD's owner, but they then have no say in its decisions) or when the entity is not a type the Portal shows a Decisions tab for. As with the other group tools, the first call sends nothing, signing needs the risks quoted in a later message, and the same link is sent once per conversation; once signed, the oracle reads the transaction back and answers `linked` with the POD's Decisions link only when it went through. The POD Creator now points to it for a POD made earlier or an existing group.
+
+  Also in that plugin: `create_dao_proposal`, `vote_on_dao_proposal`, `execute_dao_proposal` and `close_dao_proposal`, one wallet signature each, for a DAO DAO group such as a POD's governance group. The first call sends nothing and returns the summary and risks to show the user; the second, with the risks the user accepted and only in a later message than the first, asks the wallet. The summary names what a proposal would do with its values (for example the recipient and amount of a payment from the group), and the risks include each of those actions' risks; before a proposal is carried out, the oracle reads its actions from the chain and lists them, saying plainly when one cannot be read. Before voting, carrying out or closing, both calls read the proposal from the chain and refuse a step that cannot succeed, saying why: its status, the votes against what it needs, and when voting closes. For example, in a group that lets members change their votes a proposal stays open until voting closes even with enough yes votes, so carrying it out early is refused with when it can be carried out. When the wallet or the chain still refuses a step (for example a vote from someone who is not a member, or a proposal that has not passed), the chain's own reason now reaches the oracle with a plain explanation, instead of only "could not be started"; a chain error is no longer mistaken for the user declining.
+
+  New in the POD Creator: after a POD is created, the oracle offers a governance group (from the design when it names one, otherwise as a question; never unasked, and with members the user gives). `create_pod_group` shows the exact group (name, every member, how many yes votes pass a proposal, how long voting lasts and whether votes can be changed) and creates it once the user confirms in a later message; the oracle asks the user for those two voting rules (default: the Portal's 7 days and vote changes allowed), explaining that with vote changes a proposal passes only when voting closes and without them as soon as enough members vote yes; `link_pod_group` then links it to the POD so the Portal's Decisions tab and the POD's rooms use it, and returns the Decisions link. Each is one wallet signature, once per POD; mainnet still needs `POD_CREATOR_ALLOW_MAINNET`.
+
+  Reading a transaction back by its hash now refuses anything that is not a 64-character hex hash without contacting the chain.
+
+  `chain_lookup` now shows an entity's `governingGroup`, and each proposal list in `daos` its `intake` (where new proposals are sent). A contract read of an address with no contract on it is now answered as that, not as the chain being unavailable.
+
+  A fork with its own POD Creator `ChainGateway` must add `findPodGroup`, which reads the new group's address from its transaction.
+
+### Patch Changes
+
+- Updated dependencies [[`6a05f6f`](https://github.com/ixoworld/qiforge/commit/6a05f6ff8536cec363b614ca035f428045b35788)]:
+  - @ixo/ixo-transaction@0.3.0
+  - @ixo/common@1.8.2
+
+## 0.43.0
+
+### Minor Changes
+
+- [#500](https://github.com/ixoworld/qiforge/pull/500) [`8a264d6`](https://github.com/ixoworld/qiforge/commit/8a264d63557106fda1b401248c0feecc30dc21f2) Thanks [@mykhailopronka](https://github.com/mykhailopronka)! - Action card lifetimes come from a policy table per owner kind, owned by the runtime.
+
+  - Claim, Claim block, bid and approval cards keep their 7-day action window, and lose their values 30 days after it.
+  - Question, artifact, task and owner-reference cards have no action window: their `expiresAt` is the new exported `NO_ACTION_WINDOW`, and they live with their chat, outside retention.
+  - The weekly cap of 200 cards per chat counts kinds with and without an action window apart, so a chat full of charts can still prepare a claim.
+  - A claim step takes many claims. A reported claim no longer closes the step: the ordinary form may submit again, and a prepare with the new `repeat` field starts another card (`/health` lists the `repeat` operation). Without `repeat`, the step returns its submitted card in its own chat and 409 `repeat_required` elsewhere. A claim sent from the ordinary form leaves no outcome in the runtime, so after it a card needs `repeat` even while that claim may still be on its way; only the person's request for another claim may set it. Bids stay one per role.
+  - The Portal plugin's guidance covers every card the person sees, answers, reviews or signs.
+  - Asking the person (`ask_question_card`, or `ask_user_question` where a chat has no cards) is bound on every turn that declares it, instead of waiting for the Portal capability to load; every other browser tool stays on demand.
+
+### Patch Changes
+
+- Updated dependencies [[`8a264d6`](https://github.com/ixoworld/qiforge/commit/8a264d63557106fda1b401248c0feecc30dc21f2)]:
+  - @ixo/action-interactions@0.2.0
+  - @ixo/ixo-transaction@0.2.0
+
+## 0.42.1
+
+### Patch Changes
+
+- [#498](https://github.com/ixoworld/qiforge/pull/498) [`1e0203e`](https://github.com/ixoworld/qiforge/commit/1e0203eb8fda7f17bf266a0e99c1f3a39326a783) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Pick up `@ixo/ucan` 2.4.0, which refuses re-labelled UCANs. A UCAN archive's block CIDs are written by its sender and no signature covers them, so one signed invocation or delegation could be re-sent under another CID (a sha2-512 CID over the same bytes, its JWT form, a CBOR block with an empty nonce) and slip past a replay store or revocation check keyed on that CID. `validate()` and `validateDelegation()` now refuse with `INVALID_FORMAT` any archive whose UCANs do not sit under the CID derived from their signed form, and refuse JWT-form UCANs. The runtime's HTTP shell, the deposited-delegation check and the IXO Channels ingress all validate through the library, so they refuse such tokens too. These packages pinned `@ixo/ucan` 2.3.0 (directly, or through `@ixo/oracles-chain-client`); they now pin 2.4.0.
+
+- Updated dependencies [[`1e0203e`](https://github.com/ixoworld/qiforge/commit/1e0203eb8fda7f17bf266a0e99c1f3a39326a783)]:
+  - @ixo/common@1.8.1
+  - @ixo/ixo-transaction@0.2.0
+
+## 0.42.0
+
+### Minor Changes
+
+- [#492](https://github.com/ixoworld/qiforge/pull/492) [`95139d3`](https://github.com/ixoworld/qiforge/commit/95139d36d67a74e358d7577256094f944ce51593) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - POD Creator now creates a finished POD on chain. The bundled plugin uses a real chain gateway by default: `prepare_pod_transaction` takes the POD's name (and an optional description, at most 600 characters) from the design, checks that the user's identity is on chain and lists their account (the chain refuses the POD otherwise), reads their public key, reserves the POD's public profile on the oracle's homeserver and prepares one `MsgCreateEntity` owned by the user, with the relayer node of the network's Portal (`POD_CREATOR_RELAYER_NODE_DID` overrides it). The summary the user approves quotes the exact name and description. The profile is published only after the user approves, right before their own Portal wallet is asked to sign; if the homeserver is down the approval is kept. `confirm_pod_creation` looks the transaction up on chain for up to 20 seconds, keeping on through brief chain outages, checks that it is the batch this conversation sent and that the POD belongs to the user, and returns the new POD's DID and its Portal link (`POD_CREATOR_PORTAL_URL` overrides the default). When the POD is not on chain yet it says so and can be asked again with the same hash, in the same turn or later. A new tool, `add_pod_domain_card`, then adds the POD's public domain card as the Portal does (one more wallet signature, once per POD) and asks the domain indexer to index it. Expected refusals of every step come back as results the model can explain, not errors. In the design pipeline, a stage passed during a turn now hands over to the next stage's specialists on the very next model call (every specialist is bound once a design exists and the model is shown only the current stage's; a call to another stage's is refused with the next step). Before, the next stage's specialists were missing for the rest of the turn, and a model that called them went on telling the user they did not exist. Within one turn, a gate specialist that failed is not offered again until the user's next message, and the design cannot be restarted once a specialist ran (a model otherwise re-ran failed checks and restarted the design unasked). Each step's result says which stage and specialists come next, and a specialist of a stage already passed no longer overwrites its section. Plugins can now tell `ctx.matrix.botCredentials({ rejected })` that the homeserver refused a token and get fresh credentials. Mainnet still needs `POD_CREATOR_ALLOW_MAINNET=true`. A fork can still pass its own gateway, or `notConfiguredChainGateway` to keep creation off. A POD created here has no governance group yet (the Portal adds one through a contract message the transaction catalog does not support).
+
+## 0.41.3
+
+### Patch Changes
+
+- [#488](https://github.com/ixoworld/qiforge/pull/488) [`5c6c4db`](https://github.com/ixoworld/qiforge/commit/5c6c4db488a7c2d8422cfee197a02574dae59b45) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Sub-agent results are no longer reported to the model as interrupted, and `read_result` no longer invites reading a saved result to the end.
+
+  - A sub-agent with `forwardTools` hands back its forwarded messages before the parent call's own result (with parallel calls, also before the other calls' results). The dangling-call repair only looked at the results right after a call, so it answered every such call with "was interrupted … nothing from it was recorded. Call it again", and a model re-ran POD specialists that had already recorded their sections. The repair now moves a result that arrived later in the turn up to its call; only a call with no result anywhere in the turn is still answered as interrupted.
+  - Messages a sub-agent forwards into the chat (`forwardTools`) are now marked (`forwardedFrom`) and left out of the parent's model requests: they are for the UI. Shown to the model, a forwarded call read as one of its own (a model called a specialist's `submit_section` itself) and its arguments were resent on every model call.
+  - A sub-agent that ends on an empty reply now hands the parent its last tool result, labelled as such (at most 2,000 characters), instead of an empty string.
+  - POD Creator specialists forward only `submit_section`: their full-section `read_blueprint` reads (often over 60 KB) no longer land in the conductor's thread to be capped and paged through.
+  - The result-cap footer and `read_result`'s description now say to read only the part a task needs and never to read a result back to check that a call worked. A turn may make at most six `read_result` reads (parallel reads each count); a read is at least 2,000 characters and by default the largest chunk.
+
+## 0.41.2
+
+### Patch Changes
+
+- [#480](https://github.com/ixoworld/qiforge/pull/480) [`e77aa6e`](https://github.com/ixoworld/qiforge/commit/e77aa6e7bfe47cde9006fdbe5e7b722fb81ce715) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Hub actions: the tools that prepare an Auth Hub action (`hub_action_capabilities`, `hub_action_options`, `request_hub_action`, `describe_chain_messages` and `request_chain_transaction`) are offered on channel turns only, as request-time tools. On a Portal, Matrix or other turn they could only refuse, and a model that was offered them read the bare `{status: 'unavailable'}` as an Auth Hub outage (it told a Portal user that Auth Hub was unavailable when the Hub was never called). Those turns now get `hub_action_status` alone, whose description says Hub actions are prepared only in a channel chat (such as WhatsApp) and never to call that an outage. Every refusal now carries a reason: off a channel turn, "Auth Hub was not contacted and nothing was prepared or sent; ask in the channel chat"; with Hub actions off, "not enabled for this oracle"; a status read without a valid id names the `actionId` it needs.
+
+## 0.41.1
+
+### Patch Changes
+
+- [#478](https://github.com/ixoworld/qiforge/pull/478) [`70220f9`](https://github.com/ixoworld/qiforge/commit/70220f94e729eac71929ef6f7ec70d90e7f3eaf6) Thanks [@youssefhany-ixo](https://github.com/youssefhany-ixo)! - asks: the skills list now comes from `plugins/<folder>/skills/index.json` on raw.githubusercontent.com instead of GitHub's API, which answered 403 on Cloudflare's shared IPs, so new asks skills reached no oracle. Until that file is on ixo-plugins `main`, the plugin keeps its bundled skills, as before.
+
+- [#477](https://github.com/ixoworld/qiforge/pull/477) [`eb56a2d`](https://github.com/ixoworld/qiforge/commit/eb56a2dc37d5e9eeb397c8c57a3de944f7f6edc6) Thanks [@youssefhany-ixo](https://github.com/youssefhany-ixo)! - asks: a turn never waits for asks.world's tool list. With nothing cached yet, the plugin answers at once with its own asks tools, tells the model the rest are loading, and fetches the list in the background, so the full set is there from the next message. A sign-in that ended is still noticed in that background fetch. Hosts without `background` wait for the list as before.
+
 ## 0.41.0
 
 ### Minor Changes
