@@ -1,15 +1,21 @@
 import { z } from 'zod';
 import type { UserKvSurface } from '../../plugin-api/types';
 import { CREDENTIALS_KV_NAMESPACE } from './check-store';
-import { GrantSchema, type PermissionGrant } from './hub-client';
+import {
+  GrantSchema,
+  StatusAnswer,
+  type PermissionGrant,
+  type PermissionState,
+} from './hub-client';
 import { LINK_STATUSES, type LinkState } from './self-client';
 
 /**
  * What the plugin remembers about one person in their own kv (namespace
  * `credentials`, next to the check rows of `check-store.ts`):
  *
- * - `permissions`: the ids of the permission cards THIS person was asked
- *   (`credentials_permission_status` reads no other id).
+ * - `permissions`: the permission cards THIS person was asked, each once
+ *   with the kinds of its items (`credentials_permission_status` reads no
+ *   other id).
  * - `grants:<action>`: the grants of an allowed action card, kept until the
  *   earliest of them ends, so a repeat call does not ask the Hub again.
  * - `link:<linkId>`: the last status read for a link, and `linkrate:<linkId>`
@@ -20,21 +26,33 @@ const PERMISSIONS_KEY = 'permissions';
 const MAX_PERMISSIONS = 32;
 const PERMISSION_IDLE_TTL_MS = 32 * 24 * 3600 * 1000;
 
-const Ids = z.array(z.string());
+const ItemKinds = z.array(z.enum(['credential-check', 'service-action']));
+/** One card: its id once, with the kinds of its items (older rows: the id alone). */
+const Entry = z.union([
+  z.string().transform((id) => ({ id, kinds: [] as string[] })),
+  z.object({ id: z.string(), kinds: ItemKinds }),
+]);
+const Entries = z.array(Entry);
 
-/** Remember a permission card's id as this person's (oldest dropped first). */
+/**
+ * Remember a permission card's id as this person's, once, with the kinds of
+ * its items (oldest dropped first).
+ */
 export async function recordPermission(
   kv: UserKvSurface,
   id: string,
+  kinds: readonly ('credential-check' | 'service-action')[] = [],
 ): Promise<void> {
   await kv.update(
     CREDENTIALS_KV_NAMESPACE,
     PERMISSIONS_KEY,
     (current) => {
-      const parsed = Ids.safeParse(current);
-      const ids = (parsed.success ? parsed.data : []).filter((x) => x !== id);
-      ids.push(id);
-      return ids.slice(-MAX_PERMISSIONS);
+      const parsed = Entries.safeParse(current);
+      const entries = (parsed.success ? parsed.data : []).filter(
+        (x) => x.id !== id,
+      );
+      entries.push({ id, kinds: [...kinds] });
+      return entries.slice(-MAX_PERMISSIONS);
     },
     { idleTtlMs: PERMISSION_IDLE_TTL_MS },
   );
@@ -45,10 +63,10 @@ export async function knowsPermission(
   kv: UserKvSurface,
   id: string,
 ): Promise<boolean> {
-  const parsed = Ids.safeParse(
+  const parsed = Entries.safeParse(
     await kv.get(CREDENTIALS_KV_NAMESPACE, PERMISSIONS_KEY),
   );
-  return parsed.success && parsed.data.includes(id);
+  return parsed.success && parsed.data.some((x) => x.id === id);
 }
 
 // ---------------------------------------------------------------------------
@@ -185,4 +203,119 @@ export async function chargeLinkStatus(
   );
   const parsed = Rate.safeParse(next);
   return !parsed.success || parsed.data.count <= LINK_STATUS_CALLS_PER_MINUTE;
+}
+
+// ---------------------------------------------------------------------------
+// Card status.
+
+/** How long a pending or allowed card's status is kept before the Hub is asked again. */
+export const PERMISSION_STATUS_KEEP_MS = 5_000;
+/** The most status reads for one card per minute. */
+export const PERMISSION_STATUS_CALLS_PER_MINUTE = 6;
+const ENDED_CARD: ReadonlySet<string> = new Set([
+  'declined',
+  'expired',
+  'stopped',
+]);
+
+const permStatusKey = (id: string) => `permstatus:${id}`;
+const permRateKey = (id: string) => `permrate:${id}`;
+
+const CachedCard = z.object({ at: z.number(), state: StatusAnswer });
+
+/**
+ * The card status read last, when it is still good: under 5 s old, or
+ * final (a declined, expired or stopped card never changes again).
+ */
+export async function readPermissionCache(
+  kv: UserKvSurface,
+  id: string,
+  nowMs: number,
+): Promise<PermissionState | null> {
+  const parsed = CachedCard.safeParse(
+    await kv.get(CREDENTIALS_KV_NAMESPACE, permStatusKey(id)),
+  );
+  if (!parsed.success) return null;
+  const { at, state } = parsed.data;
+  return ENDED_CARD.has(state.status) || nowMs - at < PERMISSION_STATUS_KEEP_MS
+    ? state
+    : null;
+}
+
+export async function writePermissionCache(
+  kv: UserKvSurface,
+  state: PermissionState,
+  nowMs: number,
+): Promise<void> {
+  await kv.set(
+    CREDENTIALS_KV_NAMESPACE,
+    permStatusKey(state.id),
+    { at: nowMs, state },
+    { idleTtlMs: 3600 * 1000 },
+  );
+}
+
+/** Count one status call for card `id`; false when it is past the minute's cap. */
+export async function chargePermissionStatus(
+  kv: UserKvSurface,
+  id: string,
+  nowMs: number,
+): Promise<boolean> {
+  const next = await kv.update(
+    CREDENTIALS_KV_NAMESPACE,
+    permRateKey(id),
+    (current) => {
+      const parsed = Rate.safeParse(current);
+      return parsed.success && nowMs - parsed.data.start < 60_000
+        ? { start: parsed.data.start, count: parsed.data.count + 1 }
+        : { start: nowMs, count: 1 };
+    },
+    { idleTtlMs: 120_000 },
+  );
+  const parsed = Rate.safeParse(next);
+  return (
+    !parsed.success || parsed.data.count <= PERMISSION_STATUS_CALLS_PER_MINUTE
+  );
+}
+
+// ---------------------------------------------------------------------------
+// The card waiting for an answer, per action.
+
+const pendingKey = (action: string) => `pending:${action}`;
+const Pending = z.object({ permissionId: z.string() });
+
+/**
+ * The newest card asked for `action`, kept apart from the one in use
+ * (`action:<id>`) until it is allowed: a declined second card must not
+ * remove grants that still work.
+ */
+export async function writePendingAction(
+  kv: UserKvSurface,
+  action: string,
+  permissionId: string,
+  ttlMs: number,
+): Promise<void> {
+  await kv.set(
+    CREDENTIALS_KV_NAMESPACE,
+    pendingKey(action),
+    { permissionId },
+    { idleTtlMs: ttlMs },
+  );
+}
+
+export async function readPendingAction(
+  kv: UserKvSurface,
+  action: string,
+): Promise<string | null> {
+  const parsed = Pending.safeParse(
+    await kv.get(CREDENTIALS_KV_NAMESPACE, pendingKey(action)),
+  );
+  return parsed.success ? parsed.data.permissionId : null;
+}
+
+export async function clearPendingAction(
+  kv: UserKvSurface,
+  action: string,
+): Promise<void> {
+  await kv.delete(CREDENTIALS_KV_NAMESPACE, pendingKey(action));
 }

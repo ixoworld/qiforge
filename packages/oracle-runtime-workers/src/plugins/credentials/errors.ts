@@ -6,8 +6,10 @@
  * the service's own `error` code). Tools never throw it at the agent: they
  * answer `{ error, message, hint? }`: `error` is the code (for developers
  * and logs), `message` a plain sentence to the person (second person, ready
- * to send as it is) and `hint` what the agent should do next (never sent).
- * Neither carries a DID, a code, a service URL or a stack.
+ * to send as it is) and `hint` what the agent should do next (never sent to
+ * the person). The `message` carries no DID, code, service URL or stack; a
+ * `hint` may name a reason code or a version for the agent, never for the
+ * person.
  */
 
 export type CredentialsService = 'hub' | 'credentials' | 'self';
@@ -128,6 +130,22 @@ export const MESSAGES = {
   unknownAction: {
     message: "That isn't something I can ask for.",
   },
+  hubUpdateNeeded: {
+    message: "This isn't available yet; a service update is needed.",
+    hint: 'The Auth Hub answered without the per-item card shape (it predates the one-card release, auth-hub feat/one-card-permissions); an operator must update the Hub. Do not retry.',
+  },
+  requestConflict: {
+    message: "This request can't be set up any more. Ask again in the chat.",
+    hint: 'The same request key was used for a different list of items; ask again in a new turn.',
+  },
+  noLongerAvailable: {
+    message: "This request can't be set up any more. Ask again in the chat.",
+    hint: 'Something in the request is no longer offered by the Hub; ask again in a new turn.',
+  },
+  duplicateItem: {
+    message: "The same thing can't be asked for twice in one request.",
+    hint: 'Two service-action items name the same action; send each action once.',
+  },
   daysNotAllowed: {
     message: "That's longer than this permission can last.",
     hint: 'Ask for fewer days.',
@@ -177,6 +195,33 @@ export function shortTime(unixSeconds: number, timeZone?: string): string {
 }
 
 /**
+ * `400 invalid_item`: the Hub names the item's position (`details.index`, from
+ * 0) and a reason for developers. The person is told the item's place in
+ * plain words; the reason goes to the agent's hint only.
+ */
+function invalidItem(error: CredentialsServiceError): CredentialsRefusal {
+  const details = error.body?.details;
+  const raw =
+    details && typeof details === 'object'
+      ? (details as Record<string, unknown>).index
+      : undefined;
+  const index = typeof raw === 'number' ? raw : Number.NaN;
+  const reason =
+    details && typeof details === 'object'
+      ? (details as Record<string, unknown>).reason
+      : undefined;
+  const position = Number.isInteger(index) && index >= 0 ? index + 1 : null;
+  return {
+    error: 'invalid_item',
+    message:
+      position === null
+        ? "One of the items in this request isn't something we can set up."
+        : `Item ${position} of this request isn't something we can set up.`,
+    hint: `Fix or drop ${position === null ? 'that item' : `item ${position}`} and ask again${typeof reason === 'string' && /^[a-z0-9_ .:-]{1,80}$/i.test(reason) ? ` (Hub reason: ${reason})` : ''}; nothing was sent.`,
+  };
+}
+
+/**
  * The refusal a tool answers for `error`. Anything that is not a
  * {@link CredentialsServiceError} is a fault on our side; it is logged by the
  * caller, never shown.
@@ -188,6 +233,8 @@ export function refusalFor(
   if (!(error instanceof CredentialsServiceError))
     return refusal('internal_error', MESSAGES.ourSide);
   const { code, status, service } = error;
+  if (code === 'hub_update_needed')
+    return refusal(code, MESSAGES.hubUpdateNeeded);
   if (status === 0 || status >= 500) return refusal(code, MESSAGES.busy);
   switch (code) {
     case 'unknown_credential':
@@ -198,6 +245,12 @@ export function refusalFor(
       return refusal(code, MESSAGES.unnamedService);
     case 'unknown_action':
       return refusal(code, MESSAGES.unknownAction);
+    case 'invalid_item':
+      return invalidItem(error);
+    case 'request_conflict':
+      return refusal(code, MESSAGES.requestConflict);
+    case 'no_longer_available':
+      return refusal(code, MESSAGES.noLongerAvailable);
     case 'days_not_allowed':
       return refusal(code, MESSAGES.daysNotAllowed);
     case 'too_many_pending':

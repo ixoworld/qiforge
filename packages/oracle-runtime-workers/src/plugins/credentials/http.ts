@@ -66,6 +66,9 @@ async function readBody(
   }
 }
 
+/** A service's `error` code is trusted only in this shape. */
+const SAFE_CODE = /^[a-z0-9_]{1,64}$/;
+
 /** The timeout of the next attempt; 0 when the deadline has passed. */
 function attemptTimeout(call: ServiceCall): number {
   const limit = call.timeoutMs ?? SERVICE_TIMEOUT_MS;
@@ -137,7 +140,9 @@ export async function callService(call: ServiceCall): Promise<ServiceAnswer> {
     service: call.service,
     status: response.status,
     code:
-      typeof body?.error === 'string' ? body.error : `http_${response.status}`,
+      typeof body?.error === 'string' && SAFE_CODE.test(body.error)
+        ? body.error
+        : `http_${response.status}`,
     ...(after !== undefined ? { retryAfterSeconds: after } : {}),
     ...(body ? { body } : {}),
   });
