@@ -155,7 +155,7 @@ const storedBatchSchema = z
 
 type StoredBatch = z.infer<typeof storedBatchSchema>;
 
-const CHAIN_UNAVAILABLE_MESSAGE =
+export const CHAIN_UNAVAILABLE_MESSAGE =
   'On-chain POD creation is turned off on this oracle: it was built ' +
   'without a chain gateway. The design blueprint is saved; creating the ' +
   'POD on chain needs an oracle that has one.';
@@ -296,6 +296,14 @@ export type AddPodDomainCardResult =
       message: string;
     }
   | { status: 'timeout'; outcome: 'unknown'; error: string };
+
+/**
+ * How the model offers a confirmed POD's governance group: from the design
+ * when it names one, else as a question; never unasked, never with members
+ * the user did not give.
+ */
+const GROUP_OFFER =
+  "a governance group for the POD (create_pod_group, then link_pod_group: two wallet signatures), which the POD's Decisions tab needs; if the user already has a DAO DAO group for it, link_dao_group (IXO Transaction) links that one instead, with one signature. If the design names a governance group, multisig, board or other body that decides for the POD, offer to create it with those members and that approval rule; otherwise ask the user whether they want one. Ask too how long voting on a proposal lasts and whether members may change their votes (create_pod_group explains both and their defaults). Never create a group the user did not ask for, and never invent members: each member is an ixo1… address the user gives or confirms.";
 
 const RETRY_AFTER_SPENT_APPROVAL =
   'Nothing was signed and the approval was spent: to retry, the user confirms again in a new message and you call approve_pod_transaction, then request_pod_signature.';
@@ -709,8 +717,7 @@ export function createCreateTools(
         podDid: outcome.podDid,
         portalUrl: `${portalUrl}/domain/${outcome.podDid}/overview`,
         summary: outcome.summary,
-        message:
-          "Tell the user the POD exists and give them its Portal link; its public profile (name and description) is published. Then offer the next step: add the POD's public domain card (add_pod_domain_card, one more wallet signature), so the Portal lists it and search finds it.",
+        message: `Tell the user the POD exists and give them its Portal link; its public profile (name and description) is published. Then offer the next steps, one at a time: add the POD's public domain card (add_pod_domain_card, one more wallet signature), so the Portal lists it and search finds it; and ${GROUP_OFFER}`,
       };
     },
     {
@@ -842,8 +849,7 @@ export function createCreateTools(
             ...(outcome.transactionHash !== undefined
               ? { txHash: outcome.transactionHash }
               : {}),
-            message:
-              'The domain card was added. The domain indexer was asked to index the POD; it can take a few minutes to show in the Portal lists and search.',
+            message: `The domain card was added. The domain indexer was asked to index the POD; it can take a few minutes to show in the Portal lists and search. If the POD has no governance group yet, offer ${GROUP_OFFER}`,
           };
         }
         case 'failed':

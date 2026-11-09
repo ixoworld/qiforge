@@ -1241,3 +1241,212 @@ describe('prepareDomainCard and requestIndexing', () => {
     }
   });
 });
+
+/* ── findPodGroup ─────────────────────────────────────────────────────── */
+
+const MEMBER = 'ixo1qgpqyqszqgpqyqszqgpqyqszqgpqyqszuzefze';
+const CORE = 'ixo1q5zs2pg9q5zs2pg9q5zs2pg9q5zs2pg9q5zs2pg9q5zs2pg9q5zsrtecm8';
+const MODULE = 'ixo1qurswpc8qurswpc8qurswpc8qurswpc8qurswpc8qurswpc8qurst089cd';
+const GROUP = {
+  name: 'Solar POD',
+  members: [ADDRESS, MEMBER],
+  threshold: 2,
+  votingPeriodSeconds: 604_800,
+  allowRevoting: true,
+};
+
+const base64Json = (value: unknown): string =>
+  btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(value))));
+
+/**
+ * The group's `MsgInstantiateContract` as chain REST shows it in a body
+ * (the shape checked on a devnet `dao_core` instantiate on Nov 9 2026): the
+ * top-level `msg` as JSON, each module's own `msg` as base64 of its JSON.
+ */
+function groupBody(
+  over: {
+    sender?: string;
+    codeId?: string;
+    name?: string;
+    members?: string[];
+    threshold?: string;
+    votingPeriodSeconds?: number;
+    allowRevoting?: boolean;
+  } = {},
+) {
+  return {
+    '@type': '/cosmwasm.wasm.v1.MsgInstantiateContract',
+    sender: over.sender ?? ADDRESS,
+    admin: over.sender ?? ADDRESS,
+    code_id: over.codeId ?? '3',
+    label: `did:ixo:${ADDRESS}contract3`,
+    msg: {
+      admin: null,
+      automatically_add_cw20s: true,
+      automatically_add_cw721s: true,
+      name: over.name ?? GROUP.name,
+      description: '',
+      voting_module_instantiate_info: {
+        admin: { core_module: {} },
+        code_id: 20,
+        label: `DAO_${GROUP.name}_DaoVotingCw4`,
+        msg: base64Json({
+          cw4_group_code_id: 24,
+          initial_members: (over.members ?? GROUP.members).map((addr) => ({
+            addr,
+            weight: 1,
+          })),
+        }),
+      },
+      proposal_modules_instantiate_info: [
+        {
+          admin: { core_module: {} },
+          code_id: 16,
+          label: `DAO_${GROUP.name}_DaoProposalSingle`,
+          msg: base64Json({
+            threshold: {
+              absolute_count: { threshold: over.threshold ?? '2' },
+            },
+            max_voting_period: {
+              time: over.votingPeriodSeconds ?? GROUP.votingPeriodSeconds,
+            },
+            allow_revoting: over.allowRevoting ?? GROUP.allowRevoting,
+          }),
+        },
+      ],
+    },
+    funds: [],
+  };
+}
+
+/** The `instantiate` events of a group creation: the core, then its modules. */
+const instantiated = (address: string, codeId: string) => ({
+  type: 'instantiate',
+  attributes: [
+    { key: '_contract_address', value: address, index: true },
+    { key: 'code_id', value: codeId, index: true },
+    { key: 'msg_index', value: '0', index: true },
+  ],
+});
+const GROUP_EVENTS = [instantiated(CORE, '3'), instantiated(MODULE, '16')];
+
+function findGroup(
+  tx: Handler,
+  ctx: RuntimeContext = ownerCtx(),
+  group: typeof GROUP = GROUP,
+) {
+  const { fetchImpl, seen } = upstream({ tx });
+  const result = gateway(fetchImpl).findPodGroup(
+    { txHash: TX_HASH, network: 'testnet', group },
+    ctx,
+  );
+  return { result, seen };
+}
+
+describe('findPodGroup', () => {
+  it('looks the transaction up again until the node has it, then reads the group’s core from its dao_core instantiate', async () => {
+    const { result, seen } = findGroup((n) =>
+      n < 2
+        ? NOT_FOUND()
+        : txAnswer({ messages: [groupBody()], events: GROUP_EVENTS, data: '' }),
+    );
+    await expect(result).resolves.toEqual({
+      status: 'found',
+      coreAddress: CORE,
+      // The proposal module's own instantiate event (code 16) names it too.
+      proposalModule: MODULE,
+    });
+    expect(seen).toHaveLength(2);
+  });
+
+  it('reads the members in any order: the group is the same', async () => {
+    const { result } = findGroup(() =>
+      txAnswer({
+        messages: [groupBody({ members: [MEMBER, ADDRESS] })],
+        events: GROUP_EVENTS,
+        data: '',
+      }),
+    );
+    await expect(result).resolves.toEqual({
+      status: 'found',
+      coreAddress: CORE,
+      // The proposal module's own instantiate event (code 16) names it too.
+      proposalModule: MODULE,
+    });
+  });
+
+  it('answers failed, not to be tried again, for a transaction that is not the group this conversation sent', async () => {
+    for (const messages of [
+      [groupBody({ sender: MEMBER })],
+      [groupBody({ codeId: '4' })],
+      [groupBody({ name: 'Another group' })],
+      [groupBody({ members: [ADDRESS] })],
+      [groupBody({ threshold: '1' })],
+      [groupBody({ votingPeriodSeconds: 86_400 })],
+      [groupBody({ allowRevoting: false })],
+      [groupBody(), groupBody()],
+      [BODY_MESSAGE()],
+    ]) {
+      resetUpstreamHealth();
+      const { result } = findGroup(() =>
+        txAnswer({ messages, events: GROUP_EVENTS, data: '' }),
+      );
+      await expect(result).resolves.toEqual({
+        status: 'failed',
+        retryable: false,
+        message: expect.stringMatching(
+          /^That transaction is not the governance group this conversation sent/,
+        ),
+      });
+    }
+  });
+
+  it('answers failed for a group transaction that failed on chain, or names no group', async () => {
+    await expect(
+      findGroup(() =>
+        txAnswer({ code: 5, messages: [groupBody()], events: [], data: '' }),
+      ).result,
+    ).resolves.toMatchObject({
+      status: 'failed',
+      message: expect.stringMatching(
+        /failed on chain \(code 5.*no group was created/,
+      ),
+    });
+    await expect(
+      findGroup(() =>
+        txAnswer({
+          messages: [groupBody()],
+          events: [instantiated(MODULE, '16')],
+          data: '',
+        }),
+      ).result,
+    ).resolves.toMatchObject({
+      status: 'failed',
+      message: expect.stringMatching(/names no new group contract/),
+    });
+  });
+
+  it('answers pending within its budget, saying to call link_pod_group again', async () => {
+    const { result } = findGroup(NOT_FOUND);
+    await expect(result).resolves.toEqual({
+      status: 'pending',
+      retryable: true,
+      message: expect.stringMatching(
+        /it may not be in a block yet\. Call link_pod_group again in a moment\.$/,
+      ),
+    });
+  });
+
+  it('refuses a user whose DID is not an IXO account before any request', async () => {
+    const base = ownerCtx();
+    const { result, seen } = findGroup(() => txAnswer(), {
+      ...base,
+      user: { ...base.user, did: 'did:ixo:user1' },
+    });
+    await expect(result).resolves.toMatchObject({
+      status: 'failed',
+      message: expect.stringMatching(/not an IXO account/),
+    });
+    expect(seen).toEqual([]);
+  });
+});

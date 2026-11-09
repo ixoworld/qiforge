@@ -11,6 +11,7 @@ import {
   type ChainCall,
   type Outcome,
 } from './http';
+import { clip } from './summaries';
 
 export const REST_MAX_BYTES = 512 * 1024;
 /** Per-attempt wall bound for one REST read. */
@@ -35,6 +36,16 @@ export interface RestOptions {
    * any other 400 is a failure.
    */
   noneOn?: readonly number[];
+  /**
+   * A CosmWasm read (a smart query, or a contract's info): a contract's
+   * refusal of the query (the gateway's HTTP 500 whose body says `query
+   * wasm contract failed`, e.g. no such proposal, or a query that contract
+   * does not know) and an address with no contract at all (`no such
+   * contract`) are a quiet `invalid_input` failure with the chain's words,
+   * not retried; asking again cannot change it. Any other 500 stays
+   * `unavailable`.
+   */
+  contractQuery?: boolean;
 }
 
 /** gRPC InvalidArgument and NotFound: the codes of a gateway 400 that says "there is none". */
@@ -58,6 +69,43 @@ function isNone(
   }
   const parsed = grpcError.safeParse(body);
   return parsed.success && NONE_GRPC_CODES.includes(parsed.data.code);
+}
+
+/** The most of a contract's refusal kept in the failure's detail. */
+const CONTRACT_REFUSAL_CHARS = 300;
+const gatewayError = z.object({ message: z.string() });
+const WASM_QUERY_FAILED = /query wasm contract failed: ([\s\S]*)$/;
+const WASM_NO_SUCH_CONTRACT = /\bno such contract: ([\s\S]*)$/;
+
+/**
+ * The chain's words when `answer` is a CosmWasm read it refused: a smart
+ * query the contract refused (the gateway wraps it as `codespace wasm code
+ * 9: query wasm contract failed: <reason>`), or an address without a
+ * contract (`codespace wasm code 22: no such contract: <address>`), one line
+ * and at most {@link CONTRACT_REFUSAL_CHARS}; undefined for any other answer.
+ */
+function contractRefusal(
+  answer: Extract<Attempt<string>, { ok: false }>,
+): string | undefined {
+  if (answer.status !== 500 || answer.errorBody === undefined) return undefined;
+  let body: unknown;
+  try {
+    body = JSON.parse(answer.errorBody);
+  } catch {
+    return undefined;
+  }
+  const parsed = gatewayError.safeParse(body);
+  if (!parsed.success) return undefined;
+  const { message } = parsed.data;
+  const line = (words: string) =>
+    clip(words.replace(/\s+/g, ' ').trim(), CONTRACT_REFUSAL_CHARS);
+  const refused = WASM_QUERY_FAILED.exec(message)?.[1];
+  if (refused !== undefined)
+    return `The contract refused the query: ${line(refused)}`;
+  const missing = WASM_NO_SUCH_CONTRACT.exec(message)?.[1];
+  if (missing !== undefined)
+    return `There is no contract at that address: ${line(missing)}`;
+  return undefined;
 }
 
 /** The answer of a read whose upstream answered one of its `noneOn` statuses. */
@@ -99,6 +147,10 @@ export async function restJson<S extends z.ZodType>(
 ): Promise<Outcome<z.infer<S>> | Absent> {
   const base = call.restUrl.replace(/\/+$/, '');
   const url = `${base}${path}`;
+  const errorBodyOn = [
+    ...(opts.noneOn?.includes(400) ? [400] : []),
+    ...(opts.contractQuery ? [500] : []),
+  ];
   const read = await withRetry<Found<z.infer<S>>>(
     call,
     {
@@ -116,13 +168,30 @@ export async function restJson<S extends z.ZodType>(
           timeoutMs: opts.timeoutMs ?? REST_ATTEMPT_TIMEOUT_MS,
           maxBytes: opts.maxBytes ?? REST_MAX_BYTES,
           notFoundOn404: opts.notFoundOn404 ?? false,
-          ...(opts.noneOn?.includes(400) ? { errorBodyOn: [400] } : {}),
+          ...(errorBodyOn.length > 0 ? { errorBodyOn } : {}),
         },
       );
-      if (!answer.ok)
-        return isNone(answer, opts.noneOn)
-          ? { ok: true, value: { absent: true } }
-          : answer;
+      if (!answer.ok) {
+        if (isNone(answer, opts.noneOn))
+          return { ok: true, value: { absent: true } };
+        const refusal = opts.contractQuery
+          ? contractRefusal(answer)
+          : undefined;
+        return refusal === undefined
+          ? answer
+          : {
+              ok: false,
+              failure: {
+                reason: 'invalid_input',
+                detail: refusal,
+                retryable: false,
+              },
+              retry: false,
+              quiet: true,
+              status: 500,
+              note: 'contract refused the query',
+            };
+      }
       let body: unknown;
       try {
         body = JSON.parse(answer.value);

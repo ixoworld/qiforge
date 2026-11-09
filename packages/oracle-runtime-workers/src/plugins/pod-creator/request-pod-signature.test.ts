@@ -126,6 +126,11 @@ function gatewayFor(messages: ITrxMsg[] = podBatchMessages()): ChainGateway {
       retryable: false,
     }),
     requestIndexing: async () => undefined,
+    findPodGroup: async () => ({
+      status: 'failed',
+      retryable: false,
+      message: 'not in these tests',
+    }),
   };
 }
 

@@ -220,6 +220,97 @@ describe('restJson', () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
+  it('answers a smart query the contract refused as invalid_input with its words, not retried, not logged', async () => {
+    // As devnet's chain REST answered a query for a proposal that does not
+    // exist (Nov 9 2026).
+    const refusal = () =>
+      new Response(
+        JSON.stringify({
+          code: 2,
+          message:
+            'codespace wasm code 9: query wasm contract failed: dao_proposal_single::proposal::SingleChoiceProposal not found',
+          details: [],
+        }),
+        { status: 500 },
+      );
+    const fetcher = vi.fn(async () => refusal());
+    expect(
+      await restJson(callWith(fetcher), '/x', schema, {
+        label: 'x',
+        contractQuery: true,
+      }),
+    ).toEqual({
+      ok: false,
+      failure: {
+        reason: 'invalid_input',
+        detail:
+          'The contract refused the query: dao_proposal_single::proposal::SingleChoiceProposal not found',
+        retryable: false,
+      },
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(warn).not.toHaveBeenCalled();
+
+    // Without contractQuery, and for any other 500, the node is unavailable.
+    for (const [opts, answer] of [
+      [{ label: 'x' }, refusal],
+      [
+        { label: 'x', contractQuery: true },
+        () => new Response('{"code":13,"message":"internal"}', { status: 500 }),
+      ],
+    ] as const) {
+      resetUpstreamHealth();
+      expect(
+        await restJson(
+          callWith(vi.fn(async () => answer())),
+          '/x',
+          schema,
+          opts,
+        ),
+      ).toEqual({
+        ok: false,
+        failure: {
+          reason: 'unavailable',
+          detail: 'The chain node is unavailable right now (HTTP 500).',
+          retryable: true,
+        },
+      });
+    }
+  });
+
+  it('answers a CosmWasm read of an address without a contract as invalid_input, not retried, not logged', async () => {
+    // As devnet's chain REST answered a contract info read and a smart
+    // query of an address no contract lives at (Nov 9 2026).
+    const address =
+      'ixo1q5zs2pg9q5zs2pg9q5zs2pg9q5zs2pg9q5zs2pg9q5zs2pg9q5zsrtecm8';
+    const fetcher = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            code: 2,
+            message: `codespace wasm code 22: no such contract: address ${address}`,
+            details: [],
+          }),
+          { status: 500 },
+        ),
+    );
+    expect(
+      await restJson(callWith(fetcher), '/x', schema, {
+        label: 'x',
+        contractQuery: true,
+      }),
+    ).toEqual({
+      ok: false,
+      failure: {
+        reason: 'invalid_input',
+        detail: `There is no contract at that address: address ${address}`,
+        retryable: false,
+      },
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
   it('waits the default 1–3 s when Retry-After is zero or in the past', async () => {
     vi.useFakeTimers();
     vi.spyOn(Math, 'random').mockReturnValue(0);

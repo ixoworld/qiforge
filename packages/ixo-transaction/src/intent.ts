@@ -4,6 +4,7 @@ import {
   QUERY_ONLY_MODULES,
   findMessageByRoute,
   findMessageByTypeUrl,
+  findMessagesByTypeUrl,
   routeForMessageName,
   type MessageSpec,
 } from './catalog.js';
@@ -32,6 +33,8 @@ const MODULE_ALIASES: Record<string, string> = {
   smartaccount: 'smart-account',
   'smart-account': 'smart-account',
   authenticator: 'smart-account',
+  daodao: 'daodao',
+  group: 'daodao',
   // Deferred modules: aliased so the refusal names the module.
   bond: 'bonds',
   'liquid-stake': 'liquidstake',
@@ -55,6 +58,7 @@ const ACTION_ALIASES: Record<string, string> = {
   retirecredit: 'retire',
   addauthenticator: 'add-authenticator',
   removeauthenticator: 'remove-authenticator',
+  creategroup: 'create-group',
 };
 
 const NATURAL_LANGUAGE_RULES: Array<{
@@ -136,6 +140,37 @@ const NATURAL_LANGUAGE_RULES: Array<{
     action: 'add-authenticator',
     confidence: 0.9,
   },
+  {
+    pattern:
+      /\b(create|new|set up|start)\b.*\b(group|multisig|daodao|dao dao)\b/i,
+    module: 'daodao',
+    action: 'create-group',
+    confidence: 0.88,
+  },
+  {
+    pattern: /\bvote\b.*\bproposal\b/i,
+    module: 'daodao',
+    action: 'vote',
+    confidence: 0.9,
+  },
+  {
+    pattern: /\b(execute|carry out)\b.*\bproposal\b/i,
+    module: 'daodao',
+    action: 'execute',
+    confidence: 0.9,
+  },
+  {
+    pattern: /\bclose\b.*\bproposal\b/i,
+    module: 'daodao',
+    action: 'close',
+    confidence: 0.9,
+  },
+  {
+    pattern: /\b(propose|(create|submit|make|new)\b.*\bproposal)\b/i,
+    module: 'daodao',
+    action: 'propose',
+    confidence: 0.86,
+  },
 ];
 
 function normalizeToken(value: string): string {
@@ -187,6 +222,14 @@ const IXO_TYPE_URL_MODULE = /^\/ixo\.([a-z0-9]+)\./;
 function requireTypeUrl(typeUrl: string): MessageSpec {
   const spec = findMessageByTypeUrl(typeUrl);
   if (spec) return spec;
+  const shared = findMessagesByTypeUrl(typeUrl);
+  if (shared.length > 1) {
+    throw new Error(
+      `${typeUrl} is used by several routes: name one of ${shared
+        .map((entry) => `/ixo ${entry.module} ${entry.action}`)
+        .join(', ')}`,
+    );
+  }
   const protoModule = IXO_TYPE_URL_MODULE.exec(typeUrl)?.[1];
   const module = protoModule ? normalizeModule(protoModule) : undefined;
   if (module && includesModule(DEFERRED_MODULES, module)) {

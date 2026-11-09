@@ -94,7 +94,7 @@ const RouteListToolSchema = z.object({
     .string()
     .optional()
     .describe(
-      'Module to list (entity, iid, claims, token, smart-account); all when omitted',
+      'Module to list (entity, iid, claims, token, smart-account, daodao); all when omitted',
     ),
 });
 

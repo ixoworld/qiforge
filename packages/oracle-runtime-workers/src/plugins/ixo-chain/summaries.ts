@@ -9,6 +9,7 @@
  * (never `amount`, which `get_account_balances` uses for converted units);
  * 1155 token amounts are whole units and stay `amount`.
  */
+import { DaoDaoContractAddressSchema } from '@ixo/ixo-transaction';
 import { z } from 'zod';
 import type { Failure } from './http';
 import type { ChainRequest } from './queries';
@@ -440,6 +441,43 @@ function resourceOf(value: unknown) {
   });
 }
 
+/**
+ * Every DAO DAO group an entity's linked entities say governs it: the core
+ * contract address after the `#` of each linked entity of type `group` with
+ * relationship `governs` (any case: the Portal writes `Group` / `Governs`,
+ * other tools lowercase), as the Portal's Decisions tab reads it.
+ */
+export function governingGroupCores(linkedEntities: unknown): Set<string> {
+  const cores = new Set<string>();
+  if (!Array.isArray(linkedEntities)) return cores;
+  for (const link of linkedEntities) {
+    if (
+      !isRecord(link) ||
+      typeof link.id !== 'string' ||
+      typeof link.type !== 'string' ||
+      typeof link.relationship !== 'string' ||
+      link.type.toLowerCase() !== 'group' ||
+      link.relationship.toLowerCase() !== 'governs'
+    )
+      continue;
+    const hash = link.id.indexOf('#');
+    const core = hash < 0 ? '' : link.id.slice(hash + 1);
+    if (DaoDaoContractAddressSchema.safeParse(core).success) cores.add(core);
+  }
+  return cores;
+}
+
+/**
+ * The DAO DAO group that governs an entity ({@link governingGroupCores}).
+ * Undefined when there is none, or when several such links name different
+ * groups.
+ */
+function governingGroupOf(linkedEntities: unknown): string | undefined {
+  const cores = governingGroupCores(linkedEntities);
+  const [core] = cores;
+  return cores.size === 1 ? core : undefined;
+}
+
 function listOf<T>(value: unknown, map: (item: unknown) => T | undefined): T[] {
   if (!Array.isArray(value)) return [];
   const out: T[] = [];
@@ -613,6 +651,7 @@ export function shapeResult(request: ChainRequest, raw: unknown): Shaped {
                 })
               : undefined,
           ),
+          governingGroup: governingGroupOf(node.linkedEntity),
           linkedResource: listOf(node.linkedResource, resourceOf),
           service: listOf(node.service, resourceOf),
           settings: isRecord(node.settings)

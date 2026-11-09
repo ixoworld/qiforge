@@ -20,7 +20,57 @@ iterating and the full matrix once at the end.
   over the real `FrontendCallRegistry`, the timeout keeping the write claim
   across turns, `unavailable` at once with only a background executor of
   the session connected, the chain id on every request, the mainnet
-  receipt check, mainnet off by default), and the pod-creator suites
+  receipt check, mainnet off by default, the tools on Portal turns only and
+  nothing bound or loadable on a Matrix or channel turn, the DAO DAO step
+  tools — confirm first and nothing sent, each step's exact message and
+  summary with the proposal's title, the proposal read from a mocked chain
+  REST first (every status a step is refused for, with its exact message;
+  an open proposal that passes only when voting closes; a vote after
+  voting closed; a proposal the chain does not have; an unreadable chain as
+  retryable; a second read right before sending), a non-member's vote
+  refused with its hint, the wallet simulation's contract error passed on
+  as `error` (never read as the user's refusal) and bounded, every mapped
+  DAO DAO 2.0.3 error text, the timeout keeping the claim; what a proposal
+  does disclosed (a proposal's actions named with their values and their
+  risks and level joined to the proposal's, a carry-out's actions decoded
+  from the proposal's `msgs` with an undecodable one said plainly, the
+  summary bound, the actions' risks required to sign); every DAO DAO tool
+  signing only after a preview in an earlier request with the same fields,
+  once per preview, and nothing on a host without `ctx.kv`
+  (`dao-confirmations.test.ts`: the record's previews per user, session and
+  digest, its bounds, one creation per group and the hold of an unknown
+  outcome); `create_dao_group`
+  — the exact group and summary shown first with nothing sent or read, the
+  Portal's voting defaults, the 12-member summary within the wallet's
+  bound, refused when the user is not a member, for a member twice, a
+  threshold out of bounds, bad or contract addresses, a bad name or voting
+  time, without an IXO account and on mainnet when off, risks quoted with
+  plain apostrophes accepted, the one `dao_core` instantiate sent, the core,
+  proposal module and intake read back from a recorded devnet group
+  transaction (`fixtures/devnet-dao-group-tx.json`), `created` without an
+  address when the transaction is unreadable, not the group or has no hash,
+  a failed transaction and the timeout as an unknown outcome, the same
+  group refused once created and after a lost answer until it is read back
+  by its `txHash`, and sent again after a decline or a failed transaction;
+  `link_dao_group` (`dao-link.test.ts`, chain REST answering as devnet did
+  for a linked POD and its group, `fixtures/devnet-linked-pod.json` and
+  `fixtures/devnet-dao-link-tx.json`) — the preview with every read (entity,
+  contract info, `dump_state`, members, pass rule, the Names worker) and its
+  exact summary, the notes for an entity type the Portal does not govern, a
+  user who is not a member, more than one page of members and a voting
+  module without a member list, refused for an account not under
+  `authentication` (also one only under `assertionMethod`), an address
+  without a contract, a contract of another code, a bad DID or address (no
+  read), an entity the chain lacks, the same group already linked, another
+  group governing, mainnet when off, a missing or reworded risk (the
+  preview kept), the same request and no preview; both messages sent and
+  read back as `linked` with the Decisions link, only the missing message
+  after a partial link, a failed transaction with its hint and released, a
+  transaction that does not carry the link as `signed` and not sent again,
+  the timeout keeping the claim until the chain shows the link, the
+  wallet's reason with its hint —
+  and `bundle.test.ts`: the plugin in `BUNDLED_WORKERS_PLUGINS`,
+  booting with the bundle, and the last instance of a name loaded), and the pod-creator suites
   (`src/plugins/pod-creator/*.test.ts`, listed in
   [pod-creator](pod-creator.md#tests); `request-pod-signature.test.ts`
   drives the batch form of the same `sign_transaction` contract against the

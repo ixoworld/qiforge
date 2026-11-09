@@ -1,6 +1,7 @@
 import { ActionProposalsPlugin } from './action-proposals/action-proposals.plugin';
 import { HubActionsPlugin } from './hub-actions/hub-actions.plugin';
 import { IxoChainPlugin } from './ixo-chain';
+import { IxoTransactionPlugin } from './ixo-transaction';
 export { ActionProposalsPlugin } from './action-proposals/action-proposals.plugin';
 export { HubActionsPlugin } from './hub-actions/hub-actions.plugin';
 /**
@@ -8,20 +9,25 @@ export { HubActionsPlugin } from './hub-actions/hub-actions.plugin';
  * plugins. Each is gated the same way as on Node: `autoDetect` on its env
  * key where one exists (memory / sandbox / firecrawl / composio), always-on
  * otherwise (domain-indexer; ixo-chain unless `IXO_CHAIN_TOOLS=off`; vfs
- * self-gates on `ctx.ucan.hasSigningKey()`; sandbox, vfs, pod-creator and
- * ixo-chain are on-demand and stay hidden until `load_capability`).
+ * self-gates on `ctx.ucan.hasSigningKey()`; sandbox, vfs, pod-creator,
+ * ixo-chain and ixo-transaction are on-demand and stay hidden until
+ * `load_capability`).
  *
  * A host opts in by spreading `BUNDLED_WORKERS_PLUGINS` into
  * `createOracleWorker({ plugins })` — plugins whose env keys are absent are
- * skipped by their `autoDetect`.
+ * skipped by their `autoDetect`. A plugin listed twice (by name) is loaded
+ * once, as its last instance: a host passes its own configured instance
+ * after the spread.
+ *
+ * `IxoTransactionPlugin` asks the user's Portal wallet to sign chain
+ * transactions (DAO DAO group proposal steps included). Its tools exist on
+ * Portal turns only, so Matrix and channel turns never see it (chain steps
+ * there go through hub-actions); mainnet signing stays off unless
+ * `IXO_TRANSACTION_ALLOW_MAINNET=true`.
  *
  * asks.world (`AsksPlugin`) self-gates on `ASKS_TOKEN_KEY`, `ORACLE_PUBLIC_URL`
  * and `NETWORK`; the host also binds and exports `AsksConnectionDO`
  * (`docs/asks.md`).
- *
- * Shipped but opt-in (not in the bundle): `IxoTransactionPlugin`, which asks
- * the user's Portal wallet to sign chain transactions; an oracle adds
- * `new IxoTransactionPlugin()` itself.
  */
 import type { OraclePlugin } from '../plugin-api/oracle-plugin';
 import { AsksPlugin } from './asks';
@@ -71,6 +77,7 @@ export const attachmentsPlugin = new AttachmentsPlugin();
 export const matrixGroupChatsPlugin = new MatrixGroupChatsPlugin();
 export const podCreatorPlugin = new PodCreatorPlugin();
 export const asksPlugin = new AsksPlugin();
+export const ixoTransactionPlugin = new IxoTransactionPlugin();
 /** TasksPlugin is already an object (defineOraclePlugin), not a class. */
 export const tasksPlugin = TasksPlugin;
 
@@ -96,6 +103,7 @@ export const BUNDLED_WORKERS_PLUGINS = [
   aguiPlugin,
   attachmentsPlugin,
   matrixGroupChatsPlugin,
+  ixoTransactionPlugin,
   podCreatorPlugin,
   asksPlugin,
 ] as const satisfies readonly OraclePlugin[];

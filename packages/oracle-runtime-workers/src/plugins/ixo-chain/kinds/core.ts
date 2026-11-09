@@ -172,6 +172,7 @@ export const CORE_KINDS: readonly KindDef[] = [
     explain: [
       'Resources, services and settings show what and where (id, type, description, serviceEndpoint, mediaType), never their content.',
       "`status` is a number the entity's creator defines.",
+      '`governingGroup`: the DAO DAO group that governs it (a POD’s or DAO’s group, from its `group` linked entity with relationship `governs`): its core contract address, the `dao` of `dao_proposals` and `daos`.',
       'Ask it beside `did_document` for "what is did:ixo:entity:…".',
       "`subject` is `user` when the entity's owner is the user.",
     ].join(' '),

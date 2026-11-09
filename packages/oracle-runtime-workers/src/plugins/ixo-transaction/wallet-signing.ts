@@ -16,6 +16,7 @@ import type {
   FrontendCallSurface,
   RuntimeContext,
 } from '../../plugin-api/types';
+import { clip } from '../ixo-chain/summaries';
 
 /** How a signing request ended, before a plugin adds its own context. */
 export type WalletSignatureOutcome =
@@ -55,8 +56,31 @@ const MISSING_HANDLER = `Action tool ${SIGN_TRANSACTION_ACTION_NAME} not found`;
  */
 const WALLET_REFUSAL = /\b(?:reject|denied|declin|cancel)/i;
 
+/**
+ * The chain's own words for a message that failed (cosmos-sdk 0.50 baseapp
+ * `runMsgs`, as a wallet's simulation or broadcast passes them on). Such a
+ * text is never a user's refusal, whatever the contract's reason says
+ * (DAO DAO's "only rejected proposals may be closed").
+ */
+const CHAIN_MESSAGE_FAILURE = /failed to execute message; message index: \d+/;
+
+/**
+ * The most of a wallet's or chain's error text passed on to the model: the
+ * contract's reason fits well within it, a long simulation log is cut.
+ */
+export const WALLET_ERROR_MAX_CHARS = 600;
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** A wallet's or chain's error text as the model gets it: one line, bounded. */
+function boundedError(text: string): string {
+  const line = text
+    .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return clip(line, WALLET_ERROR_MAX_CHARS);
 }
 
 type WalletChannel =
@@ -131,15 +155,18 @@ function settledOutcome(
         ...(summary.delivered.height !== undefined
           ? { height: summary.delivered.height }
           : {}),
-        error:
+        error: boundedError(
           summary.error ??
-          `The transaction failed on chain with code ${summary.delivered.code}`,
+            `The transaction failed on chain with code ${summary.delivered.code}`,
+        ),
       };
     }
     if (!summary.success) {
       return {
         status: 'error',
-        error: summary.error ?? 'The wallet reported a failed transaction',
+        error: boundedError(
+          summary.error ?? 'The wallet reported a failed transaction',
+        ),
       };
     }
     return {
@@ -160,10 +187,16 @@ function settledOutcome(
   }
   // A rejected call carries only the Portal's error text (a delivered
   // transaction comes back as `failed` above, with its code and hash), so a
-  // refusal is read from that text — never from a chain log.
+  // refusal is read from that text — never from a chain log. That text is
+  // passed on (bounded): when the wallet's simulation refused the
+  // transaction it holds the chain's reason, e.g. a contract's error.
+  const error = boundedError(outcome.error);
   return {
-    status: WALLET_REFUSAL.test(outcome.error) ? 'rejected' : 'error',
-    error: outcome.error,
+    status:
+      WALLET_REFUSAL.test(error) && !CHAIN_MESSAGE_FAILURE.test(error)
+        ? 'rejected'
+        : 'error',
+    error,
   };
 }
 

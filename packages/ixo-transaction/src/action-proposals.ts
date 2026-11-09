@@ -60,7 +60,7 @@ export const ActionProposalSubjectSchema = z
       });
     for (const message of p.action.inputs.messages) {
       try {
-        validateMessage(message);
+        validateMessage(message, { network: p.action.network });
       } catch {
         ctx.addIssue({
           code: 'custom',

@@ -103,6 +103,24 @@ export interface PodCreatorConfig {
 const withoutSlash = (url: string): string => url.replace(/\/+$/, '');
 
 /**
+ * The Portal a `network` entity is opened in, as the POD Creator links it:
+ * `POD_CREATOR_PORTAL_URL` when the merged config sets a valid one, else the
+ * network's ({@link PORTAL_URLS}); without a trailing slash.
+ */
+export function portalUrlFor(
+  network: Network,
+  config: RuntimeContext['config'],
+): string {
+  const override =
+    podCreatorConfigSchema.shape.POD_CREATOR_PORTAL_URL.safeParse(
+      config.POD_CREATOR_PORTAL_URL,
+    );
+  return withoutSlash(
+    (override.success ? override.data : undefined) ?? PORTAL_URLS[network],
+  );
+}
+
+/**
  * Network routing + the mainnet opt-in, read from the merged config. Falls
  * back to testnet with mainnet disabled when the config is unreadable — and
  * says so, since a silent network fallback on the create path would mask

@@ -35,14 +35,19 @@
  * event and one ownership mint to the user's address, agreeing with the
  * message response.
  *
+ * group: the governance group's transaction is looked up the same way. It
+ * must carry exactly one `MsgInstantiateContract` of the network's
+ * `dao_core` from the user's account, with the name, members, threshold
+ * and voting rules the conversation sent; the group's address is the `_contract_address` of
+ * its `dao_core` `instantiate` event (`findDaoGroup`, shared with the IXO
+ * Transaction plugin's `create_dao_group`).
+ *
  * Every chain read is bounded (time, size, retries) through the ixo-chain
  * plugin's `restJson`, and shares the user's chain read permits with it.
  * Expected failures are answered as results; only the turn's abort throws.
  */
-import { sha256 } from '@noble/hashes/sha2';
-import { ripemd160 } from '@noble/hashes/legacy';
-import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
-import type { ITrxMsg, Network } from '@ixo/ixo-transaction';
+import { bytesToHex } from '@noble/hashes/utils';
+import { type ITrxMsg, type Network } from '@ixo/ixo-transaction';
 import { TxMsgData } from '@ixo/impactxclient-sdk/module/codegen/cosmos/base/abci/v1beta1/abci.js';
 import { MsgCreateEntityResponse } from '@ixo/impactxclient-sdk/module/codegen/ixo/entity/v1beta1/tx.js';
 import { base58btc } from 'multiformats/bases/base58';
@@ -51,16 +56,31 @@ import { fetchWithoutRedirects } from '../../core/domain-context/transport';
 import { ixoAddressOf } from '../../core/user-identity';
 import type { RuntimeContext } from '../../plugin-api/types';
 import {
-  MIN_ATTEMPT_MS,
   TOOL_BUDGET_MS,
   sleep,
   throwIfAborted,
   type ChainCall,
   type Failure,
 } from '../ixo-chain/http';
+import {
+  hexBytes,
+  keyAccount,
+  listsAccountUnder,
+  methodKey,
+  sameBytes,
+  verificationMethodSchema,
+  type SignerRelationship,
+} from '../ixo-chain/iid-signer';
 import { chainRestUrlFor } from '../ixo-chain/ixo-chain.plugin';
 import { bech32Bytes } from '../ixo-chain/queries';
 import { restJson } from '../ixo-chain/rest';
+import {
+  TX_LOOKUP_POLL_MS,
+  lookupTransaction,
+  type Tx,
+  type TxEvent,
+} from '../ixo-chain/tx-lookup';
+import { findDaoGroup } from '../ixo-transaction/dao-group';
 import type {
   ChainGateway,
   GatewayRefusal,
@@ -87,7 +107,10 @@ const SECP_KEY_TYPE = 'EcdsaSecp256k1VerificationKey2019';
 const SECP_PUBKEY_TYPE = '/cosmos.crypto.secp256k1.PubKey';
 const ENTITY_DID = /^did:ixo:entity:[0-9a-f]{32}$/;
 /** The relationships the chain accepts a signer under (`iidtx.go` constraints). */
-const SIGNER_RELATIONSHIPS = ['authentication', 'assertionMethod'] as const;
+const SIGNER_RELATIONSHIPS: readonly SignerRelationship[] = [
+  'authentication',
+  'assertionMethod',
+];
 /** The linked resource id of an entity's profile, which the chain fills in. */
 const PROFILE_RESOURCE_ID = '{id}#pro';
 
@@ -102,10 +125,10 @@ export const PUBLISH_BUDGET_MS = TOOL_BUDGET_MS;
 export const HOMESERVER_TIMEOUT_MS = 10_000;
 /** Upper bound on getting the oracle's Matrix device credentials. */
 export const CREDENTIALS_TIMEOUT_MS = 10_000;
-/** How long `confirmPodCreation` looks for the transaction before giving up. */
+/** How long `confirmPodCreation` (and `findPodGroup`) look for the transaction before giving up. */
 export const CONFIRM_BUDGET_MS = TOOL_BUDGET_MS;
 /** The wait between two lookups of a transaction not on chain (or not readable) yet. */
-export const CONFIRM_POLL_MS = 2_000;
+export const CONFIRM_POLL_MS = TX_LOOKUP_POLL_MS;
 /** Upper bound on the domain indexer's answer. */
 export const INDEXER_TIMEOUT_MS = 10_000;
 
@@ -115,7 +138,7 @@ export interface IxoChainGatewayDeps {
   fetch?: typeof fetch;
   /** The clock the entity's start and end dates (and a card's `validFrom`) are read from. */
   now?: () => Date;
-  /** Total time `confirmPodCreation` looks for the transaction. */
+  /** Total time `confirmPodCreation` and `findPodGroup` look for the transaction. */
   confirmBudgetMs?: number;
   /** The wait between two lookups of the transaction. */
   pollIntervalMs?: number;
@@ -251,17 +274,6 @@ const ACCOUNT_KEY_HOLDER: Record<
   ),
 };
 
-const verificationMethodSchema = z.object({
-  id: z.string(),
-  type: z.string(),
-  blockchainAccountID: z.string().optional(),
-  publicKeyHex: z.string().optional(),
-  publicKeyMultibase: z.string().optional(),
-  publicKeyBase58: z.string().optional(),
-});
-
-type VerificationMethod = z.infer<typeof verificationMethodSchema>;
-
 const iidSchema = z.object({
   iidDocument: z.object({
     verificationMethod: z.array(verificationMethodSchema).default([]),
@@ -270,85 +282,12 @@ const iidSchema = z.object({
   }),
 });
 
-type IidDocument = z.infer<typeof iidSchema>['iidDocument'];
-
 function base64Bytes(text: string): Uint8Array | null {
   try {
     return Uint8Array.from(atob(text), (char) => char.charCodeAt(0));
   } catch {
     return null;
   }
-}
-
-function hexBytes(text: string): Uint8Array | null {
-  if (!/^(?:[0-9a-fA-F]{2})+$/.test(text)) return null;
-  return hexToBytes(text.toLowerCase());
-}
-
-function base58Bytes(text: string): Uint8Array | null {
-  try {
-    return base58btc.baseDecode(text);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * A verification method's key bytes, read the way the chain reads them when
- * it checks a signer (`IidDocument.HasRelationship`): `publicKeyMultibase`
- * as hex after its one-character prefix (the Portal writes `F` + hex),
- * `publicKeyHex` as hex, `publicKeyBase58` as base58.
- */
-function methodKey(method: VerificationMethod): Uint8Array | null {
-  if (method.publicKeyMultibase !== undefined)
-    return hexBytes(method.publicKeyMultibase.slice(1));
-  if (method.publicKeyHex !== undefined) return hexBytes(method.publicKeyHex);
-  if (method.publicKeyBase58 !== undefined)
-    return base58Bytes(method.publicKeyBase58);
-  return null;
-}
-
-const sameBytes = (a: Uint8Array, b: Uint8Array): boolean =>
-  a.length === b.length && a.every((byte, index) => byte === b[index]);
-
-/**
- * The account a 33-byte key stands for: RIPEMD-160 of its SHA-256, as the
- * chain derives a secp256k1 key's address. Null for any other length.
- */
-function keyAccount(key: Uint8Array): Uint8Array | null {
-  return key.length === 33 ? ripemd160(sha256(key)) : null;
-}
-
-/** Whether the chain counts `method` as the account `address` (`HasRelationship`'s material match). */
-function methodIsAccount(
-  method: VerificationMethod,
-  address: string,
-  accountBytes: Uint8Array,
-): boolean {
-  if (method.blockchainAccountID !== undefined)
-    return method.blockchainAccountID === address;
-  const key = methodKey(method);
-  const account = key ? keyAccount(key) : null;
-  return account !== null && sameBytes(account, accountBytes);
-}
-
-/**
- * Whether the IID document lets `address` act for its DID the way the
- * chain's ante handler checks a signer: a verification method of that
- * account named under `authentication` or `assertionMethod`.
- */
-function listsSigner(
-  doc: IidDocument,
-  address: string,
-  accountBytes: Uint8Array,
-): boolean {
-  const named = new Set(
-    SIGNER_RELATIONSHIPS.flatMap((relationship) => doc[relationship]),
-  );
-  return doc.verificationMethod.some(
-    (method) =>
-      named.has(method.id) && methodIsAccount(method, address, accountBytes),
-  );
 }
 
 /** Whether `key` is a compressed secp256k1 public key of the account `accountBytes`. */
@@ -390,7 +329,9 @@ async function ownerPublicKey(
       false,
     );
   const doc = iid.value.iidDocument;
-  if (!listsSigner(doc, owner.address, accountBytes))
+  if (
+    !listsAccountUnder(doc, owner.address, accountBytes, SIGNER_RELATIONSHIPS)
+  )
     return refuse(
       `Your identity document does not list your account ${owner.address} under authentication or assertionMethod, so the chain would refuse the POD: ` +
         "it accepts a message for an owner only from an account the owner's identity lists. Add the account to your identity, then prepare the POD again.",
@@ -426,36 +367,7 @@ async function ownerPublicKey(
   );
 }
 
-/* ── the transaction lookup ───────────────────────────────────────────── */
-
-const txSchema = z.object({
-  tx: z.object({
-    body: z.object({
-      messages: z.array(z.looseObject({ '@type': z.string() })).default([]),
-    }),
-  }),
-  tx_response: z.object({
-    txhash: z.string(),
-    height: z.string(),
-    code: z.number().int(),
-    codespace: z.string().default(''),
-    raw_log: z.string().default(''),
-    data: z.string().default(''),
-    events: z
-      .array(
-        z.object({
-          type: z.string(),
-          attributes: z
-            .array(z.object({ key: z.string(), value: z.string().default('') }))
-            .default([]),
-        }),
-      )
-      .default([]),
-  }),
-});
-
-type Tx = z.infer<typeof txSchema>;
-type TxEvent = Tx['tx_response']['events'][number];
+/* ── the POD's transaction ────────────────────────────────────────────── */
 
 function attribute(event: TxEvent, key: string): string | undefined {
   return event.attributes.find((attr) => attr.key === key)?.value;
@@ -791,53 +703,18 @@ export function createIxoChainGateway(
     },
 
     async confirmPodCreation({ txHash, network, sent }, ctx) {
-      const started = Date.now();
-      const call = chainCall(ctx, network, io, started + confirmBudgetMs);
+      const call = chainCall(ctx, network, io, Date.now() + confirmBudgetMs);
+      const found = await lookupTransaction(call, txHash, {
+        label: 'POD transaction',
+        tag: POD_TAG,
+        wait,
+        pollMs,
+        again:
+          'Call confirm_pod_creation again in a moment with the same hash.',
+      });
+      if (found.status !== 'found') return found;
       const owner = { did: ctx.user.did, address: ixoAddressOf(ctx.user.did) };
-      let lastFailure: Failure | null = null;
-      while (true) {
-        const read = await restJson(
-          call,
-          `/cosmos/tx/v1beta1/txs/${txHash}`,
-          txSchema,
-          { label: 'POD transaction', tag: POD_TAG, noneOn: [404] },
-        );
-        if (read.ok && !('absent' in read)) {
-          if (
-            read.value.tx_response.txhash.toUpperCase() !== txHash.toUpperCase()
-          )
-            return {
-              status: 'unavailable',
-              retryable: false,
-              message:
-                'The chain answered with a different transaction than the one asked for.',
-            };
-          return podOfTransaction(read.value, owner, sent, network);
-        }
-        if (!read.ok && !read.failure.retryable)
-          return {
-            status: 'unavailable',
-            retryable: false,
-            message: `Could not read the transaction from the chain: ${read.failure.detail}`,
-          };
-        // Not indexed yet, or the node is briefly unavailable: ask again
-        // while the budget leaves room for a wait and one more read.
-        lastFailure = read.ok ? null : read.failure;
-        if (call.deadline - Date.now() < pollMs + MIN_ATTEMPT_MS) break;
-        await wait(pollMs, ctx.abortSignal);
-      }
-      const seconds = Math.round((Date.now() - started) / 1000);
-      return lastFailure === null
-        ? {
-            status: 'pending',
-            retryable: true,
-            message: `The chain has no transaction ${txHash} after ${seconds} s: it may not be in a block yet. Call confirm_pod_creation again in a moment with the same hash.`,
-          }
-        : {
-            status: 'unavailable',
-            retryable: true,
-            message: `The chain could not be read for ${seconds} s (${lastFailure.detail}). Call confirm_pod_creation again in a moment with the same hash.`,
-          };
+      return podOfTransaction(found.tx, owner, sent, network);
     },
 
     async prepareDomainCard({ network, podDid, profile }, ctx) {
@@ -895,6 +772,28 @@ export function createIxoChainGateway(
         domainIndexerUrlFor(ctx, network),
         podDid,
         fetchImpl,
+      );
+    },
+
+    async findPodGroup({ txHash, network, group }, ctx) {
+      const sender = ixoAddressOf(ctx.user.did);
+      if (!sender)
+        return {
+          status: 'failed',
+          retryable: false,
+          message: notAnAccount.message,
+        };
+      return findDaoGroup(
+        chainCall(ctx, network, io, Date.now() + confirmBudgetMs),
+        { txHash, sender, group, network },
+        {
+          label: 'group transaction',
+          tag: POD_TAG,
+          wait,
+          pollMs,
+          again: 'Call link_pod_group again in a moment.',
+          what: 'the governance group',
+        },
       );
     },
   };

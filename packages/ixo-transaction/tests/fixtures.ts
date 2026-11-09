@@ -1,4 +1,4 @@
-import { findMessageByTypeUrl } from '../src/catalog.js';
+import { findMessageByRoute } from '../src/catalog.js';
 import { parseSlashCommand } from '../src/intent.js';
 import type { RiskConfirmation, TransactionDraft } from '../src/schemas.js';
 
@@ -28,7 +28,8 @@ export const RECEIPT = {
 
 /** The user accepting, word for word, every risk of the command's route. */
 export function acceptAllRisks(command: string): RiskConfirmation {
-  const spec = findMessageByTypeUrl(parseSlashCommand(command).typeUrl);
+  const intent = parseSlashCommand(command);
+  const spec = findMessageByRoute(intent.module, intent.action);
   if (!spec) throw new Error(`no catalog entry for ${command}`);
   return { confirmed: true, acceptedRisks: [...spec.risks] };
 }

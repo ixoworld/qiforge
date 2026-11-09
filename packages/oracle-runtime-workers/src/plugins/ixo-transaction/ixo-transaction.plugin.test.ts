@@ -25,9 +25,9 @@ import {
   type AmbientServices,
 } from '../../core/runtime-context';
 import {
-  makeBuildCtx,
   makeClaimStore,
   makeEnv,
+  makeRuntimeContext,
 } from '../../core/test-fixtures';
 import { ToolScheduler } from '../../core/tool-scheduler';
 import { TurnBudget } from '../../core/turn-budget';
@@ -48,7 +48,33 @@ const TOOL_NAMES = [
   'classify_ixo_transaction_intent',
   'validate_ixo_transaction_draft',
   'sign_ixo_transaction',
+  'create_dao_group',
+  'link_dao_group',
+  'create_dao_proposal',
+  'vote_on_dao_proposal',
+  'execute_dao_proposal',
+  'close_dao_proposal',
 ];
+
+/** The plugin's tools on a turn from `client`. */
+function turnTools(
+  client: 'portal' | 'matrix' | 'slack' | 'channel' = 'portal',
+  plugin = new IxoTransactionPlugin(),
+) {
+  return plugin.getRequestTools(
+    makeRuntimeContext(
+      {},
+      {
+        runConfig: {
+          context: {
+            ...requestCtx,
+            session: { ...requestCtx.session, client },
+          },
+        },
+      },
+    ),
+  );
+}
 
 const USER_DID = 'did:ixo:user1';
 
@@ -156,6 +182,7 @@ async function runTurn(
     claims?: ReturnType<typeof makeClaimStore>;
     runId?: string;
     threadId?: string;
+    client?: 'portal' | 'matrix' | 'channel';
   } = {},
 ) {
   const built = await createMainAgent({
@@ -164,7 +191,10 @@ async function runTurn(
     config: core.validatedEnv,
     availablePlugins: core.availablePlugins,
     ambient: ambientFor(core, script, opts.frontend),
-    requestCtx,
+    requestCtx: {
+      ...requestCtx,
+      session: { ...requestCtx.session, client: opts.client ?? 'portal' },
+    },
     state: {},
     checkpointer: new MemorySaver(),
     ...(opts.claims
@@ -210,9 +240,9 @@ describe('IxoTransactionPlugin: identity, manifest and configuration', () => {
     });
   });
 
-  it('contributes the four tools, and every manifest example names one with arguments its schema accepts', () => {
+  it('contributes its tools on a Portal turn, and every manifest example names one with arguments its schema accepts', () => {
     const plugin = new IxoTransactionPlugin();
-    const tools = plugin.getTools(makeBuildCtx());
+    const tools = turnTools('portal', plugin);
     expect(tools.map((t) => t.name)).toEqual(TOOL_NAMES);
     expect(
       validateExamplesAgainstTools(
@@ -227,16 +257,28 @@ describe('IxoTransactionPlugin: identity, manifest and configuration', () => {
     }
   });
 
-  it('marks the discovery tools as reads and leaves the signing tool a write', () => {
-    const effects = new IxoTransactionPlugin()
-      .getTools(makeBuildCtx())
-      .map((t) => [t.name, t.effect ?? 'write']);
+  it('marks the discovery tools as reads and leaves the signing tools writes', () => {
+    const effects = turnTools().map((t) => [t.name, t.effect ?? 'write']);
     expect(effects).toEqual([
       ['list_ixo_transaction_routes', 'read'],
       ['classify_ixo_transaction_intent', 'read'],
       ['validate_ixo_transaction_draft', 'read'],
       ['sign_ixo_transaction', 'write'],
+      ['create_dao_group', 'write'],
+      ['link_dao_group', 'write'],
+      ['create_dao_proposal', 'write'],
+      ['vote_on_dao_proposal', 'write'],
+      ['execute_dao_proposal', 'write'],
+      ['close_dao_proposal', 'write'],
     ]);
+  });
+
+  it('offers nothing on a Matrix, Slack or channel turn: the wallet is reached only through a Portal tab', () => {
+    const plugin = new IxoTransactionPlugin();
+    expect(plugin.getTools).toBeUndefined();
+    for (const client of ['matrix', 'slack', 'channel'] as const)
+      expect(turnTools(client, plugin)).toEqual([]);
+    expect(turnTools('portal', plugin).map((t) => t.name)).toEqual(TOOL_NAMES);
   });
 
   it('boots with mainnet off, the verified chain ids and a 120 s signing timeout', () => {
@@ -328,6 +370,37 @@ describe('IxoTransactionPlugin in a turn', () => {
       message: { typeUrl: '/ixo.token.v1beta1.MsgRetireToken' },
       requiresConfirmation: true,
     });
+  });
+
+  it('stays out of a Matrix or channel turn: nothing bound, nothing to load, the wallet never asked', async () => {
+    const core = bootCore();
+    await core.warm();
+    for (const client of ['matrix', 'channel'] as const) {
+      const bridge = silentBridge();
+      const { built, tools } = await runTurn(
+        core,
+        [
+          [
+            {
+              name: 'load_capability',
+              args: { names: ['ixo-transaction'] },
+              id: 'c1',
+            },
+          ],
+          [{ name: 'vote_on_dao_proposal', args: {}, id: 'c2' }],
+          [],
+        ],
+        { frontend: bridge.surface, client },
+      );
+      for (const name of TOOL_NAMES)
+        expect(built.boundToolNames).not.toContain(name);
+      // Never in the catalogue or preloaded; loaded by name it binds nothing.
+      expect(JSON.parse(String(tools.get('c1')?.content))).toEqual([
+        expect.objectContaining({ name: 'ixo-transaction', tools: [] }),
+      ]);
+      expect(tools.get('c2')?.status).toBe('error');
+      expect(bridge.calls).toEqual([]);
+    }
   });
 
   it('does not dispatch an identical signing request in a later turn while a timeout left its outcome unknown', async () => {
