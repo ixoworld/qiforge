@@ -1,5 +1,12 @@
 # @ixo/oracle-runtime
 
+## 1.99.6
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @ixo/common@1.8.2
+
 ## 1.99.5
 
 ### Patch Changes

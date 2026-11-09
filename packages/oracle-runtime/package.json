@@ -1,6 +1,6 @@
 {
   "name": "@ixo/oracle-runtime",
-  "version": "1.99.5",
+  "version": "1.99.6",
   "description": "DEPRECATED — the Node runtime for QiForge oracles is no longer developed. Use @ixo/oracle-runtime-workers (Cloudflare Workers).",
   "private": false,
   "publishConfig": {
