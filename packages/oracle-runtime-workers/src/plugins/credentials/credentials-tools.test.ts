@@ -13,25 +13,28 @@ import {
   setStatusBit,
 } from '@ixo/credentials-kit/status';
 import { describe, expect, it } from 'vitest';
-import { deliverToPluginInbox } from '../../core/plugin-inbox';
 import { createMemoryUserKv } from '../../core/user-kv';
 import type {
   PluginTool,
   RuntimeContext,
   UserKvSurface,
 } from '../../plugin-api/types';
+import { recordPermission } from './person-state';
 import { VerifierEntryMemo } from './credentials-client';
 import {
   createCredentialsTools,
   type CredentialsToolsDeps,
 } from './credentials-tools';
-import { MESSAGES } from './errors';
-import { canonicalJson, sha256Hex } from './hub-client';
 import {
   CREDENTIALS_KV_NAMESPACE,
-  inboxKeyOf,
-  openResponseToken,
-} from './response-route';
+  readCheck,
+  receiveAnswer,
+  saveCheck,
+} from './check-store';
+import { purposeFor } from './config';
+import { MESSAGES, refusal } from './errors';
+import { canonicalJson, sha256Hex } from './hub-client';
+import { openResponseToken } from './response-route';
 import {
   BLOCKSYNC_URL,
   channelCtx,
@@ -140,6 +143,7 @@ async function walletAnswers(
   call: RecordedCall,
   kv: UserKvSurface,
   oracleDoc: unknown,
+  revoked: number[] = [],
 ) {
   const { request } = JSON.parse(call.body);
   const req = await verifyAuthorizationRequest(request, {
@@ -168,12 +172,30 @@ async function walletAnswers(
   });
   if (!target || target.ownerDid !== PERSON_DID)
     throw new Error('bad response URI');
-  return deliverToPluginInbox(
+  // What the route does: the person's own object verifies the answer.
+  return deliver(kv, target.checkId, response.body, oracleDoc, revoked);
+}
+
+/** The route's hand-off: the answer goes to the owner callback, which verifies it. */
+function deliver(
+  kv: UserKvSurface,
+  checkId: string,
+  body: string,
+  oracleDoc: unknown,
+  revoked: number[] = [],
+) {
+  return receiveAnswer({
     kv,
-    CREDENTIALS_KV_NAMESPACE,
-    inboxKeyOf(target.checkId),
-    response.body,
-  );
+    ownerDid: PERSON_DID,
+    checkId,
+    body,
+    verifier: new VerifierContext(
+      BLOCKSYNC_URL,
+      false,
+      kitFetch(oracleDoc, revoked),
+    ),
+    nowMs: Date.now(),
+  });
 }
 
 function deposited(id = 'req_1') {
@@ -251,10 +273,9 @@ describe('the WhatsApp gate', () => {
       channelCtx(adapter, { provider: 'telegram' }),
     ])
       for (const [name, args] of Object.entries(inputs))
-        await expect(run(tools[name], args, ctx)).resolves.toEqual({
-          error: 'whatsapp_only',
-          message: MESSAGES.whatsAppOnly,
-        });
+        await expect(run(tools[name], args, ctx)).resolves.toEqual(
+          refusal('whatsapp_only', MESSAGES.whatsAppOnly),
+        );
     expect(calls).toHaveLength(0);
   });
 
@@ -288,10 +309,7 @@ describe('the trust anchor (CREDENTIALS_TRUSTED_ISSUERS)', () => {
     ]) {
       await expect(
         run(tools[name], { ...CHECK_ARGS, issuers: [OTHER_ISSUER] }, ctx),
-      ).resolves.toEqual({
-        error: 'untrusted_issuer',
-        message: MESSAGES.untrustedIssuer,
-      });
+      ).resolves.toEqual(refusal('untrusted_issuer', MESSAGES.untrustedIssuer));
       await expect(
         run(
           tools[name],
@@ -302,10 +320,9 @@ describe('the trust anchor (CREDENTIALS_TRUSTED_ISSUERS)', () => {
           },
           ctx,
         ),
-      ).resolves.toEqual({
-        error: 'untrusted_credential',
-        message: MESSAGES.untrustedCredential,
-      });
+      ).resolves.toEqual(
+        refusal('untrusted_credential', MESSAGES.untrustedCredential),
+      );
     }
     // No card, no catalog write, no request.
     expect(calls).toHaveLength(0);
@@ -398,6 +415,7 @@ describe('permission cards', () => {
       url: CARD.url,
       expiresAt: CARD.expiresAt,
       message: `Tap this link to see what Companion is asking and choose Allow or Don't allow: ${CARD.url}`,
+      hint: 'Send `message` as it is, as one link in a short message. Never paste ids or tokens.',
     });
     const sent = JSON.parse(calls[0]?.body ?? '');
     expect(sent).toMatchObject({
@@ -447,17 +465,20 @@ describe('permission cards', () => {
           ],
         }),
     });
+    const kv = createMemoryUserKv();
+    await recordPermission(kv, 'card_1');
     const out = await run(
       toolsFor(fetchImpl, oracleKey.doc).credentials_permission_status,
       { permissionId: 'card_1' },
-      channelCtx(adapter),
+      channelCtx(adapter, { kv }),
     );
     expect(out).toEqual({
       permissionId: 'card_1',
       status: 'allowed',
       allowedAt: 1792000000,
       expiresAt: 1794000000,
-      message: 'They allowed it.',
+      message: 'Thanks, you allowed it.',
+      hint: 'Go on with the task.',
     });
     expect(JSON.stringify(out)).not.toContain('SECRET');
   });
@@ -474,10 +495,7 @@ describe('permission cards', () => {
         CHECK_ARGS,
         channelCtx(adapter),
       ),
-    ).resolves.toEqual({
-      error: 'unknown_claim',
-      message: MESSAGES.unknownClaim,
-    });
+    ).resolves.toEqual(refusal('unknown_claim', MESSAGES.unknownClaim));
   });
 });
 
@@ -498,7 +516,9 @@ describe('credentials_check', () => {
           201,
         ),
       [`POST ${WORKER}/v1/requests`]: async (call) => {
-        expect(await walletAnswers(call, kv, oracleKey.doc)).toBe(true);
+        expect(await walletAnswers(call, kv, oracleKey.doc)).toEqual({
+          status: 200,
+        });
         return deposited();
       },
     });
@@ -511,7 +531,8 @@ describe('credentials_check', () => {
       result: 'valid',
       claims: { age_over_18: true },
       requestId: 'req_1',
-      message: 'Their credential checks out.',
+      message: 'Thanks, your credential checks out.',
+      hint: 'Use only the fields you asked for, for this task.',
     });
     // Only the field asked for comes back, never the birth date.
     expect(JSON.stringify(out)).not.toContain('2000-01-02');
@@ -523,7 +544,7 @@ describe('credentials_check', () => {
     const deposit = JSON.parse(calls[2]?.body ?? '');
     expect(deposit).toMatchObject({
       subject: PERSON_DID,
-      purpose: 'Companion would like to check this.',
+      purpose: 'Check your Identity Level 1',
     });
     // The request object never names the person.
     expect(JSON.stringify(deposit.request)).not.toContain(PERSON_DID.slice(8));
@@ -533,17 +554,29 @@ describe('credentials_check', () => {
       [
         'did:web:dev.credentials.ixo.earth',
         'credentials/verify',
-        { method: 'PUT', path: `/v1/catalog/verifiers/${ORACLE_DID}` },
+        {
+          method: 'PUT',
+          path: `/v1/catalog/verifiers/${ORACLE_DID}`,
+          body_sha256: await sha256Hex(calls[1]?.body ?? ''),
+        },
       ],
       [
         'did:web:dev.credentials.ixo.earth',
         'credentials/verify',
-        { method: 'POST', path: '/v1/requests' },
+        {
+          method: 'POST',
+          path: '/v1/requests',
+          body_sha256: await sha256Hex(calls[2]?.body ?? ''),
+        },
       ],
     ]);
     // The check's rows are gone once it ended.
-    const rowKey = `check:${(await sha256Hex(canonicalJson({ subject: PERSON_DID, ...CHECK_ARGS }))).slice(0, 32)}`;
-    expect(await kv.get(CREDENTIALS_KV_NAMESPACE, rowKey)).toBeUndefined();
+    const queryHash = (
+      await sha256Hex(canonicalJson({ subject: PERSON_DID, ...CHECK_ARGS }))
+    ).slice(0, 32);
+    expect(
+      await kv.get(CREDENTIALS_KV_NAMESPACE, `open:${queryHash}`),
+    ).toBeUndefined();
   });
 
   it('reports a revoked credential as revoked', async () => {
@@ -562,7 +595,7 @@ describe('credentials_check', () => {
           201,
         ),
       [`POST ${WORKER}/v1/requests`]: async (call) => {
-        await walletAnswers(call, kv, oracleKey.doc);
+        await walletAnswers(call, kv, oracleKey.doc, [3]);
         return deposited();
       },
     });
@@ -588,11 +621,12 @@ describe('credentials_check', () => {
     ).resolves.toEqual({
       result: 'revoked',
       requestId: 'req_1',
-      message: 'Their credential has been revoked by its issuer.',
+      message: 'Your credential has been revoked by its issuer.',
+      hint: 'It cannot be used; do not retry.',
     });
   });
 
-  it('keeps the real answer when junk filled the inbox first', async () => {
+  it('keeps the real answer when junk came first (junk is refused, never stored)', async () => {
     const { adapter, oracleKey } = recordingUcan();
     const kv = createMemoryUserKv();
     const { fetchImpl } = routedFetch({
@@ -617,14 +651,18 @@ describe('credentials_check', () => {
           serviceKey: SERVICE_KEY,
           oracleDid: ORACLE_DID,
         });
-        // More junk than the inbox holds, then the person's answer.
+        // Junk is refused and stores nothing, then the person's answer.
         for (let i = 0; i < 12; i++)
-          await deliverToPluginInbox(
-            kv,
-            CREDENTIALS_KV_NAMESPACE,
-            inboxKeyOf(target?.checkId ?? ''),
-            `response=junk-${i}`,
-          );
+          expect(
+            (
+              await deliver(
+                kv,
+                target?.checkId ?? '',
+                `response=junk-${i}`,
+                oracleKey.doc,
+              )
+            ).status,
+          ).toBe(400);
         await walletAnswers(call, kv, oracleKey.doc);
         return deposited();
       },
@@ -681,7 +719,8 @@ describe('credentials_check', () => {
       result: 'pending',
       requestId: 'req_1',
       walletUrl: `${HUB}/credentials/requests/req_1`,
-      message: `They need to answer in their IXO wallet: ${HUB}/credentials/requests/req_1`,
+      message: `Please answer in your IXO wallet: ${HUB}/credentials/requests/req_1`,
+      hint: 'No standing permission answered. Send `message` as it is, or ask for standing permission with credentials_request_check_permission; then call again with the same fields to continue this request.',
     });
     // Bounded polling: a status read every few seconds, not every pass.
     const polls = calls.filter(
@@ -732,12 +771,16 @@ describe('credentials_check', () => {
           serviceKey: SERVICE_KEY,
           oracleDid: ORACLE_DID,
         });
-        await deliverToPluginInbox(
-          kv,
-          CREDENTIALS_KV_NAMESPACE,
-          inboxKeyOf(target?.checkId ?? ''),
-          'response=junk',
-        );
+        expect(
+          (
+            await deliver(
+              kv,
+              target?.checkId ?? '',
+              'response=junk',
+              oracleKey.doc,
+            )
+          ).status,
+        ).toBe(400);
         return deposited();
       },
       [`GET ${WORKER}/v1/requests/req_1`]: () =>
@@ -760,7 +803,8 @@ describe('credentials_check', () => {
     expect(out).toEqual({
       result: 'none',
       requestId: 'req_1',
-      message: "They didn't share a credential for this.",
+      message: "You didn't share a credential for this.",
+      hint: 'They declined or let it end; ask again only if they want to.',
     });
   });
 
@@ -810,10 +854,7 @@ describe('credentials_check', () => {
     const ctx = channelCtx(adapter, { kv });
     await expect(
       run(tools.credentials_check, CHECK_ARGS, ctx),
-    ).resolves.toEqual({
-      error: 'answer_lost',
-      message: MESSAGES.busy,
-    });
+    ).resolves.toEqual(refusal('answer_lost', MESSAGES.busy));
     await expect(
       run(tools.credentials_check, CHECK_ARGS, ctx),
     ).resolves.toMatchObject({
@@ -845,10 +886,7 @@ describe('credentials_check', () => {
         CHECK_ARGS,
         channelCtx(adapter),
       ),
-    ).resolves.toEqual({
-      error: 'not_available',
-      message: MESSAGES.notAvailable,
-    });
+    ).resolves.toEqual(refusal('not_available', MESSAGES.notAvailable));
   });
 
   it('passes on a blocked deposit as a plain sentence and keeps nothing', async () => {
@@ -875,7 +913,7 @@ describe('credentials_check', () => {
         CHECK_ARGS,
         channelCtx(adapter, { kv }),
       ),
-    ).resolves.toEqual({ error: 'blocked', message: MESSAGES.blocked });
+    ).resolves.toEqual(refusal('blocked', MESSAGES.blocked));
   });
 });
 
@@ -925,10 +963,7 @@ describe('catalogued actions (self.identity-check)', () => {
         { action: 'self.identity-check' },
         channelCtx(adapter),
       ),
-    ).resolves.toEqual({
-      error: 'no_permission',
-      message: MESSAGES.noPermission,
-    });
+    ).resolves.toEqual(refusal('no_permission', MESSAGES.noPermission));
   });
 
   it('says so while the card is unanswered', async () => {
@@ -947,10 +982,9 @@ describe('catalogued actions (self.identity-check)', () => {
         { action: 'self.identity-check' },
         ctx,
       ),
-    ).resolves.toEqual({
-      error: 'permission_pending',
-      message: MESSAGES.permissionPending,
-    });
+    ).resolves.toEqual(
+      refusal('permission_pending', MESSAGES.permissionPending),
+    );
   });
 
   it('creates the link with the allowed delegations, then reads its status', async () => {
@@ -999,6 +1033,7 @@ describe('catalogued actions (self.identity-check)', () => {
       expiresAt: Date.UTC(2026, 10, 9, 14, 5) / 1000,
       message:
         'Tap this link to start your identity check. It works once and ends at 18:05: https://dev.self.ixo.earth/l/tok',
+      hint: 'Send `message` as it is. Keep the linkId to read progress. A new link replaces one nobody has opened yet, so do not call this again to resend.',
     });
     const create = calls.find((c) => c.url === `${SELF}/identity/v1/links`);
     expect(JSON.parse(create?.body ?? '')).toMatchObject({
@@ -1011,7 +1046,11 @@ describe('catalogued actions (self.identity-check)', () => {
       capability: { can: 'identity/link', with: 'ixo:identity' },
       // The request binding, then the oracle's entity (Self names the requester from it).
       facts: [
-        { method: 'POST', path: '/identity/v1/links' },
+        {
+          method: 'POST',
+          path: '/identity/v1/links',
+          body_sha256: await sha256Hex(create?.body ?? ''),
+        },
         { entityDid: 'did:ixo:entity:309db22aa6e41e3929597dcb185a23be' },
       ],
     });
@@ -1029,7 +1068,8 @@ describe('catalogued actions (self.identity-check)', () => {
       status: 'in_progress',
       updatedAt: 1,
       expiresAt: 2,
-      message: "They're doing the identity check now.",
+      message: "You're doing the identity check now.",
+      hint: 'Wait for them to finish; do not poll.',
     });
   });
 
@@ -1075,7 +1115,8 @@ describe('catalogued actions (self.identity-check)', () => {
       linkStatus: 'sent',
       expiresAt: ends,
       message:
-        'A link is already open; it ends at 14:05. Please use the link you already have.',
+        'Your identity check is already in progress; it ends at 14:05. Please carry on with it.',
+      hint: 'Its link cannot be sent again; read progress with this linkId.',
     });
     await expect(
       run(
@@ -1083,19 +1124,314 @@ describe('catalogued actions (self.identity-check)', () => {
         { action: 'self.identity-check' },
         ctx,
       ),
-    ).resolves.toEqual({
-      error: 'already_verified',
-      message: 'They already have an identity credential.',
-    });
+    ).resolves.toEqual(refusal('already_verified', MESSAGES.alreadyVerified));
     await expect(
       run(
         tools.credentials_request_action,
         { action: 'self.identity-check' },
         ctx,
       ),
-    ).resolves.toEqual({
-      error: 'unauthorized',
-      message: MESSAGES.notConfirmed,
+    ).resolves.toEqual(refusal('unauthorized', MESSAGES.notConfirmed));
+  });
+});
+
+describe('what the plugin keeps per person (kv)', () => {
+  const ALLOWED = (calls?: { n: number }) => () => {
+    if (calls) calls.n += 1;
+    return json({
+      id: 'card_1',
+      status: 'allowed',
+      grants: [
+        {
+          id: 'offer',
+          can: 'credentials/offer',
+          with: 'ixo:credentials',
+          audience: 'x',
+          expiresAt: 4_000_000_000,
+          token: 'OFFER_DELEGATION',
+        },
+        {
+          id: 'link',
+          can: 'identity/link',
+          with: 'ixo:identity',
+          audience: ORACLE_DID,
+          expiresAt: 4_000_000_000,
+          token: 'LINK_DELEGATION',
+        },
+      ],
     });
+  };
+  const LINK = {
+    linkId: 'lnk_1',
+    url: 'https://dev.self.ixo.earth/l/tok',
+    expiresAt: 4_000_000_000,
+  };
+  const ACTION = { action: 'self.identity-check' };
+
+  it('answers a permission id only when this person was asked that card', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl, calls } = routedFetch({
+      [`GET ${HUB}/api/internal/permissions/card_9`]: () =>
+        json({ id: 'card_9', status: 'allowed' }),
+    });
+    await expect(
+      run(
+        toolsFor(fetchImpl, oracleKey.doc).credentials_permission_status,
+        { permissionId: 'card_9' },
+        channelCtx(adapter),
+      ),
+    ).resolves.toEqual(refusal('not_found', MESSAGES.notFound));
+    expect(calls).toHaveLength(0);
+  });
+
+  it("records the check cards' ids too", async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const kv = createMemoryUserKv();
+    const { fetchImpl } = routedFetch({
+      [`POST ${HUB}/api/internal/permissions`]: () => json(CARD, 201),
+      [`GET ${HUB}/api/internal/permissions/card_1`]: () =>
+        json({ id: 'card_1', status: 'pending' }),
+    });
+    const tools = toolsFor(fetchImpl, oracleKey.doc);
+    const ctx = channelCtx(adapter, { kv });
+    await run(tools.credentials_request_check_permission, CHECK_ARGS, ctx);
+    await expect(
+      run(tools.credentials_permission_status, { permissionId: 'card_1' }, ctx),
+    ).resolves.toMatchObject({ status: 'pending' });
+  });
+
+  it('keeps the allowed grants, asks the Hub again only when Self refuses them', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const hub = { n: 0 };
+    const { fetchImpl, calls } = routedFetch({
+      [`POST ${HUB}/api/internal/permissions`]: () => json(CARD, 201),
+      [`GET ${HUB}/api/internal/permissions/card_1`]: ALLOWED(hub),
+      [`POST ${SELF}/identity/v1/links`]: [
+        () => json(LINK, 201),
+        () => json(LINK, 201),
+        () => json({ error: 'forbidden', message: 'x' }, 403),
+        () => json(LINK, 201),
+      ],
+    });
+    const tools = toolsFor(fetchImpl, oracleKey.doc);
+    const ctx = channelCtx(adapter);
+    await run(tools.credentials_request_action_permission, ACTION, ctx);
+    await run(tools.credentials_request_action, ACTION, ctx);
+    expect(hub.n).toBe(1);
+    // Kept: the Hub is not asked again.
+    await expect(
+      run(tools.credentials_request_action, ACTION, ctx),
+    ).resolves.toMatchObject({ status: 'sent' });
+    expect(hub.n).toBe(1);
+    // Self refuses the kept grants (the person stopped it): fetched again, retried once.
+    await expect(
+      run(tools.credentials_request_action, ACTION, ctx),
+    ).resolves.toMatchObject({ status: 'sent' });
+    expect(hub.n).toBe(2);
+    expect(
+      calls.filter((c) => c.url === `${SELF}/identity/v1/links`),
+    ).toHaveLength(4);
+  });
+
+  it('keeps a link status 5 s, and caps status calls at 6 a minute per link', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const self = { n: 0 };
+    const { fetchImpl } = routedFetch({
+      [`POST ${HUB}/api/internal/permissions`]: () => json(CARD, 201),
+      [`GET ${HUB}/api/internal/permissions/card_1`]: ALLOWED(),
+      [`GET ${SELF}/identity/v1/links/lnk_1`]: () => {
+        self.n += 1;
+        return json({
+          linkId: 'lnk_1',
+          status: 'opened',
+          updatedAt: 1,
+          expiresAt: 2,
+        });
+      },
+      [`GET ${SELF}/identity/v1/links/lnk_2`]: () => {
+        self.n += 100;
+        return json({ error: 'not_found', message: 'x' }, 404);
+      },
+    });
+    const tools = toolsFor(fetchImpl, oracleKey.doc);
+    const ctx = channelCtx(adapter);
+    await run(tools.credentials_request_action_permission, ACTION, ctx);
+    for (let i = 0; i < 3; i++)
+      await expect(
+        run(tools.credentials_action_status, { ...ACTION, ref: 'lnk_1' }, ctx),
+      ).resolves.toMatchObject({ status: 'opened' });
+    expect(self.n).toBe(1);
+    // Failures are not kept, so the cap is what stops the 7th call.
+    const results: unknown[] = [];
+    for (let i = 0; i < 7; i++)
+      results.push(
+        await run(
+          tools.credentials_action_status,
+          { ...ACTION, ref: 'lnk_2' },
+          ctx,
+        ),
+      );
+    expect(self.n).toBe(601);
+    expect(results[6]).toMatchObject({ error: 'rate_limited' });
+    expect(results[5]).toMatchObject({ error: 'not_found' });
+  });
+
+  it('keeps waiting when the worker cannot be asked for the status', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const kv = createMemoryUserKv();
+    const { fetchImpl } = routedFetch({
+      [`GET ${CATALOG}`]: () => json({ error: 'not_found', message: 'x' }, 404),
+      [`PUT ${CATALOG}`]: () => json({ entry: {} }, 201),
+      [`POST ${WORKER}/v1/requests`]: () => deposited(),
+      [`GET ${WORKER}/v1/requests/req_1`]: () =>
+        json({ error: 'internal', message: 'x' }, 500),
+    });
+    const time = clock();
+    const out = await run(
+      toolsFor(fetchImpl, oracleKey.doc, { now: time.now, sleep: time.sleep })
+        .credentials_check,
+      CHECK_ARGS,
+      channelCtx(adapter, { kv }),
+    );
+    expect(out).toMatchObject({ result: 'pending', requestId: 'req_1' });
+  });
+
+  it('removes the rows of an ended check on the next check', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const kv = createMemoryUserKv();
+    const old = {
+      v: 1 as const,
+      checkId: 'old-check-id-0001',
+      queryHash: 'oldhash',
+      expiresAt: Math.floor(Date.now() / 1000) - 10,
+      subject: PERSON_DID,
+      query: { vct: VCT, issuers: [ISSUER_DID], claims: [] },
+      requestJwt: 'jwt',
+      privateJwk: {
+        kty: 'EC' as const,
+        crv: 'P-256' as const,
+        x: 'x',
+        y: 'y',
+        d: 'd',
+      },
+    };
+    await saveCheck(kv, old, Date.now() - 20_000);
+    const { fetchImpl } = routedFetch({
+      [`GET ${CATALOG}`]: () => json({ error: 'not_found', message: 'x' }, 404),
+      [`PUT ${CATALOG}`]: () => json({ entry: {} }, 201),
+      [`POST ${WORKER}/v1/requests`]: () => deposited(),
+      [`GET ${WORKER}/v1/requests/req_1`]: () =>
+        json({
+          id: 'req_1',
+          ref: 'x',
+          status: 'pending',
+          created_at: 1,
+          expires_at: 2,
+          updated_at: 1,
+        }),
+    });
+    const time = clock();
+    await run(
+      toolsFor(fetchImpl, oracleKey.doc, { now: time.now, sleep: time.sleep })
+        .credentials_check,
+      CHECK_ARGS,
+      channelCtx(adapter, { kv }),
+    );
+    expect(await readCheck(kv, old.checkId)).toBeNull();
+  });
+});
+
+describe('receiveAnswer (the person object verifies the wallet answer)', () => {
+  const check = (over: Record<string, unknown> = {}) => ({
+    v: 1 as const,
+    checkId: 'check-id-0000000001',
+    queryHash: 'h',
+    expiresAt: Math.floor(Date.now() / 1000) + 900,
+    subject: PERSON_DID,
+    query: { vct: VCT, issuers: [ISSUER_DID], claims: ['age_over_18'] },
+    requestJwt: 'jwt',
+    privateJwk: {
+      kty: 'EC' as const,
+      crv: 'P-256' as const,
+      x: 'x',
+      y: 'y',
+      d: 'd',
+    },
+    ...over,
+  });
+  const input = (kv: UserKvSurface, ownerDid = PERSON_DID) => ({
+    kv,
+    ownerDid,
+    checkId: 'check-id-0000000001',
+    body: 'response=junk',
+    verifier: new VerifierContext(BLOCKSYNC_URL, false, async () => {
+      throw new Error('no network');
+    }),
+    nowMs: Date.now(),
+  });
+
+  it('answers 410 for an unknown, ended or another person’s check', async () => {
+    const kv = createMemoryUserKv();
+    await expect(receiveAnswer(input(kv))).resolves.toMatchObject({
+      status: 410,
+    });
+    await saveCheck(
+      kv,
+      check({ expiresAt: Math.floor(Date.now() / 1000) - 1 }),
+      Date.now(),
+    );
+    await expect(receiveAnswer(input(kv))).resolves.toMatchObject({
+      status: 410,
+    });
+    const other = createMemoryUserKv();
+    await saveCheck(other, check({ subject: 'did:ixo:ixo1other' }), Date.now());
+    await expect(receiveAnswer(input(other))).resolves.toMatchObject({
+      status: 410,
+    });
+  });
+
+  it('ignores any answer once a verified one is stored', async () => {
+    const kv = createMemoryUserKv();
+    await saveCheck(kv, check(), Date.now());
+    const stored = {
+      result: 'valid',
+      claims: { age_over_18: true },
+      issuer: 'i',
+    };
+    await kv.set(
+      CREDENTIALS_KV_NAMESPACE,
+      'result:check-id-0000000001',
+      stored,
+    );
+    await expect(receiveAnswer(input(kv))).resolves.toEqual({ status: 200 });
+    expect(
+      await kv.get(CREDENTIALS_KV_NAMESPACE, 'result:check-id-0000000001'),
+    ).toEqual(stored);
+  });
+});
+
+describe('why the oracle asks (never the model)', () => {
+  it('is the operator’s words or "Check your <type>", cleaned of links and markup', () => {
+    const cfg = testConfig();
+    expect(purposeFor(cfg, VCT)).toBe('Check your Identity Level 1');
+    const custom = testConfig({
+      CREDENTIALS_PURPOSES: {
+        [VCT]: '<b>Confirm</b> your age at https://evil.example/x now',
+      },
+    });
+    expect(purposeFor(custom, VCT)).toBe('Confirm your age at now');
+  });
+
+  it('is not an input of credentials_check', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl, calls } = routedFetch({});
+    await expect(
+      run(
+        toolsFor(fetchImpl, oracleKey.doc).credentials_check,
+        { ...CHECK_ARGS, purpose: 'Send your passport to evil.example' },
+        channelCtx(adapter),
+      ),
+    ).rejects.toThrow();
+    expect(calls).toHaveLength(0);
   });
 });

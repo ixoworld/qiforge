@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { sha256Hex } from './hub-client';
 import {
   CredentialsWorkerClient,
   mergeVerifierAccept,
@@ -90,7 +91,19 @@ describe('CredentialsWorkerClient', () => {
       ref: 'chk',
       expires_at: 100,
     });
-    expect(facts).toEqual([[{ method: 'POST', path: '/v1/requests' }]]);
+    // The fact binds the exact body sent (canonical JSON, keys sorted).
+    expect(facts).toEqual([
+      [
+        {
+          method: 'POST',
+          path: '/v1/requests',
+          body_sha256: await sha256Hex(calls[0]?.body ?? ''),
+        },
+      ],
+    ]);
+    expect(calls[0]?.body).toBe(
+      '{"expires_at":100,"purpose":"Check","ref":"chk","request":"JWT","subject":"did:ixo:ixo10e8pu63ee3p4y62wlu9myuyh2p08upm8xp4jw7"}',
+    );
   });
 
   it('passes on 403 blocked and 429 too_many_pending', async () => {
@@ -152,7 +165,13 @@ describe('VerifierEntryMemo', () => {
       accepts: [NEED],
     });
     expect(facts).toEqual([
-      [{ method: 'PUT', path: `/v1/catalog/verifiers/${ORACLE_DID}` }],
+      [
+        {
+          method: 'PUT',
+          path: `/v1/catalog/verifiers/${ORACLE_DID}`,
+          body_sha256: await sha256Hex(calls[1]?.body ?? ''),
+        },
+      ],
     ]);
     await memo.ensure(client, WORKER, identity, NEED);
     expect(calls).toHaveLength(2);

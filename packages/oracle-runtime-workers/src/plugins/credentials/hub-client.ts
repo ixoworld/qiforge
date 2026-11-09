@@ -61,7 +61,7 @@ const CardAnswer = z.object({
   expiresAt: z.number().int().positive(),
 });
 
-const Grant = z.object({
+export const GrantSchema = z.object({
   /** The catalogue entry's grant id (`link`, `offer`). */
   id: z.string().min(1).max(64).optional(),
   can: z.string().min(1),
@@ -70,14 +70,14 @@ const Grant = z.object({
   expiresAt: z.number().int().positive(),
   token: z.string().min(1),
 });
-export type PermissionGrant = z.infer<typeof Grant>;
+export type PermissionGrant = z.infer<typeof GrantSchema>;
 
 const StatusAnswer = z.object({
   id: z.string().regex(OPAQUE_ID),
   status: z.enum(PERMISSION_STATUSES),
   allowedAt: z.number().int().positive().optional(),
   expiresAt: z.number().int().positive().optional(),
-  grants: z.array(Grant).max(16).optional(),
+  grants: z.array(GrantSchema).max(16).optional(),
 });
 export type PermissionState = z.infer<typeof StatusAnswer>;
 
@@ -113,13 +113,18 @@ export async function sha256Hex(text: string): Promise<string> {
   ).join('');
 }
 
-/** `body_sha256`: the hash of the body without its `invocation` field. */
+/** `body_sha256` of a JSON body: hex SHA-256 of its canonical form. */
+export function jsonBodySha256(body: unknown): Promise<string> {
+  return sha256Hex(canonicalJson(body));
+}
+
+/** `body_sha256` of a Hub POST: the hash of the body without its `invocation` field. */
 export async function permissionBodySha256(
   body: Record<string, unknown>,
 ): Promise<string> {
   const { invocation: _invocation, ...rest } = body;
   void _invocation;
-  return sha256Hex(canonicalJson(rest));
+  return jsonBodySha256(rest);
 }
 
 /** Mints one single-use invocation bound by `facts` (throws when it cannot). */
@@ -136,6 +141,9 @@ export interface HubPermissionsClientOptions {
   fetchImpl?: FetchLike;
   timeoutMs?: number;
   sleep?: (ms: number) => Promise<void>;
+  /** The tool's deadline (unix ms), see `ServiceCall.deadline`. */
+  deadline?: number;
+  now?: () => number;
 }
 
 export class HubPermissionsClient {
@@ -230,6 +238,10 @@ export class HubPermissionsClient {
       ...(this.opts.fetchImpl ? { fetchImpl: this.opts.fetchImpl } : {}),
       ...(this.opts.timeoutMs ? { timeoutMs: this.opts.timeoutMs } : {}),
       ...(this.opts.sleep ? { sleep: this.opts.sleep } : {}),
+      ...(this.opts.deadline !== undefined
+        ? { deadline: this.opts.deadline }
+        : {}),
+      ...(this.opts.now ? { now: this.opts.now } : {}),
     };
   }
 }

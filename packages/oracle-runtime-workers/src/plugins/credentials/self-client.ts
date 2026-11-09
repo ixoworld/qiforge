@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { CredentialsServiceError } from './errors';
 import { callService, type FetchLike } from './http';
+import { canonicalJson, jsonBodySha256 } from './hub-client';
 
 /**
  * Self (the identity oracle): identity-check links for a person.
@@ -65,6 +66,9 @@ export interface SelfLinksClientOptions {
   fetchImpl?: FetchLike;
   timeoutMs?: number;
   sleep?: (ms: number) => Promise<void>;
+  /** The tool's deadline (unix ms), see `ServiceCall.deadline`. */
+  deadline?: number;
+  now?: () => number;
 }
 
 export class SelfLinksClient {
@@ -74,10 +78,13 @@ export class SelfLinksClient {
     this.origin = new URL(opts.selfUrl).origin;
   }
 
-  /** The facts of one call: the request binding, then the oracle's entity. */
-  private facts(method: 'GET' | 'POST', path: string) {
+  /**
+   * The facts of one call: the request binding (with `body_sha256` for a
+   * body), then the oracle's entity.
+   */
+  private facts(method: 'GET' | 'POST', path: string, bodySha256?: string) {
     return [
-      { method, path },
+      bodySha256 ? { method, path, body_sha256: bodySha256 } : { method, path },
       ...(this.opts.entityDid ? [{ entityDid: this.opts.entityDid }] : []),
     ];
   }
@@ -99,19 +106,21 @@ export class SelfLinksClient {
     offerConsent: string;
     requestKey: string;
   }): Promise<CreatedLink> {
+    const json = {
+      offerConsent: input.offerConsent,
+      requestKey: input.requestKey,
+    };
+    const bodySha256 = await jsonBodySha256(json);
     const answer = await callService({
       service: 'self',
       method: 'POST',
       url: `${this.origin}${LINKS_PATH}`,
       prepare: async () => ({
         headers: {
-          authorization: `Bearer ${await this.opts.mint(this.facts('POST', LINKS_PATH))}`,
+          authorization: `Bearer ${await this.opts.mint(this.facts('POST', LINKS_PATH, bodySha256))}`,
           'content-type': 'application/json',
         },
-        body: JSON.stringify({
-          offerConsent: input.offerConsent,
-          requestKey: input.requestKey,
-        }),
+        body: canonicalJson(json),
       }),
       ...this.transport(),
     });
@@ -158,6 +167,10 @@ export class SelfLinksClient {
       ...(this.opts.fetchImpl ? { fetchImpl: this.opts.fetchImpl } : {}),
       ...(this.opts.timeoutMs ? { timeoutMs: this.opts.timeoutMs } : {}),
       ...(this.opts.sleep ? { sleep: this.opts.sleep } : {}),
+      ...(this.opts.deadline !== undefined
+        ? { deadline: this.opts.deadline }
+        : {}),
+      ...(this.opts.now ? { now: this.opts.now } : {}),
     };
   }
 }

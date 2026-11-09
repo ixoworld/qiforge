@@ -18,6 +18,7 @@ import {
   type DcqlQuery,
   type P256PrivateJwk,
 } from '@ixo/credentials-kit/oid4vp';
+import { base64url } from '@ixo/credentials-kit/jose';
 import { VerificationUnavailable } from '@ixo/credentials-kit/verify';
 
 /**
@@ -76,12 +77,63 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
   return diff === 0;
 }
 
-/** Signs with the oracle's key: the host's `ctx.ucan.signWithOracleKey`. */
-export type OracleSign = (
-  bytes: Uint8Array,
-) => Promise<
-  { signature: Uint8Array; publicKey: Uint8Array } | { error: string }
->;
+/** The host's scoped signer (`ctx.ucan.signJws`, `ctx.ucan.oraclePublicKey`). */
+export interface OracleJwsSigner {
+  signJws: (input: {
+    typ: 'oauth-authz-req+jwt';
+    kid: string;
+    payload: Record<string, unknown>;
+  }) => Promise<{ jws: string } | { error: string }>;
+  oraclePublicKey: () => Promise<Uint8Array | null>;
+}
+
+/** The JWS `typ` of an OpenID4VP request object, the one the host signs. */
+const REQUEST_OBJECT_TYP = 'oauth-authz-req+jwt';
+
+function jsonOfSegment(segment: string): unknown {
+  return JSON.parse(new TextDecoder().decode(base64url.decode(segment)));
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * The kit's `Signer` over the host's scoped signer: the kit hands over the
+ * bytes `<header>.<payload>` it wants signed; the adapter checks the header
+ * is exactly the request object's, gives the host the payload, and returns
+ * the signature only when the host signed those very bytes.
+ */
+export function requestObjectSigner(signer: OracleJwsSigner, kid: string) {
+  return {
+    kid,
+    sign: async (bytes: Uint8Array): Promise<Uint8Array> => {
+      const signingInput = new TextDecoder().decode(bytes);
+      const [head, body, ...rest] = signingInput.split('.');
+      if (!head || !body || rest.length > 0)
+        throw new VerifierSetupError('no_signing_key');
+      const header = jsonOfSegment(head);
+      const payload = jsonOfSegment(body);
+      if (
+        !isJsonObject(header) ||
+        header.alg !== 'EdDSA' ||
+        header.typ !== REQUEST_OBJECT_TYP ||
+        header.kid !== kid ||
+        Object.keys(header).length !== 3 ||
+        !isJsonObject(payload)
+      )
+        throw new VerifierSetupError('no_signing_key');
+      const signed = await signer.signJws({
+        typ: REQUEST_OBJECT_TYP,
+        kid,
+        payload,
+      });
+      if ('error' in signed || !signed.jws.startsWith(`${signingInput}.`))
+        throw new VerifierSetupError('no_signing_key');
+      return base64url.decode(signed.jws.slice(signingInput.length + 1));
+    },
+  };
+}
 
 export class VerifierSetupError extends Error {
   constructor(readonly code: 'no_signing_key' | 'key_not_on_did') {
@@ -129,16 +181,16 @@ export class VerifierContext {
   }
 
   /** The kid of the oracle's signing key on `oracleDid`'s document. */
-  async oracleKid(oracleDid: string, sign: OracleSign): Promise<string> {
+  async oracleKid(oracleDid: string, signer: OracleJwsSigner): Promise<string> {
     if (this.kid?.did === oracleDid) return this.kid.kid;
-    const probe = await sign(new Uint8Array([0]));
-    if ('error' in probe) throw new VerifierSetupError('no_signing_key');
+    const publicKey = await signer.oraclePublicKey();
+    if (!publicKey) throw new VerifierSetupError('no_signing_key');
     const doc = await this.resolver(oracleDid);
     const key = doc
       ? [
           ...keysFor(doc, 'assertionMethod'),
           ...keysFor(doc, 'authentication'),
-        ].find((k) => sameBytes(k.publicKey, probe.publicKey))
+        ].find((k) => sameBytes(k.publicKey, publicKey))
       : undefined;
     if (!key) throw new VerifierSetupError('key_not_on_did');
     this.kid = { did: oracleDid, kid: key.id };
@@ -163,23 +215,16 @@ export function newResponseKeys(): Promise<ResponseKeys> {
 export async function buildCredentialRequest(input: {
   verifier: VerifierContext;
   oracleDid: string;
-  sign: OracleSign;
+  signer: OracleJwsSigner;
   responseUri: string;
   query: CredentialQuery;
   expiresAt: number;
   keys: ResponseKeys;
 }): Promise<BuiltRequest> {
-  const kid = await input.verifier.oracleKid(input.oracleDid, input.sign);
+  const kid = await input.verifier.oracleKid(input.oracleDid, input.signer);
   const { keys } = input;
   const requestJwt = await createAuthorizationRequest({
-    signer: {
-      kid,
-      sign: async (bytes) => {
-        const signed = await input.sign(bytes);
-        if ('error' in signed) throw new VerifierSetupError('no_signing_key');
-        return signed.signature;
-      },
-    },
+    signer: requestObjectSigner(input.signer, kid),
     clientDid: input.oracleDid,
     responseUri: input.responseUri,
     nonce: randomToken(),

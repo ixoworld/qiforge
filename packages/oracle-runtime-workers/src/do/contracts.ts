@@ -233,6 +233,14 @@ export interface OracleWorkerEnv {
    * it the per-IP check uses `RATE_LIMIT`'s limit under a feedback-only key.
    */
   FEEDBACK_RATE_LIMIT?: RateLimit;
+  /**
+   * Optional rate-limit binding for the credentials plugin's response
+   * endpoint, keyed per client IP. The Hub answers every person's checks
+   * from shared Cloudflare addresses, so it must be generous (e.g.
+   * `simple: { limit: 2000, period: 60 }`). Without it the endpoint keeps a
+   * per-isolate budget and never uses the shared `RATE_LIMIT` per IP.
+   */
+  CREDENTIALS_RATE_LIMIT?: RateLimit;
 
   // --- anonymous response feedback (docs/configuration.md) ------------------
   // Read by the shell only (`src/feedback/config.ts`); never part of the
@@ -816,17 +824,19 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
   ): Promise<InteractionOutcome<string>>;
   recordHubActionOutcome(outcome: ActionOutcomeV1): Promise<void>;
   /**
-   * Append a callback body to an open plugin inbox row in the owner's kv
-   * (`src/core/plugin-inbox.ts`); `false` when no open row expects it.
-   * Called by plugin routes (a verifier's response endpoint); does not count
-   * as the owner's access.
+   * Run a plugin's `handleOwnerCallback` in this owner's object (a plugin
+   * route forwards a reply only this object can check, such as a verifier's
+   * encrypted answer). 404 when no loaded plugin of that name handles one.
+   * Does not count as the owner's access.
    */
-  deliverPluginInbox(
+  ownerCallback(
     ownerDid: string,
-    namespace: string,
-    key: string,
-    body: string,
-  ): Promise<boolean>;
+    plugin: string,
+    call: { key: string; body: string },
+  ): Promise<{
+    status: 200 | 400 | 404 | 410 | 503;
+    body?: Record<string, string>;
+  }>;
   topicDeliverable(
     identity: TurnIdentity,
     operationId: string,

@@ -179,6 +179,34 @@ export interface UcanMintOptions {
   facts?: readonly Record<string, unknown>[];
 }
 
+/**
+ * A call a plugin route forwards into the owner's user object
+ * (`OraclePlugin.handleOwnerCallback`): `key` names what it answers (a
+ * credential check's id), `body` is the request body as received.
+ */
+export interface OwnerCallback {
+  key: string;
+  body: string;
+}
+
+/**
+ * What a plugin's owner callback runs with, inside the owner's object: the
+ * owner, their own kv rows, the validated config and a logger. No turn, no
+ * model, no delegation: the caller is not the owner.
+ */
+export interface OwnerCallbackContext {
+  ownerDid: string;
+  kv: UserKvSurface;
+  config: MergedConfig;
+  logger: Logger;
+}
+
+/** The HTTP answer the route sends for an owner callback. */
+export interface OwnerCallbackResult {
+  status: 200 | 400 | 404 | 410 | 503;
+  body?: Record<string, string>;
+}
+
 /** UCAN delegation envelope. */
 export interface UcanDelegation {
   readonly raw: string;
@@ -889,17 +917,28 @@ export interface RuntimeContext<TConfig = MergedConfig> {
       options?: UcanMintOptions,
     ) => Promise<{ invocation: string } | { error: string }>;
     /**
-     * Sign `bytes` with the oracle's own Ed25519 key (the key that signs its
-     * UCANs, listed on its DID document): `{ signature, publicKey }` (raw
-     * 64-byte signature, raw 32-byte key) or `{ error }`. For signed objects
-     * that are not UCANs, such as the OpenID4VP request object of a
-     * credential check. Absent on hosts without a signing key surface.
+     * Sign an OpenID4VP request object (a compact JWS, `typ`
+     * `oauth-authz-req+jwt`) with the oracle's own Ed25519 key, for a plugin
+     * that acts as a verifier: `{ jws }` or `{ error }`.
+     *
+     * Trust boundary: this is the only non-UCAN signature a plugin can get
+     * from the oracle's key. The runtime builds the protected header itself
+     * (`{ alg: 'EdDSA', typ, kid }`), refuses any other `typ`, a `kid` that is
+     * not a DID URL of the oracle's DID and a payload that is not a JSON
+     * object, so the signed bytes always begin with that header and can never
+     * be a UCAN delegation or invocation in the oracle's name. There is no
+     * raw signer on this surface. Absent on hosts without the signer.
      */
-    signWithOracleKey?: (
-      bytes: Uint8Array,
-    ) => Promise<
-      { signature: Uint8Array; publicKey: Uint8Array } | { error: string }
-    >;
+    signJws?: (input: {
+      typ: 'oauth-authz-req+jwt';
+      kid: string;
+      payload: Record<string, unknown>;
+    }) => Promise<{ jws: string } | { error: string }>;
+    /**
+     * The raw 32-byte Ed25519 public key the oracle signs with, or null
+     * without a signing key (public; to find its verification method id).
+     */
+    oraclePublicKey?: () => Promise<Uint8Array | null>;
     /**
      * Fetch, from the UCAN Store Worker, a delegation the user deposited for
      * this oracle over `opts.resource`. Selects the newest active delegation

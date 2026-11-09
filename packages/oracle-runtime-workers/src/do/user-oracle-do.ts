@@ -361,7 +361,6 @@ import {
 import { bytesToBase64 } from '../plugins/base64';
 import { UserPreferencesStore } from '../plugins/user-preferences/user-preferences-store';
 import { SqliteUserKv } from '../sqlite/user-kv-store';
-import { deliverToPluginInbox } from '../core/plugin-inbox';
 import {
   channelHistoryIndexDebounceMs,
   pageOfMessages,
@@ -4191,20 +4190,28 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         this.markDirty();
     }
 
-    async deliverPluginInbox(
+    async ownerCallback(
       ownerDid: string,
-      namespace: string,
-      key: string,
-      body: string,
-    ): Promise<boolean> {
+      plugin: string,
+      call: { key: string; body: string },
+    ): Promise<{
+      status: 200 | 400 | 404 | 410 | 503;
+      body?: Record<string, string>;
+    }> {
       // A callback is not the user: it must not delay idle eviction.
       await this.ready({ userDid: ownerDid }, { recordAccess: false });
-      if (!this.db) return false;
-      return deliverToPluginInbox(
-        new SqliteUserKv(this.db),
-        namespace,
-        key,
-        body,
+      const handler = this.core.plugins.find(
+        (p) => p.name === plugin && typeof p.handleOwnerCallback === 'function',
+      );
+      if (!handler?.handleOwnerCallback || !this.db) return { status: 404 };
+      return handler.handleOwnerCallback(
+        { key: call.key, body: call.body },
+        {
+          ownerDid,
+          kv: new SqliteUserKv(this.db),
+          config: this.core.validatedEnv,
+          logger: console,
+        },
       );
     }
 

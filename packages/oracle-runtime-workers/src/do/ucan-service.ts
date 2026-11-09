@@ -43,6 +43,24 @@ function invocationFacts(
 
 /** The multicodec prefix of an Ed25519 public key in a `did:key`. */
 const ED25519_PUB_PREFIX = [0xed, 0x01] as const;
+
+/** The only JWS types the oracle's key signs (never a UCAN's). */
+const SIGNABLE_JWS_TYPES: ReadonlySet<string> = new Set([
+  'oauth-authz-req+jwt',
+]);
+
+function base64urlBytes(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary)
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
+
+function base64urlJson(value: unknown): string {
+  return base64urlBytes(new TextEncoder().encode(JSON.stringify(value)));
+}
 type ServiceDelegationResult =
   | { token: string; with: string }
   | { error: 'no-delegation' | 'store-error'; detail?: string };
@@ -433,37 +451,77 @@ export class WorkersUcanService {
     }
   }
 
+  /** The oracle's signer (one derivation per call; the phrase never leaves). */
+  private async oracleSigner() {
+    if (!this.opts.signingMnemonic) return null;
+    return (await signerFromMnemonic(this.opts.signingMnemonic)).signer;
+  }
+
   /**
-   * An Ed25519 signature over `bytes` with the oracle's own key (the key on
-   * its DID document that signs its UCANs), and that key's raw public key.
-   * For a signed object that is not a UCAN, such as an OpenID4VP request
-   * object the oracle sends as a verifier.
+   * The raw 32-byte Ed25519 public key the oracle signs with (the key on its
+   * DID document), or null without a signing key. Public: plugins use it to
+   * find the key's verification method id.
    */
-  async signWithOracleKey(
-    bytes: Uint8Array,
-  ): Promise<
-    { signature: Uint8Array; publicKey: Uint8Array } | { error: string }
-  > {
-    if (!this.opts.signingMnemonic)
-      return {
-        error:
-          'Oracle has no signing key configured — set ORACLE_SIGNING_MNEMONIC',
-      };
+  async oraclePublicKey(): Promise<Uint8Array | null> {
+    const signer = await this.oracleSigner();
+    if (!signer) return null;
+    // `did:key:z…` = base58btc of the Ed25519 multicodec prefix + the key.
+    const multikey = base58btc.decode(
+      signer.toDIDKey().slice('did:key:'.length),
+    );
+    if (
+      multikey.length !== 34 ||
+      multikey[0] !== ED25519_PUB_PREFIX[0] ||
+      multikey[1] !== ED25519_PUB_PREFIX[1]
+    )
+      return null;
+    return multikey.slice(2);
+  }
+
+  /**
+   * A compact JWS signed with the oracle's own key, for the one kind of
+   * object the runtime signs besides UCANs: an OpenID4VP request object
+   * (`typ` `oauth-authz-req+jwt`). The runtime builds the protected header
+   * itself (`{ alg: 'EdDSA', typ, kid }`) and refuses every other `typ`, a
+   * `kid` that is not a DID URL of the oracle's DID and a payload that is not
+   * a plain JSON object: the signed bytes always begin with that header, so
+   * they can never be a UCAN (a delegation or an invocation) in the oracle's
+   * name.
+   */
+  async signJws(input: {
+    typ: string;
+    kid: string;
+    payload: Record<string, unknown>;
+  }): Promise<{ jws: string } | { error: string }> {
+    if (!SIGNABLE_JWS_TYPES.has(input.typ))
+      return { error: `The runtime does not sign a JWS of typ ${input.typ}` };
+    if (
+      typeof input.kid !== 'string' ||
+      input.kid.length > 512 ||
+      !input.kid.startsWith(`${this.opts.oracleDid}#`)
+    )
+      return { error: "The kid must name a key of the oracle's own DID" };
+    const payload: unknown = input.payload;
+    if (
+      payload === null ||
+      typeof payload !== 'object' ||
+      Array.isArray(payload)
+    )
+      return { error: 'The payload must be a JSON object' };
     try {
-      const { signer } = await signerFromMnemonic(this.opts.signingMnemonic);
-      const signature = await signer.sign(bytes);
-      // `did:key:z…` = base58btc of the Ed25519 multicodec prefix + the key.
-      const didKey = signer.toDIDKey();
-      const multikey = base58btc.decode(didKey.slice('did:key:'.length));
-      if (
-        multikey.length !== 34 ||
-        multikey[0] !== ED25519_PUB_PREFIX[0] ||
-        multikey[1] !== ED25519_PUB_PREFIX[1]
-      )
-        return { error: 'The oracle signing key is not an Ed25519 key' };
+      const signer = await this.oracleSigner();
+      if (!signer)
+        return {
+          error:
+            'Oracle has no signing key configured — set ORACLE_SIGNING_MNEMONIC',
+        };
+      const header = { alg: 'EdDSA', typ: input.typ, kid: input.kid };
+      const signingInput = `${base64urlJson(header)}.${base64urlJson(payload)}`;
+      const signature = await signer.sign(
+        new TextEncoder().encode(signingInput),
+      );
       return {
-        signature: new Uint8Array(signature.raw),
-        publicKey: multikey.slice(2),
+        jws: `${signingInput}.${base64urlBytes(new Uint8Array(signature.raw))}`,
       };
     } catch (error) {
       return {
@@ -608,7 +666,8 @@ export class WorkersUcanService {
         this.createInvocationFromDelegation(car, url, cap, o),
       mintSelfSignedInvocation: (url, cap, o) =>
         this.mintSelfSignedInvocation(url, cap, o),
-      signWithOracleKey: (bytes) => this.signWithOracleKey(bytes),
+      signJws: (input) => this.signJws(input),
+      oraclePublicKey: () => this.oraclePublicKey(),
       getServiceDelegation: (did, o) => this.getServiceDelegation(did, o),
     };
   }

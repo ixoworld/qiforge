@@ -189,21 +189,71 @@ describe('WorkersUcanService: request-bound facts and the oracle key', () => {
     expect(result).toHaveProperty('error');
   });
 
-  it("signs bytes with the oracle's own Ed25519 key (the key the kit derives from the same phrase)", async () => {
-    const bytes = new TextEncoder().encode('request object');
-    const signed = await service().signWithOracleKey(bytes);
+  it("signs an OpenID4VP request object with the oracle's own Ed25519 key, under a header the runtime builds", async () => {
+    const kid = `${ORACLE_DID}#key-1`;
+    const payload = { iss: ORACLE_DID, nonce: 'n' };
+    const signed = await service().signJws({
+      typ: 'oauth-authz-req+jwt',
+      kid,
+      payload,
+    });
     if ('error' in signed) throw new Error(signed.error);
+    const [head, body, sig] = signed.jws.split('.');
+    const decode = (part: string) =>
+      new Uint8Array(Buffer.from(part ?? '', 'base64url'));
+    expect(JSON.parse(Buffer.from(decode(head ?? '')).toString())).toEqual({
+      alg: 'EdDSA',
+      typ: 'oauth-authz-req+jwt',
+      kid,
+    });
+    expect(JSON.parse(Buffer.from(decode(body ?? '')).toString())).toEqual(
+      payload,
+    );
     const kit = signerFromEd25519Seed(
       ed25519SeedFromMnemonic(ORACLE_MNEMONIC),
       'x',
     );
-    expect(Array.from(signed.publicKey)).toEqual(Array.from(kit.publicKey));
-    expect(verifyEd25519(signed.signature, bytes, signed.publicKey)).toBe(true);
+    const publicKey = await service().oraclePublicKey();
+    expect(Array.from(publicKey ?? [])).toEqual(Array.from(kit.publicKey));
     expect(
-      await new WorkersUcanService({ oracleDid: ORACLE_DID }).signWithOracleKey(
-        bytes,
+      verifyEd25519(
+        decode(sig ?? ''),
+        new TextEncoder().encode(`${head}.${body}`),
+        kit.publicKey,
       ),
+    ).toBe(true);
+  });
+
+  it('refuses every other JWS type (a UCAN is never signed this way), a foreign kid and a non-object payload', async () => {
+    const kid = `${ORACLE_DID}#key-1`;
+    const payload = { a: 1 };
+    for (const typ of ['JWT', 'dc+sd-jwt', 'ucan', '']) {
+      const refused = await service().signJws({
+        typ: typ as 'oauth-authz-req+jwt',
+        kid,
+        payload,
+      });
+      expect(refused).toHaveProperty('error');
+    }
+    expect(
+      await service().signJws({
+        typ: 'oauth-authz-req+jwt',
+        kid: 'did:ixo:ixo1other#key-1',
+        payload,
+      }),
     ).toHaveProperty('error');
+    expect(
+      await service().signJws({
+        typ: 'oauth-authz-req+jwt',
+        kid,
+        payload: JSON.parse('["x"]'),
+      }),
+    ).toHaveProperty('error');
+    const keyless = new WorkersUcanService({ oracleDid: ORACLE_DID });
+    expect(
+      await keyless.signJws({ typ: 'oauth-authz-req+jwt', kid, payload }),
+    ).toHaveProperty('error');
+    expect(await keyless.oraclePublicKey()).toBeNull();
   });
 });
 

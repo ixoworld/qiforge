@@ -147,10 +147,18 @@ export function recordingUcan(oracleSeedLabel = 'oracle') {
       });
       return { invocation: `inv-${++n}` };
     },
-    signWithOracleKey: async (bytes) => ({
-      signature: await oracleKey.signer.sign(bytes),
-      publicKey: oracleKey.signer.publicKey,
-    }),
+    signJws: async ({ typ, kid, payload }) => {
+      const b64 = (value: unknown) =>
+        Buffer.from(JSON.stringify(value)).toString('base64url');
+      const signingInput = `${b64({ alg: 'EdDSA', typ, kid })}.${b64(payload)}`;
+      const signature = await oracleKey.signer.sign(
+        new TextEncoder().encode(signingInput),
+      );
+      return {
+        jws: `${signingInput}.${Buffer.from(signature).toString('base64url')}`,
+      };
+    },
+    oraclePublicKey: async () => oracleKey.signer.publicKey,
     getServiceDelegation: async () => ({ error: 'no-delegation' as const }),
   };
   return { adapter, mints, oracleKey };

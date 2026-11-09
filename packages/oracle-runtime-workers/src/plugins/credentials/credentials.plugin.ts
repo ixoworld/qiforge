@@ -1,11 +1,15 @@
 import { OraclePlugin, type PluginEnv } from '../../plugin-api/oracle-plugin';
 import type {
   AuthExcludedRoute,
+  OwnerCallback,
+  OwnerCallbackContext,
+  OwnerCallbackResult,
   PluginContext,
   PluginManifest,
   PluginTool,
 } from '../../plugin-api/types';
 import type { PluginRoute } from '../../shell/app';
+import { receiveAnswer } from './check-store';
 import { credentialsConfigSchema, resolveCredentialsConfig } from './config';
 import { VerifierEntryMemo } from './credentials-client';
 import { createCredentialsTools } from './credentials-tools';
@@ -13,7 +17,7 @@ import type { FetchLike } from './http';
 import {
   credentialsResponseRoute,
   RESPONSE_ROUTE_PATH,
-  type DeliverToOwner,
+  type VerifyInOwner,
 } from './response-route';
 import { VerifierContext } from './verifier';
 
@@ -86,7 +90,7 @@ export interface CredentialsPluginOptions {
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
   checkWaitMs?: number;
-  deliver?: DeliverToOwner;
+  verify?: VerifyInOwner;
 }
 
 /**
@@ -179,7 +183,39 @@ export class CredentialsPlugin extends OraclePlugin {
   }
 
   override getRoutes(): PluginRoute[] {
-    return [credentialsResponseRoute(this.options.deliver)];
+    return [credentialsResponseRoute(this.options.verify)];
+  }
+
+  /**
+   * The wallet's answer to a check, run in the person's own object (which
+   * holds the check's private key): decrypted and verified there, stored
+   * only when it proves to come from the person, once.
+   */
+  override async handleOwnerCallback(
+    call: OwnerCallback,
+    ctx: OwnerCallbackContext,
+  ): Promise<OwnerCallbackResult> {
+    const cfg = resolveCredentialsConfig(ctx.config);
+    const verifier = cfg.enabled
+      ? this.verifierFor(cfg.blocksyncUrl, cfg.allowLocal)
+      : null;
+    if (!cfg.enabled) return { status: 404 };
+    if (!verifier)
+      return {
+        status: 503,
+        body: {
+          error: 'unavailable',
+          message: 'Please try again in a moment.',
+        },
+      };
+    return receiveAnswer({
+      kv: ctx.kv,
+      ownerDid: ctx.ownerDid,
+      checkId: call.key,
+      body: call.body,
+      verifier,
+      nowMs: (this.options.now ?? Date.now)(),
+    });
   }
 
   override getAuthExcludedRoutes(): AuthExcludedRoute[] {

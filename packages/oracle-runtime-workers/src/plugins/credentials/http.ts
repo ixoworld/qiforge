@@ -21,9 +21,15 @@ export interface ServiceCall {
    */
   prepare: () => Promise<{ headers: Record<string, string>; body?: string }>;
   timeoutMs?: number;
+  /**
+   * The tool's deadline (unix ms): each attempt's timeout is cut to the time
+   * left, and the retry is made only if it still fits.
+   */
+  deadline?: number;
   fetchImpl?: FetchLike;
-  /** Injected for tests (no real waiting). */
+  /** Injected for tests (no real waiting, a manual clock). */
   sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
 }
 
 export interface ServiceAnswer {
@@ -60,13 +66,27 @@ async function readBody(
   }
 }
 
+/** The timeout of the next attempt; 0 when the deadline has passed. */
+function attemptTimeout(call: ServiceCall): number {
+  const limit = call.timeoutMs ?? SERVICE_TIMEOUT_MS;
+  if (call.deadline === undefined) return limit;
+  return Math.max(0, Math.min(limit, call.deadline - (call.now ?? Date.now)()));
+}
+
 async function attempt(call: ServiceCall): Promise<Response> {
+  const timeoutMs = attemptTimeout(call);
+  if (timeoutMs <= 0)
+    throw new CredentialsServiceError({
+      service: call.service,
+      status: 0,
+      code: 'timeout',
+    });
   const { headers, body } = await call.prepare();
   const request = new Request(call.url, {
     method: call.method,
     headers,
     ...(body !== undefined ? { body } : {}),
-    signal: AbortSignal.timeout(call.timeoutMs ?? SERVICE_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
     redirect: 'manual',
   });
   try {
@@ -99,7 +119,10 @@ export async function callService(call: ServiceCall): Promise<ServiceAnswer> {
   if (retryable(response.status)) {
     const after = retryAfterSeconds(response);
     const waitMs = after !== undefined ? after * 1000 : DEFAULT_RETRY_WAIT_MS;
-    if (waitMs <= MAX_RETRY_WAIT_MS) {
+    const fits =
+      call.deadline === undefined ||
+      (call.now ?? Date.now)() + waitMs + 1_000 < call.deadline;
+    if (waitMs <= MAX_RETRY_WAIT_MS && fits) {
       // Drain the first answer before the second request.
       await response.body?.cancel().catch(() => undefined);
       await sleep(waitMs);

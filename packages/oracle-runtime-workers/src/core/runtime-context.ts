@@ -151,12 +151,14 @@ export interface UcanAdapter {
     capability: { can: string; with: string },
     options?: UcanMintOptions,
   ): Promise<{ invocation: string } | { error: string }>;
-  /** See `RuntimeContext['ucan']['signWithOracleKey']`. */
-  signWithOracleKey?(
-    bytes: Uint8Array,
-  ): Promise<
-    { signature: Uint8Array; publicKey: Uint8Array } | { error: string }
-  >;
+  /** See `RuntimeContext['ucan']['signJws']` (the scoped, non-UCAN signer). */
+  signJws?(input: {
+    typ: 'oauth-authz-req+jwt';
+    kid: string;
+    payload: Record<string, unknown>;
+  }): Promise<{ jws: string } | { error: string }>;
+  /** See `RuntimeContext['ucan']['oraclePublicKey']`. */
+  oraclePublicKey?(): Promise<Uint8Array | null>;
   getServiceDelegation(
     userDid: string,
     opts: { storeUrl: string; resource: string; requiredAbility: string },
@@ -535,12 +537,11 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
         ),
       mintSelfSignedInvocation: (serviceUrl, capability, opts) =>
         ambient.ucan.mintSelfSignedInvocation(serviceUrl, capability, opts),
-      ...(ambient.ucan.signWithOracleKey
-        ? {
-            signWithOracleKey: ambient.ucan.signWithOracleKey.bind(
-              ambient.ucan,
-            ),
-          }
+      ...(ambient.ucan.signJws
+        ? { signJws: ambient.ucan.signJws.bind(ambient.ucan) }
+        : {}),
+      ...(ambient.ucan.oraclePublicKey
+        ? { oraclePublicKey: ambient.ucan.oraclePublicKey.bind(ambient.ucan) }
         : {}),
       getServiceDelegation: (userDid, opts) =>
         ambient.ucan.getServiceDelegation(userDid, opts),

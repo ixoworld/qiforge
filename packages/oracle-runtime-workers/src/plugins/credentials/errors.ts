@@ -4,10 +4,10 @@
  * Every failure of a call to the Auth Hub, the Credentials worker or Self
  * becomes a {@link CredentialsServiceError} (the service, the HTTP status,
  * the service's own `error` code). Tools never throw it at the agent: they
- * answer the house shape `{ error, message }`, where `error` is the code
- * (for developers and logs) and `message` a plain sentence the agent can
- * pass on to the person. Messages never carry a DID, a code, a URL of a
- * service or a stack.
+ * answer `{ error, message, hint? }`: `error` is the code (for developers
+ * and logs), `message` a plain sentence to the person (second person, ready
+ * to send as it is) and `hint` what the agent should do next (never sent).
+ * Neither carries a DID, a code, a service URL or a stack.
  */
 
 export type CredentialsService = 'hub' | 'credentials' | 'self';
@@ -45,44 +45,116 @@ export class CredentialsServiceError extends Error {
 /** What a tool answers when it cannot do what was asked. */
 export interface CredentialsRefusal {
   error: string;
+  /** To the person, ready to send. */
   message: string;
+  /** To the agent: what to do next. Never sent. */
+  hint?: string;
+}
+
+/** One answer: the person's sentence and, when useful, the agent's next step. */
+export interface Wording {
+  message: string;
+  hint?: string;
 }
 
 export const MESSAGES = {
-  whatsAppOnly:
-    'I can only ask for this in our WhatsApp chat for now, so nothing was sent.',
-  notAvailable: "This isn't available right now, so nothing was sent.",
-  busy: 'The service is busy right now. Please try again in a few minutes.',
-  ourSide:
-    "Something went wrong on our side, so I couldn't do this. Please try again later.",
-  notFound: "I couldn't find that request. It may have ended.",
-  unknownCredential:
-    "I can't ask for that credential: it isn't one I can check.",
-  unknownClaim: "I can't ask for one of those details for that credential.",
-  unnamedService:
-    'This service needs a public name before it can ask for permissions.',
-  tooManyPending:
-    'There are already requests waiting for this person. Please wait until they answer or those requests end.',
-  rateLimited: 'Too many requests right now. Please try again in a minute.',
-  blocked: "This person isn't accepting requests from this service.",
-  unknownPerson: "I couldn't find this person's wallet.",
-  alreadyVerified: 'They already have an identity credential.',
-  noPermission:
-    "I don't have their permission for this yet. Ask for permission first.",
-  permissionPending:
-    "They haven't answered the permission request yet. Please check again after they open the link.",
-  permissionEnded:
-    'The permission for this has ended or was stopped. Ask for permission again.',
-  unknownAction: "That isn't an action I can request.",
-  untrustedCredential:
-    "I can't check that credential: it isn't one this service accepts, so nothing was sent.",
-  untrustedIssuer:
-    "I can't accept that issuer for this credential, so nothing was sent.",
-  daysNotAllowed:
-    "That's longer than this permission can last. Ask for fewer days.",
-  notConfirmed:
-    "I couldn't confirm who is asking, so nothing was sent. Please try again later.",
-} as const;
+  whatsAppOnly: {
+    message: "This isn't available in this chat yet.",
+    hint: 'These tools work only in our WhatsApp chat; nothing was sent.',
+  },
+  notAvailable: {
+    message: "This isn't available right now.",
+    hint: 'The plugin is not fully configured for this oracle; nothing was sent.',
+  },
+  busy: {
+    message:
+      'The service is busy right now. Please try again in a few minutes.',
+    hint: 'A service did not answer in time; try again later, not at once.',
+  },
+  ourSide: {
+    message: 'Something went wrong on our side. Please try again later.',
+  },
+  notFound: {
+    message: "I couldn't find that request. It may have ended.",
+    hint: 'Use an id this person got from a tool in this chat.',
+  },
+  unknownCredential: {
+    message: "I can't ask for that credential.",
+    hint: "The Credentials catalog does not list that type for the issuer; don't retry.",
+  },
+  unknownClaim: {
+    message: "I can't ask for one of those details.",
+    hint: "One of the fields is not in the issuer's catalog entry for the type; ask for fewer.",
+  },
+  unnamedService: {
+    message: "This service can't ask for permissions yet.",
+    hint: "The oracle's entity has no name in IXO Names; an operator must set one.",
+  },
+  tooManyPending: {
+    message:
+      'You already have requests waiting. Please answer them, or wait until they end.',
+  },
+  rateLimited: {
+    message: 'Too many requests right now. Please try again in a minute.',
+  },
+  blocked: {
+    message: "You're not accepting requests from this service.",
+    hint: 'The person blocked this oracle in their wallet; do not ask again.',
+  },
+  unknownPerson: {
+    message: "I couldn't find your wallet.",
+    hint: 'The person has no IXO wallet the Credentials worker knows.',
+  },
+  alreadyVerified: {
+    message: 'You already have an identity credential.',
+    hint: 'No identity check is needed; use credentials_check instead.',
+  },
+  noPermission: {
+    message: 'I need your permission for this first.',
+    hint: 'Ask for permission first with credentials_request_action_permission.',
+  },
+  permissionPending: {
+    message: "You haven't answered the permission request yet.",
+    hint: 'Wait until they answer the card; do not ask again or poll.',
+  },
+  permissionEnded: {
+    message: 'Your permission for this has ended or was stopped.',
+    hint: 'Ask for permission again only if they still want this.',
+  },
+  declined: {
+    message: 'You chose not to allow it.',
+    hint: 'Respect it; ask again only if they bring it up.',
+  },
+  unknownAction: {
+    message: "That isn't something I can ask for.",
+  },
+  daysNotAllowed: {
+    message: "That's longer than this permission can last.",
+    hint: 'Ask for fewer days.',
+  },
+  notConfirmed: {
+    message:
+      "Something went wrong on our side, so this couldn't be sent. Please try again later.",
+    hint: 'Self could not confirm the oracle (401); an operator should check its keys.',
+  },
+  untrustedCredential: {
+    message: "I can't check that credential.",
+    hint: 'This credential type is not in CREDENTIALS_TRUSTED_ISSUERS; nothing was sent.',
+  },
+  untrustedIssuer: {
+    message: "I can't accept that issuer for this credential.",
+    hint: 'Only the configured issuers of the type are accepted; leave issuers out to use them.',
+  },
+} as const satisfies Record<string, Wording>;
+
+/** A refusal from a wording. */
+export function refusal(error: string, wording: Wording): CredentialsRefusal {
+  return {
+    error,
+    message: wording.message,
+    ...(wording.hint ? { hint: wording.hint } : {}),
+  };
+}
 
 /** A short, local time for a moment the person reads ("14:05"), in their zone when known. */
 export function shortTime(unixSeconds: number, timeZone?: string): string {
@@ -114,52 +186,51 @@ export function refusalFor(
   opts: { timeZone?: string } = {},
 ): CredentialsRefusal {
   if (!(error instanceof CredentialsServiceError))
-    return { error: 'internal_error', message: MESSAGES.ourSide };
+    return refusal('internal_error', MESSAGES.ourSide);
   const { code, status, service } = error;
-  if (status === 0 || status >= 500)
-    return { error: code, message: MESSAGES.busy };
+  if (status === 0 || status >= 500) return refusal(code, MESSAGES.busy);
   switch (code) {
     case 'unknown_credential':
-      return { error: code, message: MESSAGES.unknownCredential };
+      return refusal(code, MESSAGES.unknownCredential);
     case 'unknown_claim':
-      return { error: code, message: MESSAGES.unknownClaim };
+      return refusal(code, MESSAGES.unknownClaim);
     case 'unnamed_service':
-      return { error: code, message: MESSAGES.unnamedService };
+      return refusal(code, MESSAGES.unnamedService);
     case 'unknown_action':
-      return { error: code, message: MESSAGES.unknownAction };
+      return refusal(code, MESSAGES.unknownAction);
     case 'days_not_allowed':
-      return { error: code, message: MESSAGES.daysNotAllowed };
+      return refusal(code, MESSAGES.daysNotAllowed);
     case 'too_many_pending':
-      return { error: code, message: MESSAGES.tooManyPending };
+      return refusal(code, MESSAGES.tooManyPending);
     case 'rate_limited':
-      return { error: code, message: MESSAGES.rateLimited };
+      return refusal(code, MESSAGES.rateLimited);
     case 'blocked':
-      return { error: code, message: MESSAGES.blocked };
+      return refusal(code, MESSAGES.blocked);
     case 'unknown_subject':
-      return { error: code, message: MESSAGES.unknownPerson };
+      return refusal(code, MESSAGES.unknownPerson);
     case 'already_verified':
-      return { error: code, message: MESSAGES.alreadyVerified };
+      return refusal(code, MESSAGES.alreadyVerified);
     case 'link_active': {
       const ends = Number(error.body?.expiresAt);
       return {
         error: code,
         message: Number.isFinite(ends)
-          ? `A link is already open; it ends at ${shortTime(ends, opts.timeZone)}.`
-          : 'A link is already open for them.',
+          ? `Your identity check is already in progress; it ends at ${shortTime(ends, opts.timeZone)}.`
+          : 'Your identity check is already in progress.',
       };
     }
     case 'not_found':
-      return { error: code, message: MESSAGES.notFound };
+      return refusal(code, MESSAGES.notFound);
     default:
       break;
   }
-  if (status === 429) return { error: code, message: MESSAGES.rateLimited };
+  if (status === 429) return refusal(code, MESSAGES.rateLimited);
   // Self: 401 = the caller could not be confirmed; 403 = the delegation
   // does not allow it (ended, revoked).
   if (service === 'self' && status === 401)
-    return { error: code, message: MESSAGES.notConfirmed };
+    return refusal(code, MESSAGES.notConfirmed);
   if (service === 'self' && status === 403)
-    return { error: code, message: MESSAGES.permissionEnded };
-  if (status === 404) return { error: code, message: MESSAGES.notFound };
-  return { error: code, message: MESSAGES.ourSide };
+    return refusal(code, MESSAGES.permissionEnded);
+  if (status === 404) return refusal(code, MESSAGES.notFound);
+  return refusal(code, MESSAGES.ourSide);
 }

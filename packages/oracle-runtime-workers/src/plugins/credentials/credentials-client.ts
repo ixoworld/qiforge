@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { CredentialsServiceError } from './errors';
 import { callService, type FetchLike } from './http';
+import { canonicalJson, jsonBodySha256 } from './hub-client';
 
 /**
  * The Credentials worker, called by the oracle as a verifier: its verifier
@@ -120,6 +121,9 @@ export interface CredentialsWorkerClientOptions {
   fetchImpl?: FetchLike;
   timeoutMs?: number;
   sleep?: (ms: number) => Promise<void>;
+  /** The tool's deadline (unix ms), see `ServiceCall.deadline`. */
+  deadline?: number;
+  now?: () => number;
 }
 
 export class CredentialsWorkerClient {
@@ -137,14 +141,27 @@ export class CredentialsWorkerClient {
     });
   }
 
-  private signed(method: 'GET' | 'POST' | 'PUT', path: string, body?: string) {
+  /**
+   * One signed call. A body is sent in its canonical form and bound by the
+   * first fact: `{ method, path, body_sha256 }`.
+   */
+  private async signed(
+    method: 'GET' | 'POST' | 'PUT',
+    path: string,
+    json?: unknown,
+  ) {
+    const body = json === undefined ? undefined : canonicalJson(json);
+    const fact =
+      json === undefined
+        ? { method, path }
+        : { method, path, body_sha256: await jsonBodySha256(json) };
     return {
       service: 'credentials' as const,
       method,
       url: `${this.origin}${path}`,
       prepare: async () => ({
         headers: {
-          authorization: `Bearer ${await this.opts.mint([{ method, path }])}`,
+          authorization: `Bearer ${await this.opts.mint([fact])}`,
           ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
         },
         ...(body !== undefined ? { body } : {}),
@@ -175,11 +192,7 @@ export class CredentialsWorkerClient {
 
   async putVerifierEntry(entry: VerifierEntry): Promise<void> {
     await callService(
-      this.signed(
-        'PUT',
-        `/v1/catalog/verifiers/${entry.did}`,
-        JSON.stringify(entry),
-      ),
+      await this.signed('PUT', `/v1/catalog/verifiers/${entry.did}`, entry),
     );
   }
 
@@ -192,17 +205,13 @@ export class CredentialsWorkerClient {
     expiresAt: number;
   }): Promise<DepositedRequest> {
     const answer = await callService(
-      this.signed(
-        'POST',
-        '/v1/requests',
-        JSON.stringify({
-          subject: input.subject,
-          ref: input.ref,
-          request: input.request,
-          purpose: input.purpose,
-          expires_at: input.expiresAt,
-        }),
-      ),
+      await this.signed('POST', '/v1/requests', {
+        subject: input.subject,
+        ref: input.ref,
+        request: input.request,
+        purpose: input.purpose,
+        expires_at: input.expiresAt,
+      }),
     );
     const parsed = Deposited.safeParse(answer.body);
     if (!parsed.success) this.invalid();
@@ -212,7 +221,7 @@ export class CredentialsWorkerClient {
   /** The verifier's view of a request: its status only. */
   async requestStatus(id: string): Promise<RequestView> {
     const path = `/v1/requests/${encodeURIComponent(id)}`;
-    const answer = await callService(this.signed('GET', path));
+    const answer = await callService(await this.signed('GET', path));
     const parsed = RequestView.safeParse(answer.body);
     if (!parsed.success || parsed.data.id !== id) this.invalid();
     return parsed.data;
@@ -223,6 +232,10 @@ export class CredentialsWorkerClient {
       ...(this.opts.fetchImpl ? { fetchImpl: this.opts.fetchImpl } : {}),
       ...(this.opts.timeoutMs ? { timeoutMs: this.opts.timeoutMs } : {}),
       ...(this.opts.sleep ? { sleep: this.opts.sleep } : {}),
+      ...(this.opts.deadline !== undefined
+        ? { deadline: this.opts.deadline }
+        : {}),
+      ...(this.opts.now ? { now: this.opts.now } : {}),
     };
   }
 }

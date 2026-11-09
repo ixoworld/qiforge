@@ -1,12 +1,14 @@
-import { PLUGIN_INBOX_MAX_BODY_LENGTH } from '../../core/plugin-inbox';
 import { userObjectName, type OracleWorkerEnv } from '../../do/contracts';
-import type { PluginRoute } from '../../shell/app';
+import { ipOverLimit, rateLimitKey, type PluginRoute } from '../../shell/app';
+import { CREDENTIALS_KV_NAMESPACE } from './check-store';
 
 /**
  * The verifier's response endpoint (OpenID4VP `response_uri`): the wallet
  * (the Hub, or the person's own wallet) POSTs the encrypted answer to a
- * credential check here, and the answer is put in the inbox of the check in
- * the person's own object, where the waiting tool decrypts and verifies it.
+ * credential check here. The person's own object (the only place holding the
+ * check's private key and request) decrypts and verifies it on arrival
+ * (`receiveAnswer`) and keeps it only when it proves to come from the
+ * person; the waiting tool reads that verified result.
  *
  * The URL carries a sealed token (AES-GCM under a key derived from the
  * oracle account's Hub key) naming the person, the check, its end and the
@@ -14,12 +16,14 @@ import type { PluginRoute } from '../../shell/app';
  * object, and a token that was not made here, or has ended, is refused
  * before any user object is woken. So is a body that is not one encrypted
  * answer for that key (`response=<JWE>`, ECDH-ES, that `kid`), and calls
- * past the per-IP and per-check limits.
+ * past the per-IP budget or a check's budget of failed answers.
  */
 
 export const RESPONSE_ROUTE_PREFIX = 'credentials/response';
 export const RESPONSE_ROUTE_PATH = `${RESPONSE_ROUTE_PREFIX}/:token`;
-export const CREDENTIALS_KV_NAMESPACE = 'credentials';
+export { CREDENTIALS_KV_NAMESPACE };
+/** Largest answer body, in bytes (an SD-JWT presentation of a few fields is a few KiB). */
+export const MAX_ANSWER_BYTES = 24 * 1024;
 
 const PERSON_DID = /^did:ixo:(ixo1[02-9ac-hj-np-z]{38})$/;
 const ADDRESS = /^ixo1[02-9ac-hj-np-z]{38}$/;
@@ -27,9 +31,17 @@ const CHECK_ID = /^[A-Za-z0-9_-]{16,64}$/;
 const TOKEN = /^[A-Za-z0-9_-]{40,400}$/;
 const KID = /^[A-Za-z0-9_-]{1,64}$/;
 const B64URL = /^[A-Za-z0-9_-]*$/;
-/** Answers one isolate takes per check, and per IP, in a minute. */
-export const RESPONSES_PER_CHECK_PER_MINUTE = 10;
-export const RESPONSES_PER_IP_PER_MINUTE = 60;
+/**
+ * Answers to one check that fail verification, per minute, before the check
+ * refuses more (a real flow sends one answer that verifies).
+ */
+export const FAILED_ANSWERS_PER_CHECK_PER_MINUTE = 20;
+/**
+ * Calls per IP per minute one isolate takes when the Worker has no
+ * `CREDENTIALS_RATE_LIMIT` binding: generous, the Hub answers every person
+ * from shared Cloudflare addresses.
+ */
+export const RESPONSES_PER_IP_PER_MINUTE = 2_000;
 const KEY_INFO = 'qiforge/credentials/response-route/v1';
 const TOKEN_AAD = new TextEncoder().encode('credentials-response');
 
@@ -40,11 +52,6 @@ export interface ResponseTarget {
   expiresAt: number;
   /** The `kid` of the check's answer key (the JWE header must name it). */
   kid: string;
-}
-
-/** The inbox key of one check. */
-export function inboxKeyOf(checkId: string): string {
-  return `inbox:${checkId}`;
 }
 
 function base64url(bytes: Uint8Array): string {
@@ -188,8 +195,8 @@ function headerOf(segment: string): Record<string, unknown> | null {
  * True for one encrypted OpenID4VP answer to this check: a form body whose
  * only field is `response`, a compact JWE of five base64url parts whose
  * protected header is ECDH-ES (with its `epk`), A128GCM or A256GCM, and
- * names `kid`. It proves nothing about who sent it (the waiting tool
- * decrypts and verifies); it keeps anything else out of the inbox.
+ * names `kid`. It proves nothing about who sent it (the person's object
+ * decrypts and verifies); it keeps anything else from waking the person's object.
  */
 export function isWellFormedDelivery(body: string, kid: string): boolean {
   let form: URLSearchParams;
@@ -220,8 +227,7 @@ export function isWellFormedDelivery(body: string, kid: string): boolean {
 }
 
 /**
- * A per-isolate fixed-window counter: the backstop when the Worker has no
- * `RATE_LIMIT` binding, and a cap per check whatever the binding says.
+ * A per-isolate fixed-window counter. `blocked` peeks, `charge` counts one.
  */
 export class WindowLimiter {
   private readonly hits = new Map<string, { start: number; count: number }>();
@@ -233,61 +239,68 @@ export class WindowLimiter {
     private readonly now: () => number = Date.now,
   ) {}
 
-  /** `true` when this hit is within the limit (and counts it). */
-  take(key: string): boolean {
+  private entry(key: string) {
     const now = this.now();
     const entry = this.hits.get(key);
-    if (!entry || now - entry.start >= this.windowMs) {
-      if (!entry && this.hits.size >= this.maxKeys) {
-        const oldest = this.hits.keys().next().value;
-        if (oldest !== undefined) this.hits.delete(oldest);
-      }
-      this.hits.delete(key);
-      this.hits.set(key, { start: now, count: 1 });
-      return true;
+    if (entry && now - entry.start < this.windowMs) return entry;
+    if (!entry && this.hits.size >= this.maxKeys) {
+      const oldest = this.hits.keys().next().value;
+      if (oldest !== undefined) this.hits.delete(oldest);
     }
+    const fresh = { start: now, count: 0 };
+    this.hits.delete(key);
+    this.hits.set(key, fresh);
+    return fresh;
+  }
+
+  /** `true` when `key` has used its budget for this window. */
+  blocked(key: string): boolean {
+    return this.entry(key).count >= this.limit;
+  }
+
+  /** Count one hit; `true` when it was within the budget. */
+  charge(key: string): boolean {
+    const entry = this.entry(key);
     entry.count += 1;
     return entry.count <= this.limit;
   }
-}
 
-const isolateLimits = {
-  perCheck: new WindowLimiter(RESPONSES_PER_CHECK_PER_MINUTE),
-  perIp: new WindowLimiter(RESPONSES_PER_IP_PER_MINUTE),
-};
-
-/** The Worker's `RATE_LIMIT` binding, when bound; `true` = allowed. */
-async function bindingAllows(
-  env: OracleWorkerEnv,
-  key: string,
-): Promise<boolean> {
-  if (!env.RATE_LIMIT) return true;
-  try {
-    return (await env.RATE_LIMIT.limit({ key })).success;
-  } catch {
-    // A limiter that fails does not take the endpoint down; the isolate
-    // counters still apply.
-    return true;
+  /** Use the rest of `key`'s budget (a shared limiter said it is spent). */
+  exhaust(key: string): void {
+    this.entry(key).count = this.limit;
   }
 }
 
-/** Appends a body to the check's inbox in the owner's object. */
-export type DeliverToOwner = (
+export interface ResponseLimits {
+  /** Failed answers per check (charged only when an answer is refused). */
+  perCheck: WindowLimiter;
+  /** Calls per IP when the Worker has no `CREDENTIALS_RATE_LIMIT`. */
+  perIp: WindowLimiter;
+}
+
+const isolateLimits: ResponseLimits = {
+  perCheck: new WindowLimiter(FAILED_ANSWERS_PER_CHECK_PER_MINUTE),
+  perIp: new WindowLimiter(RESPONSES_PER_IP_PER_MINUTE),
+};
+
+/** Runs the person's object's verification of one answer (its owner callback). */
+export type VerifyInOwner = (
   env: OracleWorkerEnv,
   target: ResponseTarget,
   body: string,
-) => Promise<boolean>;
+) => Promise<{
+  status: 200 | 400 | 404 | 410 | 503;
+  body?: Record<string, string>;
+}>;
 
-const deliverToOwnerObject: DeliverToOwner = (env, target, body) => {
+const verifyInOwnerObject: VerifyInOwner = (env, target, body) => {
   const stub = env.USER_ORACLE.get(
     env.USER_ORACLE.idFromName(userObjectName(target.ownerDid, env.ORACLE_DID)),
   );
-  return stub.deliverPluginInbox(
-    target.ownerDid,
-    CREDENTIALS_KV_NAMESPACE,
-    inboxKeyOf(target.checkId),
+  return stub.ownerCallback(target.ownerDid, 'credentials', {
+    key: target.checkId,
     body,
-  );
+  });
 };
 
 /**
@@ -342,6 +355,11 @@ function answer(
   });
 }
 
+const NOTHING_HERE = {
+  error: 'not_found',
+  message: 'There is nothing to answer here.',
+};
+
 function tooMany(): Response {
   return answer(
     429,
@@ -351,35 +369,42 @@ function tooMany(): Response {
 }
 
 /**
- * `POST /credentials/response/:token`. 200 `{}` once the answer is in the
- * check's inbox (the waiting tool verifies it); 400 for a body that is not
- * one encrypted answer for this check; 404 for a token not made here or
- * ended; 410 when the check is closed; 413 for a body over the inbox's
- * limit; 429 past the per-IP or per-check limit; 503 when the owner's
- * object could not be reached.
+ * `POST /credentials/response/:token`, in this order: the plugin switched
+ * on; the per-IP budget; the token (made here, not ended); the body (at
+ * most 24 KiB, one encrypted answer for the check's key); the check's
+ * budget of failed answers; then the person's object verifies it.
+ *
+ * 200 `{}` once a verified answer is stored (or one already was); 400 for a
+ * body that is not an answer from the person; 404 for a token not made here
+ * or ended, or the plugin off; 410 when the check has ended; 413 for a body
+ * over the limit; 429 past a budget; 503 when the object or a dependency
+ * could not be reached.
  */
 export function credentialsResponseRoute(
-  deliver: DeliverToOwner = deliverToOwnerObject,
-  limits: { perCheck: WindowLimiter; perIp: WindowLimiter } = isolateLimits,
+  verify: VerifyInOwner = verifyInOwnerObject,
+  limits: ResponseLimits = isolateLimits,
 ): PluginRoute {
-  const { perCheck, perIp } = limits;
   return {
     method: 'POST',
     path: RESPONSE_ROUTE_PATH,
     handler: async (request, env) => {
       const serviceKey = env.AUTH_HUB_CHANNEL_SERVICE_KEY;
-      if (!serviceKey || !env.ORACLE_DID)
-        return answer(404, {
-          error: 'not_found',
-          message: 'There is nothing to answer here.',
-        });
-      const ip = request.headers.get('cf-connecting-ip') ?? 'unknown';
       if (
-        !perIp.take(ip) ||
-        !(await bindingAllows(
-          env,
-          `${env.ORACLE_DID}:credentials-response:ip:${ip}`,
-        ))
+        Reflect.get(env, 'CREDENTIALS_ENABLED') !== 'true' ||
+        !serviceKey ||
+        !env.ORACLE_DID
+      )
+        return answer(404, NOTHING_HERE);
+      const ip = request.headers.get('cf-connecting-ip') ?? undefined;
+      if (
+        env.CREDENTIALS_RATE_LIMIT
+          ? await ipOverLimit(
+              env,
+              'credentials-response',
+              ip,
+              env.CREDENTIALS_RATE_LIMIT,
+            )
+          : !limits.perIp.charge(ip ?? 'unknown')
       )
         return tooMany();
       const token = new URL(request.url).pathname.split('/').pop() ?? '';
@@ -387,26 +412,14 @@ export function credentialsResponseRoute(
         serviceKey,
         oracleDid: env.ORACLE_DID,
       });
-      if (!target)
-        return answer(404, {
-          error: 'not_found',
-          message: 'There is nothing to answer here.',
-        });
-      if (
-        !perCheck.take(target.checkId) ||
-        !(await bindingAllows(
-          env,
-          `${env.ORACLE_DID}:credentials-response:check:${target.checkId}`,
-        ))
-      )
-        return tooMany();
+      if (!target) return answer(404, NOTHING_HERE);
       const declared = Number(request.headers.get('content-length') ?? '0');
-      if (declared > PLUGIN_INBOX_MAX_BODY_LENGTH)
+      if (declared > MAX_ANSWER_BYTES)
         return answer(413, {
           error: 'request_too_large',
           message: 'The answer is too large.',
         });
-      const body = await readCapped(request, PLUGIN_INBOX_MAX_BODY_LENGTH);
+      const body = await readCapped(request, MAX_ANSWER_BYTES);
       if (body === 'too_large')
         return answer(413, {
           error: 'request_too_large',
@@ -417,19 +430,31 @@ export function credentialsResponseRoute(
           error: 'invalid_response',
           message: 'This is not an answer to this check.',
         });
+      // Well-formed answers to a check whose budget of failed answers is
+      // spent are not decrypted again this minute.
+      if (limits.perCheck.blocked(target.checkId)) return tooMany();
+      let verdict: Awaited<ReturnType<VerifyInOwner>>;
       try {
-        return (await deliver(env, target, body))
-          ? answer(200)
-          : answer(410, {
-              error: 'check_closed',
-              message: 'This check has already ended.',
-            });
+        verdict = await verify(env, target, body);
       } catch {
         return answer(503, {
           error: 'unavailable',
           message: 'Please try again in a moment.',
         });
       }
+      if (verdict.status === 400) {
+        limits.perCheck.charge(target.checkId);
+        if (
+          env.RATE_LIMIT &&
+          !(
+            await env.RATE_LIMIT.limit({
+              key: rateLimitKey(env, 'credentials-check', target.checkId),
+            })
+          ).success
+        )
+          limits.perCheck.exhaust(target.checkId);
+      }
+      return answer(verdict.status, verdict.body ?? {});
     },
   };
 }

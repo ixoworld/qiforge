@@ -52,7 +52,7 @@ export {
   openResponseToken,
   RESPONSE_ROUTE_PATH,
   sealResponseToken,
-  type DeliverToOwner,
+  type VerifyInOwner,
 } from './response-route';
 export {
   CredentialsServiceError,

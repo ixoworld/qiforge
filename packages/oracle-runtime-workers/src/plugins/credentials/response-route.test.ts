@@ -6,7 +6,7 @@ import {
   openResponseToken,
   sealResponseToken,
   WindowLimiter,
-  type DeliverToOwner,
+  type VerifyInOwner,
 } from './response-route';
 import { ORACLE_DID, PERSON_DID, SERVICE_KEY } from './test-fixtures';
 
@@ -41,6 +41,7 @@ function answerBody(header: Record<string, unknown> = {}) {
 function envOf(): OracleWorkerEnv {
   // Only the keys the route reads; the rest of the env is not used.
   return Object.assign(Object.create(null), {
+    CREDENTIALS_ENABLED: 'true',
     AUTH_HUB_CHANNEL_SERVICE_KEY: SERVICE_KEY,
     ORACLE_DID,
   });
@@ -123,15 +124,21 @@ describe('isWellFormedDelivery', () => {
   });
 });
 
+const OK = { status: 200 as const };
+const REFUSED = {
+  status: 400 as const,
+  body: { error: 'invalid_response', message: 'x' },
+};
+
 describe('POST /credentials/response/:token', () => {
-  it('delivers a well-formed answer to the owner of the check', async () => {
-    const deliver = vi.fn<DeliverToOwner>(async () => true);
-    const route = credentialsResponseRoute(deliver, limits());
+  it("hands a well-formed answer to the person's object, which verifies it", async () => {
+    const verify = vi.fn<VerifyInOwner>(async () => OK);
+    const route = credentialsResponseRoute(verify, limits());
     const token = await sealResponseToken(live(), SECRET);
     const res = await route.handler(post(token), envOf(), { auth: null });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({});
-    expect(deliver).toHaveBeenCalledWith(
+    expect(verify).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
         ownerDid: PERSON_DID,
@@ -141,54 +148,67 @@ describe('POST /credentials/response/:token', () => {
     );
   });
 
-  it('stores nothing that is not an answer for this check', async () => {
-    const deliver = vi.fn<DeliverToOwner>(async () => true);
-    const route = credentialsResponseRoute(deliver, limits());
+  it('is off (404) unless CREDENTIALS_ENABLED is true', async () => {
+    const verify = vi.fn<VerifyInOwner>(async () => OK);
+    const token = await sealResponseToken(live(), SECRET);
+    const env = Object.assign(envOf(), { CREDENTIALS_ENABLED: 'false' });
+    const res = await credentialsResponseRoute(verify, limits()).handler(
+      post(token),
+      env,
+      { auth: null },
+    );
+    expect(res.status).toBe(404);
+    expect(verify).not.toHaveBeenCalled();
+  });
+
+  it('refuses junk with 400 before any object is woken, and charges no check budget', async () => {
+    const verify = vi.fn<VerifyInOwner>(async () => OK);
+    const limiter = limits(1, 100);
+    const route = credentialsResponseRoute(verify, limiter);
     const token = await sealResponseToken(live(), SECRET);
     for (const body of [
       'response=junk',
       answerBody({ kid: 'enc-other' }),
       'a=b',
+      '',
     ]) {
       const res = await route.handler(post(token, body), envOf(), {
         auth: null,
       });
       expect(res.status).toBe(400);
     }
-    expect(deliver).not.toHaveBeenCalled();
+    expect(verify).not.toHaveBeenCalled();
+    expect(limiter.perCheck.blocked(TARGET.checkId)).toBe(false);
+  });
+
+  it("passes the object's refusal on and charges the check's failed-answer budget only then", async () => {
+    const verify = vi.fn<VerifyInOwner>(async () => REFUSED);
+    const route = credentialsResponseRoute(verify, limits(2, 100));
+    const token = await sealResponseToken(live(), SECRET);
+    const statuses: number[] = [];
+    for (let i = 0; i < 3; i++)
+      statuses.push(
+        (await route.handler(post(token), envOf(), { auth: null })).status,
+      );
+    expect(statuses).toEqual([400, 400, 429]);
+    expect(verify).toHaveBeenCalledTimes(2);
   });
 
   it('refuses a token it did not make without waking any object', async () => {
-    const deliver = vi.fn<DeliverToOwner>(async () => true);
-    const res = await credentialsResponseRoute(deliver, limits()).handler(
+    const verify = vi.fn<VerifyInOwner>(async () => OK);
+    const res = await credentialsResponseRoute(verify, limits()).handler(
       post('A'.repeat(80)),
       envOf(),
       { auth: null },
     );
     expect(res.status).toBe(404);
-    expect(deliver).not.toHaveBeenCalled();
+    expect(verify).not.toHaveBeenCalled();
   });
 
-  it('limits answers per check and per IP', async () => {
-    const deliver = vi.fn<DeliverToOwner>(async () => true);
+  it('limits calls per IP', async () => {
+    const verify = vi.fn<VerifyInOwner>(async () => OK);
     const token = await sealResponseToken(live(), SECRET);
-    const perCheck = credentialsResponseRoute(deliver, limits(2, 100));
-    const statuses: number[] = [];
-    for (let i = 0; i < 3; i++)
-      statuses.push(
-        (
-          await perCheck.handler(
-            post(token, answerBody(), `198.51.100.${i}`),
-            envOf(),
-            {
-              auth: null,
-            },
-          )
-        ).status,
-      );
-    expect(statuses).toEqual([200, 200, 429]);
-
-    const perIp = credentialsResponseRoute(deliver, limits(100, 1));
+    const perIp = credentialsResponseRoute(verify, limits(100, 1));
     expect(
       (await perIp.handler(post(token), envOf(), { auth: null })).status,
     ).toBe(200);
@@ -197,38 +217,41 @@ describe('POST /credentials/response/:token', () => {
     expect(limited.headers.get('retry-after')).toBe('10');
   });
 
-  it('uses the RATE_LIMIT binding when the Worker has one', async () => {
-    const deliver = vi.fn<DeliverToOwner>(async () => true);
+  it('uses the CREDENTIALS_RATE_LIMIT binding (its own budget, keyed by IP) when the Worker has one', async () => {
+    const verify = vi.fn<VerifyInOwner>(async () => OK);
     const keys: string[] = [];
     const env = Object.assign(envOf(), {
-      RATE_LIMIT: {
+      CREDENTIALS_RATE_LIMIT: {
         limit: async ({ key }: { key: string }) => {
           keys.push(key);
-          return { success: !key.includes(':check:') };
+          return { success: false };
         },
       },
     });
     const token = await sealResponseToken(live(), SECRET);
-    const res = await credentialsResponseRoute(deliver, limits()).handler(
+    const res = await credentialsResponseRoute(verify, limits()).handler(
       post(token),
       env,
       { auth: null },
     );
     expect(res.status).toBe(429);
-    expect(keys).toEqual([
-      `${ORACLE_DID}:credentials-response:ip:203.0.113.7`,
-      `${ORACLE_DID}:credentials-response:check:${TARGET.checkId}`,
-    ]);
-    expect(deliver).not.toHaveBeenCalled();
+    expect(keys).toEqual([`${ORACLE_DID}|credentials-response|203.0.113.7`]);
+    expect(verify).not.toHaveBeenCalled();
   });
 
   it('answers 410 for a closed check, 413 for a large body, 503 when the object fails', async () => {
     const token = await sealResponseToken(live(), SECRET);
-    const closed = credentialsResponseRoute(async () => false, limits());
+    const closed = credentialsResponseRoute(
+      async () => ({
+        status: 410,
+        body: { error: 'check_closed', message: 'ended' },
+      }),
+      limits(),
+    );
     expect(
       (await closed.handler(post(token), envOf(), { auth: null })).status,
     ).toBe(410);
-    const big = credentialsResponseRoute(async () => true, limits());
+    const big = credentialsResponseRoute(async () => OK, limits());
     expect(
       (
         await big.handler(post(token, 'x'.repeat(30 * 1024)), envOf(), {

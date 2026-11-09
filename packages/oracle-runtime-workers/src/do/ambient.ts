@@ -262,7 +262,8 @@ export function createUcanAdapter(
       service.createInvocationFromDelegation(car, url, cap, o),
     mintSelfSignedInvocation: (url, cap, o) =>
       service.mintSelfSignedInvocation(url, cap, o),
-    signWithOracleKey: (bytes) => service.signWithOracleKey(bytes),
+    signJws: (input) => service.signJws(input),
+    oraclePublicKey: () => service.oraclePublicKey(),
     getServiceDelegation: (did, o) => service.getServiceDelegation(did, o),
   };
 }

@@ -1,9 +1,4 @@
 import { z } from 'zod';
-import {
-  dropFromPluginInbox,
-  openPluginInbox,
-  readPluginInbox,
-} from '../../core/plugin-inbox';
 import { tool } from '../../plugin-api/tool-helper';
 import type {
   PluginTool,
@@ -11,8 +6,21 @@ import type {
   UserKvSurface,
 } from '../../plugin-api/types';
 import {
+  checkIdleTtlMs,
+  CREDENTIALS_KV_NAMESPACE,
+  checkKey,
+  deleteCheck,
+  openKey,
+  pruneEndedChecks,
+  readCheck,
+  readResult,
+  saveCheck,
+  type CheckRow,
+} from './check-store';
+import {
   DID_PATTERN,
   MAX_ISSUERS_PER_TYPE,
+  purposeFor,
   type CredentialsConfig,
 } from './config';
 import {
@@ -23,9 +31,11 @@ import {
 import {
   CredentialsServiceError,
   MESSAGES,
+  refusal,
   refusalFor,
   shortTime,
   type CredentialsRefusal,
+  type Wording,
 } from './errors';
 import type { FetchLike } from './http';
 import {
@@ -37,11 +47,16 @@ import {
   type PermissionStatus,
 } from './hub-client';
 import {
-  CREDENTIALS_KV_NAMESPACE,
-  inboxKeyOf,
-  RESPONSE_ROUTE_PREFIX,
-  sealResponseToken,
-} from './response-route';
+  chargeLinkStatus,
+  clearGrantsCache,
+  knowsPermission,
+  readGrantsCache,
+  readLinkCache,
+  recordPermission,
+  writeGrantsCache,
+  writeLinkCache,
+} from './person-state';
+import { RESPONSE_ROUTE_PREFIX, sealResponseToken } from './response-route';
 import {
   LINK_CAPABILITY,
   LINK_STATUSES,
@@ -53,11 +68,10 @@ import {
   isVerificationUnavailable,
   newResponseKeys,
   randomToken,
-  verifyDelivery,
   VerifierSetupError,
   type CheckOutcome,
   type CredentialQuery,
-  type OracleSign,
+  type OracleJwsSigner,
   type VerifierContext,
 } from './verifier';
 
@@ -135,6 +149,10 @@ export const PermissionStatusInput = z
   })
   .strict();
 
+/**
+ * No `purpose`: why the oracle asks is the operator's fixed wording per
+ * credential type (`purposeFor`), never text the model writes.
+ */
 export const CheckInput = z
   .object({
     vct: Vct,
@@ -144,14 +162,6 @@ export const CheckInput = z
     claims: Claims.default([]).describe(
       'The fields you need to see, as few as possible (empty = only that they hold one).',
     ),
-    purpose: z
-      .string()
-      .min(1)
-      .max(140)
-      .optional()
-      .describe(
-        'Why you ask, in a few plain words the person may read in their wallet.',
-      ),
   })
   .strict();
 
@@ -197,7 +207,10 @@ export interface CredentialsToolsDeps {
   fetchImpl?: FetchLike;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
-  /** How long `credentials_check` waits for an answer (default 20 s). */
+  /**
+   * The whole deadline of `credentials_check`, in ms (default 25 s): setup,
+   * the calls and the wait for the answer all fit in it.
+   */
   checkWaitMs?: number;
 }
 
@@ -205,9 +218,13 @@ export interface CredentialsToolsDeps {
 export const PERMISSION_CARD_TTL_SECONDS = 24 * 3600 - 300;
 /** A presentation request of `credentials_check` lives 15 minutes. */
 export const CHECK_REQUEST_TTL_SECONDS = 15 * 60;
-export const CHECK_WAIT_MS = 20_000;
+/** One deadline per tool: every call it makes ends inside it. */
+export const TOOL_DEADLINE_MS = 25_000;
+export const CHECK_WAIT_MS = TOOL_DEADLINE_MS;
 /** How often the worker is asked for the request's status while waiting. */
 const WORKER_POLL_MS = 4_000;
+/** As long as the longest grant a card can carry, plus its day. */
+const ACTION_RECORD_TTL_MS = 32 * 24 * 3600 * 1000;
 
 const defaultSleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -223,11 +240,10 @@ function readiness(
   cfg: CredentialsConfig,
 ): Ready | CredentialsRefusal {
   const binding = whatsAppBinding(ctx);
-  if (!binding)
-    return { error: 'whatsapp_only', message: MESSAGES.whatsAppOnly };
+  if (!binding) return refusal('whatsapp_only', MESSAGES.whatsAppOnly);
   const { serviceKey, oracleDid } = cfg;
   if (!cfg.enabled || !serviceKey || !oracleDid || !ctx.ucan.hasSigningKey())
-    return { error: 'not_available', message: MESSAGES.notAvailable };
+    return refusal('not_available', MESSAGES.notAvailable);
   return { cfg: { ...cfg, serviceKey, oracleDid }, binding };
 }
 
@@ -250,10 +266,20 @@ function minted(
   return result.invocation;
 }
 
+function transport(deps: CredentialsToolsDeps, deadline: number) {
+  return {
+    deadline,
+    ...(deps.now ? { now: deps.now } : {}),
+    ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+    ...(deps.sleep ? { sleep: deps.sleep } : {}),
+  };
+}
+
 function hubClient(
   ctx: RuntimeContext,
   ready: Ready,
   deps: CredentialsToolsDeps,
+  deadline: number,
 ) {
   return new HubPermissionsClient({
     hubUrl: ready.cfg.hub.url,
@@ -268,7 +294,7 @@ function hubClient(
         'the Hub',
         ctx.logger,
       ),
-    ...transport(deps),
+    ...transport(deps, deadline),
   });
 }
 
@@ -276,6 +302,7 @@ function workerClient(
   ctx: RuntimeContext,
   ready: Ready,
   deps: CredentialsToolsDeps,
+  deadline: number,
 ) {
   return new CredentialsWorkerClient({
     baseUrl: ready.cfg.credentials.url,
@@ -289,7 +316,7 @@ function workerClient(
         'the Credentials worker',
         ctx.logger,
       ),
-    ...transport(deps),
+    ...transport(deps, deadline),
   });
 }
 
@@ -298,6 +325,7 @@ function selfClient(
   ready: Ready,
   deps: CredentialsToolsDeps,
   linkGrant: PermissionGrant,
+  deadline: number,
 ) {
   return new SelfLinksClient({
     selfUrl: ready.cfg.self.url,
@@ -316,15 +344,8 @@ function selfClient(
         'Self',
         ctx.logger,
       ),
-    ...transport(deps),
+    ...transport(deps, deadline),
   });
-}
-
-function transport(deps: CredentialsToolsDeps) {
-  return {
-    ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
-    ...(deps.sleep ? { sleep: deps.sleep } : {}),
-  };
 }
 
 /** A stable key for one tool call (the same on a resumed run), else random. */
@@ -356,15 +377,12 @@ export function acceptedIssuers(
     ? cfg.trustedIssuers[vct]
     : undefined;
   if (!listed?.length)
-    return {
-      error: 'untrusted_credential',
-      message: MESSAGES.untrustedCredential,
-    };
+    return refusal('untrusted_credential', MESSAGES.untrustedCredential);
   const configured = sortedUnique(listed);
   if (asked === undefined) return { issuers: configured, configured };
   const issuers = sortedUnique(asked);
   if (issuers.some((did) => !configured.includes(did)))
-    return { error: 'untrusted_issuer', message: MESSAGES.untrustedIssuer };
+    return refusal('untrusted_issuer', MESSAGES.untrustedIssuer);
   return { issuers, configured };
 }
 
@@ -374,7 +392,7 @@ function failed(
   tool: string,
   error: unknown,
 ): CredentialsRefusal {
-  const refusal = refusalFor(error, {
+  const result = refusalFor(error, {
     ...(ctx.user.timezone ? { timeZone: ctx.user.timezone } : {}),
   });
   ctx.logger.warn(
@@ -386,26 +404,50 @@ function failed(
           : 'error'
     }`,
   );
-  return refusal;
+  return result;
 }
 
 function kvOf(ctx: RuntimeContext): UserKvSurface | null {
   return ctx.kv ?? null;
 }
 
+/** A tool answer: the person's sentence (`message`) and the agent's (`hint`). */
+function said(wording: Wording, extra: Record<string, unknown> = {}) {
+  return {
+    ...extra,
+    message: wording.message,
+    ...(wording.hint ? { hint: wording.hint } : {}),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Permission cards.
 
-const STATUS_MESSAGES: Record<PermissionStatus, string> = {
-  pending: "They haven't answered yet.",
-  allowed: 'They allowed it.',
-  declined: 'They chose not to allow it.',
-  expired: 'The request ended before they answered.',
-  stopped: 'They stopped this permission.',
+const STATUS_WORDING: Record<PermissionStatus, Wording> = {
+  pending: {
+    message: "You haven't answered yet.",
+    hint: "They haven't answered the card; wait for them, do not ask again or poll.",
+  },
+  allowed: {
+    message: 'Thanks, you allowed it.',
+    hint: 'Go on with the task.',
+  },
+  declined: MESSAGES.declined,
+  expired: {
+    message: 'The request ended before you answered.',
+    hint: 'Ask again only if they still want this.',
+  },
+  stopped: {
+    message: 'You stopped this permission.',
+    hint: 'Respect it; ask again only if they bring it up.',
+  },
 };
 
-function linkMessage(name: string, url: string): string {
-  return `Tap this link to see what ${name} is asking and choose Allow or Don't allow: ${url}`;
+function cardMessage(name: string, url: string): Wording {
+  return {
+    message: `Tap this link to see what ${name} is asking and choose Allow or Don't allow: ${url}`,
+    hint: 'Send `message` as it is, as one link in a short message. Never paste ids or tokens.',
+  };
 }
 
 /** The kv key that remembers the card for one action. */
@@ -422,49 +464,34 @@ const OpenLink = z.object({
 });
 
 // ---------------------------------------------------------------------------
-// credentials_check: rows in the person's kv.
+// credentials_check.
 
-const CheckRow = z.object({
-  v: z.literal(1),
-  checkId: z.string(),
-  /** Unix seconds. */
-  expiresAt: z.number(),
-  subject: z.string(),
-  query: z.object({
-    vct: z.string(),
-    issuers: z.array(z.string()),
-    claims: z.array(z.string()),
-  }),
-  requestJwt: z.string(),
-  privateJwk: z.object({
-    kty: z.literal('EC'),
-    crv: z.literal('P-256'),
-    x: z.string(),
-    y: z.string(),
-    d: z.string(),
-    kid: z.string().optional(),
-    use: z.literal('enc').optional(),
-    alg: z.literal('ECDH-ES').optional(),
-  }),
-  requestId: z.string().optional(),
-  walletUrl: z.string().optional(),
-});
-type CheckRow = z.infer<typeof CheckRow>;
-
-const CHECK_RESULT_MESSAGES: Record<CheckOutcome['result'] | 'none', string> = {
-  valid: 'Their credential checks out.',
-  invalid: "Their credential didn't pass the check.",
-  revoked: 'Their credential has been revoked by its issuer.',
-  expired: 'Their credential has expired.',
-  none: "They didn't share a credential for this.",
+const CHECK_WORDING: Record<CheckOutcome['result'] | 'none', Wording> = {
+  valid: {
+    message: 'Thanks, your credential checks out.',
+    hint: 'Use only the fields you asked for, for this task.',
+  },
+  invalid: {
+    message: "Your credential didn't pass the check.",
+    hint: 'It was not accepted; do not retry the same request.',
+  },
+  revoked: {
+    message: 'Your credential has been revoked by its issuer.',
+    hint: 'It cannot be used; do not retry.',
+  },
+  expired: {
+    message: 'Your credential has expired.',
+    hint: 'It cannot be used until it is renewed.',
+  },
+  none: {
+    message: "You didn't share a credential for this.",
+    hint: 'They declined or let it end; ask again only if they want to.',
+  },
 };
 
-function liveRow(value: unknown, nowSeconds: number): CheckRow | null {
-  const parsed = CheckRow.safeParse(value);
+function liveCheck(row: CheckRow | null, nowSeconds: number): CheckRow | null {
   // A request about to end is not reused: a new one gets a full window.
-  return parsed.success && parsed.data.expiresAt > nowSeconds + 60
-    ? parsed.data
-    : null;
+  return row && row.expiresAt > nowSeconds + 60 ? row : null;
 }
 
 /** The Hub page where the person answers the request. */
@@ -494,16 +521,20 @@ export function createCredentialsTools(
   const { cfg, oracle } = deps;
   /** The credential types this oracle may check (the operator's list). */
   const acceptedTypes = `Credential types this service accepts (vct): ${Object.keys(cfg.trustedIssuers).join(', ') || 'none'}; their issuers are set by the operator.`;
+  const unavailable = () => refusal('not_available', MESSAGES.notAvailable);
 
   const requestCheckPermission = tool(
     async (raw, ctx) => {
       const ready = readiness(ctx, cfg);
       if (isRefusal(ready)) return ready;
+      const kv = kvOf(ctx);
+      if (!kv) return unavailable();
       const args = CheckPermissionInput.parse(raw);
       const accepted = acceptedIssuers(cfg, args.vct, args.issuers);
       if ('error' in accepted) return accepted;
+      const deadline = now() + TOOL_DEADLINE_MS;
       try {
-        const card = await hubClient(ctx, ready, deps).request({
+        const card = await hubClient(ctx, ready, deps, deadline).request({
           ...ready.binding,
           requestKey: await requestKeyOf(ctx, 'check-permission'),
           expiresAt: Math.floor(now() / 1000) + PERMISSION_CARD_TTL_SECONDS,
@@ -515,13 +546,13 @@ export function createCredentialsTools(
             days: args.days,
           },
         });
-        return {
+        await recordPermission(kv, card.id);
+        return said(cardMessage(oracle.name, card.url), {
           status: 'sent',
           permissionId: card.id,
           url: card.url,
           expiresAt: card.expiresAt,
-          message: linkMessage(oracle.name, card.url),
-        };
+        });
       } catch (error) {
         return failed(ctx, 'credentials_request_check_permission', error);
       }
@@ -533,7 +564,7 @@ export function createCredentialsTools(
         'Use it before credentials_check when they have not allowed it yet, or when a check comes back pending. Ask for one credential type and as few fields as you need; the accepted issuers are configured (you may only narrow them).',
         acceptedTypes,
         "The person gets a card in the IXO wallet showing who asks, the credential, who issued it, the fields you will see and how long; they tap Allow or Don't allow.",
-        'Send the returned url as one link in a short message (the `message` is ready to send). Never paste ids or tokens. Then check the answer with credentials_permission_status, or just call credentials_check once they say they allowed it.',
+        'Send the `message` (it holds the link) as it is, in a short message. Never paste ids or tokens. Then check the answer with credentials_permission_status, or just call credentials_check once they say they allowed it.',
         'WhatsApp only.',
       ].join(' '),
       schema: CheckPermissionInput,
@@ -544,18 +575,24 @@ export function createCredentialsTools(
     async (raw, ctx) => {
       const ready = readiness(ctx, cfg);
       if (isRefusal(ready)) return ready;
+      const kv = kvOf(ctx);
+      if (!kv) return unavailable();
       const args = PermissionStatusInput.parse(raw);
+      // Only the cards this person was asked: another person's id, or a
+      // made-up one, is "not found" without asking the Hub.
+      if (!(await knowsPermission(kv, args.permissionId)))
+        return refusal('not_found', MESSAGES.notFound);
+      const deadline = now() + TOOL_DEADLINE_MS;
       try {
-        const state = await hubClient(ctx, ready, deps).status(
+        const state = await hubClient(ctx, ready, deps, deadline).status(
           args.permissionId,
         );
-        return {
+        return said(STATUS_WORDING[state.status], {
           permissionId: state.id,
           status: state.status,
           ...(state.allowedAt ? { allowedAt: state.allowedAt } : {}),
           ...(state.expiresAt ? { expiresAt: state.expiresAt } : {}),
-          message: STATUS_MESSAGES[state.status],
-        };
+        });
       } catch (error) {
         return failed(ctx, 'credentials_permission_status', error);
       }
@@ -574,9 +611,15 @@ export function createCredentialsTools(
       const ready = readiness(ctx, cfg);
       if (isRefusal(ready)) return ready;
       const kv = kvOf(ctx);
-      const sign: OracleSign | undefined = ctx.ucan.signWithOracleKey;
-      if (!kv || !sign || !deps.verifier || !cfg.publicUrl)
-        return { error: 'not_available', message: MESSAGES.notAvailable };
+      const signer: OracleJwsSigner | undefined =
+        ctx.ucan.signJws && ctx.ucan.oraclePublicKey
+          ? {
+              signJws: ctx.ucan.signJws,
+              oraclePublicKey: ctx.ucan.oraclePublicKey,
+            }
+          : undefined;
+      if (!kv || !signer || !deps.verifier || !cfg.publicUrl)
+        return unavailable();
       const args = CheckInput.parse(raw);
       const accepted = acceptedIssuers(cfg, args.vct, args.issuers);
       if ('error' in accepted) return accepted;
@@ -590,31 +633,29 @@ export function createCredentialsTools(
           ctx,
           ready,
           kv,
-          sign,
+          signer,
           verifier: deps.verifier,
           publicUrl: cfg.publicUrl,
           query,
           catalogIssuers: accepted.configured,
-          purpose:
-            args.purpose ??
-            `${oracle.name} would like to check this.`.slice(0, 140),
+          purpose: purposeFor(cfg, args.vct),
         });
       } catch (error) {
         if (error instanceof VerifierSetupError) {
           ctx.logger.warn(`[credentials] credentials_check: ${error.code}`);
-          return { error: 'not_available', message: MESSAGES.notAvailable };
+          return unavailable();
         }
         if (isVerificationUnavailable(error))
-          return { error: 'verification_unavailable', message: MESSAGES.busy };
+          return refusal('verification_unavailable', MESSAGES.busy);
         return failed(ctx, 'credentials_check', error);
       }
     },
     {
       name: 'credentials_check',
       description: [
-        "Check one of the person's credentials: give the credential type (vct) and the fields you need (the accepted issuers are configured; you may only narrow them). It asks their IXO wallet, waits up to about 20 seconds and verifies the answer.",
+        "Check one of the person's credentials: give the credential type (vct) and the fields you need (the accepted issuers are configured; you may only narrow them). It asks their IXO wallet, waits up to about 25 seconds and verifies the answer. Why you ask is fixed wording; you do not write it.",
         acceptedTypes,
-        'result: valid (claims holds only the fields you asked for), invalid, revoked, expired, none (they did not share one) or pending (no standing permission answered: send them walletUrl as one link so they can answer in their wallet, or ask for standing permission first with credentials_request_check_permission).',
+        'result: valid (claims holds only the fields you asked for), invalid, revoked, expired, none (they did not share one) or pending (no standing permission answered: send them the `message`, which holds their wallet link, or ask for standing permission first with credentials_request_check_permission).',
         'Calling it again with the same fields continues the same request; it does not ask twice. Never quote the claims back beyond what the conversation needs. WhatsApp only.',
       ].join(' '),
       schema: CheckInput,
@@ -625,7 +666,7 @@ export function createCredentialsTools(
     ctx: RuntimeContext;
     ready: Ready;
     kv: UserKvSurface;
-    sign: OracleSign;
+    signer: OracleJwsSigner;
     verifier: VerifierContext;
     publicUrl: string;
     query: CredentialQuery;
@@ -634,14 +675,25 @@ export function createCredentialsTools(
     purpose: string;
   }) {
     const { ctx, ready, kv, query } = input;
-    const worker = workerClient(ctx, ready, deps);
+    const start = now();
+    // One deadline: the setup, every call and the wait all end inside it.
+    const deadline = start + (deps.checkWaitMs ?? CHECK_WAIT_MS);
+    const worker = workerClient(ctx, ready, deps, deadline);
     const subject = ctx.user.did;
-    const rowKey = `check:${(await sha256Hex(canonicalJson({ subject, ...query }))).slice(0, 32)}`;
-    const nowSeconds = Math.floor(now() / 1000);
-    let row = liveRow(
-      await kv.get(CREDENTIALS_KV_NAMESPACE, rowKey),
-      nowSeconds,
-    );
+    const queryHash = (
+      await sha256Hex(canonicalJson({ subject, ...query }))
+    ).slice(0, 32);
+    const nowSeconds = Math.floor(start / 1000);
+
+    // Rows of checks that have ended go now, not at the next flush.
+    await pruneEndedChecks(kv, nowSeconds).catch(() => undefined);
+
+    const openId = await kv.get(CREDENTIALS_KV_NAMESPACE, openKey(queryHash));
+    let row =
+      typeof openId === 'string'
+        ? liveCheck(await readCheck(kv, openId), nowSeconds)
+        : null;
+    if (row && row.subject !== subject) row = null;
 
     if (!row) {
       await deps.memo.ensure(
@@ -668,7 +720,7 @@ export function createCredentialsTools(
       const built = await buildCredentialRequest({
         verifier: input.verifier,
         oracleDid: ready.cfg.oracleDid,
-        sign: input.sign,
+        signer: input.signer,
         responseUri: `${input.publicUrl}/${RESPONSE_ROUTE_PREFIX}/${token}`,
         query,
         expiresAt,
@@ -677,30 +729,30 @@ export function createCredentialsTools(
       const fresh: CheckRow = {
         v: 1,
         checkId,
+        queryHash,
         expiresAt,
         subject,
         query,
         requestJwt: built.requestJwt,
         privateJwk: built.privateJwk,
       };
-      const idleTtlMs = CHECK_REQUEST_TTL_SECONDS * 1000 + 60_000;
-      // The inbox opens before the request is visible anywhere.
-      await openPluginInbox(kv, CREDENTIALS_KV_NAMESPACE, inboxKeyOf(checkId), {
-        expiresAt: expiresAt * 1000,
-      });
-      // Two calls at once for the same check: the first row wins.
-      const stored = liveRow(
-        await kv.update(
-          CREDENTIALS_KV_NAMESPACE,
-          rowKey,
-          (current) => liveRow(current, nowSeconds) ?? fresh,
-          { idleTtlMs },
-        ),
-        nowSeconds,
+      // The row exists before the request is visible anywhere.
+      await saveCheck(kv, fresh, start);
+      // Two calls at once for the same check: the first one wins.
+      if (typeof openId === 'string')
+        await kv.delete(CREDENTIALS_KV_NAMESPACE, openKey(queryHash));
+      const winner = await kv.update(
+        CREDENTIALS_KV_NAMESPACE,
+        openKey(queryHash),
+        (current) => (typeof current === 'string' ? current : checkId),
+        { idleTtlMs: checkIdleTtlMs(expiresAt, start) },
       );
-      if (stored && stored.checkId !== checkId) {
-        await kv.delete(CREDENTIALS_KV_NAMESPACE, inboxKeyOf(checkId));
-        row = stored;
+      if (winner !== checkId) {
+        await deleteCheck(kv, fresh);
+        const theirs =
+          typeof winner === 'string' ? await readCheck(kv, winner) : null;
+        if (!theirs) throw new Error('The open check has no row');
+        row = theirs;
       } else {
         try {
           const deposited = await worker.deposit({
@@ -717,11 +769,12 @@ export function createCredentialsTools(
               ? { walletUrl: deposited.wallet_url }
               : {}),
           };
-          await kv.set(CREDENTIALS_KV_NAMESPACE, rowKey, row, { idleTtlMs });
+          await kv.set(CREDENTIALS_KV_NAMESPACE, checkKey(checkId), row, {
+            idleTtlMs: checkIdleTtlMs(expiresAt, start),
+          });
         } catch (error) {
           // Nobody can answer a request that was not deposited.
-          await kv.delete(CREDENTIALS_KV_NAMESPACE, rowKey);
-          await kv.delete(CREDENTIALS_KV_NAMESPACE, inboxKeyOf(checkId));
+          await deleteCheck(kv, fresh);
           throw error;
         }
       }
@@ -732,84 +785,51 @@ export function createCredentialsTools(
       result: CheckOutcome['result'] | 'none',
       claims?: Record<string, unknown>,
     ) => {
-      await kv.delete(CREDENTIALS_KV_NAMESPACE, rowKey);
-      await kv.delete(CREDENTIALS_KV_NAMESPACE, inboxKeyOf(active.checkId));
-      return {
+      await deleteCheck(kv, active);
+      return said(CHECK_WORDING[result], {
         result,
         ...(claims ? { claims } : {}),
         ...(active.requestId ? { requestId: active.requestId } : {}),
-        message: CHECK_RESULT_MESSAGES[result],
-      };
+      });
     };
 
-    const deadline = now() + (deps.checkWaitMs ?? CHECK_WAIT_MS);
-    const inboxKey = inboxKeyOf(active.checkId);
     let delay = 500;
     // The worker is asked only after the Hub had a moment to answer.
     let lastPoll = now();
-    let unavailable = false;
     let answered = false;
     for (;;) {
-      const deliveries = await readPluginInbox(
-        kv,
-        CREDENTIALS_KV_NAMESPACE,
-        inboxKey,
-      );
-      // Answers that do not prove to come from the person leave the inbox,
-      // so they never hold a place the real answer needs.
-      const rejected: string[] = [];
-      for (const body of deliveries) {
-        try {
-          const outcome = await verifyDelivery({
-            verifier: input.verifier,
-            body,
-            requestJwt: active.requestJwt,
-            privateJwk: active.privateJwk,
-            subject,
-            query,
-          });
-          if (outcome)
-            return finish(
-              outcome.result,
-              outcome.result === 'valid' ? outcome.claims : undefined,
-            );
-          rejected.push(body);
-        } catch (error) {
-          if (!isVerificationUnavailable(error)) throw error;
-          // A dependency is down: this one stays and is tried again on
-          // the next pass.
-          unavailable = true;
-        }
-      }
-      await dropFromPluginInbox(
-        kv,
-        CREDENTIALS_KV_NAMESPACE,
-        inboxKey,
-        rejected,
-      );
+      // The verified answer: the person's object stored it (and only it).
+      const outcome = await readResult(kv, active.checkId);
+      if (outcome)
+        return finish(
+          outcome.result,
+          outcome.result === 'valid' ? outcome.claims : undefined,
+        );
       if (active.requestId && now() - lastPoll >= WORKER_POLL_MS) {
         lastPoll = now();
-        const view = await worker.requestStatus(active.requestId);
-        if (
-          view.status === 'declined' ||
-          view.status === 'cancelled' ||
-          view.status === 'expired'
-        )
-          return finish('none');
-        answered = view.status === 'answered';
+        try {
+          const view = await worker.requestStatus(active.requestId);
+          if (
+            view.status === 'declined' ||
+            view.status === 'cancelled' ||
+            view.status === 'expired'
+          )
+            return finish('none');
+          answered = view.status === 'answered';
+        } catch {
+          // The worker did not answer this time: keep waiting.
+        }
       }
       if (now() >= deadline) break;
       await sleep(Math.min(delay, Math.max(0, deadline - now())));
       delay = Math.min(Math.round(delay * 1.6), 3_000);
     }
-    if (unavailable)
-      return { error: 'verification_unavailable', message: MESSAGES.busy };
     if (answered) {
-      // Answered at the worker, but no answer from the person reached the
-      // response endpoint: this request cannot be answered again, so it is
-      // closed here and the next call starts a new one.
+      // Answered at the worker, but no verified answer from the person
+      // reached the response endpoint: this request cannot be answered
+      // again, so it is closed here and the next call starts a new one.
       await finish('none');
-      return { error: 'answer_lost', message: MESSAGES.busy };
+      return refusal('answer_lost', MESSAGES.busy);
     }
     const walletUrl = active.requestId
       ? walletUrlOf(cfg, active.requestId, active.walletUrl)
@@ -818,7 +838,8 @@ export function createCredentialsTools(
       result: 'pending',
       ...(active.requestId ? { requestId: active.requestId } : {}),
       walletUrl,
-      message: `They need to answer in their IXO wallet: ${walletUrl}`,
+      message: `Please answer in your IXO wallet: ${walletUrl}`,
+      hint: 'No standing permission answered. Send `message` as it is, or ask for standing permission with credentials_request_check_permission; then call again with the same fields to continue this request.',
     };
   }
 
@@ -827,11 +848,11 @@ export function createCredentialsTools(
       const ready = readiness(ctx, cfg);
       if (isRefusal(ready)) return ready;
       const kv = kvOf(ctx);
-      if (!kv)
-        return { error: 'not_available', message: MESSAGES.notAvailable };
+      if (!kv) return unavailable();
       const args = ActionPermissionInput.parse(raw);
+      const deadline = now() + TOOL_DEADLINE_MS;
       try {
-        const card = await hubClient(ctx, ready, deps).request({
+        const card = await hubClient(ctx, ready, deps, deadline).request({
           ...ready.binding,
           requestKey: await requestKeyOf(
             ctx,
@@ -848,16 +869,17 @@ export function createCredentialsTools(
           CREDENTIALS_KV_NAMESPACE,
           actionKey(args.action),
           { permissionId: card.id },
-          // As long as the longest grant the card can carry, plus its day.
-          { idleTtlMs: 32 * 24 * 3600 * 1000 },
+          { idleTtlMs: ACTION_RECORD_TTL_MS },
         );
-        return {
+        // Grants kept for an earlier card are not this card's.
+        await clearGrantsCache(kv, args.action);
+        await recordPermission(kv, card.id);
+        return said(cardMessage(oracle.name, card.url), {
           status: 'sent',
           permissionId: card.id,
           url: card.url,
           expiresAt: card.expiresAt,
-          message: linkMessage(oracle.name, card.url),
-        };
+        });
       } catch (error) {
         return failed(ctx, 'credentials_request_action_permission', error);
       }
@@ -867,46 +889,92 @@ export function createCredentialsTools(
       description: [
         'Ask the person for permission to use a catalogued service on their behalf. Today: "self.identity-check" (Self may create a link for them to start an identity check).',
         "They get a card in the IXO wallet showing who asks, the action, the service, what it allows and how long; they tap Allow or Don't allow.",
-        'Send the returned url as one link in a short message (the `message` is ready to send); never paste ids or tokens. Once they allow it, call credentials_request_action.',
+        'Send the `message` (it holds the link) as it is, in a short message; never paste ids or tokens. Once they allow it, call credentials_request_action.',
         'WhatsApp only.',
       ].join(' '),
       schema: ActionPermissionInput,
     },
   );
 
-  /** The allowed grants of an action's card, or the refusal to answer. */
+  /**
+   * The allowed grants of an action's card, or the refusal to answer. They
+   * are kept in the person's kv until the earliest ends, so a repeat call
+   * does not ask the Hub again; `fresh` skips that copy (Self refused it).
+   */
   async function allowedGrants(
     ctx: RuntimeContext,
     ready: Ready,
     kv: UserKvSurface,
     action: SupportedAction,
-  ): Promise<PermissionGrant[] | CredentialsRefusal> {
+    deadline: number,
+    fresh: boolean,
+  ): Promise<
+    { grants: PermissionGrant[]; cached: boolean } | CredentialsRefusal
+  > {
     const record = ActionRecord.safeParse(
       await kv.get(CREDENTIALS_KV_NAMESPACE, actionKey(action)),
     );
-    if (!record.success)
-      return { error: 'no_permission', message: MESSAGES.noPermission };
-    const state = await hubClient(ctx, ready, deps).status(
-      record.data.permissionId,
+    if (!record.success) return refusal('no_permission', MESSAGES.noPermission);
+    const { permissionId } = record.data;
+    if (!fresh) {
+      const kept = await readGrantsCache(
+        kv,
+        action,
+        permissionId,
+        Math.floor(now() / 1000),
+      );
+      if (kept) return { grants: kept, cached: true };
+    }
+    const state = await hubClient(ctx, ready, deps, deadline).status(
+      permissionId,
     );
     if (state.status === 'pending')
-      return {
-        error: 'permission_pending',
-        message: MESSAGES.permissionPending,
-      };
-    const nowSeconds = Math.floor(now() / 1000);
-    const grants = (state.grants ?? []).filter((g) => g.expiresAt > nowSeconds);
+      return refusal('permission_pending', MESSAGES.permissionPending);
+    const grants = (state.grants ?? []).filter(
+      (g) => g.expiresAt > Math.floor(now() / 1000),
+    );
     if (state.status !== 'allowed' || grants.length === 0) {
       await kv.delete(CREDENTIALS_KV_NAMESPACE, actionKey(action));
-      return {
-        error: 'permission_ended',
-        message:
-          state.status === 'declined'
-            ? STATUS_MESSAGES.declined
-            : MESSAGES.permissionEnded,
-      };
+      await clearGrantsCache(kv, action);
+      return refusal(
+        'permission_ended',
+        state.status === 'declined'
+          ? MESSAGES.declined
+          : MESSAGES.permissionEnded,
+      );
     }
-    return grants;
+    await writeGrantsCache(kv, action, permissionId, grants, now());
+    return { grants, cached: false };
+  }
+
+  /**
+   * Run `run` with the action's grants. When Self refuses kept grants (401 or
+   * 403: the person stopped the permission, or it ended), they are dropped,
+   * fetched again from the Hub, and `run` is tried once more.
+   */
+  async function withGrants<T>(
+    ctx: RuntimeContext,
+    ready: Ready,
+    kv: UserKvSurface,
+    action: SupportedAction,
+    deadline: number,
+    run: (grants: PermissionGrant[]) => Promise<T>,
+  ): Promise<T | CredentialsRefusal> {
+    const first = await allowedGrants(ctx, ready, kv, action, deadline, false);
+    if ('error' in first) return first;
+    try {
+      return await run(first.grants);
+    } catch (error) {
+      const refused =
+        error instanceof CredentialsServiceError &&
+        error.service === 'self' &&
+        (error.status === 401 || error.status === 403);
+      if (!first.cached || !refused) throw error;
+    }
+    await clearGrantsCache(kv, action);
+    const second = await allowedGrants(ctx, ready, kv, action, deadline, true);
+    if ('error' in second) return second;
+    return run(second.grants);
   }
 
   /** The grant with this catalogue id (`link`, `offer`), else the one with this capability. */
@@ -926,47 +994,68 @@ export function createCredentialsTools(
       const ready = readiness(ctx, cfg);
       if (isRefusal(ready)) return ready;
       const kv = kvOf(ctx);
-      if (!kv)
-        return { error: 'not_available', message: MESSAGES.notAvailable };
+      if (!kv) return unavailable();
       const args = ActionInput.parse(raw);
+      const deadline = now() + TOOL_DEADLINE_MS;
+      const requestKey = await requestKeyOf(ctx, `action:${args.action}`);
       try {
-        const grants = await allowedGrants(ctx, ready, kv, args.action);
-        if (!Array.isArray(grants)) return grants;
-        const link = grantFor(grants, 'link', LINK_CAPABILITY);
-        const offer = grantFor(grants, 'offer', {
-          can: 'credentials/offer',
-          with: 'ixo:credentials',
-        });
-        if (!link || !offer) {
-          ctx.logger.warn('[credentials] the allowed card lacks a grant');
-          return { error: 'internal_error', message: MESSAGES.ourSide };
-        }
-        const created = await selfClient(ctx, ready, deps, link).createLink({
-          offerConsent: offer.token,
-          requestKey: await requestKeyOf(ctx, `action:${args.action}`),
-        });
-        const ends = shortTime(created.expiresAt, ctx.user.timezone);
-        return {
-          status: 'sent',
-          url: created.url,
-          linkId: created.linkId,
-          expiresAt: created.expiresAt,
-          message: `Tap this link to start your identity check. It works once and ends at ${ends}: ${created.url}`,
-        };
+        return await withGrants(
+          ctx,
+          ready,
+          kv,
+          args.action,
+          deadline,
+          async (grants) => {
+            const link = grantFor(grants, 'link', LINK_CAPABILITY);
+            const offer = grantFor(grants, 'offer', {
+              can: 'credentials/offer',
+              with: 'ixo:credentials',
+            });
+            if (!link || !offer) {
+              ctx.logger.warn('[credentials] the allowed card lacks a grant');
+              return refusal('internal_error', MESSAGES.ourSide);
+            }
+            const created = await selfClient(
+              ctx,
+              ready,
+              deps,
+              link,
+              deadline,
+            ).createLink({ offerConsent: offer.token, requestKey });
+            const ends = shortTime(created.expiresAt, ctx.user.timezone);
+            return said(
+              {
+                message: `Tap this link to start your identity check. It works once and ends at ${ends}: ${created.url}`,
+                hint: 'Send `message` as it is. Keep the linkId to read progress. A new link replaces one nobody has opened yet, so do not call this again to resend.',
+              },
+              {
+                status: 'sent',
+                url: created.url,
+                linkId: created.linkId,
+                expiresAt: created.expiresAt,
+              },
+            );
+          },
+        );
       } catch (error) {
-        // One open link per person: the open one is reused, not a failure.
-        // Self keeps only a hash of its token, so its URL cannot be sent
-        // again; the person uses the link they already have.
+        // Self refuses a new link only while a check is in progress: that
+        // one is continued, not a failure. Self keeps only a hash of its
+        // token, so its URL cannot be sent again.
         const open = openLinkOf(error);
         if (open) {
           const ends = shortTime(open.expiresAt, ctx.user.timezone);
-          return {
-            status: 'already_open',
-            linkId: open.linkId,
-            linkStatus: open.status,
-            expiresAt: open.expiresAt,
-            message: `A link is already open; it ends at ${ends}. Please use the link you already have.`,
-          };
+          return said(
+            {
+              message: `Your identity check is already in progress; it ends at ${ends}. Please carry on with it.`,
+              hint: 'Its link cannot be sent again; read progress with this linkId.',
+            },
+            {
+              status: 'already_open',
+              linkId: open.linkId,
+              linkStatus: open.status,
+              expiresAt: open.expiresAt,
+            },
+          );
         }
         return failed(ctx, 'credentials_request_action', error);
       }
@@ -974,8 +1063,8 @@ export function createCredentialsTools(
     {
       name: 'credentials_request_action',
       description: [
-        'Carry out a catalogued action the person allowed with credentials_request_action_permission. For "self.identity-check" it asks Self for a link where they start an identity check (one open link at a time; it works once and ends after about 15 minutes; the first device that opens it keeps it).',
-        'Send the url as one link in a short message (the `message` is ready to send). Keep the linkId to read progress with credentials_action_status. status "already_open": a link they already have is still open (its URL cannot be sent again); relay the message and read its progress with that linkId.',
+        'Carry out a catalogued action the person allowed with credentials_request_action_permission. For "self.identity-check" it asks Self for a link where they start an identity check (it works once and ends after about 15 minutes; the first device that opens it keeps it).',
+        'Send the `message` (it holds the link) as it is. Keep the linkId to read progress with credentials_action_status. A new call replaces a link nobody has opened yet (the old one stops working), so call it again only when they need a new link. status "already_open": their check is in progress; relay the message and read progress with that linkId.',
         'If they have not allowed it yet the answer says so: ask for permission first. WhatsApp only.',
       ].join(' '),
       schema: ActionInput,
@@ -996,14 +1085,40 @@ export function createCredentialsTools(
     return parsed.success ? parsed.data : null;
   }
 
-  const LINK_MESSAGES: Record<LinkStatus, string> = {
-    sent: "They haven't opened the link yet.",
-    opened: 'They opened the link.',
-    in_progress: "They're doing the identity check now.",
-    passed: 'They passed the identity check and saved their credential.',
-    failed: "The identity check didn't pass.",
-    expired: 'The link ended before it was used.',
-    cancelled: 'The link was cancelled.',
+  const LINK_WORDING: Record<LinkStatus, Wording> = {
+    sent: {
+      message: "You haven't opened the link yet.",
+      hint: 'Wait for them; do not poll.',
+    },
+    opened: {
+      message: 'You opened the link.',
+      hint: 'Wait for them to go on; do not poll.',
+    },
+    in_progress: {
+      message: "You're doing the identity check now.",
+      hint: 'Wait for them to finish; do not poll.',
+    },
+    passed: {
+      message: 'You passed the identity check and saved your credential.',
+      hint: 'Go on with the task; credentials_check can now prove it.',
+    },
+    failed: {
+      message: "The identity check didn't pass.",
+      hint: 'Offer a new link only if they want to try again.',
+    },
+    expired: {
+      message: 'The link ended before it was used.',
+      hint: 'Offer a new link only if they still want the check.',
+    },
+    cancelled: {
+      message: 'The link was cancelled.',
+      hint: 'Offer a new link only if they still want the check.',
+    },
+  };
+
+  const WAIT_WORDING: Wording = {
+    message: "There's nothing new yet. Please give it a little while.",
+    hint: 'You asked about this link too often (at most 6 a minute). Do not poll; wait for the person to say how it went.',
   };
 
   const actionStatus = tool(
@@ -1011,25 +1126,48 @@ export function createCredentialsTools(
       const ready = readiness(ctx, cfg);
       if (isRefusal(ready)) return ready;
       const kv = kvOf(ctx);
-      if (!kv)
-        return { error: 'not_available', message: MESSAGES.notAvailable };
+      if (!kv) return unavailable();
       const args = ActionStatusInput.parse(raw);
-      try {
-        const grants = await allowedGrants(ctx, ready, kv, args.action);
-        if (!Array.isArray(grants)) return grants;
-        const link = grantFor(grants, 'link', LINK_CAPABILITY);
-        if (!link)
-          return { error: 'internal_error', message: MESSAGES.ourSide };
-        const state = await selfClient(ctx, ready, deps, link).linkStatus(
-          args.ref,
-        );
-        return {
+      const stateAnswer = (state: {
+        linkId: string;
+        status: LinkStatus;
+        updatedAt: number;
+        expiresAt: number;
+      }) =>
+        said(LINK_WORDING[state.status], {
           linkId: state.linkId,
           status: state.status,
           updatedAt: state.updatedAt,
           expiresAt: state.expiresAt,
-          message: LINK_MESSAGES[state.status],
-        };
+        });
+      try {
+        // At most 6 calls a minute per link; the status read last is kept
+        // 5 s (a final one for good), so most calls never reach Self.
+        const allowed = await chargeLinkStatus(kv, args.ref, now());
+        const kept = await readLinkCache(kv, args.ref, now());
+        if (!allowed)
+          return kept
+            ? stateAnswer(kept)
+            : refusal('rate_limited', WAIT_WORDING);
+        if (kept) return stateAnswer(kept);
+        const deadline = now() + TOOL_DEADLINE_MS;
+        const answer = await withGrants(
+          ctx,
+          ready,
+          kv,
+          args.action,
+          deadline,
+          async (grants) => {
+            const link = grantFor(grants, 'link', LINK_CAPABILITY);
+            if (!link) return refusal('internal_error', MESSAGES.ourSide);
+            return selfClient(ctx, ready, deps, link, deadline).linkStatus(
+              args.ref,
+            );
+          },
+        );
+        if ('error' in answer) return answer;
+        await writeLinkCache(kv, answer, now());
+        return stateAnswer(answer);
       } catch (error) {
         return failed(ctx, 'credentials_action_status', error);
       }
@@ -1037,7 +1175,7 @@ export function createCredentialsTools(
     {
       name: 'credentials_action_status',
       description:
-        'Read the progress of an action credentials_request_action started: for "self.identity-check" pass the linkId as ref (sent, opened, in_progress, passed, failed, expired, cancelled). No personal data comes back. Only call it when you need the answer; do not poll in a loop. WhatsApp only.',
+        'Read the progress of an action credentials_request_action started: for "self.identity-check" pass the linkId as ref (sent, opened, in_progress, passed, failed, expired, cancelled). No personal data comes back. Only call it when you need the answer; do not poll in a loop (at most 6 a minute per link; an answer is kept 5 seconds). WhatsApp only.',
       schema: ActionStatusInput,
       effect: 'read',
     },

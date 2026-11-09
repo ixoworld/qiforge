@@ -56,7 +56,19 @@ const TrustedIssuers = z.record(
 );
 export type TrustedIssuers = z.infer<typeof TrustedIssuers>;
 
-const trustedIssuersSchema = z.preprocess((value) => {
+const trustedIssuersSchema = z.preprocess(
+  (value) => jsonOf(value),
+  TrustedIssuers,
+);
+
+/** The default trust anchor: Self's identity credential on this network. */
+export function defaultTrustedIssuers(
+  network: CredentialsNetwork,
+): TrustedIssuers {
+  return { [IDENTITY_LEVEL1_VCT]: [SELF_ISSUER_DIDS[network]] };
+}
+
+const jsonOf = (value: unknown) => {
   if (typeof value !== 'string') return value;
   try {
     return JSON.parse(value);
@@ -64,13 +76,46 @@ const trustedIssuersSchema = z.preprocess((value) => {
     // Not JSON: the record check refuses it, naming the key.
     return value;
   }
-}, TrustedIssuers);
+};
 
-/** The default trust anchor: Self's identity credential on this network. */
-export function defaultTrustedIssuers(
-  network: CredentialsNetwork,
-): TrustedIssuers {
-  return { [IDENTITY_LEVEL1_VCT]: [SELF_ISSUER_DIDS[network]] };
+/** Operator words per credential type: why the oracle asks (shown in the wallet). */
+const Purposes = z.record(
+  z.string().url().max(512),
+  z.string().min(1).max(140),
+);
+
+/**
+ * Text that reaches the person's wallet or the public catalog: no links, no
+ * markup, no control or invisible characters, one line, at most `max`.
+ */
+export function plainText(text: string, max = 140): string {
+  return (
+    text
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/\b(?:https?|ftp):\/\/\S+/gi, ' ')
+      .replace(/\bwww\.\S+/gi, ' ')
+      // Control and invisible format characters (zero-width, bidi, BOM).
+      .replace(/[\p{Cc}\p{Cf}]/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, max)
+      .trim()
+  );
+}
+
+/** A readable name for a credential type from its vct (`IdentityLevel1` → `Identity Level 1`). */
+export function typeNameOf(vct: string): string {
+  let last = '';
+  try {
+    last = new URL(vct).pathname.split('/').filter(Boolean).pop() ?? '';
+  } catch {
+    last = '';
+  }
+  const words = decodeURIComponent(last)
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/([A-Za-z])(\d)/g, '$1 $2');
+  return plainText(words, 80) || 'credential';
 }
 
 const secureUrl = z
@@ -98,6 +143,15 @@ export const credentialsConfigSchema = z.object({
    * list (the default is not added).
    */
   CREDENTIALS_TRUSTED_ISSUERS: trustedIssuersSchema.optional(),
+  /**
+   * Why the oracle asks, per credential type (JSON `{ "<vct>": "text" }`,
+   * at most 140 characters): the words on the request in the person's
+   * wallet and in the catalog. Default "Check your <type name>". Never
+   * written by the model.
+   */
+  CREDENTIALS_PURPOSES: z
+    .preprocess((value) => jsonOf(value), Purposes)
+    .optional(),
 });
 
 /** Base-schema keys the plugin reads but does not own. */
@@ -125,6 +179,8 @@ export interface CredentialsConfig {
   selfWebOrigin: string;
   /** The issuers accepted per credential type: the trust anchor. */
   trustedIssuers: TrustedIssuers;
+  /** Operator words per credential type (see `purposeFor`). */
+  purposes: Record<string, string>;
   /** The oracle account's key for `/api/internal/*` on the Hub; absent = cards off. */
   serviceKey?: string;
   /** The oracle's own DID (`did:ixo:ixo1…`): the UCAN issuer, the verifier DID. */
@@ -192,6 +248,7 @@ export function resolveCredentialsConfig(config: unknown): CredentialsConfig {
     selfWebOrigin: selfWebOriginOf(selfUrl, owned?.SELF_WEB_URL),
     trustedIssuers:
       owned?.CREDENTIALS_TRUSTED_ISSUERS ?? defaultTrustedIssuers(network),
+    purposes: owned?.CREDENTIALS_PURPOSES ?? {},
     ...(owned?.AUTH_HUB_CHANNEL_SERVICE_KEY
       ? { serviceKey: owned.AUTH_HUB_CHANNEL_SERVICE_KEY }
       : {}),
@@ -205,4 +262,22 @@ export function resolveCredentialsConfig(config: unknown): CredentialsConfig {
       : {}),
     allowLocal: isLocal(publicUrl),
   };
+}
+
+/**
+ * Why the oracle asks for `vct`, as the person reads it in their wallet:
+ * the operator's words (`CREDENTIALS_PURPOSES`) or "Check your <type
+ * name>", cleaned of links and markup either way. Never model text.
+ */
+export function purposeFor(
+  cfg: Pick<CredentialsConfig, 'purposes'>,
+  vct: string,
+): string {
+  const configured = Object.hasOwn(cfg.purposes, vct)
+    ? cfg.purposes[vct]
+    : undefined;
+  return (
+    plainText(configured ?? `Check your ${typeNameOf(vct)}`) ||
+    `Check your ${typeNameOf(vct)}`
+  );
 }

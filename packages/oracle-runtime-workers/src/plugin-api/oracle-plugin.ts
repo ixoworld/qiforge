@@ -8,6 +8,9 @@ import type { PluginRoute } from '../shell/app';
 import type {
   AgentMiddleware,
   AuthExcludedRoute,
+  OwnerCallback,
+  OwnerCallbackContext,
+  OwnerCallbackResult,
   PluginContext,
   PluginManifest,
   PluginSubAgent,
@@ -165,6 +168,18 @@ export abstract class OraclePlugin {
    * can close over config without reading `env` themselves.
    */
   getRoutes?(ctx: PluginContext): PluginRoute[];
+
+  /**
+   * A call one of this plugin's routes forwarded into the owner's user
+   * object (the object's `ownerCallback` RPC), run there with the owner's kv
+   * rows: for a reply that must be checked against state only the owner's
+   * object holds (a verifier's encrypted answer, decrypted with the check's
+   * private key). Called only for plugins that define it.
+   */
+  handleOwnerCallback?(
+    call: OwnerCallback,
+    ctx: OwnerCallbackContext,
+  ): Promise<OwnerCallbackResult>;
 
   /**
    * Routes owned by this plugin's `getRoutes()` that MUST NOT pass through

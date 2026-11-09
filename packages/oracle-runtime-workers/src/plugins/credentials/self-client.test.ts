@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { sha256Hex } from './hub-client';
 import { LINKS_PATH, SelfLinksClient } from './self-client';
 import { json, noSleep, routedFetch, SELF } from './test-fixtures';
 
@@ -38,7 +39,15 @@ describe('SelfLinksClient', () => {
       offerConsent: 'OFFER',
       requestKey: 'rk',
     });
-    expect(facts).toEqual([[{ method: 'POST', path: LINKS_PATH }]]);
+    expect(facts).toEqual([
+      [
+        {
+          method: 'POST',
+          path: LINKS_PATH,
+          body_sha256: await sha256Hex(calls[0]?.body ?? ''),
+        },
+      ],
+    ]);
   });
 
   it('keeps the data of 409 link_active', async () => {
@@ -94,14 +103,21 @@ describe('SelfLinksClient', () => {
   });
 
   it("names the oracle's entity in a second fact when configured", async () => {
-    const { fetchImpl } = routedFetch({
+    const { fetchImpl, calls } = routedFetch({
       [`POST ${SELF}${LINKS_PATH}`]: () => json(LINK, 201),
     });
     const entityDid = 'did:ixo:entity:309db22aa6e41e3929597dcb185a23be';
     const { self, facts } = client(fetchImpl, entityDid);
     await self.createLink({ offerConsent: 'OFFER', requestKey: 'rk' });
     expect(facts).toEqual([
-      [{ method: 'POST', path: LINKS_PATH }, { entityDid }],
+      [
+        {
+          method: 'POST',
+          path: LINKS_PATH,
+          body_sha256: await sha256Hex(calls[0]?.body ?? ''),
+        },
+        { entityDid },
+      ],
     ]);
   });
 
