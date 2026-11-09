@@ -1,5 +1,12 @@
 # @ixo/common
 
+## 1.8.2
+
+### Patch Changes
+
+- Updated dependencies [[`6a05f6f`](https://github.com/ixoworld/qiforge/commit/6a05f6ff8536cec363b614ca035f428045b35788)]:
+  - @ixo/ixo-transaction@0.3.0
+
 ## 1.8.1
 
 ### Patch Changes
