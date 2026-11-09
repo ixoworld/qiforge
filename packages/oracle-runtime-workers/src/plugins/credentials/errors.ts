@@ -123,6 +123,11 @@ export const MESSAGES = {
     message: 'Your permission for this has ended or was stopped.',
     hint: 'Ask for permission again only if they still want this.',
   },
+  stateUnknown: {
+    message:
+      "This permission is in a state this version doesn't know yet; update the runtime.",
+    hint: "The Auth Hub reported a permission state this runtime doesn't recognise; no grants are used. An operator must update the runtime. Do not retry.",
+  },
   declined: {
     message: 'You chose not to allow it.',
     hint: 'Respect it; ask again only if they bring it up.',

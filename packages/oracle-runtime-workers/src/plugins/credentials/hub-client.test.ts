@@ -319,7 +319,7 @@ describe('HubPermissionsClient.status', () => {
     const { fetchImpl } = routedFetch({
       [`GET ${HUB}${PERMISSIONS_PATH}/card_1`]: [
         () => json({ id: 'card_1', status: 'allowed', grants: [] }),
-        () => json({ id: 'card_1', status: 'nonsense', items: [] }),
+        () => json({ id: 'card_1', status: 7, items: [] }),
       ],
     });
     const { hub } = client(fetchImpl);
@@ -343,6 +343,36 @@ describe('HubPermissionsClient.status', () => {
     const { hub } = client(fetchImpl);
     const state = await hub.status('card_1');
     expect(state.items[0]?.status).toBe('stopped');
+  });
+
+  it('accepts the Hub stopping state on an item and a card', async () => {
+    const { fetchImpl } = routedFetch({
+      [`GET ${HUB}${PERMISSIONS_PATH}/card_1`]: () =>
+        json({
+          id: 'card_1',
+          status: 'stopping',
+          items: [{ index: 0, kind: 'credential-check', status: 'stopping' }],
+        }),
+    });
+    const { hub } = client(fetchImpl);
+    const state = await hub.status('card_1');
+    expect(state.status).toBe('stopping');
+    expect(state.items[0]?.status).toBe('stopping');
+  });
+
+  it('maps a state it does not know to unknown without throwing', async () => {
+    const { fetchImpl } = routedFetch({
+      [`GET ${HUB}${PERMISSIONS_PATH}/card_1`]: () =>
+        json({
+          id: 'card_1',
+          status: 'frozen',
+          items: [{ index: 0, kind: 'credential-check', status: 'paused' }],
+        }),
+    });
+    const { hub } = client(fetchImpl);
+    const state = await hub.status('card_1');
+    expect(state.status).toBe('unknown');
+    expect(state.items[0]?.status).toBe('unknown');
   });
 
   it('trusts a Hub error code only in its plain shape', async () => {

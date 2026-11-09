@@ -48,6 +48,7 @@ import {
   type PermissionItemState,
   type PermissionRequest,
   type PermissionState,
+  type ItemStatus,
   type PermissionStatus,
 } from './hub-client';
 import {
@@ -492,7 +493,27 @@ const STATUS_WORDING: Record<PermissionStatus, Wording> = {
     message: 'You stopped this permission.',
     hint: 'Respect it; ask again only if they bring it up.',
   },
+  stopping: {
+    message: 'This permission is being stopped.',
+    hint: 'Treat it as stopped: it is no longer in use. Respect it; ask again only if they bring it up.',
+  },
+  unknown: MESSAGES.stateUnknown,
 };
+
+/** The refusal for a card or item that is not usable: declined, in an unknown state, or ended. */
+function endedRefusal(
+  cardStatus: PermissionStatus,
+  itemStatus?: ItemStatus,
+): CredentialsRefusal {
+  if (cardStatus === 'unknown' || itemStatus === 'unknown')
+    return refusal('permission_ended', MESSAGES.stateUnknown);
+  return refusal(
+    'permission_ended',
+    cardStatus === 'declined' || itemStatus === 'declined'
+      ? MESSAGES.declined
+      : MESSAGES.permissionEnded,
+  );
+}
 
 function cardMessage(name: string, url: string): Wording {
   return {
@@ -1122,12 +1143,7 @@ export function createCredentialsTools(
         // Declined, expired or stopped: the card in use, if any, stays.
         await clearPendingAction(kv, action);
         if (!inUse.success)
-          return refusal(
-            'permission_ended',
-            state.status === 'declined'
-              ? MESSAGES.declined
-              : MESSAGES.permissionEnded,
-          );
+          return endedRefusal(state.status, actionItem(state, action)?.status);
       }
     }
     if (inUse.success) return { permissionId: inUse.data.permissionId };
@@ -1177,12 +1193,7 @@ export function createCredentialsTools(
     ) {
       await kv.delete(CREDENTIALS_KV_NAMESPACE, actionKey(action));
       await clearGrantsCache(kv, action);
-      return refusal(
-        'permission_ended',
-        state.status === 'declined' || item?.status === 'declined'
-          ? MESSAGES.declined
-          : MESSAGES.permissionEnded,
-      );
+      return endedRefusal(state.status, item?.status);
     }
     await writeGrantsCache(kv, action, permissionId, grants, now());
     return { grants, cached: false };
@@ -1257,12 +1268,7 @@ export function createCredentialsTools(
         state.status !== 'allowed' ||
         (item.status ?? 'allowed') !== 'allowed'
       )
-        return refusal(
-          'permission_ended',
-          state.status === 'declined' || item?.status === 'declined'
-            ? MESSAGES.declined
-            : MESSAGES.permissionEnded,
-        );
+        return endedRefusal(state.status, item?.status);
       const nowSeconds = Math.floor(now() / 1000);
       const live = {
         ...item,

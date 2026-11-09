@@ -1706,6 +1706,74 @@ describe('review fixes for the one-card plugin', () => {
     ]);
   });
 
+  it('returns a stopping item with no grants, and an unknown state as unknown', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const kv = createMemoryUserKv();
+    let item: Record<string, unknown> = { status: 'stopping' };
+    const { fetchImpl } = routedFetch({
+      [`POST ${HUB}/api/internal/permissions`]: () => json(CARD, 201),
+      [`GET ${HUB}/api/internal/permissions/card_1`]: () =>
+        json(
+          allowedBody([
+            {
+              index: 0,
+              kind: 'service-action',
+              action: 'yo.rewards-claim',
+              grants: [grant('claim', 'rewards/claim')],
+              ...item,
+            },
+          ]),
+        ),
+    });
+    const c = clock();
+    const tools = toolsFor(fetchImpl, oracleKey.doc, c);
+    const ctx = channelCtx(adapter, { kv });
+    await run(
+      tools.credentials_request_action_permission,
+      { action: 'yo.rewards-claim' },
+      ctx,
+    );
+    const status = (await run(
+      tools.credentials_permission_status,
+      { permissionId: 'card_1' },
+      ctx,
+    )) as { items: { state: string; granted?: unknown }[] };
+    expect(status.items.map((i) => i.state)).toEqual(['stopping']);
+    expect(status.items[0]?.granted).toBeUndefined();
+    const used = (await run(
+      tools.credentials_request_action,
+      { action: 'yo.rewards-claim' },
+      ctx,
+    )) as { error?: string; granted?: unknown };
+    expect(used.error).toBe('permission_ended');
+    expect(used.granted).toBeUndefined();
+
+    // A state this version does not know: unknown, never a throw.
+    item = { status: 'frozen' };
+    await c.sleep(5_001);
+    const unknown = (await run(
+      tools.credentials_permission_status,
+      { permissionId: 'card_1' },
+      ctx,
+    )) as { items: { state: string; granted?: unknown }[] };
+    expect(unknown.items.map((i) => i.state)).toEqual(['unknown']);
+    expect(unknown.items[0]?.granted).toBeUndefined();
+    await c.sleep(5_001);
+    // The stopping answer above ended the waiting card; ask again.
+    await run(
+      tools.credentials_request_action_permission,
+      { action: 'yo.rewards-claim' },
+      ctx,
+    );
+    const refused = (await run(
+      tools.credentials_request_action,
+      { action: 'yo.rewards-claim' },
+      ctx,
+    )) as { error?: string; message?: string };
+    expect(refused.error).toBe('permission_ended');
+    expect(refused.message).toContain("doesn't know yet");
+  });
+
   it('names the item for a local refusal in a several-item request', async () => {
     const { adapter, oracleKey } = recordingUcan();
     const { fetchImpl, calls } = routedFetch({});
