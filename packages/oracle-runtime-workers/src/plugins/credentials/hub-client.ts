@@ -80,7 +80,18 @@ export type PermissionGrant = z.infer<typeof GrantSchema>;
  * kept: the item's position and kind, the action of a service action (to
  * find its grants) and the outcome ids written when the person allowed it.
  */
+export const ITEM_STATUSES = [
+  'pending',
+  'allowed',
+  'stopped',
+  'expired',
+  'declined',
+] as const;
+export type ItemStatus = (typeof ITEM_STATUSES)[number];
+
 export const ItemStateSchema = z.object({
+  /** The item's own state; older answers carry only the card's. */
+  status: z.enum(ITEM_STATUSES).optional(),
   index: z
     .number()
     .int()
@@ -93,11 +104,13 @@ export const ItemStateSchema = z.object({
 });
 export type PermissionItemState = z.infer<typeof ItemStateSchema>;
 
-const StatusAnswer = z.object({
+const CardStatus = z.object({
   id: z.string().regex(OPAQUE_ID),
   status: z.enum(PERMISSION_STATUSES),
   allowedAt: z.number().int().positive().optional(),
   expiresAt: z.number().int().positive().optional(),
+});
+export const StatusAnswer = CardStatus.extend({
   items: z.array(ItemStateSchema).min(1).max(MAX_PERMISSION_ITEMS),
 });
 export type PermissionState = z.infer<typeof StatusAnswer>;
@@ -250,8 +263,18 @@ export class HubPermissionsClient {
       }),
       ...this.transport(),
     });
+    // Two steps: a valid card without `items` is a Hub from before the
+    // one-card release, not a fault to retry.
+    const card = CardStatus.safeParse(answer.body);
+    if (!card.success || card.data.id !== id) this.invalid();
+    if (!answer.body || !('items' in answer.body))
+      throw new CredentialsServiceError({
+        service: 'hub',
+        status: 502,
+        code: 'hub_update_needed',
+      });
     const parsed = StatusAnswer.safeParse(answer.body);
-    if (!parsed.success || parsed.data.id !== id) this.invalid();
+    if (!parsed.success) this.invalid();
     return parsed.data;
   }
 

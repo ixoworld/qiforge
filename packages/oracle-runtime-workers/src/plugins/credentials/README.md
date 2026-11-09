@@ -22,7 +22,8 @@ holding 1-5 items:
   presentation requests for that credential by itself.
 - **Use a service for you** item (`service-action`): an entry id from the
   Hub's approved list (the Hub validates it and refuses ids it does not know;
-  ask the operator which entries exist). Allow signs the entry's delegations,
+  use only an entry id the operator's instructions name; `self.identity-check`
+  is the only built-in one). Allow signs the entry's delegations,
   person to oracle, and writes the entry's own standing consents. Today's
   entry, `self.identity-check`, yields on ONE card the `link` and `offer`
   grants AND a standing consent for Self's verifier, so a later
