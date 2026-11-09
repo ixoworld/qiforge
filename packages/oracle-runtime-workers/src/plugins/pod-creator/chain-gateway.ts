@@ -1,5 +1,9 @@
 import type { BatchMessageRoute, ITrxMsg, Network } from '@ixo/ixo-transaction';
 import type { RuntimeContext } from '../../plugin-api/types';
+import type {
+  DaoGroupLookup,
+  DaoGroupSpec,
+} from '../ixo-transaction/dao-group';
 import type { ServicePodBlueprint } from './blueprint-types';
 
 /**
@@ -75,6 +79,21 @@ export type PodConfirmation =
       retryable: boolean;
     };
 
+/**
+ * The governance group a POD's `create_pod_group` asked the wallet to
+ * create: a DAO DAO group as the IXO Transaction plugin's `create_dao_group`
+ * creates one (`ixo-transaction/dao-group.ts`).
+ */
+export type PodGroupSpec = DaoGroupSpec;
+
+/**
+ * What a group creation transaction says (`findDaoGroup`). `found`: it
+ * created the group the conversation sent, at `coreAddress`; `pending`: not
+ * on chain (or not indexed) within the lookup's time; `failed`: it failed,
+ * or it is not that group; `unavailable`: the chain could not be read.
+ */
+export type PodGroupLookup = DaoGroupLookup;
+
 /** What the user's wallet was asked to sign, as the create session records it. */
 export interface SentPodBatch {
   /** The messages exactly as sent (proto-JSON, catalog-validated). */
@@ -143,7 +162,8 @@ export interface PodProfile {
  * The bundled implementation is `createIxoChainGateway()`
  * (`ixo-chain-gateway.ts`): one `MsgCreateEntity` owned by the user, its
  * profile reserved on the oracle's homeserver and published after approval,
- * read back from chain REST; then the POD's domain card. Every method
+ * read back from chain REST; then the POD's domain card, and the address of
+ * the governance group the user created for it. Every method
  * receives the request `RuntimeContext` (the user, the config, the turn's
  * abort signal, the oracle's Matrix device) and answers an expected refusal
  * as a result; a throw is a programming error. The seam is injected so the
@@ -179,6 +199,15 @@ export interface ChainGateway {
     input: { network: Network; podDid: string },
     ctx: RuntimeContext,
   ): Promise<void>;
+  /**
+   * Read a group creation transaction back: that the user's account
+   * created exactly `group` (a DAO DAO `dao_core` of the network), and the
+   * address of its core contract.
+   */
+  findPodGroup(
+    input: { txHash: string; network: Network; group: PodGroupSpec },
+    ctx: RuntimeContext,
+  ): Promise<PodGroupLookup>;
 }
 
 const notConfigured = (): never => {
@@ -199,4 +228,5 @@ export const notConfiguredChainGateway: ChainGateway = {
   confirmPodCreation: async () => notConfigured(),
   prepareDomainCard: async () => notConfigured(),
   requestIndexing: async () => notConfigured(),
+  findPodGroup: async () => notConfigured(),
 };

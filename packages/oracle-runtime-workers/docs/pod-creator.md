@@ -117,13 +117,13 @@ one another's. A stored row that no longer matches the schema is reported
 (blueprint) or treated as no session (create session — the safe direction for
 an approval gate).
 
-| Store                        | Where                                     | Contents                                                                                              | Bound (per user)         |
-| ---------------------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------ |
-| `KvBlueprintStore`           | `ctx.kv` `pod-creator/blueprints`         | one blueprint per thread                                                                              | 500 entries / 24 h idle  |
-| `KvCreateSessionStore`       | `ctx.kv` `pod-creator/create-sessions`    | propose→approve state per (user, thread); what was sent for signing, the confirmed POD, its card step | 1000 entries / 1 h idle  |
-| prepared batch               | `ctx.blobStore` (object storage, not SQL) | the batch's validated proto-JSON, the profile, the documents still to publish                         | 1 h TTL                  |
-| public documents             | `ctx.kv` `pod-creator/public-documents`   | per homeserver + document SHA-256: the reserved (or uploaded) media                                   | 100 entries / 1 h idle   |
-| `CapsuleContentClient` cache | plugin instance (isolate memory)          | SKILL.md per capsule name (public text)                                                               | 64 / 6 h; failures 5 min |
+| Store                        | Where                                     | Contents                                                                                                                                                          | Bound (per user)         |
+| ---------------------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| `KvBlueprintStore`           | `ctx.kv` `pod-creator/blueprints`         | one blueprint per thread                                                                                                                                          | 500 entries / 24 h idle  |
+| `KvCreateSessionStore`       | `ctx.kv` `pod-creator/create-sessions`    | propose→approve state per (user, thread); what was sent for signing, the confirmed POD, its card step and its governance group (preview, creation, address, link) | 1000 entries / 1 h idle  |
+| prepared batch               | `ctx.blobStore` (object storage, not SQL) | the batch's validated proto-JSON, the profile, the documents still to publish                                                                                     | 1 h TTL                  |
+| public documents             | `ctx.kv` `pod-creator/public-documents`   | per homeserver + document SHA-256: the reserved (or uploaded) media                                                                                               | 100 entries / 1 h idle   |
+| `CapsuleContentClient` cache | plugin instance (isolate memory)          | SKILL.md per capsule name (public text)                                                                                                                           | 64 / 6 h; failures 5 min |
 
 On a host without `ctx.kv` every tool fails with a clear error rather than
 keeping a design silently in memory; the per-turn sub-agent hook contributes
@@ -160,6 +160,9 @@ stateDiagram-v2
     Sent --> Approved: re-approve to dispatch again
     Sent --> Confirmed: confirm_pod_creation (the tx carries the sent batch)
     Confirmed --> CardAdded: add_pod_domain_card (once per POD)
+    Confirmed --> GroupShown: create_pod_group without riskConfirmation
+    GroupShown --> GroupCreated: create_pod_group with riskConfirmation (a later turn, the same group)
+    GroupCreated --> GroupLinked: link_pod_group (once per POD)
     Prepared --> Prepared: re-prepare supersedes everything
     Prepared --> [*]: start_pod_design restart (clears session)
     Approved --> [*]: start_pod_design restart (clears session)
@@ -239,13 +242,128 @@ credentials: only a forced re-index needs the indexer's admin key; devnet
 `https://domain-indexer.ixo.earth`, or `DOMAIN_INDEXER_URL`); a failure is
 only logged, the indexer's chain poller indexes it later anyway.
 
-**Known limits — what the Portal adds that the oracle does not.** The Portal
-also provisions a POD's governance group (`lib/pods/provisionPodGroup.ts`: a
-DAO DAO multisig through `MsgInstantiateContract`, linked as `Governs` and
-added as a controller), which the `@ixo/ixo-transaction` catalog does not
-support, so a POD created here has no group and its Decisions tab is empty
-until one is linked. The POD's Matrix space is created by the Portal (the
-rooms bot) the first time the POD is opened there.
+**Known limits — what the Portal adds that the oracle does not.** The POD's
+Matrix space is created by the Portal (the rooms bot) the first time the POD
+is opened there.
+
+### The governance group
+
+A confirmed POD can get the governance group its Decisions tab needs, as the
+Portal provisions one (ixo-portal `lib/pods/provisionPodGroup.ts`), in two
+wallet signatures (`group-tools.ts`). It is optional and the user's choice:
+the hand-offs after `confirm_pod_creation` and after the domain card ask the
+model to offer it — with the members and approval rule the design names when
+its sections specify a governance group, multisig, board or other deciding
+body, otherwise as a question — and never to create one unasked or with
+members the user did not give. The words the model gets, after confirm:
+"…and a governance group for the POD (create_pod_group, then link_pod_group:
+two wallet signatures), which the POD's Decisions tab needs. If the design
+names a governance group, multisig, board or other body that decides for the
+POD, offer to create it with those members and that approval rule; otherwise
+ask the user whether they want one. Ask too how long voting on a proposal
+lasts and whether members may change their votes (create_pod_group explains
+both and their defaults). Never create a group the user did not
+ask for, and never invent members: each member is an ixo1… address the user
+gives or confirms." (after "…which the POD's Decisions tab needs" it adds
+"; if the user already has a DAO DAO group for it, link_dao_group (IXO
+Transaction) links that one instead, with one signature"). The domain
+card's result ends "If the POD has no governance group yet, offer" the
+same.
+
+These two tools act on the POD of their own conversation only. A group for
+a POD made earlier, elsewhere or in the Portal, or an existing group, is the
+IXO Transaction plugin's `link_dao_group`
+([ixo-transaction](ixo-transaction.md#linking-a-group-to-an-entity)): it
+reads the entity and the group on chain, checks that the user can change
+the entity, and sends the same two messages (or the one still missing).
+`create_pod_group`'s description and the no-POD refusal point there.
+
+1. **`create_pod_group({ members, threshold, name?, votingPeriodSeconds?, allowRevoting?, riskConfirmation? })`** —
+   one `MsgInstantiateContract` of the network's `dao_core`
+   (`buildDaoDaoGroupInstantiate`): a cw4 group of the members (1 to
+   `MAX_POD_GROUP_MEMBERS` = 12 checksummed `ixo1…` accounts, one vote
+   each), single-choice proposals passed by `threshold` yes votes (1 to the
+   number of members), `votingPeriodSeconds` to vote (1 hour to 30 days,
+   default the Portal's 7 days) and `allowRevoting` (whether members may
+   change their vote, default the Portal's yes), the user's account as sender and
+   wasm admin, an empty description, `name` the POD's name unless given
+   (at most 64 characters; a longer POD name is refused with a request for a
+   group name). Validated by the catalog for the network before anything is
+   asked. The first call (no `riskConfirmation`) sends nothing and answers
+   `{ status: 'confirm', podDid, name, members, threshold,
+votingPeriodSeconds, allowRevoting, summary, linkSummary, risks, message }`:
+   the summary the wallet will show (the name, every member, the threshold,
+   how long voting lasts and the vote-change rule in plain words — "Votes can
+   be changed until it ends, so a proposal passes only then" or "It passes as
+   soon as it has them, and votes cannot be changed" —, whether the user is a
+   member) and the
+   risks of **both** signatures (the `create-group` route's and the link
+   pair's: `MsgAddLinkedEntity`, `MsgAddController`), recorded in the create
+   session as a digest of the POD, network and group with the request that
+   showed it. The call that signs must quote every risk, carry the same
+   group, and come from a later request (`same-request` / `not-previewed`
+   are refused), so the user has seen the members in the chat before the
+   wallet asks. It then claims the POD's one group (once per POD), sends the
+   batch, and on `signed` reads the transaction back by its hash
+   (`gateway.findPodGroup`, below) for the group's core address:
+   `{ status: 'created', podDid, name, txHash, coreAddress?, message }`;
+   without a readable address yet `coreAddress` is absent and
+   `link_pod_group` reads it again. `failed`, `rejected`, `error`,
+   `unavailable` release the claim (a new preview and confirmation are
+   needed); a `timeout` keeps it (outcome unknown: never sent again).
+   Twelve members with a 64-character name and the longest voting-time
+   wording fit the 1000-character summary. The tool's description tells the
+   model to ask the user both voting rules (or offer the defaults), with the
+   trade-off: with vote changes a proposal passes only when voting closes,
+   even with enough yes votes, so it is carried out only then; without, it
+   passes as soon as enough members vote yes, and no vote can be changed.
+   The rules are part of the previewed digest (other rules than shown are
+   `not-previewed`), and a group recorded before they existed reads with the
+   Portal's.
+2. **`link_pod_group({ txHash? })`** — `buildDaoDaoGroupLinkMessages`:
+   `MsgAddLinkedEntity { id: <pod>, linkedEntity: { id: "{id}#<core>",
+type: "group", relationship: "governs", service: "" } }` and
+   `MsgAddController { id: <pod>, controllerDid: "did:ixo:wasm:<core>" }`,
+   signed by the user's account (the Portal writes `Group` / `Governs`;
+   the Portal reads the relationship in any case, and the rooms bot admits
+   the members of a `did:ixo:wasm:` controller). No second chat
+   confirmation: the user accepted its risks with the group, and the wallet
+   shows it. When the address is not known it is read first, from the
+   recorded hash or, after a timeout or a wallet that returned no hash, the
+   `txHash` the user gives; `pending` / `unavailable` results say to call
+   again. Once per POD (claimed while out, released when nothing was
+   signed, kept on an unknown outcome); `{ status: 'linked', podDid,
+coreAddress, txHash?, decisionsUrl, message }` with the Portal's
+   Decisions tab, `<portal>/domain/<pod>/overview?tab=decisions`.
+
+Both refuse with `{ status: 'refused', retryable, message }` when no POD was
+confirmed in this conversation (a group is created only for the POD this
+conversation created, which the user owns), on mainnet without
+`POD_CREATOR_ALLOW_MAINNET`, without a chain gateway, or for a user whose
+DID is not an IXO account; nothing is sent then. Each step writes an audit
+line (`[pod-creator] group previewed / wallet signed / group <core>
+created / group link …` with user, thread and POD; never a secret).
+
+**`findPodGroup`** (bundled gateway) looks the transaction up the way
+confirm does (`/cosmos/tx/v1beta1/txs/{hash}`, polled within 20 s through
+404s and transient failures; a hash that is not 64 hex characters is
+refused without a request) and accepts it only when it carries exactly
+one `MsgInstantiateContract` from the user's account of the network's
+`dao_core` code id whose name, members (in any order, weight 1),
+threshold, voting time and vote-change rule are the ones sent — chain REST shows the top-level `msg` as JSON
+and each module's `msg` as base64 of its JSON — and takes the address of
+its `dao_core` `instantiate` event (`findDaoDaoCoreAddress`), and of its
+proposal module and intake when the transaction names exactly one of each.
+Anything else is `failed` and not retried. The lookup and the check are
+shared with the IXO Transaction plugin's `create_dao_group`
+(`lookupTransaction` in `ixo-chain/tx-lookup.ts`, `findDaoGroup` in
+`ixo-transaction/dao-group.ts`), as are the group's input bounds and its
+plain-words summary helpers.
+
+Proposals of the group, in the Portal chat, go through the IXO Transaction
+plugin's DAO DAO step tools ([ixo-transaction](ixo-transaction.md#dao-dao-proposal-steps),
+confirmed in a later message as `create_pod_group` is);
+`chain_lookup entity` shows a POD's `governingGroup`.
 
 Every step writes an audit line via `ctx.logger`
 (`[pod-creator] prepared/approved/signed/confirmed …` with user DID, thread,
@@ -369,10 +487,25 @@ the package root, so a fork constructs its own instance and passes it in
       input: { network: Network; podDid: string },
       ctx: RuntimeContext,
     ): Promise<void>;
+    findPodGroup(
+      input: { txHash: string; network: Network; group: PodGroupSpec },
+      ctx: RuntimeContext,
+    ): Promise<
+      | { status: 'found'; coreAddress: string }
+      | { status: 'failed'; message: string; retryable: false }
+      | {
+          status: 'pending' | 'unavailable';
+          message: string;
+          retryable: boolean;
+        }
+    >;
   }
   ```
 
-  Expected refusals are results; a throw is a programming error.
+  Expected refusals are results; a throw is a programming error. A fork's
+  own gateway implements `findPodGroup` too (the group step reads the new
+  group's address through it); `notConfiguredChainGateway` throws there
+  like everywhere, and the group tools refuse without calling it.
 
   `messages` are proto-JSON `{ typeUrl, value }` (camelCase fields, integer
   amounts as strings, bytes as base64, timestamps as RFC 3339 strings) with
@@ -542,7 +675,8 @@ network is mainnet without the opt-in, before spending the approval.
 ## Tests
 
 - `pnpm test` (workerd) — `src/plugins/pod-creator/*.test.ts` (bounded map,
-  blueprint store, create-session store, capsule client + registry fetcher,
+  blueprint store, create-session store (the group's preview, claim,
+  address and link included), capsule client + registry fetcher,
   stage, orchestration tools, sub-agents, create tools, plugin boot through
   `createRuntimeCore`). `request-pod-signature.test.ts` drives the create
   path through the plugin's own tools against a fake AG-UI bridge over the
@@ -565,7 +699,20 @@ network is mainnet without the opt-in, before spending the approval.
   when publishing fails), what the model sees for every confirm outcome
   (`effect: 'read'`, the Portal link, nothing sent → refused), and the card
   step (once per POD, released or kept by outcome, a wrong batch refused,
-  the mainnet gate). `ixo-chain-gateway.test.ts` drives the bundled gateway
+  the mainnet gate), and the governance group hand-off after confirm and
+  after the card. `group-tools.test.ts` covers the group shown before it is
+  signed (the exact summary of both signatures and every risk), the
+  confirmation refused in the same turn, for another group or with a risk
+  missing, the refusals (no POD, mainnet, no gateway, a group the catalog
+  refuses, a POD name too long), the voting rules the user chose (in the
+  preview, the wallet's summary and the instantiate message; other rules
+  than shown refused; a voting time outside 1 hour to 30 days refused),
+  the largest group fitting the summary, the
+  two signatures with their exact messages and once per POD, an address
+  read later from the recorded hash, a timeout never sending the group
+  again and the user's hash linking it, a hash that is not this group, a
+  declined group needing a new confirmation and a declined link sent again
+  alone, and nothing claimed without a Portal tab. `ixo-chain-gateway.test.ts` drives the bundled gateway
   against a fake chain REST, homeserver and indexer, on a faked clock (the
   waits are injected, nothing waits for real): the profile document and its
   reservation, the `MsgCreateEntity` passing `validateTransactionBatch` and
@@ -575,7 +722,12 @@ network is mainnet without the opt-in, before spending the approval.
   document or the account, the one prepare budget, confirm polling through
   404, 429, 5xx and network errors, `pending`/`unavailable` with the real
   elapsed time, an unreadable or oversized answer, the turn's abort while
-  waiting, every binding refusal, and the card and indexer calls.
+  waiting, every binding refusal, the card and indexer calls, and
+  `findPodGroup` (the core address after polling, members in any order,
+  every transaction that is not the sent group — another voting time or
+  vote-change rule included —, a failed transaction or one
+  naming no group, `pending` within the budget, a user without an IXO
+  account).
   `matrix-media.test.ts` covers the reservation and upload against Synapse's
   answer shapes: reuse of the same bytes, the fallback without async
   uploads, a 401 and fresh credentials, `botCredentials` failing or hanging,

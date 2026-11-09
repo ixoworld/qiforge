@@ -1,7 +1,11 @@
-import { ITrxMsgSchema } from '@ixo/ixo-transaction';
+import {
+  DAODAO_DEFAULT_ALLOW_REVOTING,
+  DAODAO_VOTING_PERIOD_SECONDS,
+  ITrxMsgSchema,
+} from '@ixo/ixo-transaction';
 import { z } from 'zod';
 import type { RuntimeContext, UserKvSurface } from '../../plugin-api/types';
-import type { SentPodBatch } from './chain-gateway';
+import type { PodGroupSpec, SentPodBatch } from './chain-gateway';
 
 /**
  * Per-(user, thread) state machine for the create path's propose → approve →
@@ -20,8 +24,9 @@ import type { SentPodBatch } from './chain-gateway';
  * prepare → approve → sign on its own.
  *
  * After the commit it keeps what was sent for signing (confirmation checks
- * the transaction against it), the POD confirmed from it, and the one domain
- * card step that may follow.
+ * the transaction against it), the POD confirmed from it, and the steps
+ * that may follow, each once per POD: its domain card, and its governance
+ * group (shown to the user, created, then linked to the POD).
  */
 export interface CreateSessionStore {
   /** Record a freshly prepared batch; anything before it in the thread is superseded. */
@@ -77,6 +82,54 @@ export interface CreateSessionStore {
     threadId: string,
     outcome: 'added' | 'released',
   ): Promise<void>;
+  /**
+   * Record the governance group shown to the user for confirmation (its
+   * digest) from request `requestId`; a later preview replaces it.
+   * `no-pod` when no POD was confirmed in the thread, `claimed` when its
+   * group is being created or was created already.
+   */
+  previewGroup(
+    userDid: string,
+    threadId: string,
+    preview: { digest: string; requestId: string },
+  ): Promise<GroupPreviewOutcome>;
+  /**
+   * Claim the confirmed POD's one group creation for `group`, whose digest
+   * must be the one previewed, from a later request than the preview's. The
+   * preview is spent; the group is recorded as being created.
+   */
+  claimGroup(
+    userDid: string,
+    threadId: string,
+    claim: { digest: string; requestId: string; group: PodGroupSpec },
+  ): Promise<GroupClaim>;
+  /**
+   * End a claimed group creation: `released` lets it be previewed again;
+   * `{ txHash? }` records it signed (with its transaction when known).
+   */
+  settleGroup(
+    userDid: string,
+    threadId: string,
+    outcome: 'released' | { txHash?: string },
+  ): Promise<void>;
+  /** Record the group's core contract, read from its transaction `txHash`. */
+  recordGroupCore(
+    userDid: string,
+    threadId: string,
+    found: { txHash: string; coreAddress: string },
+  ): Promise<void>;
+  /**
+   * Claim the link of the created group to the POD. `no-pod`, `no-group`
+   * (none created), `no-core` (its address not read yet) or `claimed` (being
+   * linked, or linked) refuse.
+   */
+  claimGroupLink(userDid: string, threadId: string): Promise<GroupLinkClaim>;
+  /** End a claimed link: `linked` keeps it closed, `released` lets it run again. */
+  settleGroupLink(
+    userDid: string,
+    threadId: string,
+    outcome: 'linked' | 'released',
+  ): Promise<void>;
   /** Drop the session (the design was restarted). */
   clear(userDid: string, threadId: string): Promise<void>;
 }
@@ -87,12 +140,41 @@ export interface CreateSessionView {
   approvedBlobId?: string;
   sent?: SentPodBatch;
   confirmed?: { podDid: string; txHash: string };
+  /** The confirmed POD's governance group, once its creation was claimed. */
+  group?: PodGroupView;
+}
+
+/** A POD's governance group as the session keeps it. */
+export interface PodGroupView {
+  group: PodGroupSpec;
+  /** `sending`: the wallet was asked and its answer is not known; `created`: signed. */
+  state: 'sending' | 'created';
+  txHash?: string;
+  coreAddress?: string;
+  link?: 'sending' | 'linked';
 }
 
 export type CardClaim =
   | { status: 'ok'; podDid: string; sent: SentPodBatch }
   | { status: 'no-pod' }
   | { status: 'claimed'; state: 'sending' | 'added' };
+
+export type GroupPreviewOutcome = 'ok' | 'no-pod' | 'claimed';
+
+export type GroupClaim =
+  | { status: 'ok'; podDid: string }
+  | { status: 'no-pod' | 'not-previewed' | 'same-request' }
+  | { status: 'claimed'; state: PodGroupView['state'] };
+
+export type GroupLinkClaim =
+  | {
+      status: 'ok';
+      podDid: string;
+      group: PodGroupSpec;
+      coreAddress: string;
+    }
+  | { status: 'no-pod' | 'no-group' | 'no-core' }
+  | { status: 'claimed'; state: 'sending' | 'linked' };
 
 /** Resolves the create-session store for one request (it lives in the user's database). */
 export type CreateSessionStoreFor = (ctx: RuntimeContext) => CreateSessionStore;
@@ -121,6 +203,34 @@ const createSessionSchema = z.object({
   confirmed: z.object({ podDid: z.string(), txHash: z.string() }).optional(),
   /** The confirmed POD's domain card: being added (claimed), or added. */
   card: z.enum(['sending', 'added']).optional(),
+  /** The confirmed POD's governance group, from its preview to its link. */
+  group: z
+    .object({
+      /** The group shown to the user, and the request that showed it. */
+      preview: z
+        .object({ digest: z.string(), requestId: z.string() })
+        .optional(),
+      /** Set once its creation is claimed. */
+      created: z
+        .object({
+          group: z.object({
+            name: z.string(),
+            members: z.array(z.string()),
+            threshold: z.number(),
+            // A group claimed before these were chosen had the Portal's rules.
+            votingPeriodSeconds: z
+              .number()
+              .default(DAODAO_VOTING_PERIOD_SECONDS.default),
+            allowRevoting: z.boolean().default(DAODAO_DEFAULT_ALLOW_REVOTING),
+          }),
+          state: z.enum(['sending', 'created']),
+          txHash: z.string().optional(),
+          coreAddress: z.string().optional(),
+          link: z.enum(['sending', 'linked']).optional(),
+        })
+        .optional(),
+    })
+    .optional(),
 });
 
 type CreateSession = z.infer<typeof createSessionSchema>;
@@ -254,6 +364,7 @@ export class KvCreateSessionStore implements CreateSessionStore {
       ...(session.approved ? { approvedBlobId: session.preparedBlobId } : {}),
       ...(session.sent ? { sent: session.sent } : {}),
       ...(session.confirmed ? { confirmed: session.confirmed } : {}),
+      ...(session.group?.created ? { group: session.group.created } : {}),
     };
   }
 
@@ -268,9 +379,10 @@ export class KvCreateSessionStore implements CreateSessionStore {
       (current) => {
         const session = parseSession(current);
         if (!session?.sent) return session;
-        // The card belongs to the POD: another confirmed POD starts afresh.
+        // The card and the group belong to the POD: another confirmed POD
+        // starts afresh.
         const samePod = session.confirmed?.podDid === pod.podDid;
-        const { card: _card, ...rest } = session;
+        const { card: _card, group: _group, ...rest } = session;
         return {
           ...(samePod ? session : rest),
           confirmed: { podDid: pod.podDid, txHash: pod.txHash },
@@ -324,6 +436,168 @@ export class KvCreateSessionStore implements CreateSessionStore {
       },
       this.writeOptions,
     );
+  }
+
+  /** One atomic read-modify-write of the session's group, with what the step decided. */
+  private async updateGroup<T>(
+    userDid: string,
+    threadId: string,
+    fallback: T,
+    step: (
+      session: CreateSession,
+    ) => { outcome: T; group?: CreateSession['group'] } | undefined,
+  ): Promise<T> {
+    let outcome = fallback;
+    await this.kv.update(
+      CREATE_SESSION_NAMESPACE,
+      key(userDid, threadId),
+      (current) => {
+        const session = parseSession(current);
+        if (!session) return session;
+        const decided = step(session);
+        if (!decided) return session;
+        outcome = decided.outcome;
+        if (!('group' in decided)) return session;
+        const { group: _group, ...rest } = session;
+        return decided.group ? { ...rest, group: decided.group } : rest;
+      },
+      this.writeOptions,
+    );
+    return outcome;
+  }
+
+  previewGroup(
+    userDid: string,
+    threadId: string,
+    preview: { digest: string; requestId: string },
+  ): Promise<GroupPreviewOutcome> {
+    return this.updateGroup<GroupPreviewOutcome>(
+      userDid,
+      threadId,
+      'no-pod',
+      (session) => {
+        if (!session.confirmed) return undefined;
+        if (session.group?.created) return { outcome: 'claimed' };
+        return { outcome: 'ok', group: { preview } };
+      },
+    );
+  }
+
+  claimGroup(
+    userDid: string,
+    threadId: string,
+    claim: { digest: string; requestId: string; group: PodGroupSpec },
+  ): Promise<GroupClaim> {
+    return this.updateGroup<GroupClaim>(
+      userDid,
+      threadId,
+      { status: 'no-pod' },
+      (session) => {
+        const { confirmed, group } = session;
+        if (!confirmed) return undefined;
+        if (group?.created)
+          return {
+            outcome: { status: 'claimed', state: group.created.state },
+          };
+        if (group?.preview?.digest !== claim.digest)
+          return { outcome: { status: 'not-previewed' } };
+        if (group.preview.requestId === claim.requestId)
+          return { outcome: { status: 'same-request' } };
+        return {
+          outcome: { status: 'ok', podDid: confirmed.podDid },
+          group: { created: { group: claim.group, state: 'sending' } },
+        };
+      },
+    );
+  }
+
+  async settleGroup(
+    userDid: string,
+    threadId: string,
+    outcome: 'released' | { txHash?: string },
+  ): Promise<void> {
+    await this.updateGroup(userDid, threadId, undefined, (session) => {
+      const created = session.group?.created;
+      if (created?.state !== 'sending') return undefined;
+      if (outcome === 'released')
+        return { outcome: undefined, group: undefined };
+      return {
+        outcome: undefined,
+        group: {
+          created: {
+            ...created,
+            state: 'created',
+            ...(outcome.txHash !== undefined ? { txHash: outcome.txHash } : {}),
+          },
+        },
+      };
+    });
+  }
+
+  async recordGroupCore(
+    userDid: string,
+    threadId: string,
+    found: { txHash: string; coreAddress: string },
+  ): Promise<void> {
+    await this.updateGroup(userDid, threadId, undefined, (session) => {
+      const created = session.group?.created;
+      if (!created || created.coreAddress !== undefined) return undefined;
+      return {
+        outcome: undefined,
+        group: {
+          created: {
+            ...created,
+            state: 'created',
+            txHash: found.txHash,
+            coreAddress: found.coreAddress,
+          },
+        },
+      };
+    });
+  }
+
+  claimGroupLink(userDid: string, threadId: string): Promise<GroupLinkClaim> {
+    return this.updateGroup<GroupLinkClaim>(
+      userDid,
+      threadId,
+      { status: 'no-pod' },
+      (session) => {
+        const created = session.group?.created;
+        if (!session.confirmed) return undefined;
+        if (!created) return { outcome: { status: 'no-group' } };
+        if (created.link)
+          return { outcome: { status: 'claimed', state: created.link } };
+        if (created.coreAddress === undefined)
+          return { outcome: { status: 'no-core' } };
+        return {
+          outcome: {
+            status: 'ok',
+            podDid: session.confirmed.podDid,
+            group: created.group,
+            coreAddress: created.coreAddress,
+          },
+          group: { created: { ...created, link: 'sending' } },
+        };
+      },
+    );
+  }
+
+  async settleGroupLink(
+    userDid: string,
+    threadId: string,
+    outcome: 'linked' | 'released',
+  ): Promise<void> {
+    await this.updateGroup(userDid, threadId, undefined, (session) => {
+      const created = session.group?.created;
+      if (created?.link !== 'sending') return undefined;
+      const { link: _link, ...rest } = created;
+      return {
+        outcome: undefined,
+        group: {
+          created: outcome === 'linked' ? { ...created, link: 'linked' } : rest,
+        },
+      };
+    });
   }
 
   async clear(userDid: string, threadId: string): Promise<void> {

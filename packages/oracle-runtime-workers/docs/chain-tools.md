@@ -454,7 +454,13 @@ status? }`, an authz `MsgExec` as its first 5 inner summaries, anything
   "defined by the implementer and interpreted by client applications", with
   no enum. `entities` adds `orderedBy: 'id (text)'` (see the ordering
   limits below). Entity and DID lists are capped at 20 items, resources at
-  `{ id, type, description, serviceEndpoint, mediaType }`.
+  `{ id, type, description, serviceEndpoint, mediaType }`. `entity` adds
+  `governingGroup`: the DAO DAO core address after the `#` of its linked
+  entity of type `group` with relationship `governs`, compared in any case
+  (the Portal writes `Group` / `Governs`), as the Portal's Decisions tab
+  reads it; absent when there is none, when the part after `#` is not a
+  checksummed 32-byte `ixo1…` contract, or when two such links name
+  different groups (no guess).
 - **Every string from the index is clipped**: ids, addresses, hashes and
   dates 120 characters, names and labels 200, memos 256, excerpts 240.
 
@@ -793,7 +799,11 @@ allowed"` (no `remaining` then), an empty cw20 limit `cw20SpendLimit:
   (Auth Hub's `daodao.proposal.create` card, [channels](channels.md#group-steps))
   each DAO also carries `proposalLists` (its first 3 proposal modules,
   `idx_dao_proposal_module_dao`, with the intake module by primary key;
-  `moreProposalLists: true` past them): `proposalModule`, `prefix`,
+  `moreProposalLists: true` past them): `proposalModule`, `intake` (the
+  pre-propose contract a new proposal is sent to, from the list's
+  `proposalCreationPolicy` `{ module: { addr } }`; none when the list takes
+  proposals from anyone directly — what the Portal's
+  `create_dao_proposal` tool sends to, [ixo-transaction](ixo-transaction.md#dao-dao-proposal-steps)), `prefix`,
   `membersOnly` (the intake's `open_proposal_submission: false`),
   `deposit` (a bank coin, or a cw20 amount marked `cardCannotPay`, with
   `refundPolicy` `only_passed` / `always` / `never`; none when the module
@@ -1038,7 +1048,16 @@ may instead name the statuses that mean "none" (`noneOn`, `rest.ts`; the
 gov vote read's 400 and 404): such an answer is `{ ok: true, absent: true }`,
 neither retried nor logged. A 400 counts as none only when its body (at
 most 8 KiB read) is a gRPC-gateway error with `code` 3 or 5; any other
-400 is a failure. A kind
+400 is a failure. A CosmWasm read (a smart query or a contract's info) may
+set `contractQuery`: a 500 whose body (at most 8 KiB) says `query wasm
+contract failed: <reason>` is the contract refusing the query (no such
+item, a query it does not know), and one that says `no such contract:
+
+<address>` is an address without a contract; both are answered as a quiet
+`invalid_input` with the chain's words (the reason at most 300 characters),
+not retried; any other 500 stays `unavailable`. The IXO Transaction
+plugin's DAO DAO proposal check and `link_dao_group` read contracts this
+way. A kind
 never throws for an upstream problem; it answers `{ ok: false, reason,
 detail, retryable }`.
 `BLOCKSYNC_GRAPHQL_URL` is checked once per call with `new URL()` (http or

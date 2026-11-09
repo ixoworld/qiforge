@@ -1,0 +1,32 @@
+{
+  "tx": {
+    "body": {
+      "messages": [
+        {
+          "@type": "/ixo.iid.v1beta1.MsgAddLinkedEntity",
+          "id": "did:ixo:entity:25b5f5c01545f004d5ecb5f32c14495e",
+          "linkedEntity": {
+            "type": "group",
+            "id": "{id}#ixo1add3jw5qcm3pvcywy2mhhxcw50s40pm0hyenarvpmy5p3t65ey0q906c48",
+            "relationship": "governs",
+            "service": ""
+          },
+          "signer": "ixo1pe3q5htqe02p7x7etqastvl0kn37k6xepn0f4r"
+        },
+        {
+          "@type": "/ixo.iid.v1beta1.MsgAddController",
+          "id": "did:ixo:entity:25b5f5c01545f004d5ecb5f32c14495e",
+          "controller_did": "did:ixo:wasm:ixo1add3jw5qcm3pvcywy2mhhxcw50s40pm0hyenarvpmy5p3t65ey0q906c48",
+          "signer": "ixo1pe3q5htqe02p7x7etqastvl0kn37k6xepn0f4r"
+        }
+      ]
+    }
+  },
+  "tx_response": {
+    "txhash": "6B8EB9594948393E647409500490DCAB2CA6B31DBEA175AB22AA9289CA670BE3",
+    "height": "16270406",
+    "code": 0,
+    "codespace": "",
+    "raw_log": ""
+  }
+}

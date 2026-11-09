@@ -51,6 +51,12 @@ export {
   type RequestPodSignatureResult,
 } from './create-tools';
 export {
+  MAX_POD_GROUP_MEMBERS,
+  createGroupTools,
+  type CreatePodGroupResult,
+  type LinkPodGroupResult,
+} from './group-tools';
+export {
   POD_BATCH_TYPE_URLS,
   notConfiguredChainGateway,
   podBatchProblem,
@@ -59,6 +65,8 @@ export {
   type GatewayResult,
   type PendingDocument,
   type PodConfirmation,
+  type PodGroupLookup,
+  type PodGroupSpec,
   type PodProfile,
   type PreparedPodBatch,
   type SentPodBatch,
@@ -73,6 +81,10 @@ export {
   KvCreateSessionStore,
   type ApproveOutcome,
   type CardClaim,
+  type GroupClaim,
+  type GroupLinkClaim,
+  type GroupPreviewOutcome,
+  type PodGroupView,
   type CreateSessionStore,
   type CreateSessionView,
   type CreateSessionStoreFor,

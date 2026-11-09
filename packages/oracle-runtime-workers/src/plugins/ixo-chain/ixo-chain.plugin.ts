@@ -72,7 +72,11 @@ const configSchema = z.object({
 
 type Network = z.infer<typeof NetworkSchema>;
 
-function networkOf(config: MergedConfig): Network {
+/**
+ * The network the oracle's chain reads (and the Portal wallet steps built
+ * from them) are for: `NETWORK`, else mainnet.
+ */
+export function networkOf(config: MergedConfig): Network {
   const parsed = NetworkSchema.safeParse(config.NETWORK);
   return parsed.success ? parsed.data : 'mainnet';
 }

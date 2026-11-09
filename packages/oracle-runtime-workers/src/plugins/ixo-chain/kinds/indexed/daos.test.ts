@@ -87,6 +87,9 @@ describe('daos', () => {
             {
               proposalModule:
                 'ixo15sy5qemc86ytfka8xqapvntyjth6vxpan5pvd6k98nt7gn7a4myq9t8qvk',
+              // The intake a new proposal is sent to.
+              intake:
+                'ixo1rwpggyhce88huyf5drlgm43n29mczaqm6svdzzjjq48625nnnsvsej2dhv',
               prefix: 'A',
               membersOnly: true,
               deposit: {
@@ -131,6 +134,8 @@ describe('daos', () => {
             {
               proposalModule:
                 'ixo1770puc38e2p6cg4shhmum3q70u9jlx5yx3ryvyrhc958694w77rqludyf7',
+              intake:
+                'ixo19v3herxcvuhkng5rel3fd8fklv3zz6jltk69drvhyvnr7fzjhh2qgsnl4v',
               prefix: 'A',
               membersOnly: true,
               votingTime: '3 days',
@@ -301,6 +306,7 @@ describe('daos', () => {
           proposalLists: [
             {
               proposalModule: 'ixo1list',
+              intake: 'ixo1intake',
               prefix: 'A',
               votingTime: '1 hour',
               allowRevoting: true,
@@ -313,6 +319,7 @@ describe('daos', () => {
             },
             {
               proposalModule: 'ixo1cw20',
+              intake: 'ixo1intake',
               prefix: 'C',
               disabled: true,
               multipleChoice: true,

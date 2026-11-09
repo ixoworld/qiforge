@@ -21,6 +21,7 @@ import {
   type CreateSessionStore,
 } from './create-session-store';
 import { createCreateTools } from './create-tools';
+import { createGroupTools } from './group-tools';
 import { createIxoChainGateway } from './ixo-chain-gateway';
 import { createOrchestrationTools } from './orchestration-tools';
 import {
@@ -46,9 +47,11 @@ const manifest: PluginManifest = {
   whenToUse: [
     'User wants to create, design, or stand up a new POD (Programmable Organisational Domain) or service domain on IXO.',
     'User describes a service or organisation they want to launch and asks the oracle to turn it into a working POD.',
+    'User wants the POD created in this chat to get a governance group (DAO DAO multisig).',
   ],
   whenNotToUse: [
     'Operating or supporting an already-live POD — out of scope for now.',
+    'A governance group for a POD made earlier or elsewhere: link_dao_group (IXO Transaction).',
     'Generic on-chain entity creation unrelated to POD design.',
   ],
   examples: [
@@ -108,9 +111,10 @@ function requireUserKv(ctx: RuntimeContext): UserKvSurface {
  * `CapsuleContentClient`.
  *
  * Exposes the conductor's orchestration tools (the blueprint lifecycle), the
- * stage-gated specialist sub-agents, and the on-chain create path — a
+ * stage-gated specialist sub-agents, the on-chain create path — a
  * propose → approve → commit handoff with single-use approvals, ending in the
- * blocking `sign_transaction` AG-UI round-trip. Composing the batch and
+ * blocking `sign_transaction` AG-UI round-trip — and what follows a created
+ * POD: its domain card and, when the user wants one, its governance group. Composing the batch and
  * reading the broadcast transaction back sit behind an injectable gateway
  * (the bundled one by default).
  *
@@ -155,6 +159,7 @@ export class PodCreatorPlugin extends OraclePlugin {
         this.chainGateway,
         createSessionStoreFor,
       ),
+      ...createGroupTools(this.chainGateway, createSessionStoreFor),
     ];
   }
 

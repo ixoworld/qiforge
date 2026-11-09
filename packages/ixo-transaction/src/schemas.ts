@@ -120,9 +120,21 @@ export const LinkedResourceSchema = z
   })
   .strict();
 
+/**
+ * A linked entity that is an account or contract rather than a DID, as the
+ * Portal writes it: `{id}#<address>`, `{id}` read as the document's own id
+ * (a group's core contract linked to the entity it governs).
+ */
+const LinkedEntityAddressSchema = z
+  .string()
+  .regex(
+    /^\{id\}#ixo1(?:[023456789acdefghjklmnpqrstuvwxyz]{38}|[023456789acdefghjklmnpqrstuvwxyz]{58})$/,
+    'Expected a did:ixo DID or {id}#ixo1… (an account or contract address)',
+  );
+
 export const LinkedEntitySchema = z
   .object({
-    id: IxoDidSchema,
+    id: z.union([IxoDidSchema, LinkedEntityAddressSchema]),
     type: z.string().min(1),
     relationship: z.string().min(1),
     service: z.string().optional(),
@@ -506,7 +518,8 @@ export type FieldKind =
   | 'accordedRight'
   | 'accordedRightArray'
   | 'tokenBatchArray'
-  | 'authzGrant';
+  | 'authzGrant'
+  | 'wasmMsg';
 
 export function schemaForFieldKind(kind: FieldKind): z.ZodTypeAny {
   switch (kind) {
@@ -578,6 +591,10 @@ export function schemaForFieldKind(kind: FieldKind): z.ZodTypeAny {
       return z.array(AdjudicationDidSchema);
     case 'mintBatchArray':
       return z.array(MintBatchSchema).min(1);
+    case 'wasmMsg':
+      // A contract message as a JSON object. The catalog checks each
+      // DAO DAO route's message exactly (`daodao-schemas.ts`).
+      return z.record(z.string(), z.unknown());
     default:
       return z.never();
   }

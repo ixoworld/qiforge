@@ -316,6 +316,8 @@ async function proposalListOf(
   const viaIntake = isRecord(policy.module);
   return compact({
     proposalModule: idText(list.address),
+    // The intake (pre-propose contract) a new proposal is sent to.
+    intake: isRecord(policy.module) ? idText(policy.module.addr) : undefined,
     prefix: text(list.prefix, 20),
     disabled: list.status === 'disabled' ? true : undefined,
     multipleChoice:
@@ -422,7 +424,7 @@ export const daos = defineKind({
     '`addedByGroupAdmin: true` (every cw4-member row): members of this kind of group are added by its admin. That is normal: leave it out of an ordinary answer and never suggest the person did not join; mention it briefly only when it matters, for example when they do not recognise a group (“Members of this group are added by its admin.”).',
     '`nameIsSelfChosen: true`: the group chose its own name and description. Mention it only when it matters (for example when they rely on the name to tell who runs the group), in one short, calm note such as “Group names are chosen by the group itself.”',
     '`dao` is also the group’s own account: what the group holds (chain_lookup balances with that address) and what acts when one of its proposals passes.',
-    '`proposalLists` (at most 3; `moreProposalLists: true` past them): where the DAO takes proposals, each `proposalModule` (its address), `prefix` (the letter before proposal numbers, A in A3), `votingTime`, `allowRevoting` (whether a vote can be changed until voting closes), `membersOnly: true` (only members may propose), `membersOnlyCarryOut: true` (only members may carry out a passed proposal), and `deposit` when proposing takes one: a bank coin (`amount` beside `symbol`) or a cw20 amount with `cardCannotPay: true`, with `refundPolicy` (`only_passed`: back only if it passes and is carried out, `always`: back when carried out or closed, `never`: not back). `multipleChoice: true`: Auth Hub cards cannot use that list. `disabled: true`: the group switched it off: no new proposals through it, and its proposals with actions can’t be carried out (votes and closes still work).',
+    '`proposalLists` (at most 3; `moreProposalLists: true` past them): where the DAO takes proposals, each `proposalModule` (its address), `intake` (when there is one: the contract a new proposal is sent to, which passes it to the list), `prefix` (the letter before proposal numbers, A in A3), `votingTime`, `allowRevoting` (whether a vote can be changed until voting closes), `membersOnly: true` (only members may propose), `membersOnlyCarryOut: true` (only members may carry out a passed proposal), and `deposit` when proposing takes one: a bank coin (`amount` beside `symbol`) or a cw20 amount with `cardCannotPay: true`, with `refundPolicy` (`only_passed`: back only if it passes and is carried out, `always`: back when carried out or closed, `never`: not back). `multipleChoice: true`: Auth Hub cards cannot use that list. `disabled: true`: the group switched it off: no new proposals through it, and its proposals with actions can’t be carried out (votes and closes still work).',
     'NFT (cw721) staking is not indexed here. Ask `dao_proposals` for what the DAOs are voting on.',
   ].join(' '),
   source: 'blocksync',

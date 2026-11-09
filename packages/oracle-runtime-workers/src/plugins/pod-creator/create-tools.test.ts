@@ -147,6 +147,11 @@ function mockGateway(over: Partial<ChainGateway> = {}): ChainGateway {
       documents: [CARD_DOCUMENT],
     }),
     requestIndexing: async () => undefined,
+    findPodGroup: async () => ({
+      status: 'failed',
+      retryable: false,
+      message: 'not in these tests',
+    }),
     ...over,
   };
 }
@@ -780,6 +785,11 @@ describe('create-path tools', () => {
       summary: 'POD live',
       message: expect.stringContaining('add_pod_domain_card'),
     });
+    // The governance group is offered from the design, or as a question,
+    // never created unasked or with invented members.
+    expect(z.object({ message: z.string() }).parse(out).message).toMatch(
+      /a governance group for the POD \(create_pod_group, then link_pod_group: two wallet signatures\).*If the design names a governance group, multisig, board.*otherwise ask the user whether they want one\. Ask too how long voting on a proposal lasts and whether members may change their votes.*Never create a group the user did not ask for, and never invent members/,
+    );
     expect(confirmSpy).toHaveBeenCalledWith(
       { txHash: TX_HASH, network: 'testnet', sent: SENT },
       expect.anything(),
@@ -1225,7 +1235,9 @@ describe('add_pod_domain_card', () => {
       status: 'added',
       podDid: POD_DID,
       txHash: TX_HASH,
-      message: expect.stringMatching(/domain card was added/),
+      message: expect.stringMatching(
+        /domain card was added.*If the POD has no governance group yet, offer a governance group for the POD \(create_pod_group/,
+      ),
     });
     expect(prepareCard).toHaveBeenCalledExactlyOnceWith(
       { network: 'testnet', podDid: POD_DID, profile: PREPARE_ARGS },

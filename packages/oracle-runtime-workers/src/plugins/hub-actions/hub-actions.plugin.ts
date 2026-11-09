@@ -914,7 +914,7 @@ export const HUB_ACTIONS_OFF_REASON =
  * never reads the refusal as an Auth Hub outage.
  */
 export const NOT_A_CHANNEL_CHAT_REASON =
-  'Coin sends, chain transactions and other Auth Hub actions can be prepared only in a channel chat with this oracle (such as WhatsApp), not in this chat. Auth Hub was not contacted and nothing was prepared or sent. Tell the person to ask in their channel chat.';
+  'Auth Hub actions can be prepared only in a channel chat with this oracle (such as WhatsApp), not in this chat. Auth Hub was not contacted and nothing was prepared or sent. In a Portal chat, coin sends, chain transactions and DAO DAO group proposals and votes are signed in the Portal wallet through the ixo-transaction capability instead; elsewhere, tell the person to ask in their channel chat.';
 
 /**
  * The turn's channel binding and Hub client when Hub actions can be
@@ -1278,6 +1278,7 @@ const manifest: PluginManifest = {
   ],
   whenNotToUse: [
     'Signing, executing, or treating a resource open as acceptance.',
+    'A Portal chat: there, coin sends, chain transactions and DAO DAO group proposals and votes are signed in the Portal wallet through the ixo-transaction capability. Auth Hub actions are for channel chats (such as WhatsApp).',
   ],
   tags: ['actions', 'channels'],
   category: 'integration',

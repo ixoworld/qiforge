@@ -5,11 +5,11 @@
  * kinds) proto-JSON the SDK's codec reads and encodes; every nested schema
  * must use the SDK message's field names.
  */
-import { cosmos, google, ixo } from '@ixo/impactxclient-sdk';
+import { cosmos, cosmwasm, google, ixo } from '@ixo/impactxclient-sdk';
 import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 
-import { MESSAGE_CATALOG } from '../src/catalog.js';
+import { MESSAGE_CATALOG, findMessageByTypeUrl } from '../src/catalog.js';
 import { resolveProtoCodec, toEncodeObject } from '../src/react/proto.js';
 import {
   AUTHORIZATION_TYPE_URLS,
@@ -49,6 +49,7 @@ import {
   ENTITY_DID,
   verification,
 } from './fixtures.js';
+import { DAODAO_ROUTE_SAMPLES } from './daodao-fixtures.js';
 
 interface FullCodec {
   fromPartial(object: object): object;
@@ -171,7 +172,34 @@ const SAMPLES: Record<FieldKind, unknown> = {
     },
     expiration: '2026-12-31T00:00:00.000Z',
   },
+  // Every route with a contract message has its own sample (DAO DAO: one
+  // exact shape per route), used instead of the per-kind samples.
+  wasmMsg: {},
 };
+
+/** The SDK namespace of a typeUrl and the codec path inside it. */
+function sdkCodec(typeUrl: string): FullCodec {
+  const [namespace, ...path] = typeUrl.replace(/^\//, '').split('.');
+  const root =
+    namespace === 'cosmos' ? cosmos : namespace === 'cosmwasm' ? cosmwasm : ixo;
+  return codecAt(root, path.join('.'));
+}
+
+/** A valid value for the entry: its route's own sample, else one per field kind. */
+function sampleValue(
+  spec: (typeof MESSAGE_CATALOG)[number],
+): Record<string, unknown> {
+  const routeSample =
+    spec.module === 'daodao' ? DAODAO_ROUTE_SAMPLES[spec.action] : undefined;
+  if (spec.module === 'daodao' && !routeSample) {
+    throw new Error(`No sample for /ixo daodao ${spec.action}`);
+  }
+  return routeSample
+    ? routeSample().value
+    : Object.fromEntries(
+        spec.fields.map((field) => [field.name, SAMPLES[field.kind]]),
+      );
+}
 
 /**
  * Nested kinds whose sample must come back out of the SDK codec intact
@@ -204,62 +232,65 @@ describe('the SDK the catalog is verified against', () => {
   });
 });
 
-describe.each(MESSAGE_CATALOG.map((spec) => [spec.typeUrl, spec] as const))(
-  'catalog entry %s',
-  (typeUrl, spec) => {
-    const codec = codecAt(
-      typeUrl.startsWith('/cosmos.') ? cosmos : ixo,
-      typeUrl.replace(/^\/(?:ixo|cosmos)\./, ''),
+describe.each(
+  MESSAGE_CATALOG.map(
+    (spec) =>
+      [`${spec.typeUrl} (${spec.module} ${spec.action})`, spec] as const,
+  ),
+)('catalog entry %s', (_name, spec) => {
+  const typeUrl = spec.typeUrl;
+  const codec = sdkCodec(typeUrl);
+
+  it('lists exactly the SDK message fields', () => {
+    expect(spec.fields.map((field) => field.name).sort()).toEqual(
+      sortedKeys(codec.fromPartial({})),
     );
+  });
 
-    it('lists exactly the SDK message fields', () => {
-      expect(spec.fields.map((field) => field.name).sort()).toEqual(
-        sortedKeys(codec.fromPartial({})),
-      );
-    });
+  it('validates a sample of every field and the SDK codec encodes it', () => {
+    const value = sampleValue(spec);
+    // A typeUrl several routes share is named by its route too.
+    const validated = validateTransactionDraft(
+      findMessageByTypeUrl(typeUrl)
+        ? { typeUrl, value }
+        : { messageType: spec.module, action: spec.action, typeUrl, value },
+    );
+    expect(resolveProtoCodec(typeUrl).fromJSON).toBe(codec.fromJSON);
 
-    it('validates a sample of every field and the SDK codec encodes it', () => {
-      const value = Object.fromEntries(
-        spec.fields.map((field) => [field.name, SAMPLES[field.kind]]),
-      );
-      const validated = validateTransactionDraft({ typeUrl, value });
-      expect(resolveProtoCodec(typeUrl).fromJSON).toBe(codec.fromJSON);
-
-      // The Portal's own conversion (authorizations encoded into `Any`).
-      const bytes = codec
-        .encode(toEncodeObject(validated.message).value)
-        .finish();
-      const decoded = codec.decode(bytes);
-      if (!isRecord(decoded)) throw new Error('decoded to a non-object');
-      const json = codec.toJSON(decoded);
-      if (!isRecord(json)) throw new Error('toJSON gave a non-object');
-      const nestedFields = spec.fields.filter((field) =>
-        ROUND_TRIP_KINDS.has(field.kind),
-      );
-      expect(
-        Object.fromEntries(
-          nestedFields.map((field) => [field.name, json[field.name]]),
-        ),
-      ).toMatchObject(
-        Object.fromEntries(
-          nestedFields.map((field) => [field.name, SAMPLES[field.kind]]),
-        ),
-      );
-      const stringFields = spec.fields.filter((field) =>
-        STRING_KINDS.has(field.kind),
-      );
-      expect(
-        Object.fromEntries(
-          stringFields.map((field) => [field.name, decoded[field.name]]),
-        ),
-      ).toEqual(
-        Object.fromEntries(
-          stringFields.map((field) => [field.name, SAMPLES[field.kind]]),
-        ),
-      );
-    });
-  },
-);
+    // The Portal's own conversion (authorizations encoded into `Any`).
+    const bytes = codec
+      .encode(toEncodeObject(validated.message).value)
+      .finish();
+    const decoded = codec.decode(bytes);
+    if (!isRecord(decoded)) throw new Error('decoded to a non-object');
+    const json = codec.toJSON(decoded);
+    if (!isRecord(json)) throw new Error('toJSON gave a non-object');
+    const nestedFields = spec.fields.filter((field) =>
+      ROUND_TRIP_KINDS.has(field.kind),
+    );
+    expect(
+      Object.fromEntries(
+        nestedFields.map((field) => [field.name, json[field.name]]),
+      ),
+    ).toMatchObject(
+      Object.fromEntries(
+        nestedFields.map((field) => [field.name, value[field.name]]),
+      ),
+    );
+    const stringFields = spec.fields.filter((field) =>
+      STRING_KINDS.has(field.kind),
+    );
+    expect(
+      Object.fromEntries(
+        stringFields.map((field) => [field.name, decoded[field.name]]),
+      ),
+    ).toEqual(
+      Object.fromEntries(
+        stringFields.map((field) => [field.name, value[field.name]]),
+      ),
+    );
+  });
+});
 
 describe('nested schemas use the SDK field names', () => {
   it.each([

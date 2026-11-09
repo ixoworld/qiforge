@@ -1,0 +1,108 @@
+{
+  "entity": {
+    "id": "did:ixo:entity:25b5f5c01545f004d5ecb5f32c14495e",
+    "type": "pod",
+    "start_date": "2026-11-09T06:58:00.516Z",
+    "end_date": "2126-10-16T06:58:00.516Z",
+    "status": 0,
+    "relayer_node": "did:ixo:entity:ac12c6f8f299071eb24f2a10591d7ab7",
+    "credentials": [],
+    "entity_verified": false,
+    "metadata": {
+      "version_id": "118f7cf98316e94415e6a453597b403a996944b1c72d3bed5662e78cfcdb5b51",
+      "created": "2026-11-09T06:58:51.412438781Z",
+      "updated": "2026-11-09T06:58:51.412438781Z"
+    },
+    "accounts": [
+      {
+        "name": "admin",
+        "address": "ixo152s0rlcd6pv0e7w68wfnxxch0eaa92x8uhw8p6"
+      }
+    ]
+  },
+  "iidDocument": {
+    "context": [],
+    "id": "did:ixo:entity:25b5f5c01545f004d5ecb5f32c14495e",
+    "controller": [
+      "did:ixo:entity:25b5f5c01545f004d5ecb5f32c14495e",
+      "did:ixo:ixo1pe3q5htqe02p7x7etqastvl0kn37k6xepn0f4r",
+      "did:ixo:wasm:ixo1add3jw5qcm3pvcywy2mhhxcw50s40pm0hyenarvpmy5p3t65ey0q906c48"
+    ],
+    "verificationMethod": [
+      {
+        "id": "did:ixo:ixo1pe3q5htqe02p7x7etqastvl0kn37k6xepn0f4r",
+        "type": "EcdsaSecp256k1VerificationKey2019",
+        "controller": "did:ixo:ixo1pe3q5htqe02p7x7etqastvl0kn37k6xepn0f4r",
+        "publicKeyBase58": "rKwpwiq2YkhRxyc1Me2Z9sDYrYTWu3TUvnKshS9jpran"
+      },
+      {
+        "id": "did:ixo:ixo1pe3q5htqe02p7x7etqastvl0kn37k6xepn0f4r#02dce71b4a43310532d933fc73f75decebe06c93d8e1d75e3f9cdad21e04007cc3",
+        "type": "EcdsaSecp256k1VerificationKey2019",
+        "controller": "did:ixo:ixo1pe3q5htqe02p7x7etqastvl0kn37k6xepn0f4r",
+        "publicKeyMultibase": "F02dce71b4a43310532d933fc73f75decebe06c93d8e1d75e3f9cdad21e04007cc3"
+      },
+      {
+        "id": "did:ixo:ixo1pe3q5htqe02p7x7etqastvl0kn37k6xepn0f4r#rKwpwiq2YkhRxyc1Me2Z9sDYrYTWu3TUvnKshS9jpran",
+        "type": "EcdsaSecp256k1VerificationKey2019",
+        "controller": "did:ixo:ixo1pe3q5htqe02p7x7etqastvl0kn37k6xepn0f4r",
+        "publicKeyBase58": "rKwpwiq2YkhRxyc1Me2Z9sDYrYTWu3TUvnKshS9jpran"
+      },
+      {
+        "id": "did:ixo:ixo1pe3q5htqe02p7x7etqastvl0kn37k6xepn0f4r#ixo1pe3q5htqe02p7x7etqastvl0kn37k6xepn0f4r",
+        "type": "CosmosAccountAddress",
+        "controller": "did:ixo:ixo1pe3q5htqe02p7x7etqastvl0kn37k6xepn0f4r",
+        "blockchainAccountID": "ixo1pe3q5htqe02p7x7etqastvl0kn37k6xepn0f4r"
+      }
+    ],
+    "service": [],
+    "authentication": [
+      "did:ixo:ixo1pe3q5htqe02p7x7etqastvl0kn37k6xepn0f4r",
+      "did:ixo:ixo1pe3q5htqe02p7x7etqastvl0kn37k6xepn0f4r#02dce71b4a43310532d933fc73f75decebe06c93d8e1d75e3f9cdad21e04007cc3",
+      "did:ixo:ixo1pe3q5htqe02p7x7etqastvl0kn37k6xepn0f4r#rKwpwiq2YkhRxyc1Me2Z9sDYrYTWu3TUvnKshS9jpran",
+      "did:ixo:ixo1pe3q5htqe02p7x7etqastvl0kn37k6xepn0f4r#ixo1pe3q5htqe02p7x7etqastvl0kn37k6xepn0f4r"
+    ],
+    "assertionMethod": [],
+    "keyAgreement": [],
+    "capabilityInvocation": [],
+    "capabilityDelegation": [],
+    "linkedResource": [
+      {
+        "type": "Settings",
+        "id": "{id}#pro",
+        "description": "Profile",
+        "mediaType": "application/json",
+        "serviceEndpoint": "https://mx.mike-test.ixo.world/_matrix/media/v3/download/mx.mike-test.ixo.world/ABgSemzjfIVPwzriNQyxKgxN",
+        "proof": "59a3088b83b6a4653c568942a78980c14553a3eab96199d8186e9dc3d259a7c0",
+        "encrypted": "false",
+        "right": ""
+      },
+      {
+        "type": "domainCard",
+        "id": "{id}#dmn",
+        "description": "Domain Card",
+        "mediaType": "application/json",
+        "serviceEndpoint": "https://mx.mike-test.ixo.world/_matrix/media/v3/download/mx.mike-test.ixo.world/uSnVkrAwIUqDUpDNXgHXLBUO",
+        "proof": "2a377645c6ba0f101c50f79c780ad085bd0340befd66b42b05a976221666795e",
+        "encrypted": "false",
+        "right": ""
+      }
+    ],
+    "linkedClaim": [],
+    "accordedRight": [],
+    "linkedEntity": [
+      {
+        "type": "group",
+        "id": "{id}#ixo1add3jw5qcm3pvcywy2mhhxcw50s40pm0hyenarvpmy5p3t65ey0q906c48",
+        "relationship": "governs",
+        "service": ""
+      }
+    ],
+    "alsoKnownAs": "",
+    "metadata": {
+      "versionId": "7a713cefd930991466200baf5b429e856078f6d4d6f1d44f193f48e1a0806b92",
+      "created": "2026-11-09T06:58:51.412438781Z",
+      "updated": "2026-11-09T07:05:13.870984716Z",
+      "deactivated": false
+    }
+  }
+}
