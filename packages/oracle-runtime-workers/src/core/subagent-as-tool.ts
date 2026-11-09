@@ -287,6 +287,7 @@ export function createSubagentAsTool(
     parentConfigurable: Record<string, unknown> | undefined,
     parentContext: Record<string, unknown> | undefined,
     signal: AbortSignal | undefined,
+    forwardedFrom: string | undefined,
   ) => {
     // Merge parent's configurable so fields like `requestId` propagate into
     // the sub-agent's tool invocations. Override `thread_id` (for checkpoint
@@ -311,6 +312,12 @@ export function createSubagentAsTool(
         // tokens never surface as user-visible text (its result reaches the
         // model as the tool's output).
         tags: ['internal', `subagent:${spec.name}`],
+        // The parent call its forwarded calls are stored under: the SSE
+        // stream names those calls the same way live, so a client keeps one
+        // card per call before and after a refetch.
+        ...(forwardedFrom
+          ? { metadata: { [FORWARDED_FROM_KEY]: forwardedFrom } }
+          : {}),
       },
     );
     return result.messages as BaseMessage[];
@@ -386,6 +393,7 @@ export function createSubagentAsTool(
           parentConfigurable,
           parentContext,
           config.signal,
+          forwardSet.size > 0 ? config.toolCall?.id : undefined,
         );
 
         if (options?.onComplete) {

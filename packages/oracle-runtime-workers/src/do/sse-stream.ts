@@ -27,6 +27,7 @@ import {
 } from '../llm/provider-error';
 import { reportsUnknownOutcome } from '@ixo/common/ai/frontend-bridge';
 import { type AIMessageChunk, ToolMessage } from '@langchain/core/messages';
+import { FORWARDED_FROM_KEY } from '../core/subagent-as-tool';
 import { harnessLimitOf, type HarnessLimitError } from '../core/turn-budget';
 import { RunBuffer, type RunFrame } from './run-buffer';
 
@@ -401,11 +402,19 @@ export async function runTurnFrames(
         continue;
       }
       if (evt.event === 'on_chat_model_end') {
-        if (isInternalModelEvent(evt)) continue;
+        // A sub-agent's model is internal (its text is not the reply), but the
+        // chat stores the calls it forwards as `<parent call id>_<call id>`
+        // (subagent-as-tool.ts), so they stream under those same ids.
+        const forwardedFrom = evt.metadata?.[FORWARDED_FROM_KEY];
+        const prefix =
+          typeof forwardedFrom === 'string' && forwardedFrom
+            ? `${forwardedFrom}_`
+            : '';
+        if (isInternalModelEvent(evt) && !prefix) continue;
         const output = (evt.data as { output?: AIMessageChunk })?.output;
         for (const call of output?.tool_calls ?? []) {
           if (call.id)
-            pendingCalls.set(call.id, {
+            pendingCalls.set(`${prefix}${call.id}`, {
               toolName: call.name,
               args: (call.args ?? {}) as Record<string, unknown>,
             });
