@@ -7,7 +7,13 @@
  * did.json lookup silently killed every plugin mint.
  */
 import {
+  ed25519SeedFromMnemonic,
+  signerFromEd25519Seed,
+  verifyEd25519,
+} from '@ixo/credentials-kit/jose';
+import {
   createDelegation,
+  parseDelegation,
   serializeDelegation,
   signerFromMnemonic,
 } from '@ixo/ucan';
@@ -102,6 +108,102 @@ describe('WorkersUcanService.createInvocationFromDelegation', () => {
       'https://memory.example.com/.well-known/did.json',
       { signal: expect.any(AbortSignal) },
     );
+  });
+});
+
+describe('WorkersUcanService: request-bound facts and the oracle key', () => {
+  const fetchSpy = vi.fn<typeof fetch>();
+  let realFetch: typeof fetch;
+
+  beforeEach(() => {
+    realFetch = globalThis.fetch;
+    fetchSpy.mockReset();
+    globalThis.fetch = fetchSpy;
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const service = () =>
+    new WorkersUcanService({
+      oracleDid: ORACLE_DID,
+      signingMnemonic: ORACLE_MNEMONIC,
+    });
+  const binding = {
+    method: 'POST',
+    path: '/api/internal/permissions',
+    body_sha256: 'ab'.repeat(32),
+  };
+
+  it('puts the caller facts first and a fresh nonce last, to a did: audience without a fetch', async () => {
+    const cap = { can: 'permissions/request', with: 'ixo:permissions' };
+    const a = await service().mintSelfSignedInvocation(
+      'did:web:hub.example',
+      cap,
+      {
+        maxTtlSeconds: 120,
+        facts: [binding],
+      },
+    );
+    const b = await service().mintSelfSignedInvocation(
+      'did:web:hub.example',
+      cap,
+      {
+        maxTtlSeconds: 120,
+        facts: [binding],
+      },
+    );
+    if ('error' in a || 'error' in b) throw new Error('mint failed');
+    const parsed = await parseDelegation(a.invocation);
+    expect(parsed.audience.did()).toBe('did:web:hub.example');
+    expect(parsed.facts[0]).toEqual(binding);
+    expect(parsed.facts[1]).toEqual({ nonce: expect.any(String) });
+    // Two mints of the same request are two different tokens.
+    expect((await parseDelegation(b.invocation)).facts[1]).not.toEqual(
+      parsed.facts[1],
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('binds a delegated invocation the same way', async () => {
+    const result = await service().createInvocationFromDelegation(
+      await userDelegationCar(),
+      SERVICE_DID,
+      { can: 'memory/*', with: 'ixo:memory' },
+      { facts: [{ method: 'GET', path: '/x' }] },
+    );
+    if ('error' in result) throw new Error(result.error);
+    expect((await parseDelegation(result.invocation)).facts[0]).toEqual({
+      method: 'GET',
+      path: '/x',
+    });
+  });
+
+  it('refuses a fact that is not a plain object', async () => {
+    const result = await service().mintSelfSignedInvocation(
+      'did:web:hub.example',
+      { can: 'permissions/request', with: 'ixo:permissions' },
+      // What a careless caller could pass at runtime (JSON is untyped).
+      { facts: JSON.parse('[["not", "an", "object"]]') },
+    );
+    expect(result).toHaveProperty('error');
+  });
+
+  it("signs bytes with the oracle's own Ed25519 key (the key the kit derives from the same phrase)", async () => {
+    const bytes = new TextEncoder().encode('request object');
+    const signed = await service().signWithOracleKey(bytes);
+    if ('error' in signed) throw new Error(signed.error);
+    const kit = signerFromEd25519Seed(
+      ed25519SeedFromMnemonic(ORACLE_MNEMONIC),
+      'x',
+    );
+    expect(Array.from(signed.publicKey)).toEqual(Array.from(kit.publicKey));
+    expect(verifyEd25519(signed.signature, bytes, signed.publicKey)).toBe(true);
+    expect(
+      await new WorkersUcanService({ oracleDid: ORACLE_DID }).signWithOracleKey(
+        bytes,
+      ),
+    ).toHaveProperty('error');
   });
 });
 

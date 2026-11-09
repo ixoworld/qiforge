@@ -361,6 +361,7 @@ import {
 import { bytesToBase64 } from '../plugins/base64';
 import { UserPreferencesStore } from '../plugins/user-preferences/user-preferences-store';
 import { SqliteUserKv } from '../sqlite/user-kv-store';
+import { deliverToPluginInbox } from '../core/plugin-inbox';
 import {
   channelHistoryIndexDebounceMs,
   pageOfMessages,
@@ -4188,6 +4189,23 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         );
       if (await this.hubActionStore!.recordOutcome(remote.outcome))
         this.markDirty();
+    }
+
+    async deliverPluginInbox(
+      ownerDid: string,
+      namespace: string,
+      key: string,
+      body: string,
+    ): Promise<boolean> {
+      // A callback is not the user: it must not delay idle eviction.
+      await this.ready({ userDid: ownerDid }, { recordAccess: false });
+      if (!this.db) return false;
+      return deliverToPluginInbox(
+        new SqliteUserKv(this.db),
+        namespace,
+        key,
+        body,
+      );
     }
 
     async listSessions(

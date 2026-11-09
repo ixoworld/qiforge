@@ -34,6 +34,7 @@ import type {
   UcanDelegation,
   UserContextData,
   UserKvSurface,
+  UcanMintOptions,
 } from '../plugin-api/types';
 import { UcanMintUnavailableError } from '../plugin-api/ucan-errors';
 import { NOOP_LOGGER, sweepExpired } from './utils';
@@ -143,13 +144,19 @@ export interface UcanAdapter {
     delegationCar: string,
     serviceUrl: string,
     capability: { can: string; with: string },
-    options?: { maxTtlSeconds?: number },
+    options?: UcanMintOptions,
   ): Promise<{ invocation: string } | { error: string }>;
   mintSelfSignedInvocation(
     serviceUrl: string,
     capability: { can: string; with: string },
-    options?: { maxTtlSeconds?: number },
+    options?: UcanMintOptions,
   ): Promise<{ invocation: string } | { error: string }>;
+  /** See `RuntimeContext['ucan']['signWithOracleKey']`. */
+  signWithOracleKey?(
+    bytes: Uint8Array,
+  ): Promise<
+    { signature: Uint8Array; publicKey: Uint8Array } | { error: string }
+  >;
   getServiceDelegation(
     userDid: string,
     opts: { storeUrl: string; resource: string; requiredAbility: string },
@@ -528,6 +535,13 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
         ),
       mintSelfSignedInvocation: (serviceUrl, capability, opts) =>
         ambient.ucan.mintSelfSignedInvocation(serviceUrl, capability, opts),
+      ...(ambient.ucan.signWithOracleKey
+        ? {
+            signWithOracleKey: ambient.ucan.signWithOracleKey.bind(
+              ambient.ucan,
+            ),
+          }
+        : {}),
       getServiceDelegation: (userDid, opts) =>
         ambient.ucan.getServiceDelegation(userDid, opts),
     },

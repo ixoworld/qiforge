@@ -815,6 +815,18 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
     references?: boolean,
   ): Promise<InteractionOutcome<string>>;
   recordHubActionOutcome(outcome: ActionOutcomeV1): Promise<void>;
+  /**
+   * Append a callback body to an open plugin inbox row in the owner's kv
+   * (`src/core/plugin-inbox.ts`); `false` when no open row expects it.
+   * Called by plugin routes (a verifier's response endpoint); does not count
+   * as the owner's access.
+   */
+  deliverPluginInbox(
+    ownerDid: string,
+    namespace: string,
+    key: string,
+    body: string,
+  ): Promise<boolean>;
   topicDeliverable(
     identity: TurnIdentity,
     operationId: string,

@@ -74,13 +74,17 @@ iterating and the full matrix once at the end.
   (`src/plugins/pod-creator/*.test.ts`, listed in
   [pod-creator](pod-creator.md#tests); `request-pod-signature.test.ts`
   drives the batch form of the same `sign_transaction` contract against the
-  same fake bridge, every outcome included).
+  same fake bridge, every outcome included), and the credentials suites
+  (`src/plugins/credentials/*.test.ts`: the Hub, Self and Credentials
+  worker clients, the response token and route, the WhatsApp gate, and a
+  real OpenID4VP round trip through `credentials_check`, listed in
+  [credentials](../src/plugins/credentials/README.md#tests)).
 - `pnpm test:core` — plain-Node suites (`vitest.core.config.ts`): plugin
   loader, env composition, registries, middlewares, prompt composer, a full
   tool-calling turn against a fake model, the memory indexer, the
   attachment pipeline, and the bundled-plugin tests that mock the MCP and
   Composio SDKs (every plugin outside `editor/`, `flows/`,
-  `ixo-transaction/` and `pod-creator/`).
+  `ixo-transaction/`, `pod-creator/` and `credentials/`).
 - `src/core/**` suites run in both projects. That is how the Decision tests
   prove their contract on workerd as well as Node: `src/core/decisions.test.ts`
   covers provider wiring, routing, provenance and applicability, and

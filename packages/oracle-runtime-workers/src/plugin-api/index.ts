@@ -79,6 +79,7 @@ export type {
   ToolCallEventPayload,
   ToolPlane,
   UcanDelegation,
+  UcanMintOptions,
   UserContextData,
   UserKvSurface,
   UserKvWriteOptions,

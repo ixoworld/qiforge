@@ -17,14 +17,32 @@ import {
   signerFromMnemonic,
   type SupportedDID,
 } from '@ixo/ucan';
+import { base58btc } from 'multiformats/bases/base58';
 import {
   abilityCovers,
   delegationHasCapability,
   resourceCovers,
 } from '../core/runtime-context';
-import type { RuntimeContext, UcanDelegation } from '../plugin-api/types';
+import type {
+  RuntimeContext,
+  UcanDelegation,
+  UcanMintOptions,
+} from '../plugin-api/types';
 
 type MintResult = { invocation: string } | { error: string };
+
+/** The facts of one invocation: the caller's binding facts, then a fresh nonce. */
+function invocationFacts(
+  facts: UcanMintOptions['facts'],
+): Record<string, unknown>[] {
+  for (const fact of facts ?? [])
+    if (fact === null || typeof fact !== 'object' || Array.isArray(fact))
+      throw new TypeError('Every invocation fact must be a plain object');
+  return [...(facts ?? []), { nonce: crypto.randomUUID() }];
+}
+
+/** The multicodec prefix of an Ed25519 public key in a `did:key`. */
+const ED25519_PUB_PREFIX = [0xed, 0x01] as const;
 type ServiceDelegationResult =
   | { token: string; with: string }
   | { error: 'no-delegation' | 'store-error'; detail?: string };
@@ -290,7 +308,7 @@ export class WorkersUcanService {
     delegationCar: string,
     serviceUrlOrDid: string,
     capability: { can: string; with: string; nb?: Record<string, unknown> },
-    options: { maxTtlSeconds?: number } = {},
+    options: UcanMintOptions = {},
   ): Promise<MintResult> {
     if (!this.opts.signingMnemonic)
       return {
@@ -361,7 +379,7 @@ export class WorkersUcanService {
         },
         proofs: [delegation],
         expiration,
-        facts: [{ nonce: crypto.randomUUID() }],
+        facts: invocationFacts(options.facts),
       });
       return { invocation: await serializeInvocation(invocation) };
     } catch (error) {
@@ -372,19 +390,23 @@ export class WorkersUcanService {
   }
 
   async mintSelfSignedInvocation(
-    serviceUrl: string,
+    serviceUrlOrDid: string,
     capability: { can: string; with: string },
-    options: { maxTtlSeconds?: number } = {},
+    options: UcanMintOptions = {},
   ): Promise<MintResult> {
     if (!this.opts.signingMnemonic)
       return {
         error:
           'Oracle has no signing key configured — set ORACLE_SIGNING_MNEMONIC',
       };
-    const serviceDid = await this.resolveServiceDid(serviceUrl);
+    // A caller that knows the service's DID (a did:web it derived from the
+    // service's host) passes it directly, as for delegated invocations.
+    const serviceDid = serviceUrlOrDid.startsWith('did:')
+      ? serviceUrlOrDid
+      : await this.resolveServiceDid(serviceUrlOrDid);
     if (!serviceDid)
       return {
-        error: `Could not resolve worker DID via ${serviceUrl}/.well-known/did.json`,
+        error: `Could not resolve worker DID via ${serviceUrlOrDid}/.well-known/did.json`,
       };
     try {
       const { signer } = await signerFromMnemonic(
@@ -401,12 +423,51 @@ export class WorkersUcanService {
         },
         proofs: [],
         expiration: nowSeconds + (options.maxTtlSeconds ?? 120),
-        facts: [{ nonce: crypto.randomUUID() }],
+        facts: invocationFacts(options.facts),
       });
       return { invocation: await serializeInvocation(invocation) };
     } catch (error) {
       return {
         error: `Failed to mint invocation: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  /**
+   * An Ed25519 signature over `bytes` with the oracle's own key (the key on
+   * its DID document that signs its UCANs), and that key's raw public key.
+   * For a signed object that is not a UCAN, such as an OpenID4VP request
+   * object the oracle sends as a verifier.
+   */
+  async signWithOracleKey(
+    bytes: Uint8Array,
+  ): Promise<
+    { signature: Uint8Array; publicKey: Uint8Array } | { error: string }
+  > {
+    if (!this.opts.signingMnemonic)
+      return {
+        error:
+          'Oracle has no signing key configured — set ORACLE_SIGNING_MNEMONIC',
+      };
+    try {
+      const { signer } = await signerFromMnemonic(this.opts.signingMnemonic);
+      const signature = await signer.sign(bytes);
+      // `did:key:z…` = base58btc of the Ed25519 multicodec prefix + the key.
+      const didKey = signer.toDIDKey();
+      const multikey = base58btc.decode(didKey.slice('did:key:'.length));
+      if (
+        multikey.length !== 34 ||
+        multikey[0] !== ED25519_PUB_PREFIX[0] ||
+        multikey[1] !== ED25519_PUB_PREFIX[1]
+      )
+        return { error: 'The oracle signing key is not an Ed25519 key' };
+      return {
+        signature: new Uint8Array(signature.raw),
+        publicKey: multikey.slice(2),
+      };
+    } catch (error) {
+      return {
+        error: `Failed to sign: ${error instanceof Error ? error.message : String(error)}`,
       };
     }
   }
@@ -547,6 +608,7 @@ export class WorkersUcanService {
         this.createInvocationFromDelegation(car, url, cap, o),
       mintSelfSignedInvocation: (url, cap, o) =>
         this.mintSelfSignedInvocation(url, cap, o),
+      signWithOracleKey: (bytes) => this.signWithOracleKey(bytes),
       getServiceDelegation: (did, o) => this.getServiceDelegation(did, o),
     };
   }

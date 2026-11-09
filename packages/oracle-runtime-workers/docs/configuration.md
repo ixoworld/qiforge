@@ -435,6 +435,18 @@ and `ASKS_ALLOWED_DIDS` are optional. The oracle script also binds
 `ASKS_CONNECTIONS` to `AsksConnectionDO`, adds its migration and re-exports
 the class.
 
+### Credentials
+
+The bundled credentials plugin
+([credentials](../src/plugins/credentials/README.md)): credential checks
+as a verifier at the Credentials worker and the Auth Hub's two permission
+cards, WhatsApp only. Off unless `CREDENTIALS_ENABLED=true` and
+`AUTH_HUB_CHANNEL_SERVICE_KEY` (secret, the oracle account's Hub key) are
+set. `AUTH_HUB_URL`, `CREDENTIALS_URL`, `SELF_API_URL` and `SELF_WEB_URL`
+default per `NETWORK`; `credentials_check` also needs `ORACLE_PUBLIC_URL`
+(its response endpoint, `POST /credentials/response/:token`, outside UCAN
+auth) and the oracle's signing key.
+
 ### Chain tools
 
 The bundled ixo-chain plugin ([chain-tools](chain-tools.md)): read-only

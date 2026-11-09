@@ -166,6 +166,19 @@ export type ModelRole = 'main' | 'subagent' | 'utility' | (string & {});
 /** Optional fields forwarded to ChatOpenAI when materialising an LLM. */
 export type ChatOpenAIFields = Record<string, unknown>;
 
+/**
+ * Options of one UCAN mint (`ctx.ucan.createInvocationFromDelegation`,
+ * `ctx.ucan.mintSelfSignedInvocation`). `maxTtlSeconds` bounds the
+ * invocation's lifetime. `facts` are put on the invocation before the nonce
+ * fact every invocation carries: a service that binds a token to one request
+ * reads them (`{ method, path }`, a body hash). Each fact is a plain JSON
+ * object.
+ */
+export interface UcanMintOptions {
+  maxTtlSeconds?: number;
+  facts?: readonly Record<string, unknown>[];
+}
+
 /** UCAN delegation envelope. */
 export interface UcanDelegation {
   readonly raw: string;
@@ -860,19 +873,33 @@ export interface RuntimeContext<TConfig = MergedConfig> {
       delegationCar: string,
       serviceUrl: string,
       capability: { can: string; with: string; nb?: Record<string, unknown> },
-      options?: { maxTtlSeconds?: number },
+      options?: UcanMintOptions,
     ) => Promise<{ invocation: string } | { error: string }>;
     /**
      * Mint a SELF-SIGNED invocation — issued by this oracle with NO proof
      * chain — for calling a downstream service AS THE ORACLE ITSELF (not on a
-     * user's behalf). Returns `{ invocation }` on success or `{ error }` with a
-     * surfaced-verbatim reason (signing key missing, did:web unreachable, etc.).
+     * user's behalf). The audience is the service's DID when `serviceUrl` is
+     * a DID, else the `id` of its `/.well-known/did.json`. Returns
+     * `{ invocation }` on success or `{ error }` with a surfaced-verbatim
+     * reason (signing key missing, did:web unreachable, etc.).
      */
     mintSelfSignedInvocation: (
       serviceUrl: string,
       capability: { can: string; with: string },
-      options?: { maxTtlSeconds?: number },
+      options?: UcanMintOptions,
     ) => Promise<{ invocation: string } | { error: string }>;
+    /**
+     * Sign `bytes` with the oracle's own Ed25519 key (the key that signs its
+     * UCANs, listed on its DID document): `{ signature, publicKey }` (raw
+     * 64-byte signature, raw 32-byte key) or `{ error }`. For signed objects
+     * that are not UCANs, such as the OpenID4VP request object of a
+     * credential check. Absent on hosts without a signing key surface.
+     */
+    signWithOracleKey?: (
+      bytes: Uint8Array,
+    ) => Promise<
+      { signature: Uint8Array; publicKey: Uint8Array } | { error: string }
+    >;
     /**
      * Fetch, from the UCAN Store Worker, a delegation the user deposited for
      * this oracle over `opts.resource`. Selects the newest active delegation
