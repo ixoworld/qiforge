@@ -52,8 +52,29 @@ export const PERMISSION_STATUSES = [
   'declined',
   'expired',
   'stopped',
+  'stopping',
 ] as const;
-export type PermissionStatus = (typeof PERMISSION_STATUSES)[number];
+/**
+ * A card state this version knows, or `unknown` for one a newer Hub added.
+ * `stopping`: the person's consent was stopped elsewhere and the UCAN store
+ * has not yet confirmed the revocation; no grants are served meanwhile.
+ */
+export type PermissionStatus = (typeof PERMISSION_STATUSES)[number] | 'unknown';
+
+/**
+ * Parse a state as any string, then keep it when it is one of `known` and
+ * map anything else to `unknown`: a Hub newer than this runtime must never
+ * make a read throw.
+ */
+function lenientStatus<const T extends readonly string[]>(known: T) {
+  return z
+    .string()
+    .transform((value): T[number] | 'unknown' =>
+      (known as readonly string[]).includes(value)
+        ? (value as T[number])
+        : 'unknown',
+    );
+}
 
 const OPAQUE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -86,12 +107,13 @@ export const ITEM_STATUSES = [
   'stopped',
   'expired',
   'declined',
+  'stopping',
 ] as const;
-export type ItemStatus = (typeof ITEM_STATUSES)[number];
+export type ItemStatus = (typeof ITEM_STATUSES)[number] | 'unknown';
 
 export const ItemStateSchema = z.object({
   /** The item's own state; older answers carry only the card's. */
-  status: z.enum(ITEM_STATUSES).optional(),
+  status: lenientStatus(ITEM_STATUSES).optional(),
   index: z
     .number()
     .int()
@@ -106,7 +128,7 @@ export type PermissionItemState = z.infer<typeof ItemStateSchema>;
 
 const CardStatus = z.object({
   id: z.string().regex(OPAQUE_ID),
-  status: z.enum(PERMISSION_STATUSES),
+  status: lenientStatus(PERMISSION_STATUSES),
   allowedAt: z.number().int().positive().optional(),
   expiresAt: z.number().int().positive().optional(),
 });

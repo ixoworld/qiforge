@@ -212,6 +212,9 @@ export async function chargeLinkStatus(
 export const PERMISSION_STATUS_KEEP_MS = 5_000;
 /** The most status reads for one card per minute. */
 export const PERMISSION_STATUS_CALLS_PER_MINUTE = 6;
+// `stopping` (stopped elsewhere, revocation not yet confirmed) and `unknown`
+// are deliberately not final: like `pending` they are kept 5 s, so a card
+// flips to `stopped` on the next read.
 const ENDED_CARD: ReadonlySet<string> = new Set([
   'declined',
   'expired',
