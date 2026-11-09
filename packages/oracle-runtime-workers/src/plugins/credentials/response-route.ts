@@ -437,12 +437,17 @@ export function credentialsResponseRoute(
       try {
         verdict = await verify(env, target, body);
       } catch {
-        return answer(503, {
-          error: 'unavailable',
-          message: 'Please try again in a moment.',
-        });
+        verdict = {
+          status: 503,
+          body: {
+            error: 'unavailable',
+            message: 'Please try again in a moment.',
+          },
+        };
       }
-      if (verdict.status === 400) {
+      // Every answer that is not accepted counts against the check's budget
+      // (400, 503, a thrown error), so none is free to repeat.
+      if (verdict.status !== 200) {
         limits.perCheck.charge(target.checkId);
         if (
           env.RATE_LIMIT &&

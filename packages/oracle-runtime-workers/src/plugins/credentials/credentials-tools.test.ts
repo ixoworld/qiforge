@@ -781,6 +781,22 @@ describe('credentials_check', () => {
             )
           ).status,
         ).toBe(400);
+        // A JWE-shaped body that cannot be decrypted is a bad answer (400),
+        // never a server fault (503).
+        const shaped = btoa(JSON.stringify({ alg: 'ECDH-ES', enc: 'A256GCM' }))
+          .replace(/=+$/, '')
+          .replace(/\+/g, '-')
+          .replace(/\//g, '_');
+        expect(
+          (
+            await deliver(
+              kv,
+              target?.checkId ?? '',
+              `response=${shaped}..aXY.Y2lwaGVy.dGFn`,
+              oracleKey.doc,
+            )
+          ).status,
+        ).toBe(400);
         return deposited();
       },
       [`GET ${WORKER}/v1/requests/req_1`]: () =>

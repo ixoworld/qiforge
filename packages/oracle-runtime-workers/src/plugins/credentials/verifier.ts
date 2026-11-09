@@ -12,7 +12,6 @@ import {
   createAuthorizationRequest,
   decodeOwnAuthorizationRequest,
   generateResponseKeyPair,
-  Oid4vpError,
   parseAuthorizationResponse,
   verifyAuthorizationResponse,
   type DcqlQuery,
@@ -273,8 +272,10 @@ export async function verifyDelivery(input: {
   } catch (error) {
     // Junk, or a wallet error sent in the clear (it cannot be
     // authenticated): the worker's status says whether the person declined.
-    if (error instanceof Oid4vpError) return null;
-    throw error;
+    // Anything but a dependency being down is a bad answer (malformed
+    // JWE, wrong key, broken JSON): invalid, never a server fault.
+    if (isVerificationUnavailable(error)) throw error;
+    return null;
   }
   if (parsed.state !== request.state) return null;
   let out;
@@ -298,8 +299,8 @@ export async function verifyDelivery(input: {
       },
     });
   } catch (error) {
-    if (error instanceof Oid4vpError) return null;
-    throw error;
+    if (isVerificationUnavailable(error)) throw error;
+    return null;
   }
   if (!out.holderAuthenticated) return null;
   const answer = out.results[QUERY_ID];

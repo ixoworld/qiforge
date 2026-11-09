@@ -194,6 +194,25 @@ describe('POST /credentials/response/:token', () => {
     expect(verify).toHaveBeenCalledTimes(2);
   });
 
+  it('charges every answer that is not accepted (400, 503, a thrown error) to the check', async () => {
+    const token = await sealResponseToken(live(), SECRET);
+    for (const verify of [
+      async () => REFUSED,
+      async () => ({ status: 503 as const }),
+      async () => {
+        throw new Error('boom');
+      },
+    ]) {
+      const route = credentialsResponseRoute(verify, limits(2, 100));
+      const statuses: number[] = [];
+      for (let i = 0; i < 3; i++)
+        statuses.push(
+          (await route.handler(post(token), envOf(), { auth: null })).status,
+        );
+      expect(statuses[2]).toBe(429);
+    }
+  });
+
   it('refuses a token it did not make without waking any object', async () => {
     const verify = vi.fn<VerifyInOwner>(async () => OK);
     const res = await credentialsResponseRoute(verify, limits()).handler(
