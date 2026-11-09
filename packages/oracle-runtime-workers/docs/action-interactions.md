@@ -7,7 +7,7 @@ monorepo (and for consumers that pin a git commit) it resolves to its TypeScript
 source; the published package is compiled to `dist` through `publishConfig`, so
 Node and CommonJS consumers never load TypeScript from `node_modules`.
 
-The public `/health` response advertises `actionInteractions: {version: 1, owners, operations}` only when enabled. This is protocol negotiation, not proof of deployment acceptance or collection authority.
+The public `/health` response advertises `actionInteractions: {version: 1, owners, operations}` only when enabled. This is protocol negotiation, not proof of deployment acceptance or collection authority. A runtime that lists the `repeat` operation accepts `repeat` on a prepare (see [Card policies](#card-policies)); an older one refuses the field.
 
 The Workers shell enables the routes only with
 `ACTION_INTERACTIONS_ENABLED=true`. Every route requires a signed UCAN invocation,
@@ -46,15 +46,16 @@ reservations use compare-and-swap revisions inside real DO transactions.
 A claim step (account, network, Flow, run, step) has at most one current draft,
 whichever chat prepared it. Preparing it again:
 
-| Existing draft for the step                                      | Result                                                            |
-| ---------------------------------------------------------------- | ----------------------------------------------------------------- |
-| None, cancelled, or expired (an expired reservation included)    | A new draft; the old one ends `cancelled`/`superseded`            |
-| Open in this chat, same collection and schema                    | The existing draft, `replayed: true`                              |
-| Open in this chat, collection or schema changed                  | A new draft for the new form; the old one is superseded           |
-| Open or being dispatched in another chat                         | 409 `target_in_use`                                               |
-| Being dispatched in this chat, form changed                      | 409 `target_changed`                                              |
-| Its operation reached the claim service, or the host reported it | Same chat and form: the record; otherwise 409 `dispatch_consumed` |
-| The ordinary form already passed its dispatch check for the step | 409 `dispatch_consumed` (a card could file the same claim again)  |
+| Existing draft for the step                                                                   | Result                                                                                                                                          |
+| --------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| None, cancelled, or expired (an expired reservation included)                                 | A new draft; the old one ends `cancelled`/`superseded`                                                                                          |
+| Open in this chat, same collection and schema                                                 | The existing draft, `replayed: true`                                                                                                            |
+| Open in this chat, collection or schema changed                                               | A new draft for the new form; the old one is superseded                                                                                         |
+| Open or being dispatched in another chat                                                      | 409 `target_in_use`                                                                                                                             |
+| Being dispatched in this chat, form changed                                                   | 409 `target_changed`                                                                                                                            |
+| Its operation reached the claim service with an unknown or partial outcome, or a bid reported | Same chat and form: the record; otherwise 409 `dispatch_consumed`                                                                               |
+| A claim reported (the card shows Submitted)                                                   | With `repeat`: a new draft, and the reported one stays as it is. Without: same chat and form: the record; otherwise 409 `repeat_required`       |
+| The ordinary form already passed its dispatch check for the step                              | A bid: 409 `dispatch_consumed` (a card could file the same bid again). A claim: a new draft only with `repeat`, otherwise 409 `repeat_required` |
 
 Question and artifact owners are keyed per chat and follow the same rules
 without reservations.
@@ -77,15 +78,20 @@ the user object, so it is one small Durable Object call.
   The operation key is consumed atomically, once; a second tab or a replay gets
   409 `dispatch_consumed`.
 - **The ordinary form** (no `cardRef`) goes ahead unless a Companion operation
-  for the step already consumed its key or was reported observed (409
-  `dispatch_consumed`: check the claims list). Any other draft for the step,
-  open, expired, cancelled, or reserved without having been dispatched, is
-  superseded in the same transaction, so its card can no longer pass this
-  check and an abandoned card never locks the step. The step is also marked
-  as submitted from the form, so no card prepared afterwards can file the
-  same claim (it gets 409 `dispatch_consumed`); the mark is written before the
-  form signs, so a form submission the person then abandons still closes the
-  step to cards for that run.
+  for the step already consumed its key and its outcome is unknown or partial,
+  or a bid was reported (409 `dispatch_consumed`: check the claims list). A
+  reported claim stays as it is: a claim step takes many claims. Any other
+  draft for the step, open, expired, cancelled, or reserved without having
+  been dispatched, is superseded in the same transaction, so its card can no
+  longer pass this check and an abandoned card never locks the step. The step
+  is also marked as submitted from the form, so no card prepared afterwards
+  files the same claim by itself: a bid card is refused (409
+  `dispatch_consumed`), and a claim card needs `repeat` (409 `repeat_required`
+  without it). The mark is written before the form signs, so it holds even
+  when the person then abandons the form. The runtime never learns the form's
+  outcome, so the mark does not hold the step while the form's claim is on its
+  way: a card prepared with `repeat` can file another claim at any time. Only
+  the person's request for another claim may set `repeat`.
 
 The check never boots the user object: it reads the stored user binding and a
 few keys, so an ordinary claim from someone who never used Companion costs one
@@ -116,17 +122,27 @@ lost, a closed tab). After dispatch, the host reports one outcome:
 
 `observe` is accepted after the draft expired, so a late outcome is still
 recorded. A step whose operation reached the claim service with an `unknown`
-or `reported` outcome stays closed to further managed or manual submissions in
-that run, because only the claim service can tell whether it succeeded; there
-is no reconciliation endpoint yet, so the person continues with a new run.
+outcome stays closed to further managed or manual submissions in that run,
+because only the claim service can tell whether it succeeded; there is no
+reconciliation endpoint yet, so the person continues with a new run. A
+`reported` bid closes its step for good: a bid is one per role. A claim step
+takes many claims, so a `reported` claim releases it: the ordinary form may
+submit again, and so may a card whose prepare asks to `repeat`. Without
+`repeat`, preparing the step again returns the submitted card in its own chat
+and 409 `repeat_required` anywhere else, so an agent that prepares again after
+a reload never files the same claim twice. These holds cover claims sent from
+cards only; a claim sent from the ordinary form leaves no outcome here (see
+the dispatch check above).
 
 `observed` records a caller-reported executor reference only. It never means
 verified completion. Re-read the trusted Flow/claim owner for completion and
 receipt evidence. Questions and artifact references can use the same private
 proposal service but cannot obtain claim dispatch reservations.
 
-Draft values have a 64 KiB bound and drafts expire for mutation after seven days.
-Existing expired references remain historical and must be rendered noninteractive.
+Draft values have a 64 KiB bound. How long a card can be acted on, and how
+long its record lives, depend on its kind (see [Card policies](#card-policies)).
+A card past its action window is historical and must be rendered
+noninteractive.
 Ended drafts carry `cancelReason`: `user` (cancelled by the person or agent),
 `superseded` (the step was submitted from the form, or a newer card replaced a
 stale or changed-form draft) or `not-submitted` (the executor refused before
@@ -136,16 +152,20 @@ closed list (`status`, `cancelReason`, an owner `kind`) is a contract version
 change. A record this version cannot read is answered with 409
 `record_unreadable` (never a 500, which the Portal would treat as "could not
 ask"), is left out of session lists, and is kept untouched by retention.
-A chat creates at most 200 cards within one draft lifetime of 7 days (409
-`too_many_drafts`); older cards, including kept records of sent claims, do not
-count.
+Within 7 days a chat creates at most 200 cards with an action window and 200
+without one (409 `too_many_drafts`). The two are counted apart, so a chat full
+of charts can still prepare a claim. Older cards, including kept records of
+sent claims, do not count.
 
-Storage is the user object's key-value store, with three indexes so no request
+Storage is the user object's key-value store, with four indexes so no request
 scans every record: one per session (lists read at most 50 keys and fetch the
-records in one batched read), one by expiry, and one from each record to its
-prepare tombstones. Retention runs after each new draft and on the object's
-housekeeping alarm, at most 16 records per pass, for records whose `expiresAt`
-is more than 30 days past: an abandoned draft is deleted with its owner key,
+records in one batched read), one per session and cap group for the weekly
+cap, one by expiry, and one from each record to its prepare tombstones.
+Retention runs after each new draft and on the object's housekeeping alarm, at
+most 16 records per pass. It handles only kinds kept for their action window,
+for records whose `expiresAt` is more than 30 days past; kinds that live with
+their chat are never queued, and a record queued before its kind lived with
+its chat just leaves the queue. An abandoned draft is deleted with its owner key,
 indexes and request tombstones; a draft whose operation reached the claim
 service keeps its record, reservation and dispatch tombstone (they stop a
 duplicate claim) but loses its draft values (with a revision bump). Deleting a
@@ -167,6 +187,31 @@ Validate with the portable package tests, Workers package typecheck, and
 `vitest run src/action-interactions/store.test.ts`. The latter uses workerd and
 real Durable Object storage transactions. Live claim/signature execution
 remains an independent acceptance gate in Portal.
+
+## Card policies
+
+Each owner kind declares how long its card can be acted on, how long its
+record lives, whether the person can save it to their Library, and whether its
+owner takes another operation after a reported one. The runtime owns this
+table (`CARD_POLICIES` in `src/action-interactions/store.ts`): a client can
+never choose a longer life. A new kind, a long-living one included, is one row.
+
+| Kind                             | Action window                                          | Record                                                                      | Library | Repeats                                |
+| -------------------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------- | ------- | -------------------------------------- |
+| `flow-claim`, `flow-claim-block` | 7 days                                                 | Values removed 30 days after the window; what stops a duplicate claim stays | No      | Yes, when the prepare asks to `repeat` |
+| `flow-bid`                       | 7 days                                                 | As above                                                                    | No      | No: one bid per role                   |
+| `approval`                       | 7 days                                                 | As above                                                                    | No      | No                                     |
+| `question`                       | None: open until it is answered or its chat is deleted | Lives with its chat                                                         | No      | No                                     |
+| `artifact`                       | None                                                   | Lives with its chat                                                         | Yes     | No                                     |
+| `task`, `owner-reference`        | None                                                   | Lives with its chat                                                         | No      | No                                     |
+
+- A kind without an action window carries `expiresAt` `NO_ACTION_WINDOW`
+  (`9999-12-31T23:59:59.999Z`, exported by the contract), so every reader, an
+  older Portal included, keeps it open.
+- A kind the person can save to their Library always lives with its chat. The
+  Library itself keeps the saved copy, so deleting the chat never loses it.
+- "Lives with its chat" means no retention: deleting the chat removes the
+  record by the rules above.
 
 ## Additional owner families
 

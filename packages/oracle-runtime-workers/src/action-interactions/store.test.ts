@@ -9,6 +9,7 @@ import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import {
   InteractionSchema,
+  NO_ACTION_WINDOW,
   PrepareInteractionSchema,
   interactionValuesDigest,
   type Interaction,
@@ -420,7 +421,8 @@ describe('private interaction drafts on Workers', () => {
     ).interaction;
     expect(observed.status).toBe('observed');
     expect(observed).not.toHaveProperty('verified');
-    // A reported operation is never replaced, even by a changed form.
+    // A reported claim is never replaced by itself, even by a changed form:
+    // another claim on the step has to be asked for.
     expect(
       await command(stub, alice, {
         kind: 'prepare',
@@ -430,7 +432,7 @@ describe('private interaction drafts on Workers', () => {
           owner: { ...input.owner, schemaDigest: 'changed' },
         },
       }),
-    ).toMatchObject({ code: 'dispatch_consumed' });
+    ).toMatchObject({ code: 'repeat_required' });
   });
 
   it('checks every host dispatch across sessions and consumes a reserved operation once', async () => {
@@ -544,13 +546,14 @@ describe('private interaction drafts on Workers', () => {
     });
     expect(await reserve(first)).toMatchObject({ code: 'stale_revision' });
     expect(await reserve(ended)).toMatchObject({ code: 'not_dispatchable' });
-    // The form already submitted this step: a new card could file it again.
+    // The form already submitted this step: a new card is another claim, so
+    // it has to be asked for.
     expect(
       await command(stub, alice, {
         kind: 'prepare',
         input: { ...input, requestId: crypto.randomUUID() },
       }),
-    ).toMatchObject({ code: 'dispatch_consumed' });
+    ).toMatchObject({ code: 'repeat_required' });
 
     // A reservation whose dispatch check never ran is superseded too, and its
     // card can no longer pass that check.
@@ -894,7 +897,17 @@ describe('private interaction drafts on Workers', () => {
         kind: 'prepare',
         input: {
           ...prepare(),
-          owner: { kind: 'question', requestId: 'abandoned' },
+          owner: { ...input.owner, runId: 'abandoned-run' },
+        },
+      }),
+    ).interaction;
+    // A question lives with its chat: retention never touches it.
+    const question = unwrap(
+      await command(stub, alice, {
+        kind: 'prepare',
+        input: {
+          ...prepare(),
+          owner: { kind: 'question', requestId: 'kept' },
         },
       }),
     ).interaction;
@@ -951,10 +964,14 @@ describe('private interaction drafts on Workers', () => {
     expect(await stub.prune(alice)).toBe(2);
     const keys = await stub.keys();
     expect(keys.filter((k) => k.includes(abandoned.id))).toEqual([]);
-    expect(keys.filter((k) => k.startsWith('interaction-request:'))).toEqual(
-      [],
-    );
+    // Only the question's prepare is still remembered.
+    expect(
+      keys.filter((k) => k.startsWith('interaction-request:')),
+    ).toHaveLength(1);
     expect(keys.filter((k) => k.startsWith('interaction-expiry:'))).toEqual([]);
+    expect(
+      unwrap(await read(stub, alice, question.id, input.sessionId)),
+    ).toMatchObject({ status: 'draft', values: question.values });
     const kept = unwrap(await read(stub, alice, claim.id, input.sessionId));
     expect(kept).toMatchObject({ status: 'outcome-unknown', values: {} });
     expect(
@@ -1040,7 +1057,7 @@ describe('private interaction drafts on Workers', () => {
     expect(await stub.keys()).toContain(`interaction:${draft.id}`);
   });
 
-  it('caps the cards one chat creates in a week and reports when retention is next due', async () => {
+  it('caps the cards one chat creates in a week, apart with and without an action window', async () => {
     const stub = env.ACTION_INTERACTIONS_TEST.getByName('cap');
     expect(await stub.nextRetentionAt(alice)).toBeNull();
     const question = (n: number): PrepareInteraction => ({
@@ -1050,18 +1067,36 @@ describe('private interaction drafts on Workers', () => {
       owner: { kind: 'question', requestId: `q-${n}` },
       values: {},
     });
-    const first = unwrap(
-      await command(stub, alice, { kind: 'prepare', input: question(0) }),
-    ).interaction;
-    expect(await stub.nextRetentionAt(alice)).toBe(
-      first.expiresAt + 30 * 24 * 60 * 60 * 1000,
-    );
-    for (let n = 1; n < 200; n++)
+    const claim = (n: number): PrepareInteraction => {
+      const input = prepare();
+      if (input.owner.kind !== 'flow-claim')
+        throw new Error('Expected claim owner');
+      return {
+        ...input,
+        sessionId: '$crowded',
+        owner: { ...input.owner, runId: `run-${n}` },
+      };
+    };
+    for (let n = 0; n < 200; n++)
       unwrap(
         await command(stub, alice, { kind: 'prepare', input: question(n) }),
       );
     expect(
       await command(stub, alice, { kind: 'prepare', input: question(200) }),
+    ).toMatchObject({ code: 'too_many_drafts' });
+    // Questions live with their chat, so nothing waits for retention yet.
+    expect(await stub.nextRetentionAt(alice)).toBeNull();
+    // A chat full of questions or charts can still prepare a claim.
+    const first = unwrap(
+      await command(stub, alice, { kind: 'prepare', input: claim(0) }),
+    ).interaction;
+    expect(await stub.nextRetentionAt(alice)).toBe(
+      first.expiresAt + 30 * 24 * 60 * 60 * 1000,
+    );
+    for (let n = 1; n < 200; n++)
+      unwrap(await command(stub, alice, { kind: 'prepare', input: claim(n) }));
+    expect(
+      await command(stub, alice, { kind: 'prepare', input: claim(200) }),
     ).toMatchObject({ code: 'too_many_drafts' });
     // Another chat is unaffected.
     expect(
@@ -1070,11 +1105,229 @@ describe('private interaction drafts on Workers', () => {
         input: { ...question(201), sessionId: '$fresh' },
       }),
     ).toMatchObject({ ok: true });
-    // A week later the old cards are still kept for retention, but they no longer lock the chat.
+    // A week later the old cards are still kept, but they no longer lock the chat.
     await stub.advance(8 * 24 * 60 * 60 * 1000);
     expect(
       await command(stub, alice, { kind: 'prepare', input: question(202) }),
     ).toMatchObject({ ok: true });
+    expect(
+      await command(stub, alice, { kind: 'prepare', input: claim(201) }),
+    ).toMatchObject({ ok: true });
+  });
+
+  it('keeps cards without an action window open for as long as their chat', async () => {
+    const stub = env.ACTION_INTERACTIONS_TEST.getByName('no-window');
+    const card = (owner: PrepareInteraction['owner']): PrepareInteraction => ({
+      version: 1,
+      requestId: crypto.randomUUID(),
+      sessionId: '$chat',
+      owner,
+      values: {},
+    });
+    const question = unwrap(
+      await command(stub, alice, {
+        kind: 'prepare',
+        input: card({ kind: 'question', requestId: 'q' }),
+      }),
+    ).interaction;
+    const artifact = unwrap(
+      await command(stub, alice, {
+        kind: 'prepare',
+        input: card({ kind: 'artifact', artifactId: 'chart' }),
+      }),
+    ).interaction;
+    expect(question.expiresAt).toBe(NO_ACTION_WINDOW);
+    expect(artifact.expiresAt).toBe(NO_ACTION_WINDOW);
+    const expiryKeys = async () =>
+      (await stub.keys()).filter((k) => k.startsWith('interaction-expiry:'));
+    expect(await expiryKeys()).toEqual([]);
+    await stub.advance(40 * 24 * 60 * 60 * 1000);
+    expect(await stub.prune(alice)).toBe(0);
+    // A question is still answered weeks later.
+    expect(
+      await command(stub, alice, {
+        kind: 'update',
+        id: question.id,
+        input: {
+          version: 1,
+          requestId: crypto.randomUUID(),
+          sessionId: '$chat',
+          expectedRevision: question.revision,
+          kind: 'update',
+          patch: { answer: 'yes' },
+          source: 'user',
+        },
+      }),
+    ).toMatchObject({ ok: true });
+    expect(unwrap(await read(stub, alice, artifact.id, '$chat'))).toEqual(
+      artifact,
+    );
+    // A record an older version queued for retention just leaves the queue.
+    const legacy = {
+      ...artifact,
+      id: crypto.randomUUID(),
+      expiresAt: artifact.createdAt + 7 * 24 * 60 * 60 * 1000,
+    };
+    await stub.seed(
+      JSON.stringify({
+        [`interaction:${legacy.id}`]: legacy,
+        [`interaction-expiry:${legacy.expiresAt.toString().padStart(16, '0')}:${legacy.id}`]:
+          legacy.id,
+      }),
+    );
+    expect(await stub.prune(alice)).toBe(1);
+    expect(await expiryKeys()).toEqual([]);
+    expect(unwrap(await read(stub, alice, legacy.id, '$chat'))).toEqual(legacy);
+    // Deleting the chat removes them.
+    expect(await stub.forget(alice, '$chat')).toBe(2);
+    expect(await read(stub, alice, question.id, '$chat')).toMatchObject({
+      code: 'not_found',
+    });
+    expect(await read(stub, alice, artifact.id, '$chat')).toMatchObject({
+      code: 'not_found',
+    });
+  });
+
+  it('lets a claim step take another claim after a reported one only when asked, and keeps a bid to one', async () => {
+    const stub = env.ACTION_INTERACTIONS_TEST.getByName('repeat');
+    const input = prepare();
+    if (input.owner.kind !== 'flow-claim')
+      throw new Error('Expected claim owner');
+    const check = { version: 1, owner: input.owner };
+    const dispatch = async (value: unknown) =>
+      JSON.parse(await stub.dispatch(alice, JSON.stringify(value)));
+    const prepareAgain = (changes: Partial<PrepareInteraction> = {}) =>
+      command(stub, alice, {
+        kind: 'prepare',
+        input: { ...input, requestId: crypto.randomUUID(), ...changes },
+      });
+    /** Reserves and dispatches a card as the host does; returns its report. */
+    const send = async (draft: Interaction) => {
+      const reserved = unwrap(
+        await command(stub, alice, {
+          kind: 'reserve',
+          id: draft.id,
+          input: {
+            version: 1,
+            requestId: crypto.randomUUID(),
+            sessionId: draft.sessionId,
+            expectedRevision: draft.revision,
+            valuesDigest: await interactionValuesDigest(draft.values),
+          },
+        }),
+      ).interaction;
+      if (!reserved.reservation) throw new Error('Missing reservation');
+      const { operationKey, valuesDigest } = reserved.reservation;
+      expect(
+        await dispatch({
+          version: 1,
+          owner: draft.owner,
+          cardRef: reserved.id,
+          operationKey,
+          valuesDigest,
+        }),
+      ).toMatchObject({ ok: true });
+      return async () =>
+        unwrap(
+          await command(stub, alice, {
+            kind: 'observe',
+            id: reserved.id,
+            input: {
+              version: 1,
+              requestId: crypto.randomUUID(),
+              sessionId: draft.sessionId,
+              expectedRevision: reserved.revision,
+              operationKey,
+              outcome: 'reported',
+              ownerExecutionRef: `receipt-${reserved.id}`,
+            },
+          }),
+        ).interaction;
+    };
+
+    const first = unwrap(
+      await command(stub, alice, { kind: 'prepare', input }),
+    ).interaction;
+    const reportFirst = await send(first);
+    // While the claim is on its way the step stays closed, even when asked.
+    expect(
+      await prepareAgain({ repeat: true, sessionId: '$other-chat' }),
+    ).toMatchObject({ code: 'dispatch_consumed' });
+    expect(await dispatch(check)).toMatchObject({ code: 'dispatch_consumed' });
+    const reported = await reportFirst();
+    expect(reported.status).toBe('observed');
+    // Prepared again without asking: the submitted card in its own chat, a
+    // refusal anywhere else, so a reload never files the same claim twice.
+    expect(unwrap(await prepareAgain())).toEqual({
+      interaction: reported,
+      replayed: true,
+    });
+    expect(await prepareAgain({ sessionId: '$other-chat' })).toMatchObject({
+      code: 'repeat_required',
+    });
+    // Asked for, another claim gets a new card; the submitted one stays.
+    const second = unwrap(
+      await prepareAgain({ repeat: true, sessionId: '$other-chat' }),
+    );
+    expect(second.replayed).toBe(false);
+    expect(second.interaction).toMatchObject({
+      status: 'draft',
+      sessionId: '$other-chat',
+    });
+    expect(
+      unwrap(await read(stub, alice, first.id, input.sessionId)),
+    ).toMatchObject({
+      status: 'observed',
+      ownerExecutionRef: `receipt-${first.id}`,
+    });
+    await (
+      await send(second.interaction)
+    )();
+    // The ordinary form may submit again, and the submitted card stays.
+    expect(await dispatch(check)).toEqual({
+      ok: true,
+      result: { allowed: true, managed: false },
+    });
+    expect(
+      unwrap(await read(stub, alice, second.interaction.id, '$other-chat')),
+    ).toMatchObject({ status: 'observed' });
+    // After a claim from the form, a card is another claim too.
+    await stub.advance(1);
+    expect(await prepareAgain({ sessionId: '$third-chat' })).toMatchObject({
+      code: 'repeat_required',
+    });
+    const third = unwrap(
+      await prepareAgain({ repeat: true, sessionId: '$third-chat' }),
+    ).interaction;
+    expect((await (await send(third))()).status).toBe('observed');
+
+    // A bid is one per role: asking to repeat changes nothing.
+    const bid: PrepareInteraction = {
+      ...input,
+      requestId: crypto.randomUUID(),
+      sessionId: '$bids',
+      owner: { ...input.owner, kind: 'flow-bid', roleId: 'service_provider' },
+    };
+    const bidDraft = unwrap(
+      await command(stub, alice, { kind: 'prepare', input: bid }),
+    ).interaction;
+    await (
+      await send(bidDraft)
+    )();
+    expect(
+      await command(stub, alice, {
+        kind: 'prepare',
+        input: {
+          ...bid,
+          requestId: crypto.randomUUID(),
+          sessionId: '$other-chat',
+          repeat: true,
+        },
+      }),
+    ).toMatchObject({ code: 'dispatch_consumed' });
+    expect(await dispatch({ version: 1, owner: bid.owner })).toMatchObject({
+      code: 'dispatch_consumed',
+    });
   });
 });
 

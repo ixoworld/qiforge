@@ -141,7 +141,20 @@ export const PrepareInteractionSchema = z.strictObject({
   ...context,
   owner: InteractionOwnerSchema,
   values,
+  /**
+   * Asks for another operation on an owner that already has a reported one,
+   * for owner kinds that repeat (a Flow claim step takes many claims).
+   * Without it, such an owner keeps its submitted card. Send it only to a
+   * runtime whose `/health` lists the `repeat` operation: an older runtime
+   * refuses the field.
+   */
+  repeat: z.boolean().optional(),
 });
+/**
+ * The `expiresAt` of a card kind without an action window. It stays open for
+ * as long as its chat, so every reader, an older one included, keeps it open.
+ */
+export const NO_ACTION_WINDOW = Date.UTC(9999, 11, 31, 23, 59, 59, 999);
 const mutation = { ...context, expectedRevision: z.number().int().positive() };
 export const UpdateInteractionSchema = z.discriminatedUnion('kind', [
   z

@@ -100,6 +100,12 @@ export class ActionInteractionsTestDO extends DurableObject {
   async corrupt(id: string) {
     await this.ctx.storage.put(`interaction:${id}`, { version: 99 });
   }
+  /** Writes keys as an older version of the store left them. */
+  async seed(entriesJson: string) {
+    await this.ctx.storage.put(
+      z.record(z.string(), z.unknown()).parse(JSON.parse(entriesJson)),
+    );
+  }
   /** Every key the store wrote, so retention tests can prove what is gone. */
   async keys() {
     return Array.from((await this.ctx.storage.list()).keys());
