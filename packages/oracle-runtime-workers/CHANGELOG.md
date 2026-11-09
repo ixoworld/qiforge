@@ -1,5 +1,16 @@
 # @ixo/oracle-runtime-workers
 
+## 0.45.0
+
+### Minor Changes
+
+- [#505](https://github.com/ixoworld/qiforge/pull/505) [`e14cc77`](https://github.com/ixoworld/qiforge/commit/e14cc77a976662d71803f986f9ca843a5b476fb8) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - A bundled `credentials` plugin: credential checks and the Auth Hub's two permission cards, WhatsApp only, off unless `CREDENTIALS_ENABLED=true` and `AUTH_HUB_CHANNEL_SERVICE_KEY` are set.
+
+  - Six tools for any credential type and fields, against the issuers the operator trusts (`CREDENTIALS_TRUSTED_ISSUERS`, default Self's IdentityLevel1 issuer of the network; the model may only narrow it), plus the Hub's catalogued actions: `credentials_request_check_permission`, `credentials_permission_status`, `credentials_check`, `credentials_request_action_permission`, `credentials_request_action` and `credentials_action_status` (`self.identity-check` links from Self).
+  - `credentials_check` makes the oracle an OpenID4VP verifier with `@ixo/credentials-kit` 0.1.1: its catalog entry, a signed request at the Credentials worker, the encrypted answer at `POST /credentials/response/:token`, verified in the person's own object (the plugin's `handleOwnerCallback`, via the user object's `ownerCallback`), which stores only a verified answer, once; `pending` with the wallet link when no standing consent answers within the tool's 25 s deadline. Every result carries `message` (second person, ready to send) and `hint` (for the agent); the grants of an allowed card and a link's status are kept in the person's kv; invocations to Self and the Credentials worker carry a `body_sha256` fact; `CREDENTIALS_PURPOSES` sets why the oracle asks (never model text) and `CREDENTIALS_RATE_LIMIT` is the optional per-IP binding of the response endpoint.
+  - `ctx.ucan.createInvocationFromDelegation` and `ctx.ucan.mintSelfSignedInvocation` take `facts` (put before the nonce, for services that bind a token to one request); `mintSelfSignedInvocation` takes a DID audience; `ctx.ucan.signJws` signs an OpenID4VP request object (`typ` `oauth-authz-req+jwt` only; the runtime builds the header) with the oracle's own key and `ctx.ucan.oraclePublicKey` returns its public key; there is no raw signer.
+  - Owner callbacks: a plugin may define `handleOwnerCallback(call, ctx)`, run in the owner's user object (with their kv) when a public plugin route forwards a reply only that object can check, through the object's `ownerCallback`.
+
 ## 0.44.0
 
 ### Minor Changes
