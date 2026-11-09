@@ -1,5 +1,15 @@
 # @ixo/oracle-runtime
 
+## 1.99.5
+
+### Patch Changes
+
+- [#498](https://github.com/ixoworld/qiforge/pull/498) [`1e0203e`](https://github.com/ixoworld/qiforge/commit/1e0203eb8fda7f17bf266a0e99c1f3a39326a783) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Pick up `@ixo/ucan` 2.4.0, which refuses re-labelled UCANs. A UCAN archive's block CIDs are written by its sender and no signature covers them, so one signed invocation or delegation could be re-sent under another CID (a sha2-512 CID over the same bytes, its JWT form, a CBOR block with an empty nonce) and slip past a replay store or revocation check keyed on that CID. `validate()` and `validateDelegation()` now refuse with `INVALID_FORMAT` any archive whose UCANs do not sit under the CID derived from their signed form, and refuse JWT-form UCANs. The runtime's HTTP shell, the deposited-delegation check and the IXO Channels ingress all validate through the library, so they refuse such tokens too. These packages pinned `@ixo/ucan` 2.3.0 (directly, or through `@ixo/oracles-chain-client`); they now pin 2.4.0.
+
+- Updated dependencies [[`1e0203e`](https://github.com/ixoworld/qiforge/commit/1e0203eb8fda7f17bf266a0e99c1f3a39326a783)]:
+  - @ixo/oracles-chain-client@2.1.5
+  - @ixo/common@1.8.1
+
 ## 1.99.4
 
 ### Patch Changes
