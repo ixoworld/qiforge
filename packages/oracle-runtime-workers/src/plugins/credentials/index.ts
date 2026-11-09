@@ -4,7 +4,8 @@ export {
 } from './credentials.plugin';
 export {
   createCredentialsTools,
-  SUPPORTED_ACTIONS,
+  IDENTITY_CHECK_ACTION,
+  ACTION_ID_PATTERN,
   WHATSAPP_PROVIDER,
   whatsAppBinding,
   type CredentialsToolsDeps,

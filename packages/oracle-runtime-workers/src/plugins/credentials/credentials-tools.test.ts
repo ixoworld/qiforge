@@ -64,6 +64,11 @@ const CARD = {
   expiresAt: 1793000000,
 };
 
+/** A card's items: one identity-check action holding these grants. */
+const identityItems = (grants: unknown[]) => [
+  { index: 0, kind: 'service-action', action: 'self.identity-check', grants },
+];
+
 const issuer = party('issuer', ISSUER_DID);
 const person = party('person', PERSON_DID);
 
@@ -256,6 +261,9 @@ describe('the WhatsApp gate', () => {
     const { fetchImpl, calls } = routedFetch({});
     const tools = toolsFor(fetchImpl, oracleKey.doc);
     const inputs: Record<string, unknown> = {
+      credentials_request_permissions: {
+        items: [{ kind: 'service-action', action: 'self.identity-check' }],
+      },
       credentials_request_check_permission: CHECK_ARGS,
       credentials_permission_status: { permissionId: 'card_1' },
       credentials_check: CHECK_ARGS,
@@ -338,7 +346,7 @@ describe('the trust anchor (CREDENTIALS_TRUSTED_ISSUERS)', () => {
       { vct: VCT, claims: ['age_over_18'] },
       channelCtx(adapter),
     );
-    expect(JSON.parse(calls[0]?.body ?? '').permission.issuers).toEqual([
+    expect(JSON.parse(calls[0]?.body ?? '').permissions[0].issuers).toEqual([
       ISSUER_DID,
     ]);
   });
@@ -422,13 +430,15 @@ describe('permission cards', () => {
       bindingId: 'bind_1',
       bindingRevision: 3,
       requestKey: await sha256Hex('run-1:call-1:check-permission'),
-      permission: {
-        kind: 'credential-check',
-        vct: VCT,
-        issuers: [ISSUER_DID],
-        claims: ['age_over_18', 'identity_level'],
-        days: 30,
-      },
+      permissions: [
+        {
+          kind: 'credential-check',
+          vct: VCT,
+          issuers: [ISSUER_DID],
+          claims: ['age_over_18', 'identity_level'],
+          days: 30,
+        },
+      ],
     });
     expect(mints).toEqual([
       expect.objectContaining({
@@ -454,19 +464,35 @@ describe('permission cards', () => {
           status: 'allowed',
           allowedAt: 1792000000,
           expiresAt: 1794000000,
-          grants: [
+          items: [
             {
-              can: 'identity/link',
-              with: 'ixo:identity',
-              audience: 'x',
-              expiresAt: 1794000000,
-              token: 'SECRET',
+              index: 0,
+              kind: 'service-action',
+              action: 'self.identity-check',
+              grants: [
+                {
+                  id: 'link',
+                  can: 'identity/link',
+                  with: 'ixo:identity',
+                  audience: 'x',
+                  expiresAt: 1794000000,
+                  token: 'SECRET',
+                },
+              ],
+            },
+            {
+              index: 1,
+              kind: 'credential-check',
+              consentIds: ['cons_1'],
             },
           ],
         }),
     });
     const kv = createMemoryUserKv();
-    await recordPermission(kv, 'card_1');
+    await recordPermission(kv, 'card_1', [
+      'service-action',
+      'credential-check',
+    ]);
     const out = await run(
       toolsFor(fetchImpl, oracleKey.doc).credentials_permission_status,
       { permissionId: 'card_1' },
@@ -477,6 +503,31 @@ describe('permission cards', () => {
       status: 'allowed',
       allowedAt: 1792000000,
       expiresAt: 1794000000,
+      items: [
+        {
+          index: 0,
+          kind: 'service-action',
+          action: 'self.identity-check',
+          state: 'allowed',
+          granted: {
+            grants: [
+              {
+                id: 'link',
+                can: 'identity/link',
+                with: 'ixo:identity',
+                audience: 'x',
+                expiresAt: 1794000000,
+              },
+            ],
+          },
+        },
+        {
+          index: 1,
+          kind: 'credential-check',
+          state: 'allowed',
+          granted: { consentIds: ['cons_1'] },
+        },
+      ],
       message: 'Thanks, you allowed it.',
       hint: 'Go on with the task.',
     });
@@ -964,7 +1015,7 @@ describe('catalogued actions (self.identity-check)', () => {
         json({
           id: 'card_1',
           status,
-          ...(status === 'allowed' ? { grants: GRANTS } : {}),
+          items: identityItems(status === 'allowed' ? GRANTS : []),
         }),
       ...selfRoutes,
     });
@@ -1031,11 +1082,9 @@ describe('catalogued actions (self.identity-check)', () => {
       ctx,
     );
     expect(card).toMatchObject({ status: 'sent', permissionId: 'card_1' });
-    expect(JSON.parse(calls[0]?.body ?? '').permission).toEqual({
-      kind: 'service-action',
-      action: 'self.identity-check',
-      days: 7,
-    });
+    expect(JSON.parse(calls[0]?.body ?? '').permissions).toEqual([
+      { kind: 'service-action', action: 'self.identity-check', days: 7 },
+    ]);
 
     const link = await run(
       tools.credentials_request_action,
@@ -1095,7 +1144,11 @@ describe('catalogued actions (self.identity-check)', () => {
     const { fetchImpl } = routedFetch({
       [`POST ${HUB}/api/internal/permissions`]: () => json(CARD, 201),
       [`GET ${HUB}/api/internal/permissions/card_1`]: () =>
-        json({ id: 'card_1', status: 'allowed', grants: GRANTS }),
+        json({
+          id: 'card_1',
+          status: 'allowed',
+          items: identityItems(GRANTS),
+        }),
       [`POST ${SELF}/identity/v1/links`]: [
         () =>
           json(
@@ -1151,13 +1204,373 @@ describe('catalogued actions (self.identity-check)', () => {
   });
 });
 
+describe('one card for everything (credentials_request_permissions)', () => {
+  const IDENTITY = {
+    kind: 'service-action',
+    action: 'self.identity-check',
+    days: 7,
+  } as const;
+  const LINK_GRANT = {
+    id: 'link',
+    can: 'identity/link',
+    with: 'ixo:identity',
+    audience: ORACLE_DID,
+    expiresAt: 4_000_000_000,
+    token: 'LINK_DELEGATION',
+  };
+  const OFFER_GRANT = {
+    id: 'offer',
+    can: 'credentials/offer',
+    with: 'ixo:credentials',
+    audience: 'did:ixo:entity:80f392610e8a128b4f4b1ed828dbeb7f',
+    expiresAt: 4_000_000_000,
+    token: 'OFFER_DELEGATION',
+  };
+
+  it('sends several items as one card, once per request key, and records the id once', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const kv = createMemoryUserKv();
+    const { fetchImpl, calls } = routedFetch({
+      [`POST ${HUB}/api/internal/permissions`]: () => json(CARD, 201),
+    });
+    const tools = toolsFor(fetchImpl, oracleKey.doc);
+    const ctx = channelCtx(adapter, { kv });
+    const args = {
+      items: [IDENTITY, { kind: 'credential-check', ...CHECK_ARGS, days: 30 }],
+    };
+    const first = await run(tools.credentials_request_permissions, args, ctx);
+    expect(first).toMatchObject({
+      status: 'sent',
+      permissionId: 'card_1',
+      url: CARD.url,
+    });
+    // A resumed run asks again: the same list under the same key.
+    await run(tools.credentials_request_permissions, args, ctx);
+    expect(calls).toHaveLength(2);
+    const [a, b] = calls.map((c) => JSON.parse(c.body));
+    expect(a.permission).toBeUndefined();
+    expect(a.permissions).toEqual([
+      IDENTITY,
+      {
+        kind: 'credential-check',
+        vct: VCT,
+        issuers: [ISSUER_DID],
+        claims: ['age_over_18'],
+        days: 30,
+      },
+    ]);
+    expect(a.requestKey).toBe(await sha256Hex('run-1:call-1:permissions'));
+    expect(b.requestKey).toBe(a.requestKey);
+    expect(b.permissions).toEqual(a.permissions);
+    // The id is recorded once, with its item kinds.
+    const stored = await kv.get(CREDENTIALS_KV_NAMESPACE, 'permissions');
+    expect(stored).toEqual([
+      { id: 'card_1', kinds: ['service-action', 'credential-check'] },
+    ]);
+  });
+
+  it('refuses more than 5 items or none, and an issuer outside the trust list before any call', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl, calls } = routedFetch({});
+    const tools = toolsFor(fetchImpl, oracleKey.doc);
+    const { RequestPermissionsInput } = await import('./credentials-tools');
+    expect(RequestPermissionsInput.safeParse({ items: [] }).success).toBe(
+      false,
+    );
+    expect(
+      RequestPermissionsInput.safeParse({
+        items: Array.from({ length: 6 }, () => IDENTITY),
+      }).success,
+    ).toBe(false);
+    await expect(
+      run(
+        tools.credentials_request_permissions,
+        {
+          items: [
+            {
+              kind: 'credential-check',
+              ...CHECK_ARGS,
+              issuers: ['did:ixo:entity:other'],
+              days: 30,
+            },
+          ],
+        },
+        channelCtx(adapter),
+      ),
+    ).resolves.toMatchObject({ error: 'untrusted_issuer' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('maps invalid_item to a plain sentence naming the item position', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl } = routedFetch({
+      [`POST ${HUB}/api/internal/permissions`]: () =>
+        json(
+          {
+            error: 'invalid_item',
+            message: "Item 3 of this request isn't something we can set up.",
+            details: { index: 2, reason: 'unknown_claim' },
+          },
+          400,
+        ),
+    });
+    const out = await run(
+      toolsFor(fetchImpl, oracleKey.doc).credentials_request_permissions,
+      { items: [IDENTITY] },
+      channelCtx(adapter),
+    );
+    expect(out).toMatchObject({
+      error: 'invalid_item',
+      message: "Item 3 of this request isn't something we can set up.",
+    });
+    // No DID, code or URL reaches the person.
+    expect(JSON.stringify((out as { message: string }).message)).not.toMatch(
+      /unknown_claim|did:/,
+    );
+  });
+
+  it('maps an entry id the Hub does not know to a plain message', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl, calls } = routedFetch({
+      [`POST ${HUB}/api/internal/permissions`]: [
+        () => json({ error: 'unknown_action', message: 'x' }, 400),
+        () =>
+          json(
+            {
+              error: 'invalid_item',
+              message: 'x',
+              details: { index: 0, reason: 'unknown_action' },
+            },
+            400,
+          ),
+      ],
+    });
+    const tools = toolsFor(fetchImpl, oracleKey.doc);
+    const items = [{ kind: 'service-action', action: 'yo.rewards-claim' }];
+    // Any id of the Hub's pattern is sent as it is; the Hub decides.
+    await expect(
+      run(
+        tools.credentials_request_action_permission,
+        { action: 'yo.rewards-claim' },
+        channelCtx(adapter),
+      ),
+    ).resolves.toEqual(refusal('unknown_action', MESSAGES.unknownAction));
+    await expect(
+      run(
+        tools.credentials_request_permissions,
+        { items },
+        channelCtx(adapter),
+      ),
+    ).resolves.toMatchObject({
+      error: 'invalid_item',
+      message: "Item 1 of this request isn't something we can set up.",
+    });
+    expect(JSON.parse(calls[0]?.body ?? '').permissions).toEqual([
+      { kind: 'service-action', action: 'yo.rewards-claim' },
+    ]);
+  });
+
+  it('needs only this one card for the identity flow (link, offer and consent)', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl, calls } = routedFetch({
+      [`POST ${HUB}/api/internal/permissions`]: () => json(CARD, 201),
+      [`GET ${HUB}/api/internal/permissions/card_1`]: () =>
+        json({
+          id: 'card_1',
+          status: 'allowed',
+          expiresAt: 4_000_000_000,
+          items: [
+            {
+              index: 0,
+              kind: 'service-action',
+              action: 'self.identity-check',
+              consentIds: ['cons_1'],
+              grants: [OFFER_GRANT, LINK_GRANT],
+            },
+          ],
+        }),
+      [`POST ${SELF}/identity/v1/links`]: () =>
+        json(
+          {
+            linkId: 'lnk_1',
+            url: 'https://dev.self.ixo.earth/l/tok',
+            expiresAt: 4_000_000_000,
+          },
+          201,
+        ),
+    });
+    const tools = toolsFor(fetchImpl, oracleKey.doc);
+    const ctx = channelCtx(adapter);
+    await run(
+      tools.credentials_request_permissions,
+      { items: [IDENTITY] },
+      ctx,
+    );
+    await expect(
+      run(
+        tools.credentials_request_action,
+        { action: 'self.identity-check' },
+        ctx,
+      ),
+    ).resolves.toMatchObject({ status: 'sent', linkId: 'lnk_1' });
+    // Exactly one card was asked, and the link used the item's grants.
+    expect(
+      calls.filter((c) => c.method === 'POST' && c.url.startsWith(HUB)),
+    ).toHaveLength(1);
+    const create = calls.find((c) => c.url === `${SELF}/identity/v1/links`);
+    expect(JSON.parse(create?.body ?? '')).toMatchObject({
+      offerConsent: 'OFFER_DELEGATION',
+    });
+  });
+
+  it('finds the grants in the item of its own action when the card holds several', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl } = routedFetch({
+      [`POST ${HUB}/api/internal/permissions`]: () => json(CARD, 201),
+      [`GET ${HUB}/api/internal/permissions/card_1`]: () =>
+        json({
+          id: 'card_1',
+          status: 'allowed',
+          items: [
+            { index: 0, kind: 'credential-check', consentIds: ['c1'] },
+            {
+              index: 1,
+              kind: 'service-action',
+              action: 'self.identity-check',
+              grants: [LINK_GRANT, OFFER_GRANT],
+            },
+          ],
+        }),
+      [`POST ${SELF}/identity/v1/links`]: () =>
+        json(
+          {
+            linkId: 'lnk_2',
+            url: 'https://dev.self.ixo.earth/l/t',
+            expiresAt: 4_000_000_000,
+          },
+          201,
+        ),
+    });
+    const tools = toolsFor(fetchImpl, oracleKey.doc);
+    const ctx = channelCtx(adapter);
+    await run(
+      tools.credentials_request_permissions,
+      {
+        items: [
+          { kind: 'credential-check', ...CHECK_ARGS, days: 30 },
+          IDENTITY,
+        ],
+      },
+      ctx,
+    );
+    await expect(
+      run(
+        tools.credentials_request_action,
+        { action: 'self.identity-check' },
+        ctx,
+      ),
+    ).resolves.toMatchObject({ linkId: 'lnk_2' });
+  });
+
+  it('returns the granted capabilities, never tokens, for an entry with no flow here', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl } = routedFetch({
+      [`POST ${HUB}/api/internal/permissions`]: () => json(CARD, 201),
+      [`GET ${HUB}/api/internal/permissions/card_1`]: () =>
+        json({
+          id: 'card_1',
+          status: 'allowed',
+          items: [
+            {
+              index: 0,
+              kind: 'service-action',
+              action: 'yo.rewards-claim',
+              consentIds: ['c1'],
+              grants: [{ ...LINK_GRANT, id: 'claim', can: 'rewards/claim' }],
+            },
+          ],
+        }),
+    });
+    const tools = toolsFor(fetchImpl, oracleKey.doc);
+    const ctx = channelCtx(adapter);
+    await run(
+      tools.credentials_request_action_permission,
+      { action: 'yo.rewards-claim' },
+      ctx,
+    );
+    const out = await run(
+      tools.credentials_request_action,
+      { action: 'yo.rewards-claim' },
+      ctx,
+    );
+    expect(out).toMatchObject({
+      status: 'granted',
+      action: 'yo.rewards-claim',
+      granted: {
+        consentIds: ['c1'],
+        grants: [
+          {
+            id: 'claim',
+            can: 'rewards/claim',
+            with: 'ixo:identity',
+            audience: ORACLE_DID,
+            expiresAt: 4_000_000_000,
+          },
+        ],
+      },
+    });
+    expect(JSON.stringify(out)).not.toContain('LINK_DELEGATION');
+    await expect(
+      run(
+        tools.credentials_action_status,
+        { action: 'yo.rewards-claim', ref: 'x' },
+        ctx,
+      ),
+    ).resolves.toMatchObject({ error: 'unknown_action' });
+  });
+
+  it('keeps the two single-item tools as one-item lists', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl, calls } = routedFetch({
+      [`POST ${HUB}/api/internal/permissions`]: () => json(CARD, 201),
+    });
+    const tools = toolsFor(fetchImpl, oracleKey.doc);
+    const ctx = channelCtx(adapter);
+    await run(
+      tools.credentials_request_check_permission,
+      { ...CHECK_ARGS, days: 30 },
+      ctx,
+    );
+    await run(
+      tools.credentials_request_action_permission,
+      { action: 'self.identity-check' },
+      ctx,
+    );
+    const bodies = calls.map((c) => JSON.parse(c.body));
+    expect(bodies.map((b) => b.permissions.length)).toEqual([1, 1]);
+    expect(bodies[1].permissions[0]).toEqual({
+      kind: 'service-action',
+      action: 'self.identity-check',
+    });
+    expect(Object.keys(tools)).toEqual([
+      'credentials_request_permissions',
+      'credentials_request_check_permission',
+      'credentials_permission_status',
+      'credentials_check',
+      'credentials_request_action_permission',
+      'credentials_request_action',
+      'credentials_action_status',
+    ]);
+  });
+});
+
 describe('what the plugin keeps per person (kv)', () => {
   const ALLOWED = (calls?: { n: number }) => () => {
     if (calls) calls.n += 1;
     return json({
       id: 'card_1',
       status: 'allowed',
-      grants: [
+      items: identityItems([
         {
           id: 'offer',
           can: 'credentials/offer',
@@ -1174,7 +1587,7 @@ describe('what the plugin keeps per person (kv)', () => {
           expiresAt: 4_000_000_000,
           token: 'LINK_DELEGATION',
         },
-      ],
+      ]),
     });
   };
   const LINK = {
@@ -1188,7 +1601,7 @@ describe('what the plugin keeps per person (kv)', () => {
     const { adapter, oracleKey } = recordingUcan();
     const { fetchImpl, calls } = routedFetch({
       [`GET ${HUB}/api/internal/permissions/card_9`]: () =>
-        json({ id: 'card_9', status: 'allowed' }),
+        json({ id: 'card_9', status: 'allowed', items: identityItems([]) }),
     });
     await expect(
       run(
@@ -1206,7 +1619,7 @@ describe('what the plugin keeps per person (kv)', () => {
     const { fetchImpl } = routedFetch({
       [`POST ${HUB}/api/internal/permissions`]: () => json(CARD, 201),
       [`GET ${HUB}/api/internal/permissions/card_1`]: () =>
-        json({ id: 'card_1', status: 'pending' }),
+        json({ id: 'card_1', status: 'pending', items: identityItems([]) }),
     });
     const tools = toolsFor(fetchImpl, oracleKey.doc);
     const ctx = channelCtx(adapter, { kv });

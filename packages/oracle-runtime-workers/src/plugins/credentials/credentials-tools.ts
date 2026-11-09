@@ -41,9 +41,13 @@ import type { FetchLike } from './http';
 import {
   canonicalJson,
   HubPermissionsClient,
+  MAX_PERMISSION_ITEMS,
   PERMISSIONS_CAPABILITY,
   sha256Hex,
   type PermissionGrant,
+  type PermissionItemState,
+  type PermissionRequest,
+  type PermissionState,
   type PermissionStatus,
 } from './hub-client';
 import {
@@ -120,9 +124,19 @@ const Vct = z.string().url().max(512);
 const Issuers = z.array(Did).min(1).max(MAX_ISSUERS_PER_TYPE).optional();
 const Claims = z.array(ClaimName).max(30);
 
-/** Catalogued service actions this runtime can carry out. */
-export const SUPPORTED_ACTIONS = ['self.identity-check'] as const;
-export type SupportedAction = (typeof SUPPORTED_ACTIONS)[number];
+/**
+ * The catalogue entry that has its own flow here (a link from Self). Any
+ * other entry id is accepted as the Hub's pattern allows; the Hub answers
+ * 400 for ids it does not know.
+ */
+export const IDENTITY_CHECK_ACTION = 'self.identity-check';
+/** The Hub's pattern for a catalogue entry id. */
+export const ACTION_ID_PATTERN = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9-]*)+$/;
+const ActionId = z
+  .string()
+  .max(128)
+  .regex(ACTION_ID_PATTERN, 'a catalogue entry id such as self.identity-check');
+export type SupportedAction = string;
 
 export const CheckPermissionInput = z
   .object({
@@ -140,6 +154,39 @@ export const CheckPermissionInput = z
       .max(90)
       .default(30)
       .describe('How long the permission lasts, in days (1-90).'),
+  })
+  .strict();
+
+const CheckItem = CheckPermissionInput.extend({
+  kind: z.literal('credential-check'),
+});
+const ActionItem = z
+  .object({
+    kind: z.literal('service-action'),
+    action: ActionId.describe(
+      'An entry id from the Hub\'s approved list, for example "self.identity-check".',
+    ),
+    days: z
+      .number()
+      .int()
+      .min(1)
+      .max(90)
+      .optional()
+      .describe(
+        "How long the permission lasts, in days; omit for the entry's usual length (the Hub refuses more than the entry allows).",
+      ),
+  })
+  .strict();
+
+export const RequestPermissionsInput = z
+  .object({
+    items: z
+      .array(z.discriminatedUnion('kind', [CheckItem, ActionItem]))
+      .min(1)
+      .max(MAX_PERMISSION_ITEMS)
+      .describe(
+        'Everything you need from the person, 1-5 items, shown on ONE card.',
+      ),
   })
   .strict();
 
@@ -167,26 +214,24 @@ export const CheckInput = z
 
 export const ActionPermissionInput = z
   .object({
-    action: z.enum(SUPPORTED_ACTIONS),
+    action: ActionId,
     days: z
       .number()
       .int()
       .min(1)
-      .max(30)
+      .max(90)
       .optional()
       .describe(
-        "How long the permission lasts, in days (1-30); omit for the action's usual length.",
+        "How long the permission lasts, in days; omit for the action's usual length.",
       ),
   })
   .strict();
 
-export const ActionInput = z
-  .object({ action: z.enum(SUPPORTED_ACTIONS) })
-  .strict();
+export const ActionInput = z.object({ action: ActionId }).strict();
 
 export const ActionStatusInput = z
   .object({
-    action: z.enum(SUPPORTED_ACTIONS),
+    action: ActionId,
     ref: z
       .string()
       .regex(/^[A-Za-z0-9_-]{1,128}$/)
@@ -450,8 +495,46 @@ function cardMessage(name: string, url: string): Wording {
   };
 }
 
+/** What the agent may see of one item: ids and capabilities, never tokens. */
+function itemSummary(item: PermissionItemState, status: PermissionStatus) {
+  return {
+    index: item.index,
+    kind: item.kind,
+    ...(item.action ? { action: item.action } : {}),
+    state: status,
+    ...(status === 'allowed' && (item.consentIds?.length || item.grants?.length)
+      ? {
+          granted: {
+            ...(item.consentIds?.length ? { consentIds: item.consentIds } : {}),
+            ...(item.grants?.length
+              ? {
+                  grants: item.grants.map((g) => ({
+                    ...(g.id ? { id: g.id } : {}),
+                    can: g.can,
+                    with: g.with,
+                    audience: g.audience,
+                    expiresAt: g.expiresAt,
+                  })),
+                }
+              : {}),
+          },
+        }
+      : {}),
+  };
+}
+
+/** The service-action item of `action` in a card's state. */
+function actionItem(
+  state: PermissionState,
+  action: string,
+): PermissionItemState | undefined {
+  return state.items.find(
+    (i) => i.kind === 'service-action' && i.action === action,
+  );
+}
+
 /** The kv key that remembers the card for one action. */
-function actionKey(action: SupportedAction): string {
+function actionKey(action: string): string {
   return `action:${action}`;
 }
 
@@ -523,47 +606,114 @@ export function createCredentialsTools(
   const acceptedTypes = `Credential types this service accepts (vct): ${Object.keys(cfg.trustedIssuers).join(', ') || 'none'}; their issuers are set by the operator.`;
   const unavailable = () => refusal('not_available', MESSAGES.notAvailable);
 
-  const requestCheckPermission = tool(
-    async (raw, ctx) => {
-      const ready = readiness(ctx, cfg);
-      if (isRefusal(ready)) return ready;
-      const kv = kvOf(ctx);
-      if (!kv) return unavailable();
-      const args = CheckPermissionInput.parse(raw);
-      const accepted = acceptedIssuers(cfg, args.vct, args.issuers);
-      if ('error' in accepted) return accepted;
-      const deadline = now() + TOOL_DEADLINE_MS;
-      try {
-        const card = await hubClient(ctx, ready, deps, deadline).request({
-          ...ready.binding,
-          requestKey: await requestKeyOf(ctx, 'check-permission'),
-          expiresAt: Math.floor(now() / 1000) + PERMISSION_CARD_TTL_SECONDS,
-          permission: {
-            kind: 'credential-check',
-            vct: args.vct,
-            issuers: accepted.issuers,
-            claims: sortedUnique(args.claims),
-            days: args.days,
-          },
+  /**
+   * Ask the Hub for ONE card holding `items`. The shared path of the three
+   * request tools; `label` keeps each tool's request key apart.
+   */
+  async function sendCard(
+    ctx: RuntimeContext,
+    toolName: string,
+    label: string,
+    items: z.infer<typeof RequestPermissionsInput>['items'],
+  ) {
+    const ready = readiness(ctx, cfg);
+    if (isRefusal(ready)) return ready;
+    const kv = kvOf(ctx);
+    if (!kv) return unavailable();
+    const permissions: PermissionRequest[] = [];
+    for (const item of items) {
+      if (item.kind === 'credential-check') {
+        const accepted = acceptedIssuers(cfg, item.vct, item.issuers);
+        if ('error' in accepted) return accepted;
+        permissions.push({
+          kind: 'credential-check',
+          vct: item.vct,
+          issuers: accepted.issuers,
+          claims: sortedUnique(item.claims),
+          days: item.days,
         });
-        await recordPermission(kv, card.id);
-        return said(cardMessage(oracle.name, card.url), {
-          status: 'sent',
-          permissionId: card.id,
-          url: card.url,
-          expiresAt: card.expiresAt,
+      } else {
+        permissions.push({
+          kind: 'service-action',
+          action: item.action,
+          ...(item.days !== undefined ? { days: item.days } : {}),
         });
-      } catch (error) {
-        return failed(ctx, 'credentials_request_check_permission', error);
       }
+    }
+    const deadline = now() + TOOL_DEADLINE_MS;
+    try {
+      const card = await hubClient(ctx, ready, deps, deadline).request({
+        ...ready.binding,
+        requestKey: await requestKeyOf(ctx, label),
+        expiresAt: Math.floor(now() / 1000) + PERMISSION_CARD_TTL_SECONDS,
+        permissions,
+      });
+      for (const p of permissions) {
+        if (p.kind !== 'service-action') continue;
+        await kv.set(
+          CREDENTIALS_KV_NAMESPACE,
+          actionKey(p.action),
+          { permissionId: card.id },
+          { idleTtlMs: ACTION_RECORD_TTL_MS },
+        );
+        // Grants kept for an earlier card are not this card's.
+        await clearGrantsCache(kv, p.action);
+      }
+      await recordPermission(
+        kv,
+        card.id,
+        permissions.map((p) => p.kind),
+      );
+      return said(cardMessage(oracle.name, card.url), {
+        status: 'sent',
+        permissionId: card.id,
+        url: card.url,
+        expiresAt: card.expiresAt,
+      });
+    } catch (error) {
+      return failed(ctx, toolName, error);
+    }
+  }
+
+  const requestPermissions = tool(
+    (raw, ctx) => {
+      const args = RequestPermissionsInput.parse(raw);
+      return sendCard(
+        ctx,
+        'credentials_request_permissions',
+        'permissions',
+        args.items,
+      );
+    },
+    {
+      name: 'credentials_request_permissions',
+      description: [
+        "Ask the person for everything you need in ONE card (1-5 items); they tap Allow or Don't allow once and Allow covers every item. Always put all you need in one request instead of sending several cards.",
+        'Item kinds: {kind:"credential-check", vct, claims, issuers?, days} (standing permission to check one credential; the accepted issuers are configured, you may only narrow them) and {kind:"service-action", action, days?} (an action from the Hub\'s approved list; ask the operator which entries exist).',
+        'Identity: ONE item {kind:"service-action", action:"self.identity-check", days} covers the identity link, the credential offer AND the standing consent to check IdentityLevel1 afterwards; add a credential-check item only for other credential types.',
+        acceptedTypes,
+        'Send the `message` (it holds the link) as it is, in a short message. Never paste ids or tokens. Then read the answer with credentials_permission_status, or go on once they say they allowed it. WhatsApp only.',
+      ].join(' '),
+      schema: RequestPermissionsInput,
+    },
+  );
+
+  const requestCheckPermission = tool(
+    (raw, ctx) => {
+      const args = CheckPermissionInput.parse(raw);
+      return sendCard(
+        ctx,
+        'credentials_request_check_permission',
+        'check-permission',
+        [{ ...args, kind: 'credential-check' }],
+      );
     },
     {
       name: 'credentials_request_check_permission',
       description: [
-        'Ask the person, once, for standing permission to check one of their credentials (for example that they are over 18 or have a verified identity).',
-        'Use it before credentials_check when they have not allowed it yet, or when a check comes back pending. Ask for one credential type and as few fields as you need; the accepted issuers are configured (you may only narrow them).',
+        'One-item form of credentials_request_permissions: ask the person, once, for standing permission to check one credential (for example that they are over 18). If you need more than this, use credentials_request_permissions and ask for everything in ONE card.',
+        'Ask for one credential type and as few fields as you need; the accepted issuers are configured (you may only narrow them).',
         acceptedTypes,
-        "The person gets a card in the IXO wallet showing who asks, the credential, who issued it, the fields you will see and how long; they tap Allow or Don't allow.",
         'Send the `message` (it holds the link) as it is, in a short message. Never paste ids or tokens. Then check the answer with credentials_permission_status, or just call credentials_check once they say they allowed it.',
         'WhatsApp only.',
       ].join(' '),
@@ -592,6 +742,7 @@ export function createCredentialsTools(
           status: state.status,
           ...(state.allowedAt ? { allowedAt: state.allowedAt } : {}),
           ...(state.expiresAt ? { expiresAt: state.expiresAt } : {}),
+          items: state.items.map((item) => itemSummary(item, state.status)),
         });
       } catch (error) {
         return failed(ctx, 'credentials_permission_status', error);
@@ -600,7 +751,7 @@ export function createCredentialsTools(
     {
       name: 'credentials_permission_status',
       description:
-        'Read whether the person answered a permission card (pending, allowed, declined, expired or stopped). Use the permissionId a credentials_request_*_permission tool returned. Only call it when you need the answer to go on; do not poll in a loop. WhatsApp only.',
+        'Read whether the person answered a permission card (pending, allowed, declined, expired or stopped) and, per item, its kind, state and what was granted (ids only, never tokens). The card is answered as a whole: Allow covers every item. Use the permissionId a credentials_request_* tool returned. Only call it when you need the answer to go on; do not poll in a loop. WhatsApp only.',
       schema: PermissionStatusInput,
       effect: 'read',
     },
@@ -844,52 +995,27 @@ export function createCredentialsTools(
   }
 
   const requestActionPermission = tool(
-    async (raw, ctx) => {
-      const ready = readiness(ctx, cfg);
-      if (isRefusal(ready)) return ready;
-      const kv = kvOf(ctx);
-      if (!kv) return unavailable();
+    (raw, ctx) => {
       const args = ActionPermissionInput.parse(raw);
-      const deadline = now() + TOOL_DEADLINE_MS;
-      try {
-        const card = await hubClient(ctx, ready, deps, deadline).request({
-          ...ready.binding,
-          requestKey: await requestKeyOf(
-            ctx,
-            `action-permission:${args.action}`,
-          ),
-          expiresAt: Math.floor(now() / 1000) + PERMISSION_CARD_TTL_SECONDS,
-          permission: {
+      return sendCard(
+        ctx,
+        'credentials_request_action_permission',
+        `action-permission:${args.action}`,
+        [
+          {
             kind: 'service-action',
             action: args.action,
             ...(args.days !== undefined ? { days: args.days } : {}),
           },
-        });
-        await kv.set(
-          CREDENTIALS_KV_NAMESPACE,
-          actionKey(args.action),
-          { permissionId: card.id },
-          { idleTtlMs: ACTION_RECORD_TTL_MS },
-        );
-        // Grants kept for an earlier card are not this card's.
-        await clearGrantsCache(kv, args.action);
-        await recordPermission(kv, card.id);
-        return said(cardMessage(oracle.name, card.url), {
-          status: 'sent',
-          permissionId: card.id,
-          url: card.url,
-          expiresAt: card.expiresAt,
-        });
-      } catch (error) {
-        return failed(ctx, 'credentials_request_action_permission', error);
-      }
+        ],
+      );
     },
     {
       name: 'credentials_request_action_permission',
       description: [
-        'Ask the person for permission to use a catalogued service on their behalf. Today: "self.identity-check" (Self may create a link for them to start an identity check).',
+        'One-item form of credentials_request_permissions: ask the person for permission to use a service on their behalf: any action from the Hub\'s approved list (ask the operator which entries exist); the Hub refuses ids it does not know. "self.identity-check" covers the identity link, the credential offer and the consent to check the identity credential afterwards, all on one card.',
         "They get a card in the IXO wallet showing who asks, the action, the service, what it allows and how long; they tap Allow or Don't allow.",
-        'Send the `message` (it holds the link) as it is, in a short message; never paste ids or tokens. Once they allow it, call credentials_request_action.',
+        'Send the `message` (it holds the link) as it is, in a short message; never paste ids or tokens. Once they allow it, call credentials_request_action. If you need more than this, use credentials_request_permissions.',
         'WhatsApp only.',
       ].join(' '),
       schema: ActionPermissionInput,
@@ -905,7 +1031,7 @@ export function createCredentialsTools(
     ctx: RuntimeContext,
     ready: Ready,
     kv: UserKvSurface,
-    action: SupportedAction,
+    action: string,
     deadline: number,
     fresh: boolean,
   ): Promise<
@@ -930,7 +1056,7 @@ export function createCredentialsTools(
     );
     if (state.status === 'pending')
       return refusal('permission_pending', MESSAGES.permissionPending);
-    const grants = (state.grants ?? []).filter(
+    const grants = (actionItem(state, action)?.grants ?? []).filter(
       (g) => g.expiresAt > Math.floor(now() / 1000),
     );
     if (state.status !== 'allowed' || grants.length === 0) {
@@ -956,7 +1082,7 @@ export function createCredentialsTools(
     ctx: RuntimeContext,
     ready: Ready,
     kv: UserKvSurface,
-    action: SupportedAction,
+    action: string,
     deadline: number,
     run: (grants: PermissionGrant[]) => Promise<T>,
   ): Promise<T | CredentialsRefusal> {
@@ -989,6 +1115,52 @@ export function createCredentialsTools(
     );
   }
 
+  /**
+   * For an entry that has no flow here: what the person allowed (ids,
+   * capabilities, audiences and ends; never tokens), so the agent or another
+   * plugin can act on it.
+   */
+  async function grantedOutline(
+    ctx: RuntimeContext,
+    ready: Ready,
+    kv: UserKvSurface,
+    action: string,
+    deadline: number,
+  ) {
+    const record = ActionRecord.safeParse(
+      await kv.get(CREDENTIALS_KV_NAMESPACE, actionKey(action)),
+    );
+    if (!record.success) return refusal('no_permission', MESSAGES.noPermission);
+    try {
+      const state = await hubClient(ctx, ready, deps, deadline).status(
+        record.data.permissionId,
+      );
+      if (state.status === 'pending')
+        return refusal('permission_pending', MESSAGES.permissionPending);
+      const item = actionItem(state, action);
+      if (state.status !== 'allowed' || !item)
+        return refusal(
+          'permission_ended',
+          state.status === 'declined'
+            ? MESSAGES.declined
+            : MESSAGES.permissionEnded,
+        );
+      return said(
+        {
+          message: 'Thanks, you allowed it.',
+          hint: "This runtime has no built-in flow for this action; the granted capabilities are listed (no tokens). Another plugin or the operator's instructions say how to use them.",
+        },
+        {
+          status: 'granted',
+          permissionId: state.id,
+          ...itemSummary(item, state.status),
+        },
+      );
+    } catch (error) {
+      return failed(ctx, 'credentials_request_action', error);
+    }
+  }
+
   const requestAction = tool(
     async (raw, ctx) => {
       const ready = readiness(ctx, cfg);
@@ -997,6 +1169,8 @@ export function createCredentialsTools(
       if (!kv) return unavailable();
       const args = ActionInput.parse(raw);
       const deadline = now() + TOOL_DEADLINE_MS;
+      if (args.action !== IDENTITY_CHECK_ACTION)
+        return grantedOutline(ctx, ready, kv, args.action, deadline);
       const requestKey = await requestKeyOf(ctx, `action:${args.action}`);
       try {
         return await withGrants(
@@ -1063,9 +1237,9 @@ export function createCredentialsTools(
     {
       name: 'credentials_request_action',
       description: [
-        'Carry out a catalogued action the person allowed with credentials_request_action_permission. For "self.identity-check" it asks Self for a link where they start an identity check (it works once and ends after about 15 minutes; the first device that opens it keeps it).',
+        'Carry out a catalogued action the person allowed (on the card from credentials_request_permissions or credentials_request_action_permission). For "self.identity-check" (one card is enough: it holds the link, the offer and the consent) it asks Self for a link where they start an identity check (it works once and ends after about 15 minutes; the first device that opens it keeps it).',
         'Send the `message` (it holds the link) as it is. Keep the linkId to read progress with credentials_action_status. A new call replaces a link nobody has opened yet (the old one stops working), so call it again only when they need a new link. status "already_open": their check is in progress; relay the message and read progress with that linkId.',
-        'If they have not allowed it yet the answer says so: ask for permission first. WhatsApp only.',
+        'For any other entry id it answers status "granted" with the capabilities the person allowed (ids, capabilities, audiences and ends; never tokens) so another plugin or you can act on them. If they have not allowed it yet the answer says so: ask for permission first. WhatsApp only.',
       ].join(' '),
       schema: ActionInput,
     },
@@ -1128,6 +1302,11 @@ export function createCredentialsTools(
       const kv = kvOf(ctx);
       if (!kv) return unavailable();
       const args = ActionStatusInput.parse(raw);
+      if (args.action !== IDENTITY_CHECK_ACTION)
+        return refusal('unknown_action', {
+          message: MESSAGES.unknownAction.message,
+          hint: 'Only self.identity-check has progress to read here; use credentials_permission_status for any other entry.',
+        });
       const stateAnswer = (state: {
         linkId: string;
         status: LinkStatus;
@@ -1182,6 +1361,7 @@ export function createCredentialsTools(
   );
 
   return [
+    requestPermissions,
     requestCheckPermission,
     permissionStatus,
     check,

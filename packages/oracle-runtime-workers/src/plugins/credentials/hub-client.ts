@@ -3,9 +3,9 @@ import { CredentialsServiceError } from './errors';
 import { callService, type FetchLike } from './http';
 
 /**
- * Auth Hub permission cards: the oracle asks the Hub to show the person one
- * of two fixed cards (check a credential, use a catalogued service) and
- * reads the answer back.
+ * Auth Hub permission cards: the oracle asks the Hub to show the person ONE
+ * card holding 1-5 items (each a credential check or a catalogued service
+ * action) and reads the answer back, item by item.
  *
  * Every call carries the oracle account's key (`x-channels-service-key`)
  * AND a UCAN invocation issued by the oracle's own DID to the Hub's did:web,
@@ -43,6 +43,9 @@ export type PermissionRequest =
   | CredentialCheckPermission
   | ServiceActionPermission;
 
+/** The most items one card holds. */
+export const MAX_PERMISSION_ITEMS = 5;
+
 export const PERMISSION_STATUSES = [
   'pending',
   'allowed',
@@ -72,12 +75,30 @@ export const GrantSchema = z.object({
 });
 export type PermissionGrant = z.infer<typeof GrantSchema>;
 
+/**
+ * One item of the card as the Hub echoes it. Only what the plugin uses is
+ * kept: the item's position and kind, the action of a service action (to
+ * find its grants) and the outcome ids written when the person allowed it.
+ */
+export const ItemStateSchema = z.object({
+  index: z
+    .number()
+    .int()
+    .min(0)
+    .max(MAX_PERMISSION_ITEMS - 1),
+  kind: z.enum(['credential-check', 'service-action']),
+  action: z.string().max(128).optional(),
+  consentIds: z.array(z.string().min(1).max(128)).max(16).optional(),
+  grants: z.array(GrantSchema).max(16).optional(),
+});
+export type PermissionItemState = z.infer<typeof ItemStateSchema>;
+
 const StatusAnswer = z.object({
   id: z.string().regex(OPAQUE_ID),
   status: z.enum(PERMISSION_STATUSES),
   allowedAt: z.number().int().positive().optional(),
   expiresAt: z.number().int().positive().optional(),
-  grants: z.array(GrantSchema).max(16).optional(),
+  items: z.array(ItemStateSchema).min(1).max(MAX_PERMISSION_ITEMS),
 });
 export type PermissionState = z.infer<typeof StatusAnswer>;
 
@@ -168,14 +189,15 @@ export class HubPermissionsClient {
     bindingRevision: number;
     requestKey: string;
     expiresAt: number;
-    permission: PermissionRequest;
+    /** 1-5 items for the one card. */
+    permissions: PermissionRequest[];
   }): Promise<PermissionCard> {
     const unsigned: Record<string, unknown> = {
       bindingId: input.bindingId,
       bindingRevision: input.bindingRevision,
       requestKey: input.requestKey,
       expiresAt: input.expiresAt,
-      permission: input.permission,
+      permissions: input.permissions,
     };
     const bodySha256 = await permissionBodySha256(unsigned);
     // The body (and so its hash) is the same on the retry; the invocation
@@ -207,7 +229,7 @@ export class HubPermissionsClient {
     return parsed.data;
   }
 
-  /** The card's status; `grants` only for an allowed service action. */
+  /** The card's status and, per item, what was granted (grants only while allowed). */
   async status(id: string): Promise<PermissionState> {
     if (!OPAQUE_ID.test(id))
       throw new CredentialsServiceError({

@@ -177,6 +177,32 @@ export function shortTime(unixSeconds: number, timeZone?: string): string {
 }
 
 /**
+ * `400 invalid_item`: the Hub names the item's position (`details.index`, from
+ * 0) and a reason for developers. The person is told the item's place in
+ * plain words; the reason goes to the agent's hint only.
+ */
+function invalidItem(error: CredentialsServiceError): CredentialsRefusal {
+  const details = error.body?.details;
+  const index =
+    details && typeof details === 'object'
+      ? Number((details as Record<string, unknown>).index)
+      : Number.NaN;
+  const reason =
+    details && typeof details === 'object'
+      ? (details as Record<string, unknown>).reason
+      : undefined;
+  const position = Number.isInteger(index) && index >= 0 ? index + 1 : null;
+  return {
+    error: 'invalid_item',
+    message:
+      position === null
+        ? "One of the items in this request isn't something we can set up."
+        : `Item ${position} of this request isn't something we can set up.`,
+    hint: `Fix or drop ${position === null ? 'that item' : `item ${position}`} and ask again${typeof reason === 'string' && /^[a-z0-9_ .:-]{1,80}$/i.test(reason) ? ` (Hub reason: ${reason})` : ''}; nothing was sent.`,
+  };
+}
+
+/**
  * The refusal a tool answers for `error`. Anything that is not a
  * {@link CredentialsServiceError} is a fault on our side; it is logged by the
  * caller, never shown.
@@ -198,6 +224,8 @@ export function refusalFor(
       return refusal(code, MESSAGES.unnamedService);
     case 'unknown_action':
       return refusal(code, MESSAGES.unknownAction);
+    case 'invalid_item':
+      return invalidItem(error);
     case 'days_not_allowed':
       return refusal(code, MESSAGES.daysNotAllowed);
     case 'too_many_pending':

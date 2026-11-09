@@ -8,8 +8,9 @@ import { LINK_STATUSES, type LinkState } from './self-client';
  * What the plugin remembers about one person in their own kv (namespace
  * `credentials`, next to the check rows of `check-store.ts`):
  *
- * - `permissions`: the ids of the permission cards THIS person was asked
- *   (`credentials_permission_status` reads no other id).
+ * - `permissions`: the permission cards THIS person was asked, each once
+ *   with the kinds of its items (`credentials_permission_status` reads no
+ *   other id).
  * - `grants:<action>`: the grants of an allowed action card, kept until the
  *   earliest of them ends, so a repeat call does not ask the Hub again.
  * - `link:<linkId>`: the last status read for a link, and `linkrate:<linkId>`
@@ -20,21 +21,33 @@ const PERMISSIONS_KEY = 'permissions';
 const MAX_PERMISSIONS = 32;
 const PERMISSION_IDLE_TTL_MS = 32 * 24 * 3600 * 1000;
 
-const Ids = z.array(z.string());
+const ItemKinds = z.array(z.enum(['credential-check', 'service-action']));
+/** One card: its id once, with the kinds of its items (older rows: the id alone). */
+const Entry = z.union([
+  z.string().transform((id) => ({ id, kinds: [] as string[] })),
+  z.object({ id: z.string(), kinds: ItemKinds }),
+]);
+const Entries = z.array(Entry);
 
-/** Remember a permission card's id as this person's (oldest dropped first). */
+/**
+ * Remember a permission card's id as this person's, once, with the kinds of
+ * its items (oldest dropped first).
+ */
 export async function recordPermission(
   kv: UserKvSurface,
   id: string,
+  kinds: readonly ('credential-check' | 'service-action')[] = [],
 ): Promise<void> {
   await kv.update(
     CREDENTIALS_KV_NAMESPACE,
     PERMISSIONS_KEY,
     (current) => {
-      const parsed = Ids.safeParse(current);
-      const ids = (parsed.success ? parsed.data : []).filter((x) => x !== id);
-      ids.push(id);
-      return ids.slice(-MAX_PERMISSIONS);
+      const parsed = Entries.safeParse(current);
+      const entries = (parsed.success ? parsed.data : []).filter(
+        (x) => x.id !== id,
+      );
+      entries.push({ id, kinds: [...kinds] });
+      return entries.slice(-MAX_PERMISSIONS);
     },
     { idleTtlMs: PERMISSION_IDLE_TTL_MS },
   );
@@ -45,10 +58,10 @@ export async function knowsPermission(
   kv: UserKvSurface,
   id: string,
 ): Promise<boolean> {
-  const parsed = Ids.safeParse(
+  const parsed = Entries.safeParse(
     await kv.get(CREDENTIALS_KV_NAMESPACE, PERMISSIONS_KEY),
   );
-  return parsed.success && parsed.data.includes(id);
+  return parsed.success && parsed.data.some((x) => x.id === id);
 }
 
 // ---------------------------------------------------------------------------

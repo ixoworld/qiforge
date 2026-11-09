@@ -27,13 +27,15 @@ const REQUEST = {
   ...BINDING,
   requestKey: 'key-1',
   expiresAt: 1793000000,
-  permission: {
-    kind: 'credential-check' as const,
-    vct: 'https://credentials.ixo.world/types/IdentityLevel1',
-    issuers: ['did:ixo:entity:80f392610e8a128b4f4b1ed828dbeb7f'],
-    claims: ['age_over_18', 'identity_level'],
-    days: 30,
-  },
+  permissions: [
+    {
+      kind: 'credential-check' as const,
+      vct: 'https://credentials.ixo.world/types/IdentityLevel1',
+      issuers: ['did:ixo:entity:80f392610e8a128b4f4b1ed828dbeb7f'],
+      claims: ['age_over_18', 'identity_level'],
+      days: 30,
+    },
+  ],
 };
 
 function client(fetchImpl: (r: Request) => Promise<Response>) {
@@ -94,7 +96,8 @@ describe('HubPermissionsClient.request', () => {
     expect(call?.headers.get('content-type')).toBe('application/json');
     const sent = JSON.parse(call?.body ?? '{}');
     expect(sent.invocation).toBe('invocation-1');
-    expect(sent.permission).toEqual(REQUEST.permission);
+    expect(sent.permissions).toEqual(REQUEST.permissions);
+    expect(sent.permission).toBeUndefined();
     // The fact binds method, path and the hash of exactly what was sent.
     expect(facts).toEqual([
       [
@@ -105,6 +108,50 @@ describe('HubPermissionsClient.request', () => {
         },
       ],
     ]);
+  });
+
+  it('sends several items as one list under one key, hashed as sent', async () => {
+    const { fetchImpl, calls } = routedFetch({
+      [`POST ${HUB}${PERMISSIONS_PATH}`]: () => json(CARD, 201),
+    });
+    const { hub, facts } = client(fetchImpl);
+    const permissions = [
+      ...REQUEST.permissions,
+      {
+        kind: 'service-action' as const,
+        action: 'self.identity-check',
+        days: 7,
+      },
+    ];
+    await hub.request({ ...REQUEST, permissions });
+    const sent = JSON.parse(calls[0]?.body ?? '{}');
+    expect(sent.permissions).toEqual(permissions);
+    expect(sent.requestKey).toBe('key-1');
+    expect(facts[0]?.[0]?.body_sha256).toBe(await permissionBodySha256(sent));
+    // The same list asked again (a resumed run) is the same body and hash.
+    await hub.request({ ...REQUEST, permissions });
+    expect(JSON.parse(calls[1]?.body ?? '{}').permissions).toEqual(permissions);
+    expect(facts[1]?.[0]?.body_sha256).toBe(facts[0]?.[0]?.body_sha256);
+  });
+
+  it('carries the Hub invalid_item answer with its details', async () => {
+    const { fetchImpl } = routedFetch({
+      [`POST ${HUB}${PERMISSIONS_PATH}`]: () =>
+        json(
+          {
+            error: 'invalid_item',
+            message: 'x',
+            details: { index: 2, reason: 'unknown_action' },
+          },
+          400,
+        ),
+    });
+    const { hub } = client(fetchImpl);
+    await expect(hub.request(REQUEST)).rejects.toMatchObject({
+      status: 400,
+      code: 'invalid_item',
+      body: { details: { index: 2, reason: 'unknown_action' } },
+    });
   });
 
   it('answers 401 as a typed refusal, without retrying', async () => {
@@ -232,19 +279,51 @@ describe('HubPermissionsClient.status', () => {
           id: 'card_1',
           status: 'allowed',
           allowedAt: 1792000000,
-          grants,
+          expiresAt: 1793000000,
+          items: [
+            {
+              index: 0,
+              kind: 'service-action',
+              action: 'self.identity-check',
+              grants,
+            },
+            {
+              index: 1,
+              kind: 'credential-check',
+              vct: 'https://x.example/t',
+              consentIds: ['cons_1'],
+            },
+          ],
         }),
     });
     const { hub, facts } = client(fetchImpl);
-    await expect(hub.status('card_1')).resolves.toMatchObject({
-      status: 'allowed',
-      grants,
-    });
+    const state = await hub.status('card_1');
+    expect(state.status).toBe('allowed');
+    expect(state.items).toEqual([
+      {
+        index: 0,
+        kind: 'service-action',
+        action: 'self.identity-check',
+        grants,
+      },
+      { index: 1, kind: 'credential-check', consentIds: ['cons_1'] },
+    ]);
     expect(calls[0]?.headers.get('authorization')).toBe('Bearer invocation-1');
     expect(calls[0]?.headers.get('x-channels-service-key')).toBe(SERVICE_KEY);
     expect(facts).toEqual([
       [{ method: 'GET', path: `${PERMISSIONS_PATH}/card_1` }],
     ]);
+  });
+
+  it('refuses an answer without items', async () => {
+    const { fetchImpl } = routedFetch({
+      [`GET ${HUB}${PERMISSIONS_PATH}/card_1`]: () =>
+        json({ id: 'card_1', status: 'allowed' }),
+    });
+    const { hub } = client(fetchImpl);
+    await expect(hub.status('card_1')).rejects.toMatchObject({
+      code: 'invalid_response',
+    });
   });
 
   it('refuses a malformed id without calling the Hub', async () => {
