@@ -1,5 +1,16 @@
 # @ixo/ucan
 
+## 2.4.0
+
+### Minor Changes
+
+- **Security: the replay store and the revocation checker could be bypassed by re-labelling a signed UCAN under another CID.** A CAR archive's CIDs are written by its sender and covered by no signature (ucanto's `Delegation.extract` does not re-hash blocks), and dag-ucan verifies a signature over the payload re-formatted from the decoded fields, not over the block bytes. So the same signed invocation could be re-sent under a sha2-512 CID over the same bytes, as a JWT (raw codec) block, as a JWT whose JSON is spelled differently, or as a dag-cbor block with an empty `nnc` (the signed JSON omits it). Each passed the invocation store as a new invocation, so anyone who saw a used token (a log line, an error reporter, a stored copy) could use it again until it expired. A revoked delegation re-labelled the same way inside a fresh invocation, or passed to `validateDelegation()`, missed the revocation checker.
+
+  - `validate()` and `validateDelegation()` refuse (`INVALID_FORMAT`) any archive whose embedded UCANs (the token and every embedded proof) do not sit under the CID derived from their signed form alone (dag-cbor, sha2-256, CIDv1). The check runs right after the proof-chain shape limits, before the replay reservation, any DID resolution or signature check. Every CID handed to `invocationStore` and `revocationChecker` is therefore canonical; the store and checker interfaces are unchanged, so a service picks the fix up with this version alone.
+  - Visible to callers: UCANs in the JWT representation are no longer accepted (tokens minted with `@ixo/ucan` or ucanto are unaffected), and an invocation without a CID is refused instead of skipping the replay check.
+  - New exports `canonicalCid`, `nonCanonicalBlock` and `signedForm`, for services that parse delegations outside the validator (for example to record a revocation under its canonical CID).
+  - `VERSION` reports `2.4.0`.
+
 ## 2.3.0
 
 ### Minor Changes

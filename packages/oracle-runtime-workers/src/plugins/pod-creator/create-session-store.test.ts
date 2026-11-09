@@ -4,7 +4,7 @@ import {
   CREATE_SESSION_NAMESPACE,
   KvCreateSessionStore,
 } from './create-session-store';
-import { THREAD, USER } from './test-fixtures';
+import { PREPARE_ARGS, THREAD, USER, podBatchMessages } from './test-fixtures';
 
 /** The request that prepared the batch, and a later one (the user's reply). */
 const PREP = 'req-prepare';
@@ -123,5 +123,57 @@ describe('KvCreateSessionStore', () => {
       'not-prepared',
     );
     expect(await store.consume(USER, THREAD, 'blob_a')).toBe(false);
+  });
+
+  it('consume records what was sent; confirmation needs it, and opens the one card step of that POD', async () => {
+    const store = freshStore();
+    const sent = { messages: podBatchMessages(), profile: PREPARE_ARGS };
+    const pod = { podDid: 'did:ixo:entity:pod1', txHash: 'A'.repeat(64) };
+    await store.prepared(USER, THREAD, 'blob_a', PREP);
+    // Nothing sent yet: nothing to confirm, no card.
+    await store.confirmed(USER, THREAD, pod);
+    expect(await store.claimCard(USER, THREAD)).toEqual({ status: 'no-pod' });
+    await store.approve(USER, THREAD, 'blob_a', LATER);
+    expect(await store.read(USER, THREAD)).toEqual({
+      approvedBlobId: 'blob_a',
+    });
+    expect(await store.consume(USER, THREAD, 'blob_a', sent)).toBe(true);
+    expect(await store.read(USER, THREAD)).toEqual({ sent });
+    expect(await store.claimCard(USER, THREAD)).toEqual({ status: 'no-pod' });
+
+    await store.confirmed(USER, THREAD, pod);
+    expect(await store.read(USER, THREAD)).toEqual({ sent, confirmed: pod });
+    expect(await store.claimCard(USER, THREAD)).toEqual({
+      status: 'ok',
+      podDid: pod.podDid,
+      sent,
+    });
+    expect(await store.claimCard(USER, THREAD)).toEqual({
+      status: 'claimed',
+      state: 'sending',
+    });
+    await store.settleCard(USER, THREAD, 'released');
+    expect(await store.claimCard(USER, THREAD)).toMatchObject({ status: 'ok' });
+    await store.settleCard(USER, THREAD, 'added');
+    expect(await store.claimCard(USER, THREAD)).toEqual({
+      status: 'claimed',
+      state: 'added',
+    });
+    // Confirming the same POD again keeps its card closed; another POD opens its own.
+    await store.confirmed(USER, THREAD, pod);
+    expect(await store.claimCard(USER, THREAD)).toMatchObject({
+      status: 'claimed',
+    });
+    await store.confirmed(USER, THREAD, {
+      ...pod,
+      podDid: 'did:ixo:entity:pod2',
+    });
+    expect(await store.claimCard(USER, THREAD)).toMatchObject({
+      status: 'ok',
+      podDid: 'did:ixo:entity:pod2',
+    });
+    // A fresh prepare starts the thread over.
+    await store.prepared(USER, THREAD, 'blob_b', PREP);
+    expect(await store.read(USER, THREAD)).toEqual({});
   });
 });

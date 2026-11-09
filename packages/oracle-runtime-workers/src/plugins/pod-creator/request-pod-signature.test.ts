@@ -38,6 +38,7 @@ import { notConfiguredChainGateway, type ChainGateway } from './chain-gateway';
 import { PodCreatorPlugin } from './pod-creator.plugin';
 import {
   ALL_ROLE_IDS,
+  PREPARE_ARGS,
   THREAD,
   USER,
   acceptPodRisks,
@@ -107,8 +108,24 @@ function fakeBridge(opts: { connected?: boolean } = {}) {
 
 function gatewayFor(messages: ITrxMsg[] = podBatchMessages()): ChainGateway {
   return {
-    preparePodBatch: async () => ({ messages, summary: SUMMARY }),
-    confirmPodCreation: async () => ({ podDid: POD_DID, summary: 'live' }),
+    preparePodBatch: async () => ({
+      ok: true,
+      messages,
+      summary: SUMMARY,
+      documents: [],
+    }),
+    publishDocuments: async () => ({ ok: true }),
+    confirmPodCreation: async () => ({
+      status: 'created',
+      podDid: POD_DID,
+      summary: 'live',
+    }),
+    prepareDomainCard: async () => ({
+      ok: false,
+      message: 'not in these tests',
+      retryable: false,
+    }),
+    requestIndexing: async () => undefined,
   };
 }
 
@@ -155,7 +172,10 @@ async function approvedBatch(
   const prepared = z
     .object({ prepared: z.literal(true), blobId: z.string() })
     .parse(
-      await byName(tools, 'prepare_pod_transaction').handler({}, turn('req-1')),
+      await byName(tools, 'prepare_pod_transaction').handler(
+        PREPARE_ARGS,
+        turn('req-1'),
+      ),
     );
   z.object({ approved: z.literal(true) }).parse(
     await byName(tools, 'approve_pod_transaction').handler(
@@ -246,7 +266,12 @@ describe('request_pod_signature sends the ixo-transaction sign_transaction contr
         { txHash: TX_HASH },
         turn('req-3'),
       ),
-    ).resolves.toEqual({ created: true, podDid: POD_DID, summary: 'live' });
+    ).resolves.toMatchObject({
+      created: true,
+      podDid: POD_DID,
+      portalUrl: `https://test.portal.qi.space/domain/${POD_DID}/overview`,
+      summary: 'live',
+    });
   });
 
   it('names the chain of the configured network, with the shared IXO_TRANSACTION_CHAIN_ID_* overrides', async () => {
@@ -427,7 +452,7 @@ describe('the mainnet gate and the gateway', () => {
     const tools = new PodCreatorPlugin({ chainGateway: gateway }).getTools();
     await expect(
       byName(tools, 'prepare_pod_transaction').handler(
-        {},
+        PREPARE_ARGS,
         makeRuntimeContext(
           { config: { NETWORK: 'mainnet' } },
           { ambient: { kv } },
@@ -468,18 +493,42 @@ describe('the mainnet gate and the gateway', () => {
     expect(bridge.calls).toHaveLength(0);
   });
 
-  it('the bundled plugin has no gateway: creation is reported unavailable, and the default gateway refuses explicitly', async () => {
+  it('the bundled plugin prepares through the real chain gateway, which refuses a user who is no IXO account before any request', async () => {
     const kv = createMemoryUserKv();
     await seedRoles(new KvBlueprintStore(kv), THREAD, ALL_ROLE_IDS);
-    const tools = new PodCreatorPlugin().getTools();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    try {
+      const tools = new PodCreatorPlugin().getTools();
+      await expect(
+        byName(tools, 'prepare_pod_transaction').handler(
+          PREPARE_ARGS,
+          makeRuntimeContext({}, { ambient: { kv } }),
+        ),
+      ).resolves.toEqual({
+        prepared: false,
+        retryable: false,
+        message: expect.stringMatching(/^Your identity is not an IXO account/),
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('a fork that passes the not-configured gateway gets creation reported unavailable, and that gateway refuses explicitly', async () => {
+    const kv = createMemoryUserKv();
+    await seedRoles(new KvBlueprintStore(kv), THREAD, ALL_ROLE_IDS);
+    const tools = new PodCreatorPlugin({
+      chainGateway: notConfiguredChainGateway,
+    }).getTools();
     await expect(
       byName(tools, 'prepare_pod_transaction').handler(
-        {},
+        PREPARE_ARGS,
         makeRuntimeContext({}, { ambient: { kv } }),
       ),
     ).resolves.toEqual({
       prepared: false,
-      message: expect.stringMatching(/chain gateway is not configured/),
+      message: expect.stringMatching(/built without a chain gateway/),
     });
     await expect(
       notConfiguredChainGateway.preparePodBatch(
@@ -497,6 +546,7 @@ describe('the mainnet gate and the gateway', () => {
             assembledAt: '2026-10-07T00:00:00.000Z',
           },
           network: 'testnet',
+          profile: PREPARE_ARGS,
         },
         makeRuntimeContext(),
       ),

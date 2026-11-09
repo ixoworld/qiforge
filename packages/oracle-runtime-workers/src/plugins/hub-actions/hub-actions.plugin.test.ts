@@ -41,6 +41,10 @@ import {
   RUNTIME_BUILT_KINDS,
   chainTransactionTool,
   requestOperationJsonSchema,
+  HUB_ACTION_CHANNEL_TOOLS,
+  HUB_ACTION_STATUS_TOOL,
+  HUB_ACTIONS_OFF_REASON,
+  NOT_A_CHANNEL_CHAT_REASON,
 } from './hub-actions.plugin';
 import { chainTxOperation } from '../../hub-actions/request';
 import { chainTxAmountsInBaseUnits } from '../../hub-actions/transfer';
@@ -63,6 +67,16 @@ import type {
   RuntimeContext,
   UserKvSurface,
 } from '../../plugin-api/types';
+
+/** Every Hub action tool definition, for calling a handler directly. */
+const HUB_ACTION_TOOLS = [...HUB_ACTION_CHANNEL_TOOLS, HUB_ACTION_STATUS_TOOL];
+
+/** The turn's request_chain_transaction, when the turn offers one. */
+async function chainTxToolOf(plugin: HubActionsPlugin, ctx: RuntimeContext) {
+  return (await plugin.getRequestTools(ctx)).find(
+    (tool) => tool.name === 'request_chain_transaction',
+  );
+}
 
 /** A status read of a held action, as the owner object answers it. */
 function heldStatus(
@@ -169,9 +183,9 @@ describe('Hub actions Workers plugin', () => {
         status: async () => heldStatus(),
       },
     });
-    const tool = new HubActionsPlugin()
-      .getTools()
-      .find((item) => item.name === 'request_hub_action');
+    const tool = HUB_ACTION_TOOLS.find(
+      (item) => item.name === 'request_hub_action',
+    );
     if (!tool) throw new Error('request tool missing');
     expect(await tool.handler({ operation }, ctx)).toEqual({
       status: 'prepared',
@@ -298,9 +312,9 @@ describe('Hub actions Workers plugin', () => {
         status: async () => heldStatus(),
       },
     });
-    const tool = new HubActionsPlugin()
-      .getTools()
-      .find((item) => item.name === 'request_hub_action');
+    const tool = HUB_ACTION_TOOLS.find(
+      (item) => item.name === 'request_hub_action',
+    );
     if (!tool) throw new Error('request tool missing');
     // The plugin that runs the claim collection builds these cards from
     // the turn's own files; the model can never write one, so it can never
@@ -356,9 +370,9 @@ describe('Hub actions Workers plugin', () => {
         status: async () => heldStatus(failed),
       },
     });
-    const tool = new HubActionsPlugin()
-      .getTools()
-      .find((item) => item.name === 'hub_action_status');
+    const tool = HUB_ACTION_TOOLS.find(
+      (item) => item.name === 'hub_action_status',
+    );
     if (!tool) throw new Error('status tool missing');
     const result = await tool.handler({ actionId: id }, ctx);
     expect(result).toEqual({
@@ -458,9 +472,9 @@ describe('Hub actions Workers plugin', () => {
         status: async () => heldStatus(),
       },
     });
-    const tool = new HubActionsPlugin()
-      .getTools()
-      .find((item) => item.name === 'request_hub_action');
+    const tool = HUB_ACTION_TOOLS.find(
+      (item) => item.name === 'request_hub_action',
+    );
     if (!tool) throw new Error('request tool missing');
     expect(await tool.handler({ operation }, ctx)).toMatchObject({
       status: 'prepared',
@@ -501,9 +515,9 @@ describe('Hub actions Workers plugin', () => {
         status: async () => heldStatus(),
       },
     });
-    const tool = new HubActionsPlugin()
-      .getTools()
-      .find((item) => item.name === 'hub_action_options');
+    const tool = HUB_ACTION_TOOLS.find(
+      (item) => item.name === 'hub_action_options',
+    );
     if (!tool) throw new Error('Options tool missing');
     // `did:ixo:owner` names no IXO account.
     expect(await tool.handler({}, ctx)).toEqual({
@@ -562,9 +576,9 @@ describe('Hub actions Workers plugin', () => {
         status: async () => heldStatus(),
       },
     });
-    const tool = new HubActionsPlugin()
-      .getTools()
-      .find((item) => item.name === 'hub_action_options');
+    const tool = HUB_ACTION_TOOLS.find(
+      (item) => item.name === 'hub_action_options',
+    );
     if (!tool) throw new Error('Options tool missing');
     expect(await tool.handler({}, ctx)).toEqual({
       ...owned,
@@ -638,9 +652,9 @@ describe('Hub actions Workers plugin', () => {
       text: 'Keep these exact words.',
     },
   ])('uses the shared tool schema for $kind', (candidate) => {
-    const tool = new HubActionsPlugin()
-      .getTools()
-      .find((item) => item.name === 'request_hub_action');
+    const tool = HUB_ACTION_TOOLS.find(
+      (item) => item.name === 'request_hub_action',
+    );
     if (!tool) throw new Error('Request tool missing');
     expect(tool.schema.safeParse({ operation: candidate }).success).toBe(true);
     expect(
@@ -704,9 +718,9 @@ describe('Hub actions Workers plugin', () => {
           status: async () => heldStatus(),
         },
       });
-      const tool = new HubActionsPlugin()
-        .getTools()
-        .find((item) => item.name === 'request_hub_action');
+      const tool = HUB_ACTION_TOOLS.find(
+        (item) => item.name === 'request_hub_action',
+      );
       if (!tool) throw new Error('request tool missing');
       expect(await tool.handler({ operation }, ctx)).toEqual({
         status,
@@ -748,9 +762,9 @@ describe('Hub actions Workers plugin', () => {
         status: async () => heldStatus(),
       },
     });
-    const tool = new HubActionsPlugin()
-      .getTools()
-      .find((item) => item.name === 'request_hub_action');
+    const tool = HUB_ACTION_TOOLS.find(
+      (item) => item.name === 'request_hub_action',
+    );
     if (!tool) throw new Error('request tool missing');
     // The schema passes it; the protocol refuses the field.
     const bad = await tool.handler(
@@ -820,9 +834,9 @@ describe('Hub actions Workers plugin', () => {
         status: async () => heldStatus(),
       },
     });
-    const tool = new HubActionsPlugin()
-      .getTools()
-      .find((item) => item.name === 'request_hub_action');
+    const tool = HUB_ACTION_TOOLS.find(
+      (item) => item.name === 'request_hub_action',
+    );
     if (!tool) throw new Error('request tool missing');
     expect(
       await tool.handler(
@@ -882,9 +896,9 @@ describe('Hub actions Workers plugin', () => {
         status: async () => heldStatus(),
       },
     });
-    const action = new HubActionsPlugin()
-      .getTools()
-      .find((item) => item.name === 'request_hub_action');
+    const action = HUB_ACTION_TOOLS.find(
+      (item) => item.name === 'request_hub_action',
+    );
     // Offered per turn from the account's types (here: every type).
     const chain = chainTransactionTool(CHAIN_TX_MESSAGE_TYPES);
     if (!action || !chain) throw new Error('request tools missing');
@@ -937,9 +951,9 @@ describe('Hub actions Workers plugin', () => {
           heldStatus(null, 'Transfer of 1.25 USDC confirmed on chain.'),
       },
     });
-    const tool = new HubActionsPlugin()
-      .getTools()
-      .find((item) => item.name === 'hub_action_status');
+    const tool = HUB_ACTION_TOOLS.find(
+      (item) => item.name === 'hub_action_status',
+    );
     if (!tool) throw new Error('status tool missing');
     expect(await tool.handler({ actionId: id }, ctx)).toEqual({
       status: 'known',
@@ -1016,9 +1030,9 @@ describe('Hub actions Workers plugin', () => {
           status: async () => heldStatus(outcome),
         },
       });
-    const tool = new HubActionsPlugin()
-      .getTools()
-      .find((item) => item.name === 'hub_action_status');
+    const tool = HUB_ACTION_TOOLS.find(
+      (item) => item.name === 'hub_action_status',
+    );
     if (!tool) throw new Error('status tool missing');
     expect(tool.description).toContain('never say the person cancelled it');
     expect(await tool.handler({ actionId: id }, ctx(cancelled))).toMatchObject({
@@ -2630,8 +2644,8 @@ describe('request_chain_transaction', () => {
         },
       });
     const offered = async (turn: RuntimeContext) => {
-      const tools = await plugin.getRequestTools(turn);
-      return tools.map((tool) => [
+      const tool = await chainTxToolOf(plugin, turn);
+      return (tool ? [tool] : []).map((tool) => [
         tool.name,
         [...providerBranches(providerParameters(tool)).keys()],
       ]);
@@ -2657,7 +2671,8 @@ describe('request_chain_transaction', () => {
     const withoutCreate = CHAIN_TX_MESSAGE_TYPES.filter(
       (type) => type !== 'ixo.entity.create',
     );
-    const [held] = await plugin.getRequestTools(
+    const held = await chainTxToolOf(
+      plugin,
       withChainTx({ messageTypes: withoutCreate, maxMessages: 8 }),
     );
     expect(held?.description).not.toContain('`ixo.entity.create`');
@@ -2701,7 +2716,7 @@ describe('request_chain_transaction', () => {
     expect(turnRead).toHaveBeenCalledWith({ turn: true });
     // A type the account was not offered is refused before any Hub call,
     // on a model turn (the schema) and on a direct handler call.
-    const [fourTool] = await plugin.getRequestTools(four);
+    const fourTool = await chainTxToolOf(plugin, four);
     const stake = level6['cosmos.staking.delegate'];
     const error: unknown = await wrapPluginTool(fourTool!, {
       ambient: createNoopAmbient(),
@@ -2849,9 +2864,9 @@ describe('request_chain_transaction', () => {
         .filter((kind) => !RUNTIME_BUILT_KINDS.includes(kind))
         .sort(),
     );
-    const tool = new HubActionsPlugin()
-      .getTools()
-      .find((item) => item.name === 'request_hub_action');
+    const tool = HUB_ACTION_TOOLS.find(
+      (item) => item.name === 'request_hub_action',
+    );
     if (!tool) throw new Error('request tool missing');
     const text = JSON.stringify(z.toJSONSchema(tool.schema));
     for (const kind of RUNTIME_BUILT_KINDS) expect(text).not.toContain(kind);
@@ -2870,9 +2885,9 @@ describe('request_chain_transaction', () => {
       ...ctx,
       hubActions: { ...ctx.hubActions!, request },
     });
-    const tool = new HubActionsPlugin()
-      .getTools()
-      .find((item) => item.name === 'request_hub_action');
+    const tool = HUB_ACTION_TOOLS.find(
+      (item) => item.name === 'request_hub_action',
+    );
     if (!tool) throw new Error('request tool missing');
     const text = JSON.stringify(z.toJSONSchema(tool.schema));
     expect(text).not.toContain('maxLength');
@@ -2914,9 +2929,9 @@ describe('request_chain_transaction', () => {
       ...ctx,
       hubActions: { ...ctx.hubActions!, request },
     });
-    const tool = new HubActionsPlugin()
-      .getTools()
-      .find((item) => item.name === 'request_hub_action');
+    const tool = HUB_ACTION_TOOLS.find(
+      (item) => item.name === 'request_hub_action',
+    );
     if (!tool) throw new Error('request tool missing');
     expect(
       await tool.handler(
@@ -2979,9 +2994,9 @@ describe('request_chain_transaction', () => {
         capabilities: () => client.capabilities(),
       },
     });
-    const tool = new HubActionsPlugin()
-      .getTools()
-      .find((item) => item.name === 'hub_action_capabilities');
+    const tool = HUB_ACTION_TOOLS.find(
+      (item) => item.name === 'hub_action_capabilities',
+    );
     if (!tool) throw new Error('capabilities tool missing');
     expect(await tool.handler({}, withClient)).toEqual(capabilities);
     expect(urls).toEqual([
@@ -2996,9 +3011,9 @@ describe('describe_chain_messages', () => {
     maxMessages: 8,
   };
   function describeTool() {
-    const tool = new HubActionsPlugin()
-      .getTools()
-      .find((item) => item.name === 'describe_chain_messages');
+    const tool = HUB_ACTION_TOOLS.find(
+      (item) => item.name === 'describe_chain_messages',
+    );
     if (!tool) throw new Error('describe tool missing');
     return tool;
   }
@@ -3314,9 +3329,9 @@ describe('chain transaction field discovery', () => {
     }),
   ];
   const describeTool = () => {
-    const found = new HubActionsPlugin()
-      .getTools()
-      .find((item) => item.name === 'describe_chain_messages');
+    const found = HUB_ACTION_TOOLS.find(
+      (item) => item.name === 'describe_chain_messages',
+    );
     if (!found) throw new Error('describe tool missing');
     return found;
   };
@@ -3346,9 +3361,7 @@ describe('chain transaction field discovery', () => {
   it('declares fields only for the types described in this session, and names every other type in one open branch', async () => {
     const kv = createMemoryUserKv();
     const plugin = new HubActionsPlugin();
-    const [before] = await plugin.getRequestTools(
-      turn(kv, 'session-a', 'run-1'),
-    );
+    const before = await chainTxToolOf(plugin, turn(kv, 'session-a', 'run-1'));
     expect(parameters(before!).properties.messages.items.oneOf).toEqual([
       {
         type: 'object',
@@ -3366,9 +3379,7 @@ describe('chain transaction field discovery', () => {
       turn(kv, 'session-a', 'run-1'),
     );
     // The next turn of the session: both carry their fields.
-    const [after] = await plugin.getRequestTools(
-      turn(kv, 'session-a', 'run-2'),
-    );
+    const after = await chainTxToolOf(plugin, turn(kv, 'session-a', 'run-2'));
     expect(fieldsOf(after, 'cosmos.staking.delegate')).toEqual([
       'type',
       'validatorAddress',
@@ -3381,14 +3392,12 @@ describe('chain transaction field discovery', () => {
     ]);
     expect(fieldsOf(after, 'ixo.token.retire')).toEqual(['type']);
     // Another session of the same owner starts with none described.
-    const [other] = await plugin.getRequestTools(
-      turn(kv, 'session-b', 'run-3'),
-    );
+    const other = await chainTxToolOf(plugin, turn(kv, 'session-b', 'run-3'));
     expect(fieldsOf(other, 'cosmos.staking.delegate')).toEqual(['type']);
     // The same pair is built once.
-    expect(
-      (await plugin.getRequestTools(turn(kv, 'session-a', 'run-4')))[0],
-    ).toBe(after);
+    expect(await chainTxToolOf(plugin, turn(kv, 'session-a', 'run-4'))).toBe(
+      after,
+    );
   });
 
   it('costs about 6 400 characters with 37 types and none described (most of it the summaries), and a type’s fields once described', () => {
@@ -3437,7 +3446,7 @@ describe('chain transaction field discovery', () => {
     const chainTransaction = vi.fn(async () => reference);
     const kv = createMemoryUserKv();
     const ctx = turn(kv, 'session-c', 'run-1', { chainTransaction });
-    const [tool] = await new HubActionsPlugin().getRequestTools(ctx);
+    const tool = await chainTxToolOf(new HubActionsPlugin(), ctx);
     const refused = await tool!.handler({ messages: [stake, vote] }, ctx);
     expect(refused).toBeInstanceOf(ToolMessage);
     const message = refused as ToolMessage;
@@ -3473,7 +3482,7 @@ describe('chain transaction field discovery', () => {
     const chainTransaction = vi.fn(async () => reference);
     const kv = createMemoryUserKv();
     const ctx = turn(kv, 'session-p', 'run-1', { chainTransaction });
-    const [tool] = await new HubActionsPlugin().getRequestTools(ctx);
+    const tool = await chainTxToolOf(new HubActionsPlugin(), ctx);
     // The describe beside it has already stored the type, but its result
     // is not in the history this call sees: still not run.
     await describeTool().handler({ types: ['cosmos.staking.delegate'] }, ctx);
@@ -3576,7 +3585,7 @@ describe('chain transaction field discovery', () => {
       chainTransaction,
       warn,
     });
-    const [tool] = await plugin.getRequestTools(unreadable);
+    const tool = await chainTxToolOf(plugin, unreadable);
     expect(fieldsOf(tool, 'cosmos.staking.delegate')).toEqual([
       'type',
       'validatorAddress',
@@ -3770,7 +3779,8 @@ describe('chain transaction field discovery', () => {
       ),
     ).flat();
     const ctx = turn(kv, 'session-g', 'run-1', { messages: history });
-    const [registered] = await plugin.getRequestTools(
+    const registered = await chainTxToolOf(
+      plugin,
       turn(kv, 'session-g', 'run-0'),
     );
     const wrapped = wrapPluginTool(registered!, {
@@ -3815,5 +3825,257 @@ describe('chain transaction field discovery', () => {
     ).rejects.toThrow('no longer fits');
     expect(events.at(-1)).toMatchObject({ kind: 'refused' });
     expect(model).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Hub action tools off a channel turn', () => {
+  const CHANNEL_TOOL_NAMES = [
+    'hub_action_capabilities',
+    'hub_action_options',
+    'request_hub_action',
+    'describe_chain_messages',
+    'request_chain_transaction',
+  ];
+  const capabilitiesWithChainTx: ActionCapabilitiesV1 = {
+    version: 'ixo.auth-capabilities/2',
+    accountId: 'account-three',
+    oracleDid: 'did:ixo:oracle',
+    network: 'ixo testnet',
+    resourceOrigin: null,
+    operations: ['ixo.chain.tx.v1'],
+    forms: [],
+    transfer: null,
+    chainTx: { messageTypes: ['cosmos.bank.send'], maxMessages: 8 },
+  };
+  type HubActions = NonNullable<RuntimeContext['hubActions']>;
+  /** A Hub client whose every call is recorded; none answers but these. */
+  function recordingHub() {
+    const capabilities = vi.fn(async () => capabilitiesWithChainTx);
+    const options = vi.fn(async () => {
+      throw new Error('options must not be read');
+    });
+    const status = vi.fn(async () => heldStatus());
+    const unused = async () => {
+      throw new Error('unused');
+    };
+    const hub: HubActions = {
+      capabilities,
+      options,
+      request: unused,
+      chainTransaction: unused,
+      status,
+    };
+    return { hub, capabilities, options, status };
+  }
+  const owner = {
+    did: 'did:ixo:owner',
+    matrixUserId: '@owner:test',
+    ucanDelegation: { raw: 'delegation' },
+  };
+  /** A turn's session; only a channel turn carries a channel binding. */
+  const sessionOn = (client: 'channel' | 'portal' | 'matrix') => ({
+    id: 'session-gate',
+    client,
+    requestId: 'request-gate',
+    runId: 'run-gate',
+    ...(client === 'channel'
+      ? {
+          channel: {
+            provider: 'whatsapp',
+            bindingId: 'chb_three',
+            bindingRevision: 4,
+          },
+        }
+      : {}),
+  });
+  function turnOn(
+    client: 'channel' | 'portal' | 'matrix',
+    hub: HubActions,
+    enabled = 'true',
+  ) {
+    return makeRuntimeContext({
+      config: { HUB_ACTIONS_ENABLED: enabled },
+      user: owner,
+      session: sessionOn(client),
+      toolCallId: 'call-gate',
+      hubActions: hub,
+    });
+  }
+  const tool = (name: string) => {
+    const found = HUB_ACTION_TOOLS.find((item) => item.name === name);
+    if (!found) throw new Error(`${name} missing`);
+    return found;
+  };
+
+  it('offers only hub_action_status at boot and the tools that prepare an action on a channel turn only, without a Hub read elsewhere', async () => {
+    const plugin = new HubActionsPlugin();
+    expect(plugin.getTools().map((item) => item.name)).toEqual([
+      'hub_action_status',
+    ]);
+    const channel = recordingHub();
+    expect(
+      (await plugin.getRequestTools(turnOn('channel', channel.hub))).map(
+        (item) => item.name,
+      ),
+    ).toEqual(CHANNEL_TOOL_NAMES);
+    for (const [client, enabled] of [
+      ['portal', 'true'],
+      ['matrix', 'true'],
+      ['channel', 'false'],
+    ] as const) {
+      const other = recordingHub();
+      expect(
+        await plugin.getRequestTools(turnOn(client, other.hub, enabled)),
+      ).toEqual([]);
+      expect(other.capabilities).not.toHaveBeenCalled();
+    }
+  });
+
+  it('refuses with a reason the model can relay, never a bare unavailable, and without calling Auth Hub', async () => {
+    for (const client of ['portal', 'matrix'] as const) {
+      const { hub, capabilities, options } = recordingHub();
+      const ctx = turnOn(client, hub);
+      for (const name of ['hub_action_capabilities', 'hub_action_options'])
+        expect(await tool(name).handler({}, ctx)).toEqual({
+          status: 'unavailable',
+          reason: NOT_A_CHANNEL_CHAT_REASON,
+        });
+      expect(
+        await tool('describe_chain_messages').handler(
+          { types: ['cosmos.bank.send'] },
+          ctx,
+        ),
+      ).toMatchObject({ status: 'known', availableTypes: [] });
+      expect(capabilities).not.toHaveBeenCalled();
+      expect(options).not.toHaveBeenCalled();
+    }
+    // Hub actions off for the oracle: that, in words.
+    const off = turnOn('channel', recordingHub().hub, 'false');
+    for (const name of [
+      'hub_action_capabilities',
+      'hub_action_options',
+      'hub_action_status',
+    ])
+      expect(await tool(name).handler({ actionId: id }, off)).toEqual({
+        status: 'unavailable',
+        reason: HUB_ACTIONS_OFF_REASON,
+      });
+    // A status read without a valid id says what it needs.
+    expect(
+      await tool('hub_action_status').handler(
+        { actionId: 'short' },
+        turnOn('channel', recordingHub().hub),
+      ),
+    ).toMatchObject({
+      status: 'unavailable',
+      reason: expect.stringContaining('actionId'),
+    });
+  });
+
+  it('still reads the status of an action prepared in a channel chat from a Portal turn', async () => {
+    const { hub, status } = recordingHub();
+    expect(
+      await tool('hub_action_status').handler(
+        { actionId: id },
+        turnOn('portal', hub),
+      ),
+    ).toMatchObject({
+      status: 'known',
+      reviewStatus: 'authorized',
+      operationStatus: 'submitted',
+    });
+    expect(status).toHaveBeenCalledWith('did:ixo:owner', id);
+  });
+
+  it('binds no tool that prepares an action on a Portal turn, through the real capability gate, and all of them on a channel turn', async () => {
+    const boundAfterLoad = async (client: 'channel' | 'portal') => {
+      const core = createRuntimeCore({
+        config: {
+          name: 'TestOracle',
+          org: 'Acme',
+          description: 'a test oracle',
+        },
+        plugins: [new HubActionsPlugin()],
+        env: makeEnv({
+          HUB_ACTIONS_ENABLED: 'true',
+          AUTH_HUB_URL: 'https://hub.test',
+          AUTH_HUB_CHANNEL_SERVICE_KEY: 'oracle-key',
+        }),
+      });
+      const bound: string[][] = [];
+      class RecordingModel extends FakeToolCallingModel {
+        override bindTools(
+          tools: Parameters<FakeToolCallingModel['bindTools']>[0],
+        ) {
+          bound.push(
+            tools.flatMap((item) =>
+              typeof item === 'object' &&
+              item !== null &&
+              'function' in item &&
+              typeof item.function === 'object' &&
+              item.function !== null &&
+              'name' in item.function &&
+              typeof item.function.name === 'string'
+                ? [item.function.name]
+                : typeof item === 'object' &&
+                    item !== null &&
+                    'name' in item &&
+                    typeof item.name === 'string'
+                  ? [item.name]
+                  : [],
+            ),
+          );
+          return super.bindTools(tools);
+        }
+      }
+      const model = new RecordingModel({
+        toolCalls: [
+          [
+            {
+              name: 'load_capability',
+              args: { names: ['hub-actions'] },
+              id: 'c1',
+            },
+          ],
+          [],
+        ],
+      });
+      const ctx = turnOn(client, recordingHub().hub);
+      const ambient: AmbientServices = {
+        ...createNoopAmbient({
+          config: core.validatedEnv,
+          identity: core.identity,
+          availablePlugins: core.availablePlugins,
+          llm: { get: () => model },
+          kv: createMemoryUserKv(),
+        }),
+        hubActions: ctx.hubActions,
+      };
+      const { agent } = await createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient,
+        requestCtx: { user: owner, session: sessionOn(client) },
+        state: {},
+        contextBudget: contextBudgetFor({
+          model: 'm',
+          tokens: 200_000,
+          origin: 'override',
+        }),
+      });
+      await agent.invoke({
+        messages: [new HumanMessage('Send 3 IXO to my friend')],
+      });
+      // The model call after load_capability admitted the plugin.
+      return bound.at(-1) ?? [];
+    };
+    const portal = await boundAfterLoad('portal');
+    expect(portal).toContain('hub_action_status');
+    for (const name of CHANNEL_TOOL_NAMES) expect(portal).not.toContain(name);
+    const channel = await boundAfterLoad('channel');
+    for (const name of [...CHANNEL_TOOL_NAMES, 'hub_action_status'])
+      expect(channel).toContain(name);
   });
 });

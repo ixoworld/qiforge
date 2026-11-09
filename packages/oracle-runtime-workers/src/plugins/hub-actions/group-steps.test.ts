@@ -35,7 +35,19 @@ import {
   HubActionsPlugin,
   PROPOSAL_NUMBER_UNKNOWN_MEANING,
   chainTransactionTool,
+  HUB_ACTION_CHANNEL_TOOLS,
+  HUB_ACTION_STATUS_TOOL,
 } from './hub-actions.plugin';
+
+/** Every Hub action tool definition, for calling a handler directly. */
+const HUB_ACTION_TOOLS = [...HUB_ACTION_CHANNEL_TOOLS, HUB_ACTION_STATUS_TOOL];
+
+/** The turn's request_chain_transaction, when the turn offers one. */
+async function chainTxToolOf(plugin: HubActionsPlugin, ctx: RuntimeContext) {
+  return (await plugin.getRequestTools(ctx)).find(
+    (tool) => tool.name === 'request_chain_transaction',
+  );
+}
 
 /**
  * The four group steps (`daodao.proposal.*`, protocol 0.9.0): the runtime's
@@ -806,9 +818,9 @@ describe('group steps', () => {
   it('asks for the rules of a new proposal’s action types before the card, and lists them compactly in describe_chain_messages', async () => {
     const chainTransaction = hostMock();
     const kv = createMemoryUserKv();
-    const describe = new HubActionsPlugin()
-      .getTools()
-      .find((tool) => tool.name === 'describe_chain_messages');
+    const describe = HUB_ACTION_TOOLS.find(
+      (tool) => tool.name === 'describe_chain_messages',
+    );
     if (!describe) throw new Error('describe tool missing');
     const described = (await describe.handler(
       { types: ['daodao.proposal.create'] },
@@ -831,7 +843,7 @@ describe('group steps', () => {
     expect(JSON.stringify(described).length).toBeLessThan(9_000);
     // The next turn: the proposal is described, the send it holds is not.
     const ctx = channelContext(chainTransaction, kv, 'run-2');
-    const [tool] = await new HubActionsPlugin().getRequestTools(ctx);
+    const tool = await chainTxToolOf(new HubActionsPlugin(), ctx);
     const message = create([
       ACTIONS['cosmos.bank.send'],
       ACTIONS['ixo.token.retire'],
@@ -883,9 +895,9 @@ describe('group steps', () => {
     const unused = async () => {
       throw new Error('unused');
     };
-    const status = new HubActionsPlugin()
-      .getTools()
-      .find((tool) => tool.name === 'hub_action_status');
+    const status = HUB_ACTION_TOOLS.find(
+      (tool) => tool.name === 'hub_action_status',
+    );
     if (!status) throw new Error('status tool missing');
     const read = (outcome: ActionOutcomeV1) =>
       status.handler(

@@ -8,6 +8,7 @@ import {
   SPECIALISTS_FOR_STAGE,
   assembleServicePodBlueprint,
   computeReadiness,
+  nextStep,
   sectionsView,
 } from './stage';
 
@@ -74,12 +75,13 @@ export function createOrchestrationTools(
         nextSpecialists: SPECIALISTS_FOR_STAGE[readiness.stage].map((id) =>
           computeSubAgentToolName(id),
         ),
+        nextStep: nextStep(bp),
       };
     },
     {
       name: 'start_pod_design',
       description:
-        'Open a POD design session and initialise the blueprint. Call this first when the user wants to create a POD; pass restart=true to discard the existing design and begin again.',
+        'Open a POD design session and initialise the blueprint. Call this first when the user wants to create a POD. Pass restart=true only when the user asks to start over: it discards the existing design.',
       schema: startSchema,
     },
   );
@@ -99,6 +101,7 @@ export function createOrchestrationTools(
         started: true,
         ...(bp.brief !== undefined ? { brief: bp.brief } : {}),
         readiness: computeReadiness(bp),
+        nextStep: nextStep(bp),
         ...sectionsView(bp, roles),
       };
     },
@@ -120,7 +123,7 @@ export function createOrchestrationTools(
           message: 'No POD design session started yet.',
         };
       }
-      return computeReadiness(bp);
+      return { ...computeReadiness(bp), nextStep: nextStep(bp) };
     },
     {
       name: 'compute_readiness',
