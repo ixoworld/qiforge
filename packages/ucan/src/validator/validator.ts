@@ -23,6 +23,7 @@ import type {
   RevocationChecker,
 } from '../types.js';
 import { InMemoryInvocationStore } from '../store/memory.js';
+import { nonCanonicalBlock } from './canonical.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type CapabilityParser = ReturnType<typeof capability<any, any, any>>;
@@ -471,10 +472,11 @@ function chainTimeBounds(
  * Canonical CID string of a proof-chain node.
  *
  * A node is normally a materialized Delegation (its block travelled inside the
- * CAR), which carries `.cid`. It may instead be a bare CID Link when the block
- * was not embedded — a Link is self-describing (it carries a multihash) and
- * stringifies to the same canonical CID. Both identify a revocable delegation,
- * so both are collected.
+ * CAR), which carries `.cid`: the CID the archive states, which both
+ * validation paths have already required to be the canonical CID of the
+ * node's signed form (`canonicalFormError`). It may instead be a bare CID Link
+ * when the block was not embedded — the link the parent's signature covers.
+ * Both identify a revocable delegation, so both are collected.
  */
 function nodeCid(node: unknown): string | undefined {
   if (typeof node !== 'object' || node === null) return undefined;
@@ -1388,6 +1390,23 @@ export async function createUCANValidator(
     return null;
   }
 
+  /**
+   * Every UCAN in the archive must sit under the CID derived from its signed
+   * form (see canonical.ts). The archive's CIDs are written by the sender and
+   * covered by no signature; without this, one signed invocation re-labelled
+   * under another CID would pass the replay store as new, and a revoked
+   * delegation re-labelled inside a fresh invocation would miss the
+   * revocation checker. Run after `structuralError` has bounded the tree.
+   */
+  async function canonicalFormError(
+    token: unknown,
+  ): Promise<ValidateResult | null> {
+    const reason = await nonCanonicalBlock(token);
+    return reason
+      ? { ok: false, error: { code: 'INVALID_FORMAT', message: reason } }
+      : null;
+  }
+
   async function validateInvocation(
     invocationBase64: string,
     capabilityDef: CapabilityParser,
@@ -1450,21 +1469,28 @@ export async function createUCANValidator(
       }
       const structural = structuralError(invocation);
       if (structural) return structural;
+      const nonCanonical = await canonicalFormError(invocation);
+      if (nonCanonical) return nonCanonical;
 
-      // 5. Replay protection. The CID is reserved BEFORE any verification
+      // 5. Replay protection. The CID — canonical, so a function of what the
+      // signature covers — is reserved BEFORE any verification
       // (DID resolution, claim(), revocation are all asynchronous), so two
       // concurrent presentations of one invocation cannot both pass. The
       // reservation is released when validation fails afterwards, so a
       // rejected attempt does not use up the token, and kept for the
       // invocation's own lifetime when it succeeds.
       const invocationCid = invocation.cid?.toString();
-      const reservation = invocationCid
-        ? await reserveInvocation(
-            invocationStore,
-            invocationCid,
-            replayMarkTtlMs(invocation.expiration),
-          )
-        : undefined;
+      if (!invocationCid) {
+        return {
+          ok: false,
+          error: { code: 'INVALID_FORMAT', message: 'Invocation has no CID' },
+        };
+      }
+      const reservation = await reserveInvocation(
+        invocationStore,
+        invocationCid,
+        replayMarkTtlMs(invocation.expiration),
+      );
       if (reservation === null) {
         return {
           ok: false,
@@ -1485,7 +1511,7 @@ export async function createUCANValidator(
           callOptions?.expect,
         );
         if (result.ok) {
-          await reservation?.commit();
+          await reservation.commit();
           accepted = true;
         }
         return result;
@@ -1493,7 +1519,7 @@ export async function createUCANValidator(
         if (!accepted) {
           // A store that cannot drop the mark leaves the token used; the
           // validation result stands either way.
-          await reservation?.release().catch(() => undefined);
+          await reservation.release().catch(() => undefined);
         }
       }
     } catch (err) {
@@ -1550,6 +1576,8 @@ export async function createUCANValidator(
       // the recursive signature walk below.
       const structural = structuralError(delegation);
       if (structural) return structural;
+      const nonCanonical = await canonicalFormError(delegation);
+      if (nonCanonical) return nonCanonical;
 
       // 5. Check the validity window: the effective expiration is the
       // earliest and the effective not-before the latest over the

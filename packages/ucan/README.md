@@ -237,9 +237,10 @@ Create a framework-agnostic validator.
 - Pass `{ expect: { can, with } }` as the fourth argument when you read the capability from the invocation yourself and route by it: the authorised `can`/`with` must then equal it exactly (no `/*` tolerance; `with` in the URL-canonical form ucanto reports), else `UNAUTHORIZED`. `nb` is not pinned — act on `result.capability`. Set `maxCapabilities: 1` on the validator when every client mints one capability per invocation.
 - Besides `rootIssuers`, an issuer may self-issue on a resource whose **authority** is its DID: the whole resource, the part after the scheme (`ixo:did:key:z6Mk…`, `ixo:tenant:did:key:z6Mk…`, optionally followed by `/path`), or the first path segment under a named authority that is not itself a DID (`ixo:tenant/did:key:z6Mk…/files`). A DID deeper in the path does not count (`ixo:filesystem/alice/did:key:z6Mk…` is Alice's resource that mentions the DID), nor one below or suffixed to a DID authority (`ixo:did:web:alice.com:did:key:zBob` is Alice's), nor a DID that is only a prefix of the named one, nor a DID inside a query or fragment.
 - Before any signature is verified or DID resolved, the token's raw proof tree must fit `proofChainLimits` (else `INVALID_FORMAT`) and, with `allowUniversalResource: false`, must not carry a capability on `ucan:*` (else `UNAUTHORIZED`). Within one call every DID is resolved once, however many links it issues.
-- The invocation's CID is reserved in the replay store before verification starts, released again if validation fails, and kept until the invocation's own expiry (plus one minute) when it succeeds; a token without expiry keeps the store's default TTL.
+- Every UCAN in the archive (the invocation and every embedded proof) must sit under its **canonical CID**: the CID derived from its signed form alone (dag-cbor, sha2-256, CIDv1), else `INVALID_FORMAT`. A CAR archive's CIDs are written by its sender and covered by no signature, and the signature is checked over the payload re-formatted from the decoded fields, so without this rule one signed token could be re-sent under other CIDs (another hash, its JWT form, a re-spelled JWT, a CBOR block with an empty `nnc`) and pass the replay store as new, or carry a revoked proof past the revocation checker. UCANs in the JWT representation are therefore refused; tokens minted with `@ixo/ucan` or ucanto are unaffected.
+- The invocation's (canonical) CID is reserved in the replay store before verification starts, released again if validation fails, and kept until the invocation's own expiry (plus one minute) when it succeeds; a token without expiry keeps the store's default TTL. An invocation without a CID is refused.
 
-**`validateDelegation()`** validates a standalone delegation token — verifies the cryptographic signature of every delegation in the proof chain, checks audience matches `serverDid`, validates the validity window over every proof (the earliest expiry and the latest not-before; a not-before in the future fails with `UNAUTHORIZED`), and ensures chain consistency (each proof's audience matches the child delegation's issuer). Supports `did:key` issuers natively and non-`did:key` issuers (e.g. `did:ixo`) via the configured `didResolver`.
+**`validateDelegation()`** validates a standalone delegation token — verifies the cryptographic signature of every delegation in the proof chain, checks audience matches `serverDid`, validates the validity window over every proof (the earliest expiry and the latest not-before; a not-before in the future fails with `UNAUTHORIZED`), requires every UCAN in the archive to carry its canonical CID (as `validate()` does, else `INVALID_FORMAT`), and ensures chain consistency (each proof's audience matches the child delegation's issuer). Supports `did:key` issuers natively and non-`did:key` issuers (e.g. `did:ixo`) via the configured `didResolver`.
 
 #### `ValidateResult`
 
@@ -321,6 +322,17 @@ replay reservation, so a rejected or unverifiable request never burns an invocat
 | `serializeInvocation(invocation)`    | Serialize to base64 CAR                   |
 | `parseDelegation(serialized)`        | Parse from base64 CAR                     |
 | `getDelegationCid(delegationOrCar)`  | Canonical CID — what a revocation targets |
+
+`getDelegationCid` returns the CID the archive states, which is the canonical one for every token
+minted with `@ixo/ucan` or ucanto, and for every token `validate()` / `validateDelegation()` accept.
+A service that reads delegations **outside** the validator (for example to record a revocation from
+an uploaded token) should check them with the exported canonical-form helpers first:
+
+| Function                  | Description                                                                                                 |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `nonCanonicalBlock(root)` | `null` when every UCAN in a parsed delegation/invocation sits under its canonical CID, else a reason string |
+| `canonicalCid(data)`      | The canonical CID of a UCAN view (`delegation.data`), derived from its signed form                          |
+| `signedForm(data)`        | The exact string the signature verifies (`header.payload.signature`); throws for a non-canonical JWT        |
 
 > **Note:** Both `createDelegation` and `createInvocation` default to `expiration: Infinity` (never expires) when no expiration is specified. Pass an explicit Unix timestamp (seconds) to set an expiration. A never-expiring token can only ever be neutralized by a revocation record that must then be kept forever — set `requireExpiration: true` on production validators to refuse them.
 

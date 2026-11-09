@@ -85,6 +85,14 @@ export {
 // Validator
 // =============================================================================
 
+// Canonical form of the UCANs in a CAR archive, for services that read
+// delegations outside the validator (e.g. a store that records revocations).
+export {
+  canonicalCid,
+  nonCanonicalBlock,
+  signedForm,
+} from './validator/canonical.js';
+
 export {
   createUCANValidator,
   resourceNamesIssuer,
@@ -164,4 +172,4 @@ export {
 // Version
 // =============================================================================
 
-export const VERSION = '2.3.0';
+export const VERSION = '2.4.0';
