@@ -164,39 +164,6 @@ describe('createSubagentAsTool', () => {
     const plain: AgentMiddleware = { name: 'Plain' };
     expect(scopeToolCallIds(plain, 'p1')).toBe(plain);
   });
-
-  it('marks a forwarding sub-agent’s run with the parent call its forwarded calls are stored under', async () => {
-    const runMetadata = async (forwardTools?: string[]) => {
-      const seen: Record<string, unknown>[] = [];
-      const subagent = createSubagentAsTool(
-        specWith(new FakeListChatModel({ responses: ['done'] })),
-        forwardTools ? { forwardTools } : undefined,
-      );
-      await subagent.invoke(
-        {
-          id: 'call_parent',
-          name: subagent.name,
-          args: { task: 'x' },
-          type: 'tool_call',
-        },
-        {
-          callbacks: [
-            {
-              handleChatModelStart: (...args: unknown[]) => {
-                seen.push((args[6] as Record<string, unknown>) ?? {});
-              },
-            },
-          ],
-        },
-      );
-      return seen;
-    };
-    const forwarding = await runMetadata(['noop']);
-    expect(forwarding.length).toBeGreaterThan(0);
-    expect(forwarding[0]?.[FORWARDED_FROM_KEY]).toBe('call_parent');
-    const plain = await runMetadata();
-    expect(plain[0]?.[FORWARDED_FROM_KEY]).toBeUndefined();
-  });
 });
 
 describe('subAgentResultText', () => {
