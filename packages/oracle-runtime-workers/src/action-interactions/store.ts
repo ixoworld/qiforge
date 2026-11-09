@@ -197,12 +197,12 @@ const unreadableRecord = () =>
     'record_unreadable',
     'This Companion draft cannot be read; check the claims list before submitting',
   );
-/** A claim step with a filed claim takes another only when the prepare asks for it. */
+/** A claim step with a filed claim takes another only at the person's request: a form's claim may still be in flight. */
 const repeatRequired = () =>
   new ActionInteractionError(
     409,
     'repeat_required',
-    'This claim step already has a submitted claim in this run; prepare it with repeat to file another',
+    'This claim step already has a claim in this run, from a card or the form, and it may still be on its way; tell the person, and set repeat only if they ask for another claim',
   );
 type RecentRequest = { requestId: string; fingerprint: string };
 const manualMarkerKey = (ownerKey: string) =>

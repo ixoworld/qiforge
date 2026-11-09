@@ -88,7 +88,10 @@ the user object, so it is one small Durable Object call.
   files the same claim by itself: a bid card is refused (409
   `dispatch_consumed`), and a claim card needs `repeat` (409 `repeat_required`
   without it). The mark is written before the form signs, so it holds even
-  when the person then abandons the form.
+  when the person then abandons the form. The runtime never learns the form's
+  outcome, so the mark does not hold the step while the form's claim is on its
+  way: a card prepared with `repeat` can file another claim at any time. Only
+  the person's request for another claim may set `repeat`.
 
 The check never boots the user object: it reads the stored user binding and a
 few keys, so an ordinary claim from someone who never used Companion costs one
@@ -127,7 +130,9 @@ takes many claims, so a `reported` claim releases it: the ordinary form may
 submit again, and so may a card whose prepare asks to `repeat`. Without
 `repeat`, preparing the step again returns the submitted card in its own chat
 and 409 `repeat_required` anywhere else, so an agent that prepares again after
-a reload never files the same claim twice.
+a reload never files the same claim twice. These holds cover claims sent from
+cards only; a claim sent from the ordinary form leaves no outcome here (see
+the dispatch check above).
 
 `observed` records a caller-reported executor reference only. It never means
 verified completion. Re-read the trusted Flow/claim owner for completion and
