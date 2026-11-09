@@ -28,6 +28,11 @@ export { HubActionsPlugin } from './hub-actions/hub-actions.plugin';
  * asks.world (`AsksPlugin`) self-gates on `ASKS_TOKEN_KEY`, `ORACLE_PUBLIC_URL`
  * and `NETWORK`; the host also binds and exports `AsksConnectionDO`
  * (`docs/asks.md`).
+ *
+ * Credentials (`CredentialsPlugin`, credential checks and the Hub's
+ * permission cards, WhatsApp only) is off unless `CREDENTIALS_ENABLED=true`
+ * and `AUTH_HUB_CHANNEL_SERVICE_KEY` are set
+ * (`src/plugins/credentials/README.md`).
  */
 import type { OraclePlugin } from '../plugin-api/oracle-plugin';
 import { AsksPlugin } from './asks';
@@ -45,6 +50,7 @@ import { AGUIPlugin } from './agui';
 import { AttachmentsPlugin } from './attachments';
 import { MatrixGroupChatsPlugin } from './matrix-group-chats';
 import { PodCreatorPlugin } from './pod-creator';
+import { CredentialsPlugin } from './credentials';
 
 export * from './asks';
 export * from './composio';
@@ -62,6 +68,7 @@ export * from './agui';
 export * from './ixo-transaction';
 export * from './ixo-chain';
 export * from './pod-creator';
+export * from './credentials';
 
 export const memoryPlugin = new MemoryPlugin();
 export const sandboxPlugin = new SandboxPlugin();
@@ -78,6 +85,7 @@ export const matrixGroupChatsPlugin = new MatrixGroupChatsPlugin();
 export const podCreatorPlugin = new PodCreatorPlugin();
 export const asksPlugin = new AsksPlugin();
 export const ixoTransactionPlugin = new IxoTransactionPlugin();
+export const credentialsPlugin = new CredentialsPlugin();
 /** TasksPlugin is already an object (defineOraclePlugin), not a class. */
 export const tasksPlugin = TasksPlugin;
 
@@ -106,4 +114,5 @@ export const BUNDLED_WORKERS_PLUGINS = [
   ixoTransactionPlugin,
   podCreatorPlugin,
   asksPlugin,
+  credentialsPlugin,
 ] as const satisfies readonly OraclePlugin[];

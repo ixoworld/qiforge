@@ -166,6 +166,47 @@ export type ModelRole = 'main' | 'subagent' | 'utility' | (string & {});
 /** Optional fields forwarded to ChatOpenAI when materialising an LLM. */
 export type ChatOpenAIFields = Record<string, unknown>;
 
+/**
+ * Options of one UCAN mint (`ctx.ucan.createInvocationFromDelegation`,
+ * `ctx.ucan.mintSelfSignedInvocation`). `maxTtlSeconds` bounds the
+ * invocation's lifetime. `facts` are put on the invocation before the nonce
+ * fact every invocation carries: a service that binds a token to one request
+ * reads them (`{ method, path }`, a body hash). Each fact is a plain JSON
+ * object.
+ */
+export interface UcanMintOptions {
+  maxTtlSeconds?: number;
+  facts?: readonly Record<string, unknown>[];
+}
+
+/**
+ * A call a plugin route forwards into the owner's user object
+ * (`OraclePlugin.handleOwnerCallback`): `key` names what it answers (a
+ * credential check's id), `body` is the request body as received.
+ */
+export interface OwnerCallback {
+  key: string;
+  body: string;
+}
+
+/**
+ * What a plugin's owner callback runs with, inside the owner's object: the
+ * owner, their own kv rows, the validated config and a logger. No turn, no
+ * model, no delegation: the caller is not the owner.
+ */
+export interface OwnerCallbackContext {
+  ownerDid: string;
+  kv: UserKvSurface;
+  config: MergedConfig;
+  logger: Logger;
+}
+
+/** The HTTP answer the route sends for an owner callback. */
+export interface OwnerCallbackResult {
+  status: 200 | 400 | 404 | 410 | 503;
+  body?: Record<string, string>;
+}
+
 /** UCAN delegation envelope. */
 export interface UcanDelegation {
   readonly raw: string;
@@ -860,19 +901,44 @@ export interface RuntimeContext<TConfig = MergedConfig> {
       delegationCar: string,
       serviceUrl: string,
       capability: { can: string; with: string; nb?: Record<string, unknown> },
-      options?: { maxTtlSeconds?: number },
+      options?: UcanMintOptions,
     ) => Promise<{ invocation: string } | { error: string }>;
     /**
      * Mint a SELF-SIGNED invocation — issued by this oracle with NO proof
      * chain — for calling a downstream service AS THE ORACLE ITSELF (not on a
-     * user's behalf). Returns `{ invocation }` on success or `{ error }` with a
-     * surfaced-verbatim reason (signing key missing, did:web unreachable, etc.).
+     * user's behalf). The audience is the service's DID when `serviceUrl` is
+     * a DID, else the `id` of its `/.well-known/did.json`. Returns
+     * `{ invocation }` on success or `{ error }` with a surfaced-verbatim
+     * reason (signing key missing, did:web unreachable, etc.).
      */
     mintSelfSignedInvocation: (
       serviceUrl: string,
       capability: { can: string; with: string },
-      options?: { maxTtlSeconds?: number },
+      options?: UcanMintOptions,
     ) => Promise<{ invocation: string } | { error: string }>;
+    /**
+     * Sign an OpenID4VP request object (a compact JWS, `typ`
+     * `oauth-authz-req+jwt`) with the oracle's own Ed25519 key, for a plugin
+     * that acts as a verifier: `{ jws }` or `{ error }`.
+     *
+     * Trust boundary: this is the only non-UCAN signature a plugin can get
+     * from the oracle's key. The runtime builds the protected header itself
+     * (`{ alg: 'EdDSA', typ, kid }`), refuses any other `typ`, a `kid` that is
+     * not a DID URL of the oracle's DID and a payload that is not a JSON
+     * object, so the signed bytes always begin with that header and can never
+     * be a UCAN delegation or invocation in the oracle's name. There is no
+     * raw signer on this surface. Absent on hosts without the signer.
+     */
+    signJws?: (input: {
+      typ: 'oauth-authz-req+jwt';
+      kid: string;
+      payload: Record<string, unknown>;
+    }) => Promise<{ jws: string } | { error: string }>;
+    /**
+     * The raw 32-byte Ed25519 public key the oracle signs with, or null
+     * without a signing key (public; to find its verification method id).
+     */
+    oraclePublicKey?: () => Promise<Uint8Array | null>;
     /**
      * Fetch, from the UCAN Store Worker, a delegation the user deposited for
      * this oracle over `opts.resource`. Selects the newest active delegation

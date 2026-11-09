@@ -50,7 +50,7 @@ export default defineConfig({
     // workerd, wallet-signing round trip included.
     exclude: [
       'src/plugins/*.test.ts',
-      'src/plugins/!(editor|flows|ixo-transaction|pod-creator)/**/*.test.ts',
+      'src/plugins/!(editor|flows|ixo-transaction|pod-creator|credentials)/**/*.test.ts',
       // Plain-Node suite (fake fetch); runs in vitest.core.config.ts.
       'src/memory/**/*.test.ts',
       // Spawns a Node child process; runs in vitest.core.config.ts.

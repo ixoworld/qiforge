@@ -4190,6 +4190,31 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         this.markDirty();
     }
 
+    async ownerCallback(
+      ownerDid: string,
+      plugin: string,
+      call: { key: string; body: string },
+    ): Promise<{
+      status: 200 | 400 | 404 | 410 | 503;
+      body?: Record<string, string>;
+    }> {
+      // A callback is not the user: it must not delay idle eviction.
+      await this.ready({ userDid: ownerDid }, { recordAccess: false });
+      const handler = this.core.plugins.find(
+        (p) => p.name === plugin && typeof p.handleOwnerCallback === 'function',
+      );
+      if (!handler?.handleOwnerCallback || !this.db) return { status: 404 };
+      return handler.handleOwnerCallback(
+        { key: call.key, body: call.body },
+        {
+          ownerDid,
+          kv: new SqliteUserKv(this.db),
+          config: this.core.validatedEnv,
+          logger: console,
+        },
+      );
+    }
+
     async listSessions(
       identity: TurnIdentity,
       o: { limit?: number; offset?: number } = {},

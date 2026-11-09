@@ -34,6 +34,7 @@ import type {
   UcanDelegation,
   UserContextData,
   UserKvSurface,
+  UcanMintOptions,
 } from '../plugin-api/types';
 import { UcanMintUnavailableError } from '../plugin-api/ucan-errors';
 import { NOOP_LOGGER, sweepExpired } from './utils';
@@ -143,13 +144,21 @@ export interface UcanAdapter {
     delegationCar: string,
     serviceUrl: string,
     capability: { can: string; with: string },
-    options?: { maxTtlSeconds?: number },
+    options?: UcanMintOptions,
   ): Promise<{ invocation: string } | { error: string }>;
   mintSelfSignedInvocation(
     serviceUrl: string,
     capability: { can: string; with: string },
-    options?: { maxTtlSeconds?: number },
+    options?: UcanMintOptions,
   ): Promise<{ invocation: string } | { error: string }>;
+  /** See `RuntimeContext['ucan']['signJws']` (the scoped, non-UCAN signer). */
+  signJws?(input: {
+    typ: 'oauth-authz-req+jwt';
+    kid: string;
+    payload: Record<string, unknown>;
+  }): Promise<{ jws: string } | { error: string }>;
+  /** See `RuntimeContext['ucan']['oraclePublicKey']`. */
+  oraclePublicKey?(): Promise<Uint8Array | null>;
   getServiceDelegation(
     userDid: string,
     opts: { storeUrl: string; resource: string; requiredAbility: string },
@@ -528,6 +537,12 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
         ),
       mintSelfSignedInvocation: (serviceUrl, capability, opts) =>
         ambient.ucan.mintSelfSignedInvocation(serviceUrl, capability, opts),
+      ...(ambient.ucan.signJws
+        ? { signJws: ambient.ucan.signJws.bind(ambient.ucan) }
+        : {}),
+      ...(ambient.ucan.oraclePublicKey
+        ? { oraclePublicKey: ambient.ucan.oraclePublicKey.bind(ambient.ucan) }
+        : {}),
       getServiceDelegation: (userDid, opts) =>
         ambient.ucan.getServiceDelegation(userDid, opts),
     },

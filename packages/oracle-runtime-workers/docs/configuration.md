@@ -435,6 +435,30 @@ and `ASKS_ALLOWED_DIDS` are optional. The oracle script also binds
 `ASKS_CONNECTIONS` to `AsksConnectionDO`, adds its migration and re-exports
 the class.
 
+### Credentials
+
+The bundled credentials plugin
+([credentials](../src/plugins/credentials/README.md)): credential checks
+as a verifier at the Credentials worker and the Auth Hub's two permission
+cards, WhatsApp only. Off unless `CREDENTIALS_ENABLED=true` and
+`AUTH_HUB_CHANNEL_SERVICE_KEY` (secret, the oracle account's Hub key) are
+set. `AUTH_HUB_URL`, `CREDENTIALS_URL`, `SELF_API_URL` and `SELF_WEB_URL`
+default per `NETWORK`; `CREDENTIALS_TRUSTED_ISSUERS` (JSON, issuers per
+credential type; default Self's IdentityLevel1 issuer of the network) is
+the trust anchor the tools may only narrow (a type without a list, or an
+issuer outside it, is refused); `CREDENTIALS_PURPOSES` (JSON, why the oracle
+asks per credential type, at most 140 characters; default "Check your <type
+name>"; never model text) is optional. `credentials_check` also needs
+`ORACLE_PUBLIC_URL` (its response endpoint, `POST /credentials/response/:token`,
+outside UCAN auth, off unless `CREDENTIALS_ENABLED`) and the oracle's signing
+key, which plugins reach only through the scoped `ctx.ucan.signJws`: the
+runtime builds the JOSE header and signs only `typ` `oauth-authz-req+jwt`
+(a `kid` of the oracle's DID, a JSON-object payload), so the oracle's key can
+never be used to sign a UCAN for a plugin. The endpoint's per-IP limit is the
+optional `CREDENTIALS_RATE_LIMIT` rate-limit binding (give it a generous
+budget, e.g. 2000 a minute: the Hub answers from shared Cloudflare
+addresses); without it each isolate allows 2000 calls a minute per IP.
+
 ### Chain tools
 
 The bundled ixo-chain plugin ([chain-tools](chain-tools.md)): read-only
