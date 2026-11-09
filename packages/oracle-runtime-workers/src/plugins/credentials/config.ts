@@ -26,6 +26,53 @@ export const SELF_DEFAULT_URLS: Readonly<Record<CredentialsNetwork, string>> = {
   mainnet: 'https://api.self.ixo.earth',
 };
 
+/** The identity credential Self issues. */
+export const IDENTITY_LEVEL1_VCT =
+  'https://credentials.ixo.world/types/IdentityLevel1';
+
+/** Self's issuer entity per network (the issuer of IdentityLevel1). */
+export const SELF_ISSUER_DIDS: Readonly<Record<CredentialsNetwork, string>> = {
+  devnet: 'did:ixo:entity:80f392610e8a128b4f4b1ed828dbeb7f',
+  testnet: 'did:ixo:entity:f45746b09949bda3808d02439e212dcb',
+  mainnet: 'did:ixo:entity:3ea2744791e5b8ce1ddd7d96c9fd27e7',
+};
+
+/** A did:ixo or did:web, as the catalog writes them. */
+export const DID_PATTERN = /^did:(ixo|web):[A-Za-z0-9._:%-]+$/;
+/** Most issuers one credential type may list (the Hub's card takes 1 to 5). */
+export const MAX_ISSUERS_PER_TYPE = 5;
+
+/**
+ * The issuers this oracle trusts, per credential type: `{ "<vct>": [DIDs] }`.
+ * The trust anchor of every check and card: the model can narrow it, never
+ * widen it. Given as a JSON string or as an object `vars` entry.
+ */
+const TrustedIssuers = z.record(
+  z.string().url().max(512),
+  z
+    .array(z.string().max(256).regex(DID_PATTERN))
+    .min(1)
+    .max(MAX_ISSUERS_PER_TYPE),
+);
+export type TrustedIssuers = z.infer<typeof TrustedIssuers>;
+
+const trustedIssuersSchema = z.preprocess((value) => {
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    // Not JSON: the record check refuses it, naming the key.
+    return value;
+  }
+}, TrustedIssuers);
+
+/** The default trust anchor: Self's identity credential on this network. */
+export function defaultTrustedIssuers(
+  network: CredentialsNetwork,
+): TrustedIssuers {
+  return { [IDENTITY_LEVEL1_VCT]: [SELF_ISSUER_DIDS[network]] };
+}
+
 const secureUrl = z
   .string()
   .url()
@@ -45,6 +92,12 @@ export const credentialsConfigSchema = z.object({
   SELF_WEB_URL: secureUrl.optional(),
   AUTH_HUB_URL: secureUrl.optional(),
   AUTH_HUB_CHANNEL_SERVICE_KEY: z.string().min(1).optional(),
+  /**
+   * The issuers accepted per credential type (JSON). Unset: Self's
+   * IdentityLevel1 issuer of the oracle's network. When set it is the whole
+   * list (the default is not added).
+   */
+  CREDENTIALS_TRUSTED_ISSUERS: trustedIssuersSchema.optional(),
 });
 
 /** Base-schema keys the plugin reads but does not own. */
@@ -70,6 +123,8 @@ export interface CredentialsConfig {
   self: ServiceEndpoint;
   /** The only origin an identity-check link may be on. */
   selfWebOrigin: string;
+  /** The issuers accepted per credential type: the trust anchor. */
+  trustedIssuers: TrustedIssuers;
   /** The oracle account's key for `/api/internal/*` on the Hub; absent = cards off. */
   serviceKey?: string;
   /** The oracle's own DID (`did:ixo:ixo1…`): the UCAN issuer, the verifier DID. */
@@ -135,6 +190,8 @@ export function resolveCredentialsConfig(config: unknown): CredentialsConfig {
     ),
     self: endpoint(selfUrl),
     selfWebOrigin: selfWebOriginOf(selfUrl, owned?.SELF_WEB_URL),
+    trustedIssuers:
+      owned?.CREDENTIALS_TRUSTED_ISSUERS ?? defaultTrustedIssuers(network),
     ...(owned?.AUTH_HUB_CHANNEL_SERVICE_KEY
       ? { serviceKey: owned.AUTH_HUB_CHANNEL_SERVICE_KEY }
       : {}),

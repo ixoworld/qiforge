@@ -74,6 +74,10 @@ export const MESSAGES = {
   permissionEnded:
     'The permission for this has ended or was stopped. Ask for permission again.',
   unknownAction: "That isn't an action I can request.",
+  untrustedCredential:
+    "I can't check that credential: it isn't one this service accepts, so nothing was sent.",
+  untrustedIssuer:
+    "I can't accept that issuer for this credential, so nothing was sent.",
   daysNotAllowed:
     "That's longer than this permission can last. Ask for fewer days.",
   notConfirmed:

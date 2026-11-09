@@ -152,6 +152,14 @@ export interface BuiltRequest {
   privateJwk: P256PrivateJwk;
 }
 
+/** The answer's encryption keys: the public one goes in the request, with its `kid`. */
+export type ResponseKeys = Awaited<ReturnType<typeof generateResponseKeyPair>>;
+
+/** A fresh key pair for one check (P-256, `kid` `enc-…`). */
+export function newResponseKeys(): Promise<ResponseKeys> {
+  return generateResponseKeyPair();
+}
+
 export async function buildCredentialRequest(input: {
   verifier: VerifierContext;
   oracleDid: string;
@@ -159,9 +167,10 @@ export async function buildCredentialRequest(input: {
   responseUri: string;
   query: CredentialQuery;
   expiresAt: number;
+  keys: ResponseKeys;
 }): Promise<BuiltRequest> {
   const kid = await input.verifier.oracleKid(input.oracleDid, input.sign);
-  const keys = await generateResponseKeyPair();
+  const { keys } = input;
   const requestJwt = await createAuthorizationRequest({
     signer: {
       kid,

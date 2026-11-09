@@ -1,12 +1,20 @@
 import { z } from 'zod';
-import { openPluginInbox, readPluginInbox } from '../../core/plugin-inbox';
+import {
+  dropFromPluginInbox,
+  openPluginInbox,
+  readPluginInbox,
+} from '../../core/plugin-inbox';
 import { tool } from '../../plugin-api/tool-helper';
 import type {
   PluginTool,
   RuntimeContext,
   UserKvSurface,
 } from '../../plugin-api/types';
-import type { CredentialsConfig } from './config';
+import {
+  DID_PATTERN,
+  MAX_ISSUERS_PER_TYPE,
+  type CredentialsConfig,
+} from './config';
 import {
   CredentialsWorkerClient,
   VERIFY_CAPABILITY,
@@ -43,6 +51,7 @@ import {
 import {
   buildCredentialRequest,
   isVerificationUnavailable,
+  newResponseKeys,
   randomToken,
   verifyDelivery,
   VerifierSetupError,
@@ -83,18 +92,18 @@ export function whatsAppBinding(
 // ---------------------------------------------------------------------------
 // Inputs.
 
-const Did = z
-  .string()
-  .max(256)
-  .regex(/^did:(ixo|web):[A-Za-z0-9._:%-]+$/, 'a did:ixo or did:web');
+const Did = z.string().max(256).regex(DID_PATTERN, 'a did:ixo or did:web');
 const ClaimName = z
   .string()
   .min(1)
   .max(100)
   .regex(/^[A-Za-z0-9_.-]+$/, 'a field name such as age_over_18');
 const Vct = z.string().url().max(512);
-/** The Hub's card takes 1 to 5 issuers; a check asks for the same. */
-const Issuers = z.array(Did).min(1).max(5);
+/**
+ * Optional: the configured issuers of the type are the default, and a
+ * list given must be among them (`acceptedIssuers`).
+ */
+const Issuers = z.array(Did).min(1).max(MAX_ISSUERS_PER_TYPE).optional();
 const Claims = z.array(ClaimName).max(30);
 
 /** Catalogued service actions this runtime can carry out. */
@@ -104,7 +113,9 @@ export type SupportedAction = (typeof SUPPORTED_ACTIONS)[number];
 export const CheckPermissionInput = z
   .object({
     vct: Vct.describe('The credential type (its vct URL).'),
-    issuers: Issuers.describe('The issuer DIDs you accept for it.'),
+    issuers: Issuers.describe(
+      'Optional: fewer issuers than this service accepts for the type. Leave it out to use them all.',
+    ),
     claims: Claims.min(1).describe(
       'The fields you need to see (1-30), as few as possible.',
     ),
@@ -127,7 +138,9 @@ export const PermissionStatusInput = z
 export const CheckInput = z
   .object({
     vct: Vct,
-    issuers: Issuers,
+    issuers: Issuers.describe(
+      'Optional: fewer issuers than this service accepts for the type. Leave it out to use them all.',
+    ),
     claims: Claims.default([]).describe(
       'The fields you need to see, as few as possible (empty = only that they hold one).',
     ),
@@ -328,6 +341,33 @@ function sortedUnique(values: readonly string[]): string[] {
   return [...new Set(values)].sort();
 }
 
+/**
+ * The issuers a check or a card may name for `vct`: the operator's list
+ * (`CREDENTIALS_TRUSTED_ISSUERS`), or the part of it the model asked for.
+ * A type without a list, or an issuer outside it, is refused before anything
+ * is sent: the model can narrow the trust anchor, never widen it.
+ */
+export function acceptedIssuers(
+  cfg: Pick<CredentialsConfig, 'trustedIssuers'>,
+  vct: string,
+  asked: readonly string[] | undefined,
+): { issuers: string[]; configured: string[] } | CredentialsRefusal {
+  const listed = Object.hasOwn(cfg.trustedIssuers, vct)
+    ? cfg.trustedIssuers[vct]
+    : undefined;
+  if (!listed?.length)
+    return {
+      error: 'untrusted_credential',
+      message: MESSAGES.untrustedCredential,
+    };
+  const configured = sortedUnique(listed);
+  if (asked === undefined) return { issuers: configured, configured };
+  const issuers = sortedUnique(asked);
+  if (issuers.some((did) => !configured.includes(did)))
+    return { error: 'untrusted_issuer', message: MESSAGES.untrustedIssuer };
+  return { issuers, configured };
+}
+
 /** The refusal for a failure, logged without any personal detail. */
 function failed(
   ctx: RuntimeContext,
@@ -452,12 +492,16 @@ export function createCredentialsTools(
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? defaultSleep;
   const { cfg, oracle } = deps;
+  /** The credential types this oracle may check (the operator's list). */
+  const acceptedTypes = `Credential types this service accepts (vct): ${Object.keys(cfg.trustedIssuers).join(', ') || 'none'}; their issuers are set by the operator.`;
 
   const requestCheckPermission = tool(
     async (raw, ctx) => {
       const ready = readiness(ctx, cfg);
       if (isRefusal(ready)) return ready;
       const args = CheckPermissionInput.parse(raw);
+      const accepted = acceptedIssuers(cfg, args.vct, args.issuers);
+      if ('error' in accepted) return accepted;
       try {
         const card = await hubClient(ctx, ready, deps).request({
           ...ready.binding,
@@ -466,7 +510,7 @@ export function createCredentialsTools(
           permission: {
             kind: 'credential-check',
             vct: args.vct,
-            issuers: sortedUnique(args.issuers),
+            issuers: accepted.issuers,
             claims: sortedUnique(args.claims),
             days: args.days,
           },
@@ -486,7 +530,8 @@ export function createCredentialsTools(
       name: 'credentials_request_check_permission',
       description: [
         'Ask the person, once, for standing permission to check one of their credentials (for example that they are over 18 or have a verified identity).',
-        'Use it before credentials_check when they have not allowed it yet, or when a check comes back pending. Ask for one credential type, the issuers you accept and as few fields as you need.',
+        'Use it before credentials_check when they have not allowed it yet, or when a check comes back pending. Ask for one credential type and as few fields as you need; the accepted issuers are configured (you may only narrow them).',
+        acceptedTypes,
         "The person gets a card in the IXO wallet showing who asks, the credential, who issued it, the fields you will see and how long; they tap Allow or Don't allow.",
         'Send the returned url as one link in a short message (the `message` is ready to send). Never paste ids or tokens. Then check the answer with credentials_permission_status, or just call credentials_check once they say they allowed it.',
         'WhatsApp only.',
@@ -533,9 +578,11 @@ export function createCredentialsTools(
       if (!kv || !sign || !deps.verifier || !cfg.publicUrl)
         return { error: 'not_available', message: MESSAGES.notAvailable };
       const args = CheckInput.parse(raw);
+      const accepted = acceptedIssuers(cfg, args.vct, args.issuers);
+      if ('error' in accepted) return accepted;
       const query: CredentialQuery = {
         vct: args.vct,
-        issuers: sortedUnique(args.issuers),
+        issuers: accepted.issuers,
         claims: sortedUnique(args.claims),
       };
       try {
@@ -547,6 +594,7 @@ export function createCredentialsTools(
           verifier: deps.verifier,
           publicUrl: cfg.publicUrl,
           query,
+          catalogIssuers: accepted.configured,
           purpose:
             args.purpose ??
             `${oracle.name} would like to check this.`.slice(0, 140),
@@ -564,7 +612,8 @@ export function createCredentialsTools(
     {
       name: 'credentials_check',
       description: [
-        "Check one of the person's credentials: give the credential type (vct), the issuers you accept and the fields you need. It asks their IXO wallet, waits up to about 20 seconds and verifies the answer.",
+        "Check one of the person's credentials: give the credential type (vct) and the fields you need (the accepted issuers are configured; you may only narrow them). It asks their IXO wallet, waits up to about 20 seconds and verifies the answer.",
+        acceptedTypes,
         'result: valid (claims holds only the fields you asked for), invalid, revoked, expired, none (they did not share one) or pending (no standing permission answered: send them walletUrl as one link so they can answer in their wallet, or ask for standing permission first with credentials_request_check_permission).',
         'Calling it again with the same fields continues the same request; it does not ask twice. Never quote the claims back beyond what the conversation needs. WhatsApp only.',
       ].join(' '),
@@ -580,6 +629,8 @@ export function createCredentialsTools(
     verifier: VerifierContext;
     publicUrl: string;
     query: CredentialQuery;
+    /** Every issuer the oracle accepts for the type (its catalog entry lists them). */
+    catalogIssuers: string[];
     purpose: string;
   }) {
     const { ctx, ready, kv, query } = input;
@@ -601,12 +652,17 @@ export function createCredentialsTools(
           name: oracle.name,
           ...(oracle.description ? { description: oracle.description } : {}),
         },
-        { purpose: input.purpose, ...query },
+        { purpose: input.purpose, ...query, issuers: input.catalogIssuers },
       );
       const checkId = randomToken(16);
       const expiresAt = nowSeconds + CHECK_REQUEST_TTL_SECONDS;
+      const keys = await newResponseKeys();
+      const kid = keys.publicJwk.kid;
+      if (!kid) throw new Error('The response key has no kid');
+      // The token names the answer key, so the endpoint stores nothing
+      // that is not an answer encrypted to it.
       const token = await sealResponseToken(
-        { ownerDid: subject, checkId, expiresAt },
+        { ownerDid: subject, checkId, expiresAt, kid },
         { serviceKey: ready.cfg.serviceKey, oracleDid: ready.cfg.oracleDid },
       );
       const built = await buildCredentialRequest({
@@ -616,6 +672,7 @@ export function createCredentialsTools(
         responseUri: `${input.publicUrl}/${RESPONSE_ROUTE_PREFIX}/${token}`,
         query,
         expiresAt,
+        keys,
       });
       const fresh: CheckRow = {
         v: 1,
@@ -686,7 +743,7 @@ export function createCredentialsTools(
     };
 
     const deadline = now() + (deps.checkWaitMs ?? CHECK_WAIT_MS);
-    let tried = 0;
+    const inboxKey = inboxKeyOf(active.checkId);
     let delay = 500;
     // The worker is asked only after the Hub had a moment to answer.
     let lastPoll = now();
@@ -696,11 +753,12 @@ export function createCredentialsTools(
       const deliveries = await readPluginInbox(
         kv,
         CREDENTIALS_KV_NAMESPACE,
-        inboxKeyOf(active.checkId),
+        inboxKey,
       );
-      for (; tried < deliveries.length; tried++) {
-        const body = deliveries[tried];
-        if (body === undefined) continue;
+      // Answers that do not prove to come from the person leave the inbox,
+      // so they never hold a place the real answer needs.
+      const rejected: string[] = [];
+      for (const body of deliveries) {
         try {
           const outcome = await verifyDelivery({
             verifier: input.verifier,
@@ -715,14 +773,20 @@ export function createCredentialsTools(
               outcome.result,
               outcome.result === 'valid' ? outcome.claims : undefined,
             );
+          rejected.push(body);
         } catch (error) {
           if (!isVerificationUnavailable(error)) throw error;
-          // The person answered but a dependency is down: try this one
-          // again on the next pass.
+          // A dependency is down: this one stays and is tried again on
+          // the next pass.
           unavailable = true;
-          break;
         }
       }
+      await dropFromPluginInbox(
+        kv,
+        CREDENTIALS_KV_NAMESPACE,
+        inboxKey,
+        rejected,
+      );
       if (active.requestId && now() - lastPoll >= WORKER_POLL_MS) {
         lastPoll = now();
         const view = await worker.requestStatus(active.requestId);

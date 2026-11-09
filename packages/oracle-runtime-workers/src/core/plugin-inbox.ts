@@ -8,12 +8,15 @@ import type { UserKvSurface } from '../plugin-api/types';
  * reads it from the user's object.
  *
  * A plugin opens the row before it hands out the callback URL; the user
- * object appends a delivery only to an open, unexpired row with room left
+ * object appends a delivery only to an open, unexpired row
  * (`deliverToPluginInbox`, called through the object's
  * `deliverPluginInbox` RPC). Nothing else is written, so a caller who did
  * not get the URL, or one who calls after the row closed, changes nothing.
  * Deliveries are kept as received: the plugin authenticates each one itself
- * (decrypts it, checks its signature) before it trusts any of it.
+ * (decrypts it, checks its signature) before it trusts any of it, and drops
+ * the ones that fail (`dropFromPluginInbox`). A full row makes room by
+ * dropping its oldest delivery, so junk sent first can never lock the real
+ * answer out.
  */
 
 /** Most deliveries one inbox row may hold. */
@@ -82,9 +85,9 @@ export async function readPluginInbox(
 }
 
 /**
- * Append `body` to an open inbox row. `true` when it was stored; `false`
- * when there is no such row, it has ended, it is full, or `body` is empty
- * or too large. Never creates a row.
+ * Append `body` to an open inbox row, dropping the oldest delivery when the
+ * row is full. `true` when it was stored; `false` when there is no such row,
+ * it has ended, or `body` is empty or too large. Never creates a row.
  */
 export async function deliverToPluginInbox(
   kv: UserKvSurface,
@@ -96,9 +99,7 @@ export async function deliverToPluginInbox(
   if (body.length === 0 || body.length > PLUGIN_INBOX_MAX_BODY_LENGTH)
     return false;
   const open = (row: unknown): row is PluginInboxRow =>
-    isPluginInboxRow(row) &&
-    row.expiresAt > now &&
-    row.deliveries.length < row.max;
+    isPluginInboxRow(row) && row.expiresAt > now;
   // The read gives the row's lifetime, which the write keeps (a write
   // without `idleTtlMs` would clear the row's idle deadline). Nothing is
   // written for a caller without an open row.
@@ -111,11 +112,45 @@ export async function deliverToPluginInbox(
     (current) => {
       // `update` may run this again on a retried read: decide from scratch.
       accepted = open(current);
-      return accepted && isPluginInboxRow(current)
-        ? { ...current, deliveries: [...current.deliveries, body] }
-        : current;
+      if (!accepted || !isPluginInboxRow(current)) return current;
+      const kept = current.deliveries.slice(
+        Math.max(0, current.deliveries.length - current.max + 1),
+      );
+      return { ...current, deliveries: [...kept, body] };
     },
     { idleTtlMs: idleTtlMs(seen.expiresAt, now) },
   );
   return accepted;
+}
+
+/**
+ * Drop deliveries the plugin could not authenticate (each first match of a
+ * body in `bodies`), keeping the row and its lifetime.
+ */
+export async function dropFromPluginInbox(
+  kv: UserKvSurface,
+  namespace: string,
+  key: string,
+  bodies: readonly string[],
+  now: number = Date.now(),
+): Promise<void> {
+  if (bodies.length === 0) return;
+  const seen = await kv.get(namespace, key);
+  if (!isPluginInboxRow(seen)) return;
+  await kv.update(
+    namespace,
+    key,
+    (current) => {
+      if (!isPluginInboxRow(current)) return current;
+      const left = [...bodies];
+      const deliveries = current.deliveries.filter((item) => {
+        const index = left.indexOf(item);
+        if (index < 0) return true;
+        left.splice(index, 1);
+        return false;
+      });
+      return { ...current, deliveries };
+    },
+    { idleTtlMs: idleTtlMs(seen.expiresAt, now) },
+  );
 }

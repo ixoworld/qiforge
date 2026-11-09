@@ -274,6 +274,112 @@ describe('the WhatsApp gate', () => {
   });
 });
 
+describe('the trust anchor (CREDENTIALS_TRUSTED_ISSUERS)', () => {
+  const OTHER_ISSUER = 'did:ixo:entity:0004e35de01fe39b3b4222a44e2566dd';
+
+  it('refuses a type or an issuer outside the configured list before any call', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl, calls } = routedFetch({});
+    const tools = toolsFor(fetchImpl, oracleKey.doc);
+    const ctx = channelCtx(adapter);
+    for (const name of [
+      'credentials_check',
+      'credentials_request_check_permission',
+    ]) {
+      await expect(
+        run(tools[name], { ...CHECK_ARGS, issuers: [OTHER_ISSUER] }, ctx),
+      ).resolves.toEqual({
+        error: 'untrusted_issuer',
+        message: MESSAGES.untrustedIssuer,
+      });
+      await expect(
+        run(
+          tools[name],
+          {
+            ...CHECK_ARGS,
+            vct: 'https://credentials.ixo.world/types/Other',
+            issuers: undefined,
+          },
+          ctx,
+        ),
+      ).resolves.toEqual({
+        error: 'untrusted_credential',
+        message: MESSAGES.untrustedCredential,
+      });
+    }
+    // No card, no catalog write, no request.
+    expect(calls).toHaveLength(0);
+  });
+
+  it('uses the configured issuers when none are given', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl, calls } = routedFetch({
+      [`POST ${HUB}/api/internal/permissions`]: () => json(CARD, 201),
+    });
+    await run(
+      toolsFor(fetchImpl, oracleKey.doc).credentials_request_check_permission,
+      { vct: VCT, claims: ['age_over_18'] },
+      channelCtx(adapter),
+    );
+    expect(JSON.parse(calls[0]?.body ?? '').permission.issuers).toEqual([
+      ISSUER_DID,
+    ]);
+  });
+
+  it('publishes every configured issuer, and asks only for the ones narrowed to', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl, calls } = routedFetch({
+      [`GET ${CATALOG}`]: () => json({ error: 'not_found', message: 'x' }, 404),
+      [`PUT ${CATALOG}`]: () =>
+        json(
+          {
+            sender_key: ORACLE_DID,
+            entry: {},
+            updated_at: 1,
+            display_dropped: [],
+          },
+          201,
+        ),
+      [`POST ${WORKER}/v1/requests`]: () => deposited(),
+      [`GET ${WORKER}/v1/requests/req_1`]: () =>
+        json({
+          id: 'req_1',
+          ref: 'x',
+          status: 'pending',
+          created_at: 1,
+          expires_at: 2,
+          updated_at: 1,
+        }),
+    });
+    const time = clock();
+    const tools = toolsFor(fetchImpl, oracleKey.doc, {
+      now: time.now,
+      sleep: time.sleep,
+      cfg: testConfig({
+        CREDENTIALS_TRUSTED_ISSUERS: { [VCT]: [ISSUER_DID, OTHER_ISSUER] },
+      }),
+    });
+    await run(tools.credentials_check, CHECK_ARGS, channelCtx(adapter));
+    const put = calls.find((c) => c.method === 'PUT');
+    expect(JSON.parse(put?.body ?? '').accepts[0].issuers).toEqual(
+      [ISSUER_DID, OTHER_ISSUER].sort(),
+    );
+    const { request } = JSON.parse(
+      calls.find((c) => c.method === 'POST')?.body ?? '{}',
+    );
+    const payload = JSON.parse(
+      atob(
+        String(request).split('.')[1]?.replace(/-/g, '+').replace(/_/g, '/') ??
+          '',
+      ),
+    );
+    expect(payload.dcql_query.credentials[0].claims).toContainEqual({
+      path: ['iss'],
+      values: [ISSUER_DID],
+    });
+  });
+});
+
 describe('permission cards', () => {
   it('asks the Hub for a check card and hands back one link to send', async () => {
     const { adapter, mints, oracleKey } = recordingUcan();
@@ -483,6 +589,54 @@ describe('credentials_check', () => {
       result: 'revoked',
       requestId: 'req_1',
       message: 'Their credential has been revoked by its issuer.',
+    });
+  });
+
+  it('keeps the real answer when junk filled the inbox first', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const kv = createMemoryUserKv();
+    const { fetchImpl } = routedFetch({
+      [`GET ${CATALOG}`]: () => json({ error: 'not_found', message: 'x' }, 404),
+      [`PUT ${CATALOG}`]: () =>
+        json(
+          {
+            sender_key: ORACLE_DID,
+            entry: {},
+            updated_at: 1,
+            display_dropped: [],
+          },
+          201,
+        ),
+      [`POST ${WORKER}/v1/requests`]: async (call) => {
+        const { request } = JSON.parse(call.body);
+        const req = await verifyAuthorizationRequest(request, {
+          resolver: createStaticResolver([oracleKey.doc as never]),
+        });
+        const token = new URL(req.responseUri).pathname.split('/').pop() ?? '';
+        const target = await openResponseToken(token, {
+          serviceKey: SERVICE_KEY,
+          oracleDid: ORACLE_DID,
+        });
+        // More junk than the inbox holds, then the person's answer.
+        for (let i = 0; i < 12; i++)
+          await deliverToPluginInbox(
+            kv,
+            CREDENTIALS_KV_NAMESPACE,
+            inboxKeyOf(target?.checkId ?? ''),
+            `response=junk-${i}`,
+          );
+        await walletAnswers(call, kv, oracleKey.doc);
+        return deposited();
+      },
+    });
+    const out = await run(
+      toolsFor(fetchImpl, oracleKey.doc).credentials_check,
+      CHECK_ARGS,
+      channelCtx(adapter, { kv }),
+    );
+    expect(out).toMatchObject({
+      result: 'valid',
+      claims: { age_over_18: true },
     });
   });
 

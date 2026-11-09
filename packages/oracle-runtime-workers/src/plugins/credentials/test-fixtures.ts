@@ -202,6 +202,7 @@ export function testConfig(
     BLOCKSYNC_GRAPHQL_URL: BLOCKSYNC_URL,
     CREDENTIALS_ENABLED: 'true',
     AUTH_HUB_CHANNEL_SERVICE_KEY: SERVICE_KEY,
+    CREDENTIALS_TRUSTED_ISSUERS: JSON.stringify({ [VCT]: [ISSUER_DID] }),
     ...overrides,
   });
 }

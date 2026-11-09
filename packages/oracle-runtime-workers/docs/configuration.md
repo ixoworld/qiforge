@@ -443,7 +443,9 @@ as a verifier at the Credentials worker and the Auth Hub's two permission
 cards, WhatsApp only. Off unless `CREDENTIALS_ENABLED=true` and
 `AUTH_HUB_CHANNEL_SERVICE_KEY` (secret, the oracle account's Hub key) are
 set. `AUTH_HUB_URL`, `CREDENTIALS_URL`, `SELF_API_URL` and `SELF_WEB_URL`
-default per `NETWORK`; `credentials_check` also needs `ORACLE_PUBLIC_URL`
+default per `NETWORK`; `CREDENTIALS_TRUSTED_ISSUERS` (JSON, issuers per
+credential type; default Self's IdentityLevel1 issuer of the network) is
+the trust anchor the tools may only narrow; `credentials_check` also needs `ORACLE_PUBLIC_URL`
 (its response endpoint, `POST /credentials/response/:token`, outside UCAN
 auth) and the oracle's signing key.
 

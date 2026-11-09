@@ -45,7 +45,6 @@ const manifest: PluginManifest = {
       tool: 'credentials_check',
       args: {
         vct: IDENTITY_VCT,
-        issuers: ['did:ixo:entity:<issuer of the identity credential>'],
         claims: ['age_over_18'],
       },
     },
@@ -55,7 +54,6 @@ const manifest: PluginManifest = {
       tool: 'credentials_request_check_permission',
       args: {
         vct: IDENTITY_VCT,
-        issuers: ['did:ixo:entity:<issuer of the identity credential>'],
         claims: ['age_over_18'],
         days: 30,
       },
@@ -75,7 +73,7 @@ const operatingGuide = `### Credentials and permissions
 - These tools work only in our WhatsApp chat. Anywhere else, say plainly that it is not available here yet.
 - Every link (a permission card, the wallet, an identity-check link) goes to the person as ONE link in a short message. Each tool's \`message\` is ready to send. Never paste ids, tokens, DIDs or codes.
 - The person sees only two kinds of card: "check a credential" (who asks, the credential, its issuer, the fields you will see, how long) and "use a service for you" (who asks, the action, the service, what it allows, how long). Do not describe anything else.
-- Ask for the fewest fields the task needs, and only issuers you really accept.
+- Ask for the fewest fields the task needs. The issuers accepted per credential type are configured by the operator: leave \`issuers\` out, or narrow them; anything else is refused.
 - \`credentials_check\` returns \`pending\` when no standing permission answered: send the wallet link, or ask for standing permission with \`credentials_request_check_permission\`. Call it again with the same fields to continue the same request.
 - For an identity check: \`credentials_request_action_permission\` (self.identity-check), wait until they allow it, then \`credentials_request_action\` for the link; \`credentials_action_status\` reads its progress.
 - Use the claims of a valid check for the task at hand only; never repeat them back beyond what the conversation needs.`;
