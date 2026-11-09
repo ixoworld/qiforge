@@ -1,5 +1,11 @@
 # @ixo/oracle-runtime-workers
 
+## 0.46.0
+
+### Minor Changes
+
+- [#507](https://github.com/ixoworld/qiforge/pull/507) [`8883f5e`](https://github.com/ixoworld/qiforge/commit/8883f5ea7b4c66b81468702c17768506f24db08e) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - credentials plugin: one permission card for everything (`credentials_request_permissions` with 1-5 items, per-item status, any Hub catalogue entry id, identity flow needs only one card).
+
 ## 0.45.0
 
 ### Minor Changes
