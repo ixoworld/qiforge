@@ -44,15 +44,15 @@ Ask for everything in one request:
 
 ## Tools
 
-| Tool                                    | What it does                                                                                                                                                                                                                                                                                             |
-| --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `credentials_request_permissions`       | Asks the Hub for ONE card holding `items` (1-5): `{kind:"credential-check", vct, claims, issuers?, days}` or `{kind:"service-action", action, days?}`. Returns `{ permissionId, url, expiresAt }`.                                                                                                       |
-| `credentials_request_check_permission`  | A one-item wrapper of the above for a credential check (`vct`, 1-5 `issuers`, 1-30 `claims`, `days` 1-90).                                                                                                                                                                                               |
-| `credentials_request_action_permission` | A one-item wrapper for a service action (any entry id of the Hub's pattern, `days` or the entry's usual length).                                                                                                                                                                                         |
-| `credentials_permission_status`         | The card's status (`pending`, `allowed`, `declined`, `expired`, `stopped`) and `items[]`: each item's `index`, `kind`, `state` and, once allowed, what was granted (consent ids; grant ids, capabilities, audiences and ends). Never a token.                                                            |
-| `credentials_check`                     | Checks a credential at the Credentials worker and returns `valid` (with only the fields asked for), `invalid`, `revoked`, `expired`, `none` or `pending`.                                                                                                                                                |
-| `credentials_request_action`            | Carries out an allowed action. For `self.identity-check`: a link from Self where the person starts an identity check, using the `link`/`offer` grants of that item in the one card. For any other entry: `granted`, listing the capabilities allowed (no tokens) so the agent or another plugin can act. |
-| `credentials_action_status`             | The progress of an identity-check link (`sent`, `opened`, `in_progress`, `passed`, `failed`, `expired`, `cancelled`). No personal data.                                                                                                                                                                  |
+| Tool                                    | What it does                                                                                                                                                                                                                                                                                                                                                                       |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `credentials_request_permissions`       | Asks the Hub for ONE card holding `items` (1-5): `{kind:"credential-check", vct, claims, issuers?, days}` or `{kind:"service-action", action, days?}`. Returns `{ status: "sent", permissionId, url, expiresAt }`, or `{ status: "already_allowed", permissionId }` when the Hub already holds what was asked ([The Hub is the source of truth](#the-hub-is-the-source-of-truth)). |
+| `credentials_request_check_permission`  | A one-item wrapper of the above for a credential check (`vct`, 1-5 `issuers`, 1-30 `claims`, `days` 1-90).                                                                                                                                                                                                                                                                         |
+| `credentials_request_action_permission` | A one-item wrapper for a service action (any entry id of the Hub's pattern, `days` or the entry's usual length).                                                                                                                                                                                                                                                                   |
+| `credentials_permission_status`         | The card's status (`pending`, `allowed`, `declined`, `expired`, `stopped`) and `items[]`: each item's `index`, `kind`, `state` and, once allowed, what was granted (consent ids; grant ids, capabilities, audiences and ends). Never a token.                                                                                                                                      |
+| `credentials_check`                     | Checks a credential at the Credentials worker and returns `valid` (with only the fields asked for), `invalid`, `revoked`, `expired`, `none` or `pending`.                                                                                                                                                                                                                          |
+| `credentials_request_action`            | Carries out an allowed action. For `self.identity-check`: a link from Self where the person starts an identity check, using the `link`/`offer` grants of that item in the one card. For any other entry: `granted`, listing the capabilities allowed (no tokens) so the agent or another plugin can act.                                                                           |
+| `credentials_action_status`             | The progress of an identity-check link (`sent`, `opened`, `in_progress`, `passed`, `failed`, `expired`, `cancelled`). No personal data.                                                                                                                                                                                                                                            |
 
 Every answer is plain data plus two texts: `message`, in the second person,
 for the person and ready to send as it is, and `hint`, guidance for the agent
@@ -67,9 +67,11 @@ Rules the tools keep:
   catalog) is never the model's text and is not a tool input: it is the
   operator's `CREDENTIALS_PURPOSES` entry for the type, else "Check your
   <type name>", with links, markup and control characters stripped.
-- `credentials_permission_status` answers only ids this person's kv recorded
-  (the cards the request tools sent; each id is recorded once, with its item
-  kinds); any other id is `not_found` without asking the Hub.
+- `credentials_permission_status` answers only this person's cards: the ids
+  their kv recorded (the cards the request tools sent; each id is recorded
+  once, with its item kinds and its link) and, for an id the kv does not
+  hold, the ones the Hub lists for this person's binding. Any other id is
+  `not_found`; the card itself is never read.
 - A request that the Hub refuses with `400 invalid_item` (`details.index`,
   `details.reason`) is answered "Item N of this request isn't something we
   can set up." (N counts from 1; the reason stays with the agent). An unknown
@@ -78,7 +80,9 @@ Rules the tools keep:
 - The grants of an allowed service-action item are kept in the person's kv until the
   earliest of them ends, so repeat calls do not ask the Hub again. When Self
   answers 401 or 403 to kept grants (stopped or ended), they are dropped,
-  fetched again and the call is retried once.
+  fetched again and the call is retried once. When that card has ended too,
+  the Hub's list is read once for a newer one before the answer is "ask for
+  permission".
 - A link's status is kept 5 s before Self is asked again (a final status for
   good), and `credentials_action_status` answers at most 6 calls a minute per
   link (Self's own limits: 2000 links a minute per oracle, 6000 status reads
@@ -95,6 +99,53 @@ Rules the tools keep:
 
 The plugin is on-demand (`load_capability(['credentials'])`). Its operating
 guide tells the agent the rules above.
+
+## The Hub is the source of truth
+
+What a person allowed lives in the Auth Hub. The person's kv (`permissions`,
+`action:<id>`, `grants:<id>`, `pending:<id>`, `permstatus:<id>`) is only a
+cache of it: an oracle that lost it (a person's database emptied or
+restored, an expired row) reads it back instead of asking the person again.
+
+`GET /api/internal/permissions?bindingId=<id>&bindingRevision=<n>` lists the
+person's live cards at this oracle: at most 32, newest first, each in the
+shape of the status answer (waiting cards that have not ended, allowed cards
+with something still running). The plugin reads it at most once per tool
+call:
+
+| When                                                                                                                  | What happens                                                                                                                                                                                                                                                                                                  |
+| --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Before a request tool sends a card                                                                                    | Every item covered by a card the person allowed: nothing is sent, the answer is `already_allowed` and the kv is filled again. Else ONE waiting card covers every item: that card's link is handed back. Else a new card for the whole list (also when a card covers only some items: one card is one answer). |
+| `credentials_request_action` / `credentials_action_status` find no card, an ended card or no running grants in the kv | The newest allowed card for the action becomes the one in use and its grants are kept again; a card still waiting answers "not answered yet"; otherwise the usual "ask for permission".                                                                                                                       |
+| Self refuses kept grants (401, 403)                                                                                   | Dropped, the card read again and, when it has ended, the list read once; one retry with the grants found, else the usual answer.                                                                                                                                                                              |
+| `credentials_permission_status` gets an id the kv does not hold                                                       | Answered when the Hub lists that id for this person, else `not_found`.                                                                                                                                                                                                                                        |
+
+Rules:
+
+- An item covers what is asked when it is the same action, or the same
+  credential type with every field asked among the card's fields and every
+  issuer asked among the card's issuers. How many days were asked plays no
+  part: a running permission is used until it ends. Each item's own state
+  decides, never the card's alone (an allowed card can hold stopped items),
+  and an allowed item counts only while it carries what Allow wrote: a grant
+  still running or a consent. A state this version does not know covers
+  nothing.
+- A waiting card can be handed back only with its link: the one the Hub
+  lists (`url`, when it sends one, checked to be on the Hub's origin) or the
+  one the kv kept when the card was sent. With neither, a new card is sent.
+  A waiting card with less than a minute left is not handed back.
+- The list counts inside the per-person limits: at most 6 reads a minute per
+  person; past that the tool goes on from the kv. Nothing polls it.
+- When the list cannot be read (the Hub is down or slow, an older Hub
+  answers 404 or 405, 400, 401, 429, 503, a broken answer, the cap) the tool behaves as it
+  did before the list existed, from the kv alone. The person never sees an
+  error because of this lookup.
+- `credentials_check` keeps no permission in the kv and reads no list: a
+  standing consent lives in the person's wallet at the Hub and answers the
+  request by itself. Its `pending` answer points to the request tools, which
+  send no second card when one exists.
+- The call carries the binding of the authenticated WhatsApp turn only;
+  nothing the model writes is in it.
 
 ## How a check works
 
@@ -154,13 +205,15 @@ sequenceDiagram
 
 ## Calls to the Hub and Self
 
-- **Hub** (`/api/internal/permissions`; the POST body carries `permissions: [...]`, the GET answers `items[]`): `x-channels-service-key` (the oracle
+- **Hub** (`/api/internal/permissions`; the POST body carries `permissions: [...]`, the GET of one card answers `items[]`, the GET of the list `permissions[]`): `x-channels-service-key` (the oracle
   account's key) plus a UCAN invocation issued by the oracle's DID to the
   Hub's did:web, `permissions/request` on `ixo:permissions`, 2 minutes,
   single use. Its first fact binds the request: `{ method, path }` and, for
   the POST, `body_sha256`, the hex SHA-256 of the JSON body without its
   `invocation` field, keys sorted. The POST carries the invocation in the
-  body's `invocation` field, the GET in `Authorization: Bearer`. The request
+  body's `invocation` field, the GETs in `Authorization: Bearer`. The `path`
+  of the list is the pathname and its query string exactly as sent
+  (`/api/internal/permissions?bindingId=…&bindingRevision=…`, built once). The request
   key is derived from the run and the tool call, so a resumed run asks for
   the same card.
 - **Self** (`/identity/v1/links`): an invocation from the person's `link`
@@ -261,5 +314,7 @@ verifies it (valid, revoked, junk refused, declined, pending then continued,
 an answer lost); `receiveAnswer` is tested for closed checks and a second
 answer. The kv rules (recorded permission ids, kept grants and the 401
 refresh, the link status keep and cap, pruning, the wait that survives poll
-errors) have their own cases, and `src/do/ucan-service.test.ts` covers the
+errors) have their own cases, as does the Hub's list (an allowed card
+reused, a waiting card handed back, partial cover, a stale grant refreshed
+once, every way the list can fail, the cap, unknown states), and `src/do/ucan-service.test.ts` covers the
 scoped JWS signer (every other `typ` refused).

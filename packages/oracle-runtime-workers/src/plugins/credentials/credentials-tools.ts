@@ -44,6 +44,7 @@ import {
   MAX_PERMISSION_ITEMS,
   PERMISSIONS_CAPABILITY,
   sha256Hex,
+  type ListedPermission,
   type PermissionGrant,
   type PermissionItemState,
   type PermissionRequest,
@@ -53,10 +54,12 @@ import {
 } from './hub-client';
 import {
   chargeLinkStatus,
+  chargePermissionList,
   chargePermissionStatus,
   clearGrantsCache,
   clearPendingAction,
   knowsPermission,
+  permissionUrl,
   readGrantsCache,
   readLinkCache,
   readPendingAction,
@@ -583,6 +586,118 @@ function actionKey(action: string): string {
 
 const ActionRecord = z.object({ permissionId: z.string() });
 
+// ---------------------------------------------------------------------------
+// The Hub's list of the person's live cards: the truth the kv is a cache of.
+
+/** A card about to end is not handed out again: a new one gets a full day. */
+const PENDING_CARD_MARGIN_SECONDS = 60;
+
+/** The refusals that mean "the kv holds nothing usable": worth one look at the Hub. */
+const NOTHING_USABLE: ReadonlySet<string> = new Set([
+  'no_permission',
+  'permission_ended',
+]);
+
+/** Whether a tool's answer is one of the {@link NOTHING_USABLE} refusals. */
+function isEnded(answer: object): answer is CredentialsRefusal {
+  return (
+    'error' in answer &&
+    typeof answer.error === 'string' &&
+    NOTHING_USABLE.has(answer.error)
+  );
+}
+
+const ALREADY_ALLOWED: Wording = {
+  message: "You've already allowed this.",
+  hint: 'No new card was sent: a permission they allowed earlier still covers everything asked. Go on with the task (credentials_check, or credentials_request_action for a service action).',
+};
+
+function itemStatusOf(card: PermissionState, item: PermissionItemState) {
+  return item.status ?? card.status;
+}
+
+/** Whether a card is in `status` and, when waiting, not about to end. */
+function cardIs(
+  card: PermissionState,
+  status: 'allowed' | 'pending',
+  nowSeconds: number,
+): boolean {
+  if (card.status !== status) return false;
+  return (
+    status === 'allowed' ||
+    card.expiresAt === undefined ||
+    card.expiresAt > nowSeconds + PENDING_CARD_MARGIN_SECONDS
+  );
+}
+
+/**
+ * Whether one item of a card covers what is asked: the same action; or the
+ * same credential type with every field asked among the card's and every
+ * issuer asked among the card's. How long was asked plays no part: a
+ * permission that is running is used until it ends.
+ */
+function itemCovers(item: PermissionItemState, asked: PermissionRequest) {
+  if (item.kind !== asked.kind) return false;
+  if (asked.kind === 'service-action') return item.action === asked.action;
+  const { claims, issuers } = item;
+  return (
+    item.vct === asked.vct &&
+    claims !== undefined &&
+    issuers !== undefined &&
+    asked.claims.every((c) => claims.includes(c)) &&
+    asked.issuers.every((i) => issuers.includes(i))
+  );
+}
+
+/** The grants of an item that have not ended. */
+function runningGrants(item: PermissionItemState, nowSeconds: number) {
+  return (item.grants ?? []).filter((g) => g.expiresAt > nowSeconds);
+}
+
+/**
+ * Whether an item is in `status`. The item's own state decides, never the
+ * card's alone: an allowed card can hold items that were stopped. An allowed
+ * item also has to carry what Allow wrote (a grant still running, or a
+ * consent); one with neither is not in use.
+ */
+function itemIs(
+  card: PermissionState,
+  item: PermissionItemState,
+  status: 'allowed' | 'pending',
+  nowSeconds: number,
+): boolean {
+  if (itemStatusOf(card, item) !== status) return false;
+  return (
+    status === 'pending' ||
+    runningGrants(item, nowSeconds).length > 0 ||
+    (item.consentIds?.length ?? 0) > 0
+  );
+}
+
+/** The newest card in `status` with an item in that state covering `asked`. */
+function coveringCard(
+  cards: readonly ListedPermission[],
+  asked: PermissionRequest,
+  status: 'allowed' | 'pending',
+  nowSeconds: number,
+): ListedPermission | undefined {
+  return cards.find(
+    (card) =>
+      cardIs(card, status, nowSeconds) &&
+      card.items.some(
+        (item) =>
+          itemIs(card, item, status, nowSeconds) && itemCovers(item, asked),
+      ),
+  );
+}
+
+/** A listed card as the status cache keeps it (without its link). */
+function stateOf(card: ListedPermission): PermissionState {
+  const { url: _url, ...state } = card;
+  void _url;
+  return state;
+}
+
 const OpenLink = z.object({
   linkId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
   status: z.enum(LINK_STATUSES),
@@ -650,8 +765,187 @@ export function createCredentialsTools(
   const unavailable = () => refusal('not_available', MESSAGES.notAvailable);
 
   /**
+   * The person's live cards at the Hub, asked at most once per tool call and
+   * inside the per-person cap (6 a minute). Null when the Hub cannot say (it
+   * is down, slow, older than the list, or the cap is reached): the tool
+   * then goes on with what the kv holds, exactly as before the list existed.
+   */
+  function liveCards(
+    ctx: RuntimeContext,
+    ready: Ready,
+    kv: UserKvSurface,
+    deadline: number,
+  ): () => Promise<ListedPermission[] | null> {
+    let asked: Promise<ListedPermission[] | null> | undefined;
+    return () =>
+      (asked ??= (async () => {
+        try {
+          if (!(await chargePermissionList(kv, now()))) return null;
+          return await hubClient(ctx, ready, deps, deadline).listPermissions(
+            ready.binding,
+          );
+        } catch (error) {
+          ctx.logger.debug?.(
+            `[credentials] permissions list: ${
+              error instanceof CredentialsServiceError
+                ? `${error.service} ${error.status} ${error.code}`
+                : 'error'
+            }`,
+          );
+          return null;
+        }
+      })());
+  }
+
+  /** Keep a listed card in the kv: its id as this person's, and its status. */
+  async function keepCard(kv: UserKvSurface, card: ListedPermission) {
+    await recordPermission(
+      kv,
+      card.id,
+      card.items.map((i) => i.kind),
+      card.url,
+    );
+    await writePermissionCache(kv, stateOf(card), now());
+  }
+
+  /**
+   * Fill the kv for `action` again from the Hub's list: the newest allowed
+   * card whose item for the action is allowed (with a grant still running
+   * when `needGrants`) becomes the one in use; failing that, a card still
+   * waiting is remembered as waiting.
+   */
+  async function restoreAction(
+    kv: UserKvSurface,
+    action: string,
+    cards: () => Promise<ListedPermission[] | null>,
+    needGrants: boolean,
+  ): Promise<'allowed' | 'pending' | 'none'> {
+    const listed = await cards();
+    if (!listed) return 'none';
+    const nowSeconds = Math.floor(now() / 1000);
+    for (const card of listed) {
+      if (!cardIs(card, 'allowed', nowSeconds)) continue;
+      const item = actionItem(card, action);
+      if (!item || !itemIs(card, item, 'allowed', nowSeconds)) continue;
+      const grants = runningGrants(item, nowSeconds);
+      if (needGrants && grants.length === 0) continue;
+      await kv.set(
+        CREDENTIALS_KV_NAMESPACE,
+        actionKey(action),
+        { permissionId: card.id },
+        { idleTtlMs: ACTION_RECORD_TTL_MS },
+      );
+      await clearGrantsCache(kv, action);
+      await writeGrantsCache(kv, action, card.id, grants, now());
+      await clearPendingAction(kv, action);
+      await keepCard(kv, card);
+      return 'allowed';
+    }
+    const waiting = coveringCard(
+      listed,
+      { kind: 'service-action', action },
+      'pending',
+      nowSeconds,
+    );
+    if (!waiting) return 'none';
+    await writePendingAction(kv, action, waiting.id, ACTION_RECORD_TTL_MS);
+    await keepCard(kv, waiting);
+    return 'pending';
+  }
+
+  /**
+   * The answer when the Hub already holds what a request tool was about to
+   * ask for; null when a new card is needed (or the Hub could not say).
+   *
+   * - Every item is covered by a card the person allowed: nothing is sent,
+   *   and the kv is filled again from those cards.
+   * - Else ONE card still waiting covers every item: that card's link again.
+   * - Else (also when only some items are covered): a new card for the whole
+   *   list, as one card is one answer.
+   */
+  async function existingCard(
+    ctx: RuntimeContext,
+    kv: UserKvSurface,
+    permissions: readonly PermissionRequest[],
+    cards: () => Promise<ListedPermission[] | null>,
+  ) {
+    const listed = await cards();
+    if (!listed?.length) return null;
+    const nowSeconds = Math.floor(now() / 1000);
+    const allowed = permissions.map((p) =>
+      coveringCard(listed, p, 'allowed', nowSeconds),
+    );
+    if (allowed.every((card) => card !== undefined)) {
+      for (const [i, p] of permissions.entries()) {
+        const card = allowed[i];
+        if (!card) continue;
+        if (p.kind === 'service-action')
+          await restoreAction(kv, p.action, async () => [card], false);
+        else await keepCard(kv, card);
+      }
+      const newest = listed.find((card) => allowed.includes(card));
+      return said(ALREADY_ALLOWED, {
+        status: 'already_allowed',
+        ...(newest ? { permissionId: newest.id } : {}),
+      });
+    }
+    const waiting = listed.find(
+      (card) =>
+        cardIs(card, 'pending', nowSeconds) &&
+        permissions.every((p) =>
+          card.items.some(
+            (item) =>
+              itemIs(card, item, 'pending', nowSeconds) && itemCovers(item, p),
+          ),
+        ),
+    );
+    if (!waiting) return null;
+    // The link: the Hub's when it lists one, else the one kept when the card
+    // was sent. Without either the card cannot be sent again, so a new one is.
+    const url = waiting.url ?? (await permissionUrl(kv, waiting.id));
+    if (!url || !onHub(url)) return null;
+    for (const p of permissions)
+      if (p.kind === 'service-action')
+        await writePendingAction(
+          kv,
+          p.action,
+          waiting.id,
+          ACTION_RECORD_TTL_MS,
+        );
+    await keepCard(kv, { ...waiting, url });
+    const wording = cardMessage(oracle.name, url);
+    return said(
+      {
+        message: wording.message,
+        hint: `This is the card they were sent before and have not answered yet; no new card was made. ${wording.hint ?? ''}`.trim(),
+      },
+      {
+        status: 'sent',
+        permissionId: waiting.id,
+        url,
+        ...(waiting.expiresAt ? { expiresAt: waiting.expiresAt } : {}),
+      },
+    );
+  }
+
+  /** Whether a link kept in the kv is on the Hub's own origin. */
+  function onHub(value: string): boolean {
+    try {
+      const url = new URL(value);
+      return (
+        url.origin === new URL(cfg.hub.url).origin &&
+        !url.username &&
+        !url.password
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Ask the Hub for ONE card holding `items`. The shared path of the three
-   * request tools; `label` keeps each tool's request key apart.
+   * request tools; `label` keeps each tool's request key apart. A card is
+   * sent only when the Hub holds none that already covers the items.
    */
   async function sendCard(
     ctx: RuntimeContext,
@@ -692,6 +986,15 @@ export function createCredentialsTools(
     }
     const deadline = now() + TOOL_DEADLINE_MS;
     try {
+      // The Hub first: a card the person already allowed, or one still
+      // waiting for them, is used again instead of sending another.
+      const existing = await existingCard(
+        ctx,
+        kv,
+        permissions,
+        liveCards(ctx, ready, kv, deadline),
+      );
+      if (existing) return existing;
       const card = await hubClient(ctx, ready, deps, deadline).request({
         ...ready.binding,
         requestKey: await requestKeyOf(ctx, label),
@@ -708,6 +1011,7 @@ export function createCredentialsTools(
         kv,
         card.id,
         permissions.map((p) => p.kind),
+        card.url,
       );
       return said(cardMessage(oracle.name, card.url), {
         status: 'sent',
@@ -737,7 +1041,8 @@ export function createCredentialsTools(
         'Item kinds: {kind:"credential-check", vct, claims, issuers?, days} (standing permission to check one credential; the accepted issuers are configured, you may only narrow them) and {kind:"service-action", action, days?} (an action from the Hub\'s approved list: use only an entry id the operator\'s instructions name; self.identity-check is the only built-in one).',
         'Identity: ONE item {kind:"service-action", action:"self.identity-check", days} covers the identity link, the credential offer AND the standing consent to check IdentityLevel1 afterwards; add a credential-check item only for other credential types.',
         acceptedTypes,
-        'Send the `message` (it holds the link) as it is, in a short message. Never paste ids or tokens. Then read the answer with credentials_permission_status, or go on once they say they allowed it. WhatsApp only.',
+        'Send the `message` (it holds the link) as it is, in a short message. Never paste ids or tokens. Then read the answer with credentials_permission_status, or go on once they say they allowed it.',
+        'status "already_allowed": a permission they allowed earlier still covers every item, so nothing was sent; go on with the task. If a card for the same items is still waiting for their answer, that same card comes back (no new one is made). WhatsApp only.',
       ].join(' '),
       schema: RequestPermissionsInput,
     },
@@ -759,7 +1064,7 @@ export function createCredentialsTools(
         'One-item form of credentials_request_permissions: ask the person, once, for standing permission to check one credential (for example that they are over 18). If you need more than this, use credentials_request_permissions and ask for everything in ONE card.',
         'Ask for one credential type and as few fields as you need; the accepted issuers are configured (you may only narrow them).',
         acceptedTypes,
-        'Send the `message` (it holds the link) as it is, in a short message. Never paste ids or tokens. Then check the answer with credentials_permission_status, or just call credentials_check once they say they allowed it.',
+        'Send the `message` (it holds the link) as it is, in a short message. Never paste ids or tokens. Then check the answer with credentials_permission_status, or just call credentials_check once they say they allowed it. status "already_allowed": they allowed this earlier and nothing was sent; just call credentials_check.',
         'WhatsApp only.',
       ].join(' '),
       schema: CheckPermissionInput,
@@ -798,11 +1103,16 @@ export function createCredentialsTools(
       const kv = kvOf(ctx);
       if (!kv) return unavailable();
       const args = PermissionStatusInput.parse(raw);
-      // Only the cards this person was asked: another person's id, or a
-      // made-up one, is "not found" without asking the Hub.
-      if (!(await knowsPermission(kv, args.permissionId)))
-        return refusal('not_found', MESSAGES.notFound);
       const deadline = now() + TOOL_DEADLINE_MS;
+      // Only this person's cards: the ones the kv recorded, else the ones
+      // the Hub lists for this person's binding. Another person's id, or a
+      // made-up one, is "not found".
+      if (!(await knowsPermission(kv, args.permissionId))) {
+        const listed = await liveCards(ctx, ready, kv, deadline)();
+        const card = listed?.find((c) => c.id === args.permissionId);
+        if (!card) return refusal('not_found', MESSAGES.notFound);
+        await keepCard(kv, card);
+      }
       try {
         const state = await readCard(
           ctx,
@@ -1066,7 +1376,7 @@ export function createCredentialsTools(
       ...(active.requestId ? { requestId: active.requestId } : {}),
       walletUrl,
       message: `Please answer in your IXO wallet: ${walletUrl}`,
-      hint: 'No standing permission answered. Send `message` as it is, or ask for standing permission with credentials_request_check_permission; then call again with the same fields to continue this request.',
+      hint: 'No standing permission answered. Send `message` as it is, or ask for standing permission with credentials_request_check_permission (it sends no new card when the Hub already holds one for this); then call again with the same fields to continue this request.',
     };
   }
 
@@ -1091,7 +1401,7 @@ export function createCredentialsTools(
       description: [
         'One-item form of credentials_request_permissions: ask the person for permission to use a service on their behalf: an action from the Hub\'s approved list: use only an entry id the operator\'s instructions name; self.identity-check is the only built-in one (the Hub refuses ids it does not know). "self.identity-check" covers the identity link, the credential offer and the consent to check the identity credential afterwards, all on one card.',
         "They get a card in the IXO wallet showing who asks, the action, the service, what it allows and how long; they tap Allow or Don't allow.",
-        'Send the `message` (it holds the link) as it is, in a short message; never paste ids or tokens. Once they allow it, call credentials_request_action. If you need more than this, use credentials_request_permissions.',
+        'Send the `message` (it holds the link) as it is, in a short message; never paste ids or tokens. Once they allow it, call credentials_request_action. status "already_allowed": they allowed this earlier and nothing was sent; call credentials_request_action now. If you need more than this, use credentials_request_permissions.',
         'WhatsApp only.',
       ].join(' '),
       schema: ActionPermissionInput,
@@ -1202,7 +1512,9 @@ export function createCredentialsTools(
   /**
    * Run `run` with the action's grants. When Self refuses kept grants (401 or
    * 403: the person stopped the permission, or it ended), they are dropped,
-   * fetched again from the Hub, and `run` is tried once more.
+   * fetched again from the Hub, and `run` is tried once more. When the kv
+   * leads to no grants at all (nothing recorded, or its card ended) the
+   * Hub's list of the person's cards is read, once, before the refusal.
    */
   async function withGrants<T>(
     ctx: RuntimeContext,
@@ -1212,7 +1524,22 @@ export function createCredentialsTools(
     deadline: number,
     run: (grants: PermissionGrant[]) => Promise<T>,
   ): Promise<T | CredentialsRefusal> {
-    const first = await allowedGrants(ctx, ready, kv, action, deadline, false);
+    const cards = liveCards(ctx, ready, kv, deadline);
+    let restored = false;
+    // The grants the kv leads to; when it leads to none, the Hub's list is
+    // read (once per tool call) and the kv filled again from it.
+    const grantsFor = async (fresh: boolean) => {
+      const got = await allowedGrants(ctx, ready, kv, action, deadline, fresh);
+      if (!isEnded(got) || restored) return got;
+      restored = true;
+      const found = await restoreAction(kv, action, cards, true);
+      if (found === 'allowed')
+        return allowedGrants(ctx, ready, kv, action, deadline, false);
+      if (found === 'pending')
+        return refusal('permission_pending', MESSAGES.permissionPending);
+      return got;
+    };
+    const first = await grantsFor(false);
     if ('error' in first) return first;
     try {
       return await run(first.grants);
@@ -1224,7 +1551,7 @@ export function createCredentialsTools(
       if (!first.cached || !refused) throw error;
     }
     await clearGrantsCache(kv, action);
-    const second = await allowedGrants(ctx, ready, kv, action, deadline, true);
+    const second = await grantsFor(true);
     if ('error' in second) return second;
     return run(second.grants);
   }
@@ -1254,40 +1581,64 @@ export function createCredentialsTools(
     deadline: number,
   ) {
     try {
-      const card = await cardFor(ctx, ready, kv, action, deadline);
-      if ('error' in card) return card;
-      const state =
-        card.state ??
-        (await readCard(ctx, ready, kv, card.permissionId, deadline));
-      if ('error' in state) return state;
-      if (state.status === 'pending')
-        return refusal('permission_pending', MESSAGES.permissionPending);
-      const item = actionItem(state, action);
-      if (
-        !item ||
-        state.status !== 'allowed' ||
-        (item.status ?? 'allowed') !== 'allowed'
-      )
-        return endedRefusal(state.status, item?.status);
-      const nowSeconds = Math.floor(now() / 1000);
-      const live = {
-        ...item,
-        grants: (item.grants ?? []).filter((g) => g.expiresAt > nowSeconds),
-      };
-      return said(
-        {
-          message: 'Thanks, you allowed it.',
-          hint: "This runtime has no built-in flow for this action; the granted capabilities are listed (no tokens). Another plugin or the operator's instructions say how to use them.",
-        },
-        {
-          status: 'granted',
-          permissionId: state.id,
-          ...itemSummary(live, state.status),
-        },
+      const first = await outlineFromKv(ctx, ready, kv, action, deadline);
+      if (!isEnded(first)) return first;
+      // Nothing usable in the kv: the Hub's list, once.
+      const found = await restoreAction(
+        kv,
+        action,
+        liveCards(ctx, ready, kv, deadline),
+        false,
       );
+      if (found === 'allowed')
+        return await outlineFromKv(ctx, ready, kv, action, deadline);
+      if (found === 'pending')
+        return refusal('permission_pending', MESSAGES.permissionPending);
+      return first;
     } catch (error) {
       return failed(ctx, 'credentials_request_action', error);
     }
+  }
+
+  /** {@link grantedOutline} from what the kv leads to. */
+  async function outlineFromKv(
+    ctx: RuntimeContext,
+    ready: Ready,
+    kv: UserKvSurface,
+    action: string,
+    deadline: number,
+  ) {
+    const card = await cardFor(ctx, ready, kv, action, deadline);
+    if ('error' in card) return card;
+    const state =
+      card.state ??
+      (await readCard(ctx, ready, kv, card.permissionId, deadline));
+    if ('error' in state) return state;
+    if (state.status === 'pending')
+      return refusal('permission_pending', MESSAGES.permissionPending);
+    const item = actionItem(state, action);
+    if (
+      !item ||
+      state.status !== 'allowed' ||
+      (item.status ?? 'allowed') !== 'allowed'
+    )
+      return endedRefusal(state.status, item?.status);
+    const nowSeconds = Math.floor(now() / 1000);
+    const live = {
+      ...item,
+      grants: (item.grants ?? []).filter((g) => g.expiresAt > nowSeconds),
+    };
+    return said(
+      {
+        message: 'Thanks, you allowed it.',
+        hint: "This runtime has no built-in flow for this action; the granted capabilities are listed (no tokens). Another plugin or the operator's instructions say how to use them.",
+      },
+      {
+        status: 'granted',
+        permissionId: state.id,
+        ...itemSummary(live, state.status),
+      },
+    );
   }
 
   const requestAction = tool(

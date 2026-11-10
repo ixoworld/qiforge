@@ -13,7 +13,9 @@ import { callService, type FetchLike } from './http';
  * to the one request by its first fact: `{ method, path }` plus, for a POST,
  * `body_sha256` (hex SHA-256 of the body without its `invocation` field,
  * keys sorted, see {@link canonicalJson}). A POST carries the invocation in
- * the body's `invocation` field; a GET in `Authorization: Bearer`.
+ * the body's `invocation` field; a GET in `Authorization: Bearer`. The
+ * `path` of the list call is the pathname and its query string, exactly as
+ * sent.
  */
 
 export const PERMISSIONS_PATH = '/api/internal/permissions';
@@ -121,6 +123,12 @@ export const ItemStateSchema = z.object({
     .max(MAX_PERMISSION_ITEMS - 1),
   kind: z.enum(['credential-check', 'service-action']),
   action: z.string().max(128).optional(),
+  // What a credential-check item asked for, as the Hub kept it. Read only to
+  // tell whether a card already covers a new request; a value this version
+  // cannot read is dropped, never a reason to refuse the answer.
+  vct: z.string().max(512).optional().catch(undefined),
+  issuers: z.array(z.string().max(256)).max(16).optional().catch(undefined),
+  claims: z.array(z.string().max(100)).max(64).optional().catch(undefined),
   consentIds: z.array(z.string().min(1).max(128)).max(16).optional(),
   grants: z.array(GrantSchema).max(16).optional(),
 });
@@ -136,6 +144,21 @@ export const StatusAnswer = CardStatus.extend({
   items: z.array(ItemStateSchema).min(1).max(MAX_PERMISSION_ITEMS),
 });
 export type PermissionState = z.infer<typeof StatusAnswer>;
+
+/** The most cards the Hub lists for one person. */
+export const MAX_LISTED_PERMISSIONS = 32;
+
+/**
+ * One card of the list: the status answer, plus the card's link when the
+ * Hub sends one (a Hub that does not is fine: the link is then the one this
+ * person's kv kept).
+ */
+const ListedCard = StatusAnswer.extend({
+  url: z.string().url().optional().catch(undefined),
+});
+export type ListedPermission = z.infer<typeof ListedCard>;
+
+const ListAnswer = z.object({ permissions: z.array(z.unknown()) });
 
 export interface PermissionCard {
   id: string;
@@ -258,9 +281,7 @@ export class HubPermissionsClient {
     const parsed = CardAnswer.safeParse(answer.body);
     if (!parsed.success) this.invalid();
     // The link the agent shares must be the Hub's own.
-    const url = new URL(parsed.data.url);
-    if (url.origin !== this.origin || url.username || url.password)
-      this.invalid();
+    if (!this.ownUrl(parsed.data.url)) this.invalid();
     return parsed.data;
   }
 
@@ -298,6 +319,54 @@ export class HubPermissionsClient {
     const parsed = StatusAnswer.safeParse(answer.body);
     if (!parsed.success) this.invalid();
     return parsed.data;
+  }
+
+  /**
+   * The person's live cards at this oracle, newest first: waiting ones and
+   * allowed ones with something still running. The query string is built
+   * once and is the same in the request and in the invocation's `path` fact.
+   * A card this version cannot read is left out, never a failure.
+   */
+  async listPermissions(binding: {
+    bindingId: string;
+    bindingRevision: number;
+  }): Promise<ListedPermission[]> {
+    const query = new URLSearchParams({
+      bindingId: binding.bindingId,
+      bindingRevision: String(binding.bindingRevision),
+    }).toString();
+    const path = `${PERMISSIONS_PATH}?${query}`;
+    const answer = await callService({
+      service: 'hub',
+      method: 'GET',
+      url: `${this.origin}${path}`,
+      prepare: async () => ({
+        headers: {
+          authorization: `Bearer ${await this.opts.mint([{ method: 'GET', path }])}`,
+          'x-channels-service-key': this.opts.serviceKey,
+        },
+      }),
+      ...this.transport(),
+    });
+    const parsed = ListAnswer.safeParse(answer.body);
+    if (!parsed.success) this.invalid();
+    const cards: ListedPermission[] = [];
+    for (const raw of parsed.data.permissions.slice(
+      0,
+      MAX_LISTED_PERMISSIONS,
+    )) {
+      const card = ListedCard.safeParse(raw);
+      if (!card.success) continue;
+      const { url, ...rest } = card.data;
+      // A link the agent may share must be the Hub's own.
+      cards.push(url && this.ownUrl(url) ? { ...rest, url } : rest);
+    }
+    return cards;
+  }
+
+  private ownUrl(value: string): boolean {
+    const url = new URL(value);
+    return url.origin === this.origin && !url.username && !url.password;
   }
 
   private transport() {
