@@ -77,12 +77,13 @@ Rules the tools keep:
   can set up." (N counts from 1; the reason stays with the agent). An unknown
   entry id comes back the same way (or as `unknown_action`). The same
   `requestKey` with another list is `request_conflict`, handled as before.
-- The grants of an allowed service-action item are kept in the person's kv until the
-  earliest of them ends, so repeat calls do not ask the Hub again. When Self
-  answers 401 or 403 to kept grants (stopped or ended), they are dropped,
-  fetched again and the call is retried once. When that card has ended too,
-  the Hub's list is read once for a newer one before the answer is "ask for
-  permission".
+- The Hub first: before `credentials_request_action` or
+  `credentials_action_status` uses any grant to call a service (Self), the
+  person's live cards are read from the Hub (one list read per call), and
+  only the Hub's answer decides. The grants of an allowed service-action item
+  are still kept in the person's kv (until the earliest of them ends), but
+  only as the fallback for when the Hub cannot be read (see "The Hub is the
+  source of truth").
 - A link's status is kept 5 s before Self is asked again (a final status for
   good), and `credentials_action_status` answers at most 6 calls a minute per
   link (Self's own limits: 2000 links a minute per oracle, 6000 status reads
@@ -121,12 +122,12 @@ shape of the status answer (waiting cards that have not ended, allowed cards
 with something still running). The plugin reads it at most once per tool
 call:
 
-| When                                                                                                                  | What happens                                                                                                                                                                                                                                                                                                  |
-| --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Before a request tool sends a card                                                                                    | Every item covered by a card the person allowed: nothing is sent, the answer is `already_allowed` and the kv is filled again. Else ONE waiting card covers every item: that card's link is handed back. Else a new card for the whole list (also when a card covers only some items: one card is one answer). |
-| `credentials_request_action` / `credentials_action_status` find no card, an ended card or no running grants in the kv | The newest allowed card for the action becomes the one in use and its grants are kept again; a card still waiting answers "not answered yet"; otherwise the usual "ask for permission".                                                                                                                       |
-| Self refuses kept grants (401, 403)                                                                                   | Dropped, the card read again and, when it has ended, the list read once; one retry with the grants found, else the usual answer.                                                                                                                                                                              |
-| `credentials_permission_status` gets an id the kv does not hold                                                       | Answered when the Hub lists that id for this person, else `not_found`.                                                                                                                                                                                                                                        |
+| When                                                                                 | What happens                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Before a request tool sends a card                                                   | Every item covered by a card the person allowed: nothing is sent, the answer is `already_allowed` and the kv is filled again. Else ONE waiting card covers every item: that card's link is handed back. Else a new card for the whole list (also when a card covers only some items: one card is one answer).                                                     |
+| `credentials_request_action` / `credentials_action_status`, before any grant is used | The newest allowed card whose item for the action is allowed, not out of date and holds running grants: its grants are used and the kv's copy refreshed from them. Else the kv's card in use and its grants are dropped: a card still waiting answers "not answered yet", an out-of-date one "once more", one the kv had "ended", otherwise "ask for permission". |
+| Self refuses kept grants (401, 403), only after the list could not be read           | Dropped, the card read again; one retry with the grants found, else the usual answer.                                                                                                                                                                                                                                                                             |
+| `credentials_permission_status` gets an id the kv does not hold                      | Answered when the Hub lists that id for this person, else `not_found`.                                                                                                                                                                                                                                                                                            |
 
 Rules:
 
@@ -141,10 +142,8 @@ Rules:
   shows the item with `current: false` and no grants, and
   `credentials_action_status` answers `permission_outdated`. Only an explicit
   `false` counts: an older Hub omits the field, and an item without it is
-  current. Known limit: grants kept in the kv (until the earliest ends) are
-  used without asking the Hub, so a change is seen at the next read of that
-  card at the Hub (`credentials_permission_status`, the list when the kv
-  leads to nothing, Self refusing the grants, or the grants ending).
+  current. Grants kept in the kv are never used while the Hub can be read,
+  so a stopped or out-of-date permission is seen at the very next call.
 - An item covers what is asked when it is the same action, or the same
   credential type with every field asked among the card's fields and every
   issuer asked among the card's issuers. How many days were asked plays no
@@ -161,8 +160,16 @@ Rules:
   person; past that the tool goes on from the kv. Nothing polls it.
 - When the list cannot be read (the Hub is down or slow, an older Hub
   answers 404 or 405, 400, 401, 429, 503, a broken answer, the cap) the tool behaves as it
-  did before the list existed, from the kv alone. The person never sees an
-  error because of this lookup.
+  did before the list existed, from the kv alone: kept grants that have not
+  ended are used, so a Hub outage never blocks the person. A grant tool logs
+  that fallback as a warning with its reason code:
+  `[credentials] credentials_request_action: hub_unread (hub_503_unavailable); going on from the kept permission`
+  (`hub_<status>_<code>`, `hub_0_timeout`, `list_capped`, `list_error`). The
+  person never sees an error because of this lookup. Known limits: during
+  such a fallback a permission stopped at the Hub is still used until its
+  kept grants end or Self refuses them; and the list holds at most 32 cards,
+  so a card in use older than the person's 32 newest live cards is not seen
+  (answered as ended; the agent asks for permission again).
 - `credentials_check` keeps no permission in the kv and reads no list: a
   standing consent lives in the person's wallet at the Hub and answers the
   request by itself. Its `pending` answer points to the request tools, which
