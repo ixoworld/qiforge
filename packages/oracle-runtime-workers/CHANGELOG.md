@@ -1,5 +1,15 @@
 # @ixo/oracle-runtime-workers
 
+## 0.46.4
+
+### Patch Changes
+
+- [#515](https://github.com/ixoworld/qiforge/pull/515) [`40288da`](https://github.com/ixoworld/qiforge/commit/40288daf64cb99889abd48b664f2352f8120b8b8) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - credentials: honour the Auth Hub's per-item `current` flag and export the time wording.
+
+  - `HubPermissionsClient` parses `current: boolean` (optional) on every item of the single view and the list, and passes it through (`PermissionItemState`, `ListedPermission`, the person's cached card status). Absent (an older Hub) is unknown and read as current; `isOutdatedItem(item)` is true only for an explicit `false`.
+  - An allowed item marked `current: false` is never reused: it covers nothing in the request tools, its action stops being the card in use or the one waiting, its kept grants are dropped, and the person is asked again on ONE card: "I need your OK once more for this. Please tap Allow here: <link>". `credentials_request_action` sends that card by itself; `credentials_permission_status` shows the item with `current: false` and no grants; `credentials_action_status` answers `permission_outdated`.
+  - `relativeTime`, `whenItEnds`, `SelfTime` and `selfTimeSeconds` are exported from the package root so other plugins use the same words ("in 15 minutes", "in about 2 hours").
+
 ## 0.46.3
 
 ### Patch Changes
