@@ -623,6 +623,14 @@ function actionKey(action: string): string {
 
 const ActionRecord = z.object({ permissionId: z.string() });
 
+/**
+ * A tool call's reader of the Hub's list of the person's live cards (read
+ * at most once); null when the Hub could not say, `failure()` then names why.
+ */
+type HubCards = (() => Promise<ListedPermission[] | null>) & {
+  failure: () => string | undefined;
+};
+
 // ---------------------------------------------------------------------------
 // The Hub's list of the person's live cards: the truth the kv is a cache of.
 
@@ -833,33 +841,37 @@ export function createCredentialsTools(
    * The person's live cards at the Hub, asked at most once per tool call and
    * inside the per-person cap (6 a minute). Null when the Hub cannot say (it
    * is down, slow, older than the list, or the cap is reached): the tool
-   * then goes on with what the kv holds, exactly as before the list existed.
+   * then goes on with what the kv holds, exactly as before the list existed;
+   * `failure()` then names why, as a reason code for the logs.
    */
   function liveCards(
     ctx: RuntimeContext,
     ready: Ready,
     kv: UserKvSurface,
     deadline: number,
-  ): () => Promise<ListedPermission[] | null> {
+  ): HubCards {
     let asked: Promise<ListedPermission[] | null> | undefined;
-    return () =>
+    let why: string | undefined;
+    const read = () =>
       (asked ??= (async () => {
         try {
-          if (!(await chargePermissionList(kv, now()))) return null;
+          if (!(await chargePermissionList(kv, now()))) {
+            why = 'list_capped';
+            return null;
+          }
           return await hubClient(ctx, ready, deps, deadline).listPermissions(
             ready.binding,
           );
         } catch (error) {
-          ctx.logger.debug?.(
-            `[credentials] permissions list: ${
-              error instanceof CredentialsServiceError
-                ? `${error.service} ${error.status} ${error.code}`
-                : 'error'
-            }`,
-          );
+          why =
+            error instanceof CredentialsServiceError
+              ? `${error.service}_${error.status}_${error.code}`
+              : 'list_error';
+          ctx.logger.debug?.(`[credentials] permissions list: ${why}`);
           return null;
         }
       })());
+    return Object.assign(read, { failure: () => why });
   }
 
   /** Keep a listed card in the kv: its id as this person's, and its status. */
@@ -899,15 +911,19 @@ export function createCredentialsTools(
    * when `needGrants`) becomes the one in use; failing that, a card still
    * waiting is remembered as waiting. `outdated`: the only allowed card for
    * the action is marked `current: false` (it is forgotten, never used).
+   * `grants`: the running grants of the card put in use (none otherwise).
    */
   async function restoreAction(
     kv: UserKvSurface,
     action: string,
     cards: () => Promise<ListedPermission[] | null>,
     needGrants: boolean,
-  ): Promise<'allowed' | 'pending' | 'outdated' | 'none'> {
+  ): Promise<{
+    found: 'allowed' | 'pending' | 'outdated' | 'none';
+    grants: PermissionGrant[];
+  }> {
     const listed = await cards();
-    if (!listed) return 'none';
+    if (!listed) return { found: 'none', grants: [] };
     const nowSeconds = Math.floor(now() / 1000);
     for (const card of listed) {
       if (!cardIs(card, 'allowed', nowSeconds)) continue;
@@ -925,19 +941,19 @@ export function createCredentialsTools(
       await writeGrantsCache(kv, action, card.id, grants, now());
       await clearPendingAction(kv, action);
       await keepCard(kv, card);
-      return 'allowed';
+      return { found: 'allowed', grants };
     }
     const asked: PermissionRequest = { kind: 'service-action', action };
     const waiting = coveringCard(listed, asked, 'pending', nowSeconds);
     if (waiting) {
       await writePendingAction(kv, action, waiting.id, ACTION_RECORD_TTL_MS);
       await keepCard(kv, waiting);
-      return 'pending';
+      return { found: 'pending', grants: [] };
     }
     const stale = outdatedCard(listed, asked, nowSeconds);
-    if (!stale) return 'none';
+    if (!stale) return { found: 'none', grants: [] };
     await forgetAction(kv, action, stale.id);
-    return 'outdated';
+    return { found: 'outdated', grants: [] };
   }
 
   /**
@@ -1623,9 +1639,10 @@ export function createCredentialsTools(
   }
 
   /**
-   * The allowed grants of an action's card, or the refusal to answer. They
-   * are kept in the person's kv until the earliest ends, so a repeat call
-   * does not ask the Hub again; `fresh` skips that copy (Self refused it).
+   * The allowed grants of an action's card from what the kv leads to, or the
+   * refusal to answer: only when the Hub's list could not be read (see
+   * {@link withGrants}). The copy kept in the kv (until the earliest grant
+   * ends) is used first; `fresh` skips it (Self refused it).
    */
   async function allowedGrants(
     ctx: RuntimeContext,
@@ -1681,11 +1698,25 @@ export function createCredentialsTools(
   }
 
   /**
-   * Run `run` with the action's grants. When Self refuses kept grants (401 or
-   * 403: the person stopped the permission, or it ended), they are dropped,
-   * fetched again from the Hub, and `run` is tried once more. When the kv
-   * leads to no grants at all (nothing recorded, or its card ended) the
-   * Hub's list of the person's cards is read, once, before the refusal.
+   * Run `run` with the action's grants, the Hub first: the person's live
+   * cards are read from the Hub (the list, once per tool call) before any
+   * grant is used, and only what the Hub answers decides.
+   *
+   * - The newest allowed card whose item for the action is allowed, not out
+   *   of date (`current: false`) and holds running grants: its grants are
+   *   used and the kv's copy is refreshed from them.
+   * - Anything else: what the kv kept for the action (the card in use and
+   *   its grants) is dropped, and the answer is "not answered yet" (a card
+   *   is waiting), "once more" (out of date: `credentials_request_action`
+   *   then sends the card again), "ended" (the kv had a card for it) or
+   *   "ask for permission".
+   *
+   * Only when the list cannot be read (the Hub down, slow, 429/5xx, an older
+   * Hub without the route, the per-person cap) does the tool go on from the
+   * kv as before, so a Hub outage never blocks the person: kept grants that
+   * have not ended are used, and when Self refuses them (401 or 403) they
+   * are dropped, read again from the card and `run` is tried once more.
+   * That fallback is logged with its reason code.
    */
   async function withGrants<T>(
     ctx: RuntimeContext,
@@ -1695,23 +1726,20 @@ export function createCredentialsTools(
     deadline: number,
     run: (grants: PermissionGrant[]) => Promise<T>,
     /** The tool call's reader of the Hub's list (read at most once). */
-    cards: () => Promise<ListedPermission[] | null>,
+    cards: HubCards,
+    toolName: string,
   ): Promise<T | CredentialsRefusal> {
-    let restored = false;
-    // The grants the kv leads to; when it leads to none, the Hub's list is
-    // read (once per tool call) and the kv filled again from it.
-    const grantsFor = async (fresh: boolean) => {
-      const got = await allowedGrants(ctx, ready, kv, action, deadline, fresh);
-      if (!isEnded(got) || restored) return got;
-      restored = true;
-      const found = await restoreAction(kv, action, cards, true);
-      if (found === 'allowed')
-        return allowedGrants(ctx, ready, kv, action, deadline, false);
-      if (found === 'pending')
-        return refusal('permission_pending', MESSAGES.permissionPending);
-      if (found === 'outdated') return outdatedRefusal();
-      return got;
-    };
+    const listed = await cards();
+    if (listed) {
+      const fromHub = await grantsFromHub(kv, action, listed);
+      if ('error' in fromHub) return fromHub;
+      return run(fromHub.grants);
+    }
+    ctx.logger.warn(
+      `[credentials] ${toolName}: hub_unread (${cards.failure() ?? 'unknown'}); going on from the kept permission`,
+    );
+    const grantsFor = (fresh: boolean) =>
+      allowedGrants(ctx, ready, kv, action, deadline, fresh);
     const first = await grantsFor(false);
     if ('error' in first) return first;
     try {
@@ -1727,6 +1755,35 @@ export function createCredentialsTools(
     const second = await grantsFor(true);
     if ('error' in second) return second;
     return run(second.grants);
+  }
+
+  /** {@link withGrants} from the Hub's answer: the grants to use, or the refusal. */
+  async function grantsFromHub(
+    kv: UserKvSurface,
+    action: string,
+    listed: ListedPermission[],
+  ): Promise<{ grants: PermissionGrant[] } | CredentialsRefusal> {
+    const inUse = ActionRecord.safeParse(
+      await kv.get(CREDENTIALS_KV_NAMESPACE, actionKey(action)),
+    );
+    const waiting = await readPendingAction(kv, action);
+    const { found, grants } = await restoreAction(
+      kv,
+      action,
+      async () => listed,
+      true,
+    );
+    if (found === 'allowed') return { grants };
+    // Nothing the Hub lists may be used: the kv's copy goes too.
+    await kv.delete(CREDENTIALS_KV_NAMESPACE, actionKey(action));
+    await clearGrantsCache(kv, action);
+    if (found === 'pending')
+      return refusal('permission_pending', MESSAGES.permissionPending);
+    if (found === 'outdated') return outdatedRefusal();
+    await clearPendingAction(kv, action);
+    return inUse.success || waiting
+      ? refusal('permission_ended', MESSAGES.permissionEnded)
+      : refusal('no_permission', MESSAGES.noPermission);
   }
 
   /** The grant with this catalogue id (`link`, `offer`), else the one with this capability. */
@@ -1758,7 +1815,7 @@ export function createCredentialsTools(
       const first = await outlineFromKv(ctx, ready, kv, action, deadline);
       if (!isEnded(first)) return first;
       // Nothing usable in the kv: the Hub's list, once.
-      const found = await restoreAction(kv, action, cards, false);
+      const { found } = await restoreAction(kv, action, cards, false);
       if (found === 'allowed')
         return await outlineFromKv(ctx, ready, kv, action, deadline);
       if (found === 'pending')
@@ -1862,7 +1919,7 @@ export function createCredentialsTools(
     kv: UserKvSurface,
     action: string,
     deadline: number,
-    cards: () => Promise<ListedPermission[] | null>,
+    cards: HubCards,
   ) {
     const requestKey = await requestKeyOf(ctx, `action:${action}`);
     try {
@@ -1906,6 +1963,7 @@ export function createCredentialsTools(
           );
         },
         cards,
+        'credentials_request_action',
       );
     } catch (error) {
       // Self refuses a new link only while a check is in progress: that
@@ -2040,6 +2098,7 @@ export function createCredentialsTools(
             );
           },
           liveCards(ctx, ready, kv, deadline),
+          'credentials_action_status',
         );
         if ('error' in answer) return answer;
         await writeLinkCache(kv, answer, now());

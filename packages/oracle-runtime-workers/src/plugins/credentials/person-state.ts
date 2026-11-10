@@ -20,7 +20,8 @@ import { LINK_STATUSES, type LinkState } from './self-client';
  * All of it is a cache: the Hub is the source of truth, and what is missing
  * here is read back from the Hub's list of the person's live cards.
  * - `grants:<action>`: the grants of an allowed action card, kept until the
- *   earliest of them ends, so a repeat call does not ask the Hub again.
+ *   earliest of them ends: used only when the Hub's list cannot be read (the
+ *   Hub's answer is otherwise read before any grant is used).
  * - `link:<linkId>`: the last status read for a link, and `linkrate:<linkId>`
  *   how often the status tool was called for it this minute.
  */
