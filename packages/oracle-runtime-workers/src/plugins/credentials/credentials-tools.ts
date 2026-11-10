@@ -33,7 +33,8 @@ import {
   MESSAGES,
   refusal,
   refusalFor,
-  shortTime,
+  checkInProgress,
+  describeError,
   type CredentialsRefusal,
   type Wording,
 } from './errors';
@@ -77,6 +78,7 @@ import {
   SelfLinksClient,
   type LinkStatus,
 } from './self-client';
+import { SelfTime, whenItEnds } from './times';
 import {
   buildCredentialRequest,
   isVerificationUnavailable,
@@ -297,8 +299,17 @@ function readiness(
   const binding = whatsAppBinding(ctx);
   if (!binding) return refusal('whatsapp_only', MESSAGES.whatsAppOnly);
   const { serviceKey, oracleDid } = cfg;
-  if (!cfg.enabled || !serviceKey || !oracleDid || !ctx.ucan.hasSigningKey())
+  if (!cfg.enabled || !serviceKey || !oracleDid || !ctx.ucan.hasSigningKey()) {
+    const missing = !cfg.enabled
+      ? 'disabled'
+      : !serviceKey
+        ? 'no_service_key'
+        : !oracleDid
+          ? 'no_oracle_did'
+          : 'no_signing_key';
+    ctx.logger.warn(`[credentials] not_available (${missing})`);
     return refusal('not_available', MESSAGES.notAvailable);
+  }
   return { cfg: { ...cfg, serviceKey, oracleDid }, binding };
 }
 
@@ -446,18 +457,18 @@ function failed(
   ctx: RuntimeContext,
   tool: string,
   error: unknown,
+  nowMs: number,
 ): CredentialsRefusal {
   const result = refusalFor(error, {
     ...(ctx.user.timezone ? { timeZone: ctx.user.timezone } : {}),
+    nowMs,
   });
   ctx.logger.warn(
-    `[credentials] ${tool}: ${
+    `[credentials] ${tool}: ${result.error} (${
       error instanceof CredentialsServiceError
         ? `${error.service} ${error.status} ${error.code}`
-        : error instanceof Error
-          ? error.name
-          : 'error'
-    }`,
+        : describeError(error)
+    })`,
   );
   return result;
 }
@@ -701,7 +712,7 @@ function stateOf(card: ListedPermission): PermissionState {
 const OpenLink = z.object({
   linkId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
   status: z.enum(LINK_STATUSES),
-  expiresAt: z.number().int().positive(),
+  expiresAt: SelfTime,
 });
 
 // ---------------------------------------------------------------------------
@@ -762,7 +773,11 @@ export function createCredentialsTools(
   const { cfg, oracle } = deps;
   /** The credential types this oracle may check (the operator's list). */
   const acceptedTypes = `Credential types this service accepts (vct): ${Object.keys(cfg.trustedIssuers).join(', ') || 'none'}; their issuers are set by the operator.`;
-  const unavailable = () => refusal('not_available', MESSAGES.notAvailable);
+  /** `not_available`, logged with the tool and what was missing. */
+  const unavailable = (ctx: RuntimeContext, tool: string, reason: string) => {
+    ctx.logger.warn(`[credentials] ${tool}: not_available (${reason})`);
+    return refusal('not_available', MESSAGES.notAvailable);
+  };
 
   /**
    * The person's live cards at the Hub, asked at most once per tool call and
@@ -956,7 +971,7 @@ export function createCredentialsTools(
     const ready = readiness(ctx, cfg);
     if (isRefusal(ready)) return ready;
     const kv = kvOf(ctx);
-    if (!kv) return unavailable();
+    if (!kv) return unavailable(ctx, toolName, 'no_kv');
     const permissions: PermissionRequest[] = [];
     const seenActions = new Set<string>();
     for (const [position, item] of items.entries()) {
@@ -1020,7 +1035,7 @@ export function createCredentialsTools(
         expiresAt: card.expiresAt,
       });
     } catch (error) {
-      return failed(ctx, toolName, error);
+      return failed(ctx, toolName, error, now());
     }
   }
 
@@ -1101,7 +1116,8 @@ export function createCredentialsTools(
       const ready = readiness(ctx, cfg);
       if (isRefusal(ready)) return ready;
       const kv = kvOf(ctx);
-      if (!kv) return unavailable();
+      if (!kv)
+        return unavailable(ctx, 'credentials_permission_status', 'no_kv');
       const args = PermissionStatusInput.parse(raw);
       const deadline = now() + TOOL_DEADLINE_MS;
       // Only this person's cards: the ones the kv recorded, else the ones
@@ -1130,7 +1146,7 @@ export function createCredentialsTools(
           items: state.items.map((item) => itemSummary(item, state.status)),
         });
       } catch (error) {
-        return failed(ctx, 'credentials_permission_status', error);
+        return failed(ctx, 'credentials_permission_status', error, now());
       }
     },
     {
@@ -1155,7 +1171,17 @@ export function createCredentialsTools(
             }
           : undefined;
       if (!kv || !signer || !deps.verifier || !cfg.publicUrl)
-        return unavailable();
+        return unavailable(
+          ctx,
+          'credentials_check',
+          !kv
+            ? 'no_kv'
+            : !signer
+              ? 'no_signer'
+              : !deps.verifier
+                ? 'no_blocksync_url'
+                : 'no_public_url',
+        );
       const args = CheckInput.parse(raw);
       const accepted = acceptedIssuers(cfg, args.vct, args.issuers);
       if ('error' in accepted) return accepted;
@@ -1177,13 +1203,16 @@ export function createCredentialsTools(
           purpose: purposeFor(cfg, args.vct),
         });
       } catch (error) {
-        if (error instanceof VerifierSetupError) {
-          ctx.logger.warn(`[credentials] credentials_check: ${error.code}`);
-          return unavailable();
-        }
-        if (isVerificationUnavailable(error))
+        if (error instanceof VerifierSetupError)
+          return unavailable(ctx, 'credentials_check', error.code);
+        if (isVerificationUnavailable(error)) {
+          // A resolver or a status list could not be read: the kit's codes say which.
+          ctx.logger.warn(
+            `[credentials] credentials_check: verification_unavailable (${describeError(error)})`,
+          );
           return refusal('verification_unavailable', MESSAGES.busy);
-        return failed(ctx, 'credentials_check', error);
+        }
+        return failed(ctx, 'credentials_check', error, now());
       }
     },
     {
@@ -1366,6 +1395,9 @@ export function createCredentialsTools(
       // reached the response endpoint: this request cannot be answered
       // again, so it is closed here and the next call starts a new one.
       await finish('none');
+      ctx.logger.warn(
+        '[credentials] credentials_check: answer_lost (answered at the worker, no verified answer arrived)',
+      );
       return refusal('answer_lost', MESSAGES.busy);
     }
     const walletUrl = active.requestId
@@ -1596,7 +1628,7 @@ export function createCredentialsTools(
         return refusal('permission_pending', MESSAGES.permissionPending);
       return first;
     } catch (error) {
-      return failed(ctx, 'credentials_request_action', error);
+      return failed(ctx, 'credentials_request_action', error, now());
     }
   }
 
@@ -1646,7 +1678,7 @@ export function createCredentialsTools(
       const ready = readiness(ctx, cfg);
       if (isRefusal(ready)) return ready;
       const kv = kvOf(ctx);
-      if (!kv) return unavailable();
+      if (!kv) return unavailable(ctx, 'credentials_request_action', 'no_kv');
       const args = ActionInput.parse(raw);
       const deadline = now() + TOOL_DEADLINE_MS;
       if (args.action !== IDENTITY_CHECK_ACTION)
@@ -1676,10 +1708,12 @@ export function createCredentialsTools(
               link,
               deadline,
             ).createLink({ offerConsent: offer.token, requestKey });
-            const ends = shortTime(created.expiresAt, ctx.user.timezone);
+            const ends = endsFor(ctx, created.expiresAt);
             return said(
               {
-                message: `Tap this link to start your identity check. It works once and ends at ${ends}: ${created.url}`,
+                message: ends
+                  ? `Tap this link to start your identity check. It works once and ends ${ends}: ${created.url}`
+                  : `Tap this link to start your identity check. It works once: ${created.url}`,
                 hint: 'Send `message` as it is. Keep the linkId to read progress. A new link replaces one nobody has opened yet, so do not call this again to resend.',
               },
               {
@@ -1697,10 +1731,9 @@ export function createCredentialsTools(
         // token, so its URL cannot be sent again.
         const open = openLinkOf(error);
         if (open) {
-          const ends = shortTime(open.expiresAt, ctx.user.timezone);
           return said(
             {
-              message: `Your identity check is already in progress; it ends at ${ends}. Please carry on with it.`,
+              message: checkInProgress(endsFor(ctx, open.expiresAt)),
               hint: 'Its link cannot be sent again; read progress with this linkId.',
             },
             {
@@ -1711,7 +1744,7 @@ export function createCredentialsTools(
             },
           );
         }
-        return failed(ctx, 'credentials_request_action', error);
+        return failed(ctx, 'credentials_request_action', error, now());
       }
     },
     {
@@ -1724,6 +1757,17 @@ export function createCredentialsTools(
       schema: ActionInput,
     },
   );
+
+  /**
+   * When something ends, for the person: "at 18:05" in their zone when the
+   * runtime knows it, else "in 15 minutes"; null once it has passed.
+   */
+  function endsFor(ctx: RuntimeContext, unixSeconds: number): string | null {
+    return whenItEnds(unixSeconds, {
+      ...(ctx.user.timezone ? { timeZone: ctx.user.timezone } : {}),
+      nowMs: now(),
+    });
+  }
 
   /** The open link Self named in a 409 `link_active`, when it named one. */
   function openLinkOf(
@@ -1780,7 +1824,7 @@ export function createCredentialsTools(
       const ready = readiness(ctx, cfg);
       if (isRefusal(ready)) return ready;
       const kv = kvOf(ctx);
-      if (!kv) return unavailable();
+      if (!kv) return unavailable(ctx, 'credentials_action_status', 'no_kv');
       const args = ActionStatusInput.parse(raw);
       if (args.action !== IDENTITY_CHECK_ACTION)
         return refusal('unknown_action', {
@@ -1828,7 +1872,7 @@ export function createCredentialsTools(
         await writeLinkCache(kv, answer, now());
         return stateAnswer(answer);
       } catch (error) {
-        return failed(ctx, 'credentials_action_status', error);
+        return failed(ctx, 'credentials_action_status', error, now());
       }
     },
     {

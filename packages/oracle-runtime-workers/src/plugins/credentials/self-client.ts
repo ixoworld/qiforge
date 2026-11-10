@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { CredentialsServiceError } from './errors';
 import { callService, type FetchLike } from './http';
 import { canonicalJson, jsonBodySha256 } from './hub-client';
+import { SelfTime } from './times';
 
 /**
  * Self (the identity oracle): identity-check links for a person.
@@ -35,18 +36,19 @@ export type LinkStatus = (typeof LINK_STATUSES)[number];
 
 const LINK_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
+// Self answers its times as ISO 8601 text; they are Unix seconds from here on.
 const CreatedLink = z.object({
   linkId: z.string().regex(LINK_ID),
   url: z.string().url(),
-  expiresAt: z.number().int().positive(),
+  expiresAt: SelfTime,
 });
 export type CreatedLink = z.infer<typeof CreatedLink>;
 
 const LinkState = z.object({
   linkId: z.string().regex(LINK_ID),
   status: z.enum(LINK_STATUSES),
-  updatedAt: z.number().int().nonnegative(),
-  expiresAt: z.number().int().positive(),
+  updatedAt: SelfTime,
+  expiresAt: SelfTime,
 });
 export type LinkState = z.infer<typeof LinkState>;
 

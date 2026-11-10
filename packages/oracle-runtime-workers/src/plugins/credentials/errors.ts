@@ -12,6 +12,8 @@
  * person.
  */
 
+import { selfTimeSeconds, whenItEnds } from './times';
+
 export type CredentialsService = 'hub' | 'credentials' | 'self';
 
 /** A refused or failed call to one of the plugin's services. */
@@ -179,24 +181,38 @@ export function refusal(error: string, wording: Wording): CredentialsRefusal {
   };
 }
 
-/** A short, local time for a moment the person reads ("14:05"), in their zone when known. */
-export function shortTime(unixSeconds: number, timeZone?: string): string {
-  const date = new Date(unixSeconds * 1000);
-  try {
-    return new Intl.DateTimeFormat('en-GB', {
-      hour: '2-digit',
-      minute: '2-digit',
-      ...(timeZone ? { timeZone } : { timeZone: 'UTC', timeZoneName: 'short' }),
-    }).format(date);
-  } catch {
-    // An unknown zone name: UTC, said so.
-    return new Intl.DateTimeFormat('en-GB', {
-      hour: '2-digit',
-      minute: '2-digit',
-      timeZone: 'UTC',
-      timeZoneName: 'short',
-    }).format(date);
-  }
+const LOG_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+const LOG_CODE = /^[a-z0-9_]{1,64}$/;
+
+/**
+ * An error for a log line: its class name and the constant codes it carries
+ * (`code`, `source`, `reason`: the Credentials kit's and ours), and the same
+ * for its `cause`. Never a message, a URL, a DID or a token: only names and
+ * codes in a fixed shape are kept.
+ */
+export function describeError(error: unknown): string {
+  const one = (e: unknown): string => {
+    if (!(e instanceof Error)) return typeof e;
+    const name = LOG_NAME.test(e.name) ? e.name : 'Error';
+    const fields: string[] = [];
+    for (const key of ['code', 'source', 'reason']) {
+      const value: unknown = Reflect.get(e, key);
+      if (typeof value === 'string' && LOG_CODE.test(value))
+        fields.push(`${key}=${value}`);
+    }
+    return fields.length ? `${name} ${fields.join(' ')}` : name;
+  };
+  const cause = error instanceof Error ? error.cause : undefined;
+  return cause === undefined
+    ? one(error)
+    : `${one(error)} (cause ${one(cause)})`;
+}
+
+/** The sentence for an identity check Self says is in progress (409 `link_active`). */
+export function checkInProgress(ends: string | null): string {
+  return ends
+    ? `Your identity check is already in progress; it ends ${ends}. Please carry on with it.`
+    : 'Your identity check is already in progress. Please carry on with it.';
 }
 
 /**
@@ -233,7 +249,7 @@ function invalidItem(error: CredentialsServiceError): CredentialsRefusal {
  */
 export function refusalFor(
   error: unknown,
-  opts: { timeZone?: string } = {},
+  opts: { timeZone?: string; nowMs?: number } = {},
 ): CredentialsRefusal {
   if (!(error instanceof CredentialsServiceError))
     return refusal('internal_error', MESSAGES.ourSide);
@@ -269,14 +285,23 @@ export function refusalFor(
     case 'already_verified':
       return refusal(code, MESSAGES.alreadyVerified);
     case 'link_active': {
-      const ends = Number(error.body?.expiresAt);
+      // Self names the open link's end beside its error (ISO 8601 text).
+      const ends = selfTimeSeconds(error.body?.expiresAt);
       return {
         error: code,
-        message: Number.isFinite(ends)
-          ? `Your identity check is already in progress; it ends at ${shortTime(ends, opts.timeZone)}.`
-          : 'Your identity check is already in progress.',
+        message: checkInProgress(
+          ends === null
+            ? null
+            : whenItEnds(ends, {
+                ...(opts.timeZone ? { timeZone: opts.timeZone } : {}),
+                nowMs: opts.nowMs ?? Date.now(),
+              }),
+        ),
       };
     }
+    case 'offer_consent_invalid':
+      // Self could not confirm the offer delegation on the card.
+      return refusal(code, MESSAGES.permissionEnded);
     case 'not_found':
       return refusal(code, MESSAGES.notFound);
     default:

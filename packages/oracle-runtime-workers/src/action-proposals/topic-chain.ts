@@ -34,7 +34,10 @@ export class TopicChainReader {
   constructor(
     private readonly rpc: string,
     private readonly chainId: string,
-    private readonly fetcher: typeof fetch = fetch,
+    // Never the bare global: `this.fetcher(...)` would call it as a method
+    // of the reader, which workerd refuses ("Illegal invocation").
+    private readonly fetcher: typeof fetch = (input, init) =>
+      fetch(input, init),
   ) {}
   private async request(path: string) {
     const base = new URL(this.rpc);
