@@ -42,6 +42,7 @@ import type { FetchLike } from './http';
 import {
   canonicalJson,
   HubPermissionsClient,
+  isOutdatedItem,
   MAX_PERMISSION_ITEMS,
   PERMISSIONS_CAPABILITY,
   sha256Hex,
@@ -58,6 +59,7 @@ import {
   chargePermissionList,
   chargePermissionStatus,
   clearGrantsCache,
+  clearGrantsCacheOf,
   clearPendingAction,
   knowsPermission,
   permissionUrl,
@@ -536,6 +538,26 @@ function cardMessage(name: string, url: string): Wording {
   };
 }
 
+/**
+ * The card's sentence when the person allowed this before, but what they
+ * allowed no longer matches the service's catalogue entry (`current: false`).
+ */
+function againMessage(url: string): Wording {
+  return {
+    message: `I need your OK once more for this. Please tap Allow here: ${url}`,
+    hint: 'What they allowed earlier no longer matches what this service needs now, so it is asked again on one card. Send `message` as it is, as one link in a short message. Never paste ids or tokens.',
+  };
+}
+
+/** The refusal for an allowed item the Hub marks `current: false`. */
+const outdatedRefusal = () =>
+  refusal('permission_outdated', MESSAGES.permissionOutdated);
+
+/** Whether a tool's answer is the {@link outdatedRefusal}. */
+function isOutdatedAnswer(answer: object): answer is CredentialsRefusal {
+  return 'error' in answer && answer.error === 'permission_outdated';
+}
+
 /** A local refusal of one item of a several-item request, in the Hub's wording for a bad item. */
 function itemRefusal(
   position: number,
@@ -559,7 +581,11 @@ function itemSummary(item: PermissionItemState, cardStatus: PermissionStatus) {
     kind: item.kind,
     ...(item.action ? { action: item.action } : {}),
     state: status,
-    ...(status === 'allowed' && (item.consentIds?.length || item.grants?.length)
+    ...(item.current !== undefined ? { current: item.current } : {}),
+    // An out-of-date item is not in use: what it granted is not listed.
+    ...(status === 'allowed' &&
+    !isOutdatedItem(item) &&
+    (item.consentIds?.length || item.grants?.length)
       ? {
           granted: {
             ...(item.consentIds?.length ? { consentIds: item.consentIds } : {}),
@@ -607,6 +633,7 @@ const PENDING_CARD_MARGIN_SECONDS = 60;
 const NOTHING_USABLE: ReadonlySet<string> = new Set([
   'no_permission',
   'permission_ended',
+  'permission_outdated',
 ]);
 
 /** Whether a tool's answer is one of the {@link NOTHING_USABLE} refusals. */
@@ -669,7 +696,8 @@ function runningGrants(item: PermissionItemState, nowSeconds: number) {
  * Whether an item is in `status`. The item's own state decides, never the
  * card's alone: an allowed card can hold items that were stopped. An allowed
  * item also has to carry what Allow wrote (a grant still running, or a
- * consent); one with neither is not in use.
+ * consent) and must not be marked out of date (`current: false`: the
+ * catalogue entry changed since); otherwise it is not in use.
  */
 function itemIs(
   card: PermissionState,
@@ -678,10 +706,32 @@ function itemIs(
   nowSeconds: number,
 ): boolean {
   if (itemStatusOf(card, item) !== status) return false;
+  if (status === 'pending') return true;
   return (
-    status === 'pending' ||
-    runningGrants(item, nowSeconds).length > 0 ||
-    (item.consentIds?.length ?? 0) > 0
+    !isOutdatedItem(item) &&
+    (runningGrants(item, nowSeconds).length > 0 ||
+      (item.consentIds?.length ?? 0) > 0)
+  );
+}
+
+/**
+ * The newest allowed card with an allowed item covering `asked` that the
+ * Hub marks out of date (`current: false`), when there is one.
+ */
+function outdatedCard(
+  cards: readonly ListedPermission[],
+  asked: PermissionRequest,
+  nowSeconds: number,
+): ListedPermission | undefined {
+  return cards.find(
+    (card) =>
+      cardIs(card, 'allowed', nowSeconds) &&
+      card.items.some(
+        (item) =>
+          itemStatusOf(card, item) === 'allowed' &&
+          isOutdatedItem(item) &&
+          itemCovers(item, asked),
+      ),
   );
 }
 
@@ -824,17 +874,38 @@ export function createCredentialsTools(
   }
 
   /**
+   * Forget card `permissionId` for `action`, as the Hub marks its item out
+   * of date: it stops being the card in use or the one waiting, and its
+   * cached grants are dropped. Another card's records are left alone.
+   */
+  async function forgetAction(
+    kv: UserKvSurface,
+    action: string,
+    permissionId: string,
+  ) {
+    const inUse = ActionRecord.safeParse(
+      await kv.get(CREDENTIALS_KV_NAMESPACE, actionKey(action)),
+    );
+    if (inUse.success && inUse.data.permissionId === permissionId)
+      await kv.delete(CREDENTIALS_KV_NAMESPACE, actionKey(action));
+    if ((await readPendingAction(kv, action)) === permissionId)
+      await clearPendingAction(kv, action);
+    await clearGrantsCacheOf(kv, action, permissionId);
+  }
+
+  /**
    * Fill the kv for `action` again from the Hub's list: the newest allowed
    * card whose item for the action is allowed (with a grant still running
    * when `needGrants`) becomes the one in use; failing that, a card still
-   * waiting is remembered as waiting.
+   * waiting is remembered as waiting. `outdated`: the only allowed card for
+   * the action is marked `current: false` (it is forgotten, never used).
    */
   async function restoreAction(
     kv: UserKvSurface,
     action: string,
     cards: () => Promise<ListedPermission[] | null>,
     needGrants: boolean,
-  ): Promise<'allowed' | 'pending' | 'none'> {
+  ): Promise<'allowed' | 'pending' | 'outdated' | 'none'> {
     const listed = await cards();
     if (!listed) return 'none';
     const nowSeconds = Math.floor(now() / 1000);
@@ -856,36 +927,41 @@ export function createCredentialsTools(
       await keepCard(kv, card);
       return 'allowed';
     }
-    const waiting = coveringCard(
-      listed,
-      { kind: 'service-action', action },
-      'pending',
-      nowSeconds,
-    );
-    if (!waiting) return 'none';
-    await writePendingAction(kv, action, waiting.id, ACTION_RECORD_TTL_MS);
-    await keepCard(kv, waiting);
-    return 'pending';
+    const asked: PermissionRequest = { kind: 'service-action', action };
+    const waiting = coveringCard(listed, asked, 'pending', nowSeconds);
+    if (waiting) {
+      await writePendingAction(kv, action, waiting.id, ACTION_RECORD_TTL_MS);
+      await keepCard(kv, waiting);
+      return 'pending';
+    }
+    const stale = outdatedCard(listed, asked, nowSeconds);
+    if (!stale) return 'none';
+    await forgetAction(kv, action, stale.id);
+    return 'outdated';
   }
 
   /**
    * The answer when the Hub already holds what a request tool was about to
-   * ask for; null when a new card is needed (or the Hub could not say).
+   * ask for; without `answer` a new card is needed (or the Hub could not say).
    *
    * - Every item is covered by a card the person allowed: nothing is sent,
    *   and the kv is filled again from those cards.
    * - Else ONE card still waiting covers every item: that card's link again.
    * - Else (also when only some items are covered): a new card for the whole
    *   list, as one card is one answer.
+   *
+   * An allowed item the Hub marks `current: false` covers nothing; its
+   * action's records are forgotten and `again` is true, so the person is
+   * asked "once more" rather than as if for the first time.
    */
   async function existingCard(
-    ctx: RuntimeContext,
     kv: UserKvSurface,
     permissions: readonly PermissionRequest[],
     cards: () => Promise<ListedPermission[] | null>,
-  ) {
+    askedAgain: boolean,
+  ): Promise<{ answer?: Record<string, unknown>; again: boolean }> {
     const listed = await cards();
-    if (!listed?.length) return null;
+    if (!listed?.length) return { again: askedAgain };
     const nowSeconds = Math.floor(now() / 1000);
     const allowed = permissions.map((p) =>
       coveringCard(listed, p, 'allowed', nowSeconds),
@@ -899,10 +975,22 @@ export function createCredentialsTools(
         else await keepCard(kv, card);
       }
       const newest = listed.find((card) => allowed.includes(card));
-      return said(ALREADY_ALLOWED, {
-        status: 'already_allowed',
-        ...(newest ? { permissionId: newest.id } : {}),
-      });
+      return {
+        again: false,
+        answer: said(ALREADY_ALLOWED, {
+          status: 'already_allowed',
+          ...(newest ? { permissionId: newest.id } : {}),
+        }),
+      };
+    }
+    let again = askedAgain;
+    for (const [i, p] of permissions.entries()) {
+      if (allowed[i]) continue;
+      const stale = outdatedCard(listed, p, nowSeconds);
+      if (!stale) continue;
+      again = true;
+      if (p.kind === 'service-action')
+        await forgetAction(kv, p.action, stale.id);
     }
     const waiting = listed.find(
       (card) =>
@@ -914,11 +1002,11 @@ export function createCredentialsTools(
           ),
         ),
     );
-    if (!waiting) return null;
+    if (!waiting) return { again };
     // The link: the Hub's when it lists one, else the one kept when the card
     // was sent. Without either the card cannot be sent again, so a new one is.
     const url = waiting.url ?? (await permissionUrl(kv, waiting.id));
-    if (!url || !onHub(url)) return null;
+    if (!url || !onHub(url)) return { again };
     for (const p of permissions)
       if (p.kind === 'service-action')
         await writePendingAction(
@@ -928,19 +1016,22 @@ export function createCredentialsTools(
           ACTION_RECORD_TTL_MS,
         );
     await keepCard(kv, { ...waiting, url });
-    const wording = cardMessage(oracle.name, url);
-    return said(
-      {
-        message: wording.message,
-        hint: `This is the card they were sent before and have not answered yet; no new card was made. ${wording.hint ?? ''}`.trim(),
-      },
-      {
-        status: 'sent',
-        permissionId: waiting.id,
-        url,
-        ...(waiting.expiresAt ? { expiresAt: waiting.expiresAt } : {}),
-      },
-    );
+    const wording = again ? againMessage(url) : cardMessage(oracle.name, url);
+    return {
+      again,
+      answer: said(
+        {
+          message: wording.message,
+          hint: `This is the card they were sent before and have not answered yet; no new card was made. ${wording.hint ?? ''}`.trim(),
+        },
+        {
+          status: 'sent',
+          permissionId: waiting.id,
+          url,
+          ...(waiting.expiresAt ? { expiresAt: waiting.expiresAt } : {}),
+        },
+      ),
+    };
   }
 
   /** Whether a link kept in the kv is on the Hub's own origin. */
@@ -959,14 +1050,22 @@ export function createCredentialsTools(
 
   /**
    * Ask the Hub for ONE card holding `items`. The shared path of the three
-   * request tools; `label` keeps each tool's request key apart. A card is
-   * sent only when the Hub holds none that already covers the items.
+   * request tools (and of `credentials_request_action` when what the person
+   * allowed is out of date: `again`); `label` keeps each tool's request key
+   * apart. A card is sent only when the Hub holds none that already covers
+   * the items. `cards` and `deadline`: the calling tool's own reader of the
+   * Hub's list (read once per call) and its one deadline.
    */
   async function sendCard(
     ctx: RuntimeContext,
     toolName: string,
     label: string,
     items: z.infer<typeof RequestPermissionsInput>['items'],
+    opts: {
+      again?: boolean;
+      cards?: () => Promise<ListedPermission[] | null>;
+      deadline?: number;
+    } = {},
   ) {
     const ready = readiness(ctx, cfg);
     if (isRefusal(ready)) return ready;
@@ -999,17 +1098,17 @@ export function createCredentialsTools(
         });
       }
     }
-    const deadline = now() + TOOL_DEADLINE_MS;
+    const deadline = opts.deadline ?? now() + TOOL_DEADLINE_MS;
     try {
       // The Hub first: a card the person already allowed, or one still
       // waiting for them, is used again instead of sending another.
       const existing = await existingCard(
-        ctx,
         kv,
         permissions,
-        liveCards(ctx, ready, kv, deadline),
+        opts.cards ?? liveCards(ctx, ready, kv, deadline),
+        opts.again ?? false,
       );
-      if (existing) return existing;
+      if (existing.answer) return existing.answer;
       const card = await hubClient(ctx, ready, deps, deadline).request({
         ...ready.binding,
         requestKey: await requestKeyOf(ctx, label),
@@ -1028,7 +1127,10 @@ export function createCredentialsTools(
         permissions.map((p) => p.kind),
         card.url,
       );
-      return said(cardMessage(oracle.name, card.url), {
+      const wording = existing.again
+        ? againMessage(card.url)
+        : cardMessage(oracle.name, card.url);
+      return said(wording, {
         status: 'sent',
         permissionId: card.id,
         url: card.url,
@@ -1138,7 +1240,26 @@ export function createCredentialsTools(
           deadline,
         );
         if ('error' in state) return state;
-        return said(STATUS_WORDING[state.status], {
+        // Allowed items the Hub marks out of date are not in use: their
+        // action's records go, and the person is asked once more.
+        const outdated =
+          state.status === 'allowed'
+            ? state.items.filter(
+                (item) =>
+                  itemStatusOf(state, item) === 'allowed' &&
+                  isOutdatedItem(item),
+              )
+            : [];
+        for (const item of outdated)
+          if (item.kind === 'service-action' && item.action)
+            await forgetAction(kv, item.action, state.id);
+        const wording: Wording = outdated.length
+          ? {
+              message: MESSAGES.permissionOutdated.message,
+              hint: `Item ${outdated.map((i) => i.index + 1).join(', ')} (counting from 1) is marked current: false. ${MESSAGES.permissionOutdated.hint}`,
+            }
+          : STATUS_WORDING[state.status];
+        return said(wording, {
           permissionId: state.id,
           status: state.status,
           ...(state.allowedAt ? { allowedAt: state.allowedAt } : {}),
@@ -1461,11 +1582,21 @@ export function createCredentialsTools(
     let pendingAnswer: CredentialsRefusal | null = null;
     if (waiting) {
       const state = await readCard(ctx, ready, kv, waiting, deadline);
+      const item = 'error' in state ? undefined : actionItem(state, action);
       if ('error' in state) {
         pendingAnswer = state;
       } else if (
         state.status === 'allowed' &&
-        (actionItem(state, action)?.status ?? 'allowed') === 'allowed'
+        item &&
+        (item.status ?? 'allowed') === 'allowed' &&
+        isOutdatedItem(item)
+      ) {
+        // Allowed, but out of date already: never put in use.
+        await clearPendingAction(kv, action);
+        if (!inUse.success) return outdatedRefusal();
+      } else if (
+        state.status === 'allowed' &&
+        (item?.status ?? 'allowed') === 'allowed'
       ) {
         await kv.set(
           CREDENTIALS_KV_NAMESPACE,
@@ -1484,8 +1615,7 @@ export function createCredentialsTools(
       } else {
         // Declined, expired or stopped: the card in use, if any, stays.
         await clearPendingAction(kv, action);
-        if (!inUse.success)
-          return endedRefusal(state.status, actionItem(state, action)?.status);
+        if (!inUse.success) return endedRefusal(state.status, item?.status);
       }
     }
     if (inUse.success) return { permissionId: inUse.data.permissionId };
@@ -1525,6 +1655,15 @@ export function createCredentialsTools(
     if (state.status === 'pending')
       return refusal('permission_pending', MESSAGES.permissionPending);
     const item = actionItem(state, action);
+    if (
+      state.status === 'allowed' &&
+      item &&
+      (item.status ?? 'allowed') === 'allowed' &&
+      isOutdatedItem(item)
+    ) {
+      await forgetAction(kv, action, permissionId);
+      return outdatedRefusal();
+    }
     const grants = (item?.grants ?? []).filter(
       (g) => g.expiresAt > Math.floor(now() / 1000),
     );
@@ -1555,8 +1694,9 @@ export function createCredentialsTools(
     action: string,
     deadline: number,
     run: (grants: PermissionGrant[]) => Promise<T>,
+    /** The tool call's reader of the Hub's list (read at most once). */
+    cards: () => Promise<ListedPermission[] | null>,
   ): Promise<T | CredentialsRefusal> {
-    const cards = liveCards(ctx, ready, kv, deadline);
     let restored = false;
     // The grants the kv leads to; when it leads to none, the Hub's list is
     // read (once per tool call) and the kv filled again from it.
@@ -1569,6 +1709,7 @@ export function createCredentialsTools(
         return allowedGrants(ctx, ready, kv, action, deadline, false);
       if (found === 'pending')
         return refusal('permission_pending', MESSAGES.permissionPending);
+      if (found === 'outdated') return outdatedRefusal();
       return got;
     };
     const first = await grantsFor(false);
@@ -1611,21 +1752,18 @@ export function createCredentialsTools(
     kv: UserKvSurface,
     action: string,
     deadline: number,
+    cards: () => Promise<ListedPermission[] | null>,
   ) {
     try {
       const first = await outlineFromKv(ctx, ready, kv, action, deadline);
       if (!isEnded(first)) return first;
       // Nothing usable in the kv: the Hub's list, once.
-      const found = await restoreAction(
-        kv,
-        action,
-        liveCards(ctx, ready, kv, deadline),
-        false,
-      );
+      const found = await restoreAction(kv, action, cards, false);
       if (found === 'allowed')
         return await outlineFromKv(ctx, ready, kv, action, deadline);
       if (found === 'pending')
         return refusal('permission_pending', MESSAGES.permissionPending);
+      if (found === 'outdated') return outdatedRefusal();
       return first;
     } catch (error) {
       return failed(ctx, 'credentials_request_action', error, now());
@@ -1655,6 +1793,10 @@ export function createCredentialsTools(
       (item.status ?? 'allowed') !== 'allowed'
     )
       return endedRefusal(state.status, item?.status);
+    if (isOutdatedItem(item)) {
+      await forgetAction(kv, action, state.id);
+      return outdatedRefusal();
+    }
     const nowSeconds = Math.floor(now() / 1000);
     const live = {
       ...item,
@@ -1681,82 +1823,112 @@ export function createCredentialsTools(
       if (!kv) return unavailable(ctx, 'credentials_request_action', 'no_kv');
       const args = ActionInput.parse(raw);
       const deadline = now() + TOOL_DEADLINE_MS;
-      if (args.action !== IDENTITY_CHECK_ACTION)
-        return grantedOutline(ctx, ready, kv, args.action, deadline);
-      const requestKey = await requestKeyOf(ctx, `action:${args.action}`);
-      try {
-        return await withGrants(
-          ctx,
-          ready,
-          kv,
-          args.action,
-          deadline,
-          async (grants) => {
-            const link = grantFor(grants, 'link', LINK_CAPABILITY);
-            const offer = grantFor(grants, 'offer', {
-              can: 'credentials/offer',
-              with: 'ixo:credentials',
-            });
-            if (!link || !offer) {
-              ctx.logger.warn('[credentials] the allowed card lacks a grant');
-              return refusal('internal_error', MESSAGES.ourSide);
-            }
-            const created = await selfClient(
-              ctx,
-              ready,
-              deps,
-              link,
-              deadline,
-            ).createLink({ offerConsent: offer.token, requestKey });
-            const ends = endsFor(ctx, created.expiresAt);
-            return said(
-              {
-                message: ends
-                  ? `Tap this link to start your identity check. It works once and ends ${ends}: ${created.url}`
-                  : `Tap this link to start your identity check. It works once: ${created.url}`,
-                hint: 'Send `message` as it is. Keep the linkId to read progress. A new link replaces one nobody has opened yet, so do not call this again to resend.',
-              },
-              {
-                status: 'sent',
-                url: created.url,
-                linkId: created.linkId,
-                expiresAt: created.expiresAt,
-              },
-            );
-          },
-        );
-      } catch (error) {
-        // Self refuses a new link only while a check is in progress: that
-        // one is continued, not a failure. Self keeps only a hash of its
-        // token, so its URL cannot be sent again.
-        const open = openLinkOf(error);
-        if (open) {
-          return said(
-            {
-              message: checkInProgress(endsFor(ctx, open.expiresAt)),
-              hint: 'Its link cannot be sent again; read progress with this linkId.',
-            },
-            {
-              status: 'already_open',
-              linkId: open.linkId,
-              linkStatus: open.status,
-              expiresAt: open.expiresAt,
-            },
-          );
-        }
-        return failed(ctx, 'credentials_request_action', error, now());
-      }
+      const cards = liveCards(ctx, ready, kv, deadline);
+      const answer =
+        args.action !== IDENTITY_CHECK_ACTION
+          ? await grantedOutline(ctx, ready, kv, args.action, deadline, cards)
+          : await identityLink(ctx, ready, kv, args.action, deadline, cards);
+      if (!isOutdatedAnswer(answer)) return answer;
+      // What the person allowed no longer matches the catalogue entry: ask
+      // for the card again on the normal path (one card, or the one already
+      // waiting), in "once more" words.
+      return sendCard(
+        ctx,
+        'credentials_request_action',
+        `again:${args.action}`,
+        [{ kind: 'service-action', action: args.action }],
+        { again: true, cards, deadline },
+      );
     },
     {
       name: 'credentials_request_action',
       description: [
         'Do not call this before the person has allowed the card. It is for service-action items only, never for credential-check items (those need no action: use credentials_check). Carry out a catalogued action the person allowed (on the card from credentials_request_permissions or credentials_request_action_permission). For "self.identity-check" (one card is enough: it holds the link, the offer and the consent) it asks Self for a link where they start an identity check (it works once and ends after about 15 minutes; the first device that opens it keeps it).',
         'Send the `message` (it holds the link) as it is. Keep the linkId to read progress with credentials_action_status. A new call replaces a link nobody has opened yet (the old one stops working), so call it again only when they need a new link. status "already_open": their check is in progress; relay the message and read progress with that linkId.',
-        'For any other entry id it answers status "granted" with the capabilities the person allowed (ids, capabilities, audiences and ends; never tokens) so another plugin or you can act on them. If they have not allowed it yet the answer says so: ask for permission first. WhatsApp only.',
+        'For any other entry id it answers status "granted" with the capabilities the person allowed (ids, capabilities, audiences and ends; never tokens) so another plugin or you can act on them. If they have not allowed it yet the answer says so: ask for permission first.',
+        'When what they allowed earlier no longer matches what the service needs now, it sends the card again by itself and answers status "sent" with a permissionId and a `message` asking for their OK once more: send it as it is and call this again once they allowed it. WhatsApp only.',
       ].join(' '),
       schema: ActionInput,
     },
   );
+
+  /**
+   * `self.identity-check`: a link from Self, made with the `link` and
+   * `offer` grants of the allowed card.
+   */
+  async function identityLink(
+    ctx: RuntimeContext,
+    ready: Ready,
+    kv: UserKvSurface,
+    action: string,
+    deadline: number,
+    cards: () => Promise<ListedPermission[] | null>,
+  ) {
+    const requestKey = await requestKeyOf(ctx, `action:${action}`);
+    try {
+      return await withGrants(
+        ctx,
+        ready,
+        kv,
+        action,
+        deadline,
+        async (grants) => {
+          const link = grantFor(grants, 'link', LINK_CAPABILITY);
+          const offer = grantFor(grants, 'offer', {
+            can: 'credentials/offer',
+            with: 'ixo:credentials',
+          });
+          if (!link || !offer) {
+            ctx.logger.warn('[credentials] the allowed card lacks a grant');
+            return refusal('internal_error', MESSAGES.ourSide);
+          }
+          const created = await selfClient(
+            ctx,
+            ready,
+            deps,
+            link,
+            deadline,
+          ).createLink({ offerConsent: offer.token, requestKey });
+          const ends = endsFor(ctx, created.expiresAt);
+          return said(
+            {
+              message: ends
+                ? `Tap this link to start your identity check. It works once and ends ${ends}: ${created.url}`
+                : `Tap this link to start your identity check. It works once: ${created.url}`,
+              hint: 'Send `message` as it is. Keep the linkId to read progress. A new link replaces one nobody has opened yet, so do not call this again to resend.',
+            },
+            {
+              status: 'sent',
+              url: created.url,
+              linkId: created.linkId,
+              expiresAt: created.expiresAt,
+            },
+          );
+        },
+        cards,
+      );
+    } catch (error) {
+      // Self refuses a new link only while a check is in progress: that
+      // one is continued, not a failure. Self keeps only a hash of its
+      // token, so its URL cannot be sent again.
+      const open = openLinkOf(error);
+      if (open) {
+        return said(
+          {
+            message: checkInProgress(endsFor(ctx, open.expiresAt)),
+            hint: 'Its link cannot be sent again; read progress with this linkId.',
+          },
+          {
+            status: 'already_open',
+            linkId: open.linkId,
+            linkStatus: open.status,
+            expiresAt: open.expiresAt,
+          },
+        );
+      }
+      return failed(ctx, 'credentials_request_action', error, now());
+    }
+  }
 
   /**
    * When something ends, for the person: "at 18:05" in their zone when the
@@ -1867,6 +2039,7 @@ export function createCredentialsTools(
               args.ref,
             );
           },
+          liveCards(ctx, ready, kv, deadline),
         );
         if ('error' in answer) return answer;
         await writeLinkCache(kv, answer, now());

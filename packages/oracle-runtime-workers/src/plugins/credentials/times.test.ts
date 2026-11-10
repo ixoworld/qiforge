@@ -5,7 +5,8 @@ import {
   refusal,
   refusalFor,
 } from './errors';
-import { relativeTime, selfTimeSeconds, whenItEnds } from './times';
+import * as runtime from '../../index';
+import { relativeTime, SelfTime, selfTimeSeconds, whenItEnds } from './times';
 
 const MIN = 60;
 const HOUR = 3600;
@@ -170,5 +171,15 @@ describe("refusalFor: Self's codes", () => {
     expect(refusalFor(selfError(503, 'auth_unavailable'))).toEqual(
       refusal('auth_unavailable', MESSAGES.busy),
     );
+  });
+});
+
+describe('the public exports', () => {
+  it('exports the wording helpers from the package root, so other plugins use the same words', () => {
+    expect(runtime.relativeTime).toBe(relativeTime);
+    expect(runtime.whenItEnds).toBe(whenItEnds);
+    expect(runtime.SelfTime).toBe(SelfTime);
+    expect(runtime.selfTimeSeconds).toBe(selfTimeSeconds);
+    expect(runtime.relativeTime(2 * HOUR)).toBe('in about 2 hours');
   });
 });

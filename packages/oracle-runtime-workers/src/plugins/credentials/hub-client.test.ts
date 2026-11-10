@@ -4,6 +4,7 @@ import { CredentialsServiceError } from './errors';
 import {
   canonicalJson,
   HubPermissionsClient,
+  isOutdatedItem,
   permissionBodySha256,
   PERMISSIONS_PATH,
 } from './hub-client';
@@ -404,6 +405,47 @@ describe('HubPermissionsClient.status', () => {
     });
   });
 
+  it('passes the item field current through, and leaves it out when an older Hub omits it', async () => {
+    const item = {
+      index: 0,
+      kind: 'service-action',
+      action: 'self.identity-check',
+      status: 'allowed',
+    };
+    const { fetchImpl } = routedFetch({
+      [`GET ${HUB}${PERMISSIONS_PATH}/card_1`]: () =>
+        json({
+          id: 'card_1',
+          status: 'allowed',
+          items: [
+            { ...item, current: false },
+            { ...item, index: 1, action: 'x.y', current: true },
+            { ...item, index: 2, action: 'x.z' },
+          ],
+        }),
+    });
+    const { hub } = client(fetchImpl);
+    const state = await hub.status('card_1');
+    expect(state.items.map((i) => i.current)).toEqual([false, true, undefined]);
+    expect('current' in (state.items[2] ?? {})).toBe(false);
+    expect(state.items.map(isOutdatedItem)).toEqual([true, false, false]);
+  });
+
+  it('refuses an answer whose current is not a boolean', async () => {
+    const { fetchImpl } = routedFetch({
+      [`GET ${HUB}${PERMISSIONS_PATH}/card_1`]: () =>
+        json({
+          id: 'card_1',
+          status: 'allowed',
+          items: [{ index: 0, kind: 'credential-check', current: 'no' }],
+        }),
+    });
+    const { hub } = client(fetchImpl);
+    await expect(hub.status('card_1')).rejects.toMatchObject({
+      code: 'invalid_response',
+    });
+  });
+
   it('refuses a malformed id without calling the Hub', async () => {
     const { fetchImpl, calls } = routedFetch({});
     const { hub } = client(fetchImpl);
@@ -488,6 +530,44 @@ describe('HubPermissionsClient.listPermissions', () => {
       ['card_1', 'pending', undefined],
     ]);
     expect(cards[0]?.items[0]?.status).toBe('unknown');
+  });
+
+  it('passes the item field current through on every listed card, absent when the Hub omits it', async () => {
+    const { fetchImpl } = routedFetch({
+      [`GET ${HUB}${PERMISSIONS_PATH}?bindingId=bind_1&bindingRevision=3`]:
+        () =>
+          json({
+            permissions: [
+              {
+                ...pending,
+                id: 'card_4',
+                status: 'allowed',
+                items: [
+                  {
+                    index: 0,
+                    kind: 'credential-check',
+                    status: 'allowed',
+                    current: false,
+                  },
+                  {
+                    index: 1,
+                    kind: 'service-action',
+                    action: 'self.identity-check',
+                    status: 'allowed',
+                    current: true,
+                  },
+                ],
+              },
+              pending,
+            ],
+          }),
+    });
+    const { hub } = client(fetchImpl);
+    const cards = await hub.listPermissions(BINDING);
+    expect(cards.map((c) => c.items.map((i) => i.current))).toEqual([
+      [false, true],
+      [undefined],
+    ]);
   });
 
   it('keeps what a credential-check item asked for, and at most 32 cards', async () => {

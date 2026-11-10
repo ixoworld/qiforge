@@ -24,15 +24,20 @@ export {
 export {
   canonicalJson,
   HubPermissionsClient,
+  isOutdatedItem,
   permissionBodySha256,
   PERMISSIONS_CAPABILITY,
   PERMISSIONS_PATH,
+  type ItemStatus,
+  type ListedPermission,
   type PermissionCard,
   type PermissionGrant,
+  type PermissionItemState,
   type PermissionRequest,
   type PermissionState,
   type PermissionStatus,
 } from './hub-client';
+export { relativeTime, SelfTime, selfTimeSeconds, whenItEnds } from './times';
 export {
   CredentialsWorkerClient,
   mergeVerifierAccept,
