@@ -149,6 +149,19 @@ export async function clearGrantsCache(
   await kv.delete(CREDENTIALS_KV_NAMESPACE, grantsKey(action));
 }
 
+/** Drop the cached grants of `action` when they came from card `permissionId`. */
+export async function clearGrantsCacheOf(
+  kv: UserKvSurface,
+  action: string,
+  permissionId: string,
+): Promise<void> {
+  const parsed = GrantsCache.safeParse(
+    await kv.get(CREDENTIALS_KV_NAMESPACE, grantsKey(action)),
+  );
+  if (parsed.success && parsed.data.permissionId === permissionId)
+    await clearGrantsCache(kv, action);
+}
+
 // ---------------------------------------------------------------------------
 // Link status.
 

@@ -131,8 +131,25 @@ export const ItemStateSchema = z.object({
   claims: z.array(z.string().max(100)).max(64).optional().catch(undefined),
   consentIds: z.array(z.string().min(1).max(128)).max(16).optional(),
   grants: z.array(GrantSchema).max(16).optional(),
+  /**
+   * Whether what the item wrote at Allow (its consents: verifier, vct,
+   * claims, issuers; its grants: can, with, audience, nb) still equals what
+   * the live catalogue entry would write today. `false`: the entry changed
+   * or is gone, so the item must not be used again and the person is asked
+   * once more. Absent (a Hub from before the field): unknown, read as
+   * current, never as `false`.
+   */
+  current: z.boolean().optional(),
 });
 export type PermissionItemState = z.infer<typeof ItemStateSchema>;
+
+/**
+ * Whether an item is known to be out of date: only an explicit
+ * `current: false` from the Hub; an absent field is not.
+ */
+export function isOutdatedItem(item: Pick<PermissionItemState, 'current'>) {
+  return item.current === false;
+}
 
 const CardStatus = z.object({
   id: z.string().regex(OPAQUE_ID),

@@ -125,6 +125,10 @@ export const MESSAGES = {
     message: 'Your permission for this has ended or was stopped.',
     hint: 'Ask for permission again only if they still want this.',
   },
+  permissionOutdated: {
+    message: 'I need your OK once more for this.',
+    hint: 'What they allowed earlier no longer matches what this service needs now (the Hub marks it current: false), so it is not used. Ask again with credentials_request_permissions for the same items (one card; credentials_request_action sends it by itself); its message holds the link.',
+  },
   stateUnknown: {
     message:
       "This permission is in a state this version doesn't know yet; update the runtime.",
