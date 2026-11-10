@@ -90,6 +90,14 @@ Rules the tools keep:
   `credentials_request_action` replaces a link nobody has opened yet (the old
   URL stops working); Self answers 409 `link_active` only while a check is in
   progress, and that link is continued, not recreated.
+- An end the person reads (the link's, an open check's) is their local time
+  when the runtime knows their zone (`ctx.user.timezone`: "It works once and
+  ends at 18:05"), else relative to now, since WhatsApp gives no zone: "It
+  works once and ends in 15 minutes" (minutes rounded up, never "in 0
+  minutes"; "in about 2 hours", "in about 3 days" beyond). Never "UTC". An end
+  that has already passed is left out ("Your identity check is already in
+  progress. Please carry on with it.": a check started in time runs on after
+  its link's end).
 - One deadline per tool (25 s): every call a tool makes, its retry and, for
   `credentials_check`, the wait for the answer end inside it. An error while
   asking the worker for the request's status inside the wait means keep
@@ -223,13 +231,35 @@ sequenceDiagram
   (the oracle's entity, which Self checks against its `#orz` and names from
   IXO Names). The body carries the `offer` delegation as `offerConsent`. A
   link already open (`409 link_active`) is reused: the answer is
-  `already_open` with its `linkId`.
+  `already_open` with its `linkId`. Self answers times as ISO 8601 text with
+  a zone (`2026-11-10T06:34:12.000Z`); Unix seconds are accepted too, and
+  both are Unix seconds in every answer the tools give. Self's errors are
+  `{ error: { code, message, retryable }, ...data }`: the plugin reads the
+  `code` (`already_verified`, `link_active`, `rate_limited`,
+  `offer_consent_invalid`, …), never the message; a body without a code is
+  `http_<status>`.
 - **Credentials worker**: self-signed invocations, `credentials/verify` on
   `ixo:credentials`, bound to `{ method, path }`.
 
 Every call has a 10 s timeout and one retry on a 5xx or 429 (after its
 `Retry-After`, when that is at most 5 s), each attempt with a fresh
 invocation. A timeout is not retried.
+
+Every fetch (the services, the kit's DID and status-list reads) is called as
+a plain function, never as a method of an object: workerd refuses the global
+`fetch` called on another object ("Illegal invocation"), which the kit
+reported as a resolver being down. A host may pass the global itself as
+`fetchImpl` or `kitFetch`.
+
+Every refusal that is not the person's own doing is logged with
+`ctx.logger.warn` as `[credentials] <tool>: <error> (<cause>)`: the service,
+status and code of a service's answer, the reason a tool is
+`not_available` (`no_kv`, `no_signer`, `no_blocksync_url`, `no_public_url`;
+a missing setting as `[credentials] not_available (<reason>)`: `disabled`,
+`no_service_key`, `no_oracle_did`, `no_signing_key`), or for
+`verification_unavailable` the kit's error class and codes
+(`ResolverUnavailable code=resolver_unavailable source=blocksync`). Only
+class names and codes, never a message, DID, URL or token.
 
 ## WhatsApp only
 
@@ -305,7 +335,10 @@ every oracle that signs UCANs).
 `src/plugins/credentials/*.test.ts` run in the workerd pool (WebCrypto ECDH,
 HKDF and AES-GCM on the real runtime): the clients against a routing fetch
 (success, 401, 409 `link_active`, 429 with and without a short
-`Retry-After`, 5xx, timeouts, foreign link origins), the body hash and the
+`Retry-After`, 5xx, timeouts, foreign link origins, Self's nested error
+codes, ISO 8601 and Unix-second times), the end-time wording (`times.test.ts`:
+relative without a zone, local with one, none once passed), the
+plain-function fetch (`verifier.test.ts`), the logged refusals, the body hash and the
 invocation facts, the response token and route, the WhatsApp gate for every
 tool, and every tool's output. `credentials_check` runs a real OpenID4VP round
 trip: the kit's wallet side answers the oracle's signed request, the answer

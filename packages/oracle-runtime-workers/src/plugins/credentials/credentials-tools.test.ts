@@ -1027,7 +1027,7 @@ describe('catalogued actions (self.identity-check)', () => {
   ];
 
   function hubAndSelf(
-    selfRoutes: Record<string, (c: RecordedCall) => Response> = {},
+    selfRoutes: Parameters<typeof routedFetch>[0] = {},
     status = 'allowed',
   ) {
     return routedFetch({
@@ -1083,7 +1083,8 @@ describe('catalogued actions (self.identity-check)', () => {
           {
             linkId: 'lnk_1',
             url: 'https://dev.self.ixo.earth/l/tok',
-            expiresAt: Date.UTC(2026, 10, 9, 14, 5) / 1000,
+            // Self answers ISO 8601 text.
+            expiresAt: '2026-11-09T14:05:00.000Z',
           },
           201,
         ),
@@ -1091,11 +1092,13 @@ describe('catalogued actions (self.identity-check)', () => {
         json({
           linkId: 'lnk_1',
           status: 'in_progress',
-          updatedAt: 1,
-          expiresAt: 2,
+          updatedAt: '1970-01-01T00:00:01.000Z',
+          expiresAt: '1970-01-01T00:00:02Z',
         }),
     });
-    const tools = toolsFor(fetchImpl, oracleKey.doc);
+    const tools = toolsFor(fetchImpl, oracleKey.doc, {
+      now: () => Date.UTC(2026, 10, 9, 13, 50),
+    });
     const ctx = channelCtx(adapter, { timezone: 'Asia/Tbilisi' });
     const card = await run(
       tools.credentials_request_action_permission,
@@ -1173,21 +1176,48 @@ describe('catalogued actions (self.identity-check)', () => {
       [`POST ${SELF}/identity/v1/links`]: [
         () =>
           json(
+            // Self's error shape (errorBody): the code is nested.
             {
-              error: 'link_active',
-              message: 'x',
+              error: {
+                code: 'link_active',
+                message: 'A link is already open for this person.',
+                retryable: false,
+              },
               linkId: 'lnk_0',
               status: 'sent',
-              expiresAt: ends,
+              expiresAt: '2026-11-09T14:05:00.000Z',
             },
             409,
           ),
-        () => json({ error: 'already_verified', message: 'x' }, 409),
-        () => json({ error: 'unauthorized', message: 'x' }, 401),
+        () =>
+          json(
+            {
+              error: {
+                code: 'already_verified',
+                message: "You're already verified.",
+                retryable: false,
+              },
+            },
+            409,
+          ),
+        () =>
+          json(
+            {
+              error: {
+                code: 'unauthorized',
+                message: 'Please sign in again.',
+                retryable: false,
+              },
+            },
+            401,
+          ),
       ],
     });
-    const tools = toolsFor(fetchImpl, oracleKey.doc);
-    const ctx = channelCtx(adapter, { timezone: 'UTC' });
+    const tools = toolsFor(fetchImpl, oracleKey.doc, {
+      now: () => Date.UTC(2026, 10, 9, 13, 50),
+    });
+    // WhatsApp gives no zone: the end is relative.
+    const ctx = channelCtx(adapter);
     await run(
       tools.credentials_request_action_permission,
       { action: 'self.identity-check' },
@@ -1205,7 +1235,7 @@ describe('catalogued actions (self.identity-check)', () => {
       linkStatus: 'sent',
       expiresAt: ends,
       message:
-        'Your identity check is already in progress; it ends at 14:05. Please carry on with it.',
+        'Your identity check is already in progress; it ends in 15 minutes. Please carry on with it.',
       hint: 'Its link cannot be sent again; read progress with this linkId.',
     });
     await expect(
@@ -1222,6 +1252,83 @@ describe('catalogued actions (self.identity-check)', () => {
         ctx,
       ),
     ).resolves.toEqual(refusal('unauthorized', MESSAGES.notConfirmed));
+  });
+
+  it('words the end relative to now when the zone is unknown (WhatsApp), and drops a passed end', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl } = hubAndSelf({
+      [`POST ${SELF}/identity/v1/links`]: [
+        () =>
+          json(
+            {
+              linkId: 'lnk_1',
+              url: 'https://dev.self.ixo.earth/l/tok',
+              expiresAt: '2026-11-10T06:34:00.000Z',
+            },
+            201,
+          ),
+        () =>
+          json(
+            {
+              linkId: 'lnk_2',
+              url: 'https://dev.self.ixo.earth/l/tok2',
+              expiresAt: Date.UTC(2026, 10, 10, 8, 20) / 1000,
+            },
+            201,
+          ),
+        // A check that started in time runs on after its link's end.
+        () =>
+          json(
+            {
+              error: {
+                code: 'link_active',
+                message: 'A link is already open for this person.',
+                retryable: false,
+              },
+              linkId: 'lnk_2',
+              status: 'in_progress',
+              expiresAt: '2026-11-10T06:00:00.000Z',
+            },
+            409,
+          ),
+      ],
+    });
+    const tools = toolsFor(fetchImpl, oracleKey.doc, {
+      now: () => Date.UTC(2026, 10, 10, 6, 19),
+    });
+    const ctx = channelCtx(adapter);
+    await run(
+      tools.credentials_request_action_permission,
+      { action: 'self.identity-check', days: 7 },
+      ctx,
+    );
+    const ask = () =>
+      run(
+        tools.credentials_request_action,
+        { action: 'self.identity-check' },
+        ctx,
+      );
+    await expect(ask()).resolves.toMatchObject({
+      status: 'sent',
+      expiresAt: Date.UTC(2026, 10, 10, 6, 34) / 1000,
+      message:
+        'Tap this link to start your identity check. It works once and ends in 15 minutes: https://dev.self.ixo.earth/l/tok',
+    });
+    await expect(ask()).resolves.toMatchObject({
+      status: 'sent',
+      message:
+        'Tap this link to start your identity check. It works once and ends in about 2 hours: https://dev.self.ixo.earth/l/tok2',
+    });
+    const open = await ask();
+    expect(open).toMatchObject({
+      status: 'already_open',
+      linkId: 'lnk_2',
+      linkStatus: 'in_progress',
+      expiresAt: Date.UTC(2026, 10, 10, 6, 0) / 1000,
+      message:
+        'Your identity check is already in progress. Please carry on with it.',
+    });
+    expect(JSON.stringify(open)).not.toContain('UTC');
   });
 });
 
@@ -2778,5 +2885,68 @@ describe('the Hub is the source of truth, the kv a cache', () => {
       state: 'allowed',
     });
     expect(JSON.stringify(out)).not.toContain('DELEGATION');
+  });
+});
+
+describe('credentials_check logs why it could not check', () => {
+  /** A channel context whose warnings are kept. */
+  function loggedCtx(adapter: Parameters<typeof channelCtx>[0]) {
+    const warnings: string[] = [];
+    const base = channelCtx(adapter, { kv: createMemoryUserKv() });
+    const ctx = {
+      ...base,
+      logger: {
+        ...base.logger,
+        warn: (message: string) => {
+          warnings.push(message);
+        },
+      },
+    };
+    return { ctx, warnings };
+  }
+
+  it('logs the reason code and the error class of verification_unavailable', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl } = routedFetch({
+      [`GET ${CATALOG}`]: () => json({ error: 'not_found', message: 'x' }, 404),
+      [`PUT ${CATALOG}`]: () =>
+        json(
+          {
+            sender_key: ORACLE_DID,
+            entry: {},
+            updated_at: 1,
+            display_dropped: [],
+          },
+          201,
+        ),
+    });
+    // Blocksync is down: the oracle's own DID document cannot be read.
+    const downKit: typeof fetch = async () =>
+      new Response('down', { status: 503 });
+    const tools = toolsFor(fetchImpl, oracleKey.doc, {
+      verifier: new VerifierContext(BLOCKSYNC_URL, false, downKit),
+    });
+    const { ctx, warnings } = loggedCtx(adapter);
+    await expect(
+      run(tools.credentials_check, CHECK_ARGS, ctx),
+    ).resolves.toEqual(refusal('verification_unavailable', MESSAGES.busy));
+    expect(warnings).toContain(
+      '[credentials] credentials_check: verification_unavailable (ResolverUnavailable code=resolver_unavailable source=blocksync)',
+    );
+    // Codes and class names only: no DID, URL or token.
+    expect(warnings.join('\n')).not.toMatch(/did:|https?:|Bearer/);
+  });
+
+  it('logs what is missing when it is not available', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl } = routedFetch({});
+    const tools = toolsFor(fetchImpl, oracleKey.doc, { verifier: null });
+    const { ctx, warnings } = loggedCtx(adapter);
+    await expect(
+      run(tools.credentials_check, CHECK_ARGS, ctx),
+    ).resolves.toEqual(refusal('not_available', MESSAGES.notAvailable));
+    expect(warnings).toEqual([
+      '[credentials] credentials_check: not_available (no_blocksync_url)',
+    ]);
   });
 });

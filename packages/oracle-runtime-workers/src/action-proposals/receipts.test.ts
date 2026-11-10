@@ -626,6 +626,28 @@ describe('durable canonical action receipts', () => {
     ).rejects.toBeInstanceOf(TopicReadUnavailable);
   });
 
+  it('calls the global fetch as a plain function when no fetcher is given (workerd "Illegal invocation")', async () => {
+    resetChainNetworkCache();
+    const seen: string[] = [];
+    // workerd throws when the global fetch is called as a method of another object.
+    const strictFetch = function (this: unknown, input: RequestInfo | URL) {
+      if (this !== undefined && this !== globalThis)
+        throw new TypeError('Illegal invocation');
+      seen.push(String(input));
+      return Promise.resolve(
+        Response.json({ result: { node_info: { network: 'pandora-8' } } }),
+      );
+    };
+    vi.stubGlobal('fetch', strictFetch);
+    try {
+      await new TopicChainReader('https://rpc.test', 'pandora-8').checkChain();
+    } finally {
+      vi.unstubAllGlobals();
+      resetChainNetworkCache();
+    }
+    expect(seen).toHaveLength(1);
+  });
+
   it("reads an RPC origin's network once per cache window for topic chain reads", async () => {
     resetChainNetworkCache();
     let status = 0;
