@@ -1,5 +1,12 @@
 # qiforge-workers-example
 
+## 0.0.54
+
+### Patch Changes
+
+- Updated dependencies [[`5125c34`](https://github.com/ixoworld/qiforge/commit/5125c348a696a4f892087083a30e7a257cb315d1)]:
+  - @ixo/oracle-runtime-workers@0.46.2
+
 ## 0.0.53
 
 ### Patch Changes
