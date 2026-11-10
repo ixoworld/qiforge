@@ -253,6 +253,14 @@ async function run(
   return t.handler(args, ctx);
 }
 
+/** The card requests (the Hub's list of live cards is read before each). */
+const cardPosts = (calls: RecordedCall[]) =>
+  calls.filter(
+    (c) => c.method === 'POST' && c.url === `${HUB}/api/internal/permissions`,
+  );
+
+const LIST_URL = `${HUB}/api/internal/permissions?bindingId=bind_1&bindingRevision=3`;
+
 const CHECK_ARGS = { vct: VCT, issuers: [ISSUER_DID], claims: ['age_over_18'] };
 
 describe('the WhatsApp gate', () => {
@@ -346,9 +354,9 @@ describe('the trust anchor (CREDENTIALS_TRUSTED_ISSUERS)', () => {
       { vct: VCT, claims: ['age_over_18'] },
       channelCtx(adapter),
     );
-    expect(JSON.parse(calls[0]?.body ?? '').permissions[0].issuers).toEqual([
-      ISSUER_DID,
-    ]);
+    expect(
+      JSON.parse(cardPosts(calls)[0]?.body ?? '').permissions[0].issuers,
+    ).toEqual([ISSUER_DID]);
   });
 
   it('publishes every configured issuer, and asks only for the ones narrowed to', async () => {
@@ -425,7 +433,7 @@ describe('permission cards', () => {
       message: `Tap this link to see what Companion is asking and choose Allow or Don't allow: ${CARD.url}`,
       hint: 'Send `message` as it is, as one link in a short message. Never paste ids or tokens.',
     });
-    const sent = JSON.parse(calls[0]?.body ?? '');
+    const sent = JSON.parse(cardPosts(calls)[0]?.body ?? '');
     expect(sent).toMatchObject({
       bindingId: 'bind_1',
       bindingRevision: 3,
@@ -440,11 +448,24 @@ describe('permission cards', () => {
         },
       ],
     });
+    // The Hub's list of the person's cards is read first, then the card is asked.
+    const signed = {
+      kind: 'self-signed',
+      audience: 'did:web:dev.auth.ixo.earth',
+      capability: { can: 'permissions/request', with: 'ixo:permissions' },
+    };
     expect(mints).toEqual([
+      {
+        ...signed,
+        facts: [
+          {
+            method: 'GET',
+            path: '/api/internal/permissions?bindingId=bind_1&bindingRevision=3',
+          },
+        ],
+      },
       expect.objectContaining({
-        kind: 'self-signed',
-        audience: 'did:web:dev.auth.ixo.earth',
-        capability: { can: 'permissions/request', with: 'ixo:permissions' },
+        ...signed,
         facts: [
           expect.objectContaining({
             method: 'POST',
@@ -771,7 +792,7 @@ describe('credentials_check', () => {
       requestId: 'req_1',
       walletUrl: `${HUB}/credentials/requests/req_1`,
       message: `Please answer in your IXO wallet: ${HUB}/credentials/requests/req_1`,
-      hint: 'No standing permission answered. Send `message` as it is, or ask for standing permission with credentials_request_check_permission; then call again with the same fields to continue this request.',
+      hint: 'No standing permission answered. Send `message` as it is, or ask for standing permission with credentials_request_check_permission (it sends no new card when the Hub already holds one for this); then call again with the same fields to continue this request.',
     });
     // Bounded polling: a status read every few seconds, not every pass.
     const polls = calls.filter(
@@ -1082,7 +1103,7 @@ describe('catalogued actions (self.identity-check)', () => {
       ctx,
     );
     expect(card).toMatchObject({ status: 'sent', permissionId: 'card_1' });
-    expect(JSON.parse(calls[0]?.body ?? '').permissions).toEqual([
+    expect(JSON.parse(cardPosts(calls)[0]?.body ?? '').permissions).toEqual([
       { kind: 'service-action', action: 'self.identity-check', days: 7 },
     ]);
 
@@ -1246,8 +1267,8 @@ describe('one card for everything (credentials_request_permissions)', () => {
     });
     // A resumed run asks again: the same list under the same key.
     await run(tools.credentials_request_permissions, args, ctx);
-    expect(calls).toHaveLength(2);
-    const [a, b] = calls.map((c) => JSON.parse(c.body));
+    expect(cardPosts(calls)).toHaveLength(2);
+    const [a, b] = cardPosts(calls).map((c) => JSON.parse(c.body));
     expect(a.permission).toBeUndefined();
     expect(a.permissions).toEqual([
       IDENTITY,
@@ -1265,7 +1286,11 @@ describe('one card for everything (credentials_request_permissions)', () => {
     // The id is recorded once, with its item kinds.
     const stored = await kv.get(CREDENTIALS_KV_NAMESPACE, 'permissions');
     expect(stored).toEqual([
-      { id: 'card_1', kinds: ['service-action', 'credential-check'] },
+      {
+        id: 'card_1',
+        kinds: ['service-action', 'credential-check'],
+        url: CARD.url,
+      },
     ]);
   });
 
@@ -1365,7 +1390,7 @@ describe('one card for everything (credentials_request_permissions)', () => {
       error: 'invalid_item',
       message: "Item 1 of this request isn't something we can set up.",
     });
-    expect(JSON.parse(calls[0]?.body ?? '').permissions).toEqual([
+    expect(JSON.parse(cardPosts(calls)[0]?.body ?? '').permissions).toEqual([
       { kind: 'service-action', action: 'yo.rewards-claim' },
     ]);
   });
@@ -1546,7 +1571,7 @@ describe('one card for everything (credentials_request_permissions)', () => {
       { action: 'self.identity-check' },
       ctx,
     );
-    const bodies = calls.map((c) => JSON.parse(c.body));
+    const bodies = cardPosts(calls).map((c) => JSON.parse(c.body));
     expect(bodies.map((b) => b.permissions.length)).toEqual([1, 1]);
     expect(bodies[1].permissions[0]).toEqual({
       kind: 'service-action',
@@ -1964,7 +1989,8 @@ describe('what the plugin keeps per person (kv)', () => {
         channelCtx(adapter),
       ),
     ).resolves.toEqual(refusal('not_found', MESSAGES.notFound));
-    expect(calls).toHaveLength(0);
+    // The card itself is never read: only the list of this person's own cards.
+    expect(calls.map((c) => c.url)).toEqual([LIST_URL]);
   });
 
   it("records the check cards' ids too", async () => {
@@ -2216,5 +2242,541 @@ describe('why the oracle asks (never the model)', () => {
       ),
     ).rejects.toThrow();
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('the Hub is the source of truth, the kv a cache', () => {
+  const NOW = Math.floor(Date.now() / 1000);
+  const ACTION = { action: 'self.identity-check' };
+  const GRANTS = [
+    {
+      id: 'offer',
+      can: 'credentials/offer',
+      with: 'ixo:credentials',
+      audience: 'x',
+      expiresAt: 4_000_000_000,
+      token: 'OFFER_DELEGATION',
+    },
+    {
+      id: 'link',
+      can: 'identity/link',
+      with: 'ixo:identity',
+      audience: ORACLE_DID,
+      expiresAt: 4_000_000_000,
+      token: 'LINK_DELEGATION',
+    },
+  ];
+  const fresh = (token: string) =>
+    GRANTS.map((g) => ({ ...g, token: `${token}_${g.id}` }));
+  const identityCard = (
+    id: string,
+    status: string,
+    grants: unknown[] = [],
+  ) => ({
+    id,
+    status,
+    ...(status === 'allowed' ? { allowedAt: NOW - 100 } : {}),
+    expiresAt: NOW + 86_000,
+    items: [
+      {
+        index: 0,
+        kind: 'service-action',
+        action: 'self.identity-check',
+        days: 30,
+        status,
+        ...(grants.length ? { grants } : {}),
+      },
+    ],
+  });
+  const checkCard = (
+    id: string,
+    status: string,
+    claims: string[],
+    extra: Record<string, unknown> = {},
+  ) => ({
+    id,
+    status,
+    expiresAt: NOW + 86_000,
+    items: [
+      {
+        index: 0,
+        kind: 'credential-check',
+        vct: VCT,
+        issuers: [ISSUER_DID],
+        claims,
+        days: 30,
+        status,
+        ...(status === 'allowed' ? { consentIds: ['cons_1'] } : {}),
+      },
+    ],
+    ...extra,
+  });
+  const listed = (...permissions: unknown[]) => ({
+    [`GET ${LIST_URL}`]: () => json({ permissions }),
+  });
+  const LINK = {
+    linkId: 'lnk_1',
+    url: 'https://dev.self.ixo.earth/l/tok',
+    expiresAt: 4_000_000_000,
+  };
+  const NEW_CARD = {
+    [`POST ${HUB}/api/internal/permissions`]: () => json(CARD, 201),
+  };
+
+  it('sends no new card when the Hub holds an allowed one, and fills the kv again', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const kv = createMemoryUserKv();
+    const { fetchImpl, calls } = routedFetch({
+      ...NEW_CARD,
+      ...listed(identityCard('card_7', 'allowed', GRANTS)),
+      [`POST ${SELF}/identity/v1/links`]: () => json(LINK, 201),
+    });
+    const tools = toolsFor(fetchImpl, oracleKey.doc);
+    const ctx = channelCtx(adapter, { kv });
+    const out = await run(
+      tools.credentials_request_action_permission,
+      ACTION,
+      ctx,
+    );
+    expect(out).toEqual({
+      status: 'already_allowed',
+      permissionId: 'card_7',
+      message: "You've already allowed this.",
+      hint: 'No new card was sent: a permission they allowed earlier still covers everything asked. Go on with the task (credentials_check, or credentials_request_action for a service action).',
+    });
+    expect(cardPosts(calls)).toHaveLength(0);
+    expect(JSON.stringify(out)).not.toContain('DELEGATION');
+    // The kv is filled again: the card in use, its grants, its id.
+    expect(
+      await kv.get(CREDENTIALS_KV_NAMESPACE, 'action:self.identity-check'),
+    ).toEqual({ permissionId: 'card_7' });
+    expect(
+      await kv.get(CREDENTIALS_KV_NAMESPACE, 'grants:self.identity-check'),
+    ).toMatchObject({ permissionId: 'card_7', grants: GRANTS });
+    expect(await kv.get(CREDENTIALS_KV_NAMESPACE, 'permissions')).toEqual([
+      { id: 'card_7', kinds: ['service-action'] },
+    ]);
+    // The action then runs from the kv alone: no card status read, no second list.
+    await expect(
+      run(tools.credentials_request_action, ACTION, ctx),
+    ).resolves.toMatchObject({ status: 'sent', linkId: 'lnk_1' });
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      `GET ${LIST_URL}`,
+      `POST ${SELF}/identity/v1/links`,
+    ]);
+  });
+
+  it('restores the grants from the Hub when the kv is empty', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const kv = createMemoryUserKv();
+    const { fetchImpl, calls } = routedFetch({
+      ...listed(
+        identityCard('card_9', 'pending'),
+        identityCard('card_7', 'allowed', GRANTS),
+      ),
+      [`POST ${SELF}/identity/v1/links`]: () => json(LINK, 201),
+    });
+    const tools = toolsFor(fetchImpl, oracleKey.doc);
+    await expect(
+      run(
+        tools.credentials_request_action,
+        ACTION,
+        channelCtx(adapter, { kv }),
+      ),
+    ).resolves.toMatchObject({ status: 'sent', linkId: 'lnk_1' });
+    const create = calls.find((c) => c.url === `${SELF}/identity/v1/links`);
+    expect(JSON.parse(create?.body ?? '')).toMatchObject({
+      offerConsent: 'OFFER_DELEGATION',
+    });
+    expect(
+      await kv.get(CREDENTIALS_KV_NAMESPACE, 'grants:self.identity-check'),
+    ).toMatchObject({ permissionId: 'card_7' });
+  });
+
+  it('says the card is still waiting when the Hub lists only a pending one', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl } = routedFetch(
+      listed(identityCard('card_9', 'pending')),
+    );
+    await expect(
+      run(
+        toolsFor(fetchImpl, oracleKey.doc).credentials_request_action,
+        ACTION,
+        channelCtx(adapter),
+      ),
+    ).resolves.toEqual(
+      refusal('permission_pending', MESSAGES.permissionPending),
+    );
+  });
+
+  it('hands back the same waiting card instead of a new one', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const kv = createMemoryUserKv();
+    const waiting = identityCard('card_1', 'pending');
+    let live: unknown[] = [];
+    const { fetchImpl, calls } = routedFetch({
+      ...NEW_CARD,
+      [`GET ${LIST_URL}`]: () => json({ permissions: live }),
+    });
+    const tools = toolsFor(fetchImpl, oracleKey.doc);
+    const ctx = channelCtx(adapter, { kv });
+    const first = await run(
+      tools.credentials_request_action_permission,
+      ACTION,
+      ctx,
+    );
+    expect(first).toMatchObject({ status: 'sent', permissionId: 'card_1' });
+    live = [waiting];
+    // Asked again (another tool, another turn): the Hub still holds the card.
+    const again = await run(
+      tools.credentials_request_permissions,
+      { items: [{ kind: 'service-action', ...ACTION }] },
+      { ...ctx, toolCallId: 'call-2' },
+    );
+    expect(again).toEqual({
+      status: 'sent',
+      permissionId: 'card_1',
+      url: CARD.url,
+      expiresAt: waiting.expiresAt,
+      message: `Tap this link to see what Companion is asking and choose Allow or Don't allow: ${CARD.url}`,
+      hint: 'This is the card they were sent before and have not answered yet; no new card was made. Send `message` as it is, as one link in a short message. Never paste ids or tokens.',
+    });
+    expect(cardPosts(calls)).toHaveLength(1);
+  });
+
+  it('uses the link the Hub lists for a waiting card when the kv is empty, and sends a new card when there is no link', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const url = `${HUB}/a/act_9?t=permission`;
+    const withLink = routedFetch({
+      ...NEW_CARD,
+      ...listed({ ...identityCard('card_9', 'pending'), url }),
+    });
+    await expect(
+      run(
+        toolsFor(withLink.fetchImpl, oracleKey.doc)
+          .credentials_request_action_permission,
+        ACTION,
+        channelCtx(adapter),
+      ),
+    ).resolves.toMatchObject({ status: 'sent', permissionId: 'card_9', url });
+    expect(cardPosts(withLink.calls)).toHaveLength(0);
+
+    // No link from the Hub and none kept: the card cannot be sent again.
+    const without = routedFetch({
+      ...NEW_CARD,
+      ...listed(identityCard('card_9', 'pending')),
+    });
+    await expect(
+      run(
+        toolsFor(without.fetchImpl, oracleKey.doc)
+          .credentials_request_action_permission,
+        ACTION,
+        channelCtx(adapter),
+      ),
+    ).resolves.toMatchObject({ status: 'sent', permissionId: 'card_1' });
+    expect(cardPosts(without.calls)).toHaveLength(1);
+  });
+
+  it('sends one new card for the whole list when a card covers only some of it', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl, calls } = routedFetch({
+      ...NEW_CARD,
+      ...listed(
+        // Allowed, but for one field only; and a waiting card for the action alone.
+        checkCard('card_5', 'allowed', ['age_over_18']),
+        { ...identityCard('card_6', 'pending'), url: `${HUB}/a/act_6` },
+      ),
+    });
+    const tools = toolsFor(fetchImpl, oracleKey.doc);
+    const items = [
+      { kind: 'service-action', ...ACTION },
+      {
+        kind: 'credential-check',
+        ...CHECK_ARGS,
+        claims: ['age_over_18', 'birth_date'],
+        days: 30,
+      },
+    ];
+    await expect(
+      run(
+        tools.credentials_request_permissions,
+        { items },
+        channelCtx(adapter),
+      ),
+    ).resolves.toMatchObject({ status: 'sent', permissionId: 'card_1' });
+    const posts = cardPosts(calls);
+    expect(posts).toHaveLength(1);
+    expect(JSON.parse(posts[0]?.body ?? '').permissions).toHaveLength(2);
+
+    // The fields asked are all among the allowed card's: nothing is sent.
+    const covered = routedFetch({
+      ...NEW_CARD,
+      ...listed(checkCard('card_5', 'allowed', ['age_over_18', 'birth_date'])),
+    });
+    await expect(
+      run(
+        toolsFor(covered.fetchImpl, oracleKey.doc)
+          .credentials_request_check_permission,
+        CHECK_ARGS,
+        channelCtx(adapter),
+      ),
+    ).resolves.toMatchObject({
+      status: 'already_allowed',
+      permissionId: 'card_5',
+    });
+    expect(cardPosts(covered.calls)).toHaveLength(0);
+
+    // Another issuer than the card's, or an item that is no longer allowed: a new card.
+    for (const card of [
+      {
+        ...checkCard('card_5', 'allowed', ['age_over_18']),
+        items: [
+          {
+            index: 0,
+            kind: 'credential-check',
+            vct: VCT,
+            issuers: ['did:ixo:entity:other'],
+            claims: ['age_over_18'],
+            status: 'allowed',
+          },
+        ],
+      },
+      {
+        ...checkCard('card_5', 'allowed', ['age_over_18']),
+        items: [
+          {
+            index: 0,
+            kind: 'credential-check',
+            vct: VCT,
+            issuers: [ISSUER_DID],
+            claims: ['age_over_18'],
+            status: 'stopped',
+          },
+        ],
+      },
+      // Top-level allowed, but nothing Allow wrote is left on the item.
+      {
+        ...checkCard('card_5', 'allowed', ['age_over_18']),
+        items: [
+          {
+            index: 0,
+            kind: 'credential-check',
+            vct: VCT,
+            issuers: [ISSUER_DID],
+            claims: ['age_over_18'],
+            status: 'allowed',
+          },
+        ],
+      },
+      checkCard('card_5', 'stopping', ['age_over_18']),
+      checkCard('card_5', 'allowing', ['age_over_18']),
+    ]) {
+      const other = routedFetch({ ...NEW_CARD, ...listed(card) });
+      await expect(
+        run(
+          toolsFor(other.fetchImpl, oracleKey.doc)
+            .credentials_request_check_permission,
+          CHECK_ARGS,
+          channelCtx(adapter),
+        ),
+      ).resolves.toMatchObject({ status: 'sent', permissionId: 'card_1' });
+      expect(cardPosts(other.calls)).toHaveLength(1);
+    }
+  });
+
+  it('refreshes a stale grant from the Hub once and retries once', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const kv = createMemoryUserKv();
+    const hub = { status: 0, list: 0 };
+    const { fetchImpl, calls } = routedFetch({
+      ...NEW_CARD,
+      // The kv's card was stopped; the person allowed a newer one elsewhere.
+      [`GET ${HUB}/api/internal/permissions/card_1`]: [
+        () => {
+          hub.status += 1;
+          return json(identityCard('card_1', 'allowed', fresh('OLD')));
+        },
+        () => {
+          hub.status += 1;
+          return json(identityCard('card_1', 'stopped'));
+        },
+      ],
+      [`GET ${HUB}/api/internal/permissions/card_8`]: () =>
+        json(identityCard('card_8', 'allowed', fresh('NEW'))),
+      [`GET ${LIST_URL}`]: [
+        () => {
+          hub.list += 1;
+          return json({ permissions: [] });
+        },
+        () => {
+          hub.list += 1;
+          return json({
+            permissions: [identityCard('card_8', 'allowed', fresh('NEW'))],
+          });
+        },
+      ],
+      [`POST ${SELF}/identity/v1/links`]: [
+        () => json(LINK, 201),
+        () => json({ error: 'forbidden', message: 'x' }, 403),
+        () => json(LINK, 201),
+        () => json({ error: 'forbidden', message: 'x' }, 403),
+      ],
+    });
+    const tools = toolsFor(fetchImpl, oracleKey.doc);
+    const ctx = channelCtx(adapter, { kv });
+    await run(tools.credentials_request_action_permission, ACTION, ctx);
+    await run(tools.credentials_request_action, ACTION, ctx);
+    expect(hub).toEqual({ status: 1, list: 1 });
+    // Self refuses the kept grants: dropped, the card read again (stopped),
+    // the list read once, the newer card's grants used for the one retry.
+    await expect(
+      run(tools.credentials_request_action, ACTION, ctx),
+    ).resolves.toMatchObject({ status: 'sent' });
+    expect(hub).toEqual({ status: 2, list: 2 });
+    const links = calls.filter((c) => c.url === `${SELF}/identity/v1/links`);
+    expect(links.map((c) => JSON.parse(c.body).offerConsent)).toEqual([
+      'OLD_offer',
+      'OLD_offer',
+      'NEW_offer',
+    ]);
+    expect(
+      await kv.get(CREDENTIALS_KV_NAMESPACE, 'action:self.identity-check'),
+    ).toEqual({ permissionId: 'card_8' });
+    // Refused again with nothing newer at the Hub: one refresh, one retry, then the plain answer.
+    const before = calls.length;
+    await expect(
+      run(tools.credentials_request_action, ACTION, ctx),
+    ).resolves.toEqual(refusal('forbidden', MESSAGES.permissionEnded));
+    expect(calls.slice(before).map((c) => `${c.method} ${c.url}`)).toEqual([
+      `POST ${SELF}/identity/v1/links`,
+      `GET ${HUB}/api/internal/permissions/card_8`,
+      `POST ${SELF}/identity/v1/links`,
+    ]);
+  });
+
+  it('asks for permission, as before, when the refreshed list holds nothing', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl } = routedFetch({
+      ...NEW_CARD,
+      [`GET ${HUB}/api/internal/permissions/card_1`]: [
+        () => json(identityCard('card_1', 'allowed', GRANTS)),
+        () => json(identityCard('card_1', 'stopped')),
+      ],
+      ...listed(),
+      [`POST ${SELF}/identity/v1/links`]: [
+        () => json(LINK, 201),
+        () => json({ error: 'forbidden', message: 'x' }, 403),
+      ],
+    });
+    const tools = toolsFor(fetchImpl, oracleKey.doc);
+    const ctx = channelCtx(adapter);
+    await run(tools.credentials_request_action_permission, ACTION, ctx);
+    await run(tools.credentials_request_action, ACTION, ctx);
+    await expect(
+      run(tools.credentials_request_action, ACTION, ctx),
+    ).resolves.toEqual(refusal('permission_ended', MESSAGES.permissionEnded));
+  });
+
+  it('behaves as before when the list cannot be read (older Hub, down, slow, broken)', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    for (const answer of [
+      () => json({ error: 'not_found', message: 'x' }, 404),
+      () => new Response('', { status: 405 }),
+      () => json({ error: 'unauthorized', message: 'x' }, 401),
+      () => json({ error: 'unavailable', message: 'x' }, 503),
+      () =>
+        json({ error: 'rate_limited', message: 'x' }, 429, {
+          'retry-after': '10',
+        }),
+      () => json({ error: 'invalid_request', message: 'x' }, 400),
+      () => json({ nothing: true }),
+      () => {
+        throw new DOMException('timed out', 'TimeoutError');
+      },
+    ]) {
+      const { fetchImpl, calls } = routedFetch({
+        ...NEW_CARD,
+        [`GET ${LIST_URL}`]: answer,
+      });
+      const tools = toolsFor(fetchImpl, oracleKey.doc);
+      const ctx = channelCtx(adapter);
+      // No permission in the kv: the usual answer, never an error from the lookup.
+      await expect(
+        run(tools.credentials_request_action, ACTION, ctx),
+      ).resolves.toEqual(refusal('no_permission', MESSAGES.noPermission));
+      await expect(
+        run(
+          tools.credentials_permission_status,
+          { permissionId: 'card_9' },
+          ctx,
+        ),
+      ).resolves.toEqual(refusal('not_found', MESSAGES.notFound));
+      // A card is sent as it always was.
+      await expect(
+        run(tools.credentials_request_action_permission, ACTION, ctx),
+      ).resolves.toMatchObject({ status: 'sent', permissionId: 'card_1' });
+      expect(cardPosts(calls)).toHaveLength(1);
+    }
+  });
+
+  it('reads the status of a card the kv forgot when the Hub lists it for this person', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const kv = createMemoryUserKv();
+    const { fetchImpl, calls } = routedFetch(
+      listed(identityCard('card_7', 'allowed', GRANTS)),
+    );
+    const tools = toolsFor(fetchImpl, oracleKey.doc);
+    const ctx = channelCtx(adapter, { kv });
+    const out = await run(
+      tools.credentials_permission_status,
+      { permissionId: 'card_7' },
+      ctx,
+    );
+    expect(out).toMatchObject({
+      permissionId: 'card_7',
+      status: 'allowed',
+      items: [{ index: 0, kind: 'service-action', state: 'allowed' }],
+    });
+    expect(JSON.stringify(out)).not.toContain('DELEGATION');
+    // An id the Hub does not list for this person stays unknown.
+    await expect(
+      run(tools.credentials_permission_status, { permissionId: 'card_8' }, ctx),
+    ).resolves.toEqual(refusal('not_found', MESSAGES.notFound));
+    expect(calls.map((c) => c.url)).toEqual([LIST_URL, LIST_URL]);
+  });
+
+  it('reads the list at most 6 times a minute per person, then goes on from the kv', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl, calls } = routedFetch(listed());
+    const tools = toolsFor(fetchImpl, oracleKey.doc);
+    const ctx = channelCtx(adapter);
+    for (let i = 0; i < 9; i++)
+      await expect(
+        run(tools.credentials_request_action, ACTION, ctx),
+      ).resolves.toEqual(refusal('no_permission', MESSAGES.noPermission));
+    expect(calls).toHaveLength(6);
+  });
+
+  it('returns the capabilities of another entry from the Hub when the kv is empty', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const card = identityCard('card_4', 'allowed', GRANTS);
+    const { fetchImpl } = routedFetch(
+      listed({
+        ...card,
+        items: [{ ...card.items[0], action: 'yo.rewards-claim' }],
+      }),
+    );
+    const out = await run(
+      toolsFor(fetchImpl, oracleKey.doc).credentials_request_action,
+      { action: 'yo.rewards-claim' },
+      channelCtx(adapter),
+    );
+    expect(out).toMatchObject({
+      status: 'granted',
+      permissionId: 'card_4',
+      action: 'yo.rewards-claim',
+      state: 'allowed',
+    });
+    expect(JSON.stringify(out)).not.toContain('DELEGATION');
   });
 });

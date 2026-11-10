@@ -89,6 +89,7 @@ const operatingGuide = `### Credentials and permissions
 - Ask for the fewest fields the task needs. The issuers accepted per credential type are configured by the operator: leave \`issuers\` out, or narrow them; anything else is refused.
 - \`credentials_check\` returns \`pending\` when no standing permission answered: send the wallet link, or ask for standing permission with \`credentials_request_permissions\` (a credential-check item). Call it again with the same fields to continue the same request.
 - For an identity check: ONE request with [{kind:"service-action", action:"self.identity-check", days}] covers the link, the credential offer and the standing consent to check the identity credential afterwards, so no second card is needed; wait until they allow it, then \`credentials_request_action\` for the link; \`credentials_action_status\` reads its progress. Add a credential-check item only for other credential types. For another approved entry, \`credentials_request_action\` lists what was granted (no tokens).
+- The Hub remembers what the person allowed. A request tool that answers \`already_allowed\` sent nothing: go on with the task. One that hands back the card they have not answered yet did not make a new one: send its \`message\` again.
 - \`credentials_permission_status\` shows the card's answer and, per item, what was granted (ids only).
 - Use the claims of a valid check for the task at hand only; never repeat them back beyond what the conversation needs.`;
 

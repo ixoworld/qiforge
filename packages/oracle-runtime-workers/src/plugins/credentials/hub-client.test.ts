@@ -306,7 +306,12 @@ describe('HubPermissionsClient.status', () => {
         action: 'self.identity-check',
         grants,
       },
-      { index: 1, kind: 'credential-check', consentIds: ['cons_1'] },
+      {
+        index: 1,
+        kind: 'credential-check',
+        vct: 'https://x.example/t',
+        consentIds: ['cons_1'],
+      },
     ]);
     expect(calls[0]?.headers.get('authorization')).toBe('Bearer invocation-1');
     expect(calls[0]?.headers.get('x-channels-service-key')).toBe(SERVICE_KEY);
@@ -406,5 +411,138 @@ describe('HubPermissionsClient.status', () => {
       code: 'not_found',
     });
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('HubPermissionsClient.listPermissions', () => {
+  const pending = {
+    id: 'card_2',
+    status: 'pending',
+    expiresAt: 1793000000,
+    items: [{ index: 0, kind: 'credential-check', status: 'pending' }],
+  };
+
+  it('signs the path with the exact query string it sends', async () => {
+    const binding = { bindingId: 'bind 1/é&x=y', bindingRevision: 12 };
+    const { fetchImpl, calls } = routedFetch({});
+    const { hub, facts } = client(async (request) => {
+      await fetchImpl(request);
+      return json({ permissions: [] });
+    });
+    await expect(hub.listPermissions(binding)).resolves.toEqual([]);
+    const sent = new URL(calls[0]?.url ?? '');
+    expect(sent.origin).toBe(HUB);
+    expect(sent.pathname).toBe(PERMISSIONS_PATH);
+    expect(sent.searchParams.get('bindingId')).toBe(binding.bindingId);
+    expect(sent.searchParams.get('bindingRevision')).toBe('12');
+    // The fact is the pathname plus the query string, byte for byte as sent.
+    expect(facts).toEqual([
+      [{ method: 'GET', path: `${sent.pathname}${sent.search}` }],
+    ]);
+    expect(calls[0]?.url).toBe(
+      `${HUB}${PERMISSIONS_PATH}?bindingId=bind+1%2F%C3%A9%26x%3Dy&bindingRevision=12`,
+    );
+    expect(calls[0]?.headers.get('authorization')).toBe('Bearer invocation-1');
+    expect(calls[0]?.headers.get('x-channels-service-key')).toBe(SERVICE_KEY);
+  });
+
+  it('reads the cards in the status shape, tolerating states and cards it does not know', async () => {
+    const { fetchImpl } = routedFetch({
+      [`GET ${HUB}${PERMISSIONS_PATH}?bindingId=bind_1&bindingRevision=3`]:
+        () =>
+          json({
+            permissions: [
+              {
+                id: 'card_3',
+                status: 'allowing',
+                expiresAt: 1793000000,
+                items: [
+                  {
+                    index: 0,
+                    kind: 'service-action',
+                    action: 'self.identity-check',
+                    status: 'allowing',
+                    days: 30,
+                  },
+                ],
+              },
+              { ...pending, url: `${HUB}/a/act_2?t=permission` },
+              // A link that is not the Hub's is dropped; the card stays.
+              { ...pending, id: 'card_1', url: 'https://evil.example/a/x' },
+              // Cards this version cannot read are left out.
+              { id: 'card_0', status: 'pending', items: [] },
+              {
+                id: 'card_x',
+                status: 'pending',
+                items: [{ kind: 'new-kind' }],
+              },
+              'junk',
+            ],
+          }),
+    });
+    const { hub } = client(fetchImpl);
+    const cards = await hub.listPermissions(BINDING);
+    expect(cards.map((c) => [c.id, c.status, c.url])).toEqual([
+      ['card_3', 'unknown', undefined],
+      ['card_2', 'pending', `${HUB}/a/act_2?t=permission`],
+      ['card_1', 'pending', undefined],
+    ]);
+    expect(cards[0]?.items[0]?.status).toBe('unknown');
+  });
+
+  it('keeps what a credential-check item asked for, and at most 32 cards', async () => {
+    const item = {
+      index: 0,
+      kind: 'credential-check',
+      status: 'allowed',
+      vct: 'https://x.example/t',
+      issuers: ['did:ixo:entity:1'],
+      claims: ['a', 'b'],
+      days: 30,
+      consentIds: ['cons_1'],
+    };
+    const { fetchImpl } = routedFetch({
+      [`GET ${HUB}${PERMISSIONS_PATH}?bindingId=bind_1&bindingRevision=3`]:
+        () =>
+          json({
+            permissions: Array.from({ length: 40 }, (_, i) => ({
+              id: `card_${i}`,
+              status: 'allowed',
+              allowedAt: 1792000000,
+              expiresAt: 1793000000,
+              items: [item],
+            })),
+          }),
+    });
+    const cards = await client(fetchImpl).hub.listPermissions(BINDING);
+    expect(cards).toHaveLength(32);
+    expect(cards[0]?.items[0]).toMatchObject({
+      vct: 'https://x.example/t',
+      issuers: ['did:ixo:entity:1'],
+      claims: ['a', 'b'],
+      consentIds: ['cons_1'],
+    });
+  });
+
+  it('fails as any other call: an older Hub, an unsigned call, a broken answer', async () => {
+    const { fetchImpl } = routedFetch({
+      [`GET ${HUB}${PERMISSIONS_PATH}?bindingId=bind_1&bindingRevision=3`]: [
+        () => json({ error: 'not_found', message: 'x' }, 404),
+        () => new Response('', { status: 405 }),
+        () => json({ error: 'unauthorized', message: 'x' }, 401),
+        () => json({ cards: [] }),
+      ],
+    });
+    const { hub } = client(fetchImpl);
+    for (const expected of [
+      { status: 404, code: 'not_found' },
+      { status: 405, code: 'http_405' },
+      { status: 401, code: 'unauthorized' },
+      { status: 502, code: 'invalid_response' },
+    ]) {
+      const error = await hub.listPermissions(BINDING).catch((e) => e);
+      expect(error).toBeInstanceOf(CredentialsServiceError);
+      expect(error).toMatchObject(expected);
+    }
   });
 });

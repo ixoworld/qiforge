@@ -14,8 +14,11 @@ import { LINK_STATUSES, type LinkState } from './self-client';
  * `credentials`, next to the check rows of `check-store.ts`):
  *
  * - `permissions`: the permission cards THIS person was asked, each once
- *   with the kinds of its items (`credentials_permission_status` reads no
- *   other id).
+ *   with the kinds of its items and its link (`credentials_permission_status`
+ *   reads no other id, except one the Hub lists for this person).
+ *
+ * All of it is a cache: the Hub is the source of truth, and what is missing
+ * here is read back from the Hub's list of the person's live cards.
  * - `grants:<action>`: the grants of an allowed action card, kept until the
  *   earliest of them ends, so a repeat call does not ask the Hub again.
  * - `link:<linkId>`: the last status read for a link, and `linkrate:<linkId>`
@@ -29,8 +32,17 @@ const PERMISSION_IDLE_TTL_MS = 32 * 24 * 3600 * 1000;
 const ItemKinds = z.array(z.enum(['credential-check', 'service-action']));
 /** One card: its id once, with the kinds of its items (older rows: the id alone). */
 const Entry = z.union([
-  z.string().transform((id) => ({ id, kinds: [] as string[] })),
-  z.object({ id: z.string(), kinds: ItemKinds }),
+  z.string().transform((id) => ({
+    id,
+    kinds: [] as string[],
+    url: undefined as string | undefined,
+  })),
+  z.object({
+    id: z.string(),
+    kinds: ItemKinds,
+    /** The card's link, kept so a card still waiting can be sent again. */
+    url: z.string().url().optional().catch(undefined),
+  }),
 ]);
 const Entries = z.array(Entry);
 
@@ -42,16 +54,18 @@ export async function recordPermission(
   kv: UserKvSurface,
   id: string,
   kinds: readonly ('credential-check' | 'service-action')[] = [],
+  url?: string,
 ): Promise<void> {
   await kv.update(
     CREDENTIALS_KV_NAMESPACE,
     PERMISSIONS_KEY,
     (current) => {
       const parsed = Entries.safeParse(current);
-      const entries = (parsed.success ? parsed.data : []).filter(
-        (x) => x.id !== id,
-      );
-      entries.push({ id, kinds: [...kinds] });
+      const all = parsed.success ? parsed.data : [];
+      // A link recorded before stays when the card is recorded again without one.
+      const link = url ?? all.find((x) => x.id === id)?.url;
+      const entries = all.filter((x) => x.id !== id);
+      entries.push({ id, kinds: [...kinds], ...(link ? { url: link } : {}) });
       return entries.slice(-MAX_PERMISSIONS);
     },
     { idleTtlMs: PERMISSION_IDLE_TTL_MS },
@@ -67,6 +81,18 @@ export async function knowsPermission(
     await kv.get(CREDENTIALS_KV_NAMESPACE, PERMISSIONS_KEY),
   );
   return parsed.success && parsed.data.some((x) => x.id === id);
+}
+
+/** The link this person's kv kept for card `id`, when it kept one. */
+export async function permissionUrl(
+  kv: UserKvSurface,
+  id: string,
+): Promise<string | null> {
+  const parsed = Entries.safeParse(
+    await kv.get(CREDENTIALS_KV_NAMESPACE, PERMISSIONS_KEY),
+  );
+  if (!parsed.success) return null;
+  return parsed.data.find((x) => x.id === id)?.url ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +282,18 @@ export async function writePermissionCache(
     { at: nowMs, state },
     { idleTtlMs: 3600 * 1000 },
   );
+}
+
+/**
+ * Count one read of the person's card list at the Hub; false when it is past
+ * the minute's cap (the same as one card's status reads). The key can never
+ * be a card's: an id holds no `*`.
+ */
+export function chargePermissionList(
+  kv: UserKvSurface,
+  nowMs: number,
+): Promise<boolean> {
+  return chargePermissionStatus(kv, '*list', nowMs);
 }
 
 /** Count one status call for card `id`; false when it is past the minute's cap. */
