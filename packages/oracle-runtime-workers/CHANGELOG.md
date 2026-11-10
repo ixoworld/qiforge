@@ -1,5 +1,11 @@
 # @ixo/oracle-runtime-workers
 
+## 0.46.3
+
+### Patch Changes
+
+- [#513](https://github.com/ixoworld/qiforge/pull/513) [`7e04752`](https://github.com/ixoworld/qiforge/commit/7e047527928d6fb885b9196c1f245770eb768808) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - credentials: three fixes from the first real WhatsApp test. Self's ISO 8601 link times are accepted (a successful `POST /identity/v1/links` was refused as `invalid_response`), and Self's nested error code is read (`{ error: { code, message, retryable } }`; before, every Self refusal was `http_<status>`, so `link_active`, `already_verified` and `rate_limited` were never recognised). The verifier calls the global `fetch` as a plain function (workerd's "Illegal invocation" made every `credentials_check` answer `verification_unavailable`); the same pattern is fixed in the Self/Hub transport and the Topic chain reader. An end the person reads is relative to now when their time zone is unknown, as on WhatsApp ("It works once and ends in 15 minutes"), their local time when it is known, never "UTC", and left out once it has passed. Refusals that are not the person's doing (`not_available`, `verification_unavailable`, `answer_lost`, service errors) are logged with a reason code and the error class, never a message, DID or token.
+
 ## 0.46.2
 
 ### Patch Changes
