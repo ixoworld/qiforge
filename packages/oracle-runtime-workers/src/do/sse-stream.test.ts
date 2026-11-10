@@ -574,3 +574,104 @@ describe('createSseTurnStream turn budget', () => {
     expect(out.at(-1)?.data).toMatchObject({ failed: true });
   });
 });
+
+describe('createSseTurnStream tool call arguments', () => {
+  async function* toolCallEvents(
+    toolName: string,
+    input: unknown,
+  ): AsyncGenerator<unknown> {
+    yield {
+      event: 'on_tool_start',
+      run_id: 'run-1',
+      name: toolName,
+      data: { input },
+    };
+    yield {
+      event: 'on_tool_end',
+      run_id: 'run-1',
+      name: toolName,
+      data: {
+        output: new ToolMessage({
+          content: '[]',
+          tool_call_id: 'run-1',
+          name: toolName,
+        }),
+      },
+    };
+  }
+
+  // [shape, `data.input` of on_tool_start, the call's arguments on the wire]
+  const cases: Array<[string, unknown, Record<string, unknown>]> = [
+    [
+      'LangChain’s JSON-string wrapper',
+      { input: '{"collectionId":"1180"}' },
+      { collectionId: '1180' },
+    ],
+    [
+      'an object wrapper',
+      { input: { collectionId: '1180' } },
+      { collectionId: '1180' },
+    ],
+    [
+      'a bare arguments object',
+      { collectionId: '1180' },
+      { collectionId: '1180' },
+    ],
+    [
+      'a wrapped string that is not JSON',
+      { input: 'not json' },
+      { input: 'not json' },
+    ],
+    [
+      'a wrapped JSON value that is not an object',
+      { input: '["1180"]' },
+      { input: '["1180"]' },
+    ],
+    ['a string instead of an object', 'collectionId=1180', {}],
+    ['no input at all', undefined, {}],
+  ];
+
+  it.each(cases)(
+    'streams the arguments from %s, with the tool name',
+    async (_shape, input, args) => {
+      const stream = createSseTurnStream({
+        events: toolCallEvents('pin.claims.list', input),
+        sessionId: 's1',
+        requestId: 'r1',
+        abortController: new AbortController(),
+      });
+      const frames = toolCallFrames(await new Response(stream).text());
+      const expected = { ...args, toolName: 'pin.claims.list' };
+      expect(frames.map((f) => [f.status, f.args])).toEqual([
+        ['isRunning', expected],
+        ['done', expected],
+      ]);
+    },
+  );
+
+  it('gives an AG-UI action frame the parsed arguments too', async () => {
+    const stream = createSseTurnStream({
+      events: toolCallEvents('create_data_table', {
+        input: '{"id":"sales_table","rows":2}',
+      }),
+      sessionId: 's1',
+      requestId: 'r1',
+      abortController: new AbortController(),
+      agActionNames: new Set(['create_data_table']),
+    });
+    const frames = (await new Response(stream).text())
+      .split('\n\n')
+      .filter((f) => f.startsWith('event: action_call'))
+      .map(
+        (f) =>
+          JSON.parse(f.slice(f.indexOf('data: ') + 6)) as Record<
+            string,
+            unknown
+          >,
+      );
+    expect(frames.map((f) => [f.status, f.args])).toEqual([
+      ['isRunning', { id: 'sales_table', rows: 2 }],
+      ['done', { id: 'sales_table', rows: 2 }],
+    ]);
+  });
+});

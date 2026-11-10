@@ -164,11 +164,27 @@ interface ActionCallPayload {
   error?: string;
 }
 
+/**
+ * The call's arguments from `on_tool_start`'s `data.input`. LangChain logs a
+ * tool's input as the JSON string of its arguments, so the event carries
+ * `{ input: "<json>" }`; that string is parsed back into the arguments
+ * object, as the Node runtime does. An object under `input` is unwrapped; a
+ * wrapped string that is not a JSON object is passed on as it came.
+ */
 function extractToolArgs(input: unknown): Record<string, unknown> {
   if (input && typeof input === 'object') {
     const maybe = input as { input?: unknown };
     if (maybe.input && typeof maybe.input === 'object')
       return maybe.input as Record<string, unknown>;
+    if (typeof maybe.input === 'string' && Object.keys(input).length === 1) {
+      try {
+        const parsed: unknown = JSON.parse(maybe.input);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
+          return parsed as Record<string, unknown>;
+      } catch {
+        // Not JSON: the wrapper is all there is.
+      }
+    }
     return input as Record<string, unknown>;
   }
   return {};
