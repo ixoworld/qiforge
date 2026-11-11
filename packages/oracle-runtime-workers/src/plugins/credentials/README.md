@@ -58,7 +58,7 @@ Ask for everything in one request:
 | `credentials_permission_status`         | The card's status (`pending`, `allowed`, `declined`, `expired`, `stopped`) and `items[]`: each item's `index`, `kind`, `state` and, once allowed, what was granted (consent ids; grant ids, capabilities, audiences and ends; never for an item the Hub marks `current: false`, which carries `current: false` instead and makes the answer "I need your OK once more for this."). Never a token.                                                                                                                                                                                                                                                                                                                   |
 | `credentials_check`                     | Checks a credential at the Credentials worker and returns `valid` (with only the fields asked for), `invalid`, `revoked`, `expired`, `none` or `pending`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `credentials_request_action`            | Carries out an allowed action. For `self.identity-check`: a link from Self where the person starts an identity check, using the `link`/`offer` grants of that item in the one card; optional `context`: `"next_step"` (the check is the next step of a task already under way) or `"standalone"` (default), which only changes the message's first words. For any other entry: `granted`, listing the capabilities allowed (no tokens) so the agent or another plugin can act. When what the person allowed is out of date (`current: false`) it sends ONE card again itself: `{ status: "sent", permissionId, url }` asking for their OK once more. `already_verified`: see [Already verified](#already-verified). |
-| `credentials_action_status`             | The progress of an identity-check link (`sent`, `opened`, `in_progress`, `passed`, `failed`, `expired`, `cancelled`; `in_progress` with `review: true` while a person reviews the check, or `saving: true` once it passed and the proof is still being saved). No personal data.                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `credentials_action_status`             | The progress of an identity-check link (`sent`, `opened`, `in_progress`, `passed`, `failed`, `expired`, `cancelled`; `in_progress` with `review: true` while a person reviews the check, or `saving: true` once it passed and the proof is still being saved; `failed` with `failure: "error"` or `"too_many_attempts"` when it was not a decision about the person). No personal data.                                                                                                                                                                                                                                                                                                                             |
 
 Every answer is plain data plus two texts: `message`, in the second person,
 for the person and ready to send as it is, and `hint`, guidance for the agent
@@ -133,7 +133,7 @@ plain and the same every time.
 | Link `in_progress`                                        | Your identity check has started but isn't finished yet. Please finish the steps on the page you opened.                                                             |
 | Link in review                                            | Thanks, your identity check is sent. Someone from our support team will look at it. Please check back later. You can ask me anytime, and I'll check how it's going. |
 | Link passed, proof being saved                            | You passed your identity check. Your proof is being saved; this can take a minute. Please ask me again shortly.                                                     |
-| Link `passed` / `failed`                                  | Your identity check is done. You are verified. / Sorry, your identity check didn't pass.                                                                            |
+| Link `passed` / `failed`                                  | Your identity check is done. You are verified. / Sorry, your identity check didn't pass. (`failed` with `failure`: see [Failed: why](#failed-why))                  |
 | Link `expired` / `cancelled`                              | That link has ended. / That link was stopped.                                                                                                                       |
 
 The card sentence is picked by exactly what the card asks (its catalogue
@@ -176,6 +176,30 @@ still being saved to their IXO account, send no new link, never say the
 check is unfinished, never promise a message, read the status again when
 they next write. Events are unaffected: Self sends `passed` only once the
 proof is saved, and an event while Self still says `saving` says nothing.
+
+### Failed: why
+
+Self adds `failure` beside `status: "failed"` (the same style and place as
+`review` and `saving`) when the check did not end with a decision about
+the person:
+
+| `failure`           | Meaning                           | Words                                                                                            |
+| ------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------ |
+| absent              | A real "not verified" outcome     | Sorry, your identity check didn't pass.                                                          |
+| `error`             | A system failure on our side      | Sorry, something went wrong with your identity check. Please ask me for a new link to try again. |
+| `too_many_attempts` | The person used up their attempts | Your identity check ran out of tries. Please ask me for a new link to try again.                 |
+
+It is read leniently: only those two values beside `failed` count; absent,
+any other value or type, or any other status is "absent" (the plain
+"didn't pass" words), never a parse failure. A known value is kept in the
+5 s status cache with the failed status, so a later read says the same
+thing, and is answered as `failure` by `credentials_action_status`. The
+hints: for `error`, it was a problem on our side, not about them, never say
+they failed or were not verified, offer a new link; for
+`too_many_attempts`, they used up their tries, never say they were
+refused, offer a new link; for all three, never promise a message. The
+`failed` identity-check event uses the same three sentences, chosen from
+Self's answer when the link is read again (`IDENTITY_FAILED_WORDING`).
 
 ### Already verified
 
@@ -260,7 +284,9 @@ same `permission_event` capability). The plugin:
    reward claim, named as the only next step as above; without them,
    `credentials_check` only if this oracle needs a claim for its own
    decision); `failed` -> "Sorry, your identity check didn't pass." (the
-   model is told to offer a new link only if they want to try again);
+   model is told to offer a new link only if they want to try again), or
+   the `error` / `too_many_attempts` words when Self's `failure` says so
+   (see [Failed: why](#failed-why));
    `in_review` -> the in-review message. Both are sent without the model.
 
 ### Cards of other plugins (the Yo agent)

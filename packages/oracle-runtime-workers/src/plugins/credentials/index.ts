@@ -7,6 +7,7 @@ export {
   createCredentialsTools,
   createPermissionEventHandler,
   IDENTITY_EVENT_TEXT,
+  IDENTITY_FAILED_WORDING,
   LINK_CONTEXTS,
   PERMISSION_CARD_TTL_SECONDS,
   PERMISSION_EVENT_TEXT,
@@ -64,6 +65,7 @@ export {
   LINK_CAPABILITY,
   LINKS_PATH,
   SelfLinksClient,
+  type LinkFailure,
   type LinkState,
   type LinkStatus,
 } from './self-client';

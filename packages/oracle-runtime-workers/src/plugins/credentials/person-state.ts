@@ -8,7 +8,7 @@ import {
   type PermissionRequest,
   type PermissionState,
 } from './hub-client';
-import { LINK_STATUSES, type LinkState } from './self-client';
+import { Failure, LINK_STATUSES, type LinkState } from './self-client';
 
 /**
  * What the plugin remembers about one person in their own kv (namespace
@@ -356,6 +356,8 @@ const CachedLink = z.object({
     review: z.literal(true).optional().catch(undefined),
     /** Self's "passed, proof being saved" beside `in_progress`; older rows have none. */
     saving: z.literal(true).optional().catch(undefined),
+    /** Why Self says a check `failed`; older rows have none. */
+    failure: Failure,
   }),
 });
 
