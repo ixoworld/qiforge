@@ -1,5 +1,0 @@
----
-'@ixo/oracle-runtime-workers': patch
----
-
-Channel turns no longer fail with `401` because one DID key lookup was slow on a fresh isolate. The channel route keeps the keys it fetched per isolate: fresh for 60 s; when a later lookup fails or times out, the last good keys of that DID stand in for at most 10 minutes since they were fetched (never for a DID not yet resolved in the isolate). The oracle's own DID is refreshed in the background once its keys pass 60 s, and concurrent turns share one lookup per DID. A lookup with nothing to fall back on is retried once at once when the failure can be transient (timeout, network, HTTP 5xx). Every failed lookup logs one `[channels] key lookup failed` line (role, shortened DID, source, failure kind, attempts, elapsed ms, whether stale keys were used, whether the turn was refused); a refusal whose keys all resolved logs `[channels] invocation refused` instead. Signatures are still verified against keys from the DID document, and a failed lookup with no usable keys still answers `401`.
