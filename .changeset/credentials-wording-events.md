@@ -1,5 +1,0 @@
----
-'@ixo/oracle-runtime-workers': minor
----
-
-Credentials plugin: fixed, friendlier wording (card sentences chosen by catalogue action id, "Something changed, so I need your OK again", the identity link with a new optional `context: "next_step" | "standalone"` on `credentials_request_action`, the bridge "Thanks, that's allowed.", every link status), Self's in-review status (`review: true` beside `in_progress`) with its own words, never promising a later message, and cards that wait one hour instead of a day. New `permission_answered` event turns from the channel gateway (`features: ["delivery_notice", "permission_event"]`): `OraclePlugin.handlePermissionEvent`, handled by the credentials plugin after it reads the card at the Auth Hub; other plugins record their cards with `rememberPermissionCard`. The same event turn also carries `identity_check_updated` (Self's link went into review, passed or failed; same `permission_event` capability): the credentials plugin reads the link at Self first and answers in fixed words ("Your identity check is done. You are verified." then the task goes on, with another plugin's `verifiedNext`).
