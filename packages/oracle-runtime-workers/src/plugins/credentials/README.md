@@ -8,7 +8,7 @@ fields, plus the actions in the Auth Hub's approved list (today
 
 It is in `BUNDLED_WORKERS_PLUGINS` and stays off unless
 `CREDENTIALS_ENABLED=true` and the oracle account's Hub key are set
-([Turning it on](#turning-it-on)). Nothing is deployed with it yet.
+([Turning it on](#turning-it-on)). The Companion and the Yo agent use it.
 
 ## One card for everything
 
@@ -33,6 +33,12 @@ One Allow covers every item (no partial answer); Don't allow covers none. Who
 asks is the DID that signed the request (the oracle's own DID); the
 permission is made out to it.
 
+A card waits **one hour** for Allow or Don't allow (the plugin asks the Hub
+for `expiresAt` = now + 3600 s, `PERMISSION_CARD_TTL_SECONDS`). That is not
+how long a permission lasts once allowed: that is each item's `days`. A
+waiting card with less than a minute left is not handed back; a new one is
+sent.
+
 Ask for everything in one request:
 
 - Identity: one request with
@@ -44,15 +50,15 @@ Ask for everything in one request:
 
 ## Tools
 
-| Tool                                    | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `credentials_request_permissions`       | Asks the Hub for ONE card holding `items` (1-5): `{kind:"credential-check", vct, claims, issuers?, days}` or `{kind:"service-action", action, days?}`. Returns `{ status: "sent", permissionId, url, expiresAt }`, or `{ status: "already_allowed", permissionId }` when the Hub already holds what was asked ([The Hub is the source of truth](#the-hub-is-the-source-of-truth)).                                                                                             |
-| `credentials_request_check_permission`  | A one-item wrapper of the above for a credential check (`vct`, 1-5 `issuers`, 1-30 `claims`, `days` 1-90).                                                                                                                                                                                                                                                                                                                                                                     |
-| `credentials_request_action_permission` | A one-item wrapper for a service action (any entry id of the Hub's pattern, `days` or the entry's usual length).                                                                                                                                                                                                                                                                                                                                                               |
-| `credentials_permission_status`         | The card's status (`pending`, `allowed`, `declined`, `expired`, `stopped`) and `items[]`: each item's `index`, `kind`, `state` and, once allowed, what was granted (consent ids; grant ids, capabilities, audiences and ends; never for an item the Hub marks `current: false`, which carries `current: false` instead and makes the answer "I need your OK once more for this."). Never a token.                                                                              |
-| `credentials_check`                     | Checks a credential at the Credentials worker and returns `valid` (with only the fields asked for), `invalid`, `revoked`, `expired`, `none` or `pending`.                                                                                                                                                                                                                                                                                                                      |
-| `credentials_request_action`            | Carries out an allowed action. For `self.identity-check`: a link from Self where the person starts an identity check, using the `link`/`offer` grants of that item in the one card. For any other entry: `granted`, listing the capabilities allowed (no tokens) so the agent or another plugin can act. When what the person allowed is out of date (`current: false`) it sends ONE card again itself: `{ status: "sent", permissionId, url }` asking for their OK once more. |
-| `credentials_action_status`             | The progress of an identity-check link (`sent`, `opened`, `in_progress`, `passed`, `failed`, `expired`, `cancelled`). No personal data.                                                                                                                                                                                                                                                                                                                                        |
+| Tool                                    | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `credentials_request_permissions`       | Asks the Hub for ONE card holding `items` (1-5): `{kind:"credential-check", vct, claims, issuers?, days}` or `{kind:"service-action", action, days?}`. Returns `{ status: "sent", permissionId, url, expiresAt }`, or `{ status: "already_allowed", permissionId }` when the Hub already holds what was asked ([The Hub is the source of truth](#the-hub-is-the-source-of-truth)).                                                                                                                                                                                                                                                                   |
+| `credentials_request_check_permission`  | A one-item wrapper of the above for a credential check (`vct`, 1-5 `issuers`, 1-30 `claims`, `days` 1-90).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `credentials_request_action_permission` | A one-item wrapper for a service action (any entry id of the Hub's pattern, `days` or the entry's usual length).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `credentials_permission_status`         | The card's status (`pending`, `allowed`, `declined`, `expired`, `stopped`) and `items[]`: each item's `index`, `kind`, `state` and, once allowed, what was granted (consent ids; grant ids, capabilities, audiences and ends; never for an item the Hub marks `current: false`, which carries `current: false` instead and makes the answer "I need your OK once more for this."). Never a token.                                                                                                                                                                                                                                                    |
+| `credentials_check`                     | Checks a credential at the Credentials worker and returns `valid` (with only the fields asked for), `invalid`, `revoked`, `expired`, `none` or `pending`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `credentials_request_action`            | Carries out an allowed action. For `self.identity-check`: a link from Self where the person starts an identity check, using the `link`/`offer` grants of that item in the one card; optional `context`: `"next_step"` (the check is the next step of a task already under way) or `"standalone"` (default), which only changes the message's first words. For any other entry: `granted`, listing the capabilities allowed (no tokens) so the agent or another plugin can act. When what the person allowed is out of date (`current: false`) it sends ONE card again itself: `{ status: "sent", permissionId, url }` asking for their OK once more. |
+| `credentials_action_status`             | The progress of an identity-check link (`sent`, `opened`, `in_progress`, `passed`, `failed`, `expired`, `cancelled`; `in_progress` with `review: true` while a person reviews the check). No personal data.                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
 Every answer is plain data plus two texts: `message`, in the second person,
 for the person and ready to send as it is, and `hint`, guidance for the agent
@@ -109,6 +115,160 @@ Rules the tools keep:
 The plugin is on-demand (`load_capability(['credentials'])`). Its operating
 guide tells the agent the rules above.
 
+## What the person reads
+
+Every sentence is fixed in the plugin, never written by the model: short,
+plain and the same every time.
+
+| When                                                      | `message`                                                                                                                                                           |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Card: the identity check (with or without IdentityLevel1) | This lets me send you a link for your identity check. Please tap this to allow: `<link>`                                                                            |
+| Card: a check of IdentityLevel1 only                      | This lets me check that your identity is verified. Please tap this to allow: `<link>`                                                                               |
+| Card: anything else                                       | Please tap this to see what `<oracle name>` is asking for, and allow it if you agree: `<link>`                                                                      |
+| Card asked again (`current: false`)                       | Something changed, so I need your OK again. Please tap this to allow: `<link>`                                                                                      |
+| `credentials_permission_status`: allowed                  | Thanks, that's allowed. (hint: a tool called in the same reply sends its message right after it, in ONE message)                                                    |
+| Identity link (`context` `standalone`, the default)       | To do your identity check, open this link. You will scan your ID document and take a selfie. The link works once and ends in 15 minutes: `<link>`                   |
+| Identity link (`context` `next_step`)                     | Next, you need to do your identity check. Open this link. You will scan your ID document and take a selfie. The link works once and ends in 15 minutes: `<link>`    |
+| Link `sent` / `opened`                                    | You haven't opened the link yet. / You opened the link but haven't started the check yet.                                                                           |
+| Link `in_progress`                                        | Your identity check has started but isn't finished yet. Please finish the steps on the page you opened.                                                             |
+| Link in review                                            | Thanks, your identity check is sent. Someone from our support team will look at it. Please check back later. You can ask me anytime, and I'll check how it's going. |
+| Link `passed` / `failed`                                  | Your identity check is done. You are verified. / Sorry, your identity check didn't pass.                                                                            |
+| Link `expired` / `cancelled`                              | That link has ended. / That link was stopped.                                                                                                                       |
+
+The card sentence is picked by exactly what the card asks (its catalogue
+action ids and credential types, `CARD_LEADS`); any other card gets the
+fallback, which names nothing. "Ends in 15 minutes" is the person's local
+time ("ends at 18:05") when the runtime knows their zone.
+
+The oracle only ever replies to a message. Every hint that could suggest
+waiting (a card not answered yet, a link not opened or in progress, a check
+in review, a status asked too often, an open check) ends with "Never say you
+will let them know or message them later; you can only reply when they
+write to you." (`NO_LATER_MESSAGE`).
+
+### In review
+
+Self adds `review: true` beside `status: "in_progress"` while a person
+reviews the check (up to 48 hours). The plugin reads it leniently: only
+`true` with `in_progress` counts; absent (an older Self), any other value or
+any other status is "not in review", and unknown fields are ignored. The
+answer of `credentials_action_status` then carries `review: true` and the
+review words above, with a hint: a person reviews it, nothing says when it
+is done, never promise a message, send no new link, read the status again
+only when they write. The status kept for 5 s in the person's kv keeps the
+flag. When Self refuses a new link because a check is open (`409
+link_active`), the same review words are used when the 409 says
+`review: true`, or when the status read last for that link was in review;
+otherwise "Your identity check is already in progress ...".
+
+## Channel events
+
+### Permission cards answered
+
+When the person answers a card in their wallet, the Auth Hub tells the
+channel gateway, and the gateway sends the oracle a `permission_answered`
+event turn (`POST /channels/turn` with `event: { kind, permissionId, status
+}`, status `allowed`, `not_allowed` or `expired`; only ids, never text; see
+[channels](../../../docs/channels.md#channel-events)). The gateway sends
+one only to a runtime whose turn results list `permission_event` in
+`features` (0.47.0 and later).
+
+The runtime runs it as a turn in the binding's current session, after any
+turn of the person already running, and asks each plugin's
+`handleChannelEvent(event, ctx)` in order. This plugin claims only a card
+this person's kv recorded (a card a request tool sent, one it read from the
+Hub's list, or one another plugin recorded), and then:
+
+1. reads the card at the Hub (`GET /api/internal/permissions/:id`). Unless
+   the Hub's state is the event's (`allowed`; `declined` for `not_allowed`;
+   `expired`) nothing is said: a forged or stale event changes nothing, and
+   nothing is granted by an event anyway (every tool still reads the Hub
+   before it uses a grant);
+2. stays silent when the person already learned that answer in the chat (a
+   tool read the card in that state: `seen`) or an event already told it
+   (`told`, with its request id; the same event's run asked again after a
+   restart answers as before);
+3. answers in fixed words:
+   - `allowed`: the model runs with a note, hidden like a delivery notice,
+     that tells it to start with exactly "Thanks, you allowed it." and then
+     go on with the task: for a card with `self.identity-check`, call
+     `credentials_request_action` with `context: "next_step"` and send the
+     link in the same message; for a credential check, `credentials_check`;
+     for another plugin's card, that plugin's `next` words;
+   - `not_allowed`: "No problem, nothing was shared. Tell me if you change
+     your mind." is sent without the model;
+   - `expired`: "That link has run out. Shall I send a new one?" is sent
+     without the model.
+
+A card no plugin claims, a plugin that throws, the Hub unreadable, the
+plugin off or the turn not on WhatsApp: the turn ends with an empty reply
+and the gateway sends nothing.
+
+### Identity checks: in review, passed, failed
+
+Self tells the Hub when an identity check goes into review, passes or
+fails, and the gateway sends an `identity_check_updated` event turn
+(`linkId`, `status` `in_review` | `passed` | `failed`; same envelope, the
+same `permission_event` capability). The plugin:
+
+1. claims only a link it made for this person (`credentials_request_action`
+   keeps every link id it creates, with the card whose grants made it); any
+   other link id is `pass`, so the turn ends with an empty reply;
+2. reads the link at Self first, with the person's `link` grant, on the same
+   Hub-first path as `credentials_action_status`. Self decides, not the
+   event: an event that says `passed` while Self says `failed` gets the
+   failed words, and one while Self says the check is still going (or
+   anything else) says nothing;
+3. says nothing for an outcome the person already learned in the chat (a
+   status read, or the in-review refusal of a new link) or an event already
+   told; the same event asked again after a restart answers as before;
+4. answers in fixed words: `passed` -> the model starts with exactly "Your
+   identity check is done. You are verified." and goes on with the task
+   (another plugin's `verifiedNext` words for its card, for example the
+   reward claim); `failed` -> "Sorry, your identity check didn't pass." (the
+   model is told to offer a new link only if they want to try again);
+   `in_review` -> the in-review message. Both are sent without the model.
+
+### Cards of other plugins (the Yo agent)
+
+A plugin that asks the Hub for its own card (the Yo agent's rewards plugin
+asks for `yo.rewards` together with the identity items on one card) records
+it right after the Hub answered, in the turn's own kv:
+
+```ts
+import { rememberPermissionCard } from '@ixo/oracle-runtime-workers';
+
+const card = await hub.request({
+  ...binding,
+  requestKey,
+  expiresAt,
+  permissions,
+});
+await rememberPermissionCard(ctx.kv, {
+  permissionId: card.id,
+  items: permissions, // what the card asks
+  url: card.url,
+  // Fixed words, read after "Then, in the same message,". At most 600 characters each.
+  next: 'call rewards_claim and send its message right after that sentence',
+  // The same once an identity check made with this card's grants passed.
+  verifiedNext:
+    'call rewards_claim and send its message right after that sentence',
+});
+```
+
+The credentials plugin (it must be on: `CREDENTIALS_ENABLED`) then answers
+that card's events exactly as above, with `next` for `allowed`, and the
+identity-check events of the link made from that card with `verifiedNext`
+for `passed`. When the
+plugin reads the card itself and the person learns the answer in the chat,
+it calls `notePermissionAnswerSeen(ctx.kv, card.id, state.status)` so a late
+event stays silent. A plugin that wants its own handling instead overrides
+`handleChannelEvent(event, ctx)` (`OraclePlugin`): answer `pass` for any
+card it did not ask for, read the card at the Hub before anything else, and
+return `ignore`, `{ kind: 'reply', text, note }` or `{ kind: 'agent', note }`
+with fixed words only. Plugins are asked in their order in the oracle's
+plugin list; the first answer that is not `pass` decides.
+
 ## The Hub is the source of truth
 
 What a person allowed lives in the Auth Hub. The person's kv (`permissions`,
@@ -135,8 +295,8 @@ Rules:
   longer equals what the catalogue entry would write today, or the entry is
   gone) is never used again: it covers nothing, its action stops being the
   card in use or the one waiting, and its kept grants are dropped. The
-  person is asked again on ONE card, in plain words: "I need your OK once
-  more for this. Please tap Allow here: <link>" (a request tool, or
+  person is asked again on ONE card, in plain words: "Something changed, so
+  I need your OK again. Please tap this to allow: <link>" (a request tool, or
   `credentials_request_action` by itself; a card already waiting for the
   same items is handed back in the same words). `credentials_permission_status`
   shows the item with `current: false` and no grants, and
@@ -373,6 +533,25 @@ every oracle that signs UCANs).
   conditional write here once the worker offers it.
 
 ## Tests
+
+`wording-and-events.test.ts` covers every fixed sentence (each card kind,
+the identity link with both contexts and the strict input, every link
+status, in review, an older Self without the field, a review on another
+status, the review in the status cache and on a 409), the one-hour card, and
+the permission events: allowed, not allowed, expired, an unknown card, a
+duplicate, the same event again, a forged or stale event the Hub does not
+confirm, an answer already learned in the chat, the Hub unreadable, a turn
+outside WhatsApp, and another plugin's card with its `next` words; and the
+identity-check events: the link kept with its card, passed (default and
+`verifiedNext` words), failed, in review, Self's state followed over the
+event's, a check still going, an unknown link, a duplicate, the same event
+again, an outcome already learned in the chat, and Self unreadable.
+`src/do/channel-events.test.ts` runs the event turn in the user object
+(an empty reply, a fixed reply without the model and the hidden note, the
+agent with the note, one decision across a restart, a plugin that throws),
+`src/core/channel-events.test.ts` the routing, and
+`src/channels/contract.test.ts` / `turns.test.ts` the event body and the
+turn.
 
 `src/plugins/credentials/*.test.ts` run in the workerd pool (WebCrypto ECDH,
 HKDF and AES-GCM on the real runtime): the clients against a routing fetch

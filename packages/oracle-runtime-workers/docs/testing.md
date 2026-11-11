@@ -77,8 +77,11 @@ iterating and the full matrix once at the end.
   same fake bridge, every outcome included), and the credentials suites
   (`src/plugins/credentials/*.test.ts`: the Hub, Self and Credentials
   worker clients, the response token and route, the WhatsApp gate, and a
-  real OpenID4VP round trip through `credentials_check`, listed in
-  [credentials](../src/plugins/credentials/README.md#tests)).
+  real OpenID4VP round trip through `credentials_check`, the fixed wording
+  and the permission events, listed in
+  [credentials](../src/plugins/credentials/README.md#tests)), and the
+  permission event turn in the user object (`src/do/channel-events.test.ts`)
+  and its routing (`src/core/channel-events.test.ts`).
 - `pnpm test:core` — plain-Node suites (`vitest.core.config.ts`): plugin
   loader, env composition, registries, middlewares, prompt composer, a full
   tool-calling turn against a fake model, the memory indexer, the

@@ -202,11 +202,15 @@ function isPlaceholderTitle(title: string): boolean {
 /**
  * Whether a stored request holds a line of the conversation (`topics`, the
  * thread index): a routing question's exchange is the oracle's words, and a
- * delivery notice the gateway's, so neither is quoted as what the person
- * said.
+ * delivery notice or a permission event the gateway's, so none is quoted as
+ * what the person said.
  */
 function holdsConversationLine(request: TurnRequest): boolean {
-  return !request.channel?.routingClarification && !request.channel?.notice;
+  return (
+    !request.channel?.routingClarification &&
+    !request.channel?.notice &&
+    !request.channel?.channelEvent
+  );
 }
 
 /** A stored title as the wire carries it: null when untitled, at most 200 code points. */
@@ -939,8 +943,9 @@ export class ChannelTurns {
     let text: string;
     if (reference.author === 'user') {
       const request = this.host.requestOf(run);
-      // A delivery notice holds no words of the person to quote.
-      if (request.channel?.notice) return unknown;
+      // A delivery notice or an event holds no words of the person to quote.
+      if (request.channel?.notice || request.channel?.channelEvent)
+        return unknown;
       text = request.message;
     } else {
       if (run.status !== 'finished') return unknown;
@@ -1887,14 +1892,14 @@ export class ChannelTurns {
       return this.respond(input, receipt, session, record);
     }
     // The run owes its user message to the user's oracle room from here on;
-    // the mirror pass sends it, the turn never waits for it. A notice turn
-    // has no user message: the gateway's note is never mirrored, only the
-    // reply to it.
+    // the mirror pass sends it, the turn never waits for it. A notice or an
+    // event turn has no user message: the gateway's note is never mirrored,
+    // only the reply to it (an empty reply is not mirrored either).
     await this.db.run(
       `UPDATE channel_requests SET session_id = ?, user_mirrored = ?, reply_mirrored = 0,
          mirror_pending = 1, mirror_failures = 0, mirror_retry_at = NULL
        WHERE run_id = ?`,
-      [session, input.notice ? 1 : 0, runId],
+      [session, input.notice || input.event ? 1 : 0, runId],
     );
     await this.host.changed();
     await this.recordSessionBinding(input, session);
@@ -1934,6 +1939,7 @@ export class ChannelTurns {
           ? { routingClarification: routing.destination.text }
           : {}),
         ...(input.notice ? { notice: input.notice } : {}),
+        ...(input.event ? { channelEvent: input.event } : {}),
       },
     });
     this.kick();
@@ -2068,7 +2074,9 @@ export class ChannelTurns {
               record.runId,
               record.partialText ?? '',
             );
-            await this.host.mirror(request, reply.withFileNames, 'oracle');
+            // An event that said nothing leaves nothing to mirror.
+            if (!request.channel?.channelEvent || reply.withFileNames.trim())
+              await this.host.mirror(request, reply.withFileNames, 'oracle');
             await this.settleMirror(
               row.run_id,
               'reply_mirrored = 1, mirror_pending = 0',

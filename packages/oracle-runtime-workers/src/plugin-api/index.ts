@@ -16,6 +16,17 @@ export type {
   PluginRoute,
   PluginRouteMethod,
 } from './oracle-plugin';
+export {
+  IDENTITY_CHECK_EVENT_STATUSES,
+  MAX_CHANNEL_EVENT_TEXT,
+  PERMISSION_EVENT_STATUSES,
+  type ChannelEventResult,
+  type IdentityCheckEventStatus,
+  type IdentityCheckUpdatedEvent,
+  type OracleChannelEvent,
+  type PermissionAnsweredEvent,
+  type PermissionEventStatus,
+} from './channel-events';
 export { defineOraclePlugin } from './define-plugin';
 export type { DefineOraclePluginInput } from './define-plugin';
 export { tool } from './tool-helper';

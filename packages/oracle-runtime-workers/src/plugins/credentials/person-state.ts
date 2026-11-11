@@ -5,6 +5,7 @@ import {
   GrantSchema,
   StatusAnswer,
   type PermissionGrant,
+  type PermissionRequest,
   type PermissionState,
 } from './hub-client';
 import { LINK_STATUSES, type LinkState } from './self-client';
@@ -14,8 +15,11 @@ import { LINK_STATUSES, type LinkState } from './self-client';
  * `credentials`, next to the check rows of `check-store.ts`):
  *
  * - `permissions`: the permission cards THIS person was asked, each once
- *   with the kinds of its items and its link (`credentials_permission_status`
- *   reads no other id, except one the Hub lists for this person).
+ *   with the kinds of its items, its link, what it asked (action ids and
+ *   credential types, plus another plugin's fixed next step) and the final
+ *   answer a tool or a permission event already gave
+ *   (`credentials_permission_status` reads no other id, except one the Hub
+ *   lists for this person; a permission event for any other id is ignored).
  *
  * All of it is a cache: the Hub is the source of truth, and what is missing
  * here is read back from the Hub's list of the person's live cards.
@@ -31,31 +35,65 @@ const MAX_PERMISSIONS = 32;
 const PERMISSION_IDLE_TTL_MS = 32 * 24 * 3600 * 1000;
 
 const ItemKinds = z.array(z.enum(['credential-check', 'service-action']));
+/** A card's final answer as the Hub names it. */
+const ANSWERS = ['allowed', 'declined', 'expired'] as const;
+export type PermissionAnswer = (typeof ANSWERS)[number];
+/** The most characters of a plugin's fixed "what next" text for an allowed card. */
+export const MAX_NEXT_STEP_CHARS = 600;
+const EntryObject = z.object({
+  id: z.string(),
+  kinds: ItemKinds,
+  /** The card's link, kept so a card still waiting can be sent again. */
+  url: z.string().url().optional().catch(undefined),
+  /** What the card asked: its catalogue action ids and credential types. */
+  actions: z.array(z.string().max(128)).max(5).optional().catch(undefined),
+  vcts: z.array(z.string().max(512)).max(5).optional().catch(undefined),
+  /** Another plugin's fixed words for the agent once the card is allowed. */
+  next: z.string().max(MAX_NEXT_STEP_CHARS).optional().catch(undefined),
+  /** Another plugin's fixed words once an identity check from this card passed. */
+  verifiedNext: z.string().max(MAX_NEXT_STEP_CHARS).optional().catch(undefined),
+  /** The final answer a tool already read in the chat (the person knows it). */
+  seen: z.enum(ANSWERS).optional().catch(undefined),
+  /** The answer a permission event already told, and the event's request id. */
+  told: z
+    .object({ status: z.enum(ANSWERS), requestId: z.string().max(180) })
+    .optional()
+    .catch(undefined),
+});
+export type PermissionRecord = z.infer<typeof EntryObject>;
 /** One card: its id once, with the kinds of its items (older rows: the id alone). */
 const Entry = z.union([
-  z.string().transform((id) => ({
-    id,
-    kinds: [] as string[],
-    url: undefined as string | undefined,
-  })),
-  z.object({
-    id: z.string(),
-    kinds: ItemKinds,
-    /** The card's link, kept so a card still waiting can be sent again. */
-    url: z.string().url().optional().catch(undefined),
-  }),
+  z.string().transform((id): PermissionRecord => ({ id, kinds: [] })),
+  EntryObject,
 ]);
 const Entries = z.array(Entry);
 
+function isAnswer(status: string): status is PermissionAnswer {
+  return (ANSWERS as readonly string[]).includes(status);
+}
+
+/** What a card asked for, kept with its id (see {@link recordPermission}). */
+export interface PermissionAsked {
+  actions?: readonly string[];
+  vcts?: readonly string[];
+  /** Fixed words for the agent once the card is allowed (another plugin's). */
+  next?: string;
+  /** Fixed words for the agent once an identity check from this card passed. */
+  verifiedNext?: string;
+}
+
 /**
  * Remember a permission card's id as this person's, once, with the kinds of
- * its items (oldest dropped first).
+ * its items and what it asked (oldest dropped first). What a card recorded
+ * before (its link, what it asked, its answers) stays when it is recorded
+ * again without it.
  */
 export async function recordPermission(
   kv: UserKvSurface,
   id: string,
   kinds: readonly ('credential-check' | 'service-action')[] = [],
   url?: string,
+  asked: PermissionAsked = {},
 ): Promise<void> {
   await kv.update(
     CREDENTIALS_KV_NAMESPACE,
@@ -63,14 +101,141 @@ export async function recordPermission(
     (current) => {
       const parsed = Entries.safeParse(current);
       const all = parsed.success ? parsed.data : [];
-      // A link recorded before stays when the card is recorded again without one.
-      const link = url ?? all.find((x) => x.id === id)?.url;
+      const kept = all.find((x) => x.id === id);
+      const link = url ?? kept?.url;
+      const actions = asked.actions ? [...asked.actions] : kept?.actions;
+      const vcts = asked.vcts ? [...asked.vcts] : kept?.vcts;
+      const next = asked.next ?? kept?.next;
+      const verifiedNext = asked.verifiedNext ?? kept?.verifiedNext;
       const entries = all.filter((x) => x.id !== id);
-      entries.push({ id, kinds: [...kinds], ...(link ? { url: link } : {}) });
+      entries.push({
+        id,
+        kinds: [...kinds],
+        ...(link ? { url: link } : {}),
+        ...(actions ? { actions } : {}),
+        ...(vcts ? { vcts } : {}),
+        ...(next ? { next } : {}),
+        ...(verifiedNext ? { verifiedNext } : {}),
+        ...(kept?.seen ? { seen: kept.seen } : {}),
+        ...(kept?.told ? { told: kept.told } : {}),
+      });
       return entries.slice(-MAX_PERMISSIONS);
     },
     { idleTtlMs: PERMISSION_IDLE_TTL_MS },
   );
+}
+
+/**
+ * For another plugin that asks the Hub for a card itself (with
+ * `HubPermissionsClient.request`): record the card in this person's
+ * credentials kv, with what it asked and, optionally, `next`: fixed words
+ * for the agent once the person allows it (what to do next, for example
+ * "call rewards_claim, then send its message"; at most 600 characters,
+ * never model or Hub text) and `verifiedNext`: the same once an identity
+ * check made with this card's grants passed. The credentials plugin then
+ * answers the card's permission events: it reads the card at the Hub, and
+ * says "Thanks, you allowed it." and lets the agent go on with `next`, or
+ * the fixed sentence for "Don't allow" or a card that ran out; and the
+ * identity-check events of a link made from the card ("Your identity check
+ * is done. You are verified." and `verifiedNext`). Call it right after the
+ * Hub answered the request, in the turn's own `ctx.kv`.
+ */
+export async function rememberPermissionCard(
+  kv: UserKvSurface,
+  card: {
+    permissionId: string;
+    items: readonly PermissionRequest[];
+    url?: string;
+    next?: string;
+    verifiedNext?: string;
+  },
+): Promise<void> {
+  const next = card.next?.trim();
+  const verifiedNext = card.verifiedNext?.trim();
+  for (const [name, value] of [
+    ['next', next],
+    ['verifiedNext', verifiedNext],
+  ] as const)
+    if (value && value.length > MAX_NEXT_STEP_CHARS)
+      throw new RangeError(
+        `${name} is longer than ${MAX_NEXT_STEP_CHARS} characters`,
+      );
+  const actions = card.items.flatMap((p) =>
+    p.kind === 'service-action' ? [p.action] : [],
+  );
+  const vcts = card.items.flatMap((p) =>
+    p.kind === 'credential-check' ? [p.vct] : [],
+  );
+  await recordPermission(
+    kv,
+    card.permissionId,
+    card.items.map((p) => p.kind),
+    card.url,
+    {
+      actions,
+      vcts,
+      ...(next ? { next } : {}),
+      ...(verifiedNext ? { verifiedNext } : {}),
+    },
+  );
+}
+
+/** Card `id` as this person's kv recorded it, or null. */
+export async function readPermissionRecord(
+  kv: UserKvSurface,
+  id: string,
+): Promise<PermissionRecord | null> {
+  const parsed = Entries.safeParse(
+    await kv.get(CREDENTIALS_KV_NAMESPACE, PERMISSIONS_KEY),
+  );
+  if (!parsed.success) return null;
+  return parsed.data.find((x) => x.id === id) ?? null;
+}
+
+/** Change the record of card `id` (nothing when the kv does not hold it). */
+async function updateRecord(
+  kv: UserKvSurface,
+  id: string,
+  change: (record: PermissionRecord) => PermissionRecord,
+): Promise<void> {
+  const record = await readPermissionRecord(kv, id);
+  if (!record) return;
+  await kv.update(
+    CREDENTIALS_KV_NAMESPACE,
+    PERMISSIONS_KEY,
+    (current) => {
+      const parsed = Entries.safeParse(current);
+      if (!parsed.success) return current;
+      return parsed.data.map((x) => (x.id === id ? change(x) : x));
+    },
+    { idleTtlMs: PERMISSION_IDLE_TTL_MS },
+  );
+}
+
+/**
+ * Note that the person already learned card `id`'s final answer in the chat
+ * (a tool read it), so a permission event for that answer stays silent.
+ * Anything but `allowed`, `declined` or `expired` is ignored.
+ */
+export async function notePermissionAnswerSeen(
+  kv: UserKvSurface,
+  id: string,
+  status: string,
+): Promise<void> {
+  if (!isAnswer(status)) return;
+  const record = await readPermissionRecord(kv, id);
+  if (!record || record.seen === status) return;
+  await updateRecord(kv, id, (x) => ({ ...x, seen: status }));
+}
+
+/** Note that a permission event (request `requestId`) told card `id`'s answer. */
+export async function notePermissionAnswerTold(
+  kv: UserKvSurface,
+  id: string,
+  status: PermissionAnswer,
+  requestId: string,
+): Promise<void> {
+  await updateRecord(kv, id, (x) => ({ ...x, told: { status, requestId } }));
 }
 
 /** Whether this person's kv records `id` as one of their permission cards. */
@@ -187,6 +352,8 @@ const CachedLink = z.object({
     status: z.enum(LINK_STATUSES),
     updatedAt: z.number(),
     expiresAt: z.number(),
+    /** Self's "in review" beside `in_progress`; rows kept before it have none. */
+    review: z.literal(true).optional().catch(undefined),
   }),
 });
 
@@ -209,6 +376,21 @@ export async function readLinkCache(
     : null;
 }
 
+/**
+ * The status read last for a link, however old: only for choosing words
+ * (a check in review leaves review only for a final status), never as an
+ * answer about progress.
+ */
+export async function lastLinkState(
+  kv: UserKvSurface,
+  linkId: string,
+): Promise<LinkState | null> {
+  const parsed = CachedLink.safeParse(
+    await kv.get(CREDENTIALS_KV_NAMESPACE, linkKey(linkId)),
+  );
+  return parsed.success ? parsed.data.state : null;
+}
+
 export async function writeLinkCache(
   kv: UserKvSurface,
   state: LinkState,
@@ -219,6 +401,113 @@ export async function writeLinkCache(
     linkKey(state.linkId),
     { at: nowMs, state },
     { idleTtlMs: 3600 * 1000 },
+  );
+  // A tool read the check's state: the person learns it in the chat.
+  const told = identityOutcomeOf(state);
+  if (told) await noteLinkSeen(kv, state.linkId, told);
+}
+
+// ---------------------------------------------------------------------------
+// Identity-check links this oracle made for the person.
+
+/** What an identity-check event or a tool can tell about a check. */
+export const IDENTITY_OUTCOMES = ['in_review', 'passed', 'failed'] as const;
+export type IdentityOutcome = (typeof IDENTITY_OUTCOMES)[number];
+
+/** A link state as an outcome the person is told, or null (still going, ended unused). */
+export function identityOutcomeOf(
+  state: Pick<LinkState, 'status' | 'review'>,
+): IdentityOutcome | null {
+  if (state.status === 'in_progress') return state.review ? 'in_review' : null;
+  return state.status === 'passed' || state.status === 'failed'
+    ? state.status
+    : null;
+}
+
+const LINKS_KEY = 'links';
+const MAX_LINKS = 32;
+
+const LinkRecordSchema = z.object({
+  linkId: z.string(),
+  /** The card whose grants made the link, when known. */
+  permissionId: z.string().optional().catch(undefined),
+  /** The outcome a tool already read in the chat. */
+  seen: z.enum(IDENTITY_OUTCOMES).optional().catch(undefined),
+  /** The outcome an identity-check event already told, and its request id. */
+  told: z
+    .object({
+      status: z.enum(IDENTITY_OUTCOMES),
+      requestId: z.string().max(180),
+    })
+    .optional()
+    .catch(undefined),
+});
+export type LinkRecord = z.infer<typeof LinkRecordSchema>;
+const LinkRecords = z.array(LinkRecordSchema);
+
+async function updateLinks(
+  kv: UserKvSurface,
+  change: (links: LinkRecord[]) => LinkRecord[],
+): Promise<void> {
+  await kv.update(
+    CREDENTIALS_KV_NAMESPACE,
+    LINKS_KEY,
+    (current) => {
+      const parsed = LinkRecords.safeParse(current);
+      return change(parsed.success ? parsed.data : []).slice(-MAX_LINKS);
+    },
+    { idleTtlMs: PERMISSION_IDLE_TTL_MS },
+  );
+}
+
+/** Remember an identity-check link made for this person (and the card it came from). */
+export async function recordLink(
+  kv: UserKvSurface,
+  linkId: string,
+  permissionId?: string,
+): Promise<void> {
+  await updateLinks(kv, (links) => [
+    ...links.filter((x) => x.linkId !== linkId),
+    { linkId, ...(permissionId ? { permissionId } : {}) },
+  ]);
+}
+
+/** The link as this person's kv recorded it, or null (not made here for them). */
+export async function readLinkRecord(
+  kv: UserKvSurface,
+  linkId: string,
+): Promise<LinkRecord | null> {
+  const parsed = LinkRecords.safeParse(
+    await kv.get(CREDENTIALS_KV_NAMESPACE, LINKS_KEY),
+  );
+  if (!parsed.success) return null;
+  return parsed.data.find((x) => x.linkId === linkId) ?? null;
+}
+
+/** Note that the person learned this outcome of link `linkId` in the chat. */
+export async function noteLinkSeen(
+  kv: UserKvSurface,
+  linkId: string,
+  status: IdentityOutcome,
+): Promise<void> {
+  const record = await readLinkRecord(kv, linkId);
+  if (!record || record.seen === status) return;
+  await updateLinks(kv, (links) =>
+    links.map((x) => (x.linkId === linkId ? { ...x, seen: status } : x)),
+  );
+}
+
+/** Note that an identity-check event (request `requestId`) told this outcome. */
+export async function noteLinkTold(
+  kv: UserKvSurface,
+  linkId: string,
+  status: IdentityOutcome,
+  requestId: string,
+): Promise<void> {
+  await updateLinks(kv, (links) =>
+    links.map((x) =>
+      x.linkId === linkId ? { ...x, told: { status, requestId } } : x,
+    ),
   );
 }
 
@@ -296,6 +585,8 @@ export async function writePermissionCache(
     { at: nowMs, state },
     { idleTtlMs: 3600 * 1000 },
   );
+  // A tool read the card's final answer: the person learns it in the chat.
+  await notePermissionAnswerSeen(kv, state.id, state.status);
 }
 
 /**
