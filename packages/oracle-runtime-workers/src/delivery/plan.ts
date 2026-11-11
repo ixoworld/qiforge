@@ -13,7 +13,9 @@ import { parseReference } from '@ixo/action-protocol';
  *  - each step goes through the shaper, which may spill it to an artefact;
  *  - a `create_artifact` call becomes its message, the link, its question;
  *  - a `send_file` call becomes a file part, where the call stands in the
- *    turn; a file sent twice is delivered once.
+ *    turn; a file sent twice is delivered once;
+ *  - a plugin tool's standalone messages (`withStandaloneMessages`) come
+ *    last, each a message of its own that nothing merges with.
  */
 import {
   AIMessage,
@@ -24,7 +26,8 @@ import { contentToText } from '../do/transcript';
 import { CREATE_ARTIFACT_TOOL, createArtifactParts } from '../artifacts/tool';
 import { turnCarryOf, turnStart } from '../core/middlewares/turn-boundary';
 import { SEND_FILE_TOOL, sentFile } from '../plugins/sandbox/send-file';
-import { isBlank, shapeStep, type SpillShape } from './shaper';
+import { isBlank, shapeStep, splitText, type SpillShape } from './shaper';
+import { MAX_STANDALONE_MESSAGES, standaloneMessagesOf } from './standalone';
 import type {
   ArtifactRef,
   ChatLimits,
@@ -40,7 +43,9 @@ export interface TurnStep {
 
 export type DraftPart =
   | ReplyContent
-  | { kind: 'spill'; key: string; spill: SpillShape };
+  | { kind: 'spill'; key: string; spill: SpillShape }
+  /** A plugin tool's standalone message: delivered alone, never merged. */
+  | { kind: 'standalone'; text: string };
 
 const NARRATION_MAX_CHARS = 200;
 
@@ -60,10 +65,16 @@ export function turnSteps(messages: readonly BaseMessage[]): {
   const toolResults = new Map<string, string>();
   const toolArtifacts = new Map<string, unknown>();
   // A mid-turn summary condensed the turn's earlier steps away. It carries
-  // their calls; a file already sent among them is still delivered, first.
+  // their calls; a file already sent among them is still delivered, first,
+  // and standalone messages handed over among them still come last.
   const carried = start > 0 ? turnCarryOf(messages[opening]!) : undefined;
   for (const [i, call] of (carried ?? []).entries()) {
-    if (call.name !== SEND_FILE_TOOL || call.artifact === undefined) continue;
+    if (call.artifact === undefined) continue;
+    if (
+      call.name !== SEND_FILE_TOOL &&
+      standaloneMessagesOf(call.artifact).length === 0
+    )
+      continue;
     const id = call.id ?? `carried-${i}`;
     steps.push({
       text: '',
@@ -142,6 +153,7 @@ export function draftReplyPlan(input: {
 }): DraftPart[] {
   const parts: DraftPart[] = [];
   const sentPaths = new Set<string>();
+  const standalone: string[] = [];
   const steps =
     input.steps.length > 0 || !input.continuation
       ? input.steps
@@ -230,16 +242,40 @@ export function draftReplyPlan(input: {
           parts.push({ kind: 'file', file: sent.file });
         }
       }
+      // Any tool's: the same text handed over twice is delivered once.
+      for (const text of standaloneMessagesOf(
+        input.toolArtifacts?.get(call.id),
+      ))
+        if (!standalone.includes(text)) standalone.push(text);
     }
   });
-  return parts;
+  return [...parts, ...standaloneParts(standalone, input.limits)];
+}
+
+/**
+ * A run's standalone messages as parts, after the reply: at most
+ * `MAX_STANDALONE_MESSAGES` messages, the rest joined to the last one, and
+ * a message longer than `bubbleMax` split like any text (each piece still
+ * alone).
+ */
+function standaloneParts(texts: string[], limits: ChatLimits): DraftPart[] {
+  const kept = texts.slice(0, MAX_STANDALONE_MESSAGES - 1);
+  const rest = texts.slice(MAX_STANDALONE_MESSAGES - 1);
+  if (rest.length > 0) kept.push(rest.join('\n\n'));
+  return kept.flatMap((text) =>
+    splitText(text, limits.bubbleMax).map((piece) => ({
+      kind: 'standalone' as const,
+      text: piece,
+    })),
+  );
 }
 
 /**
  * A part before it is numbered. `framing` marks a spill's lead or closing
- * question: its artefact holds the same text.
+ * question: its artefact holds the same text. `alone` marks a standalone
+ * message: the cap never merges it with another part.
  */
-type PlanPart = ReplyContent & { framing?: boolean };
+type PlanPart = ReplyContent & { framing?: boolean; alone?: boolean };
 
 /**
  * Over the run's cap: merge the shortest neighbouring messages while the
@@ -247,7 +283,7 @@ type PlanPart = ReplyContent & { framing?: boolean };
  * reply's last part for as long as possible. Order is kept, and neither a
  * file nor text that exists nowhere else is ever dropped: a reply with
  * several documents or files, or a long one without artefact storage, can
- * stay over the cap.
+ * stay over the cap. A standalone message is never merged.
  */
 function capParts(parts: PlanPart[], limits: ChatLimits): ReplyContent[] {
   const out = [...parts];
@@ -258,6 +294,7 @@ function capParts(parts: PlanPart[], limits: ChatLimits): ReplyContent[] {
       const a = out[i];
       const b = out[i + 1];
       if (a?.kind !== 'text' || b?.kind !== 'text') continue;
+      if (a.alone === true || b.alone === true) continue;
       const length = a.text.length + 2 + b.text.length;
       if (length <= limits.bubbleMax && length < bestLength) {
         best = i;
@@ -354,6 +391,10 @@ export async function materializeReplyPlan(
 ): Promise<ReplyPlan> {
   const parts: PlanPart[] = [];
   for (const part of draft) {
+    if (part.kind === 'standalone') {
+      parts.push({ kind: 'text', text: part.text, alone: true });
+      continue;
+    }
     if (part.kind !== 'spill') {
       parts.push(part);
       continue;
