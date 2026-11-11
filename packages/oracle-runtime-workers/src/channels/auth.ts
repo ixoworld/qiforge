@@ -1,6 +1,4 @@
 import {
-  createCompositeDIDResolver,
-  createWebDIDResolver,
   createUCANValidator,
   defineCapability,
   parseDelegation,
@@ -11,9 +9,11 @@ import { z } from 'zod';
 import type { OracleWorkerEnv, TurnIdentity } from '../do/contracts';
 import { RunAttemptDeferred } from '../do/run-coordinator';
 import {
-  IXO_DID_RESOLUTION_CACHE_TTL_MS,
-  sharedIxoDIDResolver,
-} from '../shell/auth';
+  channelDidKeys,
+  channelKeySource,
+  shortDid,
+  type ChannelKeyRole,
+} from './key-lookup';
 import {
   ChannelError,
   type ChannelTurnInput,
@@ -45,6 +45,33 @@ export interface ChannelAuthConfig {
   /** Every channel service DID allowed to invoke this deployment. */
   channelDids: readonly string[];
   didResolver: DIDKeyResolver;
+  /**
+   * Why `didResolver` refused a DID during this request, if it did: a key
+   * lookup that failed with no kept keys to stand in (already logged by
+   * the lookup), or an identity that is not allowed to be resolved.
+   */
+  lookupRefusal?: () => ChannelLookupRefusal | undefined;
+}
+
+export type ChannelLookupRefusal = 'key_lookup' | 'unapproved_identity';
+
+/**
+ * Logs a refused channel invocation whose cause is not a failed key lookup
+ * (that one is logged by the lookup itself, `[channels] key lookup failed`):
+ * `verification_failed` when every key resolved and the invocation still
+ * did not verify (a bad signature, a broken chain or capability; `code` is
+ * the validator's), `unapproved_identity` for a DID outside the allowlist,
+ * `chain` for a valid invocation of the wrong shape. No token, body or
+ * message text.
+ */
+function logChannelAuthRefusal(
+  reason: 'verification_failed' | 'unapproved_identity' | 'chain',
+  fields: Record<string, string | number | undefined>,
+): void {
+  // eslint-disable-next-line no-console -- console IS the logger on Workers (Logs/observability).
+  console.warn(
+    `[channels] invocation refused ${JSON.stringify({ reason, ...fields })}`,
+  );
 }
 
 export async function authenticateChannel(
@@ -90,19 +117,35 @@ export async function authenticateChannel(
   // The invoker is the one listed channel service that signed this
   // invocation; the user's grant must be addressed to that same service.
   const channelDid = result.invoker;
-  if (
-    !result.ok ||
-    !userDid?.startsWith('did:ixo:') ||
-    chain?.length !== 2 ||
-    !channelDid ||
-    !config.channelDids.includes(channelDid) ||
-    chain[1] !== channelDid
-  )
+  if (!result.ok) {
+    const refusal = config.lookupRefusal?.();
+    if (refusal !== 'key_lookup')
+      logChannelAuthRefusal(refusal ?? 'verification_failed', {
+        code: result.error?.code,
+      });
     throw new ChannelError(
       401,
       'Invalid user-rooted channel invocation',
       'unauthorized',
     );
+  }
+  if (
+    !userDid?.startsWith('did:ixo:') ||
+    chain?.length !== 2 ||
+    !channelDid ||
+    !config.channelDids.includes(channelDid) ||
+    chain[1] !== channelDid
+  ) {
+    logChannelAuthRefusal('chain', {
+      invoker: channelDid ? shortDid(channelDid) : undefined,
+      chainLength: chain?.length,
+    });
+    throw new ChannelError(
+      401,
+      'Invalid user-rooted channel invocation',
+      'unauthorized',
+    );
+  }
   const now = Math.floor(Date.now() / 1000);
   const invocation = await parseDelegation(token);
   const proof = invocation.proofs[0];
@@ -174,15 +217,6 @@ export async function authenticateChannel(
 }
 
 /**
- * did:web documents (a channel service identity) resolved for every channel
- * request, shared per isolate: successful lookups are cached as long as
- * did:ixo keys, failures never, and concurrent lookups share one request.
- */
-const channelWebResolver = createWebDIDResolver({
-  cacheTtlMs: IXO_DID_RESOLUTION_CACHE_TTL_MS,
-});
-
-/**
  * `CHANNEL_SERVICE_DID` is one DID or a comma-separated list (one channel
  * service per messaging provider, or a rotation overlap): entries are
  * trimmed, empty ones dropped and duplicates removed, order kept.
@@ -198,11 +232,19 @@ export function parseChannelServiceDids(raw: string | undefined): string[] {
   ];
 }
 
+/**
+ * The channel validator's config for one request. Keys of the oracle's own
+ * DID, the listed channel services and did:ixo people come from the
+ * isolate's kept keys or a lookup (`channelDidKeys`); any other DID is
+ * refused without one. `waitUntil` (the request's) keeps a shared or
+ * background lookup alive past the request that started it.
+ */
 export function channelAuthConfig(
   env: Pick<
     OracleWorkerEnv,
     'CHANNEL_SERVICE_DID' | 'BLOCKSYNC_GRAPHQL_URL' | 'ORACLE_DID'
   >,
+  waitUntil?: (work: Promise<unknown>) => void,
 ): ChannelAuthConfig {
   const channelDids = parseChannelServiceDids(env.CHANNEL_SERVICE_DID);
   if (channelDids.length === 0)
@@ -211,27 +253,38 @@ export function channelAuthConfig(
       'Channels are not configured',
       'not_configured',
     );
-  const resolver = createCompositeDIDResolver([
-    sharedIxoDIDResolver(env.BLOCKSYNC_GRAPHQL_URL),
-    channelWebResolver,
-  ]);
+  let refusal: ChannelLookupRefusal | undefined;
   return {
     oracleDid: env.ORACLE_DID,
     channelDids,
+    lookupRefusal: () => refusal,
     didResolver: async (did) => {
-      if (
-        channelDids.includes(did) ||
-        did === env.ORACLE_DID ||
-        did.startsWith('did:ixo:')
-      )
-        return resolver(did);
-      return {
-        error: {
-          name: 'DIDKeyResolutionError',
-          did,
-          message: 'Unapproved channel identity',
-        },
-      };
+      const role: ChannelKeyRole | null =
+        did === env.ORACLE_DID
+          ? 'oracle'
+          : channelDids.includes(did)
+            ? 'gateway'
+            : did.startsWith('did:ixo:')
+              ? 'person'
+              : null;
+      if (!role) {
+        refusal ??= 'unapproved_identity';
+        return {
+          error: {
+            name: 'DIDKeyResolutionError',
+            did,
+            message: 'Unapproved channel identity',
+          },
+        };
+      }
+      const result = await channelDidKeys({
+        did,
+        role,
+        ...channelKeySource(did, env.BLOCKSYNC_GRAPHQL_URL),
+        ...(waitUntil ? { waitUntil } : {}),
+      });
+      if ('error' in result) refusal ??= 'key_lookup';
+      return result;
     },
   };
 }
