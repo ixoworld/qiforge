@@ -76,7 +76,9 @@ export {
 } from './response-route';
 export {
   CredentialsServiceError,
+  hubReasonOf,
   isInReview,
+  isSaving,
   NO_LATER_MESSAGE,
   refusalFor,
   type CredentialsRefusal,

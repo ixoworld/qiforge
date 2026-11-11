@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   CredentialsServiceError,
+  hubReasonOf,
   MESSAGES,
   NO_LATER_MESSAGE,
   refusal,
@@ -173,6 +174,51 @@ describe("refusalFor: Self's codes", () => {
     expect(refusalFor(selfError(503, 'auth_unavailable'))).toEqual(
       refusal('auth_unavailable', MESSAGES.busy),
     );
+  });
+});
+
+describe("refusalFor: the Hub's reason beside unnamed_service", () => {
+  const hubError = (body?: Record<string, unknown>) =>
+    new CredentialsServiceError({
+      service: 'hub',
+      status: 400,
+      code: 'unnamed_service',
+      ...(body ? { body } : {}),
+    });
+
+  it('oracle_not_linked: the same sentence, an operator hint about the linked entity', () => {
+    const error = hubError({
+      error: 'unnamed_service',
+      reason: 'oracle_not_linked',
+    });
+    expect(hubReasonOf(error)).toBe('oracle_not_linked');
+    expect(refusalFor(error)).toEqual({
+      error: 'unnamed_service',
+      message: "This service can't ask for permissions yet.",
+      hint: "The Auth Hub refused (reason oracle_not_linked): the oracle's entity does not list the oracle's signing account as a linked entity with service matrix and relationship admin on chain. An operator must add that linked entity to the oracle's entity; nothing was sent. Do not retry.",
+    });
+    expect(MESSAGES.oracleNotLinked.message).toBe(
+      MESSAGES.unnamedService.message,
+    );
+  });
+
+  it('absent, unknown or malformed reason: the words as before', () => {
+    for (const body of [
+      undefined,
+      { error: 'unnamed_service' },
+      { error: 'unnamed_service', reason: 'no_name' },
+      { error: 'unnamed_service', reason: 42 },
+      { error: 'unnamed_service', reason: 'Oracle Not Linked!' },
+    ]) {
+      expect(refusalFor(hubError(body))).toEqual(
+        refusal('unnamed_service', MESSAGES.unnamedService),
+      );
+    }
+    expect(hubReasonOf(hubError({ reason: 'no_name' }))).toBe('no_name');
+    expect(hubReasonOf(hubError({ reason: 42 }))).toBeUndefined();
+    expect(
+      hubReasonOf(hubError({ reason: 'Oracle Not Linked!' })),
+    ).toBeUndefined();
   });
 });
 
