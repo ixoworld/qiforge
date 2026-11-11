@@ -11,6 +11,7 @@ import type {
   ChannelControlInput,
   ChannelControlOutcome,
   ChannelFileNotice,
+  ChannelEvent,
   ChannelReplyContext,
   ChannelReplyReference,
 } from '../channels/contract';
@@ -447,6 +448,18 @@ export interface TurnRequest {
      * that is not the user's, and nothing shows it as a user message.
      */
     notice?: ChannelFileNotice;
+    /**
+     * The event (a permission card's answer, an identity check's change) this turn carries instead of a message (`message`
+     * is empty): handed to the plugins when the run starts
+     * (`OraclePlugin.handleChannelEvent`).
+     */
+    channelEvent?: ChannelEvent;
+    /**
+     * The plugin's fixed note for the model, set by the run's first attempt
+     * and stored with the run so a restart reads the same: it stands where
+     * the person's words would be, hidden like a delivery notice.
+     */
+    eventNote?: string;
   };
   executionProfile?: TaskExecutionProfile;
   identity: TurnIdentity;

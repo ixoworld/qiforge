@@ -3,7 +3,13 @@ export {
   type CredentialsPluginOptions,
 } from './credentials.plugin';
 export {
+  createCredentials,
   createCredentialsTools,
+  createPermissionEventHandler,
+  IDENTITY_EVENT_TEXT,
+  LINK_CONTEXTS,
+  PERMISSION_CARD_TTL_SECONDS,
+  PERMISSION_EVENT_TEXT,
   IDENTITY_CHECK_ACTION,
   ACTION_ID_PATTERN,
   WHATSAPP_PROVIDER,
@@ -39,6 +45,14 @@ export {
 } from './hub-client';
 export { relativeTime, SelfTime, selfTimeSeconds, whenItEnds } from './times';
 export {
+  IDENTITY_OUTCOMES,
+  MAX_NEXT_STEP_CHARS,
+  notePermissionAnswerSeen,
+  rememberPermissionCard,
+  type IdentityOutcome,
+  type PermissionAnswer,
+} from './person-state';
+export {
   CredentialsWorkerClient,
   mergeVerifierAccept,
   VERIFY_CAPABILITY,
@@ -62,6 +76,8 @@ export {
 } from './response-route';
 export {
   CredentialsServiceError,
+  isInReview,
+  NO_LATER_MESSAGE,
   refusalFor,
   type CredentialsRefusal,
   type CredentialsService,

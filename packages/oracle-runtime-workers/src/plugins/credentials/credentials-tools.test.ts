@@ -32,7 +32,7 @@ import {
   saveCheck,
 } from './check-store';
 import { purposeFor } from './config';
-import { MESSAGES, refusal } from './errors';
+import { MESSAGES, NO_LATER_MESSAGE, refusal } from './errors';
 import { canonicalJson, sha256Hex } from './hub-client';
 import { openResponseToken } from './response-route';
 import {
@@ -449,7 +449,8 @@ describe('permission cards', () => {
       permissionId: 'card_1',
       url: CARD.url,
       expiresAt: CARD.expiresAt,
-      message: `Tap this link to see what Companion is asking and choose Allow or Don't allow: ${CARD.url}`,
+      // A check of the identity credential only: its own fixed sentence.
+      message: `This lets me check that your identity is verified. Please tap this to allow: ${CARD.url}`,
       hint: 'Send `message` as it is, as one link in a short message. Never paste ids or tokens.',
     });
     const sent = JSON.parse(cardPosts(calls)[0]?.body ?? '');
@@ -568,8 +569,8 @@ describe('permission cards', () => {
           granted: { consentIds: ['cons_1'] },
         },
       ],
-      message: 'Thanks, you allowed it.',
-      hint: 'Go on with the task.',
+      message: "Thanks, that's allowed.",
+      hint: "Go on with the task. If you call another tool in this same reply (for example credentials_request_action for the identity link), send this sentence first and that tool's message right after it, together in ONE message.",
     });
     expect(JSON.stringify(out)).not.toContain('SECRET');
   });
@@ -1140,7 +1141,7 @@ describe('catalogued actions (self.identity-check)', () => {
       linkId: 'lnk_1',
       expiresAt: Date.UTC(2026, 10, 9, 14, 5) / 1000,
       message:
-        'Tap this link to start your identity check. It works once and ends at 18:05: https://dev.self.ixo.earth/l/tok',
+        'To do your identity check, open this link. You will scan your ID document and take a selfie. The link works once and ends at 18:05: https://dev.self.ixo.earth/l/tok',
       hint: 'Send `message` as it is. Keep the linkId to read progress. A new link replaces one nobody has opened yet, so do not call this again to resend.',
     });
     const create = calls.find((c) => c.url === `${SELF}/identity/v1/links`);
@@ -1176,8 +1177,9 @@ describe('catalogued actions (self.identity-check)', () => {
       status: 'in_progress',
       updatedAt: 1,
       expiresAt: 2,
-      message: "You're doing the identity check now.",
-      hint: 'Wait for them to finish; do not poll.',
+      message:
+        "Your identity check has started but isn't finished yet. Please finish the steps on the page you opened.",
+      hint: `Wait for them to finish; do not poll. ${NO_LATER_MESSAGE}`,
     });
   });
 
@@ -1255,7 +1257,7 @@ describe('catalogued actions (self.identity-check)', () => {
       expiresAt: ends,
       message:
         'Your identity check is already in progress; it ends in 15 minutes. Please carry on with it.',
-      hint: 'Its link cannot be sent again; read progress with this linkId.',
+      hint: `Its link cannot be sent again; read progress with this linkId when they write. ${NO_LATER_MESSAGE}`,
     });
     await expect(
       run(
@@ -1331,12 +1333,12 @@ describe('catalogued actions (self.identity-check)', () => {
       status: 'sent',
       expiresAt: Date.UTC(2026, 10, 10, 6, 34) / 1000,
       message:
-        'Tap this link to start your identity check. It works once and ends in 15 minutes: https://dev.self.ixo.earth/l/tok',
+        'To do your identity check, open this link. You will scan your ID document and take a selfie. The link works once and ends in 15 minutes: https://dev.self.ixo.earth/l/tok',
     });
     await expect(ask()).resolves.toMatchObject({
       status: 'sent',
       message:
-        'Tap this link to start your identity check. It works once and ends in about 2 hours: https://dev.self.ixo.earth/l/tok2',
+        'To do your identity check, open this link. You will scan your ID document and take a selfie. The link works once and ends in about 2 hours: https://dev.self.ixo.earth/l/tok2',
     });
     const open = await ask();
     expect(open).toMatchObject({
@@ -1409,13 +1411,15 @@ describe('one card for everything (credentials_request_permissions)', () => {
     expect(a.requestKey).toBe(await sha256Hex('run-1:call-1:permissions'));
     expect(b.requestKey).toBe(a.requestKey);
     expect(b.permissions).toEqual(a.permissions);
-    // The id is recorded once, with its item kinds.
+    // The id is recorded once, with its item kinds and what it asked.
     const stored = await kv.get(CREDENTIALS_KV_NAMESPACE, 'permissions');
     expect(stored).toEqual([
       {
         id: 'card_1',
         kinds: ['service-action', 'credential-check'],
         url: CARD.url,
+        actions: ['self.identity-check'],
+        vcts: [VCT],
       },
     ]);
   });
@@ -2485,7 +2489,14 @@ describe('the Hub is the source of truth, the kv a cache', () => {
       await kv.get(CREDENTIALS_KV_NAMESPACE, 'grants:self.identity-check'),
     ).toMatchObject({ permissionId: 'card_7', grants: GRANTS });
     expect(await kv.get(CREDENTIALS_KV_NAMESPACE, 'permissions')).toEqual([
-      { id: 'card_7', kinds: ['service-action'] },
+      // What the card asked, from the Hub's items, and that the answer
+      // was read in the chat (a permission event for it stays silent).
+      {
+        id: 'card_7',
+        kinds: ['service-action'],
+        actions: ['self.identity-check'],
+        seen: 'allowed',
+      },
     ]);
     // The action then asks the Hub first: one list read (no card status
     // read), and the grants it lists are used.
@@ -2571,7 +2582,7 @@ describe('the Hub is the source of truth, the kv a cache', () => {
       permissionId: 'card_1',
       url: CARD.url,
       expiresAt: waiting.expiresAt,
-      message: `Tap this link to see what Companion is asking and choose Allow or Don't allow: ${CARD.url}`,
+      message: `This lets me send you a link for your identity check. Please tap this to allow: ${CARD.url}`,
       hint: 'This is the card they were sent before and have not answered yet; no new card was made. Send `message` as it is, as one link in a short message. Never paste ids or tokens.',
     });
     expect(cardPosts(calls)).toHaveLength(1);
@@ -2876,7 +2887,7 @@ describe('the Hub is the source of truth, the kv a cache', () => {
       ).resolves.toMatchObject({
         status: 'sent',
         permissionId: 'card_1',
-        message: `I need your OK once more for this. Please tap Allow here: ${CARD.url}`,
+        message: `Something changed, so I need your OK again. Please tap this to allow: ${CARD.url}`,
       });
       // One list read, the card: Self is never called.
       expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
@@ -3141,7 +3152,7 @@ describe('the Hub is the source of truth, the kv a cache', () => {
   describe('an allowed item the Hub marks out of date (current: false)', () => {
     const IDENTITY = 'self.identity-check';
     const AGAIN = (url: string) =>
-      `I need your OK once more for this. Please tap Allow here: ${url}`;
+      `Something changed, so I need your OK again. Please tap this to allow: ${url}`;
     const selfCalls = (calls: RecordedCall[]) =>
       calls.filter((c) => c.url.startsWith(SELF));
     /** A kv where `card_7` is the identity card in use, its grants kept. */

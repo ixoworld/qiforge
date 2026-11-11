@@ -61,6 +61,13 @@ export interface Wording {
   hint?: string;
 }
 
+/**
+ * Added to every hint that could suggest waiting: the oracle only ever
+ * replies to a message, so it must never promise to write first.
+ */
+export const NO_LATER_MESSAGE =
+  'Never say you will let them know or message them later; you can only reply when they write to you.';
+
 export const MESSAGES = {
   whatsAppOnly: {
     message: "This isn't available in this chat yet.",
@@ -119,7 +126,12 @@ export const MESSAGES = {
   },
   permissionPending: {
     message: "You haven't answered the permission request yet.",
-    hint: 'Wait until they answer the card; do not ask again or poll.',
+    hint: `Wait until they answer the card; do not ask again or poll. ${NO_LATER_MESSAGE}`,
+  },
+  inReview: {
+    message:
+      "Thanks, your identity check is sent. Someone from our support team will look at it. Please check back later. You can ask me anytime, and I'll check how it's going.",
+    hint: `A person reviews it; nothing tells you when it is done and you cannot message them first. ${NO_LATER_MESSAGE} Do not send a new link. Read the status again only when they write.`,
   },
   permissionEnded: {
     message: 'Your permission for this has ended or was stopped.',
@@ -220,6 +232,20 @@ export function checkInProgress(ends: string | null): string {
 }
 
 /**
+ * Whether Self says a link's check waits for a person to review it: only
+ * `review: true` beside `status: "in_progress"`. Absent, any other value or
+ * any other status: not in review (an older Self never sends the field).
+ */
+export function isInReview(answer: unknown): boolean {
+  return (
+    typeof answer === 'object' &&
+    answer !== null &&
+    Reflect.get(answer, 'status') === 'in_progress' &&
+    Reflect.get(answer, 'review') === true
+  );
+}
+
+/**
  * `400 invalid_item`: the Hub names the item's position (`details.index`, from
  * 0) and a reason for developers. The person is told the item's place in
  * plain words; the reason goes to the agent's hint only.
@@ -289,6 +315,8 @@ export function refusalFor(
     case 'already_verified':
       return refusal(code, MESSAGES.alreadyVerified);
     case 'link_active': {
+      // A check waiting for a person's review has its own words.
+      if (isInReview(error.body)) return refusal(code, MESSAGES.inReview);
       // Self names the open link's end beside its error (ISO 8601 text).
       const ends = selfTimeSeconds(error.body?.expiresAt);
       return {
@@ -301,6 +329,7 @@ export function refusalFor(
                 nowMs: opts.nowMs ?? Date.now(),
               }),
         ),
+        hint: `Its link cannot be sent again. ${NO_LATER_MESSAGE}`,
       };
     }
     case 'offer_consent_invalid':

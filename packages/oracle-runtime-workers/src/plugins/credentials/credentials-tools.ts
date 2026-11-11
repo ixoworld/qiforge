@@ -1,4 +1,10 @@
 import { z } from 'zod';
+import type {
+  ChannelEventResult,
+  IdentityCheckUpdatedEvent,
+  PermissionAnsweredEvent,
+  PermissionEventStatus,
+} from '../../plugin-api/channel-events';
 import { tool } from '../../plugin-api/tool-helper';
 import type {
   PluginTool,
@@ -19,6 +25,7 @@ import {
 } from './check-store';
 import {
   DID_PATTERN,
+  IDENTITY_LEVEL1_VCT,
   MAX_ISSUERS_PER_TYPE,
   purposeFor,
   type CredentialsConfig,
@@ -35,6 +42,8 @@ import {
   refusalFor,
   checkInProgress,
   describeError,
+  isInReview,
+  NO_LATER_MESSAGE,
   type CredentialsRefusal,
   type Wording,
 } from './errors';
@@ -61,17 +70,28 @@ import {
   clearGrantsCache,
   clearGrantsCacheOf,
   clearPendingAction,
+  identityOutcomeOf,
   knowsPermission,
+  lastLinkState,
+  noteLinkSeen,
+  noteLinkTold,
+  notePermissionAnswerTold,
   permissionUrl,
   readGrantsCache,
   readLinkCache,
   readPendingAction,
   readPermissionCache,
+  readLinkRecord,
+  readPermissionRecord,
+  recordLink,
   recordPermission,
   writeGrantsCache,
   writeLinkCache,
   writePendingAction,
   writePermissionCache,
+  type IdentityOutcome,
+  type PermissionAnswer,
+  type PermissionRecord,
 } from './person-state';
 import { RESPONSE_ROUTE_PREFIX, sealResponseToken } from './response-route';
 import {
@@ -241,7 +261,20 @@ export const ActionPermissionInput = z
   })
   .strict();
 
-export const ActionInput = z.object({ action: ActionId }).strict();
+/** How the identity link's message opens: on its own, or as the next step of a task. */
+export const LINK_CONTEXTS = ['next_step', 'standalone'] as const;
+
+export const ActionInput = z
+  .object({
+    action: ActionId,
+    context: z
+      .enum(LINK_CONTEXTS)
+      .default('standalone')
+      .describe(
+        'For "self.identity-check" only: "next_step" when the identity check is the next step of a task already under way (after a reward claim, or right after they allowed the card), else "standalone" (the default). It only changes the first words of the link message.',
+      ),
+  })
+  .strict();
 
 export const ActionStatusInput = z
   .object({
@@ -273,8 +306,11 @@ export interface CredentialsToolsDeps {
   checkWaitMs?: number;
 }
 
-/** A card lives at most a day on the Hub; a little less, for clock skew. */
-export const PERMISSION_CARD_TTL_SECONDS = 24 * 3600 - 300;
+/**
+ * How long a card waits for Allow or Don't allow: one hour. Not how long a
+ * permission lasts once allowed (that is each item's `days`).
+ */
+export const PERMISSION_CARD_TTL_SECONDS = 3600;
 /** A presentation request of `credentials_check` lives 15 minutes. */
 export const CHECK_REQUEST_TTL_SECONDS = 15 * 60;
 /** One deadline per tool: every call it makes ends inside it. */
@@ -334,7 +370,10 @@ function minted(
   return result.invocation;
 }
 
-function transport(deps: CredentialsToolsDeps, deadline: number) {
+/** What every call to a service takes from the deps. */
+type TransportDeps = Pick<CredentialsToolsDeps, 'fetchImpl' | 'sleep' | 'now'>;
+
+function transport(deps: TransportDeps, deadline: number) {
   return {
     deadline,
     ...(deps.now ? { now: deps.now } : {}),
@@ -346,7 +385,7 @@ function transport(deps: CredentialsToolsDeps, deadline: number) {
 function hubClient(
   ctx: RuntimeContext,
   ready: Ready,
-  deps: CredentialsToolsDeps,
+  deps: TransportDeps,
   deadline: number,
 ) {
   return new HubPermissionsClient({
@@ -494,11 +533,11 @@ function said(wording: Wording, extra: Record<string, unknown> = {}) {
 const STATUS_WORDING: Record<PermissionStatus, Wording> = {
   pending: {
     message: "You haven't answered yet.",
-    hint: "They haven't answered the card; wait for them, do not ask again or poll.",
+    hint: `They haven't answered the card; wait for them, do not ask again or poll. ${NO_LATER_MESSAGE}`,
   },
   allowed: {
-    message: 'Thanks, you allowed it.',
-    hint: 'Go on with the task.',
+    message: "Thanks, that's allowed.",
+    hint: "Go on with the task. If you call another tool in this same reply (for example credentials_request_action for the identity link), send this sentence first and that tool's message right after it, together in ONE message.",
   },
   declined: MESSAGES.declined,
   expired: {
@@ -531,9 +570,64 @@ function endedRefusal(
   );
 }
 
-function cardMessage(name: string, url: string): Wording {
+/** What a card asks, as a key: its action ids, then `check:<vct>` per credential type, sorted. */
+function cardKey(actions: readonly string[], vcts: readonly string[] = []) {
+  return sortedUnique([...actions, ...vcts.map((vct) => `check:${vct}`)]).join(
+    '|',
+  );
+}
+
+/**
+ * The first sentence of a card, chosen by exactly what it asks (catalogue
+ * action ids and credential types). A card asking anything else gets the
+ * safe fallback, which says nothing about what is asked.
+ */
+const CARD_LEADS: ReadonlyMap<string, string> = new Map([
+  [
+    cardKey([IDENTITY_CHECK_ACTION]),
+    'This lets me send you a link for your identity check.',
+  ],
+  [
+    cardKey([IDENTITY_CHECK_ACTION], [IDENTITY_LEVEL1_VCT]),
+    'This lets me send you a link for your identity check.',
+  ],
+  [
+    cardKey([], [IDENTITY_LEVEL1_VCT]),
+    'This lets me check that your identity is verified.',
+  ],
+]);
+
+/** The action ids and credential types of a card's items. */
+function askedOf(asked: readonly PermissionRequest[]) {
   return {
-    message: `Tap this link to see what ${name} is asking and choose Allow or Don't allow: ${url}`,
+    actions: asked.flatMap((p) =>
+      p.kind === 'service-action' ? [p.action] : [],
+    ),
+    vcts: asked.flatMap((p) => (p.kind === 'credential-check' ? [p.vct] : [])),
+  };
+}
+
+/** What a card the Hub lists asks (only what it names; nothing when it names nothing). */
+function askedOfItems(items: readonly PermissionItemState[]) {
+  const actions = items.flatMap((i) => (i.action ? [i.action] : []));
+  const vcts = items.flatMap((i) => (i.vct ? [i.vct] : []));
+  return {
+    ...(actions.length ? { actions } : {}),
+    ...(vcts.length ? { vcts } : {}),
+  };
+}
+
+function cardMessage(
+  name: string,
+  url: string,
+  asked: readonly PermissionRequest[],
+): Wording {
+  const { actions, vcts } = askedOf(asked);
+  const lead = CARD_LEADS.get(cardKey(actions, vcts));
+  return {
+    message: lead
+      ? `${lead} Please tap this to allow: ${url}`
+      : `Please tap this to see what ${name} is asking for, and allow it if you agree: ${url}`,
     hint: 'Send `message` as it is, as one link in a short message. Never paste ids or tokens.',
   };
 }
@@ -544,7 +638,7 @@ function cardMessage(name: string, url: string): Wording {
  */
 function againMessage(url: string): Wording {
   return {
-    message: `I need your OK once more for this. Please tap Allow here: ${url}`,
+    message: `Something changed, so I need your OK again. Please tap this to allow: ${url}`,
     hint: 'What they allowed earlier no longer matches what this service needs now, so it is asked again on one card. Send `message` as it is, as one link in a short message. Never paste ids or tokens.',
   };
 }
@@ -634,7 +728,7 @@ type HubCards = (() => Promise<ListedPermission[] | null>) & {
 // ---------------------------------------------------------------------------
 // The Hub's list of the person's live cards: the truth the kv is a cache of.
 
-/** A card about to end is not handed out again: a new one gets a full day. */
+/** A card about to end is not handed out again: a new one gets a full hour. */
 const PENDING_CARD_MARGIN_SECONDS = 60;
 
 /** The refusals that mean "the kv holds nothing usable": worth one look at the Hub. */
@@ -771,7 +865,12 @@ const OpenLink = z.object({
   linkId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
   status: z.enum(LINK_STATUSES),
   expiresAt: SelfTime,
+  /** Self's "in review" (read leniently: anything but `true` is not). */
+  review: z.literal(true).optional().catch(undefined),
 });
+
+/** What the person does on an identity-check link, in the words every link message uses. */
+const ID_CHECK_STEPS = 'You will scan your ID document and take a selfie.';
 
 // ---------------------------------------------------------------------------
 // credentials_check.
@@ -821,11 +920,181 @@ function walletUrlOf(
 }
 
 // ---------------------------------------------------------------------------
+// Permission events: the person answered a card in their wallet.
+
+/** The Hub's card state an event's status stands for. */
+const HUB_ANSWER: Record<PermissionEventStatus, PermissionAnswer> = {
+  allowed: 'allowed',
+  not_allowed: 'declined',
+  expired: 'expired',
+};
+
+/** The fixed sentences a permission event answers with. */
+export const PERMISSION_EVENT_TEXT = {
+  allowed: 'Thanks, you allowed it.',
+  not_allowed:
+    'No problem, nothing was shared. Tell me if you change your mind.',
+  expired: 'That link has run out. Shall I send a new one?',
+} as const satisfies Record<PermissionEventStatus, string>;
+
+/** What a card asked, for the model: its action ids and credential types. */
+function askedLine(record: PermissionRecord): string {
+  const asked = [
+    ...(record.actions ?? []),
+    ...(record.vcts ?? []).map((vct) => `a check of ${vct}`),
+  ];
+  return asked.length ? ` (it asked for: ${asked.join(', ')})` : '';
+}
+
+/** What the agent does once a card is allowed: another plugin's words, else by what it asked. */
+function nextStep(record: PermissionRecord): string {
+  if (record.next) return record.next;
+  if (record.actions?.includes(IDENTITY_CHECK_ACTION))
+    return 'go on with the task you were on: call credentials_request_action with action "self.identity-check" and context "next_step", and send its message right after that sentence';
+  if (record.vcts?.length)
+    return 'go on with the task you were on: call credentials_check for the credential you needed';
+  return 'go on with the task you were on';
+}
+
+const EVENT_NOTE_START =
+  '[Permission answer from the wallet, checked with the Auth Hub; this is not a message from the user.';
+
+/** The note and wording for a confirmed answer of `record`'s card. */
+function eventAnswer(
+  status: PermissionEventStatus,
+  record: PermissionRecord,
+): ChannelEventResult {
+  const card = `the permission card you sent them${askedLine(record)}`;
+  const text = PERMISSION_EVENT_TEXT[status];
+  if (status === 'allowed')
+    return {
+      kind: 'agent',
+      note: `${EVENT_NOTE_START} They allowed ${card}. Start your reply with exactly this sentence: "${text}" Then, in the same message, ${nextStep(record)}. Do not send the card again. ${NO_LATER_MESSAGE}]`,
+    };
+  return {
+    kind: 'reply',
+    text,
+    note:
+      status === 'not_allowed'
+        ? `${EVENT_NOTE_START} They chose Don't allow on ${card}; they were told: "${text}" Respect it; ask again only if they bring it up.]`
+        : `${EVENT_NOTE_START} They did not answer ${card} before it ran out; they were told: "${text}" If they want it, ask again with a request tool (it sends a new card).]`,
+  };
+}
+
+/**
+ * The plugin's answer to a permission event (`handleChannelEvent`). Only
+ * a card this person's kv recorded is claimed (sent by a request tool, read
+ * from the Hub's list, or recorded by another plugin with
+ * `rememberPermissionCard`); any other id is `pass`. A claimed card is read
+ * at the Hub first: unless the Hub's state is the event's (`allowed`,
+ * `declined` for `not_allowed`, `expired`) nothing is said. Nothing is said
+ * either when the person already learned that answer in the chat (a tool
+ * read it) or an event already told it; the same event's run asked again
+ * (a restart) answers as before. Only fixed sentences: `allowed` lets the
+ * model go on with the task after "Thanks, you allowed it."; the others are
+ * sent as they are.
+ */
+export function createPermissionEventHandler(
+  deps: Pick<CredentialsToolsDeps, 'cfg'> & TransportDeps,
+) {
+  const now = deps.now ?? Date.now;
+  return async (
+    event: PermissionAnsweredEvent,
+    ctx: RuntimeContext,
+  ): Promise<ChannelEventResult> => {
+    const kv = kvOf(ctx);
+    if (!kv) return { kind: 'pass' };
+    const record = await readPermissionRecord(kv, event.permissionId);
+    if (!record) return { kind: 'pass' };
+    const answer = HUB_ANSWER[event.status];
+    const again = record.told?.requestId === event.requestId;
+    if (!again && (record.told?.status === answer || record.seen === answer))
+      return { kind: 'ignore' };
+    const ready = readiness(ctx, deps.cfg);
+    if (isRefusal(ready)) return { kind: 'ignore' };
+    let state: PermissionState;
+    try {
+      state = await hubClient(
+        ctx,
+        ready,
+        deps,
+        now() + TOOL_DEADLINE_MS,
+      ).status(event.permissionId);
+    } catch (error) {
+      ctx.logger.warn(
+        `[credentials] permission event: hub_unread (${
+          error instanceof CredentialsServiceError
+            ? `hub_${error.status}_${error.code}`
+            : describeError(error)
+        })`,
+      );
+      return { kind: 'ignore' };
+    }
+    if (state.status !== answer) {
+      ctx.logger.warn(
+        `[credentials] permission event: not confirmed (event ${event.status}, hub ${state.status})`,
+      );
+      return { kind: 'ignore' };
+    }
+    // Told before the cache is written: the write marks the answer seen.
+    await notePermissionAnswerTold(kv, state.id, answer, event.requestId);
+    await writePermissionCache(kv, state, now());
+    return eventAnswer(event.status, record);
+  };
+}
+
+/** The fixed sentences an identity-check event answers with. */
+export const IDENTITY_EVENT_TEXT = {
+  in_review: MESSAGES.inReview.message,
+  passed: 'Your identity check is done. You are verified.',
+  failed: "Sorry, your identity check didn't pass.",
+} as const satisfies Record<IdentityOutcome, string>;
+
+const IDENTITY_NOTE_START =
+  '[Identity check update, checked with Self; this is not a message from the user.';
+
+/** The note and wording for an identity check's outcome as Self reports it. */
+function identityAnswer(
+  outcome: IdentityOutcome,
+  verifiedNext: string | undefined,
+): ChannelEventResult {
+  const text = IDENTITY_EVENT_TEXT[outcome];
+  if (outcome === 'passed')
+    return {
+      kind: 'agent',
+      note: `${IDENTITY_NOTE_START} Their identity check passed. Start your reply with exactly this sentence: "${text}" Then, in the same message, ${verifiedNext ?? 'go on with the task you were on, the one that needed the identity check (credentials_check can now prove it)'}. ${NO_LATER_MESSAGE}]`,
+    };
+  return {
+    kind: 'reply',
+    text,
+    note:
+      outcome === 'failed'
+        ? `${IDENTITY_NOTE_START} Their identity check did not pass; they were told: "${text}" Offer a new link only if they want to try again.]`
+        : `${IDENTITY_NOTE_START} Their identity check is waiting for a person's review; they were told: "${text}" ${MESSAGES.inReview.hint}]`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // The tools.
 
 export function createCredentialsTools(
   deps: CredentialsToolsDeps,
 ): PluginTool[] {
+  return createCredentials(deps).tools;
+}
+
+/**
+ * The plugin's tools and its answer to identity-check events, which share
+ * the tools' Hub-first grant path (the link status is read at Self with the
+ * person's `link` grant, exactly as `credentials_action_status` reads it).
+ */
+export function createCredentials(deps: CredentialsToolsDeps): {
+  tools: PluginTool[];
+  identityCheckEvent: (
+    event: IdentityCheckUpdatedEvent,
+    ctx: RuntimeContext,
+  ) => Promise<ChannelEventResult>;
+} {
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? defaultSleep;
   const { cfg, oracle } = deps;
@@ -881,6 +1150,7 @@ export function createCredentialsTools(
       card.id,
       card.items.map((i) => i.kind),
       card.url,
+      askedOfItems(card.items),
     );
     await writePermissionCache(kv, stateOf(card), now());
   }
@@ -1032,7 +1302,9 @@ export function createCredentialsTools(
           ACTION_RECORD_TTL_MS,
         );
     await keepCard(kv, { ...waiting, url });
-    const wording = again ? againMessage(url) : cardMessage(oracle.name, url);
+    const wording = again
+      ? againMessage(url)
+      : cardMessage(oracle.name, url, permissions);
     return {
       again,
       answer: said(
@@ -1142,10 +1414,11 @@ export function createCredentialsTools(
         card.id,
         permissions.map((p) => p.kind),
         card.url,
+        askedOf(permissions),
       );
       const wording = existing.again
         ? againMessage(card.url)
-        : cardMessage(oracle.name, card.url);
+        : cardMessage(oracle.name, card.url, permissions);
       return said(wording, {
         status: 'sent',
         permissionId: card.id,
@@ -1206,7 +1479,7 @@ export function createCredentialsTools(
 
   const WAIT_CARD: Wording = {
     message: "There's nothing new yet. Please give it a little while.",
-    hint: 'You asked about this card too often (at most 6 a minute). Do not poll; wait for the person to say they answered.',
+    hint: `You asked about this card too often (at most 6 a minute). Do not poll; wait for the person to say they answered. ${NO_LATER_MESSAGE}`,
   };
 
   /**
@@ -1884,7 +2157,15 @@ export function createCredentialsTools(
       const answer =
         args.action !== IDENTITY_CHECK_ACTION
           ? await grantedOutline(ctx, ready, kv, args.action, deadline, cards)
-          : await identityLink(ctx, ready, kv, args.action, deadline, cards);
+          : await identityLink(
+              ctx,
+              ready,
+              kv,
+              args.action,
+              deadline,
+              cards,
+              args.context,
+            );
       if (!isOutdatedAnswer(answer)) return answer;
       // What the person allowed no longer matches the catalogue entry: ask
       // for the card again on the normal path (one card, or the one already
@@ -1901,7 +2182,8 @@ export function createCredentialsTools(
       name: 'credentials_request_action',
       description: [
         'Do not call this before the person has allowed the card. It is for service-action items only, never for credential-check items (those need no action: use credentials_check). Carry out a catalogued action the person allowed (on the card from credentials_request_permissions or credentials_request_action_permission). For "self.identity-check" (one card is enough: it holds the link, the offer and the consent) it asks Self for a link where they start an identity check (it works once and ends after about 15 minutes; the first device that opens it keeps it).',
-        'Send the `message` (it holds the link) as it is. Keep the linkId to read progress with credentials_action_status. A new call replaces a link nobody has opened yet (the old one stops working), so call it again only when they need a new link. status "already_open": their check is in progress; relay the message and read progress with that linkId.',
+        'Send the `message` (it holds the link) as it is. Keep the linkId to read progress with credentials_action_status. A new call replaces a link nobody has opened yet (the old one stops working), so call it again only when they need a new link. status "already_open": their check is in progress (review: true: a person reviews it); relay the message and read progress with that linkId only when they write.',
+        'context (self.identity-check only): "next_step" when the check is the next step of a task already under way (after a reward claim, or right after they allowed the card; the message then opens with "Next, ..."), otherwise leave it out ("standalone").',
         'For any other entry id it answers status "granted" with the capabilities the person allowed (ids, capabilities, audiences and ends; never tokens) so another plugin or you can act on them. If they have not allowed it yet the answer says so: ask for permission first.',
         'When what they allowed earlier no longer matches what the service needs now, it sends the card again by itself and answers status "sent" with a permissionId and a `message` asking for their OK once more: send it as it is and call this again once they allowed it. WhatsApp only.',
       ].join(' '),
@@ -1920,6 +2202,7 @@ export function createCredentialsTools(
     action: string,
     deadline: number,
     cards: HubCards,
+    context: (typeof LINK_CONTEXTS)[number],
   ) {
     const requestKey = await requestKeyOf(ctx, `action:${action}`);
     try {
@@ -1946,12 +2229,28 @@ export function createCredentialsTools(
             link,
             deadline,
           ).createLink({ offerConsent: offer.token, requestKey });
+          // Kept with the card whose grants made it, so an identity-check
+          // event for it is recognised and knows what came next.
+          const inUse = ActionRecord.safeParse(
+            await kv.get(CREDENTIALS_KV_NAMESPACE, actionKey(action)),
+          );
+          await recordLink(
+            kv,
+            created.linkId,
+            inUse.success ? inUse.data.permissionId : undefined,
+          );
           const ends = endsFor(ctx, created.expiresAt);
+          const opening =
+            context === 'next_step'
+              ? 'Next, you need to do your identity check. Open this link.'
+              : 'To do your identity check, open this link.';
           return said(
             {
-              message: ends
-                ? `Tap this link to start your identity check. It works once and ends ${ends}: ${created.url}`
-                : `Tap this link to start your identity check. It works once: ${created.url}`,
+              message: `${opening} ${ID_CHECK_STEPS} ${
+                ends
+                  ? `The link works once and ends ${ends}: ${created.url}`
+                  : `The link works once: ${created.url}`
+              }`,
               hint: 'Send `message` as it is. Keep the linkId to read progress. A new link replaces one nobody has opened yet, so do not call this again to resend.',
             },
             {
@@ -1971,15 +2270,24 @@ export function createCredentialsTools(
       // token, so its URL cannot be sent again.
       const open = openLinkOf(error);
       if (open) {
+        // In review: Self says so beside the 409, or the status read last did.
+        const review =
+          isInReview(open) ||
+          (open.status === 'in_progress' &&
+            (await lastLinkState(kv, open.linkId))?.review === true);
+        if (review) await noteLinkSeen(kv, open.linkId, 'in_review');
         return said(
-          {
-            message: checkInProgress(endsFor(ctx, open.expiresAt)),
-            hint: 'Its link cannot be sent again; read progress with this linkId.',
-          },
+          review
+            ? MESSAGES.inReview
+            : {
+                message: checkInProgress(endsFor(ctx, open.expiresAt)),
+                hint: `Its link cannot be sent again; read progress with this linkId when they write. ${NO_LATER_MESSAGE}`,
+              },
           {
             status: 'already_open',
             linkId: open.linkId,
             linkStatus: open.status,
+            ...(review ? { review: true } : {}),
             expiresAt: open.expiresAt,
           },
         );
@@ -2000,9 +2308,7 @@ export function createCredentialsTools(
   }
 
   /** The open link Self named in a 409 `link_active`, when it named one. */
-  function openLinkOf(
-    error: unknown,
-  ): { linkId: string; status: LinkStatus; expiresAt: number } | null {
+  function openLinkOf(error: unknown): z.infer<typeof OpenLink> | null {
     if (
       !(error instanceof CredentialsServiceError) ||
       error.service !== 'self' ||
@@ -2016,37 +2322,38 @@ export function createCredentialsTools(
   const LINK_WORDING: Record<LinkStatus, Wording> = {
     sent: {
       message: "You haven't opened the link yet.",
-      hint: 'Wait for them; do not poll.',
+      hint: `Wait for them; do not poll. ${NO_LATER_MESSAGE}`,
     },
     opened: {
-      message: 'You opened the link.',
-      hint: 'Wait for them to go on; do not poll.',
+      message: "You opened the link but haven't started the check yet.",
+      hint: `Wait for them to go on; do not poll. ${NO_LATER_MESSAGE}`,
     },
     in_progress: {
-      message: "You're doing the identity check now.",
-      hint: 'Wait for them to finish; do not poll.',
+      message:
+        "Your identity check has started but isn't finished yet. Please finish the steps on the page you opened.",
+      hint: `Wait for them to finish; do not poll. ${NO_LATER_MESSAGE}`,
     },
     passed: {
-      message: 'You passed the identity check and saved your credential.',
+      message: 'Your identity check is done. You are verified.',
       hint: 'Go on with the task; credentials_check can now prove it.',
     },
     failed: {
-      message: "The identity check didn't pass.",
+      message: "Sorry, your identity check didn't pass.",
       hint: 'Offer a new link only if they want to try again.',
     },
     expired: {
-      message: 'The link ended before it was used.',
+      message: 'That link has ended.',
       hint: 'Offer a new link only if they still want the check.',
     },
     cancelled: {
-      message: 'The link was cancelled.',
+      message: 'That link was stopped.',
       hint: 'Offer a new link only if they still want the check.',
     },
   };
 
   const WAIT_WORDING: Wording = {
     message: "There's nothing new yet. Please give it a little while.",
-    hint: 'You asked about this link too often (at most 6 a minute). Do not poll; wait for the person to say how it went.',
+    hint: `You asked about this link too often (at most 6 a minute). Do not poll; wait for the person to say how it went. ${NO_LATER_MESSAGE}`,
   };
 
   const actionStatus = tool(
@@ -2066,13 +2373,18 @@ export function createCredentialsTools(
         status: LinkStatus;
         updatedAt: number;
         expiresAt: number;
+        review?: true;
       }) =>
-        said(LINK_WORDING[state.status], {
-          linkId: state.linkId,
-          status: state.status,
-          updatedAt: state.updatedAt,
-          expiresAt: state.expiresAt,
-        });
+        said(
+          isInReview(state) ? MESSAGES.inReview : LINK_WORDING[state.status],
+          {
+            linkId: state.linkId,
+            status: state.status,
+            ...(isInReview(state) ? { review: true } : {}),
+            updatedAt: state.updatedAt,
+            expiresAt: state.expiresAt,
+          },
+        );
       try {
         // At most 6 calls a minute per link; the status read last is kept
         // 5 s (a final one for good), so most calls never reach Self.
@@ -2110,19 +2422,101 @@ export function createCredentialsTools(
     {
       name: 'credentials_action_status',
       description:
-        'Read the progress of an action credentials_request_action started: for "self.identity-check" pass the linkId as ref (sent, opened, in_progress, passed, failed, expired, cancelled). No personal data comes back. Only call it when you need the answer; do not poll in a loop (at most 6 a minute per link; an answer is kept 5 seconds). WhatsApp only.',
+        'Read the progress of an action credentials_request_action started: for "self.identity-check" pass the linkId as ref (sent, opened, in_progress, passed, failed, expired, cancelled; in_progress with review: true means a person from support reviews it, which can take a while). No personal data comes back. Only call it when the person writes and you need the answer; do not poll in a loop (at most 6 a minute per link; an answer is kept 5 seconds). You can never message them first. WhatsApp only.',
       schema: ActionStatusInput,
       effect: 'read',
     },
   );
 
-  return [
-    requestPermissions,
-    requestCheckPermission,
-    permissionStatus,
-    check,
-    requestActionPermission,
-    requestAction,
-    actionStatus,
-  ];
+  /**
+   * An identity-check event (`identity_check_updated`): only for a link this
+   * person's kv recorded (made by `credentials_request_action`); any other
+   * link is `pass`. Self is read first, with the person's `link` grant on
+   * the Hub-first path, and Self's state decides, not the event's: in
+   * review, passed or failed is told once, anything else says nothing.
+   * Nothing is said for an outcome the person already learned in the chat
+   * or an event already told (the same event asked again after a restart
+   * answers as before).
+   */
+  async function identityCheckEvent(
+    event: IdentityCheckUpdatedEvent,
+    ctx: RuntimeContext,
+  ): Promise<ChannelEventResult> {
+    const kv = kvOf(ctx);
+    if (!kv) return { kind: 'pass' };
+    const record = await readLinkRecord(kv, event.linkId);
+    if (!record) return { kind: 'pass' };
+    const known = (status: IdentityOutcome) =>
+      record.told?.requestId !== event.requestId &&
+      (record.told?.status === status || record.seen === status);
+    // A repeat of what the person already knows needs no read at Self.
+    if (known(event.status)) return { kind: 'ignore' };
+    const ready = readiness(ctx, cfg);
+    if (isRefusal(ready)) return { kind: 'ignore' };
+    const deadline = now() + TOOL_DEADLINE_MS;
+    let state: Awaited<ReturnType<SelfLinksClient['linkStatus']>>;
+    try {
+      const answer = await withGrants(
+        ctx,
+        ready,
+        kv,
+        IDENTITY_CHECK_ACTION,
+        deadline,
+        async (grants) => {
+          const link = grantFor(grants, 'link', LINK_CAPABILITY);
+          if (!link) return refusal('internal_error', MESSAGES.ourSide);
+          return selfClient(ctx, ready, deps, link, deadline).linkStatus(
+            event.linkId,
+          );
+        },
+        liveCards(ctx, ready, kv, deadline),
+        'identity check event',
+      );
+      if ('error' in answer) {
+        ctx.logger.warn(
+          `[credentials] identity check event: self_unread (${answer.error})`,
+        );
+        return { kind: 'ignore' };
+      }
+      state = answer;
+    } catch (error) {
+      ctx.logger.warn(
+        `[credentials] identity check event: self_unread (${
+          error instanceof CredentialsServiceError
+            ? `${error.service}_${error.status}_${error.code}`
+            : describeError(error)
+        })`,
+      );
+      return { kind: 'ignore' };
+    }
+    const outcome = identityOutcomeOf(state);
+    if (outcome !== event.status)
+      ctx.logger.warn(
+        `[credentials] identity check event: self says ${outcome ?? state.status}, event ${event.status}; following Self`,
+      );
+    if (!outcome || known(outcome)) {
+      await writeLinkCache(kv, state, now());
+      return { kind: 'ignore' };
+    }
+    // Told before the cache is written: the write marks the outcome seen.
+    await noteLinkTold(kv, event.linkId, outcome, event.requestId);
+    await writeLinkCache(kv, state, now());
+    const card = record.permissionId
+      ? await readPermissionRecord(kv, record.permissionId)
+      : null;
+    return identityAnswer(outcome, card?.verifiedNext);
+  }
+
+  return {
+    tools: [
+      requestPermissions,
+      requestCheckPermission,
+      permissionStatus,
+      check,
+      requestActionPermission,
+      requestAction,
+      actionStatus,
+    ],
+    identityCheckEvent,
+  };
 }

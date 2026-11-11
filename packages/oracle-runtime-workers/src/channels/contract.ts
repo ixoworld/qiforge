@@ -2,6 +2,10 @@ import type { ActionOutcomeWire } from '@ixo/ixo-transaction/topic-proposals';
 import type { ActionOutcomeV1 } from '@ixo/action-protocol';
 import { z } from 'zod';
 import {
+  IDENTITY_CHECK_EVENT_STATUSES,
+  PERMISSION_EVENT_STATUSES,
+} from '../plugin-api/channel-events';
+import {
   CHANNEL_MAX_FILE_BYTES,
   channelAttachmentRef,
 } from '../attachments/channel';
@@ -224,10 +228,49 @@ export const ChannelFileNotice = z.strictObject({
 });
 export type ChannelFileNotice = z.infer<typeof ChannelFileNotice>;
 
+const OPAQUE_EVENT_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
 /**
- * Every field of a channel turn. `ChannelTurnBody` adds the rule that ties
- * `message` and `notice` together; this object is what other schemas take
- * fields from.
+ * An event instead of a message from the person, told to the gateway by the
+ * Auth Hub. Only ids and a fixed status: never text from the Hub or Self.
+ * The turn runs in the binding's current session, and the plugin that owns
+ * the card or link reads it at the Hub or Self before anything is said
+ * (`OraclePlugin.handleChannelEvent`).
+ *
+ * - `permission_answered`: the person answered a permission card.
+ * - `identity_check_updated`: an identity check at Self went into review,
+ *   passed or failed.
+ */
+export const ChannelEvent = z.discriminatedUnion('kind', [
+  z.strictObject({
+    kind: z.literal('permission_answered'),
+    /** The Hub card id. */
+    permissionId: z.string().regex(OPAQUE_EVENT_ID),
+    status: z.enum(PERMISSION_EVENT_STATUSES),
+  }),
+  z.strictObject({
+    kind: z.literal('identity_check_updated'),
+    /** Self's identity link id. */
+    linkId: z.string().regex(OPAQUE_EVENT_ID),
+    status: z.enum(IDENTITY_CHECK_EVENT_STATUSES),
+  }),
+]);
+export type ChannelEvent = z.infer<typeof ChannelEvent>;
+
+/**
+ * The one request id an event is sent with (`permission:<permissionId>:<status>`
+ * or `identity:<linkId>:<status>`): a resend is the same request.
+ */
+export function channelEventRequestId(event: ChannelEvent): string {
+  return event.kind === 'permission_answered'
+    ? `permission:${event.permissionId}:${event.status}`
+    : `identity:${event.linkId}:${event.status}`;
+}
+
+/**
+ * Every field of a channel turn. `ChannelTurnBody` adds the rules that tie
+ * `message`, `notice` and `event` together; this object is what other
+ * schemas take fields from.
  */
 const ChannelTurnFields = z.strictObject({
   provider: ChannelProviderId,
@@ -238,7 +281,7 @@ const ChannelTurnFields = z.strictObject({
   sessionId: z.string().min(1).max(255).optional(),
   /** An explicit correction stays in its current session, even with routing enabled. */
   sessionPolicy: z.literal('continue').optional(),
-  /** What the person sent. Required, except on a turn that carries `notice`. */
+  /** What the person sent. Required, except on a turn that carries `notice` or `event`. */
   message: z.string().min(1).max(16_000).optional(),
   /** Files sent with the message; `message` carries the caption or a placeholder. */
   attachments: z
@@ -254,6 +297,13 @@ const ChannelTurnFields = z.strictObject({
    */
   notice: ChannelFileNotice.optional(),
   /**
+   * An event instead of a message from the person (`ChannelEvent`): no
+   * message, files, quote, notice or session; `sessionPolicy: 'continue'`;
+   * the request id is `channelEventRequestId(event)`. Sent only to a runtime
+   * whose turn results list `permission_event` in `features` (both kinds).
+   */
+  event: ChannelEvent.optional(),
+  /**
    * Which kind of oracle the gateway believes it addresses. `companion` is
    * the legacy value; the gateway sends `oracle`. Both are accepted.
    */
@@ -261,6 +311,34 @@ const ChannelTurnFields = z.strictObject({
 });
 
 export const ChannelTurnBody = ChannelTurnFields.superRefine((body, ctx) => {
+  if (body.event) {
+    for (const field of [
+      'message',
+      'attachments',
+      'replyTo',
+      'notice',
+      'sessionId',
+    ] as const)
+      if (body[field] !== undefined)
+        ctx.addIssue({
+          code: 'custom',
+          path: [field],
+          message: `${field} is not allowed with an event`,
+        });
+    if (body.sessionPolicy !== 'continue')
+      ctx.addIssue({
+        code: 'custom',
+        path: ['sessionPolicy'],
+        message: "an event is sent with sessionPolicy 'continue'",
+      });
+    if (body.requestId !== channelEventRequestId(body.event))
+      ctx.addIssue({
+        code: 'custom',
+        path: ['requestId'],
+        message: `an event is sent with requestId ${channelEventRequestId(body.event)}`,
+      });
+    return;
+  }
   if (!body.notice) {
     if (body.message === undefined)
       ctx.addIssue({
@@ -296,9 +374,14 @@ export type ChannelTurnInput = z.infer<typeof ChannelTurnBody>;
 /**
  * What the runtime can do beyond the base turn contract; every turn result
  * carries the list. `delivery_notice`: a blocked file may be sent back as
- * a `notice` turn.
+ * a `notice` turn. `permission_event`: a permission card's answer, or an
+ * identity check's change at Self, may be sent as an `event` turn (a
+ * runtime without it refuses one with 400).
  */
-export const CHANNEL_TURN_FEATURES = ['delivery_notice'] as const;
+export const CHANNEL_TURN_FEATURES = [
+  'delivery_notice',
+  'permission_event',
+] as const;
 export type ChannelTurnFeature = (typeof CHANNEL_TURN_FEATURES)[number];
 
 export const ChannelOrigin = z.strictObject({

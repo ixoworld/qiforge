@@ -7,12 +7,21 @@ import type {
   PluginContext,
   PluginManifest,
   PluginTool,
+  RuntimeContext,
 } from '../../plugin-api/types';
 import type { PluginRoute } from '../../shell/app';
 import { receiveAnswer } from './check-store';
 import { credentialsConfigSchema, resolveCredentialsConfig } from './config';
 import { VerifierEntryMemo } from './credentials-client';
-import { createCredentialsTools } from './credentials-tools';
+import type {
+  ChannelEventResult,
+  OracleChannelEvent,
+} from '../../plugin-api/channel-events';
+import {
+  createCredentials,
+  createCredentialsTools,
+  createPermissionEventHandler,
+} from './credentials-tools';
 import type { FetchLike } from './http';
 import {
   credentialsResponseRoute,
@@ -92,6 +101,9 @@ const operatingGuide = `### Credentials and permissions
 - The Hub remembers what the person allowed. A request tool that answers \`already_allowed\` sent nothing: go on with the task. One that hands back the card they have not answered yet did not make a new one: send its \`message\` again.
 - When what the person allowed earlier no longer matches what the service needs now, it is not used: the request tools and \`credentials_request_action\` send ONE card asking for their OK once more (send its \`message\` as it is); \`credentials_permission_status\` marks such items \`current: false\` and \`credentials_action_status\` answers \`permission_outdated\`: then ask again with a request tool.
 - \`credentials_permission_status\` shows the card's answer and, per item, what was granted (ids only).
+- A card waits one hour for Allow or Don't allow; how long the permission lasts once allowed is the item's days.
+- When the person answers a card in their wallet, or their identity check goes into review, passes or fails, a turn may start with a bracketed permission answer or identity check update instead of their words. It is checked with the Hub; follow it exactly (start with its sentence, then go on as it says). For the identity link right after a task step or an allowed card, call \`credentials_request_action\` with \`context: "next_step"\`.
+- You can only reply when the person writes. Never say you will let them know or message them later; while a check is in progress or in review, read its status again only when they write.
 - Use the claims of a valid check for the task at hand only; never repeat them back beyond what the conversation needs.`;
 
 /** Optional dependency injection, for tests. */
@@ -193,6 +205,36 @@ export class CredentialsPlugin extends OraclePlugin {
         ? { checkWaitMs: this.options.checkWaitMs }
         : {}),
     });
+  }
+
+  /**
+   * An event turn: the person answered a card in their wallet
+   * (`permission_answered`: the card is read at the Hub,
+   * `createPermissionEventHandler`), or an identity check this oracle made
+   * a link for changed at Self (`identity_check_updated`: the link is read
+   * at Self). Only this person's own cards and links; fixed words only.
+   */
+  override handleChannelEvent(
+    event: OracleChannelEvent,
+    ctx: RuntimeContext,
+  ): Promise<ChannelEventResult> {
+    const cfg = resolveCredentialsConfig(ctx.config);
+    if (!cfg.enabled) return Promise.resolve({ kind: 'pass' });
+    const transport = {
+      ...(this.options.fetchImpl ? { fetchImpl: this.options.fetchImpl } : {}),
+      ...(this.options.sleep ? { sleep: this.options.sleep } : {}),
+      ...(this.options.now ? { now: this.options.now } : {}),
+    };
+    if (event.kind === 'permission_answered')
+      return createPermissionEventHandler({ cfg, ...transport })(event, ctx);
+    return createCredentials({
+      cfg,
+      // Only card sentences use the name; an identity-check event sends no card.
+      oracle: { name: '' },
+      verifier: null,
+      memo: this.memo,
+      ...transport,
+    }).identityCheckEvent(event, ctx);
   }
 
   override getRoutes(): PluginRoute[] {

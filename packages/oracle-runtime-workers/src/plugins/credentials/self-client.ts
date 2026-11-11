@@ -44,12 +44,26 @@ const CreatedLink = z.object({
 });
 export type CreatedLink = z.infer<typeof CreatedLink>;
 
-const LinkState = z.object({
-  linkId: z.string().regex(LINK_ID),
-  status: z.enum(LINK_STATUSES),
-  updatedAt: SelfTime,
-  expiresAt: SelfTime,
-});
+/**
+ * Self's `review: true` beside `status: "in_progress"`: the check waits for
+ * a person to review it. Read leniently: absent, any other value, or any
+ * other status is "not in review" (an older Self never sends it), and it is
+ * kept only as `true`.
+ */
+const Review = z.literal(true).optional().catch(undefined);
+
+const LinkState = z
+  .object({
+    linkId: z.string().regex(LINK_ID),
+    status: z.enum(LINK_STATUSES),
+    updatedAt: SelfTime,
+    expiresAt: SelfTime,
+    review: Review,
+  })
+  .transform(({ review, ...state }) => ({
+    ...state,
+    ...(review && state.status === 'in_progress' ? { review } : {}),
+  }));
 export type LinkState = z.infer<typeof LinkState>;
 
 /** Mints one invocation from the person's link delegation, bound by `facts`. */

@@ -118,9 +118,36 @@ A notice turn is a `POST /channels/turn` signed like any turn, with `notice` in 
 
 The notice runs through the same admission, queue, recovery and Reply Plan as a turn; its reply is delivered and mirrored like any reply. The model reads it as one human-role message whose content is the time note and a note that opens `[Delivery notice from the chat gateway, not from the user. …]`, tells it what the person was told, asks for a corrected file through `send_file` that still gives the person what they asked for (live or external data fetched in the sandbox and written in as values, not left blank) with one short line on what changed, and carries the gateway's `filename`, `reason` and `detail` as a JSON object after the instructions, as data (`channelDeliveryNote`, `src/channels/replies.ts`). The note is recorded verbatim under `additional_kwargs.channel_delivery_notice`, like the time and quoted-reply notes, so nothing shows it as the person's words: `userContent` strips it for the transcript, memory indexing, the task-approval reader and proposal evidence; the transcript, its pages and history indexing skip the message outright (`isDeliveryNoticeMessage`), so the Portal lists the reply after the previous turn's reply; the session is not titled from it; `topics` reads the last lines from the receipt before it; a quote of it as the user's message resolves `unavailable`; the thread index and the routing classifier never see it; and no user message is mirrored into the oracle room for it. Request admission handlers are not offered a notice turn.
 
+### Channel events
+
+When the person answers a permission card in their wallet (a card the oracle asked the Auth Hub for, `src/plugins/credentials/`), the Hub tells the gateway, and the gateway may send the runtime an **event turn**, so the oracle can go on without waiting for the person to write. A gateway sends one only to a runtime whose last turn result for that binding and revision listed `permission_event` in `features` (0.47.0 and later); without it, or before it has seen a result, it sends nothing. A runtime that predates it refuses the body with `400 invalid_request` (the body is strict), so the gateway clears what it kept on that answer.
+
+```json
+{
+  "provider": "whatsapp",
+  "bindingId": "chb_…",
+  "bindingRevision": 3,
+  "requestId": "permission:<permissionId>:<status>",
+  "remoteMessageRef": "hmac:<64 hex>",
+  "sessionPolicy": "continue",
+  "event": {
+    "kind": "permission_answered",
+    "permissionId": "<Hub card id>",
+    "status": "allowed"
+  },
+  "context": { "kind": "oracle" }
+}
+```
+
+A second kind, `identity_check_updated` (an identity check at Self went into review, passed or failed), uses the same envelope, authorization, capability (`permission_event` covers both kinds) and rules, with `"event": { "kind": "identity_check_updated", "linkId": "<Self link id>", "status": "in_review" | "passed" | "failed" }` and `"requestId": "identity:<linkId>:<status>"`.
+
+It is authorized like any channel turn (the same invocation, the request hash in its facts, the binding checked at the Auth Hub). `status` is `allowed`, `not_allowed` or `expired`; the body carries ids only, never text from the Hub. `requestId` must be `permission:<permissionId>:<status>`, so a resend is the same request and a second answer for the card a new one. No `message`, `attachments`, `replyTo`, `notice` or `sessionId`: the event runs in the binding's current session, with `sessionPolicy: "continue"`. It is answered like a turn (`202`, then poll); a `finished` result with an empty `text` and no plan means the runtime said nothing (send nothing).
+
+The runtime admits it like a notice turn (no user message mirrored, never quoted, not routed, not offered to request admission handlers, not a thread line) and, when its run starts, after any turn already running for the person, hands it to the plugins in order (`OraclePlugin.handleChannelEvent`, `src/core/channel-events.ts`). The first plugin that claims the card decides: `ignore` (the run finishes with an empty reply, nothing in the transcript), `reply` (a fixed text sent without the model) or `agent` (the model runs with the plugin's fixed note where the person's words would be). The decision and the note are stored with the run, so a restart reads the same. The note is recorded like a delivery notice (`additional_kwargs.channel_delivery_notice`), so nothing shows it as the person's words. A card no plugin claims, or a plugin that throws, ends with an empty reply. The credentials plugin reads the card at the Hub, or the link at Self, before it says anything; see [channel events](../src/plugins/credentials/README.md#channel-events).
+
 ## Responses and retries
 
-An admitted turn returns `202` with `requestId`, `runId`, `sessionId`, and a `queued`, `running`, or `recovering` status. Every turn response also carries `sessionTitle`, the title of `sessionId` at response time (null while untitled), so a gateway can tell the person when a turn ran in a different session than the one it sent, and `features`, what this runtime supports beyond the base contract (`["delivery_notice"]`: see [delivery notices](#delivery-notices)); a gateway that predates the field ignores it. A terminal turn returns `200` with its terminal status. A `finished` turn also contains `text` and, when available, `messageId`.
+An admitted turn returns `202` with `requestId`, `runId`, `sessionId`, and a `queued`, `running`, or `recovering` status. Every turn response also carries `sessionTitle`, the title of `sessionId` at response time (null while untitled), so a gateway can tell the person when a turn ran in a different session than the one it sent, and `features`, what this runtime supports beyond the base contract (`["delivery_notice", "permission_event"]`: see [delivery notices](#delivery-notices) and [channel events](#channel-events)); a gateway that predates the field ignores it. A terminal turn returns `200` with its terminal status. A `finished` turn also contains `text` and, when available, `messageId`.
 
 `finished` is the only successful terminal status. A chat run that fails after `send_file` still ends as `finished`, with those files and a line saying the rest is missing, because its files exist nowhere else. Its `text` may be empty after a tool-only completion; the gateway must complete delivery without sending an empty provider message. An absent `messageId` does not mean the turn should be retried.
 

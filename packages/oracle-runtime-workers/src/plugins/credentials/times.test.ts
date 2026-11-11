@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CredentialsServiceError,
   MESSAGES,
+  NO_LATER_MESSAGE,
   refusal,
   refusalFor,
 } from './errors';
@@ -118,6 +119,7 @@ describe('refusalFor: link_active', () => {
         error: 'link_active',
         message:
           'Your identity check is already in progress; it ends in 15 minutes. Please carry on with it.',
+        hint: `Its link cannot be sent again. ${NO_LATER_MESSAGE}`,
       });
   });
 
