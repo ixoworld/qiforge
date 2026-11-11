@@ -31,6 +31,14 @@ export { defineOraclePlugin } from './define-plugin';
 export type { DefineOraclePluginInput } from './define-plugin';
 export { tool } from './tool-helper';
 export {
+  MAX_STANDALONE_MESSAGE_CHARS,
+  MAX_STANDALONE_MESSAGES,
+  STANDALONE_MESSAGES_KEY,
+  standaloneMessagesOf,
+  withStandaloneMessages,
+  type StandaloneMessagesResult,
+} from '../delivery/standalone';
+export {
   ADMIN_TOOL_ACTION,
   ADMIN_TOOL_RESOURCE,
   adminToolCapability,
