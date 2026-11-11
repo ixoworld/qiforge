@@ -26,6 +26,7 @@ import {
   refusalFor,
 } from './errors';
 import {
+  lastLinkState,
   readLinkRecord,
   readPermissionRecord,
   recordLink,
@@ -288,7 +289,7 @@ describe('link status messages', () => {
     [
       'passed',
       'Your identity check is done. You are verified.',
-      'Go on with the task; credentials_check can now prove it.',
+      'The check is done. Go on with the task you were doing (a next step you were given comes first); call credentials_check only if this oracle itself needs to read a claim from the credential for its own decision.',
     ],
     [
       'failed',
@@ -416,6 +417,128 @@ describe('link status messages', () => {
       status: 'already_open',
       message: expect.stringContaining('already in progress'),
     });
+  });
+
+  it('says the check passed and the proof is being saved, never that it is unfinished', async () => {
+    const answer = await read({ status: 'in_progress', saving: true });
+    expect(answer).toEqual({
+      linkId: 'lnk_1',
+      status: 'in_progress',
+      saving: true,
+      updatedAt: Date.UTC(2026, 10, 11, 9, 0) / 1000,
+      expiresAt: Date.UTC(2026, 10, 11, 9, 15) / 1000,
+      message:
+        'You passed your identity check. Your proof is being saved; this can take a minute. Please ask me again shortly.',
+      hint: `The check is done and approved; their proof is still being saved to their IXO account. Do not send a new link and do not say the check is unfinished. ${NO_LATER_MESSAGE} Read the status again when they next write.`,
+    });
+  });
+
+  it('reads an older Self (no field), saving on another status, or a value other than true as not saving', async () => {
+    for (const body of [
+      { status: 'in_progress' },
+      { status: 'in_progress', saving: 'yes' },
+      { status: 'in_progress', saving: false },
+      { status: 'passed', saving: true },
+    ]) {
+      const answer = await read(body);
+      expect(answer).not.toHaveProperty('saving');
+      expect(answer).not.toMatchObject({ message: MESSAGES.saving.message });
+    }
+  });
+
+  it('keeps saving in the short-term status cache, and tells no identity outcome for it', async () => {
+    const kv = createMemoryUserKv();
+    await read({ status: 'in_progress', saving: true }, kv);
+    const kept = (await kv.get(CREDENTIALS_KV_NAMESPACE, 'link:lnk_1')) as {
+      state: { saving?: boolean; review?: boolean };
+    };
+    expect(kept.state.saving).toBe(true);
+    expect(kept.state.review).toBeUndefined();
+    // A row kept before the field existed still reads.
+    await kv.set(CREDENTIALS_KV_NAMESPACE, 'link:lnk_1', {
+      at: NOW,
+      state: {
+        linkId: 'lnk_1',
+        status: 'in_progress',
+        updatedAt: 1,
+        expiresAt: 2,
+      },
+    });
+    expect(await lastLinkState(kv, 'lnk_1')).toEqual({
+      linkId: 'lnk_1',
+      status: 'in_progress',
+      updatedAt: 1,
+      expiresAt: 2,
+    });
+  });
+
+  it('answers an open link being saved with the saving words (409), from the field or the status read last', async () => {
+    const conflict = (saving: boolean) => ({
+      [`GET ${LIST_URL}`]: () => json({ permissions: [allowedCard] }),
+      [`POST ${LINKS}`]: () =>
+        json(
+          {
+            error: { code: 'link_active', message: 'x', retryable: false },
+            linkId: 'lnk_1',
+            status: 'in_progress',
+            expiresAt: '2026-11-11T09:15:00.000Z',
+            ...(saving ? { saving: true } : {}),
+          },
+          409,
+        ),
+      [`GET ${LINKS}/lnk_1`]: () =>
+        json({
+          linkId: 'lnk_1',
+          status: 'in_progress',
+          saving: true,
+          updatedAt: '2026-11-11T09:00:00.000Z',
+          expiresAt: '2026-11-11T09:15:00.000Z',
+        }),
+    });
+    const { adapter } = recordingUcan();
+    await expect(
+      run(
+        tools(conflict(true)).tools.credentials_request_action,
+        { action: 'self.identity-check' },
+        channelCtx(adapter),
+      ),
+    ).resolves.toMatchObject({
+      status: 'already_open',
+      saving: true,
+      ...MESSAGES.saving,
+    });
+    const kv = createMemoryUserKv();
+    const second = tools(conflict(false)).tools;
+    const ctx = channelCtx(adapter, { kv });
+    await run(
+      second.credentials_action_status,
+      { action: 'self.identity-check', ref: 'lnk_1' },
+      ctx,
+    );
+    const answer = await run(
+      second.credentials_request_action,
+      { action: 'self.identity-check' },
+      { ...ctx, toolCallId: 'call-2' },
+    );
+    expect(answer).toMatchObject({
+      status: 'already_open',
+      saving: true,
+      ...MESSAGES.saving,
+    });
+    expect(answer).not.toHaveProperty('review');
+  });
+
+  it('refusalFor maps a 409 being saved to the saving words', () => {
+    expect(
+      refusalFor(
+        new CredentialsServiceError({
+          service: 'self',
+          status: 409,
+          code: 'link_active',
+          body: { status: 'in_progress', saving: true },
+        }),
+      ),
+    ).toEqual({ error: 'link_active', ...MESSAGES.saving });
   });
 
   it('refusalFor maps a 409 in review to the review words', () => {
@@ -639,9 +762,65 @@ describe('permission events', () => {
       `(it asked for: yo.rewards, self.identity-check, a check of ${VCT})`,
     );
     expect(note).toContain(
-      'Then, in the same message, call rewards_claim and send its message right after that sentence.',
+      'Then, in the same message, do exactly this next step (set by the plugin that sent the card), and nothing before it: call rewards_claim and send its message right after that sentence. That is the only next step: do not add credentials_check or any other call it does not name',
     );
     expect(note).not.toContain('credentials_request_action');
+    expect(note).toContain(
+      'call load_capability only for a tool the step needs that you do not have',
+    );
+  });
+
+  it('allowed, then already_verified: the scripted next step never adds a credentials_check', async () => {
+    // As the Yo rewards plugin records it: the identity link next, and the
+    // claim instead when the person is already verified.
+    const claim =
+      'continue their reward claim: call rewards_claim with the campaignId from rewards_list (call rewards_list first if you lack it)';
+    const { handle, ctx } = await setup('allowed', (kv) =>
+      rememberPermissionCard(kv, {
+        permissionId: 'card_1',
+        items: [
+          { kind: 'service-action', action: 'yo.rewards', days: 30 },
+          { kind: 'service-action', action: 'self.identity-check' },
+        ],
+        url: CARD_URL,
+        next: `send their identity check link: call credentials_request_action with action "self.identity-check" and context "next_step". If it answers already_verified, instead ${claim}`,
+        verifiedNext: claim,
+      }),
+    );
+    const answer = await handle(event('allowed'), ctx);
+    const note = answer.kind === 'agent' ? answer.note : '';
+    // The note names the plugin's step as the only one, and forbids an
+    // extra credentials_check.
+    expect(note).toContain(`and nothing before it: send their identity`);
+    expect(note).toContain('do not add credentials_check');
+    expect(note).not.toMatch(/(?<!add )credentials_check (for|can|instead)/);
+    // The tool's already_verified answer sends the model back to that step.
+    const verified = refusalFor(
+      new CredentialsServiceError({
+        service: 'self',
+        status: 409,
+        code: 'already_verified',
+      }),
+    );
+    expect(verified.error).toBe('already_verified');
+    expect(verified.hint).toContain('Go on with the task you were doing');
+    expect(verified.hint).toContain('do exactly that step and nothing else');
+    expect(verified.hint).toContain(
+      'Call credentials_check only if this oracle itself needs to read a claim from the credential for its own decision and no next step was given.',
+    );
+    expect(verified.hint).not.toContain('use credentials_check instead');
+  });
+
+  it('allowed identity card without a plugin step: an already_verified link goes on with the task, credentials_check only for its own decision', async () => {
+    const { handle, ctx } = await setup('allowed');
+    const answer = await handle(event('allowed'), ctx);
+    const note = answer.kind === 'agent' ? answer.note : '';
+    expect(note).toContain(
+      'if it answers already_verified, they are verified: go on with the task; call credentials_check only if this oracle itself needs to read a claim from the credential for its own decision',
+    );
+    expect(note).toContain(
+      'call load_capability only for a tool the step needs that you do not have',
+    );
   });
 
   it('refuses a next step longer than 600 characters', async () => {
@@ -785,8 +964,19 @@ describe('identity-check events', () => {
       await recordLink(kv, 'lnk_1', 'card_1');
     });
     const answer = await handle(event('passed'), ctx);
-    expect(answer.kind === 'agent' && answer.note).toContain(
-      'Then, in the same message, call rewards_claim and send its message right after that sentence.',
+    const note = answer.kind === 'agent' ? answer.note : '';
+    expect(note).toContain(
+      'Then, in the same message, do exactly this next step (set by the plugin that asked for the check), and nothing before it: call rewards_claim and send its message right after that sentence. That is the only next step: do not add credentials_check',
+    );
+    expect(note).not.toContain('credentials_check can now prove it');
+  });
+
+  it("passed without a plugin step: credentials_check only for the oracle's own decision", async () => {
+    const { handle, ctx } = await setup({ status: 'passed' });
+    const answer = await handle(event('passed'), ctx);
+    const note = answer.kind === 'agent' ? answer.note : '';
+    expect(note).toContain(
+      'go on with the task you were on, the one that needed the identity check (call credentials_check only if this oracle itself needs to read a claim from the credential for its own decision).',
     );
   });
 
@@ -823,6 +1013,7 @@ describe('identity-check events', () => {
     // Self says the check is still going (or an older Self without review): nothing.
     for (const body of [
       { status: 'in_progress' },
+      { status: 'in_progress', saving: true },
       { status: 'opened' },
       { status: 'expired' },
     ]) {

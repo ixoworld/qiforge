@@ -52,6 +52,13 @@ export type CreatedLink = z.infer<typeof CreatedLink>;
  */
 const Review = z.literal(true).optional().catch(undefined);
 
+/**
+ * Self's `saving: true` beside `status: "in_progress"`: the check passed and
+ * the proof is still being saved to the person's IXO account. Read as
+ * leniently as `review`.
+ */
+const Saving = z.literal(true).optional().catch(undefined);
+
 const LinkState = z
   .object({
     linkId: z.string().regex(LINK_ID),
@@ -59,10 +66,12 @@ const LinkState = z
     updatedAt: SelfTime,
     expiresAt: SelfTime,
     review: Review,
+    saving: Saving,
   })
-  .transform(({ review, ...state }) => ({
+  .transform(({ review, saving, ...state }) => ({
     ...state,
     ...(review && state.status === 'in_progress' ? { review } : {}),
+    ...(saving && state.status === 'in_progress' ? { saving } : {}),
   }));
 export type LinkState = z.infer<typeof LinkState>;
 

@@ -1456,6 +1456,50 @@ describe('one card for everything (credentials_request_permissions)', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("unnamed_service with the Hub's reason oracle_not_linked: the plain sentence, the operator hint, the reason logged", async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl } = routedFetch({
+      [`POST ${HUB}/api/internal/permissions`]: () =>
+        json(
+          {
+            error: 'unnamed_service',
+            message: 'x',
+            reason: 'oracle_not_linked',
+          },
+          400,
+        ),
+    });
+    const { ctx, warnings } = loggedCtx(adapter);
+    const out = await run(
+      toolsFor(fetchImpl, oracleKey.doc).credentials_request_permissions,
+      { items: [IDENTITY] },
+      ctx,
+    );
+    expect(out).toEqual(refusal('unnamed_service', MESSAGES.oracleNotLinked));
+    expect(warnings.join('\n')).toContain(
+      'unnamed_service (hub 400 unnamed_service reason=oracle_not_linked)',
+    );
+  });
+
+  it('unnamed_service without a reason: the words and log as before', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl } = routedFetch({
+      [`POST ${HUB}/api/internal/permissions`]: () =>
+        json({ error: 'unnamed_service', message: 'x' }, 400),
+    });
+    const { ctx, warnings } = loggedCtx(adapter);
+    const out = await run(
+      toolsFor(fetchImpl, oracleKey.doc).credentials_request_permissions,
+      { items: [IDENTITY] },
+      ctx,
+    );
+    expect(out).toEqual(refusal('unnamed_service', MESSAGES.unnamedService));
+    expect(warnings.join('\n')).toContain(
+      'unnamed_service (hub 400 unnamed_service)',
+    );
+    expect(warnings.join('\n')).not.toContain('reason=');
+  });
+
   it('maps invalid_item to a plain sentence naming the item position', async () => {
     const { adapter, oracleKey } = recordingUcan();
     const { fetchImpl } = routedFetch({
@@ -2477,7 +2521,7 @@ describe('the Hub is the source of truth, the kv a cache', () => {
       status: 'already_allowed',
       permissionId: 'card_7',
       message: "You've already allowed this.",
-      hint: 'No new card was sent: a permission they allowed earlier still covers everything asked. Go on with the task (credentials_check, or credentials_request_action for a service action).',
+      hint: 'No new card was sent: a permission they allowed earlier still covers everything asked. Go on with the task: a next step you were given comes first; otherwise credentials_check for a credential you need to check, or credentials_request_action for a service action.',
     });
     expect(cardPosts(calls)).toHaveLength(0);
     expect(JSON.stringify(out)).not.toContain('DELEGATION');

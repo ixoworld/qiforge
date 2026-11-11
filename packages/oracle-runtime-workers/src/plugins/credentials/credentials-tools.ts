@@ -42,7 +42,9 @@ import {
   refusalFor,
   checkInProgress,
   describeError,
+  hubReasonOf,
   isInReview,
+  isSaving,
   NO_LATER_MESSAGE,
   type CredentialsRefusal,
   type Wording,
@@ -504,10 +506,12 @@ function failed(
     ...(ctx.user.timezone ? { timeZone: ctx.user.timezone } : {}),
     nowMs,
   });
+  const reason =
+    error instanceof CredentialsServiceError ? hubReasonOf(error) : undefined;
   ctx.logger.warn(
     `[credentials] ${tool}: ${result.error} (${
       error instanceof CredentialsServiceError
-        ? `${error.service} ${error.status} ${error.code}`
+        ? `${error.service} ${error.status} ${error.code}${reason ? ` reason=${reason}` : ''}`
         : describeError(error)
     })`,
   );
@@ -749,7 +753,7 @@ function isEnded(answer: object): answer is CredentialsRefusal {
 
 const ALREADY_ALLOWED: Wording = {
   message: "You've already allowed this.",
-  hint: 'No new card was sent: a permission they allowed earlier still covers everything asked. Go on with the task (credentials_check, or credentials_request_action for a service action).',
+  hint: 'No new card was sent: a permission they allowed earlier still covers everything asked. Go on with the task: a next step you were given comes first; otherwise credentials_check for a credential you need to check, or credentials_request_action for a service action.',
 };
 
 function itemStatusOf(card: PermissionState, item: PermissionItemState) {
@@ -867,6 +871,8 @@ const OpenLink = z.object({
   expiresAt: SelfTime,
   /** Self's "in review" (read leniently: anything but `true` is not). */
   review: z.literal(true).optional().catch(undefined),
+  /** Self's "passed, proof being saved" (read leniently, as `review`). */
+  saving: z.literal(true).optional().catch(undefined),
 });
 
 /** What the person does on an identity-check link, in the words every link message uses. */
@@ -946,11 +952,36 @@ function askedLine(record: PermissionRecord): string {
   return asked.length ? ` (it asked for: ${asked.join(', ')})` : '';
 }
 
+/**
+ * Every event note that lets the model go on: tools already bound are used
+ * as they are, `load_capability` only for one the step needs and lacks.
+ */
+const LOAD_ONLY_IF_MISSING =
+  'Use the tools already in your tool list; call load_capability only for a tool the step needs that you do not have.';
+
+/** When the next step is not another plugin's: credentials_check only for the oracle's own decision. */
+const CHECK_ONLY_FOR_OWN_DECISION =
+  'call credentials_check only if this oracle itself needs to read a claim from the credential for its own decision';
+
+/**
+ * The sentence after the fixed one in an event note: another plugin's next
+ * step (from `rememberPermissionCard`) is the ONLY step, named plainly;
+ * otherwise `fallback`.
+ */
+function nextStepSentence(
+  pluginNext: string | undefined,
+  owner: string,
+  fallback: string,
+): string {
+  if (pluginNext)
+    return `Then, in the same message, do exactly this next step (set by the plugin that ${owner}), and nothing before it: ${pluginNext}. That is the only next step: do not add credentials_check or any other call it does not name, even when a tool's hint suggests one. ${LOAD_ONLY_IF_MISSING}`;
+  return `Then, in the same message, ${fallback}. ${LOAD_ONLY_IF_MISSING}`;
+}
+
 /** What the agent does once a card is allowed: another plugin's words, else by what it asked. */
 function nextStep(record: PermissionRecord): string {
-  if (record.next) return record.next;
   if (record.actions?.includes(IDENTITY_CHECK_ACTION))
-    return 'go on with the task you were on: call credentials_request_action with action "self.identity-check" and context "next_step", and send its message right after that sentence';
+    return `go on with the task you were on: call credentials_request_action with action "self.identity-check" and context "next_step", and send its message right after that sentence (if it answers already_verified, they are verified: go on with the task; ${CHECK_ONLY_FOR_OWN_DECISION})`;
   if (record.vcts?.length)
     return 'go on with the task you were on: call credentials_check for the credential you needed';
   return 'go on with the task you were on';
@@ -969,7 +1000,7 @@ function eventAnswer(
   if (status === 'allowed')
     return {
       kind: 'agent',
-      note: `${EVENT_NOTE_START} They allowed ${card}. Start your reply with exactly this sentence: "${text}" Then, in the same message, ${nextStep(record)}. Do not send the card again. ${NO_LATER_MESSAGE}]`,
+      note: `${EVENT_NOTE_START} They allowed ${card}. Start your reply with exactly this sentence: "${text}" ${nextStepSentence(record.next, 'sent the card', nextStep(record))} Do not send the card again. ${NO_LATER_MESSAGE}]`,
     };
   return {
     kind: 'reply',
@@ -1062,7 +1093,7 @@ function identityAnswer(
   if (outcome === 'passed')
     return {
       kind: 'agent',
-      note: `${IDENTITY_NOTE_START} Their identity check passed. Start your reply with exactly this sentence: "${text}" Then, in the same message, ${verifiedNext ?? 'go on with the task you were on, the one that needed the identity check (credentials_check can now prove it)'}. ${NO_LATER_MESSAGE}]`,
+      note: `${IDENTITY_NOTE_START} Their identity check passed. Start your reply with exactly this sentence: "${text}" ${nextStepSentence(verifiedNext, 'asked for the check', `go on with the task you were on, the one that needed the identity check (${CHECK_ONLY_FOR_OWN_DECISION})`)} ${NO_LATER_MESSAGE}]`,
     };
   return {
     kind: 'reply',
@@ -2182,7 +2213,7 @@ export function createCredentials(deps: CredentialsToolsDeps): {
       name: 'credentials_request_action',
       description: [
         'Do not call this before the person has allowed the card. It is for service-action items only, never for credential-check items (those need no action: use credentials_check). Carry out a catalogued action the person allowed (on the card from credentials_request_permissions or credentials_request_action_permission). For "self.identity-check" (one card is enough: it holds the link, the offer and the consent) it asks Self for a link where they start an identity check (it works once and ends after about 15 minutes; the first device that opens it keeps it).',
-        'Send the `message` (it holds the link) as it is. Keep the linkId to read progress with credentials_action_status. A new call replaces a link nobody has opened yet (the old one stops working), so call it again only when they need a new link. status "already_open": their check is in progress (review: true: a person reviews it); relay the message and read progress with that linkId only when they write.',
+        'Send the `message` (it holds the link) as it is. Keep the linkId to read progress with credentials_action_status. A new call replaces a link nobody has opened yet (the old one stops working), so call it again only when they need a new link. status "already_open": their check is in progress (review: true: a person reviews it; saving: true: it passed and their proof is still being saved); relay the message and read progress with that linkId only when they write. error "already_verified": they are already verified and no link is needed; go on with the task you were doing (a next step you were given comes first, and nothing else); call credentials_check only if this oracle itself needs to read a claim from the credential for its own decision.',
         'context (self.identity-check only): "next_step" when the check is the next step of a task already under way (after a reward claim, or right after they allowed the card; the message then opens with "Next, ..."), otherwise leave it out ("standalone").',
         'For any other entry id it answers status "granted" with the capabilities the person allowed (ids, capabilities, audiences and ends; never tokens) so another plugin or you can act on them. If they have not allowed it yet the answer says so: ask for permission first.',
         'When what they allowed earlier no longer matches what the service needs now, it sends the card again by itself and answers status "sent" with a permissionId and a `message` asking for their OK once more: send it as it is and call this again once they allowed it. WhatsApp only.',
@@ -2270,24 +2301,29 @@ export function createCredentials(deps: CredentialsToolsDeps): {
       // token, so its URL cannot be sent again.
       const open = openLinkOf(error);
       if (open) {
-        // In review: Self says so beside the 409, or the status read last did.
-        const review =
-          isInReview(open) ||
-          (open.status === 'in_progress' &&
-            (await lastLinkState(kv, open.linkId))?.review === true);
+        // Passed and being saved, or in review: Self says so beside the
+        // 409, or the status read last did.
+        const last =
+          open.status === 'in_progress'
+            ? await lastLinkState(kv, open.linkId)
+            : null;
+        const saving = isSaving(open) || last?.saving === true;
+        const review = !saving && (isInReview(open) || last?.review === true);
         if (review) await noteLinkSeen(kv, open.linkId, 'in_review');
         return said(
-          review
-            ? MESSAGES.inReview
-            : {
-                message: checkInProgress(endsFor(ctx, open.expiresAt)),
-                hint: `Its link cannot be sent again; read progress with this linkId when they write. ${NO_LATER_MESSAGE}`,
-              },
+          saving
+            ? MESSAGES.saving
+            : review
+              ? MESSAGES.inReview
+              : {
+                  message: checkInProgress(endsFor(ctx, open.expiresAt)),
+                  hint: `Its link cannot be sent again; read progress with this linkId when they write. ${NO_LATER_MESSAGE}`,
+                },
           {
             status: 'already_open',
             linkId: open.linkId,
             linkStatus: open.status,
-            ...(review ? { review: true } : {}),
+            ...(saving ? { saving: true } : review ? { review: true } : {}),
             expiresAt: open.expiresAt,
           },
         );
@@ -2335,7 +2371,7 @@ export function createCredentials(deps: CredentialsToolsDeps): {
     },
     passed: {
       message: 'Your identity check is done. You are verified.',
-      hint: 'Go on with the task; credentials_check can now prove it.',
+      hint: `The check is done. Go on with the task you were doing (a next step you were given comes first); ${CHECK_ONLY_FOR_OWN_DECISION}.`,
     },
     failed: {
       message: "Sorry, your identity check didn't pass.",
@@ -2374,17 +2410,25 @@ export function createCredentials(deps: CredentialsToolsDeps): {
         updatedAt: number;
         expiresAt: number;
         review?: true;
-      }) =>
-        said(
-          isInReview(state) ? MESSAGES.inReview : LINK_WORDING[state.status],
+        saving?: true;
+      }) => {
+        const saving = isSaving(state);
+        const review = !saving && isInReview(state);
+        return said(
+          saving
+            ? MESSAGES.saving
+            : review
+              ? MESSAGES.inReview
+              : LINK_WORDING[state.status],
           {
             linkId: state.linkId,
             status: state.status,
-            ...(isInReview(state) ? { review: true } : {}),
+            ...(saving ? { saving: true } : review ? { review: true } : {}),
             updatedAt: state.updatedAt,
             expiresAt: state.expiresAt,
           },
         );
+      };
       try {
         // At most 6 calls a minute per link; the status read last is kept
         // 5 s (a final one for good), so most calls never reach Self.
@@ -2422,7 +2466,7 @@ export function createCredentials(deps: CredentialsToolsDeps): {
     {
       name: 'credentials_action_status',
       description:
-        'Read the progress of an action credentials_request_action started: for "self.identity-check" pass the linkId as ref (sent, opened, in_progress, passed, failed, expired, cancelled; in_progress with review: true means a person from support reviews it, which can take a while). No personal data comes back. Only call it when the person writes and you need the answer; do not poll in a loop (at most 6 a minute per link; an answer is kept 5 seconds). You can never message them first. WhatsApp only.',
+        'Read the progress of an action credentials_request_action started: for "self.identity-check" pass the linkId as ref (sent, opened, in_progress, passed, failed, expired, cancelled; in_progress with review: true means a person from support reviews it, which can take a while; in_progress with saving: true means it passed and their proof is still being saved, which can take a minute). No personal data comes back. Only call it when the person writes and you need the answer; do not poll in a loop (at most 6 a minute per link; an answer is kept 5 seconds). You can never message them first. WhatsApp only.',
       schema: ActionStatusInput,
       effect: 'read',
     },

@@ -354,6 +354,8 @@ const CachedLink = z.object({
     expiresAt: z.number(),
     /** Self's "in review" beside `in_progress`; rows kept before it have none. */
     review: z.literal(true).optional().catch(undefined),
+    /** Self's "passed, proof being saved" beside `in_progress`; older rows have none. */
+    saving: z.literal(true).optional().catch(undefined),
   }),
 });
 

@@ -101,6 +101,11 @@ export const MESSAGES = {
     message: "This service can't ask for permissions yet.",
     hint: "The oracle's entity has no name in IXO Names; an operator must set one.",
   },
+  /** `unnamed_service` with the Hub's reason `oracle_not_linked`. */
+  oracleNotLinked: {
+    message: "This service can't ask for permissions yet.",
+    hint: "The Auth Hub refused (reason oracle_not_linked): the oracle's entity does not list the oracle's signing account as a linked entity with service matrix and relationship admin on chain. An operator must add that linked entity to the oracle's entity; nothing was sent. Do not retry.",
+  },
   tooManyPending: {
     message:
       'You already have requests waiting. Please answer them, or wait until they end.',
@@ -118,7 +123,7 @@ export const MESSAGES = {
   },
   alreadyVerified: {
     message: 'You already have an identity credential.',
-    hint: 'No identity check is needed; use credentials_check instead.',
+    hint: `The person is already verified, so no identity check or link is needed. Go on with the task you were doing: when an event note or another plugin gave you a next step, do exactly that step and nothing else. Call credentials_check only if this oracle itself needs to read a claim from the credential for its own decision and no next step was given.`,
   },
   noPermission: {
     message: 'I need your permission for this first.',
@@ -132,6 +137,12 @@ export const MESSAGES = {
     message:
       "Thanks, your identity check is sent. Someone from our support team will look at it. Please check back later. You can ask me anytime, and I'll check how it's going.",
     hint: `A person reviews it; nothing tells you when it is done and you cannot message them first. ${NO_LATER_MESSAGE} Do not send a new link. Read the status again only when they write.`,
+  },
+  /** Self's `saving: true` beside `in_progress`: approved, the proof not saved yet. */
+  saving: {
+    message:
+      'You passed your identity check. Your proof is being saved; this can take a minute. Please ask me again shortly.',
+    hint: `The check is done and approved; their proof is still being saved to their IXO account. Do not send a new link and do not say the check is unfinished. ${NO_LATER_MESSAGE} Read the status again when they next write.`,
   },
   permissionEnded: {
     message: 'Your permission for this has ended or was stopped.',
@@ -246,6 +257,44 @@ export function isInReview(answer: unknown): boolean {
 }
 
 /**
+ * Whether Self says a link's check passed and its proof is still being
+ * saved: only `saving: true` beside `status: "in_progress"`. Absent, any
+ * other value or any other status: not saving (an older Self never sends
+ * the field).
+ */
+export function isSaving(answer: unknown): boolean {
+  return (
+    typeof answer === 'object' &&
+    answer !== null &&
+    Reflect.get(answer, 'status') === 'in_progress' &&
+    Reflect.get(answer, 'saving') === true
+  );
+}
+
+/**
+ * The Hub's `reason` beside its error code, for a log line: only a constant
+ * code (`[a-z0-9_]`, up to 64), else undefined (absent, or anything else).
+ */
+export function hubReasonOf(
+  error: CredentialsServiceError,
+): string | undefined {
+  const reason = error.body?.reason;
+  return typeof reason === 'string' && LOG_CODE.test(reason)
+    ? reason
+    : undefined;
+}
+
+/**
+ * `400 unnamed_service`: the Hub's `reason` picks the hint when this runtime
+ * knows it (`oracle_not_linked`); absent or unknown, the words as before.
+ */
+function unnamedService(error: CredentialsServiceError): CredentialsRefusal {
+  return hubReasonOf(error) === 'oracle_not_linked'
+    ? refusal(error.code, MESSAGES.oracleNotLinked)
+    : refusal(error.code, MESSAGES.unnamedService);
+}
+
+/**
  * `400 invalid_item`: the Hub names the item's position (`details.index`, from
  * 0) and a reason for developers. The person is told the item's place in
  * plain words; the reason goes to the agent's hint only.
@@ -293,7 +342,7 @@ export function refusalFor(
     case 'unknown_claim':
       return refusal(code, MESSAGES.unknownClaim);
     case 'unnamed_service':
-      return refusal(code, MESSAGES.unnamedService);
+      return unnamedService(error);
     case 'unknown_action':
       return refusal(code, MESSAGES.unknownAction);
     case 'invalid_item':
@@ -315,7 +364,9 @@ export function refusalFor(
     case 'already_verified':
       return refusal(code, MESSAGES.alreadyVerified);
     case 'link_active': {
-      // A check waiting for a person's review has its own words.
+      // A check that passed and is being saved, or waits for a person's
+      // review, has its own words.
+      if (isSaving(error.body)) return refusal(code, MESSAGES.saving);
       if (isInReview(error.body)) return refusal(code, MESSAGES.inReview);
       // Self names the open link's end beside its error (ISO 8601 text).
       const ends = selfTimeSeconds(error.body?.expiresAt);
