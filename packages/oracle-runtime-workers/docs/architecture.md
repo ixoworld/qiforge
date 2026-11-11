@@ -1058,17 +1058,18 @@ depend on:
   the signal) and turns only Ed25519 keys into `did:key`s; other
   verification methods are skipped. The did:web resolver uses plain HTTP
   only for `localhost`, `127.0.0.1` and `[::1]`, also aborts after 3 s, and
-  both resolvers read the global `fetch` at lookup time. The channel route
-  keeps one did:web resolver per isolate for its service identity, cached
-  60 s like did:ixo keys (failures never cached). The runtime keeps one
-  did:ixo resolver per isolate and Blocksync URL (`sharedIxoDIDResolver`,
-  used by the shell and the channel validator) with the resolver's cache on
-  for 60 s (`IXO_DID_RESOLUTION_CACHE_TTL_MS`): concurrent lookups of one
-  DID share a request, and failures are never cached. A key rotated out of
-  a DID document on-chain is therefore still trusted by a new validation
-  for up to 60 s, and a verdict already cached stays valid until that
-  invocation expires (at most `UCAN_AUTH_MAX_TTL_SECONDS`) or, for a
-  delegation, for at most 3 minutes.
+  both resolvers read the global `fetch` at lookup time. The shell keeps
+  one did:ixo resolver per isolate and Blocksync URL (`sharedIxoDIDResolver`)
+  with the resolver's cache on for 60 s (`IXO_DID_RESOLUTION_CACHE_TTL_MS`):
+  concurrent lookups of one DID share a request, and failures are never
+  cached. A key rotated out of a DID document on-chain is therefore still
+  trusted by a new validation for up to 60 s, and a verdict already cached
+  stays valid until that invocation expires (at most
+  `UCAN_AUTH_MAX_TTL_SECONDS`) or, for a delegation, for at most 3 minutes.
+  The channel route keeps its own keys per isolate (`src/channels/key-lookup.ts`,
+  [channels](channels.md#key-lookups)): the same 60 s, plus the last good
+  keys standing in for a failed lookup for at most 10 minutes, the oracle's
+  own DID refreshed in the background, and one retry for a cold lookup.
 
 ## Tool definition size
 
