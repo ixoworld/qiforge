@@ -137,6 +137,35 @@ describe('SelfLinksClient', () => {
     });
     expect(facts).toEqual([[{ method: 'GET', path: `${LINKS_PATH}/lnk_1` }]]);
   });
+
+  it('reads `failure` leniently: only a known value beside failed, never a parse error', async () => {
+    const base = { linkId: 'lnk_1', updatedAt: 1, expiresAt: 2 };
+    const cases: Array<[Record<string, unknown>, string | undefined]> = [
+      [{ status: 'failed', failure: 'error' }, 'error'],
+      [{ status: 'failed', failure: 'too_many_attempts' }, 'too_many_attempts'],
+      [{ status: 'failed' }, undefined],
+      [{ status: 'failed', failure: 'rate_limited' }, undefined],
+      [{ status: 'failed', failure: 42 }, undefined],
+      [{ status: 'failed', failure: null }, undefined],
+      [{ status: 'failed', failure: { code: 'error' } }, undefined],
+      [{ status: 'passed', failure: 'error' }, undefined],
+      [{ status: 'in_progress', failure: 'too_many_attempts' }, undefined],
+    ];
+    const { fetchImpl } = routedFetch({
+      [`GET ${SELF}${LINKS_PATH}/lnk_1`]: cases.map(
+        ([body]) =>
+          () =>
+            json({ ...base, ...body }),
+      ),
+    });
+    const { self } = client(fetchImpl);
+    for (const [body, failure] of cases) {
+      const state = await self.linkStatus('lnk_1');
+      expect(state.status).toBe(body.status);
+      expect('failure' in state).toBe(failure !== undefined);
+      expect(state.failure).toBe(failure);
+    }
+  });
 });
 
 describe('SelfLinksClient transport', () => {

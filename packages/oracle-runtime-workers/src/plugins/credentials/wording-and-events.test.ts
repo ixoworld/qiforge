@@ -294,7 +294,7 @@ describe('link status messages', () => {
     [
       'failed',
       "Sorry, your identity check didn't pass.",
-      'Offer a new link only if they want to try again.',
+      `Offer a new link only if they want to try again. ${NO_LATER_MESSAGE}`,
     ],
     [
       'expired',
@@ -470,6 +470,95 @@ describe('link status messages', () => {
       updatedAt: 1,
       expiresAt: 2,
     });
+  });
+
+  it.each([
+    [
+      'error',
+      'Sorry, something went wrong with your identity check. Please ask me for a new link to try again.',
+      'It was a problem on our side, not about them',
+      'do not say they failed or were not verified',
+    ],
+    [
+      'too_many_attempts',
+      'Your identity check ran out of tries. Please ask me for a new link to try again.',
+      'They used up their tries',
+      'do not say they were refused',
+    ],
+  ])(
+    'failed with failure %s: its own words, never "didn\'t pass"',
+    async (failure, message, why, never) => {
+      const answer = await read({ status: 'failed', failure });
+      expect(answer).toMatchObject({ status: 'failed', failure, message });
+      const hint = (answer as { hint: string }).hint;
+      expect(hint).toContain(why);
+      expect(hint).toContain(never);
+      expect(hint).toContain('Offer them a new link');
+      expect(hint).toContain(NO_LATER_MESSAGE);
+      expect(JSON.stringify(answer)).not.toContain("didn't pass");
+    },
+  );
+
+  it('reads an unknown failure, a wrong type, or failure on another status as the default words', async () => {
+    for (const body of [
+      { status: 'failed', failure: 'rate_limited' },
+      { status: 'failed', failure: 7 },
+      { status: 'failed', failure: true },
+      { status: 'failed', failure: ['error'] },
+    ]) {
+      const answer = await read(body);
+      expect(answer).toMatchObject({
+        status: 'failed',
+        message: "Sorry, your identity check didn't pass.",
+      });
+      expect(answer).not.toHaveProperty('failure');
+      expect(answer).not.toHaveProperty('error');
+    }
+    for (const status of ['passed', 'in_progress', 'expired']) {
+      const answer = await read({ status, failure: 'error' });
+      expect(answer).toMatchObject({ status });
+      expect(answer).not.toHaveProperty('failure');
+      expect(answer).not.toMatchObject({
+        message: expect.stringContaining('something went wrong'),
+      });
+    }
+  });
+
+  it('keeps failure with the failed status in the cache, and a later read says the same thing', async () => {
+    const kv = createMemoryUserKv();
+    const first = await read({ status: 'failed', failure: 'error' }, kv);
+    const kept = (await kv.get(CREDENTIALS_KV_NAMESPACE, 'link:lnk_1')) as {
+      state: { status?: string; failure?: string };
+    };
+    expect(kept.state).toMatchObject({ status: 'failed', failure: 'error' });
+    // Self now answers without the field: the final status read last decides.
+    const again = await read({ status: 'failed' }, kv);
+    expect(again).toEqual(first);
+    // A row kept before the field existed, or with a value no longer known,
+    // reads with the default words.
+    for (const failure of [undefined, 'something_new']) {
+      await kv.set(CREDENTIALS_KV_NAMESPACE, 'link:lnk_1', {
+        at: NOW,
+        state: {
+          linkId: 'lnk_1',
+          status: 'failed',
+          updatedAt: 1,
+          expiresAt: 2,
+          ...(failure ? { failure } : {}),
+        },
+      });
+      expect(await lastLinkState(kv, 'lnk_1')).toEqual({
+        linkId: 'lnk_1',
+        status: 'failed',
+        updatedAt: 1,
+        expiresAt: 2,
+      });
+      await expect(
+        read({ status: 'failed', failure: 'error' }, kv),
+      ).resolves.toMatchObject({
+        message: "Sorry, your identity check didn't pass.",
+      });
+    }
   });
 
   it('answers an open link being saved with the saving words (409), from the field or the status read last', async () => {
@@ -998,6 +1087,52 @@ describe('identity-check events', () => {
       kind: 'reply',
       text: MESSAGES.inReview.message,
     });
+  });
+
+  it.each([
+    [
+      'error',
+      'Sorry, something went wrong with your identity check. Please ask me for a new link to try again.',
+      'a problem on our side, not a decision about them',
+    ],
+    [
+      'too_many_attempts',
+      'Your identity check ran out of tries. Please ask me for a new link to try again.',
+      'they used up their tries',
+    ],
+  ])(
+    'failed with failure %s: its own fixed sentence after re-reading Self',
+    async (failure, text, why) => {
+      const { handle, ctx, kv, selfReads } = await setup({
+        status: 'failed',
+        failure,
+      });
+      const answer = await handle(event('failed'), ctx);
+      expect(answer).toMatchObject({ kind: 'reply', text });
+      const note = answer.kind === 'reply' ? answer.note : '';
+      expect(note).toContain(why);
+      expect(note).toContain(`they were told: "${text}"`);
+      expect(note).toContain(NO_LATER_MESSAGE);
+      expect(note).not.toContain('did not pass');
+      expect(selfReads()).toBe(1);
+      // The cache keeps the cause: a later status read says the same.
+      expect(await lastLinkState(kv, 'lnk_1')).toMatchObject({
+        status: 'failed',
+        failure,
+      });
+    },
+  );
+
+  it('failed with an unknown or mistyped failure: the default sentence', async () => {
+    for (const failure of ['rate_limited', 3, null]) {
+      const { handle, ctx } = await setup({ status: 'failed', failure });
+      const answer = await handle(event('failed'), ctx);
+      expect(answer).toMatchObject({
+        kind: 'reply',
+        text: "Sorry, your identity check didn't pass.",
+        note: expect.stringContaining('Their identity check did not pass'),
+      });
+    }
   });
 
   it('follows Self, not the event: a forged or stale status says only what Self says', async () => {

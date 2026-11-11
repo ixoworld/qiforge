@@ -100,6 +100,7 @@ import {
   LINK_CAPABILITY,
   LINK_STATUSES,
   SelfLinksClient,
+  type LinkFailure,
   type LinkStatus,
 } from './self-client';
 import { SelfTime, whenItEnds } from './times';
@@ -1081,27 +1082,72 @@ export const IDENTITY_EVENT_TEXT = {
   failed: "Sorry, your identity check didn't pass.",
 } as const satisfies Record<IdentityOutcome, string>;
 
+/**
+ * The fixed words for a `failed` check, by Self's `failure`: absent
+ * (`not_verified`) is a real "not verified"; `error` was a problem on our
+ * side; `too_many_attempts` means they used up their tries. The status
+ * read and the event answer use the same words.
+ */
+export const IDENTITY_FAILED_WORDING = {
+  not_verified: {
+    message: IDENTITY_EVENT_TEXT.failed,
+    hint: `Offer a new link only if they want to try again. ${NO_LATER_MESSAGE}`,
+  },
+  error: {
+    message:
+      'Sorry, something went wrong with your identity check. Please ask me for a new link to try again.',
+    hint: `It was a problem on our side, not about them: do not say they failed or were not verified. Offer them a new link to try again. ${NO_LATER_MESSAGE}`,
+  },
+  too_many_attempts: {
+    message:
+      'Your identity check ran out of tries. Please ask me for a new link to try again.',
+    hint: `They used up their tries on that link: do not say they were refused or not verified. Offer them a new link to try again. ${NO_LATER_MESSAGE}`,
+  },
+} as const satisfies Record<LinkFailure | 'not_verified', Wording>;
+
+/** The words for a failed check, from Self's `failure` (only beside `failed`). */
+function failedWording(state: { status: LinkStatus; failure?: LinkFailure }) {
+  return IDENTITY_FAILED_WORDING[
+    state.status === 'failed' && state.failure ? state.failure : 'not_verified'
+  ];
+}
+
 const IDENTITY_NOTE_START =
   '[Identity check update, checked with Self; this is not a message from the user.';
+
+const FAILED_NOTE: Record<keyof typeof IDENTITY_FAILED_WORDING, string> = {
+  not_verified: 'Their identity check did not pass',
+  error:
+    'Their identity check ended because of a problem on our side, not a decision about them',
+  too_many_attempts:
+    'Their identity check ended because they used up their tries',
+};
 
 /** The note and wording for an identity check's outcome as Self reports it. */
 function identityAnswer(
   outcome: IdentityOutcome,
   verifiedNext: string | undefined,
+  failure: LinkFailure | undefined,
 ): ChannelEventResult {
-  const text = IDENTITY_EVENT_TEXT[outcome];
   if (outcome === 'passed')
     return {
       kind: 'agent',
-      note: `${IDENTITY_NOTE_START} Their identity check passed. Start your reply with exactly this sentence: "${text}" ${nextStepSentence(verifiedNext, 'asked for the check', `go on with the task you were on, the one that needed the identity check (${CHECK_ONLY_FOR_OWN_DECISION})`)} ${NO_LATER_MESSAGE}]`,
+      note: `${IDENTITY_NOTE_START} Their identity check passed. Start your reply with exactly this sentence: "${IDENTITY_EVENT_TEXT.passed}" ${nextStepSentence(verifiedNext, 'asked for the check', `go on with the task you were on, the one that needed the identity check (${CHECK_ONLY_FOR_OWN_DECISION})`)} ${NO_LATER_MESSAGE}]`,
     };
+  if (outcome === 'failed') {
+    const why = failure ?? 'not_verified';
+    const { message, hint } = IDENTITY_FAILED_WORDING[why];
+    return {
+      kind: 'reply',
+      text: message,
+      note: `${IDENTITY_NOTE_START} ${FAILED_NOTE[why]}; they were told: "${message}" ${hint}]`,
+    };
+  }
+  const text = IDENTITY_EVENT_TEXT.in_review;
   return {
     kind: 'reply',
     text,
-    note:
-      outcome === 'failed'
-        ? `${IDENTITY_NOTE_START} Their identity check did not pass; they were told: "${text}" Offer a new link only if they want to try again.]`
-        : `${IDENTITY_NOTE_START} Their identity check is waiting for a person's review; they were told: "${text}" ${MESSAGES.inReview.hint}]`,
+    note: `${IDENTITY_NOTE_START} Their identity check is waiting for a person's review; they were told: "${text}" ${MESSAGES.inReview.hint}]`,
   };
 }
 
@@ -2373,10 +2419,8 @@ export function createCredentials(deps: CredentialsToolsDeps): {
       message: 'Your identity check is done. You are verified.',
       hint: `The check is done. Go on with the task you were doing (a next step you were given comes first); ${CHECK_ONLY_FOR_OWN_DECISION}.`,
     },
-    failed: {
-      message: "Sorry, your identity check didn't pass.",
-      hint: 'Offer a new link only if they want to try again.',
-    },
+    // Chosen by Self's `failure`: see `failedWording`.
+    failed: IDENTITY_FAILED_WORDING.not_verified,
     expired: {
       message: 'That link has ended.',
       hint: 'Offer a new link only if they still want the check.',
@@ -2411,19 +2455,24 @@ export function createCredentials(deps: CredentialsToolsDeps): {
         expiresAt: number;
         review?: true;
         saving?: true;
+        failure?: LinkFailure;
       }) => {
         const saving = isSaving(state);
         const review = !saving && isInReview(state);
+        const failure = state.status === 'failed' ? state.failure : undefined;
         return said(
           saving
             ? MESSAGES.saving
             : review
               ? MESSAGES.inReview
-              : LINK_WORDING[state.status],
+              : state.status === 'failed'
+                ? failedWording(state)
+                : LINK_WORDING[state.status],
           {
             linkId: state.linkId,
             status: state.status,
             ...(saving ? { saving: true } : review ? { review: true } : {}),
+            ...(failure ? { failure } : {}),
             updatedAt: state.updatedAt,
             expiresAt: state.expiresAt,
           },
@@ -2466,7 +2515,7 @@ export function createCredentials(deps: CredentialsToolsDeps): {
     {
       name: 'credentials_action_status',
       description:
-        'Read the progress of an action credentials_request_action started: for "self.identity-check" pass the linkId as ref (sent, opened, in_progress, passed, failed, expired, cancelled; in_progress with review: true means a person from support reviews it, which can take a while; in_progress with saving: true means it passed and their proof is still being saved, which can take a minute). No personal data comes back. Only call it when the person writes and you need the answer; do not poll in a loop (at most 6 a minute per link; an answer is kept 5 seconds). You can never message them first. WhatsApp only.',
+        'Read the progress of an action credentials_request_action started: for "self.identity-check" pass the linkId as ref (sent, opened, in_progress, passed, failed, expired, cancelled; in_progress with review: true means a person from support reviews it, which can take a while; in_progress with saving: true means it passed and their proof is still being saved, which can take a minute; failed with failure: "error" means a problem on our side, not about them, and failure: "too_many_attempts" means they used up their tries; without failure they were not verified). No personal data comes back. Only call it when the person writes and you need the answer; do not poll in a loop (at most 6 a minute per link; an answer is kept 5 seconds). You can never message them first. WhatsApp only.',
       schema: ActionStatusInput,
       effect: 'read',
     },
@@ -2548,7 +2597,7 @@ export function createCredentials(deps: CredentialsToolsDeps): {
     const card = record.permissionId
       ? await readPermissionRecord(kv, record.permissionId)
       : null;
-    return identityAnswer(outcome, card?.verifiedNext);
+    return identityAnswer(outcome, card?.verifiedNext, state.failure);
   }
 
   return {

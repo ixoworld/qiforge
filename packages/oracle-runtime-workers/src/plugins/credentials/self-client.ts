@@ -59,6 +59,22 @@ const Review = z.literal(true).optional().catch(undefined);
  */
 const Saving = z.literal(true).optional().catch(undefined);
 
+/**
+ * Why a check ended `failed`, when it was not a decision about the person:
+ * `error` (a system failure) or `too_many_attempts` (they used up their
+ * tries). Absent: the person was not verified.
+ */
+export const LINK_FAILURES = ['error', 'too_many_attempts'] as const;
+export type LinkFailure = (typeof LINK_FAILURES)[number];
+
+/**
+ * Self's `failure` beside `status: "failed"`. Read leniently, as `review`:
+ * absent, any other value or type, or any other status is "absent" (an
+ * older Self never sends it; a newer one may add values), never a parse
+ * failure.
+ */
+export const Failure = z.enum(LINK_FAILURES).optional().catch(undefined);
+
 const LinkState = z
   .object({
     linkId: z.string().regex(LINK_ID),
@@ -67,11 +83,13 @@ const LinkState = z
     expiresAt: SelfTime,
     review: Review,
     saving: Saving,
+    failure: Failure,
   })
-  .transform(({ review, saving, ...state }) => ({
+  .transform(({ review, saving, failure, ...state }) => ({
     ...state,
     ...(review && state.status === 'in_progress' ? { review } : {}),
     ...(saving && state.status === 'in_progress' ? { saving } : {}),
+    ...(failure && state.status === 'failed' ? { failure } : {}),
   }));
 export type LinkState = z.infer<typeof LinkState>;
 
