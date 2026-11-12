@@ -6,7 +6,7 @@
 '@ixo/matrix': patch
 ---
 
-Every LangChain package moves to its current release: `@langchain/core` 1.3.4, `langchain` 1.6.1, `@langchain/langgraph` 1.6.1, `@langchain/langgraph-checkpoint` 1.2.2, `@langchain/openai` 1.8.0 (`openai` 7), `@langchain/mcp-adapters` 2.0.2, `langsmith` 0.11.8.
+Every LangChain package moves to its current release: `@langchain/core` 1.3.4, `langchain` 1.6.1, `@langchain/langgraph` 1.6.1, `@langchain/langgraph-checkpoint` 1.2.2, `@langchain/openai` 1.8.0 (`openai` 7.50), `@langchain/mcp-adapters` 2.0.2 (`@modelcontextprotocol/client` 2.4), `langsmith` 0.11.8, and in `@ixo/common` `@langchain/anthropic` 1.6.0, `@langchain/langgraph-checkpoint-sqlite` 1.1.0, `@langchain/textsplitters` 1.0.2.
 
 Workers runtime:
 
@@ -25,8 +25,11 @@ Workers runtime:
 - The main agent runs each tool call of a step as its own graph task again (`createAgent` `version: 'v2'`): a call's result is checkpointed when it returns, so a durable run resumed after a reset in the middle of a step no longer re-runs the reads that had finished or reports the writes that had finished as "outcome unknown". langchain 1.5.19+ no longer copies the whole state into each task, which was why the main agent had one task for all calls.
 - A call to an Anthropic model on OpenRouter (`anthropic/…`) sends a top-level `cache_control: { type: 'ephemeral' }`, so Anthropic caches the prompt prefix for 5 minutes. Requests to every other model are unchanged; the BYO Anthropic lane sends nothing new.
 - Every call to a GPT-5.6 model on OpenRouter (`openai/gpt-5.6-luna`, `-terra`, `-sol`), on any role, asks for OpenAI, then Azure (`provider.order`, fallbacks allowed). For `gpt-5.6-luna`, the reply model used to go to the lowest-latency provider (Amazon Bedrock) and the helper roles to OpenRouter's default routing, and Bedrock often lost the prompt cache between repeated calls. Other models are routed as before: `provider.sort: 'latency'` on the reply model, OpenRouter's default routing on helper roles.
+- OpenRouter requests no longer carry a top-level `require_parameters: true`. It is not an OpenRouter request field and had no effect.
 - BYO models (ChatGPT subscription, OpenAI key): the picker offers the models the user's account has. On connect (and on `GET /byo-llm/status?refresh=true`, or when none is kept) the runtime reads the provider's own listing (`GET /v1/models`; the ChatGPT backend's `GET /models?client_version=`), keeps it per user in the object's storage and narrows the curated list to it. `status` reports `modelSource` (`account` or `catalog`) and, when the list could not be read or the provider has none, `modelSourceNote`.
 - A BYO model call is taken as a refused model only when the provider says so (`model_not_found`, `unsupported_model`, "does not exist", "is not supported" …). A bare HTTP 400 or 404, an empty body, or a 400 about another field (for example `call_id` longer than 64 characters) is an ordinary failed turn, no longer a silent switch to the platform model with a "doesn't offer this model" notice. LangChain's own "Troubleshooting URL … MODEL_NOT_FOUND" suffix on every 404 is ignored. The notice carries the provider's `status` and `code`.
 - The ChatGPT lane no longer fails a replayed thread whose stored tool call id is longer than the backend's 64 characters (for example a sub-agent's forwarded call, renamed `<parent id>_<id>`, or another provider's id). The outgoing request carries `call_` + the base64url SHA-256 of the id (48 characters, the same every time, one per distinct id, a call and its output alike); the stored message, tool marks and transcript keep the original. A request in which that would equal another call id is refused.
 
 `@ixo/common` moves to `openai` 7, so the workspace resolves one copy of each LangChain package.
+
+Tested on a devnet oracle: platform models (GPT-5.6, Anthropic), MCP tools, the sandbox and the BYO ChatGPT lane. The BYO OpenAI-key lane was not tested live (unit tests only).

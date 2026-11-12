@@ -1005,6 +1005,15 @@ and an object stops hibernating or a request dies with an opaque error.
   Chat Completions API takes only text in a tool message: a resource link
   as its address, an image, audio clip or embedded file as a line naming
   its kind and mime type, never its data.
+- **MCP servers are connected in legacy mode, Streamable HTTP only.**
+  `mcpAdapterConfig` sets `mode: 'legacy'`: the servers speak the 2025
+  protocol, the default `auto` mode would send a `server/discover` probe
+  before every connect (and plugins connect per turn or per call), and
+  legacy mode offers the server no elicitation, so no tool can pause a run
+  to ask the user. `automaticSSEFallback: false` makes a 4xx at connect (an
+  expired token, a 403, a 429) fail on the first request instead of being
+  retried over SSE. Tool names keep their upstream form, bare or
+  `<server>__<tool>`.
 - **Never store the global `fetch`.** workerd rejects `fetch` called with a
   foreign `this` ("Illegal invocation"). Wrap it:
   `(input, init) => globalThis.fetch(input, init)`. matrix-js-sdk clients

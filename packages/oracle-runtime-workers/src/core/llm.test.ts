@@ -526,7 +526,6 @@ describe('the OpenRouter request of a main-model turn', () => {
       },
     ],
     stream_options: { include_usage: true },
-    require_parameters: true,
     include_reasoning: true,
     models: [...OPENROUTER_MAIN_FALLBACKS],
     provider: { order: ['openai', 'azure'], allow_fallbacks: true },

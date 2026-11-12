@@ -789,11 +789,9 @@ full history for the rest of this turn`); it never replaces the
   routed by OpenRouter's default routing (load balancing by price and
   uptime). The base slugs `openai` and `azure` leave out OpenAI's `flex`
   and `fast` tier endpoints and the regional Azure endpoints, which cost 10%
-  more. Every OpenRouter call also sends a top-level
-  `require_parameters: true`, which is not an OpenRouter request field and
-  has no effect. OpenRouter's `provider.require_parameters` would refuse
-  every GPT-5.6 call with a 404, because no GPT-5.6 endpoint accepts
-  `temperature`.
+  more. Calls do not set OpenRouter's `provider.require_parameters`: it
+  would refuse every GPT-5.6 call with a 404, because no GPT-5.6 endpoint
+  accepts `temperature`.
 - **Stale results.** On a cold turn (one that opens at least
   `CONTEXT_CACHE_COLD_MS` after the turn before it) tool results older than
   the last `CONTEXT_STALE_RESULT_TURNS` finished turns become one-line stubs,

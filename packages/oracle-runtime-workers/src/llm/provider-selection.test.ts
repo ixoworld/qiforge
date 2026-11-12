@@ -27,7 +27,7 @@ describe('createLlmAdapter provider selection', () => {
     const model = expectCompletions(adapter.get('main'));
     expect(model.model).toBe(DEFAULT_MODEL_ID);
     expect(model.clientConfig.baseURL).toBe(OPENROUTER_BASE_URL);
-    expect(model.modelKwargs).toMatchObject({ require_parameters: true });
+    expect(model.modelKwargs).toMatchObject({ include_reasoning: true });
   });
 
   it('LLM_PROVIDER=nebius selects the Nebius adapter with the fixed role map', () => {
@@ -56,7 +56,7 @@ describe('createLlmAdapter provider selection', () => {
     expect(guard.temperature).toBe(0);
     expect(guard.clientConfig.baseURL).toBe(NEBIUS_BASE_URL);
     // No OpenRouter wire extras on the Nebius branch.
-    expect(guard.modelKwargs?.require_parameters).toBeUndefined();
+    expect(guard.modelKwargs?.include_reasoning).toBeUndefined();
 
     const main = expectCompletions(adapter.get('main'));
     expect(main.temperature).toBe(0.8);

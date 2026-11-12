@@ -951,7 +951,6 @@ export function createLlmAdapter(
         defaultHeaders: { ...headers, ...overrideHeaders },
       },
       modelKwargs: {
-        require_parameters: true,
         include_reasoning: true,
         ...fallbackKwargs,
         ...openRouterProviderRouting(model, role),
@@ -978,8 +977,8 @@ export function createLlmAdapter(
  * Nebius Token Factory adapter — the Node provider's `nebius` branch:
  * a plain OpenAI-compatible endpoint, the fixed role map, `temperature` 0
  * for the `guard` role and 0.8 otherwise (callers override via `params`).
- * No OpenRouter wire extras (`require_parameters`, fallback `models`,
- * `reasoning` kwargs) — those break non-OpenRouter APIs.
+ * No OpenRouter wire extras (`include_reasoning`, fallback `models`,
+ * `provider`, `reasoning` kwargs) — those break non-OpenRouter APIs.
  */
 function createNebiusAdapter(
   env: LlmEnv,

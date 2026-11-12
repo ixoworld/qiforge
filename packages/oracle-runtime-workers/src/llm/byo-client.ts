@@ -3,9 +3,9 @@
  * Workers port of the Node runtime's `llm/byo-client.ts`. Given a resolved
  * user credential and a provider-native model id, returns a LangChain chat
  * model wired to the user's own account. Deliberately does NOT reuse the
- * OpenRouter factory path — `require_parameters`, `models` fallbacks and the
- * `reasoning` modelKwargs block are OpenRouter wire format and break direct
- * provider APIs.
+ * OpenRouter factory path — `include_reasoning`, `models` fallbacks,
+ * `provider` routing and the `reasoning` modelKwargs block are OpenRouter
+ * wire format and break direct provider APIs.
  *
  * The API-key providers are built on `ChatOpenAICompletions`, which always
  * calls Chat Completions: `ChatOpenAI` would send any model id containing
