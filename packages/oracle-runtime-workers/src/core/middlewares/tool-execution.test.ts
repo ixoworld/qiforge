@@ -1,5 +1,6 @@
 import { frontendOutcomeUnknown } from '@ixo/common/ai/frontend-bridge';
 import { ToolMessage } from '@langchain/core/messages';
+import { MCPAdapter } from '@langchain/mcp-adapters';
 import { describe, expect, it, vi } from 'vitest';
 import { ProviderStallError } from '../../llm/stream-liveness';
 import { ToolScheduler } from '../tool-scheduler';
@@ -13,6 +14,8 @@ import {
   uncertainWriteToolResult,
 } from './tool-execution';
 import { makeClaimStore } from '../test-fixtures';
+import { mcpAdapterConfig } from '../../plugins/mcp-tool-adapter';
+import { serveTestMcp } from '../../plugins/mcp-test-server';
 import {
   FrontendCallNotSentError,
   FrontendCallRegistry,
@@ -177,6 +180,84 @@ describe('isUncertainOutcome', () => {
       ),
     ).toBe(false);
     expect(isUncertainOutcome('not an error')).toBe(false);
+  });
+});
+
+describe('isUncertainOutcome on a failed MCP call', () => {
+  /**
+   * The error a real `MCPAdapter` throws when `tools/call` meets `failure`,
+   * over Streamable HTTP to an in-process MCP server (connect and list go
+   * through).
+   */
+  async function mcpCallError(
+    failure: () => Promise<Response>,
+  ): Promise<unknown> {
+    const url = 'https://mcp.example/mcp';
+    const server = await serveTestMcp(url, [
+      {
+        definition: {
+          name: 'create_thing',
+          description: 'writes',
+          inputSchema: { type: 'object', properties: {} },
+        },
+        call: async () => ({ content: [{ type: 'text', text: 'created' }] }),
+      },
+    ]);
+    vi.stubGlobal(
+      'fetch',
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(input, init);
+        if (
+          request.method === 'POST' &&
+          (await request.clone().text()).includes('"tools/call"')
+        )
+          return failure();
+        return server.fetch(input, init);
+      },
+    );
+    const adapter = new MCPAdapter(
+      mcpAdapterConfig('writer', { url, toolNames: 'bare' }),
+    );
+    try {
+      const [tool] = await adapter.listTools();
+      if (!tool) throw new Error('tool missing');
+      return await tool.invoke({}).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    } finally {
+      await adapter.close();
+      await server.close();
+      vi.unstubAllGlobals();
+    }
+  }
+
+  it('is true for a 5xx whose body names no status, the status being on the cause', async () => {
+    const badGateway = await mcpCallError(
+      async () => new Response('upstream connect error', { status: 502 }),
+    );
+    expect(badGateway).toHaveProperty('cause.status', 502);
+    expect(isUncertainOutcome(badGateway)).toBe(true);
+    const empty = await mcpCallError(
+      async () => new Response('', { status: 500 }),
+    );
+    expect(isUncertainOutcome(empty)).toBe(true);
+  });
+
+  it('is true for a transport failure', async () => {
+    const error = await mcpCallError(async () => {
+      throw new TypeError('Network connection lost.');
+    });
+    expect(error).toHaveProperty('cause.name', 'TypeError');
+    expect(isUncertainOutcome(error)).toBe(true);
+  });
+
+  it('is false for a refusal the server answered', async () => {
+    const error = await mcpCallError(
+      async () => new Response('forbidden', { status: 403 }),
+    );
+    expect(error).toHaveProperty('cause.status', 403);
+    expect(isUncertainOutcome(error)).toBe(false);
   });
 });
 

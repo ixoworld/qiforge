@@ -79,7 +79,7 @@ const buildFirecrawlDescription = (tools: PluginTool[]): string => {
 
 /**
  * Build the Firecrawl sub-agent definition. Tools are supplied by the
- * plugin and close over a `MultiServerMCPClient` keyed to `FIRECRAWL_MCP_URL`.
+ * plugin and close over an `MCPAdapter` keyed to `FIRECRAWL_MCP_URL`.
  */
 export function createFirecrawlSubAgent(tools: PluginTool[]): PluginSubAgent {
   return {

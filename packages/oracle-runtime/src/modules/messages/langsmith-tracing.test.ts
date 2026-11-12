@@ -61,14 +61,17 @@ describe('resolveLangsmithTracing', () => {
   });
 
   it('falls back to LangChain resolution of the project name when the project env is unset', () => {
-    // The tracer resolves the project itself (process env, then 'default') —
-    // this module must not override that with an explicit undefined.
+    // The tracer keeps no project of its own: the LangSmith SDK resolves it
+    // (process env, then 'default') when the run is posted. This module must
+    // not pin one either.
     vi.stubEnv('LANGSMITH_PROJECT', 'env-resolved-project');
     try {
       const decision = resolveLangsmithTracing(
         makeArgs({ env: { apiKey: 'ls-key', tracedDids: USER_DID } }),
       );
-      expect(decision.callbacks?.[0]?.projectName).toBe('env-resolved-project');
+      const tracer = decision.callbacks?.[0];
+      expect(tracer).toBeInstanceOf(LangChainTracer);
+      expect(tracer?.projectName).toBeUndefined();
     } finally {
       vi.unstubAllEnvs();
     }

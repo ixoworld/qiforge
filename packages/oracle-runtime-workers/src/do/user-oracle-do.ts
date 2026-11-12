@@ -216,6 +216,10 @@ import {
   admitRequest,
   admissionMetadata,
 } from '../core/request-admission';
+import {
+  routeChannelEvent,
+  type ChannelEventDecision,
+} from '../core/channel-events';
 import type {
   RequestAdmissionResult,
   RequestDisposition,
@@ -443,7 +447,7 @@ import {
   type DomainContextProvenance,
 } from '../core/domain-context';
 import { DomainContextStore } from './domain-context-store';
-import { EVENT_NAMES } from '../core/runtime-context';
+import { buildRuntimeContext, EVENT_NAMES } from '../core/runtime-context';
 import { artifactStorageConfig } from '../artifacts/config';
 import {
   ArtifactStore,
@@ -611,9 +615,11 @@ const USER_CONTEXT_PROGRESS_STEP = 'Recalling your memories…';
  * return as an empty section (which renders nothing). The checkpointed
  * value then marks a landed gather (see `hasUserContext`) even for a user
  * with no memory yet, so the thread's later turns do not count as first
- * contact; and the written value is the whole context under a merging
- * reducer (the `MainAgentGraphState` annotation's) as well as under the
- * last-value channel the agent declares (`userContextStateMiddleware`).
+ * contact. The agent's `userContext` channel is the last-value field
+ * `userContextStateMiddleware` declares (`createAgent` does not build
+ * channels from the `MainAgentGraphState` annotation, so its merging
+ * reducer never runs): the written value replaces the previous context
+ * whole, and every slot present keeps that replacement complete.
  */
 function withEverySlot(context: UserContextData): UserContextData {
   const out: UserContextData = { ...context };
@@ -633,8 +639,9 @@ function hasUserContext(value: unknown): boolean {
 
 /**
  * Whether a turn is offered to the plugins' admission handlers. Not for a
- * turn with attachments, a gateway's delivery notice (no request of the
- * person to read), a scheduled task run, or a Matrix group room: a direct
+ * turn with attachments, a gateway's delivery notice or event (no
+ * request of the person to read), a scheduled task run, or a Matrix group
+ * room: a direct
  * read is posted into the room, so one user's authorized read would be
  * shown to every member.
  */
@@ -643,6 +650,7 @@ function admissionApplies(req: TurnRequest): boolean {
     !req.attachments?.length &&
     !req.channel?.attachments?.length &&
     !req.channel?.notice &&
+    !req.channel?.channelEvent &&
     !req.taskRunId &&
     !req.sessionId.startsWith(TASK_SESSION_PREFIX) &&
     req.roomKind !== 'group'
@@ -6839,6 +6847,33 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           requestId: req.requestId,
         });
       };
+      // An event turn: the plugins decide what is said, once, and the
+      // decision is stored with the run (a restart reads the same).
+      if (
+        req.client === 'channel' &&
+        req.channel?.channelEvent &&
+        req.channel.eventNote === undefined
+      ) {
+        const decided = await this.decideChannelEvent(req, live);
+        if (decided.kind === 'ignore') {
+          announce();
+          live.buffer.push('done', { runId: live.runId });
+          return { status: 'finished', text: '', toolCalls: [] };
+        }
+        req.channel.eventNote = decided.note;
+        stored.disposition =
+          decided.kind === 'reply'
+            ? {
+                kind: 'direct-read',
+                text: decided.text,
+                title: 'Update',
+                messageId: `direct:${req.sessionId}:${req.requestId}:ai`,
+              }
+            : { kind: 'agent' };
+        const request = JSON.stringify(stored);
+        await this.runStore!.update(live.runId, { request });
+        live.record.request = request;
+      }
       if (!stored.disposition && !resumed) {
         stored.disposition = { kind: 'admitting' };
         const request = JSON.stringify(stored);
@@ -7162,6 +7197,56 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       }
     }
 
+    /**
+     * Hand an event turn (a permission card's answer, an identity check's
+     * change) to the plugins (`OraclePlugin.handleChannelEvent`) with the
+     * turn's runtime context: the person's kv, the oracle's signer, the
+     * channel binding. A plugin reads the card at the Auth Hub, or the link
+     * at Self, before it says anything.
+     */
+    private async decideChannelEvent(
+      req: TurnRequest,
+      live: LiveRun,
+    ): Promise<ChannelEventDecision> {
+      const event = req.channel?.channelEvent;
+      const ambient = this.ambient;
+      if (!event || !ambient || !req.channel?.bindingRevision)
+        return { kind: 'ignore' };
+      const ctx = buildRuntimeContext(
+        {
+          context: {
+            user: {
+              did: req.identity.userDid,
+              matrixUserId: req.identity.matrixUserId ?? '',
+              ucanDelegation: await this.turnDelegation(req.identity),
+              timezone: req.identity.timezone,
+              currentTime: new Date().toISOString(),
+            },
+            session: {
+              id: req.sessionId,
+              client: req.client,
+              requestId: req.requestId,
+              runId: live.runId,
+              channel: {
+                provider: req.channel.provider,
+                bindingId: req.channel.bindingId,
+                bindingRevision: req.channel.bindingRevision,
+              },
+            },
+          },
+          signal: live.abort.signal,
+        },
+        ambient,
+        { messages: [], loadedPlugins: new Set() },
+      );
+      return routeChannelEvent(
+        this.core.plugins,
+        { ...event, requestId: req.requestId },
+        ctx,
+        (m) => console.warn(`[user-do] ${m}`),
+      );
+    }
+
     private async runDirectRead(
       live: LiveRun,
       req: TurnRequest,
@@ -7205,11 +7290,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             }
           : {}),
       };
+      // An event's note stands where the person's words would be,
+      // hidden like a delivery notice (`isDeliveryNoticeMessage`).
+      const eventNote = req.channel?.eventNote;
       const messages = [
         new HumanMessage({
           id: `direct:${req.sessionId}:${req.requestId}:human`,
-          content:
-            req.client === 'matrix' && req.roomKind === 'group'
+          content: eventNote
+            ? eventNote
+            : req.client === 'matrix' && req.roomKind === 'group'
               ? prefixSpeaker(
                   req.message,
                   req.senderDisplayName ??
@@ -7217,7 +7306,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                     req.identity.userDid,
                 )
               : req.message,
-          additional_kwargs: kwargs,
+          additional_kwargs: eventNote
+            ? { ...kwargs, [CHANNEL_DELIVERY_NOTICE_KWARG]: eventNote }
+            : kwargs,
         }),
         new AIMessage({
           id: disposition.messageId,
@@ -8603,10 +8694,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const timeNote = suppliedContextOnly
         ? undefined
         : renderTurnTimeNote(turnAt, req.identity.timezone);
-      // A delivery notice stands where the person's words would be (the
-      // message is empty): readers take it off with `userContent` and hide
-      // the message (`isDeliveryNoticeMessage`).
-      const noticeNote = channelDeliveryNote(req.channel?.notice);
+      // A delivery notice, or an event's note, stands where the
+      // person's words would be (the message is empty): readers take it off
+      // with `userContent` and hide the message (`isDeliveryNoticeMessage`).
+      const noticeNote =
+        channelDeliveryNote(req.channel?.notice) ?? req.channel?.eventNote;
       const noticed = noticeNote
         ? withTurnTimeNote(spoken, noticeNote)
         : spoken;

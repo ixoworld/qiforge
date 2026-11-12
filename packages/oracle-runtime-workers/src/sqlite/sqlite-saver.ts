@@ -10,7 +10,7 @@
  *   checkpoints(thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
  *               type, checkpoint BLOB, metadata BLOB)
  *   writes(thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel,
- *          type, value BLOB)
+ *          type, value BLOB, task_path)
  *   messages(thread_id, checkpoint_ns, checkpoint_id, message_id PK,
  *            message_type, message_content, message BLOB, created_at)
  *   schema_migrations(version PK, name, applied_at)
@@ -24,6 +24,10 @@
  * - `put` prunes a thread to `maxCheckpointsPerThread` newest checkpoints (and
  *   their writes) once it exceeds the cap by `PRUNE_SLACK`.
  * - `pending_sends` migration for pre-v4 checkpoints.
+ * - Pending writes keep the task path `putWrites` is given and are returned
+ *   in `writesSortKey` order, `(task_path, task_id, idx)`, sorted in JS with
+ *   `compareWritesSortKeys` as the upstream savers do. Rows written before
+ *   the column existed read with path `''` and sort first, by task id.
  * - Serialization is `JsonPlusSerializer` (the `BaseCheckpointSaver` default).
  *
  * Attachment bytes are never stored: every write path (message rows, the
@@ -52,12 +56,14 @@ import {
   type CheckpointListOptions,
   type CheckpointMetadata,
   type CheckpointTuple,
+  compareWritesSortKeys,
   copyCheckpoint,
   emptyCheckpoint,
   maxChannelVersion,
   type PendingWrite,
   type SerializerProtocol,
   TASKS,
+  writesSortKey,
 } from '@langchain/langgraph-checkpoint';
 import { compressForStorage, hexToBytes, readBlobText } from './blob-codec';
 import type { DoSqliteDatabase, SqlParam } from './database';
@@ -193,7 +199,6 @@ type CheckpointRow = {
   checkpoint: Uint8Array | string;
   metadata: Uint8Array | string;
   pending_writes: string;
-  pending_sends: string;
 };
 
 type MessageRow = {
@@ -215,6 +220,9 @@ export interface ThreadMessageRow {
 
 interface PendingWriteColumn {
   task_id: string;
+  /** `''` on rows written before migration 004 and on writes without a task. */
+  task_path: string;
+  idx: number;
   channel: string;
   type: string | null;
   /** `hex(value)` — decoded via {@link hexColumnText}. */
@@ -320,10 +328,35 @@ const migration003: Migration = {
   },
 };
 
+/**
+ * Migration 004: `writes.task_path`, the serialized path of the task that
+ * made a write (`putWrites`), the first part of the order pending writes
+ * are returned in. `ADD COLUMN` with a constant default only rewrites the
+ * table's entry in `sqlite_schema`: existing rows are not touched and read
+ * the default `''`, so the migration costs the same on any file size. A
+ * file created after this release already has the column (see `doSetup`).
+ */
+const migration004: Migration = {
+  version: 4,
+  name: 'add_task_path_to_writes',
+  up: async (db) => {
+    const columns = await db.exec<{ name: string }>(
+      `SELECT name FROM pragma_table_info('writes') WHERE name = ?`,
+      ['task_path'],
+    );
+    if (columns.length === 0) {
+      await db.run(
+        `ALTER TABLE writes ADD COLUMN task_path TEXT NOT NULL DEFAULT ''`,
+      );
+    }
+  },
+};
+
 const MIGRATIONS: readonly Migration[] = [
   migration001,
   migration002,
   migration003,
+  migration004,
 ];
 
 /** Rows the one-time attachment sweep inflates and rewrites per transaction. */
@@ -342,22 +375,13 @@ const TUPLE_SELECT = `
     metadata,
     (
       SELECT json_group_array(
-        json_object('task_id', pw.task_id, 'channel', pw.channel, 'type', pw.type, 'value', hex(pw.value))
+        json_object('task_id', pw.task_id, 'task_path', pw.task_path, 'idx', pw.idx, 'channel', pw.channel, 'type', pw.type, 'value', hex(pw.value))
       )
       FROM writes AS pw
       WHERE pw.thread_id = checkpoints.thread_id
         AND pw.checkpoint_ns = checkpoints.checkpoint_ns
         AND pw.checkpoint_id = checkpoints.checkpoint_id
-    ) AS pending_writes,
-    (
-      SELECT json_group_array(json_object('type', ps.type, 'value', hex(ps.value)))
-      FROM writes AS ps
-      WHERE ps.thread_id = checkpoints.thread_id
-        AND ps.checkpoint_ns = checkpoints.checkpoint_ns
-        AND ps.checkpoint_id = checkpoints.parent_checkpoint_id
-        AND ps.channel = '${TASKS}'
-      ORDER BY ps.idx
-    ) AS pending_sends
+    ) AS pending_writes
   FROM checkpoints`;
 
 /**
@@ -451,6 +475,7 @@ export class SqliteSaver extends BaseCheckpointSaver {
         channel TEXT NOT NULL,
         type TEXT,
         value BLOB,
+        task_path TEXT NOT NULL DEFAULT '',
         PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
       )`);
     await db.run(`
@@ -874,10 +899,21 @@ export class SqliteSaver extends BaseCheckpointSaver {
     };
   }
 
+  /**
+   * A checkpoint's pending writes in `writesSortKey` order, the order live
+   * execution applies a superstep's writes in. Sorted here, not in SQL, so
+   * the order never depends on a collation or a query plan.
+   */
   private async loadPendingWrites(
     json: string,
   ): Promise<Array<[string, string, unknown]>> {
-    const columns = JSON.parse(json) as PendingWriteColumn[];
+    const columns = (JSON.parse(json) as PendingWriteColumn[])
+      .map((column) => ({
+        key: writesSortKey(column.task_path, column.task_id, column.idx),
+        column,
+      }))
+      .sort((a, b) => compareWritesSortKeys(a.key, b.key))
+      .map(({ column }) => column);
     return Promise.all(
       columns.map(
         async (write): Promise<[string, string, unknown]> => [
@@ -1291,10 +1327,16 @@ export class SqliteSaver extends BaseCheckpointSaver {
     await this.db.run('PRAGMA incremental_vacuum');
   }
 
+  /**
+   * Store a task's writes on a checkpoint, with the serialized path of the
+   * task (`taskPath`, `''` when the graph gives none: input and `Command`
+   * writes) that orders them on read (`loadPendingWrites`).
+   */
   async putWrites(
     config: RunnableConfig,
     writes: PendingWrite[],
     taskId: string,
+    taskPath?: string,
   ): Promise<void> {
     await this.setup();
     if (!config.configurable) throw new Error('Empty configuration supplied.');
@@ -1354,6 +1396,7 @@ export class SqliteSaver extends BaseCheckpointSaver {
           write[0],
           type,
           await compressForStorage(serialized),
+          taskPath ?? '',
         ];
       }),
     );
@@ -1364,8 +1407,8 @@ export class SqliteSaver extends BaseCheckpointSaver {
     await this.db.transaction(async () => {
       for (const row of rows) {
         await this.db.run(
-          `INSERT OR REPLACE INTO writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT OR REPLACE INTO writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value, task_path)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           row,
         );
       }

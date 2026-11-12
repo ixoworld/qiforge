@@ -1,10 +1,37 @@
-/* eslint-disable no-console */
 // Reproduction object: does an MCP round trip leave a Durable Object resident?
 // Deploy with the wrangler.jsonc next to this file; see docs/testing.md.
 import { DurableObject } from 'cloudflare:workers';
-import { MultiServerMCPClient } from '@langchain/mcp-adapters';
+import { MCPAdapter } from '@langchain/mcp-adapters';
 
 const FIRECRAWL = 'https://mcp-firecrawl.ixo.earth/v2/mcp';
+
+/**
+ * An adapter for Firecrawl in the shape the plugins use (legacy protocol, no
+ * SSE fallback, the upstream tool names), plus the options a variant tests:
+ * per-server `headers` and `reconnect`, and the adapter's
+ * `defaultToolTimeout`, which LangChain turns into an `AbortSignal.timeout`.
+ */
+function firecrawlAdapter(
+  server: {
+    headers?: Record<string, string>;
+    reconnect?: { enabled: boolean; maxAttempts: number; delayMs: number };
+  } = {},
+  defaultToolTimeout?: number,
+): MCPAdapter {
+  return new MCPAdapter({
+    servers: {
+      firecrawl: {
+        transport: 'http',
+        mode: 'legacy',
+        automaticSSEFallback: false,
+        url: FIRECRAWL,
+        ...server,
+      },
+    },
+    prefixToolNameWithServerName: false,
+    ...(defaultToolTimeout === undefined ? {} : { defaultToolTimeout }),
+  });
+}
 
 export class HibProbe extends DurableObject {
   private readonly instanceId = crypto.randomUUID();
@@ -13,16 +40,10 @@ export class HibProbe extends DurableObject {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === '/mcp-sdk') {
-      const client = new MultiServerMCPClient({
-        useStandardContentBlocks: true,
-        prefixToolNameWithServerName: true,
-        mcpServers: {
-          firecrawl: { type: 'http', transport: 'http', url: FIRECRAWL },
-        },
-      });
+      const client = firecrawlAdapter();
       let names: string[] = [];
       try {
-        names = (await client.getTools()).map((t) => t.name);
+        names = (await client.listTools()).map((t) => t.name);
       } finally {
         await client.close().catch(() => undefined);
       }
@@ -33,19 +54,11 @@ export class HibProbe extends DurableObject {
       });
     }
     if (url.pathname === '/mcp-call') {
-      const client = new MultiServerMCPClient({
-        useStandardContentBlocks: true,
-        prefixToolNameWithServerName: true,
-        mcpServers: {
-          firecrawl: { type: 'http', transport: 'http', url: FIRECRAWL },
-        },
-      });
+      const client = firecrawlAdapter();
       let head = '';
       try {
-        const tools = await client.getTools();
-        const scrape = tools.find(
-          (t) => t.name === 'firecrawl__firecrawl_scrape',
-        );
+        const tools = await client.listTools();
+        const scrape = tools.find((t) => t.name === 'firecrawl_scrape');
         if (!scrape) throw new Error('no scrape tool');
         const out = await scrape.invoke({
           url: 'https://example.com',
@@ -117,26 +130,17 @@ export class HibProbe extends DurableObject {
     }
     if (url.pathname === '/mcp-call2') {
       // The oracle's memory/sandbox client shape: reconnect + tool timeout + auth header.
-      const client = new MultiServerMCPClient({
-        useStandardContentBlocks: true,
-        prefixToolNameWithServerName: true,
-        defaultToolTimeout: 120_000,
-        mcpServers: {
-          firecrawl: {
-            type: 'http',
-            transport: 'http',
-            url: FIRECRAWL,
-            headers: { authorization: 'Bearer probe', 'x-auth-type': 'ucan' },
-            reconnect: { enabled: true, maxAttempts: 3, delayMs: 2000 },
-          },
+      const client = firecrawlAdapter(
+        {
+          headers: { authorization: 'Bearer probe', 'x-auth-type': 'ucan' },
+          reconnect: { enabled: true, maxAttempts: 3, delayMs: 2000 },
         },
-      });
+        120_000,
+      );
       let head = '';
       try {
-        const tools = await client.getTools();
-        const scrape = tools.find(
-          (t) => t.name === 'firecrawl__firecrawl_scrape',
-        );
+        const tools = await client.listTools();
+        const scrape = tools.find((t) => t.name === 'firecrawl_scrape');
         if (!scrape) throw new Error('no scrape tool');
         const out = await scrape.invoke({
           url: 'https://example.com',
@@ -151,35 +155,27 @@ export class HibProbe extends DurableObject {
     }
     if (url.pathname.startsWith('/mcp-opt/')) {
       const variant = url.pathname.split('/')[2] ?? '';
-      const server: Record<string, unknown> = {
-        type: 'http',
-        transport: 'http',
-        url: FIRECRAWL,
+      const server = {
+        ...(variant === 'reconnect'
+          ? { reconnect: { enabled: true, maxAttempts: 3, delayMs: 2000 } }
+          : {}),
+        ...(variant === 'headers'
+          ? {
+              headers: {
+                authorization: 'Bearer probe',
+                'x-auth-type': 'ucan',
+              },
+            }
+          : {}),
       };
-      const top: Record<string, unknown> = {
-        useStandardContentBlocks: true,
-        prefixToolNameWithServerName: true,
-      };
-      if (variant === 'reconnect')
-        server.reconnect = { enabled: true, maxAttempts: 3, delayMs: 2000 };
-      if (variant === 'timeout') top.defaultToolTimeout = 120_000;
-      if (variant === 'headers')
-        server.headers = {
-          authorization: 'Bearer probe',
-          'x-auth-type': 'ucan',
-        };
+      const defaultToolTimeout = variant === 'timeout' ? 120_000 : undefined;
       if (variant === 'own') {
         // No SDK timeout: our own race with a timer we always clear.
-        const client2 = new MultiServerMCPClient({
-          ...top,
-          mcpServers: { firecrawl: server },
-        } as ConstructorParameters<typeof MultiServerMCPClient>[0]);
+        const client2 = firecrawlAdapter(server, defaultToolTimeout);
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
-          const tools = await client2.getTools();
-          const scrape = tools.find(
-            (t) => t.name === 'firecrawl__firecrawl_scrape',
-          );
+          const tools = await client2.listTools();
+          const scrape = tools.find((t) => t.name === 'firecrawl_scrape');
           if (!scrape) throw new Error('no scrape tool');
           const call = scrape.invoke({
             url: 'https://example.com',
@@ -201,16 +197,11 @@ export class HibProbe extends DurableObject {
           await client2.close().catch(() => undefined);
         }
       }
-      const client = new MultiServerMCPClient({
-        ...top,
-        mcpServers: { firecrawl: server },
-      } as ConstructorParameters<typeof MultiServerMCPClient>[0]);
+      const client = firecrawlAdapter(server, defaultToolTimeout);
       let head = '';
       try {
-        const tools = await client.getTools();
-        const scrape = tools.find(
-          (t) => t.name === 'firecrawl__firecrawl_scrape',
-        );
+        const tools = await client.listTools();
+        const scrape = tools.find((t) => t.name === 'firecrawl_scrape');
         if (!scrape) throw new Error('no scrape tool');
         const out = await scrape.invoke({
           url: 'https://example.com',

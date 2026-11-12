@@ -1,11 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import {
+  serveTestMcp,
+  type TestMcpServer,
+  type TestMcpTool,
+} from '../mcp-test-server';
 import type { ConnectionApi } from './connection';
 import { fakeContext, MCP_URL } from './testing';
 import {
   asksTools,
   bindable,
   bindableTools,
+  connectAsksMcp,
   withoutPropertyNames,
   clearAsksToolDefs,
   hideUploadAddress,
@@ -91,8 +97,76 @@ function turnWith(
 
 const names = (tools: Array<{ name: string }>) => tools.map((one) => one.name);
 
+const ENDPOINT_TOOLS: TestMcpTool[] = [
+  {
+    definition: {
+      name: 'my_status',
+      description: 'Your status.',
+      inputSchema: { type: 'object', properties: {} },
+    },
+    call: async () => ({ content: [{ type: 'text', text: 'all good' }] }),
+  },
+  {
+    definition: {
+      name: 'refuses',
+      description: 'Always refuses.',
+      inputSchema: { type: 'object', properties: {} },
+    },
+    call: async () => ({
+      content: [{ type: 'text', text: 'Refused (HTTP 401) words.' }],
+      isError: true,
+    }),
+  },
+];
+
+/**
+ * asks' connector as the global `fetch`, for the real `connectAsksMcp`: an
+ * SDK server per connection (each holds one session), answering 401 with
+ * `invalid_token` to the requests `refuse` picks, as asks does for an ended
+ * access token. `listed`: a tool list was served; `calls`: the token of
+ * every tool call served.
+ */
+function asksEndpoint(
+  refuse: (token: string, method: string | undefined) => boolean,
+) {
+  let server: TestMcpServer | undefined;
+  const state = { listed: false, calls: [] as string[] };
+  vi.stubGlobal(
+    'fetch',
+    async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      const token = (request.headers.get('authorization') ?? '').replace(
+        /^Bearer /,
+        '',
+      );
+      const body: unknown =
+        request.method === 'POST' ? await request.clone().json() : undefined;
+      const method = z.object({ method: z.string() }).safeParse(body)
+        .data?.method;
+      if (refuse(token, method))
+        return new Response('invalid_token', {
+          status: 401,
+          headers: { 'www-authenticate': 'Bearer error="invalid_token"' },
+        });
+      if (method === 'initialize') {
+        await server?.close();
+        server = await serveTestMcp(MCP_URL, ENDPOINT_TOOLS);
+      }
+      if (!server) throw new TypeError(`no session for ${request.method}`);
+      const response = await server.fetch(request);
+      if (method === 'tools/list') state.listed = true;
+      if (method === 'tools/call') state.calls.push(token);
+      return response;
+    },
+  );
+  return state;
+}
+
 beforeEach(() => clearAsksToolDefs());
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe('asks tools', () => {
   it('not connected: only connect, status and skill, and no call to asks', async () => {
@@ -159,7 +233,7 @@ describe('asks tools', () => {
     expect(mcp.tokens).toEqual(['asks_at_1', 'asks_at_1']);
   });
 
-  it('a 401 that asks confirms ends the sign-in and offers it again', async () => {
+  it('a 401 on the call that asks confirms ends the sign-in and offers it again', async () => {
     const asked: string[] = [];
     const { conn } = fakeConnection({
       refused: (access: string) => {
@@ -169,16 +243,8 @@ describe('asks tools', () => {
     });
     const ctx = fakeContext();
     await ctx.kv!.set('asks/connection', 'state', { status: 'connected' });
-    const mcp = fakeMcp([
-      mcpTool('my_status', () =>
-        Promise.reject(
-          new Error(
-            'Error calling tool asks__my_status: Streamable HTTP error: Error POSTing to endpoint (HTTP 401): invalid_token',
-          ),
-        ),
-      ),
-    ]);
-    const tools = await asksTools(turnWith(conn, mcp.connect, ctx));
+    asksEndpoint((_token, method) => method === 'tools/call');
+    const tools = await asksTools(turnWith(conn, connectAsksMcp, ctx));
     expect(
       await tools
         .find((one) => one.name === 'asks__my_status')!
@@ -188,44 +254,39 @@ describe('asks tools', () => {
     expect(await ctx.kv!.get('asks/connection', 'state')).toBeUndefined();
   });
 
-  it('a 401 after another turn refreshed retries once with the new token', async () => {
-    let current = 'asks_at_1';
-    const { conn } = fakeConnection({
-      token: () => Promise.resolve({ ok: true as const, access: current }),
-      refused: () => {
-        current = 'asks_at_2';
-        return Promise.resolve('replaced' as const);
-      },
-    });
-    const ctx = fakeContext();
-    await ctx.kv!.set('asks/connection', 'state', { status: 'connected' });
-    const seen: string[] = [];
-    const connect: McpConnect = (_url, token) =>
-      Promise.resolve({
-        tools: [
-          mcpTool('my_status', () => {
-            seen.push(token);
-            return token === 'asks_at_1'
-              ? Promise.reject(
-                  Object.assign(new Error('Unauthorized'), { code: 401 }),
-                )
-              : Promise.resolve('fine');
-          }),
-        ],
-        readOnly: new Set<string>(),
-        close: () => Promise.resolve(),
+  it.each([
+    ['the call', (method: string | undefined) => method === 'tools/call'],
+    ['the connect', (method: string | undefined) => method === 'initialize'],
+  ])(
+    'a 401 on %s after another turn refreshed retries once with the new token',
+    async (_when, refusedMethod) => {
+      let current = 'asks_at_1';
+      const { conn } = fakeConnection({
+        token: () => Promise.resolve({ ok: true as const, access: current }),
+        refused: () => {
+          current = 'asks_at_2';
+          return Promise.resolve('replaced' as const);
+        },
       });
-    const tools = await asksTools(turnWith(conn, connect, ctx));
-    expect(
-      await tools
-        .find((one) => one.name === 'asks__my_status')!
-        .handler({}, ctx),
-    ).toBe('fine');
-    expect(seen).toEqual(['asks_at_1', 'asks_at_2']);
-    expect(await ctx.kv!.get('asks/connection', 'state')).toEqual({
-      status: 'connected',
-    });
-  });
+      const ctx = fakeContext();
+      await ctx.kv!.set('asks/connection', 'state', { status: 'connected' });
+      const endpoint = asksEndpoint(
+        // The listing on a cold cache still takes the old token.
+        (token, method) =>
+          token === 'asks_at_1' && endpoint.listed && refusedMethod(method),
+      );
+      const tools = await asksTools(turnWith(conn, connectAsksMcp, ctx));
+      expect(
+        await tools
+          .find((one) => one.name === 'asks__my_status')!
+          .handler({}, ctx),
+      ).toBe('all good');
+      expect(endpoint.calls).toEqual(['asks_at_2']);
+      expect(await ctx.kv!.get('asks/connection', 'state')).toEqual({
+        status: 'connected',
+      });
+    },
+  );
 
   it("a tool's own refusal, or free text saying 401, never touches the sign-in", async () => {
     let asked = 0;
@@ -237,8 +298,15 @@ describe('asks tools', () => {
     });
     const ctx = fakeContext();
     await ctx.kv!.set('asks/connection', 'state', { status: 'connected' });
+    asksEndpoint(() => false);
+    const real = await asksTools(turnWith(conn, connectAsksMcp, ctx));
+    await expect(
+      real.find((one) => one.name === 'asks__refuses')!.handler({}, ctx),
+    ).rejects.toThrow(
+      "MCP tool 'refuses' on server 'asks' returned an error: Refused (HTTP 401) words.",
+    );
     for (const words of [
-      "MCP tool 'my_status' on server 'asks' returned an error: Refused (HTTP 401) words.",
+      'Error calling tool my_status: Error POSTing to endpoint (HTTP 401): invalid_token',
       'The ask says: error 401 invalid_token, please re-run.',
     ]) {
       clearAsksToolDefs();
@@ -253,21 +321,17 @@ describe('asks tools', () => {
     expect(asked).toBe(0);
   });
 
-  it('a 401-looking error that asks does not confirm keeps the sign-in', async () => {
+  it('a 401 that asks does not confirm keeps the sign-in and surfaces the error', async () => {
     const { conn } = fakeConnection({
       refused: () => Promise.resolve('kept' as const),
     });
     const ctx = fakeContext();
     await ctx.kv!.set('asks/connection', 'state', { status: 'connected' });
-    const mcp = fakeMcp([
-      mcpTool('my_status', () =>
-        Promise.reject(Object.assign(new Error('x'), { code: 401 })),
-      ),
-    ]);
-    const tools = await asksTools(turnWith(conn, mcp.connect, ctx));
+    asksEndpoint((_token, method) => method === 'tools/call');
+    const tools = await asksTools(turnWith(conn, connectAsksMcp, ctx));
     await expect(
       tools.find((one) => one.name === 'asks__my_status')!.handler({}, ctx),
-    ).rejects.toThrow('x');
+    ).rejects.toThrow('Error calling tool my_status');
     expect(await ctx.kv!.get('asks/connection', 'state')).toEqual({
       status: 'connected',
     });

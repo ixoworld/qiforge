@@ -220,7 +220,124 @@ describe('the delivery note the model reads', () => {
 });
 
 describe('turn features', () => {
-  it('advertise delivery notices', () => {
-    expect(CHANNEL_TURN_FEATURES).toEqual(['delivery_notice']);
+  it('advertise delivery notices and permission events', () => {
+    expect(CHANNEL_TURN_FEATURES).toEqual([
+      'delivery_notice',
+      'permission_event',
+    ]);
+  });
+});
+
+describe('ChannelTurnBody with a permission event', () => {
+  const eventTurn = {
+    provider: 'whatsapp',
+    bindingId: 'chb_one',
+    bindingRevision: 1,
+    requestId: 'permission:card_1:allowed',
+    remoteMessageRef: `hmac:${'a'.repeat(64)}`,
+    sessionPolicy: 'continue',
+    event: {
+      kind: 'permission_answered',
+      permissionId: 'card_1',
+      status: 'allowed',
+    },
+    context: { kind: 'oracle' },
+  };
+  const issuePaths = (body: unknown) => {
+    const parsed = ChannelTurnBody.safeParse(body);
+    return parsed.success ? [] : parsed.error.issues.map((i) => i.path);
+  };
+
+  it('accepts an event turn: ids and a fixed status, no message, no session', () => {
+    const parsed = ChannelTurnBody.parse(eventTurn);
+    expect(parsed.event).toEqual(eventTurn.event);
+    expect(parsed.message).toBeUndefined();
+    for (const status of ['not_allowed', 'expired'])
+      expect(
+        ChannelTurnBody.safeParse({
+          ...eventTurn,
+          requestId: `permission:card_1:${status}`,
+          event: { ...eventTurn.event, status },
+        }).success,
+      ).toBe(true);
+  });
+
+  it('refuses words, files, a quote, a notice or a session beside an event', () => {
+    expect(issuePaths({ ...eventTurn, message: 'hi' })).toEqual([['message']]);
+    expect(issuePaths({ ...eventTurn, sessionId: 's1' })).toEqual([
+      ['sessionId'],
+    ]);
+    expect(
+      issuePaths({ ...eventTurn, replyTo: { kind: 'unavailable' } }),
+    ).toEqual([['replyTo']]);
+    expect(issuePaths({ ...eventTurn, sessionPolicy: undefined })).toEqual([
+      ['sessionPolicy'],
+    ]);
+  });
+
+  it('takes only the request id made from the card id and the status', () => {
+    expect(
+      issuePaths({ ...eventTurn, requestId: 'permission:card_2:allowed' }),
+    ).toEqual([['requestId']]);
+    expect(
+      issuePaths({ ...eventTurn, requestId: 'permission:card_1:expired' }),
+    ).toEqual([['requestId']]);
+  });
+
+  it('is strict about the event itself: no text, no other status or field', () => {
+    for (const event of [
+      { ...eventTurn.event, status: 'pending' },
+      { ...eventTurn.event, status: 'declined' },
+      { ...eventTurn.event, text: 'You allowed it' },
+      { ...eventTurn.event, kind: 'permission_requested' },
+      { ...eventTurn.event, permissionId: 'card 1' },
+    ])
+      expect(ChannelTurnBody.safeParse({ ...eventTurn, event }).success).toBe(
+        false,
+      );
+  });
+});
+
+describe('ChannelTurnBody with an identity-check event', () => {
+  const identityTurn = {
+    provider: 'whatsapp',
+    bindingId: 'chb_one',
+    bindingRevision: 1,
+    requestId: 'identity:3f1c2a9e-1b7d-4c55-9d0e-2a8f6b1c7e40:passed',
+    remoteMessageRef: `hmac:${'a'.repeat(64)}`,
+    sessionPolicy: 'continue',
+    event: {
+      kind: 'identity_check_updated',
+      linkId: '3f1c2a9e-1b7d-4c55-9d0e-2a8f6b1c7e40',
+      status: 'passed',
+    },
+    context: { kind: 'oracle' },
+  };
+
+  it('accepts in_review, passed and failed with the matching request id', () => {
+    for (const status of ['in_review', 'passed', 'failed'])
+      expect(
+        ChannelTurnBody.safeParse({
+          ...identityTurn,
+          requestId: `identity:${identityTurn.event.linkId}:${status}`,
+          event: { ...identityTurn.event, status },
+        }).success,
+      ).toBe(true);
+  });
+
+  it('refuses another status, a wrong request id, text, a message or a session', () => {
+    for (const body of [
+      {
+        ...identityTurn,
+        event: { ...identityTurn.event, status: 'in_progress' },
+      },
+      { ...identityTurn, event: { ...identityTurn.event, status: 'expired' } },
+      { ...identityTurn, event: { ...identityTurn.event, note: 'done' } },
+      { ...identityTurn, requestId: 'permission:x:passed' },
+      { ...identityTurn, message: 'hi' },
+      { ...identityTurn, sessionId: 's1' },
+      { ...identityTurn, event: { ...identityTurn.event, linkId: 'a/b' } },
+    ])
+      expect(ChannelTurnBody.safeParse(body).success).toBe(false);
   });
 });

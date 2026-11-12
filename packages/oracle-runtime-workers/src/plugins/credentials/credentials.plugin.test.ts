@@ -27,7 +27,7 @@ describe('CredentialsPlugin', () => {
     ).toBe(true);
   });
 
-  it('offers the six tools only when enabled', () => {
+  it('offers the seven tools only when enabled', () => {
     const plugin = new CredentialsPlugin();
     expect(
       plugin.getTools(
@@ -37,6 +37,7 @@ describe('CredentialsPlugin', () => {
     expect(
       plugin.getTools(makeBuildCtx({ config: ON })).map((t) => t.name),
     ).toEqual([
+      'credentials_request_permissions',
       'credentials_request_check_permission',
       'credentials_permission_status',
       'credentials_check',

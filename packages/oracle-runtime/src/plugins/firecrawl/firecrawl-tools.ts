@@ -86,14 +86,18 @@ export function createDefaultFirecrawlMcpFactory(
   return () => {
     cached ??= (async () => {
       const client = new MultiServerMCPClient({
-        useStandardContentBlocks: true,
         defaultToolTimeout: 120_000,
-        prefixToolNameWithServerName: true,
+        // Tool names are `firecrawl__<upstream name>`: the adapter's own
+        // server prefix joins with a single underscore.
+        prefixToolNameWithServerName: false,
+        additionalToolNamePrefix: 'firecrawl',
         mcpServers: {
           firecrawl: {
             type: 'http',
             transport: 'http',
             url: firecrawlUrl,
+            // Legacy protocol: the only mode that keeps HTTP stream reconnect.
+            mode: 'legacy',
             reconnect: {
               enabled: true,
               maxAttempts: 3,

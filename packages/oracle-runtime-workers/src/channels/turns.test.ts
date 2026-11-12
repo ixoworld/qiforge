@@ -1224,15 +1224,21 @@ describe('delivery notices', () => {
     const stub = env.CHANNEL_TURNS_TEST.getByName('notice-features');
     const first = await stub.submit(message);
     if (!first.ok) throw new Error('Turn rejected');
-    expect(first.result.features).toEqual(['delivery_notice']);
+    expect(first.result.features).toEqual([
+      'delivery_notice',
+      'permission_event',
+    ]);
     expect(first.result.status).toBe('running');
     const polled = await stub.poll(message);
-    expect(polled?.ok && polled.result.features).toEqual(['delivery_notice']);
+    expect(polled?.ok && polled.result.features).toEqual([
+      'delivery_notice',
+      'permission_event',
+    ]);
     await stub.fail(first.result.runId);
     const failed = await stub.poll(message);
     expect(failed?.ok && failed.result).toMatchObject({
       status: 'failed',
-      features: ['delivery_notice'],
+      features: ['delivery_notice', 'permission_event'],
     });
     const second = await stub.submit({ ...message, requestId: 'wa:two' });
     if (!second.ok) throw new Error('Turn rejected');
@@ -1241,7 +1247,10 @@ describe('delivery notices', () => {
       await stub.submit({ ...message, requestId: 'wa:two' }),
     ).toMatchObject({
       ok: true,
-      result: { status: 'finished', features: ['delivery_notice'] },
+      result: {
+        status: 'finished',
+        features: ['delivery_notice', 'permission_event'],
+      },
     });
   });
 
@@ -1256,7 +1265,7 @@ describe('delivery notices', () => {
     expect(noticed.result).toMatchObject({
       status: 'running',
       sessionId: first.result.sessionId,
-      features: ['delivery_notice'],
+      features: ['delivery_notice', 'permission_event'],
     });
     expect(noticed.result.runId).not.toBe(first.result.runId);
     const request = JSON.parse(
@@ -1297,6 +1306,66 @@ describe('delivery notices', () => {
     });
   });
 
+  it('runs a permission event in the bound session with only ids, owes no user message, and mirrors no empty reply', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('permission-event-run');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.finish(first.result.runId, undefined, 'Here is the card.');
+    await stub.deliverReply();
+    const eventTurn = (status: 'allowed' | 'expired'): ChannelTurnInput => ({
+      ...message,
+      message: undefined,
+      requestId: `permission:card_1:${status}`,
+      sessionPolicy: 'continue',
+      event: { kind: 'permission_answered', permissionId: 'card_1', status },
+    });
+    const answered = await stub.submit(eventTurn('allowed'));
+    if (!answered.ok) throw new Error(`Event refused: ${answered.code}`);
+    // No session named: it runs where the binding is.
+    expect(answered.result).toMatchObject({
+      status: 'running',
+      sessionId: first.result.sessionId,
+      features: ['delivery_notice', 'permission_event'],
+    });
+    const request = JSON.parse(
+      (await stub.run(answered.result.runId))!.request,
+    ) as { message: string; channel: Record<string, unknown> };
+    expect(request.message).toBe('');
+    expect(request.channel.channelEvent).toEqual({
+      kind: 'permission_answered',
+      permissionId: 'card_1',
+      status: 'allowed',
+    });
+    expect(await stub.receipt('permission:card_1:allowed')).toMatchObject({
+      user_mirrored: 1,
+    });
+    await stub.finish(
+      answered.result.runId,
+      undefined,
+      'Thanks, you allowed it. Next, you need to do your identity check.',
+    );
+    await stub.deliverReply();
+    // An event the runtime stayed silent on: finished with no text, nothing mirrored.
+    const silent = await stub.submit(eventTurn('expired'));
+    if (!silent.ok) throw new Error('Event refused');
+    await stub.finish(silent.result.runId, undefined, '');
+    await stub.deliverReply();
+    expect(await stub.submit(eventTurn('expired'))).toMatchObject({
+      ok: true,
+      result: { status: 'finished', text: '' },
+    });
+    expect(await stub.mirrorLog()).toEqual([
+      'user:Help me plan',
+      'oracle:Here is the card.',
+      'oracle:Thanks, you allowed it. Next, you need to do your identity check.',
+    ]);
+    expect(await stub.receipt('permission:card_1:expired')).toMatchObject({
+      user_mirrored: 1,
+      reply_mirrored: 1,
+      mirror_pending: 0,
+    });
+  });
+
   it('replays by request id: the same notice again is the same run, a changed one a conflict', async () => {
     const stub = env.CHANNEL_TURNS_TEST.getByName('notice-replay');
     const first = await stub.submit(message);
@@ -1315,7 +1384,7 @@ describe('delivery notices', () => {
         runId: a.result.runId,
         status: 'finished',
         text: 'Fixed.',
-        features: ['delivery_notice'],
+        features: ['delivery_notice', 'permission_event'],
       },
     });
     expect(await stub.count()).toBe(2);

@@ -101,14 +101,18 @@ function createMemoryMcpClient(
   headers: Record<string, string>,
 ): MultiServerMCPClient {
   return new MultiServerMCPClient({
-    useStandardContentBlocks: true,
-    prefixToolNameWithServerName: true,
+    // Tool names are `memory-engine__<upstream name>`: the adapter's own
+    // server prefix joins with a single underscore.
+    prefixToolNameWithServerName: false,
+    additionalToolNamePrefix: 'memory-engine',
     mcpServers: {
       'memory-engine': {
         type: 'http',
         transport: 'http',
         url: memoryMcpUrl,
         headers,
+        // Legacy protocol: the only mode that keeps HTTP stream reconnect.
+        mode: 'legacy',
         reconnect: {
           enabled: true,
           maxAttempts: 3,

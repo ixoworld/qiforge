@@ -436,6 +436,23 @@ describe('createToolValidationMiddleware', () => {
     const out = before(state, {}) as { messages: BaseMessage[] };
     expect(out.messages.map((m) => m.type)).toEqual(['human']);
   });
+
+  it('writes no state back when there is nothing to strip', () => {
+    const state = {
+      messages: [
+        new HumanMessage('hi'),
+        new ToolMessage({ content: 'x', tool_call_id: 't', name: 'kept' }),
+      ],
+    };
+    for (const options of [{}, { skipToolNames: ['noisy'] }]) {
+      const before = createToolValidationMiddleware(options)
+        .beforeModel as unknown as
+        | ((state: unknown, runtime: unknown) => unknown)
+        | undefined;
+      if (!before) throw new Error('beforeModel missing');
+      expect(before(state, {})).toBeUndefined();
+    }
+  });
 });
 
 describe('createToolRepetitionGuardMiddleware', () => {

@@ -66,6 +66,21 @@ async function readBody(
   }
 }
 
+/** A service's `error` code is trusted only in this shape. */
+const SAFE_CODE = /^[a-z0-9_]{1,64}$/;
+
+/**
+ * The service's error code: `{ error: "<code>" }` (the Hub, the Credentials
+ * worker) or `{ error: { code, message, retryable } }` (Self). Only the code
+ * is read, never the message.
+ */
+function serviceCode(body: Record<string, unknown> | null): string | null {
+  const raw = body?.error;
+  const code =
+    typeof raw === 'string' ? raw : isRecord(raw) ? raw.code : undefined;
+  return typeof code === 'string' && SAFE_CODE.test(code) ? code : null;
+}
+
 /** The timeout of the next attempt; 0 when the deadline has passed. */
 function attemptTimeout(call: ServiceCall): number {
   const limit = call.timeoutMs ?? SERVICE_TIMEOUT_MS;
@@ -89,8 +104,12 @@ async function attempt(call: ServiceCall): Promise<Response> {
     signal: AbortSignal.timeout(timeoutMs),
     redirect: 'manual',
   });
+  // Called as a plain function, never as a method of `call`: workerd refuses
+  // the global `fetch` invoked on another object ("Illegal invocation"), so a
+  // host passing `fetchImpl: fetch` must still work.
+  const fetchImpl = call.fetchImpl ?? fetch;
   try {
-    return await (call.fetchImpl ? call.fetchImpl(request) : fetch(request));
+    return await fetchImpl(request);
   } catch (error) {
     const timedOut =
       error instanceof Error &&
@@ -136,8 +155,7 @@ export async function callService(call: ServiceCall): Promise<ServiceAnswer> {
   throw new CredentialsServiceError({
     service: call.service,
     status: response.status,
-    code:
-      typeof body?.error === 'string' ? body.error : `http_${response.status}`,
+    code: serviceCode(body) ?? `http_${response.status}`,
     ...(after !== undefined ? { retryAfterSeconds: after } : {}),
     ...(body ? { body } : {}),
   });

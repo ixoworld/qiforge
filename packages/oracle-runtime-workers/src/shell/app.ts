@@ -529,7 +529,7 @@ export function createShell(
         c.req.raw.headers,
         raw,
         parsed.data,
-        channelAuthConfig(c.env),
+        channelAuthConfig(c.env, executionWaitUntil(c)),
       );
       if (
         c.env.RATE_LIMIT &&
@@ -640,7 +640,7 @@ export function createShell(
         c.req.raw.headers,
         raw,
         parsed.data,
-        channelAuthConfig(c.env),
+        channelAuthConfig(c.env, executionWaitUntil(c)),
       );
       // Limited as soon as the user is proven, before the Auth Hub round
       // trip: a flood or a tight poll must not cost one call there each.

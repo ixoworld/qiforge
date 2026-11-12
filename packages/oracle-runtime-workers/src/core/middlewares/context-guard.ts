@@ -48,6 +48,7 @@ import {
 import { isContextOverflowError } from '../context-window';
 import { usageCarriedBy } from '../operating-guides';
 import { NOOP_LOGGER } from '../utils';
+import { loadedPluginsState } from './capability-gate';
 import { cappedMetaOf } from './result-cap';
 import { turnOpenings } from './turn-boundary';
 
@@ -303,7 +304,7 @@ function schemaTokensOf(tools: readonly unknown[]): number {
 
 export function createContextGuardMiddleware(
   options: ContextGuardOptions,
-): AgentMiddleware {
+): AgentMiddleware<typeof loadedPluginsState> {
   const logger = options.logger ?? NOOP_LOGGER;
   const { budget } = options;
   // The guard lives for one turn and the stale line for many calls: one event.
@@ -319,6 +320,10 @@ export function createContextGuardMiddleware(
   };
   return createMiddleware({
     name: 'ContextGuardMiddleware',
+    // Declares the channel it reads; the same channel the capability gate
+    // declares, so the reducer is one whichever schema `createAgent` meets
+    // first.
+    stateSchema: loadedPluginsState,
     wrapModelCall: async (request, handler) => {
       const systemTokens = estimateContentTokens(
         request.systemMessage?.content ?? '',
@@ -329,11 +334,8 @@ export function createContextGuardMiddleware(
       const keep = (message: ToolMessage): boolean => {
         const carried = usageCarriedBy(message);
         if (carried.length === 0) return false;
-        const loaded: unknown = request.state.loadedPlugins;
-        return (
-          Array.isArray(loaded) &&
-          carried.some((plugin) => loaded.includes(plugin))
-        );
+        const loaded = request.state.loadedPlugins ?? [];
+        return carried.some((plugin) => loaded.includes(plugin));
       };
       const stale = trimStaleResults(
         request.messages,

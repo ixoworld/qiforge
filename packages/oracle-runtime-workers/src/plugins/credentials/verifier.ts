@@ -159,10 +159,16 @@ export class VerifierContext {
   constructor(
     blocksyncUrl: string,
     readonly allowLocal: boolean,
-    private readonly fetchImpl: typeof fetch = fetch,
+    // Never the bare global: workerd refuses `fetch` called as a method of
+    // another object ("Illegal invocation"), which the kit reports as a
+    // resolver being down.
+    private readonly fetchImpl: typeof fetch = (input, init) =>
+      fetch(input, init),
   ) {
+    // A plain call, never `this.fetchImpl(...)`: a host's `kitFetch` may be
+    // the global itself.
     const kitFetch = (input: string, init?: RequestInit) =>
-      this.fetchImpl(input, init);
+      fetchImpl(input, init);
     const cache = createMemoryCache({ maxEntries: 512 });
     this.resolver = composeResolvers(
       createIxoResolver({ blocksyncUrl, fetch: kitFetch, cache }),
@@ -176,7 +182,8 @@ export class VerifierContext {
   }
 
   get fetch() {
-    return (input: string, init?: RequestInit) => this.fetchImpl(input, init);
+    const fetchImpl = this.fetchImpl;
+    return (input: string, init?: RequestInit) => fetchImpl(input, init);
   }
 
   /** The kid of the oracle's signing key on `oracleDid`'s document. */

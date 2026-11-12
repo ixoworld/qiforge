@@ -126,3 +126,23 @@ describe('buildByoModelListing', () => {
     expect(items[0]!.family).toBe('deepseek');
   });
 });
+
+describe('buildByoModelListing with an account’s models', () => {
+  it('lists only the curated models the account has', () => {
+    const ids = buildByoModelListing(['openai'], {
+      openai: ['gpt-5.6-sol', 'gpt-5.6-luna', 'not-curated'],
+    }).map((m) => m.id);
+    expect(ids).toEqual(['byo:openai/gpt-5.6-luna', 'byo:openai/gpt-5.6-sol']);
+  });
+
+  it('keeps the whole curated list for a provider without an account list', () => {
+    expect(
+      buildByoModelListing(['openai', 'deepseek'], { openai: [] }).map(
+        (m) => m.id,
+      ),
+    ).toEqual([
+      'byo:deepseek/deepseek-v4-flash',
+      'byo:deepseek/deepseek-v4-pro',
+    ]);
+  });
+});

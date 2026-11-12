@@ -34,21 +34,21 @@ const clientRecords: Array<{ config: unknown; closed: boolean }> = [];
 let upstreamTools: FakeUpstreamTool[] = [];
 
 vi.mock('@langchain/mcp-adapters', () => {
-  class MultiServerMCPClient {
+  class MCPAdapter {
     readonly config: unknown;
     closed = false;
     constructor(config: unknown) {
       this.config = config;
       clientRecords.push(this);
     }
-    async getTools(): Promise<FakeUpstreamTool[]> {
+    async listTools(): Promise<FakeUpstreamTool[]> {
       return upstreamTools;
     }
     async close(): Promise<void> {
       this.closed = true;
     }
   }
-  return { MultiServerMCPClient };
+  return { MCPAdapter };
 });
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -59,10 +59,10 @@ function serverConfigOf(
   config: unknown,
   server: string,
 ): Record<string, unknown> {
-  if (!isRecord(config) || !isRecord(config.mcpServers)) {
+  if (!isRecord(config) || !isRecord(config.servers)) {
     throw new Error('mock client received a malformed config');
   }
-  const entry = config.mcpServers[server];
+  const entry = config.servers[server];
   if (!isRecord(entry)) throw new Error(`no server entry for "${server}"`);
   return entry;
 }

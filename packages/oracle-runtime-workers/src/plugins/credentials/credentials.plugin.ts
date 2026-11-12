@@ -7,12 +7,21 @@ import type {
   PluginContext,
   PluginManifest,
   PluginTool,
+  RuntimeContext,
 } from '../../plugin-api/types';
 import type { PluginRoute } from '../../shell/app';
 import { receiveAnswer } from './check-store';
 import { credentialsConfigSchema, resolveCredentialsConfig } from './config';
 import { VerifierEntryMemo } from './credentials-client';
-import { createCredentialsTools } from './credentials-tools';
+import type {
+  ChannelEventResult,
+  OracleChannelEvent,
+} from '../../plugin-api/channel-events';
+import {
+  createCredentials,
+  createCredentialsTools,
+  createPermissionEventHandler,
+} from './credentials-tools';
 import type { FetchLike } from './http';
 import {
   credentialsResponseRoute,
@@ -26,14 +35,14 @@ const IDENTITY_VCT = 'https://credentials.ixo.world/types/IdentityLevel1';
 const manifest: PluginManifest = {
   title: 'Credentials and permissions',
   summary:
-    "Check the person's verifiable credentials (age, verified identity or any other credential type and issuer) through their IXO wallet, and ask their permission, on a card in the wallet, to check a credential or to use a catalogued service for them (an identity check by Self). WhatsApp chat only for now.",
+    "Check the person's verifiable credentials (age, verified identity or any other credential type and issuer) through their IXO wallet, and ask their permission, on ONE card in the wallet, to check credentials and to use services for them (an identity check by Self). WhatsApp chat only for now.",
   category: 'auth',
   visibility: 'on-demand',
-  brief: 'check credentials; ask permission on a wallet card',
+  brief: 'check credentials; ask permission on one wallet card',
   whenToUse: [
     'You need proof of something about the person (that they are over 18, that they passed an identity check, a membership or another credential) before you go on.',
-    'The person should allow you, once, to check a credential without being asked every time: request a check permission.',
-    'The person needs an identity check and has no identity credential yet: ask permission for "self.identity-check", then send them the link Self creates.',
+    'The person should allow you, once, to check a credential without being asked every time: request a check permission, together with anything else you need, in one card.',
+    'The person needs an identity check and has no identity credential yet: ask permission for "self.identity-check" (one card also covers the later identity check), then send them the link Self creates.',
     'You sent a permission card or an identity-check link and need to know how it went.',
   ],
   whenNotToUse: [
@@ -54,20 +63,29 @@ const manifest: PluginManifest = {
     },
     {
       user: 'Sure, you can check my age whenever you need to',
-      thought: 'Ask once for standing permission; send the link.',
-      tool: 'credentials_request_check_permission',
+      thought: 'Ask once, in one card, for standing permission; send the link.',
+      tool: 'credentials_request_permissions',
       args: {
-        vct: IDENTITY_VCT,
-        claims: ['age_over_18'],
-        days: 30,
+        items: [
+          {
+            kind: 'credential-check',
+            vct: IDENTITY_VCT,
+            claims: ['age_over_18'],
+            days: 30,
+          },
+        ],
       },
     },
     {
       user: "I don't have an ID credential yet",
       thought:
-        'Ask permission for the identity check, then create the link once they allow it.',
-      tool: 'credentials_request_action_permission',
-      args: { action: 'self.identity-check', days: 7 },
+        'One card covers the link, the offer and the consent to check the identity credential afterwards; create the link once they allow it.',
+      tool: 'credentials_request_permissions',
+      args: {
+        items: [
+          { kind: 'service-action', action: 'self.identity-check', days: 7 },
+        ],
+      },
     },
   ],
 };
@@ -76,10 +94,17 @@ const operatingGuide = `### Credentials and permissions
 
 - These tools work only in our WhatsApp chat. Anywhere else, say plainly that it is not available here yet.
 - Every link (a permission card, the wallet, an identity-check link) goes to the person as ONE link in a short message. Each tool's \`message\` is ready to send. Never paste ids, tokens, DIDs or codes.
-- The person sees only two kinds of card: "check a credential" (who asks, the credential, its issuer, the fields you will see, how long) and "use a service for you" (who asks, the action, the service, what it allows, how long). Do not describe anything else.
+- Ask for everything you need in ONE card with \`credentials_request_permissions\` (1-5 items): the person taps Allow once for all of it, or Don't allow for none. Never send several cards for one task. Items are credential checks (who asks, the credential, its issuer, the fields you will see, how long) and service actions from the Hub's approved list (use only an entry id the operator's instructions name; self.identity-check is the only built-in one). Do not describe anything else.
 - Ask for the fewest fields the task needs. The issuers accepted per credential type are configured by the operator: leave \`issuers\` out, or narrow them; anything else is refused.
-- \`credentials_check\` returns \`pending\` when no standing permission answered: send the wallet link, or ask for standing permission with \`credentials_request_check_permission\`. Call it again with the same fields to continue the same request.
-- For an identity check: \`credentials_request_action_permission\` (self.identity-check), wait until they allow it, then \`credentials_request_action\` for the link; \`credentials_action_status\` reads its progress.
+- \`credentials_check\` returns \`pending\` when no standing permission answered: send the wallet link, or ask for standing permission with \`credentials_request_permissions\` (a credential-check item). Call it again with the same fields to continue the same request.
+- For an identity check: ONE request with [{kind:"service-action", action:"self.identity-check", days}] covers the link, the credential offer and the standing consent to check the identity credential afterwards, so no second card is needed; wait until they allow it, then \`credentials_request_action\` for the link; \`credentials_action_status\` reads its progress. Add a credential-check item only for other credential types. For another approved entry, \`credentials_request_action\` lists what was granted (no tokens).
+- The Hub remembers what the person allowed. A request tool that answers \`already_allowed\` sent nothing: go on with the task. One that hands back the card they have not answered yet did not make a new one: send its \`message\` again.
+- When what the person allowed earlier no longer matches what the service needs now, it is not used: the request tools and \`credentials_request_action\` send ONE card asking for their OK once more (send its \`message\` as it is); \`credentials_permission_status\` marks such items \`current: false\` and \`credentials_action_status\` answers \`permission_outdated\`: then ask again with a request tool.
+- \`credentials_permission_status\` shows the card's answer and, per item, what was granted (ids only).
+- A card waits one hour for Allow or Don't allow; how long the permission lasts once allowed is the item's days.
+- When the person answers a card in their wallet, or their identity check goes into review, passes or fails, a turn may start with a bracketed permission answer or identity check update instead of their words. It is checked with the Hub; follow it exactly (start with its sentence, then do the next step it names and nothing else first; use the tools you already have and call \`load_capability\` only for one the step needs that you lack). For the identity link right after a task step or an allowed card, call \`credentials_request_action\` with \`context: "next_step"\`.
+- \`already_verified\` means the person is already verified: no identity check or link is needed, so go on with the task you were doing (a next step you were given comes first). Call \`credentials_check\` only if this oracle itself needs to read a claim from the credential for its own decision and no next step was given.
+- You can only reply when the person writes. Never say you will let them know or message them later; while a check is in progress or in review, read its status again only when they write.
 - Use the claims of a valid check for the task at hand only; never repeat them back beyond what the conversation needs.`;
 
 /** Optional dependency injection, for tests. */
@@ -96,10 +121,11 @@ export interface CredentialsPluginOptions {
 /**
  * Credentials plugin.
  *
- * Six tools for any credential type and issuer, plus the catalogued service
- * actions: ask the person's permission on one of the Hub's two fixed cards
- * (`credentials_request_check_permission`,
- * `credentials_request_action_permission`) and read the answer
+ * Seven tools for any credential type and issuer, plus the catalogued service
+ * actions: ask the person's permission on ONE Hub card of up to 5 items
+ * (`credentials_request_permissions`; the single-item
+ * `credentials_request_check_permission` and
+ * `credentials_request_action_permission` are thin wrappers) and read the answer
  * (`credentials_permission_status`); check a credential as a verifier at
  * the Credentials worker (`credentials_check`); carry out an allowed action
  * at Self (`credentials_request_action`, `credentials_action_status`).
@@ -180,6 +206,36 @@ export class CredentialsPlugin extends OraclePlugin {
         ? { checkWaitMs: this.options.checkWaitMs }
         : {}),
     });
+  }
+
+  /**
+   * An event turn: the person answered a card in their wallet
+   * (`permission_answered`: the card is read at the Hub,
+   * `createPermissionEventHandler`), or an identity check this oracle made
+   * a link for changed at Self (`identity_check_updated`: the link is read
+   * at Self). Only this person's own cards and links; fixed words only.
+   */
+  override handleChannelEvent(
+    event: OracleChannelEvent,
+    ctx: RuntimeContext,
+  ): Promise<ChannelEventResult> {
+    const cfg = resolveCredentialsConfig(ctx.config);
+    if (!cfg.enabled) return Promise.resolve({ kind: 'pass' });
+    const transport = {
+      ...(this.options.fetchImpl ? { fetchImpl: this.options.fetchImpl } : {}),
+      ...(this.options.sleep ? { sleep: this.options.sleep } : {}),
+      ...(this.options.now ? { now: this.options.now } : {}),
+    };
+    if (event.kind === 'permission_answered')
+      return createPermissionEventHandler({ cfg, ...transport })(event, ctx);
+    return createCredentials({
+      cfg,
+      // Only card sentences use the name; an identity-check event sends no card.
+      oracle: { name: '' },
+      verifier: null,
+      memo: this.memo,
+      ...transport,
+    }).identityCheckEvent(event, ctx);
   }
 
   override getRoutes(): PluginRoute[] {

@@ -187,7 +187,8 @@ export async function startOracle(
     );
     return { url: attach, stop: async () => {}, logs: () => '' };
   }
-  const port = opts.port ?? 8787;
+  // `ORACLE_PORT` moves every suite off 8787 when another dev server holds it.
+  const port = opts.port ?? Number(process.env.ORACLE_PORT ?? 8787);
   const url = `http://127.0.0.1:${port}`;
   let logs = '';
   const child: ChildProcess = spawn(

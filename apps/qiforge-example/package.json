@@ -1,6 +1,6 @@
 {
   "name": "qiforge-example",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "description": "Reference oracle that boots the QiForge runtime with all bundled plugins.",
   "private": true,
   "type": "module",
@@ -20,7 +20,7 @@
     "@nestjs/common": "^11.1.19",
     "dotenv": "^16.4.7",
     "ioredis": "^5.6.1",
-    "langchain": "1.4.2",
+    "langchain": "1.6.1",
     "matrix-js-sdk": "^37.11.0",
     "reflect-metadata": "^0.2.2"
   },
@@ -29,7 +29,7 @@
     "@bull-board/express": "^7.2.1",
     "@bull-board/nestjs": "^7.2.1",
     "@ixo/vitest-config": "workspace:*",
-    "@langchain/core": "1.1.48",
+    "@langchain/core": "1.3.4",
     "@nestjs/bullmq": "^11.0.4",
     "@types/node": "^22.10.7",
     "bullmq": "^5.78.0",

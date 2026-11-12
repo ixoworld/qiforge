@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { CredentialsServiceError } from './errors';
 import { callService, type FetchLike } from './http';
 import { canonicalJson, jsonBodySha256 } from './hub-client';
+import { SelfTime } from './times';
 
 /**
  * Self (the identity oracle): identity-check links for a person.
@@ -35,19 +36,61 @@ export type LinkStatus = (typeof LINK_STATUSES)[number];
 
 const LINK_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
+// Self answers its times as ISO 8601 text; they are Unix seconds from here on.
 const CreatedLink = z.object({
   linkId: z.string().regex(LINK_ID),
   url: z.string().url(),
-  expiresAt: z.number().int().positive(),
+  expiresAt: SelfTime,
 });
 export type CreatedLink = z.infer<typeof CreatedLink>;
 
-const LinkState = z.object({
-  linkId: z.string().regex(LINK_ID),
-  status: z.enum(LINK_STATUSES),
-  updatedAt: z.number().int().nonnegative(),
-  expiresAt: z.number().int().positive(),
-});
+/**
+ * Self's `review: true` beside `status: "in_progress"`: the check waits for
+ * a person to review it. Read leniently: absent, any other value, or any
+ * other status is "not in review" (an older Self never sends it), and it is
+ * kept only as `true`.
+ */
+const Review = z.literal(true).optional().catch(undefined);
+
+/**
+ * Self's `saving: true` beside `status: "in_progress"`: the check passed and
+ * the proof is still being saved to the person's IXO account. Read as
+ * leniently as `review`.
+ */
+const Saving = z.literal(true).optional().catch(undefined);
+
+/**
+ * Why a check ended `failed`, when it was not a decision about the person:
+ * `error` (a system failure) or `too_many_attempts` (they used up their
+ * tries). Absent: the person was not verified.
+ */
+export const LINK_FAILURES = ['error', 'too_many_attempts'] as const;
+export type LinkFailure = (typeof LINK_FAILURES)[number];
+
+/**
+ * Self's `failure` beside `status: "failed"`. Read leniently, as `review`:
+ * absent, any other value or type, or any other status is "absent" (an
+ * older Self never sends it; a newer one may add values), never a parse
+ * failure.
+ */
+export const Failure = z.enum(LINK_FAILURES).optional().catch(undefined);
+
+const LinkState = z
+  .object({
+    linkId: z.string().regex(LINK_ID),
+    status: z.enum(LINK_STATUSES),
+    updatedAt: SelfTime,
+    expiresAt: SelfTime,
+    review: Review,
+    saving: Saving,
+    failure: Failure,
+  })
+  .transform(({ review, saving, failure, ...state }) => ({
+    ...state,
+    ...(review && state.status === 'in_progress' ? { review } : {}),
+    ...(saving && state.status === 'in_progress' ? { saving } : {}),
+    ...(failure && state.status === 'failed' ? { failure } : {}),
+  }));
 export type LinkState = z.infer<typeof LinkState>;
 
 /** Mints one invocation from the person's link delegation, bound by `facts`. */

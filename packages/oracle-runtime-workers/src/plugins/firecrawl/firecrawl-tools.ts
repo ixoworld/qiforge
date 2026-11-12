@@ -1,6 +1,6 @@
-import { MultiServerMCPClient } from '@langchain/mcp-adapters';
+import { MCPAdapter } from '@langchain/mcp-adapters';
 import { withCallTimeout } from '../mcp-call-timeout';
-import { adaptMcpClientTools } from '../mcp-tool-adapter';
+import { adaptMcpClientTools, mcpAdapterConfig } from '../mcp-tool-adapter';
 
 /**
  * Per-call limit: the MCP request's own timeout (`metadata.timeoutMs`, see
@@ -13,7 +13,7 @@ import type { PluginTool } from '../../plugin-api/types';
 
 /**
  * Minimal surface a Firecrawl MCP tool needs to expose to be proxied: an
- * identifier and an `invoke` method. `MultiServerMCPClient.getTools()`
+ * identifier and an `invoke` method. `MCPAdapter.listTools()`
  * returns `DynamicStructuredTool[]` which trivially satisfies this shape,
  * and unit tests can satisfy it with a plain object — no SDK ceremony.
  */
@@ -24,7 +24,7 @@ export interface FirecrawlMcpProxyTool {
 
 /**
  * Tool names that the upstream Firecrawl MCP server exposes (prefixed with
- * the server name configured in {@link MultiServerMCPClient}). Filtering by
+ * the server name, see `mcpAdapterConfig`). Filtering by
  * these names keeps the agent's surface area tight even if the server adds
  * extra capabilities later.
  */
@@ -102,19 +102,14 @@ export function createDefaultFirecrawlMcpFactory(
   const withClient = async <T>(
     run: (tools: FirecrawlMcpProxyTool[]) => Promise<T>,
   ): Promise<T> => {
-    const client = new MultiServerMCPClient({
-      useStandardContentBlocks: true,
-      prefixToolNameWithServerName: true,
-      mcpServers: {
-        firecrawl: {
-          type: 'http',
-          transport: 'http',
-          url: firecrawlUrl,
-        },
-      },
-    });
+    const client = new MCPAdapter(
+      mcpAdapterConfig('firecrawl', {
+        url: firecrawlUrl,
+        toolNames: 'prefixed',
+      }),
+    );
     try {
-      const all = await client.getTools();
+      const all = await client.listTools();
       return await run(
         adaptMcpClientTools(
           all.filter(

@@ -1,3 +1,4 @@
+import { getRetryable } from '@langchain/core/errors';
 import {
   createAgent,
   createMiddleware,
@@ -37,6 +38,7 @@ import {
 } from './read-result-tool';
 import { describeBudget } from './context-budget';
 import { planCapabilityContext, renderGuideNote } from './operating-guides';
+import { capabilityGateState } from './middlewares/capability-gate';
 import { createContextGuardMiddleware } from './middlewares/context-guard';
 import { repetitionCapsFromEnv } from './middlewares/tool-repetition-guard';
 import {
@@ -126,9 +128,9 @@ function selectByVisibility(
  * Declares the `userContext` channel (the memory engine's prefetched context
  * the prompt's "What you know about the user" block renders). `createAgent`
  * builds its channels from zod or `StateSchema` state schemas only — the
- * `MainAgentGraphState` annotation passed as `stateSchema` is not one — so
- * without this a `userContext` in the graph input would be dropped instead
- * of checkpointed. A plain field is a last-value channel: a turn that writes
+ * `MainAgentGraphState` annotation is not one — so without this a
+ * `userContext` in the graph input would be dropped instead of
+ * checkpointed. A plain field is a last-value channel: a turn that writes
  * it replaces the thread's previous context; one that does not keeps it.
  */
 function userContextStateMiddleware(): AgentMiddleware {
@@ -226,7 +228,7 @@ export async function createMainAgent(
             ]
           : []),
       ],
-      stateSchema: MainAgentGraphState,
+      stateSchema: capabilityGateState,
       systemPrompt,
       ...(checkpointer ? { checkpointer } : {}),
       name: identity.name,
@@ -896,7 +898,12 @@ export async function createMainAgent(
       ...toolRetryMiddleware({
         maxRetries: 1,
         tools: readToolNames,
+        // `getRetryable` is core's mark: false on a cancelled model call
+        // (`ModelAbortError`) and on a model failure that fails the same way
+        // again (401/404, exhausted quota, context overflow). This `retryOn`
+        // replaces LangChain's default, which is what would read it.
         retryOn: (error) =>
+          getRetryable(error) !== false &&
           !isToolInvocationError(error) &&
           !isHarnessLimitError(error) &&
           error.name !== 'AbortError',
@@ -1053,19 +1060,24 @@ export async function createMainAgent(
     model,
     tools,
     middleware,
-    stateSchema: MainAgentGraphState,
+    // The capability channels, as the gate declares them (the same channel
+    // objects, so nothing changes at run time): what types the graph input
+    // the caller writes `stateUpdate` into.
+    stateSchema: capabilityGateState,
     systemPrompt,
     ...(checkpointer ? { checkpointer } : {}),
     name: identity.name,
-    // One tools node runs every call of the model's message (in parallel,
-    // through the tool scheduler's lanes). The default ("v2") sends each call
-    // as its own graph task carrying a copy of the whole state, so a turn
-    // with three tool calls serializes the full thread three more times into
-    // the checkpoint writes (and into every traced tools-node run) — the
-    // peak that resets a 128 MB isolate on long threads. The runtime needs
-    // neither per-call checkpoints nor `interrupt()` inside a tool: tool
-    // side effects are guarded by its own `turn_tool_marks`.
-    version: 'v1',
+    // Each tool call of the model's message is its own graph task (they
+    // still run in parallel, through the tool scheduler's lanes), so each
+    // finished call's result is checkpointed as a pending write the moment
+    // it returns. A durable run resumed after a reset in the middle of a
+    // step then runs only the calls that had not finished: a finished write
+    // keeps its real result instead of "outcome unknown", a finished read is
+    // not run again. `turn_tool_marks` still guards the calls that were in
+    // flight. The task input is the tool call alone (langchain ≥ 1.5.19 no
+    // longer copies the whole state into each task); "v1" (one task for all
+    // calls) checkpoints nothing until every call has returned.
+    version: 'v2',
   });
 
   return {

@@ -24,6 +24,7 @@ import { isAttachmentViewMessage } from '../../attachments/retention';
 import { isCapabilityGateRefusal } from './capability-gate';
 import { isToolNotRun } from '../tool-not-run';
 import { SEND_FILE_TOOL } from '../../plugins/sandbox/send-file';
+import { standaloneMessagesOf } from '../../delivery/standalone';
 
 export const SUMMARY_PREFIX = 'Here is a summary of the conversation to date:';
 
@@ -47,8 +48,10 @@ export interface CarriedToolCall {
   /** The start of its result, for the repetition guard to quote. */
   result: string;
   /**
-   * A `send_file` call's `ToolMessage.artifact` and tool call id: the Reply
-   * Plan still owes the user that file after the summary removed the call.
+   * A `send_file` call's `ToolMessage.artifact` and tool call id, or those
+   * of a call that handed over standalone messages: the Reply Plan still
+   * owes the user that file or those messages after the summary removed the
+   * call.
    */
   artifact?: unknown;
   id?: string;
@@ -175,7 +178,9 @@ export function carriedCallsOfTurn(
       args: call.args,
       status: message.status === 'error' ? 'error' : 'success',
       result: resultText(message),
-      ...(call.name === SEND_FILE_TOOL && message.artifact !== undefined
+      ...(message.artifact !== undefined &&
+      (call.name === SEND_FILE_TOOL ||
+        standaloneMessagesOf(message.artifact).length > 0)
         ? { artifact: message.artifact, id: message.tool_call_id }
         : {}),
     });

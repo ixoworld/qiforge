@@ -1,10 +1,11 @@
 /**
  * Request `metadata` → agent state, the Node runtime's `agent-builder` rules:
  *
- *  - `editorRoomId` / `spaceId` / `currentEntityDid` update the thread's
- *    checkpointed value when the request carries them, otherwise the prior
- *    value stands; an explicit `currentEntityDid: null` clears the selected
- *    subject (omitting it keeps the prior one);
+ *  - `editorRoomId` / `spaceId` / `currentEntityDid` apply when the request
+ *    carries them, otherwise the thread's checkpointed value would stand.
+ *    The agent's state declares none of these fields, so the checkpoint
+ *    never holds one: in practice a turn has exactly what its request
+ *    carries, and a turn without a subject has none;
  *  - `sessionRunId` follows the room: a request that names the editor room
  *    also defines its session run, and "no run" must not fall back to one
  *    remembered from an earlier flow — so it is written whenever
@@ -55,7 +56,11 @@ export function parseTurnMetadata(json: string | undefined): TurnMetadata {
   return out;
 }
 
-/** The checkpointed values the mapping falls back to. */
+/**
+ * The checkpointed values the mapping falls back to. The four metadata
+ * fields are not part of the agent's state, so a checkpoint never holds
+ * them and they are always undefined here.
+ */
 export interface PriorMetadataState {
   editorRoomId?: string;
   spaceId?: string;

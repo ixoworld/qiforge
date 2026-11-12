@@ -5,6 +5,7 @@ import {
   ToolMessage,
   type BaseMessage,
 } from '@langchain/core/messages';
+import { stampRetryable } from '@langchain/core/errors';
 import { FakeListChatModel } from '@langchain/core/utils/testing';
 import { MemorySaver } from '@langchain/langgraph';
 import { createMiddleware, FakeToolCallingModel } from 'langchain';
@@ -1676,6 +1677,49 @@ describe('createMainAgent tool execution', () => {
     expect(budget.snapshot().toolAttempts).toBe(3);
   }, 15_000);
 
+  it('runs a read once when its error is marked not retryable; an unmarked one twice', async () => {
+    const calls = { marked: 0, unmarked: 0 };
+    const plugin = makePlugin({
+      name: 'marked',
+      getTools: () => [
+        makeTool('get_marked', {
+          effect: 'read',
+          handler: async () => {
+            calls.marked += 1;
+            // What core stamps on a cancelled model call or a 401/404 from
+            // a model a tool calls.
+            throw stampRetryable(new Error('model call failed'), false);
+          },
+        }),
+        makeTool('get_unmarked', {
+          effect: 'read',
+          handler: async () => {
+            calls.unmarked += 1;
+            throw new Error('model call failed');
+          },
+        }),
+      ],
+    });
+    const { agent } = await build(plugin, [
+      [
+        { name: 'get_marked', args: {}, id: 'm1' },
+        { name: 'get_unmarked', args: {}, id: 'u1' },
+      ],
+      [],
+    ]);
+    const result = (await agent.invoke(
+      { messages: [new HumanMessage('go')] },
+      { configurable: { thread_id: 'sess-marked' } },
+    )) as { messages: BaseMessage[] };
+    expect(calls).toEqual({ marked: 1, unmarked: 2 });
+    expect(
+      toolMessages(result.messages).map((m) => [m.tool_call_id, m.status]),
+    ).toEqual([
+      ['m1', 'error'],
+      ['u1', 'error'],
+    ]);
+  }, 15_000);
+
   it('ends the turn when a retry runs out of budget, instead of reporting a tool error', async () => {
     const { plugin, calls } = flakyPlugin();
     const { agent } = await build(
@@ -1861,6 +1905,51 @@ describe('createMainAgent — chat delivery', () => {
     expect(surfaces).toEqual([
       { kind: 'chat', surface: 'whatsapp', label: 'WhatsApp' },
     ]);
+  });
+
+  it('gives the model another call when a return-direct tool fails', async () => {
+    const core = bootCore();
+    const sendDocument = pluginTool(
+      async () => {
+        throw new Error('artefact storage is down');
+      },
+      {
+        name: 'create_artifact',
+        description: 'Send a document.',
+        schema: z.object({}),
+        effect: 'read',
+      },
+    );
+    const { agent, context } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(
+        core,
+        scriptedLlm({
+          main: [[{ name: 'create_artifact', args: {}, id: 'c1' }], []],
+        }),
+      ),
+      requestCtx: {
+        ...requestCtx,
+        session: { ...requestCtx.session, client: 'channel' },
+      },
+      state: {},
+      delivery: whatsapp,
+      hooks: { turnTools: [{ tool: sendDocument, returnDirect: true }] },
+    });
+
+    const result = (await agent.invoke(
+      { messages: [new HumanMessage('Plan my week')] },
+      { configurable: { thread_id: 'sess-chat-failed' }, context },
+    )) as { messages: BaseMessage[] };
+    const [failed] = toolMessages(result.messages);
+    expect(failed?.name).toBe('create_artifact');
+    expect(failed?.status).toBe('error');
+    expect(String(failed?.content)).toContain('artefact storage is down');
+    // The failed call did not end the run: the model answered after it.
+    expect(result.messages.at(-1)?.type).toBe('ai');
   });
 
   it('gives tools the files the person sent with the channel message', async () => {

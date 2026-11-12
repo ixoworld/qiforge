@@ -382,10 +382,11 @@ export class SandboxPlugin extends OraclePlugin {
           url: sandboxMcpUrl,
           transport: 'http',
           headers,
+          mode: 'legacy',
         },
       },
       defaultToolTimeout: SANDBOX_MCP_TIMEOUT_MS,
-      useStandardContentBlocks: true,
+      prefixToolNameWithServerName: false,
     });
 
     // The cold path only needs the definitions: close the listing client and
@@ -531,10 +532,11 @@ export class SandboxPlugin extends OraclePlugin {
           url: sandboxMcpUrl,
           transport: 'http',
           headers,
+          mode: 'legacy',
         },
       },
       defaultToolTimeout: SANDBOX_MCP_TIMEOUT_MS,
-      useStandardContentBlocks: true,
+      prefixToolNameWithServerName: false,
     });
     try {
       const tools = await client.getTools();

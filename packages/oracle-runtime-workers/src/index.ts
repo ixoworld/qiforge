@@ -40,6 +40,12 @@ import { sweepExpiredArtifacts } from './artifacts/sweep';
 import { feedbackConfigFromEnv } from './feedback/config';
 import { LinearFeedbackSink } from './feedback/linear-sink';
 import type { DomainContextOptions } from './core/domain-context';
+import { removeLangChainTracingSwitches } from './core/tracing-env';
+
+// Once per isolate, before any run: LangChain must never attach its own
+// tracer from `process.env` (see `removeLangChainTracingSwitches`). Tracing
+// is the runtime's, from the Worker `env`.
+removeLangChainTracingSwitches();
 
 export * from './plugin-api';
 export * from './plugins';

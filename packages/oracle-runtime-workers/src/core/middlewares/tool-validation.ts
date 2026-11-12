@@ -59,8 +59,11 @@ export const createToolValidationMiddleware = (
         });
       }
     },
+    // Returning nothing writes nothing. Returning the state unchanged would
+    // write the whole message list back through its reducer, and into the
+    // checkpoint, before every model call.
     beforeModel(state) {
-      if (skipToolNames.size === 0) return state;
+      if (skipToolNames.size === 0) return undefined;
 
       const toolMessage = state.messages.find(
         (message: BaseMessage) => message.type === 'tool',
@@ -77,7 +80,7 @@ export const createToolValidationMiddleware = (
           ),
         };
       }
-      return state;
+      return undefined;
     },
   });
 };

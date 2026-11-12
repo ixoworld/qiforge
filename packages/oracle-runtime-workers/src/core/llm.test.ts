@@ -1,15 +1,25 @@
-import { HumanMessage, ToolMessage } from '@langchain/core/messages';
+import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import {
+  AIMessage,
+  type AIMessageChunk,
+  HumanMessage,
+  SystemMessage,
+  ToolMessage,
+} from '@langchain/core/messages';
+import { RunnableLambda } from '@langchain/core/runnables';
 import { LangChainTracer } from '@langchain/core/tracers/tracer_langchain';
-import { ChatOpenAI } from '@langchain/openai';
+import { ChatOpenAICompletions } from '@langchain/openai';
 import { createAgent, FakeToolCallingModel, tool } from 'langchain';
 import { Client } from 'langsmith';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import { nativeContentBlock } from '../attachments/content-blocks';
 import {
   BYO_PROVIDER_MODELS,
   BYO_PROVIDERS,
   BYO_ROLE_MODELS,
 } from '../llm/byo-catalog';
+import { createByoLlmAdapter } from '../llm/byo-adapter';
 import { createByoChatModel } from '../llm/byo-client';
 import { LLM_MAX_OUTPUT_TOKENS_DEFAULT } from './env';
 import {
@@ -37,8 +47,11 @@ import {
   MODEL_CATALOG,
   MODEL_INPUT_CAPS,
   NEBIUS_MODEL_MAP,
+  OPENROUTER_GPT_5_6_IDS,
   OPENROUTER_MAIN_FALLBACKS,
   OPENROUTER_MODEL_MAP,
+  openRouterPromptCacheKwargs,
+  openRouterProviderRouting,
   type ProviderModelRole,
 } from './llm';
 
@@ -137,8 +150,9 @@ describe('summarizer role', () => {
     expect(adapter.modelForRole('routing')).toBe(OPENROUTER_MODEL_MAP.routing);
 
     const summarizer = adapter.get('summarizer');
-    expect(summarizer).toBeInstanceOf(ChatOpenAI);
-    if (!(summarizer instanceof ChatOpenAI)) throw new Error('unreachable');
+    expect(summarizer).toBeInstanceOf(ChatOpenAICompletions);
+    if (!(summarizer instanceof ChatOpenAICompletions))
+      throw new Error('unreachable');
     expect(summarizer.model).toBe('anthropic/claude-sonnet-5');
     // Helper effort, not the reply's; no fallback model list.
     expect(summarizer.modelKwargs).toMatchObject({
@@ -146,11 +160,13 @@ describe('summarizer role', () => {
     });
     expect(summarizer.modelKwargs?.models).toBeUndefined();
     const main = adapter.get('main');
-    if (!(main instanceof ChatOpenAI)) throw new Error('unreachable');
+    if (!(main instanceof ChatOpenAICompletions))
+      throw new Error('unreachable');
     expect(main.modelKwargs).toMatchObject({ reasoning: { effort: 'high' } });
 
     const chosen = adapter.get('summarizer', { model: 'openai/gpt-5.6-sol' });
-    if (!(chosen instanceof ChatOpenAI)) throw new Error('unreachable');
+    if (!(chosen instanceof ChatOpenAICompletions))
+      throw new Error('unreachable');
     expect(chosen.model).toBe('openai/gpt-5.6-sol');
   });
 
@@ -163,14 +179,17 @@ describe('summarizer role', () => {
     expect(NEBIUS_MODEL_MAP.summarizer).toBe(NEBIUS_MODEL_MAP.main);
     expect(adapter.modelForRole('summarizer')).toBe(NEBIUS_MODEL_MAP.main);
     const summarizer = adapter.get('summarizer');
-    if (!(summarizer instanceof ChatOpenAI)) throw new Error('unreachable');
+    if (!(summarizer instanceof ChatOpenAICompletions))
+      throw new Error('unreachable');
     expect(summarizer.model).toBe(NEBIUS_MODEL_MAP.main);
   });
 });
 
 describe('output cap', () => {
   /** The `max_tokens` a Chat Completions request from this model would carry. */
-  const wireMaxTokens = (model: ChatOpenAI): number | null | undefined => {
+  const wireMaxTokens = (
+    model: ChatOpenAICompletions,
+  ): number | null | undefined => {
     const params = model.invocationParams({});
     return 'max_tokens' in params ? params.max_tokens : undefined;
   };
@@ -182,11 +201,13 @@ describe('output cap', () => {
     });
     for (const role of ['main', 'summarizer', 'subagent'] as const) {
       const model = adapter.get(role);
-      if (!(model instanceof ChatOpenAI)) throw new Error('unreachable');
+      if (!(model instanceof ChatOpenAICompletions))
+        throw new Error('unreachable');
       expect(model.maxTokens).toBe(LLM_MAX_OUTPUT_TOKENS_DEFAULT);
     }
     const main = adapter.get('main');
-    if (!(main instanceof ChatOpenAI)) throw new Error('unreachable');
+    if (!(main instanceof ChatOpenAICompletions))
+      throw new Error('unreachable');
     expect(wireMaxTokens(main)).toBe(LLM_MAX_OUTPUT_TOKENS_DEFAULT);
 
     const nebius = createLlmAdapter({
@@ -195,7 +216,8 @@ describe('output cap', () => {
       NEBIUS_API_KEY: 'n',
       LLM_MAX_OUTPUT_TOKENS: 4096,
     }).get('main');
-    if (!(nebius instanceof ChatOpenAI)) throw new Error('unreachable');
+    if (!(nebius instanceof ChatOpenAICompletions))
+      throw new Error('unreachable');
     expect(nebius.maxTokens).toBe(4096);
   });
 
@@ -204,14 +226,15 @@ describe('output cap', () => {
       OPEN_ROUTER_API_KEY: 'k',
       LLM_MAX_OUTPUT_TOKENS: 0,
     }).get('main');
-    if (!(uncapped instanceof ChatOpenAI)) throw new Error('unreachable');
+    if (!(uncapped instanceof ChatOpenAICompletions))
+      throw new Error('unreachable');
     expect(uncapped.maxTokens).toBeUndefined();
     expect(wireMaxTokens(uncapped)).toBeUndefined();
 
     const own = createLlmAdapter({ OPEN_ROUTER_API_KEY: 'k' }).get('main', {
       maxTokens: 500,
     });
-    if (!(own instanceof ChatOpenAI)) throw new Error('unreachable');
+    if (!(own instanceof ChatOpenAICompletions)) throw new Error('unreachable');
     expect(own.maxTokens).toBe(500);
   });
 
@@ -307,8 +330,8 @@ describe('model-call liveness wiring', () => {
       LLM_STREAM_IDLE_TIMEOUT_MS: 20_000,
       LLM_STREAM_RETRIES: 2,
     }).get('subagent');
-    expect(platform).toBeInstanceOf(ChatOpenAI);
-    expect(platform instanceof ChatOpenAI && platform.timeout).toBe(
+    expect(platform).toBeInstanceOf(ChatOpenAICompletions);
+    expect(platform instanceof ChatOpenAICompletions && platform.timeout).toBe(
       livenessRequestTimeoutMs({
         headersTimeoutMs: 10_000,
         idleTimeoutMs: 20_000,
@@ -320,7 +343,7 @@ describe('model-call liveness wiring', () => {
       modelId: 'deepseek-chat',
       role: 'main',
     });
-    expect(byo instanceof ChatOpenAI && byo.timeout).toBe(
+    expect(byo instanceof ChatOpenAICompletions && byo.timeout).toBe(
       livenessRequestTimeoutMs(streamLivenessFromEnv({}, 'byo')),
     );
   });
@@ -366,6 +389,54 @@ describe('model-call liveness wiring', () => {
   });
 });
 
+describe('retries of a failing platform model call', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** Requests a call made when every answer is `status`. */
+  async function requestsUntilFailure(
+    status: number,
+    body: object,
+  ): Promise<number> {
+    let calls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        calls += 1;
+        return Response.json(body, { status });
+      }),
+    );
+    const model = createLlmAdapter({ OPEN_ROUTER_API_KEY: 'sk-test' }).get(
+      'subagent',
+      { streaming: true },
+    );
+    await expect(model.invoke([new HumanMessage('hi')])).rejects.toMatchObject({
+      status,
+    });
+    return calls;
+  }
+
+  // The SDK never retries (LangChain builds its client with `maxRetries: 0`),
+  // the stall guard only retries stalls, so a call is sent 1 + `maxRetries`
+  // (2) times.
+  it('sends a rate-limited call three times, with no Retry-After hint', async () => {
+    expect(
+      await requestsUntilFailure(429, {
+        error: { message: 'Rate limit exceeded', code: 429 },
+      }),
+    ).toBe(3);
+  });
+
+  it('sends a call refused for good once', async () => {
+    expect(
+      await requestsUntilFailure(401, {
+        error: { message: 'No auth credentials found', code: 401 },
+      }),
+    ).toBe(1);
+  });
+});
+
 describe('a stall before the first byte through the OpenAI SDK', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -403,6 +474,629 @@ describe('a stall before the first byte through the OpenAI SDK', () => {
     });
     // `maxRetries: 2` did not re-send it: the guard owns stall retries.
     expect(calls).toBe(1);
+  });
+});
+
+describe('the OpenRouter request of a main-model turn', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * The body a tool-calling main-model turn sends. Everything before the
+   * newest message is the provider's cached prompt prefix (tools, system
+   * message, history), so any change to it, key order included, costs a
+   * full prompt-cache miss: it is pinned byte for byte.
+   */
+  const EXPECTED_BODY = {
+    model: 'openai/gpt-5.6-luna',
+    temperature: 0.8,
+    stream: true,
+    tools: [
+      {
+        type: 'function',
+        function: {
+          name: 'get_weather',
+          description: 'Weather for a city.',
+          parameters: {
+            $schema: 'https://json-schema.org/draft/2020-12/schema',
+            type: 'object',
+            properties: {
+              city: { type: 'string', description: 'City name' },
+              unit: { type: 'string', enum: ['c', 'f'] },
+              days: { default: 1, type: 'integer', minimum: 1, maximum: 7 },
+            },
+            required: ['city', 'days'],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'mcp_search',
+          description: 'Search',
+          parameters: {
+            type: 'object',
+            properties: { q: { type: 'string' } },
+            required: ['q'],
+            additionalProperties: false,
+          },
+        },
+      },
+    ],
+    stream_options: { include_usage: true },
+    include_reasoning: true,
+    models: [...OPENROUTER_MAIN_FALLBACKS],
+    provider: { order: ['openai', 'azure'], allow_fallbacks: true },
+    reasoning: { effort: 'medium', summary: 'auto' },
+    max_tokens: LLM_MAX_OUTPUT_TOKENS_DEFAULT,
+    messages: [
+      { role: 'system', content: 'You are the oracle. Be brief.' },
+      { role: 'user', content: 'What is the weather in Paris?' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [
+          {
+            id: 'call_0',
+            type: 'function',
+            function: { name: 'get_weather', arguments: '{"city":"Paris"}' },
+          },
+        ],
+      },
+      {
+        role: 'tool',
+        content: 'sunny',
+        name: 'get_weather',
+        tool_call_id: 'call_0',
+      },
+      { role: 'assistant', content: 'It is sunny.' },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'And this picture?' },
+          {
+            type: 'image_url',
+            image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' },
+          },
+          {
+            type: 'file',
+            file: {
+              file_data: 'data:application/pdf;base64,JVBERi0=',
+              filename: 'a.pdf',
+            },
+          },
+        ],
+      },
+    ],
+  };
+
+  const sse = (chunks: object[]): string =>
+    chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join('') +
+    'data: [DONE]\n\n';
+  const head = {
+    id: 'gen-1',
+    object: 'chat.completion.chunk',
+    created: 1,
+    model: 'openai/gpt-5.6-luna',
+  };
+  /** A streamed reply: reasoning, text, one tool call in three slices, usage last. */
+  const REPLY = sse([
+    {
+      ...head,
+      choices: [
+        {
+          index: 0,
+          delta: { role: 'assistant', content: '', reasoning: 'Thinking' },
+        },
+      ],
+    },
+    { ...head, choices: [{ index: 0, delta: { content: 'Hello ' } }] },
+    {
+      ...head,
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_1',
+                type: 'function',
+                function: { name: 'get_weather', arguments: '' },
+              },
+            ],
+          },
+        },
+      ],
+    },
+    {
+      ...head,
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [{ index: 0, function: { arguments: '{"city":' } }],
+          },
+        },
+      ],
+    },
+    {
+      ...head,
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [{ index: 0, function: { arguments: '"Paris"}' } }],
+          },
+        },
+      ],
+    },
+    {
+      ...head,
+      choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+    },
+    {
+      ...head,
+      choices: [],
+      usage: {
+        prompt_tokens: 1000,
+        completion_tokens: 50,
+        total_tokens: 1050,
+        prompt_tokens_details: { cached_tokens: 800, cache_write_tokens: 100 },
+        completion_tokens_details: { reasoning_tokens: 20 },
+      },
+    },
+  ]);
+
+  it('goes to Chat Completions with the pinned body, and reads the streamed reply', async () => {
+    const requests: { url: string; body: unknown; headers: Headers }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        requests.push({
+          url: input instanceof Request ? input.url : String(input),
+          body: init?.body,
+          headers: new Headers(init?.headers),
+        });
+        return new Response(REPLY, {
+          headers: { 'content-type': 'text/event-stream' },
+        });
+      }),
+    );
+    const main = createLlmAdapter({ OPEN_ROUTER_API_KEY: 'sk-test' }).get(
+      'main',
+    );
+    if (!(main instanceof ChatOpenAICompletions))
+      throw new Error('unreachable');
+    const weather = tool(async () => 'sunny', {
+      name: 'get_weather',
+      description: 'Weather for a city.',
+      schema: z.object({
+        city: z.string().describe('City name'),
+        unit: z.enum(['c', 'f']).optional(),
+        days: z.number().int().min(1).max(7).default(1),
+      }),
+    });
+    const search = {
+      type: 'function' as const,
+      function: {
+        name: 'mcp_search',
+        description: 'Search',
+        parameters: {
+          type: 'object',
+          properties: { q: { type: 'string' } },
+          required: ['q'],
+          additionalProperties: false,
+        },
+      },
+    };
+
+    let reply: AIMessageChunk | undefined;
+    for await (const chunk of await main.bindTools([weather, search]).stream([
+      new SystemMessage('You are the oracle. Be brief.'),
+      new HumanMessage('What is the weather in Paris?'),
+      new AIMessage({
+        content: '',
+        tool_calls: [
+          {
+            id: 'call_0',
+            name: 'get_weather',
+            args: { city: 'Paris' },
+            type: 'tool_call',
+          },
+        ],
+      }),
+      new ToolMessage({
+        content: 'sunny',
+        tool_call_id: 'call_0',
+        name: 'get_weather',
+      }),
+      new AIMessage('It is sunny.'),
+      new HumanMessage({
+        content: [
+          { type: 'text', text: 'And this picture?' },
+          {
+            type: 'image',
+            source_type: 'base64',
+            mime_type: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+          nativeContentBlock({
+            kind: 'file',
+            mimeType: 'application/pdf',
+            base64: 'JVBERi0=',
+            filename: 'a.pdf',
+          }),
+        ],
+      }),
+    ]))
+      reply = reply ? reply.concat(chunk) : chunk;
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe(
+      'https://openrouter.ai/api/v1/chat/completions',
+    );
+    expect(requests[0]?.body).toBe(JSON.stringify(EXPECTED_BODY));
+    expect(requests[0]?.headers.get('http-referer')).toBe('oracle-app.com');
+    expect(requests[0]?.headers.get('x-title')).toBe('Oracle App');
+
+    expect(reply?.content).toBe('Hello ');
+    expect(reply?.tool_calls).toEqual([
+      {
+        name: 'get_weather',
+        args: { city: 'Paris' },
+        id: 'call_1',
+        type: 'tool_call',
+      },
+    ]);
+    // One usage chunk, after the stream: the totals are OpenRouter's own.
+    expect(reply?.usage_metadata).toEqual({
+      input_tokens: 1000,
+      output_tokens: 50,
+      total_tokens: 1050,
+      input_token_details: { cache_read: 800, cache_creation: 100 },
+      output_token_details: { reasoning: 20 },
+    });
+  });
+});
+
+const weather = tool(async () => 'sunny', {
+  name: 'get_weather',
+  description: 'Weather for a city.',
+  schema: z.object({ city: z.string() }),
+});
+
+/** The URL and raw body of the one request a tool-bound call of `model` sends. */
+async function sentRequest(
+  model: BaseChatModel,
+): Promise<{ url: string; body: string }> {
+  const requests: { url: string; body: string }[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: input instanceof Request ? input.url : String(input),
+        body: typeof init?.body === 'string' ? init.body : '',
+      });
+      return Response.json({
+        id: 'gen-1',
+        object: 'chat.completion',
+        created: 1,
+        model: 'm',
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: 'ok' },
+            finish_reason: 'stop',
+          },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 1, total_tokens: 11 },
+      });
+    }),
+  );
+  if (!model.bindTools) throw new Error('unreachable');
+  await model
+    .bindTools([weather])
+    .invoke([
+      new SystemMessage('You are the oracle. Be brief.'),
+      new HumanMessage('What is the weather in Paris?'),
+    ]);
+  vi.unstubAllGlobals();
+  expect(requests).toHaveLength(1);
+  const [request] = requests;
+  if (!request) throw new Error('unreachable');
+  return request;
+}
+
+describe('prompt caching of Anthropic models on OpenRouter', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * `body` as an Anthropic model's request: the model id replaced and
+   * `cache_control` right after `reasoning`, every other key in its place.
+   */
+  function asAnthropicBody(body: string, modelId: string): string {
+    const entries: [string, unknown][] = [];
+    for (const [key, value] of Object.entries(JSON.parse(body))) {
+      entries.push([key, key === 'model' ? modelId : value]);
+      if (key === 'reasoning')
+        entries.push(['cache_control', { type: 'ephemeral' }]);
+    }
+    return JSON.stringify(Object.fromEntries(entries));
+  }
+
+  const ANTHROPIC_IDS = MODEL_CATALOG.filter(
+    (entry) => entry.family === 'anthropic',
+  ).map((entry) => entry.id);
+
+  it('marks exactly the anthropic/ ids of the catalog and role maps', () => {
+    expect(ANTHROPIC_IDS).toEqual([
+      'anthropic/claude-sonnet-5',
+      'anthropic/claude-opus-4.8',
+    ]);
+    for (const id of ANTHROPIC_IDS)
+      expect(openRouterPromptCacheKwargs(id)).toEqual({
+        cache_control: { type: 'ephemeral' },
+      });
+    const others = [
+      ...MODEL_CATALOG.filter((entry) => entry.family !== 'anthropic').map(
+        (entry) => entry.id,
+      ),
+      ...Object.values(OPENROUTER_MODEL_MAP),
+      ...OPENROUTER_MAIN_FALLBACKS,
+      // A BYO lane's native Anthropic id is not an OpenRouter id.
+      'claude-sonnet-5',
+    ];
+    for (const id of others)
+      expect(openRouterPromptCacheKwargs(id)).toEqual({});
+  });
+
+  it('adds top-level cache_control to an Anthropic model’s request, and changes nothing else', async () => {
+    const platform = createLlmAdapter({ OPEN_ROUTER_API_KEY: 'sk-test' });
+    // The reference model is neither Anthropic nor GPT-5.6, so its `main`
+    // body has the same provider routing as an Anthropic model's.
+    const geminiDefault = createLlmAdapter({
+      OPEN_ROUTER_API_KEY: 'sk-test',
+      DEFAULT_MODEL: 'google/gemini-3.5-flash',
+    });
+    const anthropicDefault = createLlmAdapter({
+      OPEN_ROUTER_API_KEY: 'sk-test',
+      DEFAULT_MODEL: 'anthropic/claude-sonnet-5',
+    });
+    const cases: {
+      anthropic: BaseChatModel;
+      other: BaseChatModel;
+      modelId: string;
+    }[] = [
+      // The deployment default, on the main role (with its fallback list)
+      // and the summarizer that runs on it.
+      {
+        anthropic: anthropicDefault.get('main'),
+        other: geminiDefault.get('main'),
+        modelId: 'anthropic/claude-sonnet-5',
+      },
+      {
+        anthropic: anthropicDefault.get('summarizer'),
+        other: geminiDefault.get('summarizer'),
+        modelId: 'anthropic/claude-sonnet-5',
+      },
+      // A per-request choice, on the main role and on helper roles.
+      ...ANTHROPIC_IDS.flatMap((modelId) =>
+        (['main', 'summarizer', 'subagent', 'session-title'] as const).map(
+          (role) => ({
+            anthropic: platform.get(role, { model: modelId }),
+            other: platform.get(role, { model: 'google/gemini-3.5-flash' }),
+            modelId,
+          }),
+        ),
+      ),
+    ];
+    for (const { anthropic, other, modelId } of cases) {
+      const sent = await sentRequest(anthropic);
+      const reference = await sentRequest(other);
+      expect(sent.url).toBe('https://openrouter.ai/api/v1/chat/completions');
+      expect(reference.body).not.toContain('cache_control');
+      expect(sent.body).toBe(asAnthropicBody(reference.body, modelId));
+    }
+  });
+
+  it('sends no cache_control for any other model, on either platform lane', async () => {
+    const platform = createLlmAdapter({ OPEN_ROUTER_API_KEY: 'sk-test' });
+    const models: BaseChatModel[] = [
+      ...Object.keys(OPENROUTER_MODEL_MAP)
+        .filter((role) => role !== 'embedding')
+        .map((role) => platform.get(role)),
+      ...MODEL_CATALOG.filter((entry) => entry.family !== 'anthropic').map(
+        (entry) => platform.get('main', { model: entry.id }),
+      ),
+      createLlmAdapter({
+        OPEN_ROUTER_API_KEY: '',
+        LLM_PROVIDER: 'nebius',
+        NEBIUS_API_KEY: 'n',
+      }).get('main'),
+    ];
+    for (const model of models)
+      expect((await sentRequest(model)).body).not.toContain('cache_control');
+  });
+
+  it('leaves the BYO Anthropic lane without it: Anthropic’s OpenAI-compatible endpoint does not cache', async () => {
+    const byo = createByoLlmAdapter(
+      createLlmAdapter({ OPEN_ROUTER_API_KEY: 'sk-test' }),
+      {
+        credential: { provider: 'anthropic', apiKey: 'sk-ant-user' },
+        mainModelId: 'claude-sonnet-5',
+      },
+    );
+    const sent = await sentRequest(byo.get('main'));
+    expect(sent.url).toBe('https://api.anthropic.com/v1/chat/completions');
+    expect(JSON.parse(sent.body)).toMatchObject({ model: 'claude-sonnet-5' });
+    expect(sent.body).not.toContain('cache_control');
+  });
+});
+
+describe('provider routing on OpenRouter', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const PIN = { order: ['openai', 'azure'], allow_fallbacks: true };
+
+  /** `body` with `model` and `provider` replaced, every key in its place. */
+  function withRouting(
+    body: string,
+    modelId: string,
+    provider: object,
+  ): string {
+    const entries = Object.entries(JSON.parse(body)).map(
+      ([key, value]): [string, unknown] => [
+        key,
+        key === 'model' ? modelId : key === 'provider' ? provider : value,
+      ],
+    );
+    return JSON.stringify(Object.fromEntries(entries));
+  }
+
+  /** `body` with `model` replaced and `provider` inserted before `reasoning`. */
+  function withPinBeforeReasoning(body: string, modelId: string): string {
+    const entries: [string, unknown][] = [];
+    for (const [key, value] of Object.entries(JSON.parse(body))) {
+      if (key === 'reasoning') entries.push(['provider', PIN]);
+      entries.push([key, key === 'model' ? modelId : value]);
+    }
+    return JSON.stringify(Object.fromEntries(entries));
+  }
+
+  it('pins exactly the GPT-5.6 ids on every role; other models sort by latency on main only', () => {
+    expect(OPENROUTER_GPT_5_6_IDS).toEqual([
+      'openai/gpt-5.6-luna',
+      'openai/gpt-5.6-terra',
+      'openai/gpt-5.6-sol',
+    ]);
+    const catalogGpt56 = MODEL_CATALOG.map((entry) => entry.id).filter((id) =>
+      id.startsWith('openai/gpt-5.6-'),
+    );
+    expect(
+      catalogGpt56.every((id) => OPENROUTER_GPT_5_6_IDS.includes(id)),
+    ).toBe(true);
+    const roles = Object.keys(OPENROUTER_MODEL_MAP);
+    for (const id of OPENROUTER_GPT_5_6_IDS)
+      for (const role of roles)
+        expect(openRouterProviderRouting(id, role)).toEqual({ provider: PIN });
+    const others = [
+      ...MODEL_CATALOG.map((entry) => entry.id),
+      ...Object.values(OPENROUTER_MODEL_MAP),
+      ...OPENROUTER_MAIN_FALLBACKS,
+    ].filter((id) => !OPENROUTER_GPT_5_6_IDS.includes(id));
+    expect(others).toContain('anthropic/claude-sonnet-5');
+    expect(others).toContain('google/gemini-3.5-flash');
+    expect(others).toContain('meta-llama/llama-3.1-8b-instruct');
+    for (const id of others) {
+      expect(openRouterProviderRouting(id, 'main')).toEqual({
+        provider: { sort: 'latency' },
+      });
+      for (const role of roles.filter((r) => r !== 'main'))
+        expect(openRouterProviderRouting(id, role)).toEqual({});
+    }
+  });
+
+  it('sends a GPT-5.6 main call the pin, with the fallback list, and nothing else changed', async () => {
+    const platform = createLlmAdapter({ OPEN_ROUTER_API_KEY: 'sk-test' });
+    const reference = (
+      await sentRequest(
+        platform.get('main', { model: 'google/gemini-3.5-flash' }),
+      )
+    ).body;
+    expect(JSON.parse(reference)).toMatchObject({
+      models: [...OPENROUTER_MAIN_FALLBACKS],
+      provider: { sort: 'latency' },
+    });
+    const cases: { model: BaseChatModel; modelId: string }[] = [
+      // The catalog default as the deployment default.
+      { model: platform.get('main'), modelId: DEFAULT_MODEL_ID },
+      // Each GPT-5.6 id as a deployment default and as a per-request choice.
+      ...OPENROUTER_GPT_5_6_IDS.flatMap((modelId) => [
+        {
+          model: createLlmAdapter({
+            OPEN_ROUTER_API_KEY: 'sk-test',
+            DEFAULT_MODEL: modelId,
+          }).get('main'),
+          modelId,
+        },
+        { model: platform.get('main', { model: modelId }), modelId },
+      ]),
+    ];
+    for (const { model, modelId } of cases)
+      expect((await sentRequest(model)).body).toBe(
+        withRouting(reference, modelId, PIN),
+      );
+  });
+
+  it('pins every helper role that runs a GPT-5.6 model, by default or by choice, and changes nothing else', async () => {
+    const platform = createLlmAdapter({ OPEN_ROUTER_API_KEY: 'sk-test' });
+    // A helper role on a model that is not GPT-5.6: no `provider` field.
+    const reference = (
+      await sentRequest(
+        platform.get('subagent', { model: 'google/gemini-3.5-flash' }),
+      )
+    ).body;
+    expect(JSON.parse(reference)).not.toHaveProperty('provider');
+    expect(JSON.parse(reference)).not.toHaveProperty('models');
+    const cases: { model: BaseChatModel; modelId: string }[] = [
+      // Roles whose default model is GPT-5.6 (the summarizer runs the main model).
+      ...(['summarizer', 'skills', 'subagent'] as const).map((role) => ({
+        model: platform.get(role),
+        modelId: DEFAULT_MODEL_ID,
+      })),
+      // A GPT-5.6 id chosen for a role whose default is another model.
+      ...(['session-title', 'vision', 'routing'] as const).map((role) => ({
+        model: platform.get(role, { model: 'openai/gpt-5.6-sol' }),
+        modelId: 'openai/gpt-5.6-sol',
+      })),
+    ];
+    for (const { model, modelId } of cases)
+      expect((await sentRequest(model)).body).toBe(
+        withPinBeforeReasoning(reference, modelId),
+      );
+  });
+
+  it('leaves Anthropic and Gemini main calls on latency sorting, and other-model helper roles without provider routing', async () => {
+    const platform = createLlmAdapter({ OPEN_ROUTER_API_KEY: 'sk-test' });
+    for (const modelId of [
+      'anthropic/claude-sonnet-5',
+      'google/gemini-3.5-flash',
+    ]) {
+      const fromDefault = createLlmAdapter({
+        OPEN_ROUTER_API_KEY: 'sk-test',
+        DEFAULT_MODEL: modelId,
+      }).get('main');
+      for (const model of [
+        fromDefault,
+        platform.get('main', { model: modelId }),
+      ])
+        expect(JSON.parse((await sentRequest(model)).body)).toMatchObject({
+          model: modelId,
+          models: [...OPENROUTER_MAIN_FALLBACKS],
+          provider: { sort: 'latency' },
+        });
+    }
+    // Their default models: llama (session-title, guard), gemini (vision,
+    // custom_medium), gpt-oss (routing, custom_low).
+    for (const role of [
+      'session-title',
+      'guard',
+      'vision',
+      'custom_medium',
+      'routing',
+      'custom_low',
+    ] as const) {
+      const body = JSON.parse((await sentRequest(platform.get(role))).body);
+      expect(body.model).toBe(OPENROUTER_MODEL_MAP[role]);
+      expect(body).not.toHaveProperty('provider');
+    }
   });
 });
 
@@ -579,7 +1273,198 @@ describe('redactSignedLinks', () => {
     expect(protectedBodies.join('\n')).toContain('[redacted]');
     expect(protectedBodies.join('\n')).not.toContain('deadbeef0123');
   });
+
+  it('keeps signed links out of a traced run’s error and metadata, and uploads no environment values', async () => {
+    // workerd fills `process.env` from vars and secrets.
+    vi.stubEnv('LANGSMITH_TRACED_DIDS', 'did:ixo:someone-else');
+    const uploads = captureLangsmithUploads();
+    try {
+      const { tracer, client } = tracerFor('error-metadata-key');
+      await RunnableLambda.from(async (): Promise<never> => {
+        throw new Error(`HTTP 403 downloading ${SIGNED}`);
+      })
+        .invoke(
+          {},
+          {
+            callbacks: [tracer],
+            runName: 'error_probe',
+            metadata: { link: SIGNED },
+          },
+        )
+        .catch(() => undefined);
+      await client.awaitPendingTraceBatches();
+      const sent = uploads.join('\n');
+      expect(sent).toContain('error_probe');
+      expect(sent).toContain('HTTP 403 downloading');
+      expect(sent).toContain('X-Amz-Signature=[redacted]');
+      expect(sent).not.toContain('deadbeef0123');
+      expect(sent).not.toContain('LANGSMITH_TRACED_DIDS');
+      expect(sent).not.toContain('did:ixo:someone-else');
+    } finally {
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('uploads no model header or key in a traced call’s serialized model', async () => {
+    const uploads = captureLangsmithUploads();
+    try {
+      const { tracer, client } = tracerFor('serialized-key');
+      const models = [
+        createByoChatModel({
+          credential: {
+            provider: 'chatgpt',
+            oauth: {
+              accessToken: 'chatgpt-access-secret',
+              refreshToken: 'chatgpt-refresh-secret',
+              accountId: 'acct-secret-123',
+              expiresAt: Date.now() + 3_600_000,
+            },
+          },
+          modelId: 'gpt-5.6-terra',
+          role: 'main',
+          chatGptBackend: {
+            baseUrl: 'https://chatgpt.proxy.example',
+            proxyAuthToken: 'proxy-shared-secret',
+          },
+        }),
+        createByoChatModel({
+          credential: { provider: 'openai', apiKey: 'sk-byo-secret' },
+          modelId: 'gpt-5.6-terra',
+          role: 'main',
+        }),
+        createLlmAdapter({ OPEN_ROUTER_API_KEY: 'sk-or-secret' }).get('main'),
+      ];
+      for (const model of models)
+        await model
+          .invoke('hi', { callbacks: [tracer], runName: 'serialized_probe' })
+          .catch(() => undefined);
+      await client.awaitPendingTraceBatches();
+      const sent = uploads.join('\n');
+      // The models' constructor arguments were uploaded…
+      expect(sent).toContain('serialized_probe');
+      expect(sent).toContain('chatgpt.proxy.example');
+      expect(sent).toContain('openrouter.ai');
+      // …without a credential or a lane header in them.
+      for (const secret of [
+        'proxy-shared-secret',
+        'acct-secret-123',
+        'chatgpt-access-secret',
+        'chatgpt-refresh-secret',
+        'sk-byo-secret',
+        'sk-or-secret',
+        'session-id',
+      ])
+        expect(sent).not.toContain(secret);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('uploads a traced turn through the shared client, gzipped when the server accepts it', async () => {
+    const uploads: { encoding: string | null; text: string }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.endsWith('/info'))
+          return Response.json({
+            version: '0.11.0',
+            batch_ingest_config: { use_multipart_endpoint: true },
+            instance_flags: { gzip_body_enabled: true },
+          });
+        const headers = new Headers(init?.headers);
+        const encoding = headers.get('content-encoding');
+        const raw = new Response(init?.body ?? null).body;
+        const body =
+          raw && encoding === 'gzip'
+            ? raw.pipeThrough(new DecompressionStream('gzip'))
+            : raw;
+        uploads.push({ encoding, text: await new Response(body).text() });
+        return new Response('{}', { status: 200 });
+      },
+    );
+    try {
+      const { callbacks } = resolveLangsmithTracing({
+        userDid: 'did:ixo:gzip-upload',
+        client: 'portal',
+        env: {
+          apiKey: 'gzip-upload-key',
+          tracing: 'true',
+          endpoint: 'https://langsmith.example',
+        },
+      });
+      const tracer = callbacks?.[0];
+      if (!tracer || !(tracer.client instanceof Client))
+        throw new Error('unreachable');
+      const client = tracer.client;
+      await RunnableLambda.from(async (input: { text: string }) => ({
+        echoed: input.text,
+      })).invoke(
+        { text: `see ${SIGNED}` },
+        { callbacks: [tracer], runName: 'gzip_probe' },
+      );
+      await client.awaitPendingTraceBatches();
+
+      const runs = uploads.filter((upload) =>
+        upload.text.includes('gzip_probe'),
+      );
+      expect(runs.length).toBeGreaterThan(0);
+      expect(runs.every((upload) => upload.encoding === 'gzip')).toBe(true);
+      const sent = uploads.map((upload) => upload.text).join('\n');
+      expect(sent).toContain('[redacted]');
+      expect(sent).not.toContain('deadbeef0123');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
+
+/**
+ * Stub `fetch`: LangSmith at `https://langsmith.example` (gzip on) records
+ * the text of every upload; any other request gets an empty 400.
+ */
+function captureLangsmithUploads(): string[] {
+  const uploads: string[] = [];
+  vi.stubGlobal(
+    'fetch',
+    async (input: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(input, init);
+      if (!request.url.startsWith('https://langsmith.example'))
+        return new Response(null, { status: 400 });
+      if (request.url.endsWith('/info'))
+        return Response.json({
+          version: '0.11.0',
+          batch_ingest_config: { use_multipart_endpoint: true },
+          instance_flags: { gzip_body_enabled: true },
+        });
+      const raw = request.body;
+      const body =
+        raw && request.headers.get('content-encoding') === 'gzip'
+          ? raw.pipeThrough(new DecompressionStream('gzip'))
+          : raw;
+      uploads.push(await new Response(body).text());
+      return new Response('{}', { status: 200 });
+    },
+  );
+  return uploads;
+}
+
+/** The runtime's tracer for a turn traced through `captureLangsmithUploads`. */
+function tracerFor(apiKey: string): {
+  tracer: LangChainTracer;
+  client: Client;
+} {
+  const { callbacks } = resolveLangsmithTracing({
+    userDid: 'did:ixo:traced',
+    client: 'portal',
+    env: { apiKey, tracing: 'true', endpoint: 'https://langsmith.example' },
+  });
+  const tracer = callbacks?.[0];
+  if (!tracer || !(tracer.client instanceof Client))
+    throw new Error('unreachable');
+  return { tracer, client: tracer.client };
+}
 
 function toBytes(body: unknown): Uint8Array {
   if (body instanceof Uint8Array) return body;

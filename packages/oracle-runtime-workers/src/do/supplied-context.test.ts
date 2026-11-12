@@ -1,11 +1,20 @@
+import { CallbackManager } from '@langchain/core/callbacks/manager';
 import { LangChainTracer } from '@langchain/core/tracers/tracer_langchain';
 import { FakeListChatModel } from '@langchain/core/utils/testing';
 import { MemorySaver } from '@langchain/langgraph';
 import { describe, expect, it, vi } from 'vitest';
 import { createRuntimeCore } from '../core';
+import {
+  langsmithEnvFromWorkerEnv,
+  resolveLangsmithTracing,
+} from '../core/llm';
 import { createNoopAmbient } from '../core/runtime-context';
 import { makeEnv } from '../core/test-fixtures';
 import { ToolScheduler } from '../core/tool-scheduler';
+import {
+  LANGCHAIN_TRACING_SWITCHES,
+  removeLangChainTracingSwitches,
+} from '../core/tracing-env';
 import type { ModelRole } from '../plugin-api/types';
 import { UNTITLED_SESSION } from '../sqlite/sessions-store';
 import type { TurnRequest } from './contracts';
@@ -253,6 +262,101 @@ describe('a complete supplied-context run', () => {
         JSON.stringify(call).includes('usage'),
       ),
     ).toBe(false);
+  });
+});
+
+describe('LangChain tracing switches in process.env', () => {
+  // workerd fills `process.env` from the Worker's vars and secrets.
+  const ENV = {
+    LANGSMITH_TRACING: 'true',
+    LANGCHAIN_TRACING: 'true',
+    LANGSMITH_TRACING_V2: 'true',
+    LANGCHAIN_TRACING_V2: 'true',
+    LANGSMITH_API_KEY: 'env-key',
+    LANGSMITH_TRACED_DIDS: 'did:ixo:someone-else',
+  };
+  const tracerNames = (manager: CallbackManager | undefined): string[] =>
+    (manager?.handlers ?? [])
+      .map((handler) => handler.name)
+      .filter((name) => name === 'langchain_tracer');
+
+  it('are removed, so neither a restricted turn nor an unlisted user’s turn is traced', async () => {
+    Object.assign(process.env, ENV);
+    // What reached LangSmith's default endpoint (its `/info` answers `{}`,
+    // so uploads are not gzipped).
+    const uploaded: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(input, init);
+        if (request.url.includes('smith.langchain.com'))
+          uploaded.push(await request.text());
+        return Response.json({});
+      },
+    );
+    const sent = (text: string) => uploaded.some((body) => body.includes(text));
+    try {
+      // What the switches do: core attaches its own tracer to a run that
+      // carries none, and it uploads.
+      expect(tracerNames(CallbackManager.configure())).toEqual([
+        'langchain_tracer',
+      ]);
+      await new FakeListChatModel({ responses: ['control-reply'] }).invoke(
+        'hi',
+      );
+      await vi.waitFor(() => expect(sent('control-reply')).toBe(true), {
+        timeout: 5_000,
+      });
+
+      removeLangChainTracingSwitches();
+      for (const name of LANGCHAIN_TRACING_SWITCHES)
+        expect(process.env[name]).toBeUndefined();
+      expect(tracerNames(CallbackManager.configure())).toEqual([]);
+
+      // A restricted turn, start to finish.
+      const o = restrictedObject();
+      const outcome = await o.call(
+        'runAttempt',
+        {
+          runId: 'run',
+          sessionId: TASK_SESSION,
+          requestId: taskRequest.requestId,
+          record: { request: JSON.stringify(storedRunRequest(taskRequest)) },
+          buffer: { isClosed: false, push: vi.fn() },
+          abort: new AbortController(),
+          continuation: null,
+        },
+        false,
+      );
+      expect(outcome).toMatchObject({ status: 'finished' });
+      // A turn of a user the allowlist does not name, on an oracle that
+      // traces selectively (its `LANGSMITH_TRACING` is not set; a switch the
+      // runtime does not read is): the runtime attaches no tracer, and
+      // nothing else does.
+      const tracing = resolveLangsmithTracing({
+        userDid: 'did:ixo:owner',
+        client: 'portal',
+        env: langsmithEnvFromWorkerEnv({
+          LANGSMITH_API_KEY: ENV.LANGSMITH_API_KEY,
+          LANGSMITH_TRACED_DIDS: ENV.LANGSMITH_TRACED_DIDS,
+          LANGCHAIN_TRACING_V2: 'true',
+        }),
+      });
+      expect(tracing.callbacks).toBeUndefined();
+      await new FakeListChatModel({ responses: ['unlisted-reply'] }).invoke(
+        'hi',
+        { metadata: tracing.metadata },
+      );
+      // Longer than the tracing client's batch timer, which sent the
+      // control run above.
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      expect(sent('# Brief')).toBe(false);
+      expect(sent('Only authorized text')).toBe(false);
+      expect(sent('unlisted-reply')).toBe(false);
+    } finally {
+      for (const name of Object.keys(ENV)) delete process.env[name];
+      vi.unstubAllGlobals();
+    }
   });
 });
 

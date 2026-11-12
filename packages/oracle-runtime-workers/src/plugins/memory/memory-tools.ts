@@ -1,14 +1,14 @@
-import { MultiServerMCPClient } from '@langchain/mcp-adapters';
+import { MCPAdapter } from '@langchain/mcp-adapters';
 import { clientSchemaToZod } from '../../core/utils';
 import { withCallTimeout } from '../mcp-call-timeout';
 import type { z } from 'zod';
 import type { PluginTool, RuntimeContext } from '../../plugin-api/types';
-import { adaptMcpClientTools } from '../mcp-tool-adapter';
+import { adaptMcpClientTools, mcpAdapterConfig } from '../mcp-tool-adapter';
 import { buildMemoryHeaders } from './memory-ucan';
 
 /**
  * Tool names the upstream Memory Engine MCP server exposes (prefixed with the
- * server name configured in `MultiServerMCPClient`). The plugin surfaces these
+ * server name, see `mcpAdapterConfig`). The plugin surfaces these
  * upstream tools as-is — name, description, and schema all come from the
  * upstream server. Wrapping them locally with a different shape (as an earlier
  * iteration did) caused upstream-side schema rejections at invoke time
@@ -115,24 +115,15 @@ const MEMORY_TOOL_TIMEOUT_MS = 420_000;
 function createMemoryMcpClient(
   memoryMcpUrl: string,
   headers: Record<string, string>,
-): MultiServerMCPClient {
-  return new MultiServerMCPClient({
-    useStandardContentBlocks: true,
-    prefixToolNameWithServerName: true,
-    mcpServers: {
-      'memory-engine': {
-        type: 'http',
-        transport: 'http',
-        url: memoryMcpUrl,
-        headers,
-        reconnect: {
-          enabled: true,
-          maxAttempts: 3,
-          delayMs: 2000,
-        },
-      },
-    },
-  });
+): MCPAdapter {
+  return new MCPAdapter(
+    mcpAdapterConfig('memory-engine', {
+      url: memoryMcpUrl,
+      headers,
+      reconnect: { enabled: true, maxAttempts: 3, delayMs: 2000 },
+      toolNames: 'prefixed',
+    }),
+  );
 }
 
 /**
@@ -149,7 +140,7 @@ let schemaDump: MemorySchemaDump | null = null;
 export interface MemorySchemaDump {
   tool: string;
   toolCount: number;
-  /** `JSON.stringify` of the schema exactly as `client.getTools()` handed it over. */
+  /** `JSON.stringify` of the schema exactly as `client.listTools()` handed it over. */
   rawSchema: string;
   /** Whether `clientSchemaToZod` accepts it (false = permissive-record fallback). */
   convertible: boolean;
@@ -197,7 +188,7 @@ export async function fetchMemorySchemaDump(
 ): Promise<MemorySchemaDump | null> {
   const client = createMemoryMcpClient(memoryMcpUrl, headers);
   try {
-    const dump = buildMemorySchemaDump(await client.getTools());
+    const dump = buildMemorySchemaDump(await client.listTools());
     if (dump) schemaDump = dump;
     return dump;
   } finally {
@@ -240,7 +231,7 @@ async function listToolDefs(
 ): Promise<MemoryToolDef[]> {
   const client = createMemoryMcpClient(memoryMcpUrl, headers);
   try {
-    const raw = await client.getTools();
+    const raw = await client.listTools();
     dumpSchemaOnce(raw);
     const tools = adaptMcpClientTools(raw, console);
     return tools.map(({ name, description, schema }) => ({
@@ -268,7 +259,7 @@ function buildLazyUpstreamTools(
   onTurnEnd?: (dispose: () => void | Promise<void>) => void,
 ): UpstreamMcpTool[] {
   let connection: Promise<{
-    client: MultiServerMCPClient;
+    client: MCPAdapter;
     byName: Map<string, UpstreamMcpTool>;
   }> | null = null;
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -314,7 +305,7 @@ function buildLazyUpstreamTools(
       connection = (async () => {
         const client = createMemoryMcpClient(memoryMcpUrl, headers);
         try {
-          const tools = adaptMcpClientTools(await client.getTools(), console, {
+          const tools = adaptMcpClientTools(await client.listTools(), console, {
             requestTimeoutMs: MEMORY_TOOL_TIMEOUT_MS,
           });
           return { client, byName: new Map(tools.map((t) => [t.name, t])) };

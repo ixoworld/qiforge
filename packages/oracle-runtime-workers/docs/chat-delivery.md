@@ -102,6 +102,7 @@ The plan is built once, when the run finishes, from the turn's AI messages (`src
 
 1. **Narration is dropped.** Text of 200 characters or less written with a tool call ("Checking your calendar.") says nothing once the answer arrives, so it goes when a later step has text or a `create_artifact` call follows. When nothing follows it ("Your flight is 9:40, gate B12." with a `memory_save`), it is the answer and is kept. Longer text before a tool call is always content.
 2. **`create_artifact` becomes three parts:** its message, the artefact, and its optional follow-up question. **`send_file` becomes one file part**, where the call stands in the turn; a call that failed adds nothing, and a file sent twice (the same stored path after the upstream normalised it) is delivered once, at its first place.
+   A plugin tool's **standalone messages** (see [Standalone messages](#standalone-messages)) are kept aside and come last, after everything else in the reply.
 3. **Every other step goes through the shaper** (`src/delivery/shaper.ts`):
    - It splits the text into messages on paragraph, line and sentence boundaries, and keeps each message under `bubbleMax`.
    - It turns headings into bold lines and keeps a lead-in ending in `:` together with the list that follows it.
@@ -112,12 +113,52 @@ The plan is built once, when the run finishes, from the turn's AI messages (`src
    - It groups short messages toward `maxBubbles`. A step already within `maxBubbles` keeps the model's message breaks. Otherwise its messages are filled left to right up to `bubbleTarget`, and if that still leaves too many, filled again from the start up to `bubbleMax`. In this step a code block of at least `minBubble` characters keeps its own message; a shorter one merges forward like any fragment. A step that cannot fit stays at more messages, never dropped and never spilled on count.
    - Only a document-length step is **spilled**: rendered text (blocks joined by blank lines) over `spillChars`, a code block over `maxCodeLines` lines, or a list or table over `maxListItems` items or rows. The full text becomes an artefact. In chat the step keeps a lead (its first paragraph or quote whole when it fits `bubbleMax`, cut at a sentence when not, or a list or table preview; a leading code block is skipped, since the artefact holds it, and a lone paragraph after it is the closing instead), the link, and a closing: its last block when the lead did not use it (a closing list or table previewed with its lead-in, or the last paragraph, with the one before it when both fit, or its last sentences that fit). A preview that must shrink keeps fewer items, then cuts one, and always keeps "…and N more". Lead and closing are what `capParts` drops first over the run cap; the artefact holds both.
    - No message, lead or closing is longer than `bubbleMax`. A heading or lead-in starts the message holding the block after it: when both would pass `bubbleMax`, that block is split with the room left. Only a lead-in over half of `bubbleMax` goes ahead as a message of its own, never joined onto the message before it.
-4. **The plan is capped** at `maxPartsPerRun`. The shortest adjacent pair of text parts merges, as long as the result fits `bubbleMax`. If that is not enough, a spill's lead and closing go, since its artefact holds both; the reply's last part stays as long as possible. Neither a file nor text found nowhere else is ever dropped, so a reply with several documents or files, or a long reply without artefact storage, can stay over the cap.
+4. **The plan is capped** at `maxPartsPerRun`. The shortest adjacent pair of text parts merges, as long as the result fits `bubbleMax`; a standalone message is never one of the pair. If that is not enough, a spill's lead and closing go, since its artefact holds both; the reply's last part stays as long as possible. Neither a file nor text found nowhere else is ever dropped, so a reply with several documents or files, or a long reply without artefact storage, can stay over the cap.
 5. **A resumed run** puts back the text it had streamed before the reset, minus the steps the checkpoint kept, in front of the first step after them, or after the last step when the checkpoint kept every step. A resumed run with no step of its own delivers that text alone.
 
 Part ids are `p1`…`pn`. The plan is stored in `turn_run_plans` with the run, and pruned with it after the seven-day run retention. A re-poll, a replayed Matrix event or a recovered run therefore gets the same plan and the same artefact links. If an artefact can't be stored, its step is sent as plain messages and the run still finishes.
 
 The turn's `text` (the run record, `TurnResult.text`, the Matrix turn ledger's `reply_text`) is always the model's own text, on every surface; the plan sits next to it (`plan`, `reply_plan`). The plan rendered as one Markdown message, with artefacts and files as links (`planText`), is what a finished `/channels/turn` response carries as `text` for gateways that predate plans. `planTextForModel` names a file instead of linking it: the model reads it when a user quotes that reply, the Companion room mirror of a channel turn shows it (once per run, recorded in the channel receipt), and the transcript lists a reply of files alone with it.
+
+## Standalone messages
+
+A plugin tool can hand the reply text that must arrive **as a message of its own**: a dial code, a PIN, a reference number, something the person copies with one long-press. The shaper's grouping would otherwise join it to its neighbours: a fragment under `minBubble` (60 characters) merges into the message after it, a short code block included (only a code block of at least `minBubble` characters keeps its own message, and the run cap still merges any two text parts). Asking the model to copy the text verbatim also risks a paraphrase. A standalone message comes from the tool itself, and nothing about grouping changes for any other text.
+
+````ts
+import { tool, withStandaloneMessages } from '@ixo/oracle-runtime-workers';
+
+tool(
+  async (args, ctx) => {
+    const voucher = await redeem(args);
+    if (ctx.session.surface?.kind !== 'chat')
+      // The Portal builds no Reply Plan: give the model the text instead.
+      return { ready: true, dialCode: voucher.ussd, pin: voucher.pin };
+    return withStandaloneMessages(ctx, {
+      name: 'rewards_claim',
+      // What the model reads. Say the messages follow the reply.
+      content: {
+        ready: true,
+        hint: 'The dial code and the PIN go out after your reply, each on its own. Do not repeat them.',
+      },
+      // Each one delivered verbatim, alone, after the reply.
+      messages: [
+        '```\n' + voucher.ussd + '\n```',
+        '```\n' + voucher.pin + '\n```',
+      ],
+    });
+  },
+  { name: 'rewards_claim', description: '…', schema },
+);
+````
+
+- **API.** `withStandaloneMessages(ctx, { name, content, messages })` (exported from the package root and `src/plugin-api`) returns a `ToolMessage`: `content` (a string, or a value sent as JSON) is what the model reads; `messages` rides in `ToolMessage.artifact` under `standaloneMessages` (`STANDALONE_MESSAGES_KEY`). Like `send_file`'s link, the artifact never reaches the model provider; the checkpoint keeps it and the plan reads it back (`standaloneMessagesOf`). `messages` must hold 1 to `MAX_STANDALONE_MESSAGES` (4) non-blank strings of at most `MAX_STANDALONE_MESSAGE_CHARS` (1,024) characters; the helper throws a `TypeError` otherwise, and the plan ignores a list that breaks the limits.
+- **Text.** Each message is chat Markdown, like a text part, delivered verbatim: the shaper does not touch it. On WhatsApp a fenced block (` ``` `) shows as monospace and keeps `*` characters as they are, so `*130*…#` is not read as bold.
+- **Place.** After the whole reply: the model's text, cards, files and artefacts, then the run's standalone messages, in the order the calls stand in the turn (several messages of one call in their order). The model writes its introduction knowing the result, so "Dial the code in my next message" reads right.
+- **Never merged.** The shaper never sees them, and the run cap never merges them with another part, so a reply can go over `maxPartsPerRun` by their count.
+- **Bounded.** The same text handed over twice in a run (a tool called twice) is delivered once. A run delivers at most `MAX_STANDALONE_MESSAGES` (4) of them; any further ones are joined to the fourth with blank lines, so nothing is lost. A message longer than the surface's `bubbleMax` (only with an override below 1,024) is split like any text, each piece still alone. The model cannot produce them: only plugin code can, so a reply cannot explode into messages.
+- **Surfaces.** Every chat surface delivers them alike (WhatsApp and the other IXO Channels providers, Matrix rooms with the chat style, group rooms included). A gateway that reads one message (`planText`) gets them after the reply, separated by blank lines. On the Portal, scheduled tasks and Matrix rooms in the plain style there is no plan, so they are **not delivered**: check `ctx.session.surface` and put the text in the result there, as above.
+- **Durability.** A reset resumes with the checkpoint's `ToolMessage`, artifact included; a mid-turn summary that condenses the call away carries it in `turn_carry`, as for `send_file`. A run that fails after the call delivers files only (`failedRunFiles`), not standalone messages: the tool should let the person ask again (Yo Rewards: `rewards_pin`).
+- **Secrets.** A standalone message is reply text: it is stored with the plan (`turn_run_plans`, `matrix_turns.reply_plan`), is in the `/channels/turn` response, and `planTextForModel` shows it to the model when a user quotes that reply, as when the model wrote it. The runtime never logs it (the delivery log line counts parts). Keep it out of `content`, so the model never holds it.
 
 ## Files
 
@@ -150,7 +191,7 @@ The link sits in fewer places than an artefact link: the checkpoint (`ToolMessag
 ### Creation
 
 - **`create_artifact`** (`src/artifacts/tool.ts`) is bound only on chat turns, and only when storage and a public origin are configured. It takes `title`, `content` (Markdown, up to 200,000 characters), `message` (up to 1,000 characters: the conclusions, decisions and next actions, so the user has them without opening the document) and an optional `followUp`. Its description reserves it for a document or file the user asked for, or genuinely document-length output.
-  - It is a **return-direct** tool: the run ends after it, with no second model call.
+  - It is a **return-direct** tool: the run ends after a call that succeeded, with no second model call. A call that failed (arguments that fail its schema, a storage error) comes back to the model as an error `ToolMessage` and the run goes on, so the model can correct the call or answer in chat. A failed call with valid arguments still adds its message and question to the Reply Plan, before whatever the model writes next.
   - LangChain ends a step only when the step's _last_ tool call is return-direct. When the model calls it together with other tools, an `afterModel` hook (`src/core/middlewares/return-direct-first.ts`) moves it first, so the run continues and the model sees every result.
 - **Spills** are artefacts the shaper creates from a document-length step.
 

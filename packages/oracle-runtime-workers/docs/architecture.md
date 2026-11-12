@@ -354,7 +354,7 @@ before the memory search it already had. They have not been measured on real
 traffic.
 
 A preload does not cost the first call a shared cache prefix. With Companion's
-model (`openai/gpt-5.6-luna`, served by Amazon Bedrock through OpenRouter) every
+model (`openai/gpt-5.6-luna`, then served by Amazon Bedrock through OpenRouter) every
 cached read in both lab runs, 490 of them, covered a whole earlier request
 (everything but its last two tokens): the previous call of the turn, or the
 same question asked again. None covered part of one, so the first call of a new
@@ -593,6 +593,15 @@ it; the runtime never touches it).
   rewrote the latter); the one query that used the former runs the same
   `thread_id` search on a remaining index. A Node-written `.db` loads here; a compressed file
   is no longer readable by the Node runtime.
+- **Pending writes keep their task path.** `putWrites` stores the path
+  LangGraph gives each task (`writes.task_path`), and a checkpoint's
+  pending writes are returned in `writesSortKey` order
+  (`task_path, task_id, idx`), sorted in JS with LangGraph's comparator,
+  as the upstream savers do. Migration 004 adds the column with
+  `ADD COLUMN … DEFAULT ''`, which changes only the schema entry, so it
+  costs the same on any file at object start-up; rows written before it
+  read with path `''` and sort first, by task id, which is the order the
+  previous code returned them in.
 
 ### R2 page tier
 
@@ -768,7 +777,9 @@ the tool boundary, so the checkpoint and the transcript carry the capped
 text and the whole text is kept for 24 h in `tool_results` or R2
 ([context budgets](operations.md#turns-context-budgets)); and a turn cut
 off by an isolate reset resumes from its checkpoint without repeating a
-write tool ([durable runs](operations.md#turns-durable-runs)).
+write tool, and without re-running any tool call of the interrupted step
+that had already returned: each call is its own graph task whose result is
+checkpointed when it returns ([durable runs](operations.md#turns-durable-runs)).
 
 ## Object lifetime and cost
 
@@ -981,20 +992,38 @@ and an object stops hibernating or a request dies with an opaque error.
   4.126) also refused `new AbortController()`, whatever the compatibility date.
   The Workers test pool evaluates modules inside a request, so `pnpm test`
   passes either way; only a real boot (`wrangler dev`, the e2e drills) shows it.
-- **A tool result reaches the model once.** `@langchain/mcp-adapters` answers
-  a tool that returns `structuredContent` with one block holding the text and
-  the structured value, which LangChain stringifies for the model. Every plugin
-  tool's result passes `withoutStructuredCopy` (`src/core/mcp-result.ts`,
-  applied in `wrapPluginTool`), which keeps the text when the structured value
-  is a copy of it, and both when it is not. Code that calls an MCP tool itself
-  (`readSandboxResult`) still gets the block.
+- **A tool result reaches the model once.** `@langchain/mcp-adapters` hands a
+  plugin a result's content only: one text block is a plain string, and
+  `structuredContent` and `_meta` stay in the tool's artifact, which a
+  plugin's call never receives. Every plugin connects through
+  `mcpAdapterConfig` (`src/plugins/mcp-tool-adapter.ts`), whose
+  `afterToolCall` hook `keepStructuredContent` (`src/core/mcp-result.ts`)
+  leaves a text that is a copy of the structured value alone, adds the
+  structured value as a second text block beside a text that says something
+  else, and gives a result without content its structured value as JSON.
+  The model never sees `_meta`. Every other block becomes text, because the
+  Chat Completions API takes only text in a tool message: a resource link
+  as its address, an image, audio clip or embedded file as a line naming
+  its kind and mime type, never its data.
+- **MCP servers are connected in legacy mode, Streamable HTTP only.**
+  `mcpAdapterConfig` sets `mode: 'legacy'`: the servers speak the 2025
+  protocol, the default `auto` mode would send a `server/discover` probe
+  before every connect (and plugins connect per turn or per call), and
+  legacy mode offers the server no elicitation, so no tool can pause a run
+  to ask the user. `automaticSSEFallback: false` makes a 4xx at connect (an
+  expired token, a 403, a 429) fail on the first request instead of being
+  retried over SSE. Tool names keep their upstream form, bare or
+  `<server>__<tool>`.
 - **Never store the global `fetch`.** workerd rejects `fetch` called with a
   foreign `this` ("Illegal invocation"). Wrap it:
   `(input, init) => globalThis.fetch(input, init)`. matrix-js-sdk clients
   and the BYO reachability probe both went through this.
-- **No code generation from strings.** The MCP SDK's default Ajv validator
-  compiles schemas to code, which workerd forbids; the repo patches
-  `@langchain/mcp-adapters` (`patches/`) to use the cfworker validator.
+- **No code generation from strings.** Ajv compiles schemas to code, which
+  workerd forbids. `@modelcontextprotocol/client` picks its JSON Schema
+  validator by export condition: the `workerd` condition (set by wrangler and
+  the Workers test pool) selects the cfworker validator, which validates tool
+  arguments and `outputSchema` results without generating code; Node gets
+  Ajv. `src/core/mcp-result.test.ts` checks which one answers inside workerd.
   jsdom needs `node:vm`, so the editor plugin aliases it to a linkedom shim.
 - **Typed errors do not cross the DO RPC boundary.** The caller gets a plain
   `Error` with only the message, so owner-copy failures travel as a JSON
@@ -1058,17 +1087,18 @@ depend on:
   the signal) and turns only Ed25519 keys into `did:key`s; other
   verification methods are skipped. The did:web resolver uses plain HTTP
   only for `localhost`, `127.0.0.1` and `[::1]`, also aborts after 3 s, and
-  both resolvers read the global `fetch` at lookup time. The channel route
-  keeps one did:web resolver per isolate for its service identity, cached
-  60 s like did:ixo keys (failures never cached). The runtime keeps one
-  did:ixo resolver per isolate and Blocksync URL (`sharedIxoDIDResolver`,
-  used by the shell and the channel validator) with the resolver's cache on
-  for 60 s (`IXO_DID_RESOLUTION_CACHE_TTL_MS`): concurrent lookups of one
-  DID share a request, and failures are never cached. A key rotated out of
-  a DID document on-chain is therefore still trusted by a new validation
-  for up to 60 s, and a verdict already cached stays valid until that
-  invocation expires (at most `UCAN_AUTH_MAX_TTL_SECONDS`) or, for a
-  delegation, for at most 3 minutes.
+  both resolvers read the global `fetch` at lookup time. The shell keeps
+  one did:ixo resolver per isolate and Blocksync URL (`sharedIxoDIDResolver`)
+  with the resolver's cache on for 60 s (`IXO_DID_RESOLUTION_CACHE_TTL_MS`):
+  concurrent lookups of one DID share a request, and failures are never
+  cached. A key rotated out of a DID document on-chain is therefore still
+  trusted by a new validation for up to 60 s, and a verdict already cached
+  stays valid until that invocation expires (at most
+  `UCAN_AUTH_MAX_TTL_SECONDS`) or, for a delegation, for at most 3 minutes.
+  The channel route keeps its own keys per isolate (`src/channels/key-lookup.ts`,
+  [channels](channels.md#key-lookups)): the same 60 s, plus the last good
+  keys standing in for a failed lookup for at most 10 minutes, the oracle's
+  own DID refreshed in the background, and one retry for a cold lookup.
 
 ## Tool definition size
 
@@ -1141,9 +1171,13 @@ request) and keeps the source and result inside the turn:
   The next session create indexes the user's latest conversation instead.
 - No tracing. The turn gets no LangSmith tracer and no tracing metadata,
   whatever `LANGSMITH_TRACING` or `LANGSMITH_TRACED_DIDS` say. LangChain's
-  own env-driven tracer is outside this switch: it attaches only when
-  `LANGSMITH_TRACING=true` is visible through `process.env`, so a deployment
-  that runs restricted tasks must not rely on that variable being hidden.
+  own env-driven tracer cannot attach either: workerd fills `process.env`
+  from the Worker's vars and secrets, and the runtime's entry
+  (`src/index.ts`, through `src/core/tracing-env.ts`) removes the four names
+  that switch it on (`LANGSMITH_TRACING`, `LANGCHAIN_TRACING`,
+  `LANGSMITH_TRACING_V2`, `LANGCHAIN_TRACING_V2`) from `process.env` when
+  the isolate loads. The runtime's own tracing reads the Worker `env`, which
+  keeps them.
 - Task tools. `list_my_tasks` and `get_task` label the task `restricted`;
   `get_task` returns metadata only (no intent, no result text) and
   `suggest_spec_fix` refuses. The task cannot be updated, paused or resumed —

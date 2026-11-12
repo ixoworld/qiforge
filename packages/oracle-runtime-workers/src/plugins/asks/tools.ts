@@ -6,14 +6,14 @@
  * their connection object refreshes.
  */
 import { toJsonSchema } from '@langchain/core/utils/json_schema';
-import { MultiServerMCPClient } from '@langchain/mcp-adapters';
+import { MCPAdapter, UnauthorizedError } from '@langchain/mcp-adapters';
 import type { PluginTool, RuntimeContext } from '../../plugin-api';
 import { z } from 'zod';
 import { checkDraftUploads, sendFile, type KeptFile } from './attach';
 import type { ConnectionApi, Surface } from './connection';
 import { shortAccount } from './oauth';
 import { withCallTimeout } from '../mcp-call-timeout';
-import { adaptMcpClientTools } from '../mcp-tool-adapter';
+import { adaptMcpClientTools, mcpAdapterConfig } from '../mcp-tool-adapter';
 import type { Skill } from './skills';
 
 export const SERVER = 'asks';
@@ -107,20 +107,15 @@ export function bindableTools<T extends { name: string; schema: z.ZodType }>(
 }
 
 export const connectAsksMcp: McpConnect = async (url, token) => {
-  const client = new MultiServerMCPClient({
-    useStandardContentBlocks: true,
-    prefixToolNameWithServerName: true,
-    mcpServers: {
-      [SERVER]: {
-        type: 'http',
-        transport: 'http',
-        url,
-        headers: { authorization: `Bearer ${token}` },
-      },
-    },
-  });
+  const client = new MCPAdapter(
+    mcpAdapterConfig(SERVER, {
+      url,
+      headers: { authorization: `Bearer ${token}` },
+      toolNames: 'prefixed',
+    }),
+  );
   try {
-    const raw = await client.getTools();
+    const raw = await client.listTools();
     const readOnly = new Set(
       raw
         .filter(
@@ -288,22 +283,29 @@ export function mapText(value: unknown, fn: (text: string) => string): unknown {
   return value;
 }
 
+/** `.cause` hops {@link mayBeUnauthorized} follows, as the adapters do. */
+const MAX_CAUSE_DEPTH = 3;
+
 /**
  * Whether an error may be asks refusing the token (HTTP 401) rather than a
- * tool's own refusal (`returned an error`). The MCP adapters flatten the
- * status into text ("(HTTP 401)", "Authentication failed"), so this only
- * decides whether to ask the connection object: it checks the token with
- * asks before anything is forgotten (`ConnectionApi.refused`).
+ * tool's own refusal (an `isError` result, which carries no status). The
+ * adapters wrap the transport's error: at connect an `MCPClientError`, on a
+ * call a `ToolException`, each with the SDK's `SdkHttpError` (`status` 401)
+ * as its `cause`, or the SSE transport's error (`code` 401). An auth
+ * provider's refusal is the SDK's `UnauthorizedError`. This only decides
+ * whether to ask the connection object: it checks the token with asks before
+ * anything is forgotten (`ConnectionApi.refused`).
  */
 function mayBeUnauthorized(error: unknown): boolean {
-  if (error instanceof Error && error.name === 'UnauthorizedError') return true;
-  // The MCP SDK's StreamableHTTPError carries the HTTP status as `code`.
-  if ((error as { code?: unknown } | null)?.code === 401) return true;
-  const message = error instanceof Error ? error.message : String(error);
-  return (
-    !message.includes('returned an error') &&
-    /\(HTTP 401\)|Authentication failed for/.test(message)
-  );
+  let current = error;
+  for (let depth = 0; depth <= MAX_CAUSE_DEPTH; depth += 1) {
+    if (UnauthorizedError.isInstance(current)) return true;
+    if (!(current instanceof Error)) return false;
+    if ('status' in current && current.status === 401) return true;
+    if ('code' in current && current.code === 401) return true;
+    current = current.cause;
+  }
+  return false;
 }
 
 /* ── the turn ──────────────────────────────────────────────────────────── */

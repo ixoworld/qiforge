@@ -31,6 +31,13 @@ import {
   planTextForModel,
   REPLY_FILE_URL_MAX,
 } from './schema';
+import {
+  MAX_STANDALONE_MESSAGE_CHARS,
+  MAX_STANDALONE_MESSAGES,
+  STANDALONE_MESSAGES_KEY,
+  standaloneMessagesOf,
+  withStandaloneMessages,
+} from './standalone';
 import type { ArtifactRef, ChatLimits, ReplyFile, ReplyPlan } from './types';
 
 function limits(overrides: Partial<ChatLimits> = {}): ChatLimits {
@@ -811,6 +818,271 @@ describe('a send_file call in the plan', () => {
     });
     expect(JSON.stringify(param)).not.toContain('X-Amz-Signature');
     expect(JSON.stringify(param)).not.toContain('r2.example');
+  });
+});
+
+describe('standalone messages in the plan', () => {
+  const USSD = '*130*410*01*1234567890123456#';
+  const PIN = '1234567890123456';
+  const code = (text: string) => '```\n' + text + '\n```';
+  const INTRO =
+    'Your R20 airtime is ready to load 🎉 Dial the code in my next message on the phone that should get the airtime, then press call. Or go to https://airtime.test and enter the PIN below with that phone number.';
+  const claimCall = (id: string) => ({
+    id,
+    name: 'rewards_claim',
+    args: { campaignId: 'c1' },
+  });
+  const claimResult = (id: string, messages = [code(USSD), code(PIN)]) =>
+    withStandaloneMessages(
+      { toolCallId: id },
+      {
+        name: 'rewards_claim',
+        content: {
+          status: 'ready',
+          hint: 'The dial code and the PIN go out after your reply, each on its own. Do not repeat them.',
+        },
+        messages,
+      },
+    );
+  const turn = (text = INTRO): BaseMessage[] => [
+    new HumanMessage('Claim my reward'),
+    new AIMessage({ content: '', tool_calls: [claimCall('r1')] }),
+    claimResult('r1'),
+    new AIMessage(text),
+  ];
+  const texts = (plan: ReplyPlan) =>
+    plan.parts.map((part) => (part.kind === 'text' ? part.text : part.kind));
+
+  it('come after the reply, each alone, although both are under minBubble', async () => {
+    for (const message of [code(USSD), code(PIN)])
+      expect(message.length).toBeLessThan(limits().minBubble);
+    const plan = await planOf(turn());
+    expect(plan.parts).toEqual([
+      { partId: 'p1', kind: 'text', text: INTRO },
+      { partId: 'p2', kind: 'text', text: code(USSD) },
+      { partId: 'p3', kind: 'text', text: code(PIN) },
+    ]);
+    expect(parseReplyPlan(JSON.stringify(plan))).toEqual(plan);
+  });
+
+  it('the same text in the reply would have merged: the code and the PIN become one message', async () => {
+    // Why the API exists: the shaper joins fragments under minBubble.
+    const plan = await planOf([
+      new HumanMessage('Claim my reward'),
+      new AIMessage([INTRO, code(USSD), code(PIN)].join('\n\n')),
+    ]);
+    expect(texts(plan)).toEqual([INTRO, `${code(USSD)}\n\n${code(PIN)}`]);
+  });
+
+  it('never take a short line of the reply into their message, nor merge into it', async () => {
+    const plan = await planOf(turn('Here it is.'));
+    expect(texts(plan)).toEqual(['Here it is.', code(USSD), code(PIN)]);
+    // With no reply text at all they are the whole reply.
+    expect(texts(await planOf(turn('')))).toEqual([code(USSD), code(PIN)]);
+  });
+
+  it('are never merged to meet the run cap, which merges the other text instead', async () => {
+    const tight = limits({ maxPartsPerRun: 3, maxBubbles: 1 });
+    const { steps, toolResults, toolArtifacts } = turnSteps([
+      new HumanMessage('Claim my reward'),
+      new AIMessage({
+        content: `${'A long explanation that is not narration at all. '.repeat(3)}`,
+        tool_calls: [claimCall('r1')],
+      }),
+      claimResult('r1'),
+      new AIMessage(`${INTRO}\n\nAnything else?`),
+    ]);
+    const plan = await materializeReplyPlan(
+      draftReplyPlan({
+        steps,
+        toolResults,
+        toolArtifacts,
+        limits: tight,
+        canSpill: true,
+      }),
+      { limits: tight, createSpill: () => Promise.reject(new Error('no')) },
+    );
+    expect(texts(plan).slice(-2)).toEqual([code(USSD), code(PIN)]);
+    expect(plan.parts).toHaveLength(3);
+    // Over the cap they stay over it rather than merge.
+    const one = limits({ maxPartsPerRun: 1 });
+    const over = await materializeReplyPlan(
+      [
+        { kind: 'text', text: 'Ready.' },
+        { kind: 'standalone', text: code(USSD) },
+        { kind: 'standalone', text: code(PIN) },
+      ],
+      { limits: one, createSpill: () => Promise.reject(new Error('no')) },
+    );
+    expect(texts(over)).toEqual(['Ready.', code(USSD), code(PIN)]);
+  });
+
+  it('keep the call order across calls, deliver a repeated text once, and cap the count', async () => {
+    const many = ['one', 'two', 'three', 'four'];
+    expect(many).toHaveLength(MAX_STANDALONE_MESSAGES);
+    const plan = await planOf([
+      new HumanMessage('Both rewards'),
+      new AIMessage({
+        content: '',
+        tool_calls: [claimCall('r1'), claimCall('r2')],
+      }),
+      claimResult('r1', ['one', 'two']),
+      claimResult('r2', ['two', 'three', 'four', 'five']),
+      new AIMessage({ content: '', tool_calls: [claimCall('r3')] }),
+      claimResult('r3', ['six']),
+      new AIMessage('Both are ready.'),
+    ]);
+    // one, two, three, then the rest joined: nothing is lost.
+    expect(texts(plan)).toEqual([
+      'Both are ready.',
+      'one',
+      'two',
+      'three',
+      'four\n\nfive\n\nsix',
+    ]);
+  });
+
+  it('a message longer than bubbleMax is split, each piece still alone', async () => {
+    const small = limits({ bubbleMax: 40, bubbleTarget: 40, minBubble: 10 });
+    const long = 'First sentence of it. Second sentence of it.';
+    const plan = await materializeReplyPlan(
+      draftReplyPlan({
+        steps: [
+          { text: 'Ok.', toolCalls: [{ id: 'r1', name: 'x', args: {} }] },
+        ],
+        toolResults: new Map(),
+        toolArtifacts: new Map([['r1', { [STANDALONE_MESSAGES_KEY]: [long] }]]),
+        limits: small,
+        canSpill: false,
+      }),
+      { limits: small, createSpill: () => Promise.reject(new Error('no')) },
+    );
+    expect(texts(plan)).toEqual([
+      'Ok.',
+      'First sentence of it.',
+      'Second sentence of it.',
+    ]);
+  });
+
+  it('come only from a valid list: a send_file file, an MCP artifact or a malformed list add nothing', async () => {
+    for (const artifact of [
+      { ...FILE, path: '/output/report.docx' },
+      [{ type: 'resource', resource: { uri: 'x' } }],
+      { [STANDALONE_MESSAGES_KEY]: [] },
+      { [STANDALONE_MESSAGES_KEY]: ['ok', '  ​ '] },
+      {
+        [STANDALONE_MESSAGES_KEY]: [
+          'x'.repeat(MAX_STANDALONE_MESSAGE_CHARS + 1),
+        ],
+      },
+      { [STANDALONE_MESSAGES_KEY]: ['a', 'b', 'c', 'd', 'e'] },
+      { [STANDALONE_MESSAGES_KEY]: 'not a list' },
+      null,
+      'text',
+    ])
+      expect(standaloneMessagesOf(artifact)).toEqual([]);
+    expect(
+      standaloneMessagesOf({ [STANDALONE_MESSAGES_KEY]: ['a'], other: 1 }),
+    ).toEqual(['a']);
+  });
+
+  it('withStandaloneMessages refuses what the plan would not deliver', () => {
+    const ctx = { toolCallId: 'r1' };
+    const bad: string[][] = [
+      [],
+      [' '],
+      ['x'.repeat(MAX_STANDALONE_MESSAGE_CHARS + 1)],
+      Array.from({ length: MAX_STANDALONE_MESSAGES + 1 }, (_, i) => `${i}`),
+    ];
+    for (const messages of bad)
+      expect(() =>
+        withStandaloneMessages(ctx, { name: 't', content: 'ok', messages }),
+      ).toThrow(TypeError);
+    const message = withStandaloneMessages(ctx, {
+      name: 't',
+      content: { ok: true },
+      messages: ['a'],
+    });
+    expect(message.tool_call_id).toBe('r1');
+    expect(message.content).toBe('{"ok":true}');
+    expect(message.artifact).toEqual({ [STANDALONE_MESSAGES_KEY]: ['a'] });
+  });
+
+  it('never reach the model: it reads only the content', () => {
+    const [param] = convertMessagesToCompletionsMessageParams({
+      messages: [claimResult('r1')],
+    });
+    expect(JSON.stringify(param)).not.toContain(PIN);
+    expect(JSON.stringify(param)).toContain('Do not repeat them');
+  });
+
+  it('survive a reset: the checkpoint keeps them and the resumed run delivers them', async () => {
+    const roundTrip = (message: BaseMessage): Promise<BaseMessage> =>
+      new MemorySaver().serde.loadsTyped(
+        'json',
+        stringify(message, (_key, value) => _default(value)),
+      ) as Promise<BaseMessage>;
+    const kept = await Promise.all(turn().slice(0, 3).map(roundTrip));
+    const plan = await planOf([...kept, new AIMessage(INTRO)]);
+    expect(texts(plan)).toEqual([INTRO, code(USSD), code(PIN)]);
+  });
+
+  it('survive a mid-turn summary that condensed the call away', async () => {
+    const opening = new HumanMessage({ id: 'h1', content: 'Claim it' });
+    const ai = new AIMessage({
+      id: 'a1',
+      content: '',
+      tool_calls: [claimCall('r1')],
+    });
+    const result = claimResult('r1');
+    result.id = 't1';
+    const calls = carriedCallsOfTurn([opening, ai, result], new Set());
+    const summary = new HumanMessage({
+      id: 's1',
+      content: `${SUMMARY_PREFIX} the turn so far`,
+      additional_kwargs: {
+        lc_source: 'summarization',
+        ...turnCarryKwargs(calls ?? []),
+      },
+    });
+    const plan = await planOf([
+      new HumanMessage('an earlier question'),
+      new AIMessage('an earlier answer'),
+      summary,
+      new AIMessage(INTRO),
+    ]);
+    expect(texts(plan)).toEqual([INTRO, code(USSD), code(PIN)]);
+  });
+
+  it('are the same on every chat surface, a Matrix group room included', async () => {
+    for (const roomKind of ['direct', 'group'] as const) {
+      const profile = resolveDeliveryProfile(
+        { client: 'matrix', roomKind },
+        { matrixChat: true },
+      );
+      if (profile.kind !== 'chat') throw new Error('expected a chat profile');
+      const { steps, toolResults, toolArtifacts } = turnSteps(turn());
+      const plan = await materializeReplyPlan(
+        draftReplyPlan({
+          steps,
+          toolResults,
+          toolArtifacts,
+          limits: profile.limits,
+          canSpill: true,
+        }),
+        {
+          limits: profile.limits,
+          createSpill: () => Promise.reject(new Error('no')),
+        },
+      );
+      expect(texts(plan)).toEqual([INTRO, code(USSD), code(PIN)]);
+    }
+  });
+
+  it('a gateway that reads one message gets them after the reply, in order', async () => {
+    expect(planText(await planOf(turn()))).toBe(
+      [INTRO, code(USSD), code(PIN)].join('\n\n'),
+    );
   });
 });
 

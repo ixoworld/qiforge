@@ -15,6 +15,12 @@ import {
   ChannelInvoke,
   parseChannelServiceDids,
 } from './auth';
+import {
+  CHANNEL_KEY_FRESH_MS,
+  CHANNEL_KEY_STALE_MAX_MS,
+  clearChannelKeyCache,
+  shortDid,
+} from './key-lookup';
 import { RunAttemptDeferred } from '../do/run-coordinator';
 import {
   ChannelError,
@@ -622,6 +628,7 @@ describe('channel service identity resolution', () => {
   });
 
   it('fetches a did:web channel service document once across requests and caches no failure', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const service = await generateKeypair();
     // A DID no other test resolves: the resolver is shared per isolate.
     const channelDid = 'did:web:channels-cache.example.test';
@@ -655,9 +662,319 @@ describe('channel service identity resolution', () => {
         ok: [service.did],
       });
     }
+    // The first, cold lookup is asked twice (a 503 can be transient), the
+    // failure is not kept, and the next success is reused.
     expect(requests).toEqual([
       'https://channels-cache.example.test/.well-known/did.json',
       'https://channels-cache.example.test/.well-known/did.json',
+      'https://channels-cache.example.test/.well-known/did.json',
     ]);
+  });
+});
+
+describe('channel key lookups', () => {
+  type Step = 'ok' | 'hang' | 'down' | 'missing';
+  let fixtureCount = 0;
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    clearChannelKeyCache();
+  });
+
+  /**
+   * A deployment whose three DIDs resolve over a stubbed network: the
+   * oracle's and the person's did:ixo through Blocksync, the gateway's
+   * did:web from its host. `plan` queues what the next lookups of a DID
+   * meet (default `ok`); `published` is the key each DID document lists.
+   */
+  async function networkFixture() {
+    const tag = `${Date.now().toString(36)}${fixtureCount++}`;
+    const user = await generateKeypair();
+    const service = await generateKeypair();
+    const oracle = await generateKeypair();
+    const userDid: `did:ixo:${string}` = `did:ixo:ixo1user${tag}`;
+    const oracleDid: `did:ixo:${string}` = `did:ixo:ixo1oracle${tag}`;
+    const channelDid: `did:web:${string}` = `did:web:channels-${tag}.example.test`;
+    const env = {
+      ORACLE_DID: oracleDid,
+      BLOCKSYNC_GRAPHQL_URL: `https://blocksync-${tag}.invalid/graphql`,
+      CHANNEL_SERVICE_DID: channelDid,
+    };
+    const published = new Map<string, string>([
+      [userDid, user.did],
+      [oracleDid, oracle.did],
+      [channelDid, service.did],
+    ]);
+    const plan = new Map<string, Step[]>();
+    const lookups: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input instanceof Request ? input.url : input);
+        const did =
+          url === env.BLOCKSYNC_GRAPHQL_URL
+            ? (JSON.parse(String(init?.body)) as { variables: { id: string } })
+                .variables.id
+            : channelDid;
+        lookups.push(did);
+        const step = plan.get(did)?.shift() ?? 'ok';
+        if (step === 'hang')
+          return new Promise<Response>((_resolve, reject) =>
+            init?.signal?.addEventListener('abort', () =>
+              reject(init.signal?.reason),
+            ),
+          );
+        if (step === 'down')
+          return new Response('unavailable', { status: 503 });
+        const method = {
+          id: `${did}#key-1`,
+          type: 'Ed25519VerificationKey2020',
+          controller: did,
+          publicKeyMultibase: published.get(did)!.slice('did:key:'.length),
+        };
+        if (did === channelDid)
+          return Response.json({ verificationMethod: [method] });
+        return Response.json({
+          data: {
+            iids: {
+              nodes:
+                step === 'missing'
+                  ? []
+                  : [{ id: did, verificationMethod: [method] }],
+            },
+          },
+        });
+      },
+    );
+    const warnings: string[] = [];
+    vi.spyOn(console, 'warn').mockImplementation((line: unknown) => {
+      warnings.push(String(line));
+    });
+    const capability: Capability = {
+      can: 'ixo:channel/invoke',
+      with: `ixo:channel:${input.bindingId}`,
+      nb: {
+        provider: input.provider,
+        bindingRevision: input.bindingRevision,
+        oracleDid,
+      },
+    };
+    const raw = JSON.stringify(input);
+    const turn = async (userKey = user) => {
+      const grant = await createDelegation({
+        issuer: userKey.signer.withDID(userDid),
+        audience: channelDid,
+        capabilities: [capability],
+        expiration: Math.floor(Date.now() / 1000) + 300,
+      });
+      const token = await serializeInvocation(
+        await createInvocation({
+          issuer: service.signer.withDID(channelDid),
+          audience: oracleDid,
+          capability,
+          proofs: [grant],
+          expiration: Math.floor(Date.now() / 1000) + 60,
+          facts: [
+            {
+              requestId: input.requestId,
+              requestHash: await channelRequestHash(raw),
+            },
+          ],
+        }),
+      );
+      return authenticateChannel(
+        new Headers({
+          authorization: `Bearer ${token}`,
+          'x-auth-type': 'ucan',
+        }),
+        raw,
+        input,
+        channelAuthConfig(env),
+      );
+    };
+    const lookupLines = () =>
+      warnings
+        .filter((line) => line.startsWith('[channels] key lookup failed '))
+        .map(
+          (line) =>
+            JSON.parse(
+              line.slice('[channels] key lookup failed '.length),
+            ) as Record<string, unknown>,
+        );
+    const refusalLines = () =>
+      warnings.filter((line) =>
+        line.startsWith('[channels] invocation refused '),
+      );
+    return {
+      userDid,
+      oracleDid,
+      channelDid,
+      published,
+      plan,
+      lookups,
+      turn,
+      lookupLines,
+      refusalLines,
+    };
+  }
+
+  /** Moves the clock (Date only; timeouts stay real). */
+  function advance(ms: number) {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.now() + ms);
+  }
+
+  it('retries a cold oracle lookup that timed out once and accepts the turn', async () => {
+    const f = await networkFixture();
+    f.plan.set(f.oracleDid, ['hang']);
+    await expect(f.turn()).resolves.toMatchObject({ userDid: f.userDid });
+    expect(f.lookups.filter((did) => did === f.oracleDid)).toHaveLength(2);
+    expect(f.lookupLines()).toEqual([
+      expect.objectContaining({
+        role: 'oracle',
+        did: shortDid(f.oracleDid),
+        source: 'blocksync',
+        failure: 'timeout',
+        attempts: 2,
+        recoveredOnRetry: true,
+        staleKeysUsed: false,
+        turnRefused: false,
+      }),
+    ]);
+    expect(f.refusalLines()).toEqual([]);
+  }, 20_000);
+
+  it('uses the last good keys within the bound when a refresh fails, and refreshes the oracle in the background', async () => {
+    const f = await networkFixture();
+    await f.turn();
+    advance(2 * 60_000);
+    f.plan.set(f.userDid, ['down']);
+    f.plan.set(f.oracleDid, ['hang']);
+    await expect(f.turn()).resolves.toMatchObject({ userDid: f.userDid });
+    // Kept keys stand in: no retry. The oracle's refresh still hangs in
+    // the background (nothing logged for it yet): the turn did not wait.
+    expect(f.lookups.filter((did) => did === f.userDid)).toHaveLength(2);
+    expect(f.lookupLines()).toEqual([
+      expect.objectContaining({
+        role: 'person',
+        did: shortDid(f.userDid),
+        failure: 'http_503',
+        attempts: 1,
+        staleKeysUsed: true,
+        turnRefused: false,
+      }),
+    ]);
+    const staleAgeMs = Number(f.lookupLines()[0]?.['staleAgeMs']);
+    expect(staleAgeMs).toBeGreaterThanOrEqual(2 * 60_000);
+    expect(staleAgeMs).toBeLessThan(CHANNEL_KEY_STALE_MAX_MS);
+    await vi.waitFor(
+      () =>
+        expect(f.lookupLines()).toContainEqual(
+          expect.objectContaining({
+            role: 'oracle',
+            failure: 'timeout',
+            staleKeysUsed: true,
+            turnRefused: false,
+          }),
+        ),
+      { timeout: 6_000, interval: 100 },
+    );
+  }, 20_000);
+
+  it('refuses with 401 once the last good keys are past the bound', async () => {
+    const f = await networkFixture();
+    await f.turn();
+    advance(CHANNEL_KEY_STALE_MAX_MS + 1_000);
+    f.plan.set(f.userDid, ['down', 'down']);
+    await expect(f.turn()).rejects.toMatchObject({
+      status: 401,
+      code: 'unauthorized',
+    });
+    expect(f.lookupLines()).toEqual([
+      expect.objectContaining({
+        role: 'person',
+        failure: 'http_503',
+        attempts: 2,
+        staleKeysUsed: false,
+        turnRefused: true,
+      }),
+    ]);
+    // A lookup refusal is not reported as a bad signature.
+    expect(f.refusalLines()).toEqual([]);
+  });
+
+  it('refuses a DID that never resolved in this isolate', async () => {
+    const f = await networkFixture();
+    f.plan.set(f.userDid, ['down', 'down']);
+    await expect(f.turn()).rejects.toMatchObject({ status: 401 });
+    expect(f.lookupLines()).toEqual([
+      expect.objectContaining({
+        role: 'person',
+        failure: 'http_503',
+        attempts: 2,
+        staleKeysUsed: false,
+        turnRefused: true,
+      }),
+    ]);
+    // A definitive answer is not asked again.
+    f.plan.set(f.userDid, ['missing']);
+    const before = f.lookups.length;
+    await expect(f.turn()).rejects.toMatchObject({ status: 401 });
+    expect(f.lookups.slice(before)).toEqual([f.userDid]);
+    expect(f.lookupLines().at(-1)).toMatchObject({
+      role: 'person',
+      failure: 'not_found',
+      attempts: 1,
+      turnRefused: true,
+    });
+  });
+
+  it('logs a forged signature as a verification failure, not a lookup failure', async () => {
+    const f = await networkFixture();
+    // The person's grant is signed with a key their DID document does not
+    // list; every lookup answers.
+    const forger = await generateKeypair();
+    await expect(f.turn(forger)).rejects.toMatchObject({
+      status: 401,
+      code: 'unauthorized',
+      message: 'Invalid user-rooted channel invocation',
+    });
+    expect(f.lookupLines()).toEqual([]);
+    expect(f.refusalLines()).toEqual([
+      `[channels] invocation refused ${JSON.stringify({
+        reason: 'verification_failed',
+        code: 'UNAUTHORIZED',
+      })}`,
+    ]);
+  });
+
+  it('shares one lookup per DID between concurrent turns on a cold isolate', async () => {
+    const f = await networkFixture();
+    const identities = await Promise.all(
+      Array.from({ length: 5 }, () => f.turn()),
+    );
+    expect(identities.map((identity) => identity.userDid)).toEqual(
+      Array(5).fill(f.userDid),
+    );
+    expect(f.lookups.filter((did) => did === f.oracleDid)).toHaveLength(1);
+    expect(f.lookups.filter((did) => did === f.channelDid)).toHaveLength(1);
+    expect(f.lookups.filter((did) => did === f.userDid)).toHaveLength(1);
+  });
+
+  it('picks up a rotated key at the next successful refresh', async () => {
+    const f = await networkFixture();
+    await f.turn();
+    const rotated = await generateKeypair();
+    f.published.set(f.userDid, rotated.did);
+    // Inside the fresh window the kept (old) key is still used, as before.
+    await expect(f.turn(rotated)).rejects.toMatchObject({ status: 401 });
+    advance(CHANNEL_KEY_FRESH_MS + 1_000);
+    await expect(f.turn(rotated)).resolves.toMatchObject({
+      userDid: f.userDid,
+    });
+    await expect(f.turn()).rejects.toMatchObject({ status: 401 });
+    expect(f.lookupLines()).toEqual([]);
   });
 });

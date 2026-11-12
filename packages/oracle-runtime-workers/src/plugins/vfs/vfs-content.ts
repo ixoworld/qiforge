@@ -159,6 +159,8 @@ async function renderBinaryOrStub(
         mime_type: mime,
         data: base64,
         filename: name,
+        // The converter takes a file's name from `metadata.filename` only.
+        metadata: { filename: name },
       };
   const content: MessageContent = [{ type: 'text', text: prompt }, mediaBlock];
 

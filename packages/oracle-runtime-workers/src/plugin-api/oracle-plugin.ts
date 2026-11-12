@@ -3,6 +3,7 @@ import type {
   RequestAdmissionContext,
   RequestAdmissionResult,
 } from './request-admission';
+import type { ChannelEventResult, OracleChannelEvent } from './channel-events';
 import type { z } from 'zod';
 import type { PluginRoute } from '../shell/app';
 import type {
@@ -154,6 +155,24 @@ export abstract class OraclePlugin {
   getRequestAdmission?(
     ctx: RequestAdmissionContext,
   ): RequestAdmissionResult | Promise<RequestAdmissionResult>;
+
+  /**
+   * An event turn from the channel gateway: the person answered a
+   * permission card in their wallet (`permission_answered`), or an identity
+   * check at Self went into review, passed or failed
+   * (`identity_check_updated`). The runtime asks each plugin in order, in
+   * the person's own object when the event's run starts (after any turn
+   * already running), with the turn's channel binding in
+   * `ctx.session.channel`; the first answer that is not `pass` decides, and
+   * an event no plugin claims is ignored. Claim only a card or link this
+   * plugin asked for (kept in `ctx.kv`), and read it at the Auth Hub or Self
+   * before acting: the event itself proves nothing. A plugin that throws
+   * counts as `ignore`. See `src/plugins/credentials/README.md#channel-events`.
+   */
+  handleChannelEvent?(
+    event: OracleChannelEvent,
+    ctx: RuntimeContext,
+  ): Promise<ChannelEventResult>;
 
   /**
    * Read-only accessors this plugin exposes to other plugins via `ctx.shared`.
