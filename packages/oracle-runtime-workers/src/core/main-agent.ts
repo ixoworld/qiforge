@@ -92,6 +92,7 @@ import { computeSubAgentToolName, scopeToolCallIds } from './subagent-as-tool';
 import { resolveTurnToolAccess, withoutWithheldExamples } from './tool-access';
 import { wrapPluginTool } from './wrap-plugin-tool';
 import { renderSurfaceSection } from '../delivery/prompt';
+import { RICH_MESSAGE_TOOLS } from '../delivery/rich-tools';
 import { createReturnDirectFirstMiddleware } from './middlewares/return-direct-first';
 import { CREATE_ARTIFACT_TOOL } from '../artifacts/tool';
 import { SEND_FILE_TOOL } from '../plugins/sandbox/send-file';
@@ -179,7 +180,12 @@ export async function createMainAgent(
   } = args;
   const surface: SessionSurface | undefined =
     delivery?.kind === 'chat'
-      ? { kind: 'chat', surface: delivery.surface, label: delivery.label }
+      ? {
+          kind: 'chat',
+          surface: delivery.surface,
+          label: delivery.label,
+          ...(delivery.render ? { render: delivery.render } : {}),
+        }
       : delivery
         ? { kind: 'stream' }
         : undefined;
@@ -1014,6 +1020,9 @@ export async function createMainAgent(
         ({ pluginName, tool }) =>
           tool.name === SEND_FILE_TOOL && !unmetRequirements.has(pluginName),
       ),
+      turnTools
+        .map(({ tool }) => tool.name)
+        .filter((name) => RICH_MESSAGE_TOOLS.has(name)),
     ),
     operatingGuides: capabilityPlan.inPrompt.map(({ guide }) => guide),
   });

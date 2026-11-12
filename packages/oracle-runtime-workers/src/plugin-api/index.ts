@@ -39,6 +39,26 @@ export {
   type StandaloneMessagesResult,
 } from '../delivery/standalone';
 export {
+  cardsPart,
+  choicesPart,
+  DEFAULT_MENU_LABEL,
+  LINK_LABELS,
+  linkButtonPart,
+  renderOf,
+  RICH_LIMITS,
+  RICH_PARTS_KEY,
+  richPartsOf,
+  withRichParts,
+  type ChoicesInput,
+  type LinkButtonInput,
+  type RichPartsResult,
+} from '../delivery/rich';
+export type {
+  CardItem,
+  RenderCapability,
+  RichContent,
+} from '../delivery/types';
+export {
   ADMIN_TOOL_ACTION,
   ADMIN_TOOL_RESOURCE,
   adminToolCapability,

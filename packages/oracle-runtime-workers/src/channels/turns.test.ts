@@ -1227,18 +1227,20 @@ describe('delivery notices', () => {
     expect(first.result.features).toEqual([
       'delivery_notice',
       'permission_event',
+      'rich_messages',
     ]);
     expect(first.result.status).toBe('running');
     const polled = await stub.poll(message);
     expect(polled?.ok && polled.result.features).toEqual([
       'delivery_notice',
       'permission_event',
+      'rich_messages',
     ]);
     await stub.fail(first.result.runId);
     const failed = await stub.poll(message);
     expect(failed?.ok && failed.result).toMatchObject({
       status: 'failed',
-      features: ['delivery_notice', 'permission_event'],
+      features: ['delivery_notice', 'permission_event', 'rich_messages'],
     });
     const second = await stub.submit({ ...message, requestId: 'wa:two' });
     if (!second.ok) throw new Error('Turn rejected');
@@ -1249,7 +1251,7 @@ describe('delivery notices', () => {
       ok: true,
       result: {
         status: 'finished',
-        features: ['delivery_notice', 'permission_event'],
+        features: ['delivery_notice', 'permission_event', 'rich_messages'],
       },
     });
   });
@@ -1265,7 +1267,7 @@ describe('delivery notices', () => {
     expect(noticed.result).toMatchObject({
       status: 'running',
       sessionId: first.result.sessionId,
-      features: ['delivery_notice', 'permission_event'],
+      features: ['delivery_notice', 'permission_event', 'rich_messages'],
     });
     expect(noticed.result.runId).not.toBe(first.result.runId);
     const request = JSON.parse(
@@ -1306,6 +1308,87 @@ describe('delivery notices', () => {
     });
   });
 
+  it('rich messages: render rides with the run, a tap on an offered choice is resolved, the reply and the mirror carry the text version', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('rich-messages');
+    const render = {
+      v: 1 as const,
+      kinds: ['reply_buttons', 'list', 'flow'],
+      linkLabels: ['allow', 'pay'],
+      linkOrigins: ['https://dev.self.ixo.earth', 'https://bad.example/x'],
+    };
+    const first = await stub.submit({ ...message, render });
+    if (!first.ok) throw new Error('Turn rejected');
+    const stored = JSON.parse(
+      (await stub.run(first.result.runId))!.request,
+    ) as {
+      channel: Record<string, unknown>;
+    };
+    expect(stored.channel.render).toEqual({
+      kinds: ['reply_buttons', 'list'],
+      linkLabels: ['allow'],
+      linkOrigins: ['https://dev.self.ixo.earth'],
+    });
+    const choices = {
+      body: 'Which size?',
+      style: 'buttons' as const,
+      options: [
+        { id: 'oc:3f9a01c2:small', title: 'Small' },
+        { id: 'oc:3f9a01c2:large', title: 'Large' },
+      ],
+    };
+    const plan: ReplyPlan = {
+      v: 1,
+      parts: [
+        { partId: 'p1', kind: 'text', text: 'Good choice.' },
+        {
+          partId: 'p2',
+          kind: 'choices',
+          text: 'Which size?\n\n1. Small\n2. Large',
+          choices,
+        },
+      ],
+    };
+    await stub.finish(first.result.runId, plan, '');
+    expect(await stub.recordChoices(first.result.sessionId, plan)).toBe(1);
+    const polled = await stub.poll({ ...message, render });
+    expect(polled?.ok && polled.result).toMatchObject({
+      plan,
+      text: 'Good choice.\n\nWhich size?\n\n1. Small\n2. Large',
+    });
+    await stub.deliverReply();
+    expect(await stub.mirroredReply()).toBe(
+      'Good choice.\n\nWhich size?\n\n1. Small\n2. Large',
+    );
+    const tap = async (requestId: string, id: string) => {
+      const out = await stub.submit({
+        ...message,
+        requestId,
+        message: 'Small',
+        sessionPolicy: 'continue',
+        render,
+        choice: { id },
+      });
+      if (!out.ok) throw new Error(`Tap refused: ${out.code}`);
+      expect(out.result.sessionId).toBe(first.result.sessionId);
+      return JSON.parse((await stub.run(out.result.runId))!.request) as {
+        message: string;
+        channel: Record<string, unknown>;
+      };
+    };
+    const tapped = await tap('wa:tap', 'oc:3f9a01c2:small');
+    expect(tapped.message).toBe('Small');
+    expect(tapped.channel.choice).toEqual({
+      id: 'oc:3f9a01c2:small',
+      key: 'small',
+      title: 'Small',
+      question: 'Which size?',
+    });
+    // Never offered here: the message reads as text.
+    expect(
+      (await tap('wa:tap2', 'oc:00000000:small')).channel,
+    ).not.toHaveProperty('choice');
+  });
+
   it('runs a permission event in the bound session with only ids, owes no user message, and mirrors no empty reply', async () => {
     const stub = env.CHANNEL_TURNS_TEST.getByName('permission-event-run');
     const first = await stub.submit(message);
@@ -1325,7 +1408,7 @@ describe('delivery notices', () => {
     expect(answered.result).toMatchObject({
       status: 'running',
       sessionId: first.result.sessionId,
-      features: ['delivery_notice', 'permission_event'],
+      features: ['delivery_notice', 'permission_event', 'rich_messages'],
     });
     const request = JSON.parse(
       (await stub.run(answered.result.runId))!.request,
@@ -1384,7 +1467,7 @@ describe('delivery notices', () => {
         runId: a.result.runId,
         status: 'finished',
         text: 'Fixed.',
-        features: ['delivery_notice', 'permission_event'],
+        features: ['delivery_notice', 'permission_event', 'rich_messages'],
       },
     });
     expect(await stub.count()).toBe(2);

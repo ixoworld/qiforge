@@ -21,6 +21,25 @@ function preferredMessages(maxBubbles: number): string {
 }
 
 /**
+ * The prompt line for the rich-message tools bound this turn. Generic: any
+ * oracle, any reply.
+ */
+function richSection(tools: readonly string[]): string {
+  const uses = [
+    tools.includes('offer_choices')
+      ? '`offer_choices` for a real choice between a few clear options (it ends your reply; at most one per reply; never for open questions)'
+      : null,
+    tools.includes('send_link_button')
+      ? '`send_link_button` for a link the person must open'
+      : null,
+    tools.includes('send_cards')
+      ? '`send_cards` for a few items to browse, each with a picture and a link'
+      : null,
+  ].filter((use): use is string => use !== null);
+  return `- This chat can show buttons. Use them only when they make the reply simpler to act on: ${uses.join('; ')}. Most replies are plain messages. Your reply must still make sense read as plain text, and do not repeat in your text what a tool sent.`;
+}
+
+/**
  * The prompt section a chat turn gets: write for the surface. Empty on the
  * Portal. `artifacts` says whether `create_artifact` is bound this turn,
  * `files` whether `send_file` is. Agrees with the shaper and the tools' own
@@ -31,6 +50,7 @@ export function renderSurfaceSection(
   profile: DeliveryProfile | undefined,
   artifacts: boolean,
   files: boolean,
+  richTools: readonly string[] = [],
 ): string {
   if (!profile || profile.kind !== 'chat') return '';
   const { label, limits, surface } = profile;
@@ -51,6 +71,7 @@ export function renderSurfaceSection(
     artifacts
       ? `- Use \`create_artifact\` ${files ? 'for a document with no particular file format' : 'only when the user asks for a document or file'}, or when the output is genuinely document-length: several screens of text, long code, a long report. Even then, its message carries the conclusions, decisions and next actions, and the document holds the detail. Call it last: the user gets the message, the document, then at most one follow-up question.`
       : '- Everything you write is delivered as messages; when something is genuinely long, put the essential part first.',
+    ...(richTools.length > 0 ? [richSection(richTools)] : []),
     '- The user sees a typing indicator while you work. Do not narrate your steps or announce tool calls.',
     '- End with at most one question.',
   ].join('\n');

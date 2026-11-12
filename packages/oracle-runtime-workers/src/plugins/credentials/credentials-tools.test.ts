@@ -12,8 +12,11 @@ import {
   newStatusBits,
   setStatusBit,
 } from '@ixo/credentials-kit/status';
+import { ToolMessage } from '@langchain/core/messages';
 import { describe, expect, it } from 'vitest';
 import { createMemoryUserKv } from '../../core/user-kv';
+import { richPartsOf } from '../../delivery/rich';
+import type { RenderCapability } from '../../delivery/types';
 import type {
   PluginTool,
   RuntimeContext,
@@ -270,6 +273,27 @@ function loggedCtx(
     },
   };
   return { ctx, warnings };
+}
+
+/** The link buttons a WhatsApp gateway can show, with the devnet Hub and Self sites approved. */
+const RENDER: RenderCapability = {
+  kinds: ['reply_buttons', 'list', 'link_button', 'card', 'carousel'],
+  linkLabels: ['allow', 'start_check'],
+  linkOrigins: [HUB, 'https://dev.self.ixo.earth'],
+};
+
+/** `ctx` on a turn whose gateway can show `render`. */
+function withRender(
+  ctx: RuntimeContext,
+  render: RenderCapability,
+): RuntimeContext {
+  return {
+    ...ctx,
+    session: {
+      ...ctx.session,
+      surface: { kind: 'chat', surface: 'whatsapp', label: 'WhatsApp', render },
+    },
+  };
 }
 
 /** The card requests (the Hub's list of live cards is read before each). */
@@ -1273,6 +1297,65 @@ describe('catalogued actions (self.identity-check)', () => {
         ctx,
       ),
     ).resolves.toEqual(refusal('unauthorized', MESSAGES.notConfirmed));
+  });
+
+  it('sends the identity link as a Start check button where the chat can show one, else as today', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl } = hubAndSelf({
+      [`POST ${SELF}/identity/v1/links`]: () =>
+        json(
+          {
+            linkId: 'lnk_1',
+            url: 'https://dev.self.ixo.earth/l/tok',
+            expiresAt: '2026-11-10T06:34:00.000Z',
+          },
+          201,
+        ),
+    });
+    const tools = toolsFor(fetchImpl, oracleKey.doc, {
+      now: () => Date.UTC(2026, 10, 10, 6, 19),
+    });
+    const base = channelCtx(adapter);
+    await run(
+      tools.credentials_request_action_permission,
+      { action: 'self.identity-check', days: 7 },
+      base,
+    );
+    const today =
+      'To do your identity check, open this link. You will scan your ID document and take a selfie. The link works once and ends in 15 minutes: https://dev.self.ixo.earth/l/tok';
+    const out = await run(
+      tools.credentials_request_action,
+      { action: 'self.identity-check' },
+      withRender(base, RENDER),
+    );
+    expect(out).toBeInstanceOf(ToolMessage);
+    if (!(out instanceof ToolMessage))
+      throw new Error('expected a ToolMessage');
+    expect(richPartsOf(out.artifact)).toEqual([
+      {
+        kind: 'link_button',
+        text: today,
+        link: {
+          body: 'To do your identity check, open this link. You will scan your ID document and take a selfie. The link works once and ends in 15 minutes.',
+          url: 'https://dev.self.ixo.earth/l/tok',
+          label: 'start_check',
+        },
+      },
+    ]);
+    const content = JSON.parse(String(out.content));
+    expect(content).toMatchObject({ status: 'sent', linkId: 'lnk_1' });
+    expect(content).not.toHaveProperty('message');
+    expect(content).not.toHaveProperty('url');
+    expect(content.hint).toMatch(/^The message with the link was sent for you/);
+    expect(content.hint).toContain('Keep the linkId to read progress.');
+    expect(content.hint).not.toContain('Send `message`');
+    // Self's site not approved: exactly today's answer.
+    const plain = await run(
+      tools.credentials_request_action,
+      { action: 'self.identity-check' },
+      withRender(base, { ...RENDER, linkOrigins: [HUB] }),
+    );
+    expect(plain).toMatchObject({ status: 'sent', message: today });
   });
 
   it('words the end relative to now when the zone is unknown (WhatsApp), and drops a passed end', async () => {
@@ -2595,6 +2678,55 @@ describe('the Hub is the source of truth, the kv a cache', () => {
     ).resolves.toEqual(
       refusal('permission_pending', MESSAGES.permissionPending),
     );
+  });
+
+  it('sends the card as an Allow button where the chat can show one; without render or an approved Hub site, as today', async () => {
+    const { adapter, oracleKey } = recordingUcan();
+    const { fetchImpl } = routedFetch({
+      ...NEW_CARD,
+      [`GET ${LIST_URL}`]: () => json({ permissions: [] }),
+    });
+    const tools = toolsFor(fetchImpl, oracleKey.doc);
+    const today = `This lets me send you a link for your identity check. Please tap this to allow: ${CARD.url}`;
+    const out = await run(
+      tools.credentials_request_action_permission,
+      ACTION,
+      withRender(channelCtx(adapter), RENDER),
+    );
+    if (!(out instanceof ToolMessage))
+      throw new Error('expected a ToolMessage');
+    expect(richPartsOf(out.artifact)).toEqual([
+      {
+        kind: 'link_button',
+        text: today,
+        link: {
+          body: 'This lets me send you a link for your identity check.',
+          url: CARD.url,
+          label: 'allow',
+        },
+      },
+    ]);
+    expect(JSON.parse(String(out.content))).toEqual({
+      status: 'sent',
+      permissionId: 'card_1',
+      expiresAt: CARD.expiresAt,
+      hint: 'The message with the link was sent for you, as its own message with a button, after your reply. Do not repeat it, the link or the button; say at most one short line, or nothing. Never paste ids or tokens.',
+    });
+    for (const ctx of [
+      channelCtx(adapter),
+      withRender(channelCtx(adapter), { ...RENDER, linkOrigins: [] }),
+      withRender(channelCtx(adapter), { ...RENDER, linkLabels: ['open'] }),
+    ])
+      expect(
+        await run(tools.credentials_request_action_permission, ACTION, ctx),
+      ).toEqual({
+        status: 'sent',
+        permissionId: 'card_1',
+        url: CARD.url,
+        expiresAt: CARD.expiresAt,
+        message: today,
+        hint: 'Send `message` as it is, as one link in a short message. Never paste ids or tokens.',
+      });
   });
 
   it('hands back the same waiting card instead of a new one', async () => {

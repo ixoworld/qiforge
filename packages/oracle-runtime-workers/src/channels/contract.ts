@@ -10,6 +10,7 @@ import {
   channelAttachmentRef,
 } from '../attachments/channel';
 import type { AttachmentInput } from '../attachments/types';
+import { RenderCapabilityWire } from '../delivery/rich';
 import type { ReplyPlan } from '../delivery/types';
 
 /**
@@ -304,6 +305,20 @@ const ChannelTurnFields = z.strictObject({
    */
   event: ChannelEvent.optional(),
   /**
+   * What the gateway can show beyond text for this binding (reply buttons,
+   * lists, link buttons, cards), and the link-button labels and link origins
+   * it accepts. Sent only to a runtime whose turn results list
+   * `rich_messages`, and only with a message (never with a notice or an
+   * event). Absent: the reply is text only.
+   */
+  render: RenderCapabilityWire.optional(),
+  /**
+   * The person tapped a reply button or list row the oracle offered:
+   * `message` is the option's title, `id` the tapped id. Checked against
+   * the choices offered in this session; an unknown id reads as text.
+   */
+  choice: z.strictObject({ id: z.string().min(1).max(256) }).optional(),
+  /**
    * Which kind of oracle the gateway believes it addresses. `companion` is
    * the legacy value; the gateway sends `oracle`. Both are accepted.
    */
@@ -318,6 +333,8 @@ export const ChannelTurnBody = ChannelTurnFields.superRefine((body, ctx) => {
       'replyTo',
       'notice',
       'sessionId',
+      'render',
+      'choice',
     ] as const)
       if (body[field] !== undefined)
         ctx.addIssue({
@@ -348,7 +365,7 @@ export const ChannelTurnBody = ChannelTurnFields.superRefine((body, ctx) => {
       });
     return;
   }
-  for (const field of ['attachments', 'replyTo'] as const)
+  for (const field of ['attachments', 'replyTo', 'render', 'choice'] as const)
     if (body[field] !== undefined)
       ctx.addIssue({
         code: 'custom',
@@ -376,11 +393,15 @@ export type ChannelTurnInput = z.infer<typeof ChannelTurnBody>;
  * carries the list. `delivery_notice`: a blocked file may be sent back as
  * a `notice` turn. `permission_event`: a permission card's answer, or an
  * identity check's change at Self, may be sent as an `event` turn (a
- * runtime without it refuses one with 400).
+ * runtime without it refuses one with 400). `rich_messages`: a message turn
+ * may carry `render` (what the gateway can show) and `choice` (a tapped
+ * option); its plan may then hold `choices`, `link_button` and `cards`
+ * parts (a runtime without it refuses either field with 400).
  */
 export const CHANNEL_TURN_FEATURES = [
   'delivery_notice',
   'permission_event',
+  'rich_messages',
 ] as const;
 export type ChannelTurnFeature = (typeof CHANNEL_TURN_FEATURES)[number];
 

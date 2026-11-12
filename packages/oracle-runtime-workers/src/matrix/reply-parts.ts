@@ -56,7 +56,13 @@ export function replyPartContent(part: ReplyPart): {
   body: string;
   formattedBody: string;
 } {
-  if (part.kind === 'text')
+  // A rich part (choices, link button, cards) is its text version in a room.
+  if (
+    part.kind === 'text' ||
+    part.kind === 'choices' ||
+    part.kind === 'link_button' ||
+    part.kind === 'cards'
+  )
     return {
       body: part.text,
       formattedBody: renderRoomMarkdown(part.text),

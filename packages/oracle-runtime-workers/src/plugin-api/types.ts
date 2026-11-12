@@ -20,6 +20,7 @@ import type { UserPreferences } from '../core/state';
 import type { AttachmentViewSurface } from '../attachments/view';
 import type { ChannelAttachment } from '../channels/contract';
 import type { DeliveryConfig } from '../delivery/profile';
+import type { RenderCapability } from '../delivery/types';
 import type {
   HubOperationStatus,
   HubReviewStatus,
@@ -685,7 +686,18 @@ export interface MatrixPostOpts {
 /** `ctx.session.surface`: the delivery surface of the turn. */
 export type SessionSurface =
   | { kind: 'stream' }
-  | { kind: 'chat'; surface: string; label: string };
+  | {
+      kind: 'chat';
+      surface: string;
+      label: string;
+      /**
+       * What the channel gateway can show beyond text on this turn (reply
+       * buttons, lists, link buttons, cards). Absent: text only. Build
+       * rich parts against it with `linkButtonPart` / `choicesPart` /
+       * `cardsPart` and return them with `withRichParts`.
+       */
+      render?: RenderCapability;
+    };
 
 /** What `ctx.hubActions.status` reads. */
 export interface HubActionStatusRead {
