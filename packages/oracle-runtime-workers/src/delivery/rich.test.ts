@@ -12,7 +12,7 @@ import { makeRuntimeContext } from '../core/test-fixtures';
 import type { PluginTool } from '../plugin-api/types';
 import { draftReplyPlan, materializeReplyPlan, turnSteps } from './plan';
 import { resolveDeliveryProfile } from './profile';
-import { renderSurfaceSection } from './prompt';
+import { renderRichSection, renderSurfaceSection } from './prompt';
 import {
   cardsPart,
   cardsText,
@@ -812,24 +812,26 @@ describe('delivery profile and prompt', () => {
     });
   });
 
-  it('names the bound rich tools only', () => {
+  it('names the bound rich tools only, in its own section that the surface section leaves out', () => {
     const profile = resolveDeliveryProfile({
       client: 'channel',
       channel: { ...channel, render: ALL },
     });
-    const withTools = renderSurfaceSection(profile, false, false, [
+    const withTools = renderRichSection([
       OFFER_CHOICES_TOOL,
       SEND_LINK_BUTTON_TOOL,
     ]);
+    expect(withTools).toMatch(/^## Buttons in this chat/);
     expect(withTools).toContain('`offer_choices`');
     expect(withTools).toContain('`send_link_button`');
     expect(withTools).not.toContain('`send_cards`');
     expect(withTools).toContain(
-      'take precedence over any instruction to show choices as a numbered or bulleted list',
+      'take precedence over any instruction above to show choices as a numbered or bulleted list',
     );
     expect(withTools).toContain(
-      'call `offer_choices` with the question and the options',
+      'do not write those options in your text, neither as a list nor in a sentence',
     );
+    expect(renderRichSection([])).toBe('');
     expect(renderSurfaceSection(profile, false, false)).not.toContain(
       'can show buttons',
     );

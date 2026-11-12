@@ -21,15 +21,22 @@ function preferredMessages(maxBubbles: number): string {
 }
 
 /**
- * The prompt line for the rich-message tools bound this turn. Generic: any
- * oracle, any reply.
+ * The section for the rich-message tools bound this turn, placed after the
+ * oracle's own instructions so it is read last and its precedence over an
+ * instruction to write choices as a list is plain. Generic: any oracle, any
+ * reply. Empty when no rich tool is bound.
  */
-function richSection(tools: readonly string[]): string {
+export function renderRichSection(tools: readonly string[]): string {
+  if (tools.length === 0) return '';
   const lines = [
-    '- This chat can show buttons. They decide how choices and links are shown, not what you say; they take precedence over any instruction to show choices as a numbered or bulleted list, which is what other chats still receive.',
+    '## Buttons in this chat',
+    '',
+    'This chat can show buttons. They decide how choices and links are shown, not what you say, and they take precedence over any instruction above to show choices as a numbered or bulleted list: chats without buttons still receive that list.',
+    '',
     ...(tools.includes('offer_choices')
       ? [
-          '- Whenever your reply ends by asking the person to pick one of a set of options (a menu of what you can help with or what to do next, a pick-one question, yes or no), do not write the options as a list: write your lead-in, then call `offer_choices` with the question and the options. It shows them as buttons or a menu here and as that same numbered list elsewhere. Not for open questions (a name, an amount, a description of their situation). At most one per reply; it ends your reply.',
+          '- Before you send a reply, check it: if it names options for the person to pick one from (what you can help with, what to do next, which item, which plan, yes or no), do not write those options in your text, neither as a list nor in a sentence. Call `offer_choices` with a short question and the options, each title a few words. A lead-in, if any, is one short line of text before the call. Example: asked "what can you help me with?", write at most one short line, then call `offer_choices` with the question "What would you like to do?" and one option per thing you can do ("Book a visit", "See prices", "Talk to someone").',
+          '- Not for open questions (a name, an amount, a description of their situation). At most one `offer_choices` per reply; it ends your reply.',
         ]
       : []),
     ...(tools.includes('send_link_button')
@@ -58,7 +65,6 @@ export function renderSurfaceSection(
   profile: DeliveryProfile | undefined,
   artifacts: boolean,
   files: boolean,
-  richTools: readonly string[] = [],
 ): string {
   if (!profile || profile.kind !== 'chat') return '';
   const { label, limits, surface } = profile;
@@ -79,7 +85,6 @@ export function renderSurfaceSection(
     artifacts
       ? `- Use \`create_artifact\` ${files ? 'for a document with no particular file format' : 'only when the user asks for a document or file'}, or when the output is genuinely document-length: several screens of text, long code, a long report. Even then, its message carries the conclusions, decisions and next actions, and the document holds the detail. Call it last: the user gets the message, the document, then at most one follow-up question.`
       : '- Everything you write is delivered as messages; when something is genuinely long, put the essential part first.',
-    ...(richTools.length > 0 ? [richSection(richTools)] : []),
     '- The user sees a typing indicator while you work. Do not narrate your steps or announce tool calls.',
     '- End with at most one question.',
   ].join('\n');

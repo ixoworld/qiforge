@@ -91,7 +91,7 @@ import { collectSubAgentsWithFallback } from './sub-agent-fallback';
 import { computeSubAgentToolName, scopeToolCallIds } from './subagent-as-tool';
 import { resolveTurnToolAccess, withoutWithheldExamples } from './tool-access';
 import { wrapPluginTool } from './wrap-plugin-tool';
-import { renderSurfaceSection } from '../delivery/prompt';
+import { renderRichSection, renderSurfaceSection } from '../delivery/prompt';
 import { RICH_MESSAGE_TOOLS } from '../delivery/rich-tools';
 import { createReturnDirectFirstMiddleware } from './middlewares/return-direct-first';
 import { CREATE_ARTIFACT_TOOL } from '../artifacts/tool';
@@ -1020,6 +1020,8 @@ export async function createMainAgent(
         ({ pluginName, tool }) =>
           tool.name === SEND_FILE_TOOL && !unmetRequirements.has(pluginName),
       ),
+    ),
+    richBlock: renderRichSection(
       turnTools
         .map(({ tool }) => tool.name)
         .filter((name) => RICH_MESSAGE_TOOLS.has(name)),
