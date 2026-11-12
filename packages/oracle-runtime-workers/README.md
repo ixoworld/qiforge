@@ -102,6 +102,61 @@ Every variable, binding and migration is explained in
 The status fields, the runbook and the behaviour of both objects over their
 lifetime are in [operations](docs/operations.md).
 
+## Rich WhatsApp messages (for oracle authors)
+
+On WhatsApp through IXO Channels, every oracle can send reply buttons, list
+menus, link buttons and image cards. Nothing is configured per oracle, and the
+same reply reads as normal text on Matrix, the Portal and any other client.
+
+**When they are available.** Every channel turn result lists `rich_messages`
+in `features`. A gateway that has seen it sends a `render` object with each
+message turn: the element kinds it can show, the link-button labels it knows,
+and the link origins its deployment approves (gateway configuration, not the
+oracle's). Only then does the model get the tools below, plus a "Buttons in
+this chat" prompt section placed after your own instructions. The first turn
+after a runtime or gateway deploy is therefore plain text; the next ones are
+rich.
+
+| Tool               | Sends                                                                   | Limits (WhatsApp)                                                                          |
+| ------------------ | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `offer_choices`    | A question with options: reply buttons, a list menu, or a numbered list | buttons: 2–3, title ≤ 20; list: ≤ 10 rows, title ≤ 24, description ≤ 72; body ≤ 1,024      |
+| `send_link_button` | A message with one button that opens a link, optional header picture    | label from the fixed set; link on an approved origin; body ≤ 1,024                         |
+| `send_cards`       | One image card, or a carousel of 2–10                                   | carousel card text (`*title*` + text) ≤ 160 with ≤ 2 line breaks; one link button per card |
+
+- **Format selection** (the runtime picks): 2–3 options with short titles and
+  no descriptions are buttons; up to 10 options, or any description, a list;
+  anything else a numbered list. Nothing is ever cut. A call that misses
+  buttons or a list only because a title or description is too long is sent
+  back to the model once, naming each long title, so it can shorten them; the
+  second call goes out as it is. A text that repeats the link is sent back
+  once the same way.
+- **Link buttons:** labels come only from a fixed set — `open` (Open),
+  `allow` (Allow), `start_check` (Start check), `sign_in` (Sign in), `view`
+  (View), `register` (View & register), `continue` (Continue). A link becomes
+  a button only when its origin is on the gateway's approved list; otherwise
+  it goes out as text with the link. Links are parsed once and only their
+  normalised `href` is sent. Images are public https links WhatsApp fetches.
+- **The reply ends** with a rich message: the model writes its lead-in first;
+  nothing follows the buttons, card or link.
+- **Taps** arrive as a normal turn: the option's title as the message, and a
+  `choice` id (`oc:<offer>:<key>`) the runtime checks against the choices this
+  session offered in the last 24 hours. The model reads a short note naming
+  the question and the option. Typing an answer instead works as usual.
+- **Other surfaces:** each rich part carries its text version — the numbered
+  choices, `Label: url`, or each card's title, text, `Image: url` and
+  `Label: url`. Matrix rooms, the Portal, the room mirror, quotes and the
+  thread history show that text.
+
+**From plugin code**, attach the same parts without the model: build them with
+`linkButtonPart`, `choicesPart` or `cardsPart` against `renderOf(ctx)`, and
+return them with `withRichParts(ctx, { name, content, parts })`. When a
+builder returns no part (no `render`, a link not on an approved site), keep
+your plain sentence with the link. A plugin's parts are delivered after the
+model's reply and end it. The credentials plugin uses this for its permission
+card (`allow`) and identity-check link (`start_check`). Details: [chat
+delivery](docs/chat-delivery.md#rich-messages-buttons-lists-link-buttons-cards)
+and the wire contract in [channels](docs/channels.md#rich-messages).
+
 ## Documentation
 
 | Page                                                     | What it covers                                                                                                             |
