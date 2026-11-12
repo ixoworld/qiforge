@@ -6,6 +6,8 @@ import type { RunRecord } from '../do/run-store';
 import type { TurnIdentity, TurnRequest } from '../do/contracts';
 import { parseReplyPlan, planText, planTextForModel } from '../delivery/schema';
 import type { ReplyPlan } from '../delivery/types';
+import { renderCapabilityOf } from '../delivery/rich';
+import { ChannelChoices } from './choices';
 import {
   CHANNEL_TURN_FEATURES,
   ChannelError,
@@ -339,10 +341,15 @@ export class ChannelTurns {
     }
   >();
 
+  /** Choices offered per session, for checking taps (`choice`). */
+  readonly choices: ChannelChoices;
+
   constructor(
     private readonly db: DoSqliteDatabase,
     private readonly host: ChannelTurnsHost,
-  ) {}
+  ) {
+    this.choices = new ChannelChoices(db, () => this.now());
+  }
 
   private get routing(): ChannelRoutingOptions | undefined {
     return this.host.routing;
@@ -1918,6 +1925,14 @@ export class ChannelTurns {
         runId,
       );
     const replyContext = await this.replyContext(input, session);
+    // A tap counts only on a choice this session offered; else it is text.
+    const choice = input.choice
+      ? await this.choices.resolve(session, input.choice.id)
+      : null;
+    if (input.render || input.choice)
+      console.log(
+        `[channels] run ${runId}: render ${input.render ? `[${input.render.kinds.join(',')}] ${input.render.linkLabels.length} labels ${input.render.linkOrigins.length} origins` : 'none'}${input.choice ? `; tap ${choice ? 'matched an offered choice' : 'not an offered choice, read as text'}` : ''}`,
+      );
     const started = await this.host.begin(runId, {
       identity,
       sessionId: session,
@@ -1940,6 +1955,8 @@ export class ChannelTurns {
           : {}),
         ...(input.notice ? { notice: input.notice } : {}),
         ...(input.event ? { channelEvent: input.event } : {}),
+        ...(input.render ? { render: renderCapabilityOf(input.render) } : {}),
+        ...(choice ? { choice } : {}),
       },
     });
     this.kick();

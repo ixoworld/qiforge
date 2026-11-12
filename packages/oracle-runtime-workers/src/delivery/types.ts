@@ -68,7 +68,82 @@ export type DeliveryProfile =
       /** How the prompt names the surface: "WhatsApp", "a Matrix chat room". */
       label: string;
       limits: ChatLimits;
+      /**
+       * What the channel gateway can show beyond text on this turn (reply
+       * buttons, lists, link buttons, cards), as its `render` object said.
+       * Absent: text only, and the rich-message tools are not offered.
+       */
+      render?: RenderCapability;
     };
+
+/** The element kinds a gateway may list in its `render` object. */
+export type RenderKind =
+  | 'reply_buttons'
+  | 'list'
+  | 'link_button'
+  | 'card'
+  | 'carousel';
+
+/**
+ * A turn's `render` object, normalised: only the kinds and link labels this
+ * runtime knows, and only well-formed https origins.
+ */
+export interface RenderCapability {
+  kinds: RenderKind[];
+  /** Link-button label keys the gateway can show (`LINK_LABELS`). */
+  linkLabels: string[];
+  /** Origins (`https://host[:port]`) a link button may point at. */
+  linkOrigins: string[];
+}
+
+/** One option of a choice. `id` is `oc:<offer>:<key>`. */
+export interface ChoiceOption {
+  id: string;
+  title: string;
+  description?: string;
+}
+
+/** A question with options, shown as reply buttons or a list menu. */
+export interface ChoicesContent {
+  body: string;
+  style: 'buttons' | 'list';
+  /** The list's menu button label (`list` only). */
+  button?: string;
+  options: ChoiceOption[];
+}
+
+/** A message with one link button. `label` is a key of `LINK_LABELS`. */
+export interface LinkButtonContent {
+  body: string;
+  url: string;
+  label: string;
+  imageUrl?: string;
+}
+
+/** One image card with one link button. */
+export interface CardItem {
+  title: string;
+  body: string;
+  imageUrl: string;
+  link: { url: string; label: string };
+}
+
+/** One image card (1 item) or a carousel (2 to 10). */
+export interface CardsContent {
+  body: string;
+  items: CardItem[];
+}
+
+/**
+ * A rich part as a plan carries it. `text` is its complete channel-neutral
+ * fallback: what any other surface, the room mirror, a quote and the
+ * thread's history show, and what a gateway sends when it cannot show the
+ * part.
+ */
+export type RichContent =
+  | { kind: 'choices'; text: string; choices: ChoicesContent }
+  | { kind: 'link_button'; text: string; link: LinkButtonContent }
+  | { kind: 'cards'; text: string; cards: CardsContent };
 
 /** A browser-openable document delivered as a link. */
 export interface ArtifactRef {
@@ -118,7 +193,8 @@ export type ReplyPart =
       kind: 'hub-action';
       actionReference: ActionReferenceV1;
       summary: string;
-    };
+    }
+  | (RichContent & { partId: string });
 
 /** A part before it is numbered: what a plan is assembled from. */
 export type ReplyContent =
@@ -126,7 +202,8 @@ export type ReplyContent =
   | { kind: 'artifact'; artifact: ArtifactRef }
   | { kind: 'file'; file: ReplyFile }
   | { kind: 'action'; action: ActionReference }
-  | { kind: 'hub-action'; actionReference: ActionReferenceV1; summary: string };
+  | { kind: 'hub-action'; actionReference: ActionReferenceV1; summary: string }
+  | RichContent;
 
 /** What a chat surface delivers for one finished run, in delivery order. */
 export interface ReplyPlan {

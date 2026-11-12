@@ -1,6 +1,7 @@
 import { ActionReferenceSchema } from '@ixo/ixo-transaction/action-proposals';
 import { parseReference, type ActionReferenceV1 } from '@ixo/action-protocol';
 import { z } from 'zod';
+import { RichContentSchema } from './rich';
 import type { ReplyContent, ReplyFile, ReplyPlan } from './types';
 
 const ArtifactRefSchema = z.object({
@@ -76,6 +77,9 @@ export const ReplyPlanSchema = z.object({
         kind: z.literal('file'),
         file: ReplyFileSchema,
       }),
+      ...RichContentSchema.options.map((option) =>
+        option.extend({ partId: z.string() }),
+      ),
     ]),
   ),
 });
@@ -104,15 +108,19 @@ function fileLine(file: ReplyFile): string {
 
 /**
  * The plan as one Markdown message: what gateways that predate plans receive.
- * A file is a link line, so a gateway that cannot read the `file` part
- * degrades instead of losing the file. Never stored as a run's text, which
+ * A file is a link line, and a rich part (choices, link button, cards) its
+ * text version, so a gateway that cannot read a part degrades instead of
+ * losing it. Never stored as a run's text, which
  * stays the model's own, and never shown to the model or mirrored to a room:
  * see `planTextForModel`.
  */
 export function planText(plan: { parts: readonly ReplyContent[] }): string {
   return plan.parts
     .map((part) =>
-      part.kind === 'text'
+      part.kind === 'text' ||
+      part.kind === 'choices' ||
+      part.kind === 'link_button' ||
+      part.kind === 'cards'
         ? part.text
         : part.kind === 'action'
           ? `[${linkLabel(part.action.title)}](${part.action.url})`

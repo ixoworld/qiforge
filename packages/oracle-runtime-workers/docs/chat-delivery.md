@@ -160,6 +160,72 @@ tool(
 - **Durability.** A reset resumes with the checkpoint's `ToolMessage`, artifact included; a mid-turn summary that condenses the call away carries it in `turn_carry`, as for `send_file`. A run that fails after the call delivers files only (`failedRunFiles`), not standalone messages: the tool should let the person ask again (Yo Rewards: `rewards_pin`).
 - **Secrets.** A standalone message is reply text: it is stored with the plan (`turn_run_plans`, `matrix_turns.reply_plan`), is in the `/channels/turn` response, and `planTextForModel` shows it to the model when a user quotes that reply, as when the model wrote it. The runtime never logs it (the delivery log line counts parts). Keep it out of `content`, so the model never holds it.
 
+## Rich messages (buttons, lists, link buttons, cards)
+
+On a channel turn whose gateway can show more than text (today WhatsApp through IXO Channels), every oracle gets up to three tools, with nothing to configure. The same reply reads as normal messages on Matrix, the Portal and any other client: every rich part carries its whole text version.
+
+**Handshake.** Every turn result lists `rich_messages` in `features`. Once a gateway has seen it, it adds a `render` object to each message turn: the element kinds it can show for this binding (`reply_buttons`, `list`, `link_button`, `card`, `carousel`), the link-button label keys it can show, and the link origins its deployment approves. Only a turn that carried `render` gets the tools (only those its kinds allow) and a prompt section about them (`## Buttons in this chat`, after the oracle's own instructions, so it takes precedence over an instruction to write choices as a numbered list); without it (an older gateway, Matrix, the Portal, a task) nothing changes. `render` is stored with the run, so a resumed run renders the same way. The contract is in [channels](channels.md#rich-messages).
+
+| Tool               | Offered when                                | What it sends                                                                                     |
+| ------------------ | ------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `offer_choices`    | `reply_buttons` or `list`                   | A question with 2+ options: reply buttons, a list menu, or a numbered list. Ends the reply; once. |
+| `send_link_button` | `link_button`, a label and an origin        | A message with one button that opens a link (optional header picture).                            |
+| `send_cards`       | `card` or `carousel`, a label and an origin | 1 image card, or a carousel of 2–10, each with a picture, a short text and one link button.       |
+
+**Format of `offer_choices`** (the runtime picks; nothing is ever cut, a set that does not fit moves on):
+
+1. 2–3 options, every title at most 20 characters, no description, buttons available → reply buttons;
+2. else at most 10 options, titles at most 24 and descriptions at most 72 characters, a list available → a list menu (menu label at most 20, default "Choose");
+3. else → a numbered list in a normal message.
+
+**Limits** (WhatsApp, Meta's guides, checked 2026-11-12): reply buttons at most 3, title 20; list at most 10 rows, row title 24, description 72, menu label 20; one link button, label from the fixed set; every body 1,024; carousel 2–10 cards, card text (`*title*\ntext`) at most 160 characters with at most 2 line breaks, one link button per card. The runtime checks them before emitting a part; the gateway checks again and sends the part's text instead on any breach or provider refusal. Neither side truncates.
+
+**Link buttons.** The label is a key from a fixed set: `open` (Open), `allow` (Allow), `start_check` (Start check), `sign_in` (Sign in), `view` (View), `register` (View & register), `continue` (Continue); the gateway shows its own text for it. A link becomes a button only when its origin is in the turn's `render.linkOrigins` (the gateway deployment's list) and its label in `render.linkLabels`; anything else goes out as text with the link. A link (button, card or image) is parsed once: the raw string may hold no backslash, whitespace, control or format character, it must be https without user or password, the origin check runs on the parsed URL (lower-case ASCII host, so a look-alike or trailing-dot host never matches) and only the parsed `href` is sent (`safeHttpsUrl`); a text version shows the parsed `href` without user or password, and no link at all for any other scheme (`displayLink`). Images are public https links WhatsApp fetches itself; nothing copies or checks them, so only links anyone can open show.
+
+**Text versions** (what other surfaces, the room mirror, quotes, the turn's `text` and a gateway that cannot show the part use):
+
+- choices: the question, a blank line, `1. Title — description` per option;
+- link button: the text, `Image: <url>` when there is a picture, `Label: <url>`;
+- cards: the intro, then per card `n. **Title**`, its text, `Image: <url>` (always) and `Label: <url>`.
+
+**Place in the plan.** A tool's part stands where its call stands in the turn, a message of its own (never merged with text, never split); the text the model wrote before the call in the same step is kept (it is not narration). A link or cards that could not be shown go out as one text message in the same place. The tool result tells the model which format went out and holds the text version, so the thread's history reads the same on every surface. The reply ends with a rich message: once a rich-message tool or a plugin's `withRichParts` sent something, no further model step runs (`RichMessageEndMiddleware`), so no filler follows the buttons. A call is sent back to the model once per turn (nothing goes out) when only a title or description length keeps options from buttons or a list, or when the text repeats the link; the second call goes out as it is.
+
+**Taps.** A tapped button or row arrives as a normal turn: `message` is the option's title, `choice: { id }` the tapped id (`oc:<offer>:<key>`; the gateway's own topic-picker ids never carry `oc:`). The id counts only when this session offered it in the last 24 hours (`channel_choice_offers`, written when the plan is built); the model then reads a short note naming the question and the option (`channel_choice_note`, stripped from the person's words like the other notes). Anything else, and typed text, is just text.
+
+**From plugin code.** A plugin with fixed sentences attaches the same parts without the model. Build the part against the turn's capability and return it with `withRichParts`; when the builder returns none, keep today's text:
+
+```ts
+import {
+  linkButtonPart,
+  renderOf,
+  tool,
+  withRichParts,
+} from '@ixo/oracle-runtime-workers';
+
+const message = `This lets me send you a link for your identity check. Please tap this to allow: ${url}`;
+const built = linkButtonPart(
+  {
+    body: 'This lets me send you a link for your identity check.',
+    url,
+    label: 'allow',
+    fallback: message,
+  },
+  renderOf(ctx),
+);
+// No button here (no `render`, a site not approved): today's sentence.
+if (!built.part) return { status: 'sent', message };
+return withRichParts(ctx, {
+  name: 'my_tool',
+  content: {
+    status: 'sent',
+    hint: 'The link was sent as a button after your reply; do not repeat it.',
+  },
+  parts: [built.part],
+});
+```
+
+`choicesPart` and `cardsPart` work the same way. A plugin's rich parts come after the model's reply and its standalone messages. The credentials plugin uses this for its permission card (`allow`) and the identity-check link (`start_check`).
+
 ## Files
 
 A file the oracle made in the sandbox reaches the user as an attachment through **`send_file`** (`src/plugins/sandbox/send-file.ts`). `create_artifact` remains for Markdown documents.

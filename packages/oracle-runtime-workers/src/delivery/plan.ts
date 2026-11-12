@@ -15,7 +15,11 @@ import { parseReference } from '@ixo/action-protocol';
  *  - a `send_file` call becomes a file part, where the call stands in the
  *    turn; a file sent twice is delivered once;
  *  - a plugin tool's standalone messages (`withStandaloneMessages`) come
- *    last, each a message of its own that nothing merges with.
+ *    last, each a message of its own that nothing merges with;
+ *  - a rich-message tool's part (`offer_choices`, `send_link_button`,
+ *    `send_cards`) stands where its call stands, a message of its own; a
+ *    plugin's rich parts (`withRichParts`) come after the standalone
+ *    messages.
  */
 import {
   AIMessage,
@@ -28,12 +32,15 @@ import { turnCarryOf, turnStart } from '../core/middlewares/turn-boundary';
 import { SEND_FILE_TOOL, sentFile } from '../plugins/sandbox/send-file';
 import { isBlank, shapeStep, splitText, type SpillShape } from './shaper';
 import { MAX_STANDALONE_MESSAGES, standaloneMessagesOf } from './standalone';
+import { richPartsOf } from './rich';
+import { RICH_MESSAGE_TOOLS, richToolTextOf } from './rich-tools';
 import type {
   ArtifactRef,
   ChatLimits,
   ReplyContent,
   ReplyPart,
   ReplyPlan,
+  RichContent,
 } from './types';
 
 export interface TurnStep {
@@ -45,7 +52,9 @@ export type DraftPart =
   | ReplyContent
   | { kind: 'spill'; key: string; spill: SpillShape }
   /** A plugin tool's standalone message: delivered alone, never merged. */
-  | { kind: 'standalone'; text: string };
+  | { kind: 'standalone'; text: string }
+  /** A rich-message tool that went out as plain text: alone, never merged. */
+  | { kind: 'rich-text'; text: string };
 
 const NARRATION_MAX_CHARS = 200;
 
@@ -72,7 +81,9 @@ export function turnSteps(messages: readonly BaseMessage[]): {
     if (call.artifact === undefined) continue;
     if (
       call.name !== SEND_FILE_TOOL &&
-      standaloneMessagesOf(call.artifact).length === 0
+      standaloneMessagesOf(call.artifact).length === 0 &&
+      richPartsOf(call.artifact).length === 0 &&
+      richToolTextOf(call.artifact) === null
     )
       continue;
     const id = call.id ?? `carried-${i}`;
@@ -154,6 +165,7 @@ export function draftReplyPlan(input: {
   const parts: DraftPart[] = [];
   const sentPaths = new Set<string>();
   const standalone: string[] = [];
+  const pluginRich: RichContent[] = [];
   const steps =
     input.steps.length > 0 || !input.continuation
       ? input.steps
@@ -172,21 +184,32 @@ export function draftReplyPlan(input: {
     ).trim();
   });
   // Whether the reply goes on after a step's text: a later step with text,
-  // or a `create_artifact` call (its message follows, even in the same step).
-  // Only then is a short line before a tool call narration to drop.
+  // a later rich message, or a `create_artifact` call (its message follows,
+  // even in the same step). Only then is a short line before a tool call
+  // narration to drop. A step that sends a rich message keeps its text: it
+  // leads into the buttons or the link.
   const createsArtifact = steps.map((step) =>
     step.toolCalls.some((call) => call.name === CREATE_ARTIFACT_TOOL),
+  );
+  const sendsRich = steps.map((step) =>
+    step.toolCalls.some((call) => RICH_MESSAGE_TOOLS.has(call.name)),
   );
   const saysMore: boolean[] = [];
   let later = false;
   for (let i = steps.length - 1; i >= 0; i--) {
     saysMore[i] = later || createsArtifact[i] === true;
-    later ||= !isBlank(texts[i] ?? '') || createsArtifact[i] === true;
+    later ||=
+      !isBlank(texts[i] ?? '') ||
+      createsArtifact[i] === true ||
+      sendsRich[i] === true;
   }
   steps.forEach((step, i) => {
     const text = texts[i] ?? '';
     const narration =
-      step.toolCalls.length > 0 && saysMore[i] === true && isNarration(text);
+      step.toolCalls.length > 0 &&
+      saysMore[i] === true &&
+      sendsRich[i] !== true &&
+      isNarration(text);
     if (!isBlank(text) && !narration) {
       const shape = shapeStep(text, input.limits, input.canSpill);
       if (shape.kind === 'messages')
@@ -243,13 +266,22 @@ export function draftReplyPlan(input: {
         }
       }
       // Any tool's: the same text handed over twice is delivered once.
-      for (const text of standaloneMessagesOf(
-        input.toolArtifacts?.get(call.id),
-      ))
+      const artifact = input.toolArtifacts?.get(call.id);
+      for (const text of standaloneMessagesOf(artifact))
         if (!standalone.includes(text)) standalone.push(text);
+      const rich = richPartsOf(artifact);
+      if (RICH_MESSAGE_TOOLS.has(call.name)) {
+        parts.push(...rich);
+        const text = richToolTextOf(artifact);
+        if (text) parts.push({ kind: 'rich-text', text });
+      } else pluginRich.push(...rich);
     }
   });
-  return [...parts, ...standaloneParts(standalone, input.limits)];
+  return [
+    ...parts,
+    ...standaloneParts(standalone, input.limits),
+    ...pluginRich,
+  ];
 }
 
 /**
@@ -321,22 +353,33 @@ function capParts(parts: PlanPart[], limits: ChatLimits): ReplyContent[] {
   while (out.length > limits.maxPartsPerRun) {
     if (!merge() && !dropFraming()) break;
   }
-  return out.map(
-    (part): ReplyContent =>
-      part.kind === 'text'
-        ? { kind: 'text', text: part.text }
-        : part.kind === 'artifact'
-          ? { kind: 'artifact', artifact: part.artifact }
-          : part.kind === 'file'
-            ? { kind: 'file', file: part.file }
-            : part.kind === 'action'
-              ? { kind: 'action', action: part.action }
-              : {
-                  kind: 'hub-action',
-                  actionReference: part.actionReference,
-                  summary: part.summary,
-                },
-  );
+  return out.map(contentOf);
+}
+
+/** A plan part without its planning marks. */
+function contentOf(part: PlanPart): ReplyContent {
+  switch (part.kind) {
+    case 'text':
+      return { kind: 'text', text: part.text };
+    case 'artifact':
+      return { kind: 'artifact', artifact: part.artifact };
+    case 'file':
+      return { kind: 'file', file: part.file };
+    case 'action':
+      return { kind: 'action', action: part.action };
+    case 'hub-action':
+      return {
+        kind: 'hub-action',
+        actionReference: part.actionReference,
+        summary: part.summary,
+      };
+    case 'choices':
+      return { kind: 'choices', text: part.text, choices: part.choices };
+    case 'link_button':
+      return { kind: 'link_button', text: part.text, link: part.link };
+    case 'cards':
+      return { kind: 'cards', text: part.text, cards: part.cards };
+  }
 }
 
 /** Follows the files of a run that failed after sending them. */
@@ -391,7 +434,7 @@ export async function materializeReplyPlan(
 ): Promise<ReplyPlan> {
   const parts: PlanPart[] = [];
   for (const part of draft) {
-    if (part.kind === 'standalone') {
+    if (part.kind === 'standalone' || part.kind === 'rich-text') {
       parts.push({ kind: 'text', text: part.text, alone: true });
       continue;
     }
