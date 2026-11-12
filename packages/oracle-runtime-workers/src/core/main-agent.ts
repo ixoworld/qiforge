@@ -919,8 +919,9 @@ export async function createMainAgent(
     ...(returnDirectNames.size > 0
       ? [createReturnDirectFirstMiddleware(returnDirectNames)]
       : []),
-    // The reply ends once a rich-message tool sent its message.
-    ...(turnTools.some(({ tool }) => RICH_MESSAGE_TOOLS.has(tool.name))
+    // The reply ends once a rich message went out (a rich-message tool's,
+    // or a plugin's `withRichParts`): only on turns that can show them.
+    ...(delivery?.kind === 'chat' && delivery.render
       ? [createRichMessageEndMiddleware()]
       : []),
     // Innermost but one: sees the request as it goes to the provider, except

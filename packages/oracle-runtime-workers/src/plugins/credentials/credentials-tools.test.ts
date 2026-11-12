@@ -1346,7 +1346,9 @@ describe('catalogued actions (self.identity-check)', () => {
     expect(content).toMatchObject({ status: 'sent', linkId: 'lnk_1' });
     expect(content).not.toHaveProperty('message');
     expect(content).not.toHaveProperty('url');
-    expect(content.hint).toMatch(/^The message with the link was sent for you/);
+    expect(content.hint).toMatch(
+      /^The message with the link has been sent for you as a message with a button; it is the whole reply\. Write nothing before or after it/,
+    );
     expect(content.hint).toContain('Keep the linkId to read progress.');
     expect(content.hint).not.toContain('Send `message`');
     // Self's site not approved: exactly today's answer.
@@ -2710,7 +2712,7 @@ describe('the Hub is the source of truth, the kv a cache', () => {
       status: 'sent',
       permissionId: 'card_1',
       expiresAt: CARD.expiresAt,
-      hint: 'The message with the link was sent for you, as its own message with a button, after your reply. Do not repeat it, the link or the button; say at most one short line, or nothing. Never paste ids or tokens.',
+      hint: 'The message with the link has been sent for you as a message with a button; it is the whole reply. Write nothing before or after it, and do not repeat it, the link or the button. Never paste ids or tokens.',
     });
     for (const ctx of [
       channelCtx(adapter),

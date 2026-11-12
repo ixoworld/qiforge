@@ -125,11 +125,13 @@ export function titlesTooLong(
 }
 
 /**
- * Ends the reply once a rich-message tool sent its message (choices, a link
- * button, cards, or their text version): that message is the reply's last,
- * so no filler ("Done.") follows it. Runs before the next model call, so a
- * call sent back for shorter titles (nothing went out) lets the model call
- * again.
+ * Ends the reply once a rich message went out: a rich-message tool's
+ * message (choices, a link button, cards, or their text version), or a
+ * plugin tool's rich parts (`withRichParts`, e.g. the credentials plugin's
+ * Allow card). That message is the whole rest of the reply, so no filler
+ * ("Done.", "Please complete it when you're ready.") follows it. Runs before
+ * the next model call, so a call sent back (nothing went out) lets the
+ * model call again.
  */
 export function createRichMessageEndMiddleware(): AgentMiddleware {
   return createMiddleware({
@@ -142,8 +144,8 @@ export function createRichMessageEndMiddleware(): AgentMiddleware {
           const message = messages[i];
           if (!ToolMessage.isInstance(message)) break;
           if (
-            RICH_MESSAGE_TOOLS.has(message.name ?? '') &&
-            (richPartsOf(message.artifact).length > 0 ||
+            richPartsOf(message.artifact).length > 0 ||
+            (RICH_MESSAGE_TOOLS.has(message.name ?? '') &&
               richToolTextOf(message.artifact) !== null)
           )
             return { jumpTo: 'end' };

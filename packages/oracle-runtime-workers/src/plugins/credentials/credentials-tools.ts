@@ -544,7 +544,7 @@ function said(wording: Wording, extra: Record<string, unknown> = {}) {
 
 /** What the agent is told when the link went out as a button. */
 const BUTTON_HINT =
-  'The message with the link was sent for you, as its own message with a button, after your reply. Do not repeat it, the link or the button; say at most one short line, or nothing.';
+  'The message with the link has been sent for you as a message with a button; it is the whole reply. Write nothing before or after it, and do not repeat it, the link or the button.';
 
 /**
  * An answer whose link the chat can show as a button (the turn's `render`

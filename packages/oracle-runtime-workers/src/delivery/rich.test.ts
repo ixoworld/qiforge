@@ -758,6 +758,33 @@ describe('offer_choices: one chance to shorten titles', () => {
     expect(run([new HumanMessage('hi'), linkCall, linkSent])).toEqual({
       jumpTo: 'end',
     });
+    // A plugin's rich parts (the credentials Allow card) end the reply too.
+    const cardCall = new AIMessage({
+      content: '',
+      tool_calls: [
+        { id: 'p1', name: 'credentials_request_action_permission', args: {} },
+      ],
+    });
+    const cardPart = linkButtonPart(
+      {
+        body: 'This lets me send you a link.',
+        url: 'https://dev.self.ixo.earth/c/1',
+        label: 'allow',
+        fallback: 'x: https://dev.self.ixo.earth/c/1',
+      },
+      ALL,
+    ).part!;
+    const cardSent = withRichParts(
+      { toolCallId: 'p1' },
+      {
+        name: 'credentials_request_action_permission',
+        content: '{}',
+        parts: [cardPart],
+      },
+    );
+    expect(run([new HumanMessage('verify me'), cardCall, cardSent])).toEqual({
+      jumpTo: 'end',
+    });
     const other = new ToolMessage({
       tool_call_id: 'x',
       name: 'memory_save',
