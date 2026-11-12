@@ -91,7 +91,11 @@ import { collectSubAgentsWithFallback } from './sub-agent-fallback';
 import { computeSubAgentToolName, scopeToolCallIds } from './subagent-as-tool';
 import { resolveTurnToolAccess, withoutWithheldExamples } from './tool-access';
 import { wrapPluginTool } from './wrap-plugin-tool';
-import { renderSurfaceSection } from '../delivery/prompt';
+import { renderRichSection, renderSurfaceSection } from '../delivery/prompt';
+import {
+  createRichMessageEndMiddleware,
+  RICH_MESSAGE_TOOLS,
+} from '../delivery/rich-tools';
 import { createReturnDirectFirstMiddleware } from './middlewares/return-direct-first';
 import { CREATE_ARTIFACT_TOOL } from '../artifacts/tool';
 import { SEND_FILE_TOOL } from '../plugins/sandbox/send-file';
@@ -179,7 +183,12 @@ export async function createMainAgent(
   } = args;
   const surface: SessionSurface | undefined =
     delivery?.kind === 'chat'
-      ? { kind: 'chat', surface: delivery.surface, label: delivery.label }
+      ? {
+          kind: 'chat',
+          surface: delivery.surface,
+          label: delivery.label,
+          ...(delivery.render ? { render: delivery.render } : {}),
+        }
       : delivery
         ? { kind: 'stream' }
         : undefined;
@@ -934,6 +943,11 @@ export async function createMainAgent(
     ...(returnDirectNames.size > 0
       ? [createReturnDirectFirstMiddleware(returnDirectNames)]
       : []),
+    // The reply ends once a rich message went out (a rich-message tool's,
+    // or a plugin's `withRichParts`): only on turns that can show them.
+    ...(delivery?.kind === 'chat' && delivery.render
+      ? [createRichMessageEndMiddleware()]
+      : []),
     // Innermost but one: sees the request as it goes to the provider, except
     // the images the recall middleware below adds inside it. Prunes old tool
     // results under pressure, refuses what cannot fit, and learns the window
@@ -1038,6 +1052,11 @@ export async function createMainAgent(
         ({ pluginName, tool }) =>
           tool.name === SEND_FILE_TOOL && !unmetRequirements.has(pluginName),
       ),
+    ),
+    richBlock: renderRichSection(
+      turnTools
+        .map(({ tool }) => tool.name)
+        .filter((name) => RICH_MESSAGE_TOOLS.has(name)),
     ),
     operatingGuides: capabilityPlan.inPrompt.map(({ guide }) => guide),
   });

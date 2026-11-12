@@ -158,7 +158,7 @@ The runtime admits it like a notice turn (no user message mirrored, never quoted
 
 ## Responses and retries
 
-An admitted turn returns `202` with `requestId`, `runId`, `sessionId`, and a `queued`, `running`, or `recovering` status. Every turn response also carries `sessionTitle`, the title of `sessionId` at response time (null while untitled), so a gateway can tell the person when a turn ran in a different session than the one it sent, and `features`, what this runtime supports beyond the base contract (`["delivery_notice", "permission_event"]`: see [delivery notices](#delivery-notices) and [channel events](#channel-events)); a gateway that predates the field ignores it. A terminal turn returns `200` with its terminal status. A `finished` turn also contains `text` and, when available, `messageId`.
+An admitted turn returns `202` with `requestId`, `runId`, `sessionId`, and a `queued`, `running`, or `recovering` status. Every turn response also carries `sessionTitle`, the title of `sessionId` at response time (null while untitled), so a gateway can tell the person when a turn ran in a different session than the one it sent, and `features`, what this runtime supports beyond the base contract (`["delivery_notice", "permission_event", "rich_messages"]`: see [delivery notices](#delivery-notices), [channel events](#channel-events) and [rich messages](#rich-messages)); a gateway that predates the field ignores it. A terminal turn returns `200` with its terminal status. A `finished` turn also contains `text` and, when available, `messageId`.
 
 `finished` is the only successful terminal status. A chat run that fails after `send_file` still ends as `finished`, with those files and a line saying the rest is missing, because its files exist nowhere else. Its `text` may be empty after a tool-only completion; the gateway must complete delivery without sending an empty provider message. An absent `messageId` does not mean the turn should be retried.
 
@@ -1152,3 +1152,24 @@ Here `durableRequests` is the host's persistent idempotency store; it returns
 the original expiry for every retry of the same key and rejects changed
 operation bytes. The Workers adapter supplies one in the owner's Durable
 Object.
+
+## Rich messages
+
+A runtime whose turn results list `rich_messages` accepts two more fields on a **message** turn (never with `notice` or `event`; an older runtime refuses either with `400 invalid_request`):
+
+- `render`: `{ "v": 1, "kinds": [...], "linkLabels": [...], "linkOrigins": [...] }`. `kinds` (at most 16) from `reply_buttons`, `list`, `link_button`, `card`, `carousel`; `linkLabels` (at most 32) label keys; `linkOrigins` (at most 32) https origins exactly as `URL.origin` prints them. Unknown kinds and labels, and origins that are not exact https origins, are ignored, so a newer gateway never breaks the turn.
+- `choice`: `{ "id": "<tapped id>" }` with `message` set to the tapped option's title and `sessionPolicy: "continue"`.
+
+With `render`, a finished turn's plan may hold three more part kinds, each with its whole text version in `text` (also what `text` of the turn and the room mirror hold):
+
+```json
+{ "partId": "p2", "kind": "choices", "text": "Which size?\n\n1. Small\n2. Large",
+  "choices": { "body": "Which size?", "style": "buttons",
+    "options": [{ "id": "oc:3f9a01c2:small", "title": "Small" }, { "id": "oc:3f9a01c2:2", "title": "Large" }] } }
+{ "partId": "p3", "kind": "link_button", "text": "…: https://dev.self.ixo.earth/l/tok",
+  "link": { "body": "…", "url": "https://dev.self.ixo.earth/l/tok", "label": "start_check", "imageUrl": "https://…" } }
+{ "partId": "p4", "kind": "cards", "text": "…",
+  "cards": { "body": "Near you:", "items": [{ "title": "…", "body": "…", "imageUrl": "https://…", "link": { "url": "https://…", "label": "register" } }] } }
+```
+
+`style` is `buttons` or `list` (a list also has `button`, the menu label). A `cards` part with one item is an image card, with 2–10 a carousel. Limits, labels and the runtime's rules are in [chat delivery](chat-delivery.md#rich-messages-buttons-lists-link-buttons-cards). The gateway re-checks every limit, the label and the link's origin against its own configuration, and sends `text` as a normal message when it cannot show a part.

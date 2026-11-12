@@ -160,10 +160,13 @@ export function resolveDeliveryProfile(
     bubbleTarget,
     minBubble: Math.min(merged.minBubble, bubbleTarget),
   };
+  // Rich messages only where the gateway said, on this turn, what it can show.
+  const render = turn.client === 'channel' ? turn.channel?.render : undefined;
   return {
     kind: 'chat',
     surface,
     label: LABELS[surface] ?? 'a chat app',
     limits,
+    ...(render ? { render } : {}),
   };
 }

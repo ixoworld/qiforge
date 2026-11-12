@@ -556,3 +556,21 @@ describe('formatDateContext / renderTurnTimeNote', () => {
     );
   });
 });
+
+describe('the rich-message block', () => {
+  it('is rendered after the custom instructions, and not at all when empty', async () => {
+    const prompt = await composePrompt(
+      baseInput({
+        customInstructions: 'Show menus as a numbered list.',
+        richBlock: '## Buttons in this chat\n\nCall offer_choices.',
+      }),
+    );
+    const custom = prompt.indexOf('Show menus as a numbered list.');
+    const rich = prompt.indexOf('## Buttons in this chat');
+    expect(custom).toBeGreaterThan(0);
+    expect(rich).toBeGreaterThan(custom);
+    expect(
+      await composePrompt(baseInput({ customInstructions: 'x' })),
+    ).not.toContain('Buttons in this chat');
+  });
+});

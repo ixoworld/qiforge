@@ -12,7 +12,9 @@ import {
 import {
   CHANNEL_DELIVERY_NOTICE_KWARG,
   channelDeliveryNote,
+  channelChoiceNote,
   channelReplyNote,
+  CHANNEL_CHOICE_NOTE_KWARG,
   CHANNEL_REPLY_NOTE_KWARG,
   isDeliveryNoticeMessage,
 } from '../channels/replies';
@@ -455,6 +457,7 @@ import {
   type OwnedArtifact,
 } from '../artifacts/store';
 import { buildCreateArtifactTool } from '../artifacts/tool';
+import { buildRichMessageTools } from '../delivery/rich-tools';
 import { resolveDeliveryProfile } from '../delivery/profile';
 import {
   draftReplyPlan,
@@ -7153,8 +7156,23 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           ),
       });
       await this.runStore!.setPlan(live.runId, JSON.stringify(plan));
+      // The choices it offers, so a tap on one can be checked later.
+      if (this.channelTurns)
+        await this.channelTurns.choices
+          .record(req.sessionId, plan)
+          .catch((error: unknown) =>
+            console.warn(
+              `[delivery] run ${live.runId}: could not keep the offered choices; a tap will read as text: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          );
+      const rich = plan.parts.filter(
+        (p) =>
+          p.kind === 'choices' ||
+          p.kind === 'link_button' ||
+          p.kind === 'cards',
+      );
       console.log(
-        `[delivery] run ${live.runId}: ${delivery.surface} reply in ${plan.parts.length} parts (${plan.parts.filter((p) => p.kind === 'artifact').length} artefacts, ${plan.parts.filter((p) => p.kind === 'file').length} files)`,
+        `[delivery] run ${live.runId}: ${delivery.surface} reply in ${plan.parts.length} parts (${plan.parts.filter((p) => p.kind === 'artifact').length} artefacts, ${plan.parts.filter((p) => p.kind === 'file').length} files, ${rich.length} rich${rich.length ? `: ${rich.map((p) => (p.kind === 'choices' ? `choices/${p.choices.style}` : p.kind)).join(',')}` : ''}; render ${delivery.render ? `on [${delivery.render.kinds.join(',')}]` : 'off'})`,
       );
       return plan;
     }
@@ -8464,22 +8482,29 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         delivery.kind === 'chat' && this.artifacts?.canShare
           ? this.artifacts
           : null;
-      const turnTools = artifacts
-        ? [
-            {
-              tool: buildCreateArtifactTool(async (input) =>
-                artifacts.create({
-                  artifactId: await artifactIdFor(run.runId, input.source),
-                  sessionId: req.sessionId,
-                  runId: run.runId,
-                  title: input.title,
-                  content: input.content,
-                }),
-              ),
-              returnDirect: true,
-            },
-          ]
-        : [];
+      const turnTools = [
+        ...(artifacts
+          ? [
+              {
+                tool: buildCreateArtifactTool(async (input) =>
+                  artifacts.create({
+                    artifactId: await artifactIdFor(run.runId, input.source),
+                    sessionId: req.sessionId,
+                    runId: run.runId,
+                    title: input.title,
+                    content: input.content,
+                  }),
+                ),
+                returnDirect: true,
+              },
+            ]
+          : []),
+        // Buttons, lists, link buttons and cards: only on a turn whose
+        // gateway said what it can show (`render`).
+        ...(delivery.kind === 'chat' && delivery.render
+          ? buildRichMessageTools(delivery.render)
+          : []),
+      ];
 
       // The prefetched user context on first contact (bounded by the cap and
       // the turn's abort); a wait past the grace tells a Portal client what
@@ -8702,10 +8727,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const noticed = noticeNote
         ? withTurnTimeNote(spoken, noticeNote)
         : spoken;
+      const choiceNote = channelChoiceNote(req.channel?.choice);
+      const tapped = choiceNote
+        ? withTurnTimeNote(noticed, choiceNote)
+        : noticed;
       const replyNote = channelReplyNote(req.channel?.replyContext);
       const referenced = replyNote
-        ? withTurnTimeNote(noticed, replyNote)
-        : noticed;
+        ? withTurnTimeNote(tapped, replyNote)
+        : tapped;
       const guided = guideNote
         ? withTurnTimeNote(referenced, guideNote.text)
         : referenced;
@@ -8716,6 +8745,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           timestamp: turnAt.toISOString(),
           ...(timeNote ? { [TURN_TIME_NOTE_KWARG]: timeNote } : {}),
           ...(replyNote ? { [CHANNEL_REPLY_NOTE_KWARG]: replyNote } : {}),
+          ...(choiceNote ? { [CHANNEL_CHOICE_NOTE_KWARG]: choiceNote } : {}),
           ...(noticeNote
             ? { [CHANNEL_DELIVERY_NOTICE_KWARG]: noticeNote }
             : {}),

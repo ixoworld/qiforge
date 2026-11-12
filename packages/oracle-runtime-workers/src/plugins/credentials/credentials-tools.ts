@@ -6,6 +6,7 @@ import type {
   PermissionEventStatus,
 } from '../../plugin-api/channel-events';
 import { tool } from '../../plugin-api/tool-helper';
+import { linkButtonPart, renderOf, withRichParts } from '../../delivery/rich';
 import type {
   PluginTool,
   RuntimeContext,
@@ -523,13 +524,73 @@ function kvOf(ctx: RuntimeContext): UserKvSurface | null {
   return ctx.kv ?? null;
 }
 
+/**
+ * Where an answer keeps its link button (`Wording.button`): not enumerable,
+ * so an answer sent as it is (JSON) never shows it.
+ */
+const LINK_BUTTON = Symbol('credentials.linkButton');
+
 /** A tool answer: the person's sentence (`message`) and the agent's (`hint`). */
 function said(wording: Wording, extra: Record<string, unknown> = {}) {
-  return {
+  const answer = {
     ...extra,
     message: wording.message,
     ...(wording.hint ? { hint: wording.hint } : {}),
   };
+  if (wording.button)
+    Object.defineProperty(answer, LINK_BUTTON, { value: wording.button });
+  return answer;
+}
+
+/** What the agent is told when the link went out as a button. */
+const BUTTON_HINT =
+  'The message with the link has been sent for you as a message with a button; it is the whole reply. Write nothing before or after it, and do not repeat it, the link or the button.';
+
+/**
+ * An answer whose link the chat can show as a button (the turn's `render`
+ * allows the link's site and the label): the sentence and the button go
+ * out as their own message after the reply, and the agent gets the answer
+ * without `message` and the link. Anything else is returned as it is, so
+ * the agent sends `message` with the link written out, as before.
+ */
+function delivered(
+  ctx: RuntimeContext,
+  name: string,
+  answer: unknown,
+): unknown {
+  if (!answer || typeof answer !== 'object') return answer;
+  const button: unknown = Reflect.get(answer, LINK_BUTTON);
+  const message: unknown = Reflect.get(answer, 'message');
+  if (!button || typeof message !== 'string') return answer;
+  const parsed = z
+    .object({
+      body: z.string(),
+      url: z.string(),
+      label: z.enum(['allow', 'start_check']),
+    })
+    .safeParse(button);
+  if (!parsed.success) return answer;
+  const built = linkButtonPart(
+    { ...parsed.data, fallback: message },
+    renderOf(ctx),
+  );
+  if (!built.part) return answer;
+  const content: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(answer))
+    if (key !== 'message' && key !== 'url' && key !== 'hint')
+      content[key] = value;
+  const hint: unknown = Reflect.get(answer, 'hint');
+  const rest =
+    typeof hint === 'string'
+      ? hint
+          .replace(
+            /Send `message` as it is(, as one link in a short message)?\.\s*/,
+            '',
+          )
+          .trim()
+      : '';
+  content.hint = rest ? `${BUTTON_HINT} ${rest}` : BUTTON_HINT;
+  return withRichParts(ctx, { name, content, parts: [built.part] });
 }
 
 // ---------------------------------------------------------------------------
@@ -634,6 +695,13 @@ function cardMessage(
       ? `${lead} Please tap this to allow: ${url}`
       : `Please tap this to see what ${name} is asking for, and allow it if you agree: ${url}`,
     hint: 'Send `message` as it is, as one link in a short message. Never paste ids or tokens.',
+    button: {
+      body:
+        lead ??
+        `Please tap this to see what ${name} is asking for, and allow it if you agree.`,
+      url,
+      label: 'allow',
+    },
   };
 }
 
@@ -645,6 +713,11 @@ function againMessage(url: string): Wording {
   return {
     message: `Something changed, so I need your OK again. Please tap this to allow: ${url}`,
     hint: 'What they allowed earlier no longer matches what this service needs now, so it is asked again on one card. Send `message` as it is, as one link in a short message. Never paste ids or tokens.',
+    button: {
+      body: 'Something changed, so I need your OK again.',
+      url,
+      label: 'allow',
+    },
   };
 }
 
@@ -1388,6 +1461,7 @@ export function createCredentials(deps: CredentialsToolsDeps): {
         {
           message: wording.message,
           hint: `This is the card they were sent before and have not answered yet; no new card was made. ${wording.hint ?? ''}`.trim(),
+          ...(wording.button ? { button: wording.button } : {}),
         },
         {
           status: 'sent',
@@ -1508,13 +1582,17 @@ export function createCredentials(deps: CredentialsToolsDeps): {
   }
 
   const requestPermissions = tool(
-    (raw, ctx) => {
+    async (raw, ctx) => {
       const args = RequestPermissionsInput.parse(raw);
-      return sendCard(
+      return delivered(
         ctx,
         'credentials_request_permissions',
-        'permissions',
-        args.items,
+        await sendCard(
+          ctx,
+          'credentials_request_permissions',
+          'permissions',
+          args.items,
+        ),
       );
     },
     {
@@ -1532,13 +1610,17 @@ export function createCredentials(deps: CredentialsToolsDeps): {
   );
 
   const requestCheckPermission = tool(
-    (raw, ctx) => {
+    async (raw, ctx) => {
       const args = CheckPermissionInput.parse(raw);
-      return sendCard(
+      return delivered(
         ctx,
         'credentials_request_check_permission',
-        'check-permission',
-        [{ ...args, kind: 'credential-check' }],
+        await sendCard(
+          ctx,
+          'credentials_request_check_permission',
+          'check-permission',
+          [{ ...args, kind: 'credential-check' }],
+        ),
       );
     },
     {
@@ -1900,19 +1982,23 @@ export function createCredentials(deps: CredentialsToolsDeps): {
   }
 
   const requestActionPermission = tool(
-    (raw, ctx) => {
+    async (raw, ctx) => {
       const args = ActionPermissionInput.parse(raw);
-      return sendCard(
+      return delivered(
         ctx,
         'credentials_request_action_permission',
-        `action-permission:${args.action}`,
-        [
-          {
-            kind: 'service-action',
-            action: args.action,
-            ...(args.days !== undefined ? { days: args.days } : {}),
-          },
-        ],
+        await sendCard(
+          ctx,
+          'credentials_request_action_permission',
+          `action-permission:${args.action}`,
+          [
+            {
+              kind: 'service-action',
+              action: args.action,
+              ...(args.days !== undefined ? { days: args.days } : {}),
+            },
+          ],
+        ),
       );
     },
     {
@@ -2243,16 +2329,21 @@ export function createCredentials(deps: CredentialsToolsDeps): {
               cards,
               args.context,
             );
-      if (!isOutdatedAnswer(answer)) return answer;
+      if (!isOutdatedAnswer(answer))
+        return delivered(ctx, 'credentials_request_action', answer);
       // What the person allowed no longer matches the catalogue entry: ask
       // for the card again on the normal path (one card, or the one already
       // waiting), in "once more" words.
-      return sendCard(
+      return delivered(
         ctx,
         'credentials_request_action',
-        `again:${args.action}`,
-        [{ kind: 'service-action', action: args.action }],
-        { again: true, cards, deadline },
+        await sendCard(
+          ctx,
+          'credentials_request_action',
+          `again:${args.action}`,
+          [{ kind: 'service-action', action: args.action }],
+          { again: true, cards, deadline },
+        ),
       );
     },
     {
@@ -2329,6 +2420,15 @@ export function createCredentials(deps: CredentialsToolsDeps): {
                   : `The link works once: ${created.url}`
               }`,
               hint: 'Send `message` as it is. Keep the linkId to read progress. A new link replaces one nobody has opened yet, so do not call this again to resend.',
+              button: {
+                body: `${opening} ${ID_CHECK_STEPS} ${
+                  ends
+                    ? `The link works once and ends ${ends}.`
+                    : 'The link works once.'
+                }`,
+                url: created.url,
+                label: 'start_check',
+              },
             },
             {
               status: 'sent',

@@ -59,6 +59,12 @@ export interface CredentialsRefusal {
 export interface Wording {
   message: string;
   hint?: string;
+  /**
+   * The same message as a link button, where the chat can show one: the
+   * sentence without the link, the link and the button's label key. Where
+   * it cannot, `message` (the link written out) goes out as today.
+   */
+  button?: { body: string; url: string; label: 'allow' | 'start_check' };
 }
 
 /**

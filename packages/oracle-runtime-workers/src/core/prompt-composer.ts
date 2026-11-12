@@ -114,6 +114,13 @@ export interface ComposePromptInput {
    */
   surfaceBlock?: string;
   /**
+   * How to show choices, links and cards on a chat that can show buttons
+   * (`renderRichSection`). Rendered after the custom instructions, so its
+   * precedence over an instruction to write choices as a list is read
+   * last. Empty everywhere else.
+   */
+  richBlock?: string;
+  /**
    * Operating guides of the plugins the turn starts with in use, already in
    * their final order (`OraclePlugin.operatingGuide`). Rendered after every
    * other section, under one heading; empty renders nothing.
@@ -523,6 +530,10 @@ const TEMPLATE = `{{{ORACLE_SECTION}}}
 
 {{{CUSTOM_INSTRUCTIONS}}}
 {{/CUSTOM_INSTRUCTIONS}}
+{{#RICH_BLOCK}}
+
+{{{RICH_BLOCK}}}
+{{/RICH_BLOCK}}
 {{#CONTEXT_BLOCK}}
 
 ## What you know about the user
@@ -595,6 +606,7 @@ export async function composePrompt(
     CUSTOM_INSTRUCTIONS: input.customInstructions,
     COMMUNICATION_STYLE: communicationStyle,
     SURFACE_BLOCK: input.surfaceBlock ?? '',
+    RICH_BLOCK: input.richBlock ?? '',
     STATUS_LINE: input.surfaceBlock ? '' : STATUS_LINE,
     CONTEXT_BLOCK: buildContextBlock(input.userContext),
     TIME_CONTEXT: input.timeContext,

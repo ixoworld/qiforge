@@ -8,7 +8,9 @@ import {
 } from './contract';
 import { withTurnTimeNote } from '../core/turn-time-note';
 import {
+  CHANNEL_CHOICE_NOTE_KWARG,
   CHANNEL_DELIVERY_NOTICE_KWARG,
+  channelChoiceNote,
   channelDeliveryNote,
   userContent,
 } from './replies';
@@ -220,11 +222,115 @@ describe('the delivery note the model reads', () => {
 });
 
 describe('turn features', () => {
-  it('advertise delivery notices and permission events', () => {
+  it('advertise delivery notices, permission events and rich messages', () => {
     expect(CHANNEL_TURN_FEATURES).toEqual([
       'delivery_notice',
       'permission_event',
+      'rich_messages',
     ]);
+  });
+});
+
+describe('ChannelTurnBody with rich messages', () => {
+  const render = {
+    v: 1,
+    kinds: ['reply_buttons', 'list', 'link_button', 'card', 'carousel'],
+    linkLabels: ['open', 'allow'],
+    linkOrigins: ['https://dev.self.ixo.earth'],
+  };
+
+  it('accepts a message turn with render and a tapped choice', () => {
+    const parsed = ChannelTurnBody.safeParse({
+      ...turn,
+      message: 'Medium',
+      sessionPolicy: 'continue',
+      render,
+      choice: { id: 'oc:3f9a01c2:medium' },
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('accepts kinds and labels it does not know (a newer gateway)', () => {
+    expect(
+      ChannelTurnBody.safeParse({
+        ...turn,
+        render: {
+          ...render,
+          kinds: ['reply_buttons', 'flow'],
+          linkLabels: ['pay'],
+        },
+      }).success,
+    ).toBe(true);
+  });
+
+  it('refuses a render object of the wrong shape', () => {
+    for (const bad of [
+      { ...render, v: 2 },
+      { ...render, extra: true },
+      { ...render, kinds: ['Bad Kind'] },
+      { kinds: [], linkLabels: [], linkOrigins: [] },
+    ])
+      expect(ChannelTurnBody.safeParse({ ...turn, render: bad }).success).toBe(
+        false,
+      );
+    expect(
+      ChannelTurnBody.safeParse({ ...turn, choice: { id: '' } }).success,
+    ).toBe(false);
+  });
+
+  it('refuses render and choice with a notice or an event', () => {
+    const withNotice = {
+      ...noticeTurn,
+      sessionPolicy: 'continue',
+      notice,
+    };
+    expect(ChannelTurnBody.safeParse(withNotice).success).toBe(true);
+    expect(ChannelTurnBody.safeParse({ ...withNotice, render }).success).toBe(
+      false,
+    );
+    expect(
+      ChannelTurnBody.safeParse({ ...withNotice, choice: { id: 'oc:1' } })
+        .success,
+    ).toBe(false);
+    const event = {
+      kind: 'permission_answered' as const,
+      permissionId: 'perm_1',
+      status: 'allowed' as const,
+    };
+    const eventTurn = {
+      ...turn,
+      message: undefined,
+      requestId: 'permission:perm_1:allowed',
+      sessionPolicy: 'continue',
+      event,
+    };
+    expect(ChannelTurnBody.safeParse(eventTurn).success).toBe(true);
+    expect(ChannelTurnBody.safeParse({ ...eventTurn, render }).success).toBe(
+      false,
+    );
+  });
+});
+
+describe('channelChoiceNote', () => {
+  it('names the tapped option and its question, and is stripped from user words', () => {
+    const choice = {
+      id: 'oc:3f9a01c2:medium',
+      key: 'medium',
+      title: 'Medium',
+      question: 'Which size would you like?',
+    };
+    const note = channelChoiceNote(choice)!;
+    expect(note).toContain('tapped an option you offered');
+    expect(JSON.parse(note.slice(note.indexOf('\n') + 1))).toEqual({
+      question: 'Which size would you like?',
+      option: { id: 'medium', title: 'Medium' },
+    });
+    expect(
+      userContent(withTurnTimeNote('Medium', note), {
+        [CHANNEL_CHOICE_NOTE_KWARG]: note,
+      }),
+    ).toBe('Medium');
+    expect(channelChoiceNote(undefined)).toBeUndefined();
   });
 });
 

@@ -1,5 +1,11 @@
 # @ixo/oracle-runtime-workers
 
+## 0.50.0
+
+### Minor Changes
+
+- [#531](https://github.com/ixoworld/qiforge/pull/531) [`64db1c3`](https://github.com/ixoworld/qiforge/commit/64db1c3e857447271a4a51e7625ff196883aa638) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Rich WhatsApp messages for every oracle: `offer_choices` (reply buttons or a list menu), `send_link_button` and `send_cards` (an image card or a carousel), offered only on channel turns whose gateway sends a `render` object, with a channel-neutral text version on every other surface. Turn results list the new `rich_messages` feature; channel turns accept `render` and `choice` (a tapped option, checked against the choices offered in the session in the last 24 hours). New plan parts `choices`, `link_button` and `cards`. Plugin helpers `linkButtonPart`, `choicesPart`, `cardsPart`, `renderOf` and `withRichParts`; the credentials plugin sends its permission card and identity-check link as Allow and Start check buttons where the chat can show them. Links are parsed once and only their normalised href is sent.
+
 ## 0.49.0
 
 ### Minor Changes

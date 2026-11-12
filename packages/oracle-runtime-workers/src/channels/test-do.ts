@@ -378,6 +378,11 @@ export class ChannelTurnsTestDO extends DurableObject {
     });
   }
 
+  /** Keep the choices a plan offers, as the user object does when it builds the plan. */
+  async recordChoices(sessionId: string, plan: ReplyPlan): Promise<number> {
+    return (await this.ready()).choices.record(sessionId, plan);
+  }
+
   /**
    * What the user object's `onRunEnded` does for a channel run (a mirror
    * pass in the background), then wait for that pass.

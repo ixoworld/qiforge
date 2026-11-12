@@ -40,6 +40,8 @@ import type { TurnUsage } from '../core/turn-budget';
 import type { ToolSchedulerSnapshot } from '../core/tool-scheduler';
 import type { BotStatus, EncryptedFileInfo } from '@ixo/matrix-bot-workers-sdk';
 import type { AttachmentInput } from '../attachments/types';
+import type { RenderCapability } from '../delivery/types';
+import type { TappedChoice } from '../channels/choices';
 import type { RealtimeStatus } from '../realtime/realtime-endpoint';
 import type { FrontendWaitingFor } from '../plugin-api/types';
 import type { TierFlushResult, TierStatus } from '../sqlite/do-vfs';
@@ -477,6 +479,17 @@ export interface TurnRequest {
      * the person's words would be, hidden like a delivery notice.
      */
     eventNote?: string;
+    /**
+     * What the gateway can show beyond text on this turn (its `render`
+     * object, normalised). Stored with the run, so a resumed run renders
+     * the same way.
+     */
+    render?: RenderCapability;
+    /**
+     * The option the person tapped, checked against the choices offered in
+     * this session: the model reads a note naming it with the message.
+     */
+    choice?: TappedChoice;
   };
   executionProfile?: TaskExecutionProfile;
   identity: TurnIdentity;
