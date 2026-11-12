@@ -10,7 +10,12 @@ import { ChannelChoices, CHOICE_TTL_MS } from '../channels/choices';
 import { DoSqliteDatabase } from '../sqlite/database';
 import { makeRuntimeContext } from '../core/test-fixtures';
 import type { PluginTool } from '../plugin-api/types';
-import { draftReplyPlan, materializeReplyPlan, turnSteps } from './plan';
+import {
+  draftReplyPlan,
+  materializeReplyPlan,
+  turnSteps,
+  withoutRichRepeat,
+} from './plan';
 import { resolveDeliveryProfile } from './profile';
 import { renderRichSection, renderSurfaceSection } from './prompt';
 import {
@@ -1030,6 +1035,66 @@ describe('rich parts in the plan', () => {
     expect(planTextForModel(plan)).toBe(planText(plan));
     // A stored plan reads back with its rich parts.
     expect(parseReplyPlan(JSON.stringify(plan))).toEqual(plan);
+  });
+
+  // A fresh offer_choices each time: one tool sends a single choices message.
+  const offer = async (question: string, id: string) =>
+    toolMessage(
+      await buildRichMessageTools(ALL)
+        .find((t) => t.tool.name === OFFER_CHOICES_TOOL)!
+        .tool.handler(
+          {
+            question,
+            options: opts('Find opportunities', 'Check my wallet', 'Get help'),
+          },
+          makeRuntimeContext({ toolCallId: id }),
+        ),
+    );
+
+  it('text that repeats the choices question is not sent twice', async () => {
+    const question =
+      'Hi, good to see you again! What would you like to do today?';
+    const result = await offer(question, 'c1');
+    const plan = await planOf([
+      new HumanMessage('hi'),
+      new AIMessage({
+        content: question,
+        tool_calls: [{ id: 'c1', name: OFFER_CHOICES_TOOL, args: {} }],
+      }),
+      result,
+    ]);
+    expect(plan.parts.map((p) => p.kind)).toEqual(['choices']);
+  });
+
+  it('a lead-in that ends with the choices question keeps only its greeting', async () => {
+    const result = await offer('What would you like to do?', 'c1');
+    const plan = await planOf([
+      new HumanMessage('hi'),
+      new AIMessage({
+        content: 'Hi there! What would you like to do?',
+        tool_calls: [{ id: 'c1', name: OFFER_CHOICES_TOOL, args: {} }],
+      }),
+      result,
+    ]);
+    expect(
+      plan.parts.map((p) => (p.kind === 'text' ? p.text : p.kind)),
+    ).toEqual(['Hi there!', 'choices']);
+  });
+
+  it('withoutRichRepeat drops only whole repeats of what the rich message says', () => {
+    const says = ['What would you like to do?\n\n1. Find jobs\n2. Get help'];
+    expect(withoutRichRepeat('what would  you like to do?', says)).toBe('');
+    expect(withoutRichRepeat('Hi!\nWhat would you like to do?', says)).toBe(
+      'Hi!',
+    );
+    // Mentioned in the middle, or a different question: kept.
+    expect(
+      withoutRichRepeat('What would you like to do? I can help.', says),
+    ).toBe('What would you like to do? I can help.');
+    expect(withoutRichRepeat('Good choice.', says)).toBe('Good choice.');
+    // Whole words only: "Ok." is not part of "book.".
+    expect(withoutRichRepeat('Ok.', ['Read the book.'])).toBe('Ok.');
+    expect(withoutRichRepeat('Hello.', [])).toBe('Hello.');
   });
 
   it('a short line before a link button is kept, and text after it follows it', async () => {
