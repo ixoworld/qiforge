@@ -60,7 +60,8 @@ function supportsLightRead(
 
 export interface BuiltAgent {
   agent: CompiledMainAgent;
-  stateInput: Partial<TMainAgentGraphState>;
+  stateInput: Partial<TMainAgentGraphState> &
+    Pick<TMainAgentGraphState, 'messages'>;
   /**
    * Config passed as the 2nd argument to `agent.streamEvents` /
    * `agent.invoke`. `version: 'v2'` is REQUIRED for streaming — without it
@@ -528,7 +529,8 @@ export class AgentBuilder {
       }),
     });
 
-    const stateInput: Partial<TMainAgentGraphState> = {
+    const stateInput: Partial<TMainAgentGraphState> &
+      Pick<TMainAgentGraphState, 'messages'> = {
       messages: inputMessages,
       config: { did: payload.did },
       client: clientType,

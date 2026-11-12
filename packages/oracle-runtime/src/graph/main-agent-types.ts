@@ -1,6 +1,10 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
-import type { ReactAgent } from 'langchain';
+import type {
+  AgentTypeConfig,
+  ReactAgent,
+  ResponseFormatUndefined,
+} from 'langchain';
 import { z } from 'zod';
 import type {
   ChatOpenAIFields,
@@ -16,7 +20,7 @@ import type { SharedStateRegistry } from '../registries/shared-state-registry.js
 import type { SubAgentRegistry } from '../registries/subagent-registry.js';
 import type { ToolRegistry } from '../registries/tool-registry.js';
 import type { AmbientServices } from '../runtime-context/ambient.js';
-import type { TMainAgentGraphState } from './state.js';
+import type { MainAgentGraphState, TMainAgentGraphState } from './state.js';
 /** The 6 internal registries the runtime composes. */
 export interface MainAgentRegistries {
   tools: ToolRegistry;
@@ -132,5 +136,7 @@ export interface MainAgentArgs {
   hooks?: MainAgentHooks;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type CompiledMainAgent = ReactAgent<any>;
+/** The compiled main agent; its graph state is `MainAgentGraphState`. */
+export type CompiledMainAgent = ReactAgent<
+  AgentTypeConfig<ResponseFormatUndefined, typeof MainAgentGraphState>
+>;

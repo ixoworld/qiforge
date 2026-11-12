@@ -71,6 +71,24 @@ describe('createSummarizationMiddleware', () => {
     expect(isFailedSummary(summary as never)).toBe(false);
   });
 
+  it('gives the summary an id of its own, never that of a message it condenses', async () => {
+    const model = new FakeListChatModel({ responses: ['the gist'] });
+    const mw = createSummarizationMiddleware({
+      model,
+      triggerMessages: 20,
+      keepMessages: 4,
+    });
+    const thread = longThread(12);
+    const update = (await beforeModel(mw, thread)) as
+      | { messages: BaseMessage[] }
+      | undefined;
+    const summary = update?.messages.find(
+      (m) => HumanMessage.isInstance(m) && isSummarizationMessage(m),
+    );
+    expect(typeof summary?.id).toBe('string');
+    expect(thread.map((m) => m.id)).not.toContain(summary?.id);
+  });
+
   it('keeps the full history when the summary call fails, instead of replacing it with the error', async () => {
     const warn = vi.fn();
     const mw = createSummarizationMiddleware({

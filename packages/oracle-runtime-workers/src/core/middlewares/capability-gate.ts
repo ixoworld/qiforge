@@ -31,17 +31,34 @@ function nextPluginSet(
 }
 
 /**
+ * The channel of the loaded plugins. Every schema that declares
+ * `loadedPlugins` uses this one value: `createAgent` keeps the first
+ * declaration of a key it meets (the agent's, then each middleware's in
+ * order), so they must all be the same channel with the same reducer.
+ */
+const loadedPluginsChannel = new ReducedValue(z.array(z.string()).optional(), {
+  inputSchema: pluginSetUpdate,
+  reducer: nextPluginSet,
+});
+
+/**
+ * The loaded plugins alone, for a middleware that only reads them (the
+ * context guard keeps a loaded plugin's load result).
+ */
+export const loadedPluginsState = new StateSchema({
+  loadedPlugins: loadedPluginsChannel,
+});
+
+/**
  * The graph channels of the loaded plugins, of the plugins whose usage the
  * thread's messages carry, and of the plugins whose operating guides the
  * system prompt carries (`operating-guides.ts`; last value wins). `createAgent`
- * builds its channels from the middlewares' state schemas: a reducer declared
- * anywhere else never runs.
+ * builds its channels from its own and the middlewares' state schemas: a
+ * reducer declared anywhere else (an `Annotation`) never runs. The main agent
+ * declares it as its state too, which is what types its graph input.
  */
-const capabilityGateState = new StateSchema({
-  loadedPlugins: new ReducedValue(z.array(z.string()).optional(), {
-    inputSchema: pluginSetUpdate,
-    reducer: nextPluginSet,
-  }),
+export const capabilityGateState = new StateSchema({
+  loadedPlugins: loadedPluginsChannel,
   capabilityUsage: new ReducedValue(z.array(z.string()).optional(), {
     inputSchema: pluginSetUpdate,
     reducer: nextPluginSet,

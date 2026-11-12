@@ -6,6 +6,7 @@ import {
 } from '@langchain/core/messages';
 import { tool } from '@langchain/core/tools';
 import { convertToOpenAITool } from '@langchain/core/utils/function_calling';
+import { createAgent, createMiddleware, FakeToolCallingModel } from 'langchain';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { contextBudgetFor } from '../context-budget';
@@ -469,6 +470,46 @@ describe('the load result of a loaded plugin', () => {
 
   it('goes once the plugin is unloaded', async () => {
     expect(await pruned({ loadedPlugins: [] })).toBe(true);
+  });
+
+  it('reads the loaded plugins from the graph state inside an agent', async () => {
+    const budget = contextBudgetFor({
+      model: 'm',
+      tokens: 32_000,
+      origin: 'catalog',
+    });
+    const loadPruned = async (loadedPlugins: string[]): Promise<boolean> => {
+      const sent: BaseMessage[][] = [];
+      // Inside the guard: sees the request as the guard passes it on.
+      const recorder = createMiddleware({
+        name: 'Recorder',
+        wrapModelCall: (request, handler) => {
+          sent.push(request.messages);
+          return handler(request);
+        },
+      });
+      const agent = createAgent({
+        model: new FakeToolCallingModel({ toolCalls: [] }),
+        tools: [],
+        middleware: [
+          createContextGuardMiddleware({
+            budget: { ...budget, pruneAtTokens: 1 },
+            logger: silent,
+          }),
+          recorder,
+        ],
+      });
+      const filler = Array.from(
+        { length: 12 },
+        (_, i) => new AIMessage({ id: `f${i}`, content: 'x' }),
+      );
+      await agent.invoke({ messages: [load(), ...filler], loadedPlugins });
+      const sentLoad = sent[0]?.find((m) => m.id === 'load');
+      if (!sentLoad) throw new Error('the load result was not sent');
+      return sentLoad.additional_kwargs.pruned !== undefined;
+    };
+    expect(await loadPruned(['flows'])).toBe(false);
+    expect(await loadPruned([])).toBe(true);
   });
 
   it('survives stale trimming through the same rule', () => {

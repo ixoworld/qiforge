@@ -54,6 +54,10 @@ function makeService(
   enabled = true,
 ): WorkersByoService {
   return new WorkersByoService({
+    // No test reaches a provider: model discovery cannot be answered.
+    discoveryFetch: async () => {
+      throw new Error('offline');
+    },
     enabled,
     secrets,
     resolveRoomId: async () => ROOM,
@@ -124,6 +128,39 @@ describe('handleByoRequest', () => {
     expect(
       body.providers.find((p) => p.provider === 'chatgpt')?.connected,
     ).toBe(false);
+  });
+
+  it('GET /byo-llm/status offers the account’s models and names where they came from', async () => {
+    const secrets = makeSecrets();
+    secrets.values.set(BYO_SECRET_NAMES.openai, 'sk-user');
+    const service = new WorkersByoService({
+      discoveryFetch: async () =>
+        Response.json({ data: [{ id: 'gpt-5.6-luna' }] }),
+      enabled: true,
+      secrets,
+      resolveRoomId: async () => ROOM,
+      store: makeStore(),
+    });
+    const res = await handleByoRequest(
+      service,
+      DID,
+      req('GET', '/byo-llm/status'),
+    );
+    const body = (await res.json()) as {
+      providers: Array<{
+        provider: string;
+        modelSource?: string;
+        models: Array<{ id: string }>;
+      }>;
+    };
+    const openai = body.providers.find((p) => p.provider === 'openai');
+    expect(openai?.modelSource).toBe('account');
+    expect(openai?.models.map((m) => m.id)).toEqual([
+      'byo:openai/gpt-5.6-luna',
+    ]);
+    expect(
+      body.providers.find((p) => p.provider === 'chatgpt')?.modelSource,
+    ).toBeUndefined();
   });
 
   it('PUT + DELETE /byo-llm/credentials/:provider store and remove keys', async () => {

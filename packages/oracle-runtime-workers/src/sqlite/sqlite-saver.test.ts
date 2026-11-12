@@ -8,14 +8,18 @@
  */
 import {
   AIMessage,
+  AIMessageChunk,
   HumanMessage,
   ToolMessage,
   type BaseMessage,
 } from '@langchain/core/messages';
+import { messagesStateReducer } from '@langchain/langgraph';
 import {
   type Checkpoint,
   type CheckpointTuple,
   emptyCheckpoint,
+  MemorySaver,
+  type PendingWrite,
   uuid6,
 } from '@langchain/langgraph-checkpoint';
 import { env, runInDurableObject } from 'cloudflare:test';
@@ -42,8 +46,10 @@ import {
   turnCarryKwargs,
   turnCarryOf,
 } from '../core/middlewares/turn-boundary';
+import { readBlobText } from './blob-codec';
 import { compactStep } from './blob-compactor';
 import { DoSqliteDatabase } from './database';
+import { CHUNK_SIZE } from './do-vfs';
 import {
   cleanAdditionalKwargs,
   TURN_CARRY_KWARG,
@@ -646,7 +652,7 @@ describe('migration 002 (unused message indexes)', () => {
       const versions = await db.exec<{ version: number }>(
         'SELECT version FROM schema_migrations ORDER BY version',
       );
-      expect(versions.map((v) => v.version)).toEqual([1, 2, 3]);
+      expect(versions.map((v) => v.version)).toEqual([1, 2, 3, 4]);
       expect(await integrityOk(db)).toBe(true);
       await db.close();
     });
@@ -952,5 +958,377 @@ describe('the turn carry of a mid-turn summary', () => {
         'O',
       ),
     ).not.toHaveProperty(TURN_CARRY_KWARG);
+  });
+});
+
+describe('migration 004 (writes.task_path) and the order of pending writes', () => {
+  const encoder = new TextEncoder();
+
+  /** A file as setup left it before migration 004: `writes` has no `task_path`. */
+  async function previousSchema(db: DoSqliteDatabase): Promise<void> {
+    await db.run('PRAGMA auto_vacuum = INCREMENTAL');
+    await db.run(`CREATE TABLE checkpoints (
+      thread_id TEXT NOT NULL, checkpoint_ns TEXT NOT NULL DEFAULT '',
+      checkpoint_id TEXT NOT NULL, parent_checkpoint_id TEXT, type TEXT,
+      checkpoint BLOB, metadata BLOB,
+      PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id))`);
+    await db.run(`CREATE TABLE writes (
+      thread_id TEXT NOT NULL, checkpoint_ns TEXT NOT NULL DEFAULT '',
+      checkpoint_id TEXT NOT NULL, task_id TEXT NOT NULL, idx INTEGER NOT NULL,
+      channel TEXT NOT NULL, type TEXT, value BLOB,
+      PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx))`);
+    await db.run(`CREATE TABLE messages (
+      thread_id TEXT NOT NULL, checkpoint_ns TEXT NOT NULL DEFAULT '',
+      checkpoint_id TEXT NOT NULL, message_id TEXT NOT NULL,
+      message_type TEXT NOT NULL, message_content TEXT NOT NULL,
+      message BLOB, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (message_id))`);
+    await db.run(
+      'CREATE TABLE schema_migrations (version INTEGER NOT NULL PRIMARY KEY, name TEXT NOT NULL, applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)',
+    );
+    await db.run(
+      `INSERT INTO schema_migrations (version, name) VALUES (1, 'add_created_at_to_messages'), (2, 'drop_unused_message_indexes'), (3, 'add_attachment_payload_sweeps')`,
+    );
+    await db.run(
+      'CREATE TABLE attachment_payload_sweeps (thread_id TEXT NOT NULL PRIMARY KEY, swept_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)',
+    );
+    await db.run(
+      'CREATE INDEX idx_messages_thread_created ON messages(thread_id, created_at)',
+    );
+    await db.run(
+      'CREATE INDEX idx_messages_lookup ON messages(thread_id, checkpoint_ns, checkpoint_id)',
+    );
+    await db.run(
+      'CREATE INDEX idx_writes_channel ON writes(thread_id, checkpoint_id, channel)',
+    );
+  }
+
+  /** A checkpoint row as the previous code stored it (plain JSON blobs). */
+  async function oldCheckpoint(
+    db: DoSqliteDatabase,
+    threadId: string,
+    checkpointId: string,
+  ): Promise<void> {
+    await db.run(
+      `INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata) VALUES (?, '', ?, NULL, 'json', ?, ?)`,
+      [
+        threadId,
+        checkpointId,
+        encoder.encode(
+          JSON.stringify({
+            ...emptyCheckpoint(),
+            id: checkpointId,
+            channel_versions: { messages: 1 },
+          }),
+        ),
+        JSON.stringify({ source: 'loop', step: 1, parents: {} }),
+      ],
+    );
+  }
+
+  /** A pending write as the previous code stored it: no task path. */
+  async function oldWrite(
+    db: DoSqliteDatabase,
+    checkpointId: string,
+    taskId: string,
+    idx: number,
+    value: string,
+  ): Promise<void> {
+    await db.run(
+      `INSERT INTO writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value) VALUES ('t', '', ?, ?, ?, 'ch', 'json', ?)`,
+      [checkpointId, taskId, idx, encoder.encode(JSON.stringify(value))],
+    );
+  }
+
+  const at = (checkpointId: string) => ({
+    configurable: {
+      thread_id: 't',
+      checkpoint_ns: '',
+      checkpoint_id: checkpointId,
+    },
+  });
+
+  const order = (tuple: CheckpointTuple | undefined) =>
+    tuple?.pendingWrites?.map(([taskId, , value]) => [taskId, value]);
+
+  it('adds the column without rewriting the table; old and new writes read back in writesSortKey order', async () => {
+    await runInDurableObject(stub('saver-migration-004'), async (_i, state) => {
+      const db = await DoSqliteDatabase.open(state, 'mig4.db');
+      await previousSchema(db);
+      // A large `writes` table on another thread: a migration that touched
+      // its rows would write every chunk it spans.
+      const bulkRows = 2000;
+      await db.transaction(async () => {
+        for (let n = 0; n < bulkRows; n++) {
+          await db.run(
+            `INSERT INTO writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value) VALUES ('bulk', '', 'c', ?, 0, 'ch', 'json', ?)`,
+            [`task-${n}`, crypto.getRandomValues(new Uint8Array(2048))],
+          );
+        }
+      });
+      const checkpointId = uuid6(1);
+      await oldCheckpoint(db, 't', checkpointId);
+      // Inserted out of key order: the read sorts, it does not keep rowids.
+      await oldWrite(db, checkpointId, 'task-b', 0, 'old-b0');
+      await oldWrite(db, checkpointId, 'task-a', 1, 'old-a1');
+      await oldWrite(db, checkpointId, 'task-a', 0, 'old-a0');
+      const tableChunks = Math.floor(db.fileSize / CHUNK_SIZE);
+      expect(tableChunks).toBeGreaterThan(50);
+
+      const saver = new SqliteSaver(db);
+      const before = db.vfsStats();
+      await saver.setup();
+      const written = db.vfsStats().rowsWritten - before.rowsWritten;
+      // The schema entry and the migration record: a handful of chunks,
+      // however large the table is.
+      expect(written).toBeLessThanOrEqual(3);
+
+      const column = await db.get<{
+        type: string;
+        notnull: number;
+        dflt_value: string;
+      }>(
+        `SELECT type, "notnull", dflt_value FROM pragma_table_info('writes') WHERE name = 'task_path'`,
+      );
+      expect(column).toEqual({ type: 'TEXT', notnull: 1, dflt_value: "''" });
+      const versions = await db.exec<{ version: number }>(
+        'SELECT version FROM schema_migrations ORDER BY version',
+      );
+      expect(versions.map((v) => v.version)).toEqual([1, 2, 3, 4]);
+      expect(
+        await db.exec<{ task_path: string }>(
+          `SELECT DISTINCT task_path FROM writes`,
+        ),
+      ).toEqual([{ task_path: '' }]);
+
+      const writes = (value: string): PendingWrite[] => [['ch', value]];
+      await saver.putWrites(
+        at(checkpointId),
+        [...writes('new-z0'), ...writes('new-z1')],
+        'task-z',
+        '~__pregel_pull, agent',
+      );
+      await saver.putWrites(
+        at(checkpointId),
+        writes('new-c0'),
+        'task-c',
+        '~__pregel_pull, tools',
+      );
+      await saver.putWrites(at(checkpointId), writes('new-m0'), 'task-m');
+
+      // Rows without a path first, by task id then index; then by path,
+      // which outranks the task id ('task-z' before 'task-c').
+      const expected = [
+        ['task-a', 'old-a0'],
+        ['task-a', 'old-a1'],
+        ['task-b', 'old-b0'],
+        ['task-m', 'new-m0'],
+        ['task-z', 'new-z0'],
+        ['task-z', 'new-z1'],
+        ['task-c', 'new-c0'],
+      ];
+      expect(order(await saver.getTuple(at(checkpointId)))).toEqual(expected);
+      const listed: CheckpointTuple[] = [];
+      for await (const tuple of saver.list({
+        configurable: { thread_id: 't' },
+      }))
+        listed.push(tuple);
+      expect(listed.map(order)).toEqual([expected]);
+
+      // A later setup (the next object start) finds nothing to do.
+      await new SqliteSaver(db).setup();
+      expect(
+        (
+          await db.exec<{ version: number }>(
+            'SELECT version FROM schema_migrations ORDER BY version',
+          )
+        ).map((v) => v.version),
+      ).toEqual([1, 2, 3, 4]);
+      expect(
+        await db.get<{ n: number }>(
+          `SELECT count(*) AS n FROM writes WHERE thread_id = 'bulk'`,
+        ),
+      ).toEqual({ n: bulkRows });
+      expect(await integrityOk(db)).toBe(true);
+      await db.close();
+    });
+  });
+
+  it('a new file has the column and returns writes in the order the upstream MemorySaver does', async () => {
+    await runInDurableObject(stub('saver-write-order'), async (_i, state) => {
+      const db = await DoSqliteDatabase.open(state, 'order.db');
+      const saver = new SqliteSaver(db);
+      const memory = new MemorySaver();
+      const cp = checkpoint([]);
+      const meta = { source: 'loop' as const, step: 1, parents: {} };
+      await saver.put(config('t'), cp, meta);
+      await memory.put(config('t'), cp, meta);
+      expect(
+        await db.get<{ dflt_value: string }>(
+          `SELECT dflt_value FROM pragma_table_info('writes') WHERE name = 'task_path'`,
+        ),
+      ).toEqual({ dflt_value: "''" });
+
+      // Regular channels only: for `__error__`, `__interrupt__` and the
+      // other special channels the upstream savers store the negative index
+      // `WRITES_IDX_MAP` gives, this saver the write's position.
+      const calls: Array<[PendingWrite[], string, string | undefined]> = [
+        [
+          [
+            ['ch', 'p2'],
+            ['other', 'p2b'],
+          ],
+          'task-1',
+          '~__pregel_push, 0000000002, 0000000000',
+        ],
+        [[['ch', 'astral']], 'task-2', '~__pregel_push, \u{1F600}'],
+        [[['ch', 'bmp-high']], 'task-3', '~__pregel_push, ￿'],
+        [[['ch', 'input']], 'task-9', undefined],
+        [[['ch', 'pull-b']], 'task-5', '~__pregel_pull, b'],
+        [[['ch', 'pull-a-y']], 'task-y', '~__pregel_pull, a'],
+        [[['ch', 'pull-a-x']], 'task-x', '~__pregel_pull, a'],
+        [[['ch', 'p10']], 'task-4', '~__pregel_push, 0000000010, 0000000000'],
+        [[['ch', 'null-task']], '00000000-0000-0000-0000-000000000000', ''],
+      ];
+      for (const [writes, taskId, taskPath] of calls) {
+        await saver.putWrites(at(cp.id), writes, taskId, taskPath);
+        await memory.putWrites(at(cp.id), writes, taskId, taskPath);
+      }
+      const ours = await saver.getTuple(at(cp.id));
+      const upstream = await memory.getTuple(at(cp.id));
+      expect(ours?.pendingWrites).toEqual(upstream?.pendingWrites);
+      // The code-point order: an astral character sorts after U+FFFF,
+      // where UTF-16 code-unit order would put it before.
+      expect(order(ours)?.map(([, value]) => value)).toEqual([
+        'null-task',
+        'input',
+        'pull-a-x',
+        'pull-a-y',
+        'pull-b',
+        'p2',
+        'p2b',
+        'p10',
+        'bmp-high',
+        'astral',
+      ]);
+      await db.close();
+    });
+  });
+
+  it('loads an AIMessageChunk row the previous versions stored, and stores it as an AIMessage once the reducer has run', async () => {
+    await runInDurableObject(stub('saver-chunk-row'), async (_i, state) => {
+      const db = await DoSqliteDatabase.open(state, 'chunk.db');
+      await previousSchema(db);
+      const checkpointId = uuid6(1);
+      await oldCheckpoint(db, 't', checkpointId);
+      // The row `@langchain/core` 1.1.48 wrote for a streamed reply with a
+      // tool call (`AIMessageChunk.toJSON()` through this saver's kwargs
+      // normalisation), before `messagesStateReducer` turned chunks into
+      // their non-chunk class.
+      const stored = {
+        lc: 1,
+        type: 'constructor',
+        id: ['langchain_core', 'messages', 'AIMessageChunk'],
+        kwargs: {
+          content: 'Let me check.',
+          additional_kwargs: {
+            msgFromMatrixRoom: false,
+            timestamp: '2026-10-01T00:00:00.000Z',
+            oracleName: 'IXO Oracle',
+            reasoning: { lc: 2, type: 'undefined' },
+            reasoningDetails: { lc: 2, type: 'undefined' },
+          },
+          response_metadata: { model_name: 'm' },
+          tool_call_chunks: [
+            {
+              name: 'get_weather',
+              args: '{"city":"Tbilisi"}',
+              id: 'call-1',
+              index: 0,
+              type: 'tool_call_chunk',
+            },
+          ],
+          tool_calls: [
+            {
+              name: 'get_weather',
+              args: { city: 'Tbilisi' },
+              id: 'call-1',
+              type: 'tool_call',
+            },
+          ],
+          id: 'run-1',
+          usage_metadata: {
+            input_tokens: 3,
+            output_tokens: 4,
+            total_tokens: 7,
+            input_token_details: {},
+            output_token_details: {},
+          },
+          invalid_tool_calls: [],
+        },
+      };
+      await db.run(
+        `INSERT INTO messages (thread_id, checkpoint_ns, checkpoint_id, message_id, message_type, message_content, message, created_at) VALUES ('t', '', ?, 'run-1', 'ai', 'Let me check.', ?, '2026-10-01T00:00:00.000Z')`,
+        [checkpointId, encoder.encode(JSON.stringify(stored))],
+      );
+
+      const saver = new SqliteSaver(db);
+      const loaded = await saver.getTuple(at(checkpointId));
+      const messages = loaded?.checkpoint.channel_values['messages'];
+      expect(Array.isArray(messages)).toBe(true);
+      const list: BaseMessage[] = Array.isArray(messages) ? messages : [];
+      expect(list[0]).toBeInstanceOf(AIMessageChunk);
+      const toolCalls = [
+        {
+          name: 'get_weather',
+          args: { city: 'Tbilisi' },
+          id: 'call-1',
+          type: 'tool_call',
+        },
+      ];
+      expect(Reflect.get(list[0]!, 'tool_calls')).toEqual(toolCalls);
+
+      const reduced = messagesStateReducer(list, [
+        human('h-2', 'thanks', '2026-10-01T00:01:00.000Z'),
+      ]);
+      expect(reduced[0]).toBeInstanceOf(AIMessage);
+      expect(reduced[0]).not.toBeInstanceOf(AIMessageChunk);
+      const next: Checkpoint = {
+        ...emptyCheckpoint(),
+        id: uuid6(2),
+        channel_values: { messages: reduced },
+      };
+      await saver.put(at(checkpointId), next, {
+        source: 'loop',
+        step: 2,
+        parents: {},
+      });
+
+      const reread = await saver.getTuple(config('t'));
+      expect(reread?.checkpoint.id).toBe(next.id);
+      const after = reread?.checkpoint.channel_values['messages'];
+      const afterList: BaseMessage[] = Array.isArray(after) ? after : [];
+      expect(afterList.map((m) => m.id)).toEqual(['run-1', 'h-2']);
+      const ai0 = afterList[0];
+      expect(ai0).toBeInstanceOf(AIMessage);
+      expect(ai0).not.toBeInstanceOf(AIMessageChunk);
+      expect(ai0?.content).toBe('Let me check.');
+      expect(Reflect.get(ai0!, 'tool_calls')).toEqual(toolCalls);
+      expect(Reflect.get(ai0!, 'usage_metadata')).toEqual(
+        stored.kwargs.usage_metadata,
+      );
+      expect(ai0?.additional_kwargs.timestamp).toBe('2026-10-01T00:00:00.000Z');
+      const row = await db.get<{ message: Uint8Array }>(
+        `SELECT message FROM messages WHERE message_id = 'run-1'`,
+      );
+      const text = await readBlobText(row!.message);
+      expect(JSON.parse(text).id).toEqual([
+        'langchain_core',
+        'messages',
+        'AIMessage',
+      ]);
+      expect(text).not.toContain('tool_call_chunks');
+      await db.close();
+    });
   });
 });

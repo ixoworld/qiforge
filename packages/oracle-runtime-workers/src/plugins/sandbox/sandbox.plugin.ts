@@ -1,5 +1,6 @@
-import { type ClientConfig } from '@langchain/mcp-adapters';
+import { type MCPAdapterConfig } from '@langchain/mcp-adapters';
 import { withCallTimeout } from '../mcp-call-timeout';
+import { mcpAdapterConfig } from '../mcp-tool-adapter';
 import { z } from 'zod';
 import { deliversAttachments } from '../../delivery/prompt';
 import { OraclePlugin, type PluginEnv } from '../../plugin-api/oracle-plugin';
@@ -177,7 +178,7 @@ export interface SandboxMcpTool {
 }
 
 export type SandboxMcpClientFactory = (
-  config: ClientConfig,
+  config: MCPAdapterConfig,
 ) => SandboxMcpClientLike;
 
 /**
@@ -196,7 +197,7 @@ export interface SandboxPluginOptions {
   /**
    * Override the MCP-client constructor. Tests inject a stub so they can
    * intercept the headers the plugin sends and the tools it gets back without
-   * standing up a real `MultiServerMCPClient`.
+   * standing up a real `MCPAdapter`.
    */
   mcpClientFactory?: SandboxMcpClientFactory;
   /**
@@ -277,8 +278,8 @@ export class SandboxPlugin extends OraclePlugin {
     super();
     this.authBuilder = opts.authBuilder ?? createDefaultAuthBuilder();
     // Shared with the bridge: a cast-free wrapper that keeps `close()`
-    // reachable — the raw `MultiServerMCPClient` cast this used to be made
-    // every connect unclosable.
+    // reachable — a cast of the raw adapter client made every connect
+    // unclosable.
     this.mcpClientFactory =
       opts.mcpClientFactory ?? defaultSandboxMcpClientFactory;
     this.includeOracleManagementTools =
@@ -404,17 +405,13 @@ export class SandboxPlugin extends OraclePlugin {
       return [];
     }
 
-    const client = this.mcpClientFactory({
-      mcpServers: {
-        sandbox: {
-          type: 'http',
-          url: sandboxMcpUrl,
-          transport: 'http',
-          headers,
-        },
-      },
-      useStandardContentBlocks: true,
-    });
+    const client = this.mcpClientFactory(
+      mcpAdapterConfig('sandbox', {
+        url: sandboxMcpUrl,
+        headers,
+        toolNames: 'bare',
+      }),
+    );
 
     // The cold path only needs the definitions: close the listing client and
     // bind lazy tools, so the first actual invocation reconnects exactly like
@@ -563,17 +560,13 @@ export class SandboxPlugin extends OraclePlugin {
       );
     }
 
-    const client = this.mcpClientFactory({
-      mcpServers: {
-        sandbox: {
-          type: 'http',
-          url: sandboxMcpUrl,
-          transport: 'http',
-          headers,
-        },
-      },
-      useStandardContentBlocks: true,
-    });
+    const client = this.mcpClientFactory(
+      mcpAdapterConfig('sandbox', {
+        url: sandboxMcpUrl,
+        headers,
+        toolNames: 'bare',
+      }),
+    );
     try {
       const tools = await client.getTools();
       return { client, tools };

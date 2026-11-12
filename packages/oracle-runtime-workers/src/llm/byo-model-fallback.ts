@@ -2,10 +2,12 @@
  * Call-time fallback for a BYO model the user's provider refuses.
  *
  * The pre-turn checks (`WorkersByoService.resolveForTurn`) cannot know
- * whether the provider serves the selected model: the ChatGPT backend answers
- * an immediate `400` with an empty body for a model id the subscription does
- * not offer, and only the first real request finds out. This wrapper stands
- * in for the BYO chat model: when its call fails that way before the
+ * whether the provider serves the selected model (the account's model
+ * listing, `byo-model-discovery.ts`, is advisory and can lag), so only the
+ * first real request finds out. This wrapper stands in for the BYO chat
+ * model: when its call fails with a refusal that names the model
+ * (`isModelUnavailableError`: an explicit code or text, never a bare 400 or
+ * 404) before the
  * provider produced any output, it announces the fallback once (an
  * `on_custom_event` named `byo_fallback`, which the SSE producer writes as
  * the same `error`-channel notice the pre-turn fallbacks send) and answers
@@ -46,6 +48,7 @@ import {
   classifyLlmError,
   isModelUnavailableError,
   markPlatformFallbackFailure,
+  upstreamEvidence,
 } from './provider-error';
 
 /** Turn-scoped record of the BYO model ids the provider refused. */
@@ -175,7 +178,10 @@ export class ByoModelFallbackChatModel extends BaseChatModel<ByoModelFallbackCal
     );
     await runManager?.handleCustomEvent(
       BYO_FALLBACK_KIND,
-      buildByoFallbackNotice('model_unavailable', provider, { modelId }),
+      buildByoFallbackNotice('model_unavailable', provider, {
+        modelId,
+        ...upstreamEvidence(error),
+      }),
     );
   }
 

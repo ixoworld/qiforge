@@ -16,20 +16,20 @@ const clientRecords: Array<{ config: unknown }> = [];
 let upstreamTools: FakeUpstreamTool[] = [];
 
 vi.mock('@langchain/mcp-adapters', () => {
-  class MultiServerMCPClient {
+  class MCPAdapter {
     readonly config: unknown;
     constructor(config: unknown) {
       this.config = config;
       clientRecords.push(this);
     }
-    async getTools(): Promise<FakeUpstreamTool[]> {
+    async listTools(): Promise<FakeUpstreamTool[]> {
       return upstreamTools;
     }
     async close(): Promise<void> {
       // listing clients stay open in the firecrawl factory (cached)
     }
   }
-  return { MultiServerMCPClient };
+  return { MCPAdapter };
 });
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -37,10 +37,10 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 }
 
 function firecrawlServerOf(config: unknown): Record<string, unknown> {
-  if (!isRecord(config) || !isRecord(config.mcpServers)) {
+  if (!isRecord(config) || !isRecord(config.servers)) {
     throw new Error('mock client received a malformed config');
   }
-  const server = config.mcpServers.firecrawl;
+  const server = config.servers.firecrawl;
   if (!isRecord(server)) throw new Error('no firecrawl server entry');
   return server;
 }

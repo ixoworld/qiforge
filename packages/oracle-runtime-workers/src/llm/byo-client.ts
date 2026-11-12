@@ -3,29 +3,43 @@
  * Workers port of the Node runtime's `llm/byo-client.ts`. Given a resolved
  * user credential and a provider-native model id, returns a LangChain chat
  * model wired to the user's own account. Deliberately does NOT reuse the
- * OpenRouter factory path — `require_parameters`, `models` fallbacks and the
- * `reasoning` modelKwargs block are OpenRouter wire format and break direct
- * provider APIs.
+ * OpenRouter factory path — `include_reasoning`, `models` fallbacks,
+ * `provider` routing and the `reasoning` modelKwargs block are OpenRouter
+ * wire format and break direct provider APIs.
+ *
+ * The API-key providers are built on `ChatOpenAICompletions`, which always
+ * calls Chat Completions: `ChatOpenAI` would send any model id containing
+ * `gpt-5.6` to the Responses API. Only the `chatgpt` branch, whose backend
+ * speaks nothing else, uses the Responses API.
  *
  * One Workers-specific difference from Node: the `anthropic` branch speaks to
  * Anthropic's official OpenAI SDK-compatibility endpoint
- * (`https://api.anthropic.com/v1/`) through `ChatOpenAI` instead of
+ * (`https://api.anthropic.com/v1/`) through `ChatOpenAICompletions` instead of
  * `ChatAnthropic` — `@langchain/anthropic` is not part of this package's
  * dependency set. Model ids and the user's API key are unchanged.
  */
 
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { ChatOpenAI } from '@langchain/openai';
+import { ChatOpenAI, ChatOpenAICompletions } from '@langchain/openai';
 import type { ChatOpenAIFields, Logger } from '../plugin-api/types';
 import { streamLivenessFromEnv, type ProviderModelRole } from '../core/llm';
 import type { ByoCredential } from './byo-catalog';
+import { shortenCallIds } from './byo-call-ids';
 import {
+  asFetch,
   livenessFetchFor,
   livenessModelFields,
   type StreamLivenessSettings,
 } from './stream-liveness';
 
-/** OpenAI-compatible base URLs for the API-key providers that need one. */
+/**
+ * Base URLs of the API-key providers. Every lane names its own: with no
+ * `configuration.baseURL`, `@langchain/openai` and the `openai` SDK take one
+ * from `OPENAI_API_BASE`, `OPENAI_BASE_URL` or `LANGSMITH_GATEWAY` in
+ * `process.env` (which workerd fills from vars and secrets), and would send
+ * the user's own key there.
+ */
+export const OPENAI_API_BASE_URL = 'https://api.openai.com/v1';
 export const DEEPSEEK_BASE_URL = 'https://api.deepseek.com/v1';
 export const GEMINI_OPENAI_COMPAT_BASE_URL =
   'https://generativelanguage.googleapis.com/v1beta/openai/';
@@ -98,15 +112,40 @@ export function chatGptBackendHeaders(
 const CHATGPT_ORIGINATOR = 'codex_cli_rs';
 
 /**
+ * The ChatGPT lane's `fetch`. It adds `headers` to every request: they are
+ * set here, not in the model's `configuration.defaultHeaders`, because a
+ * traced run uploads the model's constructor arguments (`serialized`), and
+ * those would carry the proxy's shared secret, the account id and the
+ * session id to LangSmith; a function is not serialized.
+ *
  * The ChatGPT backend reports request errors with an empty body more often
  * than not, which the OpenAI SDK surfaces as an opaque "<status> status code
  * (no body)". Log the status and whatever body text exists (never the
  * request, which carries the bearer token) before handing the response to
  * the SDK. Success responses pass through untouched.
  */
-function chatGptDiagnosticFetch(logger: Logger): typeof fetch {
+function chatGptBackendFetch(
+  logger: Logger,
+  headers: Record<string, string>,
+  next: typeof fetch = (input, init) => fetch(input, init),
+): typeof fetch {
   return async (input, init) => {
-    const response = await fetch(input, init);
+    const requestHeaders = new Headers(
+      init?.headers ?? (input instanceof Request ? input.headers : undefined),
+    );
+    for (const [name, value] of Object.entries(headers))
+      requestHeaders.set(name, value);
+    // The Responses API refuses a `call_id` over 64 characters; stored
+    // history can hold longer ones (`byo-call-ids.ts`).
+    const body =
+      typeof init?.body === 'string'
+        ? await shortenCallIds(init.body)
+        : init?.body;
+    const response = await next(input, {
+      ...init,
+      headers: requestHeaders,
+      ...(body !== undefined && { body }),
+    });
     if (!response.ok) {
       let body = '';
       try {
@@ -179,18 +218,20 @@ export function createByoChatModel(
   // its idle budget is longer than the platform lane's.
   const liveness = args.streamLiveness ?? streamLivenessFromEnv({}, 'byo');
   const callerConfiguration = asRecord(params?.configuration);
+  // The caller's own `configuration.fetch` is the innermost fetch: under the
+  // guard directly, or under `base` when the lane has one (which then calls
+  // it).
   const guardedFetch = (base?: typeof fetch): typeof fetch =>
     livenessFetchFor({
       settings: liveness,
       label: `byo:${credential.provider} ${String(role)} ${modelId}`,
       logger,
-      callerFetch: callerConfiguration.fetch,
-      ...(base ? { base } : {}),
+      ...(base ? { base } : { callerFetch: callerConfiguration.fetch }),
     });
 
   switch (credential.provider) {
     case 'openai':
-      return new ChatOpenAI({
+      return new ChatOpenAICompletions({
         __includeRawResponse: true,
         maxRetries,
         ...livenessModelFields(liveness),
@@ -200,13 +241,14 @@ export function createByoChatModel(
         temperature: undefined,
         topP: undefined,
         configuration: {
+          baseURL: OPENAI_API_BASE_URL,
           ...callerConfiguration,
           fetch: guardedFetch(),
         },
       });
 
     case 'deepseek':
-      return new ChatOpenAI({
+      return new ChatOpenAICompletions({
         temperature,
         __includeRawResponse: true,
         maxRetries,
@@ -222,7 +264,7 @@ export function createByoChatModel(
       });
 
     case 'gemini':
-      return new ChatOpenAI({
+      return new ChatOpenAICompletions({
         temperature,
         __includeRawResponse: true,
         maxRetries,
@@ -240,7 +282,7 @@ export function createByoChatModel(
     case 'anthropic':
       // Claude 5 family: sampling params are rejected — force undefined
       // after the spreads, exactly like the openai/chatgpt branches.
-      return new ChatOpenAI({
+      return new ChatOpenAICompletions({
         __includeRawResponse: true,
         maxRetries,
         ...livenessModelFields(liveness),
@@ -274,11 +316,15 @@ export function createByoChatModel(
         useResponsesApi: true,
         streaming: true,
         // Zero-data-retention mode matches the backend's mandatory
-        // `store: false`: prior-turn reasoning is only replayed when it
-        // carries `encrypted_content`, and raw `responseMetadata.output`
-        // items (which the stateless backend cannot resolve) are never
-        // echoed back. This also keeps foreign-provider reasoning kwargs in
-        // checkpointed history out of the request.
+        // `store: false`. A prior assistant message that carries the
+        // response's raw `response_metadata.output` items is replayed as
+        // those items, ids included (reasoning `rs_…` with its
+        // `encrypted_content`, message `msg_…`, function call `fc_…`),
+        // through the openai SDK's `toResponseInputItems`; one without them
+        // is rebuilt from its content and tool calls, reasoning only when it
+        // carries `encrypted_content` and message / function-call items
+        // without ids. Foreign-provider messages carry no such output, so
+        // their reasoning kwargs stay out of the request.
         zdrEnabled: true,
         // Effort + human-readable reasoning summaries, exactly the pair the
         // Codex clients send — summaries feed the portal's thinking stream.
@@ -293,14 +339,19 @@ export function createByoChatModel(
         configuration: {
           baseURL: backend.baseUrl,
           ...callerConfiguration,
-          fetch: guardedFetch(chatGptDiagnosticFetch(logger)),
-          defaultHeaders: {
-            ...chatGptBackendHeaders(backend),
-            'ChatGPT-Account-ID': credential.oauth.accountId,
-            originator: CHATGPT_ORIGINATOR,
-            'session-id': sessionId,
-            session_id: sessionId,
-          },
+          fetch: guardedFetch(
+            chatGptBackendFetch(
+              logger,
+              {
+                ...chatGptBackendHeaders(backend),
+                'ChatGPT-Account-ID': credential.oauth.accountId,
+                originator: CHATGPT_ORIGINATOR,
+                'session-id': sessionId,
+                session_id: sessionId,
+              },
+              asFetch(callerConfiguration.fetch),
+            ),
+          ),
         },
         modelKwargs: {
           // Stateless mode is mandatory; encrypted reasoning content rides

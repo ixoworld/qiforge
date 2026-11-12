@@ -85,11 +85,21 @@ function stalledFetch(): typeof fetch {
     });
 }
 
+/** A discovery fetch that cannot reach any provider: the curated list stands. */
+const unreachableDiscovery: typeof fetch = async () => {
+  throw new Error('offline');
+};
+
 function makeService(
   secrets: ByoSecretsBackend,
-  opts?: { enabled?: boolean; roomId?: string | null },
+  opts?: {
+    enabled?: boolean;
+    roomId?: string | null;
+    discoveryFetch?: typeof fetch;
+  },
 ): WorkersByoService {
   return new WorkersByoService({
+    discoveryFetch: opts?.discoveryFetch ?? unreachableDiscovery,
     // Tests never touch the network: the reachability probe answers
     // "reachable" unless a test injects its own probeFetch.
     probeFetch: async () => json404(),
@@ -186,6 +196,136 @@ describe('WorkersByoService', () => {
     const openai = status.providers.find((p) => p.provider === 'openai')!;
     expect(openai.connected).toBe(false);
     expect(openai.models).toEqual([]);
+  });
+
+  describe('account model discovery', () => {
+    const accountList =
+      (...ids: string[]): typeof fetch =>
+      async () =>
+        Response.json({ data: ids.map((id) => ({ id })) });
+
+    it('offers only the curated models the account has, and says the list is the account’s', async () => {
+      const secrets = makeSecrets();
+      secrets.values.set(BYO_SECRET_NAMES.openai, 'sk-user');
+      const service = makeService(secrets, {
+        discoveryFetch: accountList('gpt-5.6-luna', 'gpt-5.6-terra', 'other'),
+      });
+
+      const status = await service.status(DID);
+      const openai = status.providers.find((p) => p.provider === 'openai')!;
+      expect(openai.modelSource).toBe('account');
+      expect(openai.modelSourceNote).toBeUndefined();
+      expect(openai.models.map((m) => m.id)).toEqual([
+        'byo:openai/gpt-5.6-luna',
+        'byo:openai/gpt-5.6-terra',
+      ]);
+      expect(openai.defaultModelId).toBe('byo:openai/gpt-5.6-terra');
+    });
+
+    it('moves the preselect to a model the account has', async () => {
+      const secrets = makeSecrets();
+      secrets.values.set(BYO_SECRET_NAMES.openai, 'sk-user');
+      const service = makeService(secrets, {
+        discoveryFetch: accountList('gpt-5.6-luna'),
+      });
+      const openai = (await service.status(DID)).providers.find(
+        (p) => p.provider === 'openai',
+      )!;
+      expect(openai.defaultModelId).toBe('byo:openai/gpt-5.6-luna');
+    });
+
+    it('shows no models for an account whose list has none of them', async () => {
+      const secrets = makeSecrets();
+      secrets.values.set(BYO_SECRET_NAMES.openai, 'sk-user');
+      const service = makeService(secrets, {
+        discoveryFetch: accountList('something-else'),
+      });
+      const openai = (await service.status(DID)).providers.find(
+        (p) => p.provider === 'openai',
+      )!;
+      expect(openai.modelSource).toBe('account');
+      expect(openai.models).toEqual([]);
+    });
+
+    it('falls back to the curated list and says it was not checked when the provider cannot be asked', async () => {
+      const secrets = makeSecrets();
+      secrets.values.set(BYO_SECRET_NAMES.openai, 'sk-user');
+      const service = makeService(secrets);
+      const openai = (await service.status(DID)).providers.find(
+        (p) => p.provider === 'openai',
+      )!;
+      expect(openai.modelSource).toBe('catalog');
+      expect(openai.modelSourceNote).toBe(
+        'Not checked against your account: the model listing could not be reached: offline.',
+      );
+      expect(openai.models).toHaveLength(3);
+    });
+
+    it('says so for a provider with no listing', async () => {
+      const secrets = makeSecrets();
+      secrets.values.set(BYO_SECRET_NAMES.deepseek, 'sk-ds');
+      const service = makeService(secrets);
+      const deepseek = (await service.status(DID)).providers.find(
+        (p) => p.provider === 'deepseek',
+      )!;
+      expect(deepseek.modelSource).toBe('catalog');
+      expect(deepseek.modelSourceNote).toContain('Not checked');
+    });
+
+    it('asks the provider once, keeps the answer with the user, and asks again on refresh', async () => {
+      const secrets = makeSecrets();
+      secrets.values.set(BYO_SECRET_NAMES.openai, 'sk-user');
+      const calls = vi.fn(accountList('gpt-5.6-luna'));
+      const service = makeService(secrets, { discoveryFetch: calls });
+      await service.status(DID);
+      await service.status(DID);
+      expect(calls).toHaveBeenCalledTimes(1);
+      await service.status(DID, { refresh: true });
+      expect(calls).toHaveBeenCalledTimes(2);
+    });
+
+    it('lists a new key’s models when it is stored and forgets them when it is removed', async () => {
+      const secrets = makeSecrets();
+      const calls = vi.fn(accountList('gpt-5.6-sol'));
+      const service = makeService(secrets, { discoveryFetch: calls });
+      await service.storeApiKey(DID, 'openai', 'sk-new');
+      expect(calls).toHaveBeenCalledTimes(1);
+      const first = (await service.status(DID)).providers.find(
+        (p) => p.provider === 'openai',
+      )!;
+      expect(first.models.map((m) => m.id)).toEqual(['byo:openai/gpt-5.6-sol']);
+      expect(calls).toHaveBeenCalledTimes(1);
+
+      await service.deleteCredential(DID, 'openai');
+      await service.storeApiKey(DID, 'openai', 'sk-other');
+      expect(calls).toHaveBeenCalledTimes(2);
+    });
+
+    it('lists a ChatGPT subscription’s models from the backend', async () => {
+      const secrets = makeSecrets();
+      secrets.values.set(
+        BYO_SECRET_NAMES.chatgpt,
+        JSON.stringify(freshTokens()),
+      );
+      const seen: string[] = [];
+      const service = makeService(secrets, {
+        discoveryFetch: async (input) => {
+          seen.push(String(input));
+          return Response.json({
+            models: [{ slug: 'gpt-5.6-luna' }, { slug: 'gpt-5.6-terra' }],
+          });
+        },
+      });
+      const chatgpt = (await service.status(DID)).providers.find(
+        (p) => p.provider === 'chatgpt',
+      )!;
+      expect(chatgpt.modelSource).toBe('account');
+      expect(chatgpt.models.map((m) => m.id)).toEqual([
+        'byo:chatgpt/gpt-5.6-luna',
+        'byo:chatgpt/gpt-5.6-terra',
+      ]);
+      expect(seen[0]).toMatch(/\/models\?client_version=/);
+    });
   });
 
   it('storeApiKey / deleteCredential write through the secrets backend', async () => {

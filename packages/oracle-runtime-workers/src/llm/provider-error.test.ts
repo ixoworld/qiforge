@@ -138,14 +138,27 @@ describe('isModelUnavailableError', () => {
   const httpError = (status: number, message: string, extra = {}) =>
     Object.assign(new Error(message), { status, ...extra });
 
-  it('takes the ChatGPT backend’s empty 400 as a refused model', () => {
+  it('does not take a bare 400 or 404 as a refused model', () => {
     expect(
       isModelUnavailableError(httpError(400, '400 status code (no body)')),
-    ).toBe(true);
+    ).toBe(false);
     // The status recovered from the message alone, as the SSE detail shows it.
     expect(
       isModelUnavailableError(new Error('400 status code (no body)')),
-    ).toBe(true);
+    ).toBe(false);
+    expect(
+      isModelUnavailableError(httpError(404, '404 status code (no body)')),
+    ).toBe(false);
+    // A 400 about another field says nothing about the model.
+    expect(
+      isModelUnavailableError(
+        httpError(
+          400,
+          "400 Invalid 'input[10].call_id': string too long. Expected a string with maximum length 64",
+          { code: 'string_above_max_length' },
+        ),
+      ),
+    ).toBe(false);
   });
 
   it('takes a 404 model_not_found and the providers’ model texts', () => {

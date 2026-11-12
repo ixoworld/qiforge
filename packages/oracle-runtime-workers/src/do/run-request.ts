@@ -57,10 +57,11 @@ export interface ClientSurfaceState {
  * rule: what the body carries, else what the thread's checkpoint holds.
  *
  * `state` feeds the agent build (the portal / agui plugins read it from
- * `history.state`, so it must be complete). `input` is what the graph input
- * writes back to the checkpoint: only what THIS body declared, so a turn
- * without a catalogue (a resumed attempt, a Matrix turn, a task run) never
- * erases the one the client sent earlier.
+ * `history.state`, so it must be complete). `input` goes into the graph
+ * input: only what THIS body declared. The agent's state declares neither
+ * field, so no checkpoint holds a catalogue: a turn without one (a Matrix
+ * turn, a task run) has none, and a resumed attempt gets its catalogue from
+ * the run row.
  */
 export function clientSurfaceFor(
   body: ClientSurfaceBody,

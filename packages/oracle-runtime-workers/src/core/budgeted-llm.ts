@@ -313,9 +313,10 @@ export function budgetedLlm(
     dispose: () => callback.dispose(),
     get(role: ModelRole, params?: ChatOpenAIFields): BaseChatModel {
       // The role rides on the model's run metadata, for the call trace. It
-      // goes in through the constructor params: `ChatOpenAI.bindTools`
-      // rebuilds the model from them, dropping anything set afterwards. The
-      // instance is stamped too, for adapters that ignore params.
+      // goes in through the constructor params: `ChatOpenAI.bindTools` (the
+      // ChatGPT lane) rebuilds the model from them, dropping anything set
+      // afterwards. The instance is stamped too, for adapters that ignore
+      // params.
       const callerMetadata: unknown = params?.metadata;
       const metadata = {
         ...(callerMetadata && typeof callerMetadata === 'object'

@@ -490,13 +490,17 @@ export function byoModelForRole(
  * badge and cost label mirror the platform catalog so BYO rows read the same
  * (the Workers catalog carries no pricing — the user pays their provider
  * directly); the client marks BYO-ness itself from the `byo:` id namespace.
+ * `accountModels` holds, per provider, the model ids the provider's own
+ * listing said the account can use; a provider with an entry lists only the
+ * curated models in it.
  */
 export function buildByoModelListing(
   connected: readonly ByoProvider[],
+  accountModels: Partial<Record<ByoProvider, readonly string[]>> = {},
 ): ModelListItem[] {
   const items: ModelListItem[] = [];
   for (const provider of connected) {
-    for (const entry of BYO_PROVIDER_MODELS[provider]) {
+    for (const entry of curatedModelsFor(provider, accountModels[provider])) {
       items.push({
         id: toByoModelId(provider, entry.id),
         label: entry.label,
@@ -519,6 +523,20 @@ export function buildByoModelListing(
     }
   }
   return items;
+}
+
+/**
+ * The curated models of a provider, narrowed to the ones the account's own
+ * model listing contains when one is known (`accountModelIds`). Without a
+ * listing the whole curated list stands: the caller says so to the user.
+ */
+export function curatedModelsFor(
+  provider: ByoProvider,
+  accountModelIds?: readonly string[],
+): readonly ByoModelEntry[] {
+  const curated = BYO_PROVIDER_MODELS[provider];
+  if (accountModelIds === undefined) return curated;
+  return curated.filter((entry) => accountModelIds.includes(entry.id));
 }
 
 function byoFamily(provider: ByoProvider): ModelListItem['family'] {

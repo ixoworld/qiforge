@@ -69,7 +69,7 @@ export const createGroupChatMiddleware = (
         const roomId = ctx.session.roomId;
 
         const messages: BaseMessage[] = Array.isArray(state.messages)
-          ? (state.messages as BaseMessage[])
+          ? state.messages
           : [];
         const lastHuman = findLastHuman(messages);
         if (!lastHuman) return;

@@ -210,10 +210,11 @@ export async function getSandboxBridge(
         url: sandboxMcpUrl,
         transport: 'http',
         headers,
+        mode: 'legacy',
       },
     },
     defaultToolTimeout: SANDBOX_MCP_TIMEOUT_MS,
-    useStandardContentBlocks: true,
+    prefixToolNameWithServerName: false,
   });
 
   const close = async (): Promise<void> => {

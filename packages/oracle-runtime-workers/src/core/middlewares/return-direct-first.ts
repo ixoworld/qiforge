@@ -1,9 +1,9 @@
 /**
  * LangChain's agent loop exits when the LAST tool result of a step comes
- * from a return-direct tool. A model that calls one alongside other tools
- * would then never see those other results. This middleware moves the
- * return-direct call to the front of such a step, so the loop continues and
- * the model answers with every result in view.
+ * from a return-direct tool and is not an error. A model that calls one
+ * alongside other tools would then never see those other results. This
+ * middleware moves the return-direct call to the front of such a step, so
+ * the loop continues and the model answers with every result in view.
  */
 import { AIMessage, isAIMessage } from '@langchain/core/messages';
 import { type AgentMiddleware, createMiddleware } from 'langchain';

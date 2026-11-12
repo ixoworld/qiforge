@@ -67,10 +67,8 @@ export const createSafetyGuardrailMiddleware = (
     afterAgent: {
       canJumpTo: ['end'],
       hook: async (state) => {
-        if (!state.messages || state.messages.length === 0) return;
-
-        const lastMessage = state.messages[state.messages.length - 1];
-        if (lastMessage.type !== 'ai') return;
+        const lastMessage = state.messages?.at(-1);
+        if (!lastMessage || lastMessage.type !== 'ai') return;
 
         const aiMessage = lastMessage as AIMessage;
         if (aiMessage.tool_calls && aiMessage.tool_calls.length > 0) return;

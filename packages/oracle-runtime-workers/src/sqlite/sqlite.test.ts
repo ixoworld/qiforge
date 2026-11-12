@@ -919,12 +919,12 @@ describe('migration from the Node runtime', () => {
       ).toBe(2);
 
       // schema_migrations already records migration 001 → not re-applied;
-      // 002 (dropping two unused message indexes) and 003 (the attachment
-      // sweep table) run once.
+      // 002 (dropping two unused message indexes), 003 (the attachment
+      // sweep table) and 004 (`writes.task_path`) run once.
       const applied = await db.exec<{ version: number }>(
         'SELECT version FROM schema_migrations ORDER BY version',
       );
-      expect(applied.map((r) => r.version)).toEqual([1, 2, 3]);
+      expect(applied.map((r) => r.version)).toEqual([1, 2, 3, 4]);
       const dropped = await db.exec<{ name: string }>(
         "SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('idx_messages_thread_id', 'idx_messages_checkpoint_id')",
       );

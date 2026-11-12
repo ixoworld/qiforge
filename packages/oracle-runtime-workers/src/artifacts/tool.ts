@@ -88,12 +88,29 @@ export function buildCreateArtifactTool(
   return tool(
     async (rawArgs, ctx) => {
       const args = CreateArtifactArgs.parse(rawArgs);
-      const ref = await create({
+      const input = {
         source: ctx.toolCallId ?? crypto.randomUUID(),
         title: args.title,
         content: args.content,
-      });
-      return { ok: true, ...ref };
+      };
+      // A store failure is a result, not a thrown error: a return-direct
+      // tool that throws gives the model another call, and the user would
+      // then get `message` twice. The store is tried twice (it keys the
+      // document on `source`, so the second attempt cannot make a second
+      // one); after that the reply ends here, with the message and the
+      // question and no document.
+      let reason = '';
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          return { ok: true, ...(await create(input)) };
+        } catch (error) {
+          reason = error instanceof Error ? error.message : String(error);
+        }
+      }
+      ctx.logger.warn(
+        `create_artifact could not store the document: ${reason}`,
+      );
+      return { ok: false, error: 'The document could not be stored.' };
     },
     {
       name: CREATE_ARTIFACT_TOOL,

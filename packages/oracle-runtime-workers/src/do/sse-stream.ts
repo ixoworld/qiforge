@@ -166,13 +166,15 @@ interface ActionCallPayload {
   error?: string;
 }
 
+/**
+ * A tool card's arguments: `on_tool_start`'s `data.input`, which core hands
+ * the tracer as the tool call's own arguments object (a tool invoked with a
+ * plain string arrives as `{ input: <string> }`). Nothing is unwrapped, so a
+ * tool whose own argument is named `input` keeps it.
+ */
 function extractToolArgs(input: unknown): Record<string, unknown> {
-  if (input && typeof input === 'object') {
-    const maybe = input as { input?: unknown };
-    if (maybe.input && typeof maybe.input === 'object')
-      return maybe.input as Record<string, unknown>;
+  if (input && typeof input === 'object' && !Array.isArray(input))
     return input as Record<string, unknown>;
-  }
   return {};
 }
 
