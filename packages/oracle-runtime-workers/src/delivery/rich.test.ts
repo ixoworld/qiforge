@@ -23,6 +23,7 @@ import {
   displayLink,
   linkButtonText,
   safeHttpsUrl,
+  textHasLink,
   parseChoiceId,
   renderCapabilityOf,
   richPartsOf,
@@ -772,6 +773,92 @@ describe('offer_choices: one chance to shorten titles', () => {
         other,
       ]),
     ).toBeUndefined();
+  });
+});
+
+describe('a link already in the text is not repeated', () => {
+  const ctx = (id: string) => makeRuntimeContext({ toolCallId: id });
+
+  it('textHasLink matches the link, its href and a sentence end, not a longer link', () => {
+    expect(
+      textHasLink('Open this link: https://example.com', 'https://example.com'),
+    ).toBe(true);
+    expect(
+      textHasLink(
+        'Open this link: https://example.com',
+        'https://example.com/',
+      ),
+    ).toBe(true);
+    expect(
+      textHasLink('Go to https://example.com.', 'https://example.com'),
+    ).toBe(true);
+    expect(
+      textHasLink('See https://example.com/b', 'https://example.com'),
+    ).toBe(false);
+    expect(textHasLink('No link here.', 'https://example.com')).toBe(false);
+  });
+
+  it('the text version of a link button adds no second line for a link the body holds', () => {
+    expect(
+      linkButtonText({
+        body: 'Open this link: https://example.com',
+        url: 'https://example.com',
+        label: 'open',
+      }),
+    ).toBe('Open this link: https://example.com');
+    const card: CardItem = {
+      title: 'One',
+      body: 'More at https://yoma.world/o/1',
+      imageUrl: 'https://img.example/1.jpg',
+      link: { url: 'https://yoma.world/o/1', label: 'view' },
+    };
+    expect(cardsText('Look:', [card])).toBe(
+      'Look:\n\n1. **One**\nMore at https://yoma.world/o/1\nImage: https://img.example/1.jpg',
+    );
+  });
+
+  it('send_link_button sends a call back once when its text holds the link', async () => {
+    const tool = buildRichMessageTools(ALL).find(
+      (t) => t.tool.name === SEND_LINK_BUTTON_TOOL,
+    )!.tool;
+    const args = {
+      text: 'Open this link: https://example.com',
+      url: 'https://example.com',
+      label: 'open',
+    };
+    expect(await tool.handler(args, ctx('l1'))).toContain(
+      'Leave the link out of text',
+    );
+    const second = toolMessage(await tool.handler(args, ctx('l2')));
+    // Not an approved site: text, with the link once.
+    expect(JSON.parse(String(second.content))).toMatchObject({
+      format: 'text',
+      shown: 'Open this link: https://example.com',
+    });
+  });
+
+  it('send_cards sends a call back once when a card text or the intro holds its link', async () => {
+    const tool = buildRichMessageTools(ALL).find(
+      (t) => t.tool.name === SEND_CARDS_TOOL,
+    )!.tool;
+    const args = {
+      intro: 'Have a look:',
+      cards: [
+        {
+          title: 'One',
+          text: 'Details: https://yoma.world/o/1',
+          imageUrl: 'https://img.example/1.jpg',
+          url: 'https://yoma.world/o/1',
+          label: 'view',
+        },
+      ],
+    };
+    expect(await tool.handler(args, ctx('c1'))).toContain(
+      'Leave links out of the intro and the card texts',
+    );
+    expect(toolMessage(await tool.handler(args, ctx('c2')))).toBeInstanceOf(
+      ToolMessage,
+    );
   });
 });
 

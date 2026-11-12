@@ -248,9 +248,38 @@ export function linkButtonText(input: {
 }): string {
   return [
     input.body,
-    ...imageLine(input.imageUrl),
-    ...labelledLink(input.label, input.url),
+    ...(textHasLink(input.body, input.imageUrl)
+      ? []
+      : imageLine(input.imageUrl)),
+    ...(textHasLink(input.body, input.url)
+      ? []
+      : labelledLink(input.label, input.url)),
   ].join('\n\n');
+}
+
+/**
+ * Whether `text` already holds the link (as given, or as its normalised
+ * `href` with or without a trailing slash): a text version then does not
+ * add it again.
+ */
+export function textHasLink(text: string, url: string | undefined): boolean {
+  if (!url) return false;
+  const href = displayLink(url);
+  const forms = [url, ...(href ? [href, href.replace(/\/$/, '')] : [])];
+  return forms.some((form) => {
+    if (!form) return false;
+    // A whole link only: "https://a.example" is not in "https://a.example/b".
+    for (
+      let at = text.indexOf(form);
+      at >= 0;
+      at = text.indexOf(form, at + 1)
+    ) {
+      const rest = text.slice(at + form.length);
+      if (rest === '' || /^(?:[.,;:!?]*(?:\s|$)|[\s)\]>"'])/u.test(rest))
+        return true;
+    }
+    return false;
+  });
 }
 
 /**
@@ -264,8 +293,12 @@ export function cardsText(intro: string, items: readonly CardItem[]): string {
       [
         `${i + 1}. **${item.title}**`,
         ...(item.body ? [item.body] : []),
-        ...imageLine(item.imageUrl),
-        ...labelledLink(item.link.label, item.link.url),
+        ...(textHasLink(item.body, item.imageUrl)
+          ? []
+          : imageLine(item.imageUrl)),
+        ...(textHasLink(item.body, item.link.url)
+          ? []
+          : labelledLink(item.link.label, item.link.url)),
       ].join('\n'),
     ),
   ].join('\n\n');

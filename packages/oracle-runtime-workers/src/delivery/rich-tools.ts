@@ -22,6 +22,7 @@ import {
   linkButtonPart,
   linkButtonText,
   OPTION_KEY,
+  textHasLink,
   RICH_LIMITS,
   RICH_PARTS_KEY,
   type ChoiceFormat,
@@ -175,6 +176,9 @@ export function buildRichMessageTools(
     (render.kinds.includes('card') || render.kinds.includes('carousel')) &&
     render.linkLabels.length > 0 &&
     render.linkOrigins.length > 0;
+  // Per turn: a call already sent back for a link written into its text.
+  let linkSentBack = false;
+  let cardsSentBack = false;
   const labelKey = z.string().describe(`One of: ${labelsLine(render)}.`);
 
   if (canChoose) {
@@ -301,6 +305,11 @@ export function buildRichMessageTools(
       tool: tool(
         async (rawArgs, ctx) => {
           const args = schema.parse(rawArgs);
+          // Once per turn: the link belongs on the button, not in the text.
+          if (!linkSentBack && textHasLink(args.text, args.url)) {
+            linkSentBack = true;
+            return 'Not sent: the person has seen nothing yet. Leave the link out of text: it goes on the button (and on its own line where buttons cannot be shown). Call send_link_button again now with text that says what the link is for, without the link.';
+          }
           const built = linkButtonPart(
             {
               body: args.text,
@@ -338,7 +347,8 @@ export function buildRichMessageTools(
         {
           name: SEND_LINK_BUTTON_TOOL,
           description: [
-            'Send a message with one button that opens a link: a tidy way to hand over a link the person must open (a sign-in, a form, a check, a page to register on). Where buttons are not available, or the link is not on an approved site, the same message goes out as text with the link written out.',
+            'Send a message with one button that opens a link: a tidy way to hand over a link the person must open (a sign-in, a form, a check, a page to register on). Where buttons are not available, or the link is not on an approved site, the same message goes out as text with the link on its own line.',
+            'Write `text` WITHOUT the link: say what the link is for ("Here is the Yoma website, where you can explore opportunities."). The link goes on the button, or on its own line where buttons cannot be shown.',
             `The button label comes from a fixed set; pick the key that fits: ${labelsLine(render)}. The text (up to ${RICH_LIMITS.body} characters) says what the link is for; it must read well on its own as a normal message. An optional picture link must be a public https image link anyone can open; private or signed-in links do not show.`,
             'Use it for a link the person needs to act on, not for every link you mention. It ends your reply: write anything you need to say first, in the same step, then call it; do not repeat the link in your text.',
           ].join('\n\n'),
@@ -391,6 +401,19 @@ export function buildRichMessageTools(
       tool: tool(
         async (rawArgs, ctx) => {
           const args = schema.parse(rawArgs);
+          // Once per turn: each card's link and picture belong on the card.
+          if (
+            !cardsSentBack &&
+            args.cards.some(
+              (card) =>
+                textHasLink(card.text, card.url) ||
+                textHasLink(card.text, card.imageUrl) ||
+                textHasLink(args.intro, card.url),
+            )
+          ) {
+            cardsSentBack = true;
+            return 'Not sent: the person has seen nothing yet. Leave links out of the intro and the card texts: each card shows its picture and has its link on its button. Call send_cards again now without the links in the text.';
+          }
           const built = cardsPart(
             {
               body: args.intro,
