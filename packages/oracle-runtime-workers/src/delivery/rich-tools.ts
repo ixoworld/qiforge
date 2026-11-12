@@ -124,14 +124,15 @@ export function titlesTooLong(
 }
 
 /**
- * Ends the reply once `offer_choices` sent its choices message: the
- * question is the reply's last message. Runs before the next model call, so
- * a call sent back for shorter titles (no message went out) lets the model
- * call again.
+ * Ends the reply once a rich-message tool sent its message (choices, a link
+ * button, cards, or their text version): that message is the reply's last,
+ * so no filler ("Done.") follows it. Runs before the next model call, so a
+ * call sent back for shorter titles (nothing went out) lets the model call
+ * again.
  */
-export function createChoicesEndMiddleware(): AgentMiddleware {
+export function createRichMessageEndMiddleware(): AgentMiddleware {
   return createMiddleware({
-    name: 'ChoicesEndMiddleware',
+    name: 'RichMessageEndMiddleware',
     beforeModel: {
       canJumpTo: ['end'],
       hook: (state): { jumpTo: 'end' } | undefined => {
@@ -140,7 +141,7 @@ export function createChoicesEndMiddleware(): AgentMiddleware {
           const message = messages[i];
           if (!ToolMessage.isInstance(message)) break;
           if (
-            message.name === OFFER_CHOICES_TOOL &&
+            RICH_MESSAGE_TOOLS.has(message.name ?? '') &&
             (richPartsOf(message.artifact).length > 0 ||
               richToolTextOf(message.artifact) !== null)
           )
@@ -218,7 +219,7 @@ export function buildRichMessageTools(
     });
     tools.push({
       // It ends the reply once a choices message went out
-      // (`createChoicesEndMiddleware`), not on every call: a call sent back
+      // (`createRichMessageEndMiddleware`), not on every call: a call sent back
       // for shorter titles must let the model call again.
       returnDirect: false,
       tool: tool(
@@ -229,7 +230,7 @@ export function buildRichMessageTools(
           const tooLong = retried ? null : titlesTooLong(args.options, render);
           if (tooLong) {
             retried = true;
-            return `Not sent yet: ${tooLong} Call offer_choices again now with shorter titles (the same options, a few words each, extra detail in description); write nothing else first. If a title cannot be shorter, call it again as it is and the options go out as a numbered list.`;
+            return `Not sent: the person has seen nothing yet. ${tooLong} Call offer_choices again now, in this step, with the same options and shorter titles (a few words each, the rest in description). Do not write the options in your text. If a title cannot be shorter, call it again as it is and the options go out as a numbered list.`;
           }
           const built = choicesPart(
             {
@@ -327,8 +328,8 @@ export function buildRichMessageTools(
               format: built.part ? 'link_button' : 'text',
               ...(built.reason ? { reason: built.reason } : {}),
               note: built.part
-                ? 'Sent as a message with a button that opens the link, where this call stands in your reply. Do not repeat the link or its text.'
-                : 'Sent as a normal message with the link written out, where this call stands in your reply. Do not repeat the link or its text.',
+                ? 'Sent as a message with a button that opens the link. Your reply ends with it: nothing more to write.'
+                : 'Sent as a normal message with the link written out. Your reply ends with it: nothing more to write.',
               shown: part.text,
             },
             part,
@@ -339,7 +340,7 @@ export function buildRichMessageTools(
           description: [
             'Send a message with one button that opens a link: a tidy way to hand over a link the person must open (a sign-in, a form, a check, a page to register on). Where buttons are not available, or the link is not on an approved site, the same message goes out as text with the link written out.',
             `The button label comes from a fixed set; pick the key that fits: ${labelsLine(render)}. The text (up to ${RICH_LIMITS.body} characters) says what the link is for; it must read well on its own as a normal message. An optional picture link must be a public https image link anyone can open; private or signed-in links do not show.`,
-            'Use it for a link the person needs to act on, not for every link you mention. Write what you want to say before it in the same step; do not repeat the link in your text.',
+            'Use it for a link the person needs to act on, not for every link you mention. It ends your reply: write anything you need to say first, in the same step, then call it; do not repeat the link in your text.',
           ].join('\n\n'),
           schema,
           effect: 'read',
@@ -416,8 +417,8 @@ export function buildRichMessageTools(
               ...(built.reason ? { reason: built.reason } : {}),
               note:
                 format === 'text'
-                  ? 'Sent as one normal message listing the items with their links, where this call stands in your reply. Do not repeat them.'
-                  : `Sent as ${format === 'card' ? 'an image card' : 'a carousel of image cards'}, each with a button, where this call stands in your reply. Do not repeat the items.`,
+                  ? 'Sent as one normal message listing the items with their links. Your reply ends with it: nothing more to write.'
+                  : `Sent as ${format === 'card' ? 'an image card' : 'a carousel of image cards'}, each with a button. Your reply ends with it: nothing more to write.`,
               shown: built.part.text,
             },
             built.part,
@@ -428,7 +429,7 @@ export function buildRichMessageTools(
           description: [
             'Show items to browse as image cards, each with a picture, a short text and one link button: one card alone, or a swipeable carousel of 2 to 10. Where cards are not available, they go out as one message listing each item with its picture link and link.',
             `Every card has a public https image link (anyone must be able to open it; private or signed-in images do not show), a title, a short text and a link with a label from the fixed set: ${labelsLine(render)}. With 2 or more cards, title and text together stay within 157 characters with at most one line break in the text. If any card does not fit, or its link is not on an approved site, all of them go out as text.`,
-            'Use it for a few concrete things the person may want to look at or open (opportunities, products, places), not for ordinary answers. Do not repeat the items in your text.',
+            'Use it for a few concrete things the person may want to look at or open (opportunities, products, places), not for ordinary answers. It ends your reply: write anything you need to say first, in the same step; the intro is a short line shown before the cards. Do not repeat the items in your text.',
           ].join('\n\n'),
           schema,
           effect: 'read',

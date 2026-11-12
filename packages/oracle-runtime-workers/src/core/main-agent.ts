@@ -93,8 +93,7 @@ import { resolveTurnToolAccess, withoutWithheldExamples } from './tool-access';
 import { wrapPluginTool } from './wrap-plugin-tool';
 import { renderRichSection, renderSurfaceSection } from '../delivery/prompt';
 import {
-  createChoicesEndMiddleware,
-  OFFER_CHOICES_TOOL,
+  createRichMessageEndMiddleware,
   RICH_MESSAGE_TOOLS,
 } from '../delivery/rich-tools';
 import { createReturnDirectFirstMiddleware } from './middlewares/return-direct-first';
@@ -920,9 +919,9 @@ export async function createMainAgent(
     ...(returnDirectNames.size > 0
       ? [createReturnDirectFirstMiddleware(returnDirectNames)]
       : []),
-    // The reply ends once `offer_choices` sent its question.
-    ...(turnTools.some(({ tool }) => tool.name === OFFER_CHOICES_TOOL)
-      ? [createChoicesEndMiddleware()]
+    // The reply ends once a rich-message tool sent its message.
+    ...(turnTools.some(({ tool }) => RICH_MESSAGE_TOOLS.has(tool.name))
+      ? [createRichMessageEndMiddleware()]
       : []),
     // Innermost but one: sees the request as it goes to the provider, except
     // the images the recall middleware below adds inside it. Prunes old tool

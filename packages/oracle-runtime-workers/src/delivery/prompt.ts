@@ -35,8 +35,8 @@ export function renderRichSection(tools: readonly string[]): string {
     '',
     ...(tools.includes('offer_choices')
       ? [
-          '- Before you send a reply, check it: if it names options for the person to pick one from (what you can help with, what to do next, which item, which plan, yes or no), do not write those options in your text, neither as a list nor in a sentence. Call `offer_choices` with a short question and the options, each title a few words. A lead-in, if any, is one short line of text before the call. Example: asked "what can you help me with?", write at most one short line, then call `offer_choices` with the question "What would you like to do?" and one option per thing you can do ("Book a visit", "See prices", "Talk to someone").',
-          '- Not for open questions (a name, an amount, a description of their situation). At most one `offer_choices` per reply; it ends your reply.',
+          '- Before you send a reply, check how it ends. If it asks a closed question, one the person answers by picking from options you can name, do not write those options in your text, neither as a list nor in a sentence: call `offer_choices` with a short question and the options, each title a few words. Closed questions include a menu of what you can help with or what to do next, which one of a few named items, this or that, and yes or no (titles like "Yes, start now" and "Not now"). A lead-in, if any, is one short line of text before the call. Example: asked "what can you help me with?", write at most one short line, then call `offer_choices` with the question "What would you like to do?" and one option per thing you can do ("Book a visit", "See prices", "Talk to someone").',
+          '- An open question, one the person answers in their own words (their name, an amount, what they are interested in, their situation), stays text, even with a few examples in it. At most one `offer_choices` per reply.',
         ]
       : []),
     ...(tools.includes('send_link_button')
@@ -49,7 +49,7 @@ export function renderRichSection(tools: readonly string[]): string {
           '- A few concrete items to browse that each have a picture and a link (opportunities, places, products) can go out with `send_cards`.',
         ]
       : []),
-    '- Do not repeat in your text what a tool sent.',
+    '- Each of these tools sends its message as the last of your reply: write what you need to say first, in the same step, and nothing after it (no "Done.", no repeat of what it sent).',
   ];
   return lines.join('\n');
 }

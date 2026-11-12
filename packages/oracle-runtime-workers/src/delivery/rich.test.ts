@@ -30,7 +30,7 @@ import {
 } from './rich';
 import {
   buildRichMessageTools,
-  createChoicesEndMiddleware,
+  createRichMessageEndMiddleware,
   OFFER_CHOICES_TOOL,
   titlesTooLong,
   SEND_CARDS_TOOL,
@@ -612,7 +612,7 @@ describe('offer_choices: one chance to shorten titles', () => {
     const tool = fresh();
     const first = await tool.handler(MENU, ctx('c1'));
     expect(typeof first).toBe('string');
-    expect(first).toContain('Not sent yet');
+    expect(first).toContain('Not sent: the person has seen nothing yet');
     expect(first).toContain(
       'title "Find jobs and opportunities" is 27 characters',
     );
@@ -714,7 +714,7 @@ describe('offer_choices: one chance to shorten titles', () => {
   });
 
   it('the reply ends only after a choices message went out', () => {
-    const hook = createChoicesEndMiddleware().beforeModel;
+    const hook = createRichMessageEndMiddleware().beforeModel;
     const run = (messages: BaseMessage[]) =>
       typeof hook === 'function'
         ? hook({ messages }, {})
@@ -732,7 +732,7 @@ describe('offer_choices: one chance to shorten titles', () => {
     const sentBack = new ToolMessage({
       tool_call_id: 'c1',
       name: OFFER_CHOICES_TOOL,
-      content: 'Not sent yet: …',
+      content: 'Not sent: the person has seen nothing yet.',
     });
     expect(run([new HumanMessage('hi'), call, sent])).toEqual({
       jumpTo: 'end',
@@ -740,6 +740,37 @@ describe('offer_choices: one chance to shorten titles', () => {
     expect(run([new HumanMessage('hi'), call, sentBack])).toBeUndefined();
     expect(
       run([new HumanMessage('hi'), new AIMessage('Hello')]),
+    ).toBeUndefined();
+    const linkCall = new AIMessage({
+      content: '',
+      tool_calls: [{ id: 'l1', name: SEND_LINK_BUTTON_TOOL, args: {} }],
+    });
+    const linkSent = new ToolMessage({
+      tool_call_id: 'l1',
+      name: SEND_LINK_BUTTON_TOOL,
+      content: '{}',
+      artifact: {
+        richParts: [],
+        text: 'Read this.\n\nOpen: https://evil.example/a',
+      },
+    });
+    expect(run([new HumanMessage('hi'), linkCall, linkSent])).toEqual({
+      jumpTo: 'end',
+    });
+    const other = new ToolMessage({
+      tool_call_id: 'x',
+      name: 'memory_save',
+      content: 'ok',
+    });
+    expect(
+      run([
+        new HumanMessage('hi'),
+        new AIMessage({
+          content: '',
+          tool_calls: [{ id: 'x', name: 'memory_save', args: {} }],
+        }),
+        other,
+      ]),
     ).toBeUndefined();
   });
 });
@@ -984,6 +1015,11 @@ describe('delivery profile and prompt', () => {
     expect(withTools).toContain(
       'do not write those options in your text, neither as a list nor in a sentence',
     );
+    expect(withTools).toContain('"Yes, start now" and "Not now"');
+    expect(withTools).toContain(
+      'An open question, one the person answers in their own words',
+    );
+    expect(withTools).toContain('no "Done."');
     expect(renderRichSection([])).toBe('');
     expect(renderSurfaceSection(profile, false, false)).not.toContain(
       'can show buttons',
