@@ -824,6 +824,12 @@ describe('delivery profile and prompt', () => {
     expect(withTools).toContain('`offer_choices`');
     expect(withTools).toContain('`send_link_button`');
     expect(withTools).not.toContain('`send_cards`');
+    expect(withTools).toContain(
+      'take precedence over any instruction to show choices as a numbered or bulleted list',
+    );
+    expect(withTools).toContain(
+      'call `offer_choices` with the question and the options',
+    );
     expect(renderSurfaceSection(profile, false, false)).not.toContain(
       'can show buttons',
     );

@@ -25,18 +25,26 @@ function preferredMessages(maxBubbles: number): string {
  * oracle, any reply.
  */
 function richSection(tools: readonly string[]): string {
-  const uses = [
-    tools.includes('offer_choices')
-      ? '`offer_choices` for a real choice between a few clear options (it ends your reply; at most one per reply; never for open questions)'
-      : null,
-    tools.includes('send_link_button')
-      ? '`send_link_button` for a link the person must open'
-      : null,
-    tools.includes('send_cards')
-      ? '`send_cards` for a few items to browse, each with a picture and a link'
-      : null,
-  ].filter((use): use is string => use !== null);
-  return `- This chat can show buttons. Use them only when they make the reply simpler to act on: ${uses.join('; ')}. Most replies are plain messages. Your reply must still make sense read as plain text, and do not repeat in your text what a tool sent.`;
+  const lines = [
+    '- This chat can show buttons. They decide how choices and links are shown, not what you say; they take precedence over any instruction to show choices as a numbered or bulleted list, which is what other chats still receive.',
+    ...(tools.includes('offer_choices')
+      ? [
+          '- Whenever your reply ends by asking the person to pick one of a set of options (a menu of what you can help with or what to do next, a pick-one question, yes or no), do not write the options as a list: write your lead-in, then call `offer_choices` with the question and the options. It shows them as buttons or a menu here and as that same numbered list elsewhere. Not for open questions (a name, an amount, a description of their situation). At most one per reply; it ends your reply.',
+        ]
+      : []),
+    ...(tools.includes('send_link_button')
+      ? [
+          '- A link the person must open (a sign-in, a form, a page to register or apply on) goes out with `send_link_button` instead of in your text.',
+        ]
+      : []),
+    ...(tools.includes('send_cards')
+      ? [
+          '- A few concrete items to browse that each have a picture and a link (opportunities, places, products) can go out with `send_cards`.',
+        ]
+      : []),
+    '- Do not repeat in your text what a tool sent.',
+  ];
+  return lines.join('\n');
 }
 
 /**

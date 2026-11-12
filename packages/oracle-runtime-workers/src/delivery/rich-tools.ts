@@ -171,9 +171,9 @@ export function buildRichMessageTools(
         {
           name: OFFER_CHOICES_TOOL,
           description: [
-            'Ask the person to pick one of a few options, shown as tappable reply buttons or a list menu where the chat supports them, and as a numbered list everywhere else. The runtime picks the format: 2–3 short options (titles up to 20 characters, no descriptions) become buttons; up to 10 options, or any with a description, become a list (titles up to 24, descriptions up to 72 characters); anything larger is sent as a numbered list. Nothing is cut.',
-            'Use it when the person faces a real choice between a few clear options and tapping is easier than typing: a yes/no confirmation, picking one of several plans, dates or items. Do not turn every question into buttons; never use it for open questions (a name, an amount, a description), and never when one option is the obvious answer.',
-            'It ends your reply: write anything you need to say first, in the same step, then call it with the question. Do not write the question or the options in your text. At most one per reply. The reply must still make sense read as plain text.',
+            'Ask the person to pick one of a set of options, shown as tappable reply buttons or a list menu where the chat supports them, and as a numbered list everywhere else. The runtime picks the format: 2–3 short options (titles up to 20 characters, no descriptions) become buttons; up to 10 options, or any with a description, become a list (titles up to 24, descriptions up to 72 characters); anything larger is sent as a numbered list. Nothing is cut.',
+            'Use it whenever your reply would end with a numbered or bulleted list of options for the person to pick one from: a menu of what you can help with or what to do next, a pick-one question (which job, which plan, which day), a yes/no confirmation. This includes menus that other instructions tell you to show as a numbered list: where buttons cannot be shown, the person receives exactly that numbered list. Keep each title short (the option itself, not a sentence). Never use it for open questions (a name, an amount, a description of their situation).',
+            'It ends your reply: write anything you need to say first, in the same step, then call it with the question. Do not write the question or the options in your text. At most one per reply.',
           ].join('\n\n'),
           schema,
           effect: 'read',
