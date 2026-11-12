@@ -1,5 +1,12 @@
 # qiforge-example
 
+## 0.0.10
+
+### Patch Changes
+
+- Updated dependencies [[`7a246d9`](https://github.com/ixoworld/qiforge/commit/7a246d95830a1d5bb5dee9150e0e059b0a2382d1)]:
+  - @ixo/oracle-runtime@1.99.7
+
 ## 0.0.9
 
 ### Patch Changes
