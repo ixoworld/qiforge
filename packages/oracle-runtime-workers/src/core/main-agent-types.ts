@@ -11,7 +11,14 @@ import type { RegisteredManifest } from './registries';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { BaseMessage } from '@langchain/core/messages';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
-import type { ReactAgent } from 'langchain';
+import type {
+  AgentTypeConfig,
+  AnyAnnotationRoot,
+  ReactAgent,
+  ResponseFormatUndefined,
+} from 'langchain';
+import type { ClientTool, ServerTool } from '@langchain/core/tools';
+import type { capabilityGateState } from './middlewares/capability-gate';
 import { z } from 'zod';
 import { ChannelAttachment } from '../channels/contract';
 import type {
@@ -145,7 +152,8 @@ export interface MainAgentHooks {
   /**
    * Tools the host binds for this turn only, outside every plugin and the
    * capability gate (chat delivery's `create_artifact`). `returnDirect` ends
-   * the run once the tool has answered, without another model call.
+   * the run once the tool has answered, without another model call; a call
+   * that failed (an error `ToolMessage`) goes back to the model instead.
    */
   turnTools?: Array<{ tool: PluginTool; returnDirect?: boolean }>;
   /**
@@ -244,8 +252,20 @@ export interface MainAgentArgs {
   onDomainProvenance?: (provenance: DomainContextProvenance[]) => void;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type CompiledMainAgent = ReactAgent<any>;
+/**
+ * The compiled main agent. Its state is the capability gate's channels (what
+ * `stateUpdate` writes); the middlewares' own channels are not in the type,
+ * since the middleware list is assembled per turn.
+ */
+export type CompiledMainAgent = ReactAgent<
+  AgentTypeConfig<
+    ResponseFormatUndefined,
+    typeof capabilityGateState,
+    AnyAnnotationRoot,
+    readonly AgentMiddleware[],
+    readonly (ClientTool | ServerTool)[]
+  >
+>;
 
 /** What `createMainAgent` resolves to. */
 export interface MainAgentBuildResult {

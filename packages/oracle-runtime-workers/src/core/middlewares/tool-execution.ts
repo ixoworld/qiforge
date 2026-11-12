@@ -178,20 +178,30 @@ export function isUncertainOutcome(
   // A tool whose own model call stalled (stream-liveness.ts) stopped at an
   // unknown point of its work.
   if (findProviderStall(error)) return true;
-  if (!(error instanceof Error)) return false;
-  if (error.name === 'AbortError' || error.name === 'TimeoutError') return true;
-  if (
-    'code' in error &&
-    typeof error.code === 'string' &&
-    UNCERTAIN_CODE.test(error.code)
+  // The error and its causes, outermost first: an MCP tool's failure
+  // arrives as the adapter's `ToolException` with the transport's error as
+  // `cause` (`SdkHttpError` carrying the HTTP `status`, or fetch's
+  // `TypeError`), and LangChain's middleware errors wrap the same way. The
+  // first name, code or status that decides, decides.
+  const chain: Error[] = [];
+  for (
+    let current: unknown = error;
+    current instanceof Error && chain.length < 8;
+    current = current.cause
   )
-    return true;
-  const status =
-    'status' in error && typeof error.status === 'number'
-      ? error.status
-      : undefined;
-  if (status !== undefined) return isServerStatus(status);
-  return UNCERTAIN_TEXT.test(error.message);
+    chain.push(current);
+  for (const link of chain) {
+    if (link.name === 'AbortError' || link.name === 'TimeoutError') return true;
+    if (
+      'code' in link &&
+      typeof link.code === 'string' &&
+      UNCERTAIN_CODE.test(link.code)
+    )
+      return true;
+    if ('status' in link && typeof link.status === 'number')
+      return isServerStatus(link.status);
+  }
+  return chain.some((link) => UNCERTAIN_TEXT.test(link.message));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

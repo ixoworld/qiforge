@@ -455,6 +455,26 @@ describe('stall retry rules', () => {
     expect(() => handler(abort)).toThrow('aborted');
   });
 
+  it('retries a 429 or a 413 like any transient failure, unless the account is out of quota', () => {
+    const handler = stallAwareFailedAttemptHandler();
+    const http = (status: number, extra: Record<string, unknown> = {}) =>
+      Object.assign(new Error(`${status} status code`), { status, ...extra });
+    // Without a Retry-After hint, LangChain's own rule would stop on both.
+    expect(handler(http(429))).toBeUndefined();
+    expect(handler(http(413))).toBeUndefined();
+    expect(
+      handler(http(429, { headers: new Headers({ 'retry-after': '300' }) })),
+    ).toBeUndefined();
+    // A rejected `Response` carries its status on `response`.
+    expect(
+      handler(Object.assign(new Error('x'), { response: { status: 429 } })),
+    ).toBeUndefined();
+    expect(() =>
+      handler(http(429, { error: { code: 'insufficient_quota' } })),
+    ).toThrow('429 status code');
+    expect(() => handler(http(401))).toThrow('401 status code');
+  });
+
   it('sizes the SDK timeout behind every attempt the guard may make', () => {
     expect(
       livenessRequestTimeoutMs({

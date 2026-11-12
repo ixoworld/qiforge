@@ -21,10 +21,10 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 /** Pull the headers the plugin handed the MCP client factory. */
 function headersOf(config: unknown): Record<string, unknown> {
-  if (!isRecord(config) || !isRecord(config.mcpServers)) {
+  if (!isRecord(config) || !isRecord(config.servers)) {
     throw new Error('factory received a malformed config');
   }
-  const server = config.mcpServers.sandbox;
+  const server = config.servers.sandbox;
   if (!isRecord(server) || !isRecord(server.headers)) {
     throw new Error('no sandbox server headers');
   }

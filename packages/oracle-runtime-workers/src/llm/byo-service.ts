@@ -44,6 +44,14 @@ import {
   chatGptBackendHeaders,
   DEFAULT_CHATGPT_BACKEND,
 } from './byo-client';
+import {
+  canDiscoverModels,
+  discoverAccountModels,
+  DISCOVERY_FAILURE_TTL_MS,
+  DISCOVERY_TTL_MS,
+  parseStoredDiscovery,
+  type ByoModelDiscovery,
+} from './byo-model-discovery';
 import type { ModelListItem } from '../core/llm';
 import {
   buildByoFallbackNotice,
@@ -98,6 +106,14 @@ export interface ByoProviderStatus {
   connected: boolean;
   /** Present when connected — picker entries for this provider. */
   models: ModelListItem[];
+  /**
+   * Where `models` comes from: `account` — the provider's own listing of the
+   * models this account can use, narrowing the curated list; `catalog` — no
+   * listing could be read, so the curated list is shown unchecked (the
+   * reason is in `modelSourceNote`). Absent while not connected.
+   */
+  modelSource?: 'account' | 'catalog';
+  modelSourceNote?: string;
   /** Namespaced default model id (picker preselect after connect). */
   defaultModelId: string;
 }
@@ -141,6 +157,8 @@ export interface WorkersByoServiceOptions {
   logger?: Logger;
   /** Fetch used for the ChatGPT-backend reachability probe (tests). */
   probeFetch?: typeof fetch;
+  /** Fetch used for account model discovery (tests). */
+  discoveryFetch?: typeof fetch;
   /** Bound on the reachability probe (default `CHATGPT_PROBE_TIMEOUT_MS`). */
   probeTimeoutMs?: number;
   /** Bound on a key-validation call (default `KEY_CHECK_TIMEOUT_MS`). */
@@ -193,6 +211,7 @@ export class WorkersByoService {
   /** Per-user refresh-failure cooldown (epoch-ms deadline). */
   private readonly refreshCooldownUntil = new Map<string, number>();
   private readonly probeFetch: typeof fetch;
+  private readonly discoveryFetch: typeof fetch;
   private readonly probeTimeoutMs: number;
   private readonly keyCheckTimeoutMs: number;
   readonly chatGptBackend: ChatGptBackendConfig;
@@ -211,6 +230,8 @@ export class WorkersByoService {
     // method. Resolve the global at call time so the probe really runs.
     this.probeFetch =
       opts.probeFetch ?? ((input, init) => globalThis.fetch(input, init));
+    this.discoveryFetch =
+      opts.discoveryFetch ?? ((input, init) => globalThis.fetch(input, init));
     this.probeTimeoutMs = opts.probeTimeoutMs ?? CHATGPT_PROBE_TIMEOUT_MS;
     this.keyCheckTimeoutMs = opts.keyCheckTimeoutMs ?? KEY_CHECK_TIMEOUT_MS;
     this.chatGptBackend = opts.chatGptBackend ?? DEFAULT_CHATGPT_BACKEND;
@@ -344,6 +365,99 @@ export class WorkersByoService {
   private async clearPendingTokens(userDid: string): Promise<void> {
     this.pendingChatGptTokens.delete(userDid);
     await this.store.delete(this.pendingKey(userDid));
+  }
+
+  private modelsKey(userDid: string, provider: ByoProvider): string {
+    return `models:${provider}:${userDid}`;
+  }
+
+  /**
+   * Ask the provider which models the user's credential can use and keep the
+   * answer (or the failure, briefly) in the state store. Never throws.
+   */
+  async discoverModels(
+    userDid: string,
+    provider: ByoProvider,
+  ): Promise<ByoModelDiscovery | null> {
+    const credential = (await this.getCredentials(userDid))[provider];
+    if (!credential) return null;
+    const key = this.modelsKey(userDid, provider);
+    let result: ByoModelDiscovery;
+    if (!canDiscoverModels(provider)) {
+      result = {
+        source: 'catalog',
+        reason: `${BYO_PROVIDER_INFO[provider].label} has no model listing the runtime reads`,
+        fetchedAt: Date.now(),
+      };
+    } else {
+      let effective = credential;
+      if (credential.provider === 'chatgpt') {
+        const fresh = await this.ensureFreshChatGptTokens(
+          userDid,
+          credential.oauth,
+        );
+        if (!fresh) {
+          return this.keepDiscovery(key, {
+            source: 'catalog',
+            reason: 'the ChatGPT connection needs to be renewed',
+            fetchedAt: Date.now(),
+          });
+        }
+        effective = { provider: 'chatgpt', oauth: fresh };
+      }
+      const found = await discoverAccountModels(effective, {
+        fetch: this.discoveryFetch,
+        chatGptBackend: this.chatGptBackend,
+        timeoutMs: this.keyCheckTimeoutMs,
+      });
+      result = found.ok
+        ? {
+            source: 'account',
+            modelIds: found.modelIds,
+            fetchedAt: Date.now(),
+          }
+        : { source: 'catalog', reason: found.reason, fetchedAt: Date.now() };
+      if (!found.ok) {
+        this.logger.warn(
+          `[byo] ${provider} model discovery failed for ${userDid}: ${found.reason}`,
+        );
+      }
+    }
+    return this.keepDiscovery(key, result);
+  }
+
+  private async keepDiscovery(
+    key: string,
+    result: ByoModelDiscovery,
+  ): Promise<ByoModelDiscovery> {
+    try {
+      await this.store.put(
+        key,
+        JSON.stringify(result),
+        result.source === 'account'
+          ? DISCOVERY_TTL_MS
+          : DISCOVERY_FAILURE_TTL_MS,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `[byo] could not keep the model discovery result: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return result;
+  }
+
+  /** The kept discovery for a connected provider; discovers when none is kept. */
+  private async discoveryFor(
+    userDid: string,
+    provider: ByoProvider,
+    force: boolean,
+  ): Promise<ByoModelDiscovery | null> {
+    if (!force) {
+      const kept = await this.store.get(this.modelsKey(userDid, provider));
+      const parsed = kept ? parseStoredDiscovery(kept) : null;
+      if (parsed) return parsed;
+    }
+    return this.discoverModels(userDid, provider);
   }
 
   /**
@@ -732,6 +846,9 @@ export class WorkersByoService {
       creds: next,
       expiresAt: Date.now() + CREDS_CACHE_TTL_MS,
     });
+    // A new key may belong to another account: its model list replaces the
+    // old one.
+    await this.discoverModels(userDid, provider);
   }
 
   /** Remove a stored credential (index cleared, value redacted, caches dropped). */
@@ -763,6 +880,7 @@ export class WorkersByoService {
     }
     this.credsCache.delete(userDid);
     this.clearCooldown(userDid);
+    await this.store.delete(this.modelsKey(userDid, provider));
   }
 
   /** Per-provider connection status + picker entries for the connect UI. */
@@ -774,19 +892,40 @@ export class WorkersByoService {
       return { enabled: false, providers: [] };
     }
     const creds = await this.getCredentials(userDid, opts);
-    const providers = BYO_PROVIDERS.map((provider): ByoProviderStatus => {
+    const providers: ByoProviderStatus[] = [];
+    for (const provider of BYO_PROVIDERS) {
       const info = BYO_PROVIDER_INFO[provider];
       const connected = creds[provider] !== undefined;
-      return {
+      const discovery = connected
+        ? await this.discoveryFor(userDid, provider, opts?.refresh === true)
+        : null;
+      const accountModelIds =
+        discovery?.source === 'account' ? discovery.modelIds : undefined;
+      const models = connected
+        ? buildByoModelListing(
+            [provider],
+            accountModelIds ? { [provider]: accountModelIds } : {},
+          )
+        : [];
+      const defaultId = toByoModelId(provider, BYO_DEFAULT_MODEL[provider]);
+      providers.push({
         provider,
         label: info.label,
         authType: info.authType,
         badge: info.badge,
         connected,
-        models: connected ? buildByoModelListing([provider]) : [],
-        defaultModelId: toByoModelId(provider, BYO_DEFAULT_MODEL[provider]),
-      };
-    });
+        models,
+        ...(discovery && { modelSource: discovery.source }),
+        ...(discovery?.source === 'catalog' && {
+          modelSourceNote: `Not checked against your account: ${discovery.reason}.`,
+        }),
+        // The preselect is a model the account has, when the list is known.
+        defaultModelId:
+          models.length > 0 && !models.some((m) => m.id === defaultId)
+            ? models[0]!.id
+            : defaultId,
+      });
+    }
     return { enabled: true, providers };
   }
 

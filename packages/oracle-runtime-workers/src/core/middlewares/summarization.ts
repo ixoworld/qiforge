@@ -270,7 +270,16 @@ export const createSummarizationMiddleware = (
       return undefined;
     }
     if (Array.isArray(messages) && messages.length > 0) {
-      carryTurnCalls(state.messages, messages);
+      const summary = summaryIn(messages);
+      // LangChain gives the summary the id of the first message it condenses
+      // (on a thread's first summary, the user's first message). The thread's
+      // `messages` table keeps every message by id, so that id would
+      // overwrite the condensed message's row and drop it from the
+      // transcript: the summary gets an id of its own.
+      if (summary) {
+        summary.id = crypto.randomUUID();
+        carryTurnCalls(state.messages, messages, summary);
+      }
       options.logger?.log(
         `[summarization] condensed the history: ${state.messages.length} messages → a summary + ${messages.length - 2} kept`,
       );
@@ -294,21 +303,25 @@ export const createSummarizationMiddleware = (
   };
 };
 
-/**
- * When the summary in `update` removes the current turn's opening message,
- * record on it the turn's tool calls it condensed (turn-boundary.ts).
- */
-function carryTurnCalls(
-  before: readonly BaseMessage[],
-  update: readonly unknown[],
-): void {
-  const summary = update.find(
+/** The summary message of a summarization update. */
+function summaryIn(update: readonly unknown[]): BaseMessage | undefined {
+  return update.find(
     (m): m is BaseMessage =>
       isBaseMessageLike(m) &&
       HumanMessage.isInstance(m) &&
       isSummarizationMessage(m),
   );
-  if (!summary) return;
+}
+
+/**
+ * When `summary` removes the current turn's opening message, record on it
+ * the turn's tool calls it condensed (turn-boundary.ts).
+ */
+function carryTurnCalls(
+  before: readonly BaseMessage[],
+  update: readonly unknown[],
+  summary: BaseMessage,
+): void {
   const keptIds = new Set<string>();
   for (const m of update)
     if (isBaseMessageLike(m) && m !== summary && typeof m.id === 'string')

@@ -447,16 +447,48 @@ class DefaultRetryRule extends AsyncCaller {
   }
 }
 
+/** The HTTP status of a provider error: the OpenAI SDK's `status`, or a rejected `Response`'s. */
+function httpStatusOf(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const status: unknown = Reflect.get(error, 'status');
+  if (typeof status === 'number') return status;
+  const response: unknown = Reflect.get(error, 'response');
+  if (!response || typeof response !== 'object') return undefined;
+  const responseStatus: unknown = Reflect.get(response, 'status');
+  return typeof responseStatus === 'number' ? responseStatus : undefined;
+}
+
+/** The provider's error code (`code`, or the body's `error.code`), when it is a string. */
+function errorCodeOf(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const code: unknown = Reflect.get(error, 'code');
+  if (typeof code === 'string') return code;
+  const body: unknown = Reflect.get(error, 'error');
+  if (!body || typeof body !== 'object') return undefined;
+  const bodyCode: unknown = Reflect.get(body, 'code');
+  return typeof bodyCode === 'string' ? bodyCode : undefined;
+}
+
 /**
  * `onFailedAttempt` for a guarded model: a stall the guard already gave up
  * on is not retried again by LangChain (the guard owns stall retries, so
- * `LLM_STREAM_RETRIES` is the whole budget); everything else follows
- * LangChain's default rule.
+ * `LLM_STREAM_RETRIES` is the whole budget). A 429 or a 413 is retried with
+ * LangChain's backoff up to the model's `maxRetries`, unless the provider
+ * says the account is out of quota (`insufficient_quota`): LangChain's
+ * default rule fails a 413, and a 429 without a `Retry-After` of at most
+ * 60 s, on the first attempt. Everything else follows LangChain's default
+ * rule.
  */
 export function stallAwareFailedAttemptHandler(): (error: unknown) => unknown {
   const fallback = DefaultRetryRule.handler();
   return (error) => {
     if (findProviderStall(error)) throw error;
+    const status = httpStatusOf(error);
+    if (
+      (status === 429 || status === 413) &&
+      errorCodeOf(error) !== 'insufficient_quota'
+    )
+      return undefined;
     return fallback?.(error);
   };
 }

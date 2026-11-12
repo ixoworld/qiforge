@@ -7,8 +7,10 @@ import {
 } from '@langchain/core/messages';
 import { ChatGenerationChunk, type ChatResult } from '@langchain/core/outputs';
 import { FakeListChatModel } from '@langchain/core/utils/testing';
-import { createAgent } from 'langchain';
-import { describe, expect, it } from 'vitest';
+import { createAgent, tool } from 'langchain';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
+import { createLlmAdapter, DEFAULT_MODEL_ID } from '../core/llm';
 import { HarnessLimitError } from '../core/turn-budget';
 import {
   ByoModelFallbackChatModel,
@@ -21,7 +23,7 @@ async function* fakeEvents(): AsyncGenerator<unknown> {
     event: 'on_tool_start',
     run_id: 'run-1',
     name: 'list_capabilities',
-    data: { input: { input: { includeOnDemand: true } } },
+    data: { input: { includeOnDemand: true } },
   };
   yield {
     event: 'on_tool_end',
@@ -69,7 +71,7 @@ async function* failingToolEvents(): AsyncGenerator<unknown> {
     event: 'on_tool_start',
     run_id: 'run-9',
     name: 'search_memory_engine',
-    data: { input: { input: { query: 'colour code' } } },
+    data: { input: { query: 'colour code' } },
   };
   yield {
     event: 'on_tool_error',
@@ -85,7 +87,7 @@ describe('createSseTurnStream AG-UI action outcomes', () => {
       event: 'on_tool_start',
       run_id: 'run-a',
       name: 'render_table',
-      data: { input: { input: { rows: 2 } } },
+      data: { input: { rows: 2 } },
     };
     yield {
       event: 'on_tool_end',
@@ -214,9 +216,7 @@ async function* rejectedToolEvents(): AsyncGenerator<unknown> {
     event: 'on_tool_start',
     run_id: 'run-7',
     name: 'create_task',
-    data: {
-      input: { input: { title: 'x', schedule: '2026-09-13T10:00:00Z' } },
-    },
+    data: { input: { title: 'x', schedule: '2026-09-13T10:00:00Z' } },
   };
   // ToolNode rejected the arguments: toolRetry's onFailure turned it into an
   // error ToolMessage — no on_tool_error, the tool never ran.
@@ -408,7 +408,7 @@ describe('createSseTurnStream calls rejected before the tool starts', () => {
         event: 'on_tool_start',
         run_id: 'run-3',
         name: 'list_my_tasks',
-        data: { input: { input: { status: 'all', limit: 20 } } },
+        data: { input: { status: 'all', limit: 20 } },
       };
       yield {
         event: 'on_tool_end',
@@ -575,7 +575,7 @@ describe('createSseTurnStream turn budget', () => {
         event: 'on_tool_start',
         run_id: 'run-1',
         name: 'search_web',
-        data: { input: { input: { query: 'x' } } },
+        data: { input: { query: 'x' } },
       };
       abortController.abort(
         new HarnessLimitError(
@@ -735,14 +735,30 @@ describe('runTurnFrames BYO model refused by the provider', () => {
         >,
       }));
 
+  /** How the ChatGPT backend refuses a model the subscription does not serve. */
+  const modelNotServed = () =>
+    Object.assign(
+      new Error(
+        "The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account.",
+      ),
+      { status: 400, code: 'unsupported_model' },
+    );
+
+  /** A 400 that says nothing about the model (the SDK's empty-body message). */
+  const bareBadRequest = () =>
+    Object.assign(new Error('400 status code (no body)'), { status: 400 });
+
   /**
-   * The user's model: optionally streams some text, then fails the way the
-   * ChatGPT backend refuses a model the subscription does not serve.
+   * The user's model: optionally streams some text, then fails with the
+   * given provider error.
    */
   class RefusingModel extends BaseChatModel {
     calls = 0;
 
-    constructor(private readonly before: string = '') {
+    constructor(
+      private readonly before: string = '',
+      private readonly refusal: () => Error = modelNotServed,
+    ) {
       super({});
     }
 
@@ -752,9 +768,7 @@ describe('runTurnFrames BYO model refused by the provider', () => {
 
     async _generate(): Promise<ChatResult> {
       this.calls += 1;
-      throw Object.assign(new Error('400 status code (no body)'), {
-        status: 400,
-      });
+      throw this.refusal();
     }
 
     override async *_streamResponseChunks(): AsyncGenerator<ChatGenerationChunk> {
@@ -764,9 +778,7 @@ describe('runTurnFrames BYO model refused by the provider', () => {
           text: this.before,
           message: new AIMessageChunk({ content: this.before }),
         });
-      throw Object.assign(new Error('400 status code (no body)'), {
-        status: 400,
-      });
+      throw this.refusal();
     }
   }
 
@@ -814,6 +826,8 @@ describe('runTurnFrames BYO model refused by the provider', () => {
       reason: 'model_unavailable',
       source: 'byo',
       provider: 'chatgpt',
+      status: 400,
+      code: 'unsupported_model',
       retryable: false,
       sessionId: 's1',
       requestId: 'r1',
@@ -838,14 +852,268 @@ describe('runTurnFrames BYO model refused by the provider', () => {
 
     const error = out.find((f) => f.event === 'error');
     expect(error?.data).toMatchObject({
-      kind: 'unknown',
       source: 'byo',
       provider: 'chatgpt',
-      detail: '400 status code (no body)',
+      status: 400,
+      detail: modelNotServed().message,
     });
     expect(out.some((f) => f.data.kind === 'byo_fallback')).toBe(false);
     expect(out.at(-1)?.event).toBe('done');
     expect(out.at(-1)?.data).toMatchObject({ failed: true });
     expect(byo.calls).toBe(1);
+  });
+
+  it('keeps today’s failed turn on a bare 400 that does not name the model', async () => {
+    const byo = new RefusingModel('', bareBadRequest);
+    const platform = new FakeListChatModel({ responses: ['unused'] });
+    const out = await runTurn(byo, platform);
+
+    const error = out.find((f) => f.event === 'error');
+    expect(error?.data).toMatchObject({
+      kind: 'unknown',
+      source: 'byo',
+      provider: 'chatgpt',
+      status: 400,
+      detail: '400 status code (no body)',
+    });
+    expect(out.some((f) => f.data.kind === 'byo_fallback')).toBe(false);
+    expect(out.some((f) => f.event === 'message')).toBe(false);
+    expect(out.at(-1)?.event).toBe('done');
+    expect(out.at(-1)?.data).toMatchObject({ failed: true });
+    expect(byo.calls).toBe(1);
+  });
+});
+
+describe('runTurnFrames on a streamed OpenRouter tool call', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const sse = (deltas: object[], usage: object): string =>
+    [
+      ...deltas.map((delta, index) => ({
+        id: 'gen-1',
+        object: 'chat.completion.chunk',
+        created: 1,
+        model: DEFAULT_MODEL_ID,
+        choices: [
+          {
+            index: 0,
+            delta,
+            finish_reason: index === deltas.length - 1 ? 'stop' : null,
+          },
+        ],
+      })),
+      {
+        id: 'gen-1',
+        object: 'chat.completion.chunk',
+        created: 1,
+        model: DEFAULT_MODEL_ID,
+        choices: [],
+        usage,
+      },
+    ]
+      .map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`)
+      .join('') + 'data: [DONE]\n\n';
+
+  /** First call: reasoning, then one tool call whose arguments arrive in slices. */
+  const TOOL_CALL = sse(
+    [
+      { role: 'assistant', content: '', reasoning: 'Look it up.' },
+      {
+        tool_calls: [
+          {
+            index: 0,
+            id: 'call_1',
+            type: 'function',
+            function: { name: 'get_weather', arguments: '' },
+          },
+        ],
+      },
+      { tool_calls: [{ index: 0, function: { arguments: '{"ci' } }] },
+      { tool_calls: [{ index: 0, function: { arguments: 'ty":"Par' } }] },
+      { tool_calls: [{ index: 0, function: { arguments: 'is"}' } }] },
+    ],
+    { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 },
+  );
+  /** Second call: the reply, in two text deltas. */
+  const ANSWER = sse(
+    [{ role: 'assistant', content: 'Sunny in ' }, { content: 'Paris.' }],
+    { prompt_tokens: 120, completion_tokens: 5, total_tokens: 125 },
+  );
+
+  it("sends the Portal one card per call with the tool's own arguments, then the reply", async () => {
+    const bodies = [TOOL_CALL, ANSWER];
+    let calls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        const body = bodies[calls] ?? ANSWER;
+        calls += 1;
+        return new Response(body, {
+          headers: { 'content-type': 'text/event-stream' },
+        });
+      }),
+    );
+    const weather = tool(async ({ city }) => `sunny in ${city}`, {
+      name: 'get_weather',
+      description: 'Weather for a city.',
+      schema: z.object({ city: z.string() }),
+    });
+    const agent = createAgent({
+      model: createLlmAdapter({ OPEN_ROUTER_API_KEY: 'sk-test' }).get('main'),
+      tools: [weather],
+    });
+    const stream = createSseTurnStream({
+      events: agent.streamEvents(
+        { messages: [new HumanMessage('Weather in Paris?')] },
+        { version: 'v2' },
+      ),
+      sessionId: 's1',
+      requestId: 'r1',
+      abortController: new AbortController(),
+    });
+    const frames = (await new Response(stream).text())
+      .split('\n\n')
+      .filter((f) => f.startsWith('event: '))
+      .map((f) => {
+        const data = JSON.parse(f.slice(f.indexOf('data: ') + 6)) as Record<
+          string,
+          unknown
+        >;
+        delete data.timestamp;
+        return { event: /^event: (\S+)/.exec(f)?.[1], data };
+      });
+    // Tool-call arguments arrive in slices; the Portal never sees them: one
+    // card per call, opened and settled by the tool run, keyed by the
+    // model's call id, with the whole arguments as the tool's own object
+    // (core before 1.2.12 traced them as `{ input: '<JSON string>' }`).
+    expect(frames).toEqual([
+      {
+        event: 'router.update',
+        data: { step: expect.any(String), sessionId: 's1', requestId: 'r1' },
+      },
+      {
+        event: 'reasoning',
+        data: {
+          sessionId: 's1',
+          requestId: 'r1',
+          reasoning: 'Look it up.',
+          isComplete: false,
+        },
+      },
+      {
+        event: 'tool_call',
+        data: {
+          requestId: 'r1',
+          sessionId: 's1',
+          toolName: 'get_weather',
+          args: { city: 'Paris', toolName: 'get_weather' },
+          status: 'isRunning',
+          eventId: 'call_1',
+        },
+      },
+      {
+        event: 'tool_call',
+        data: {
+          requestId: 'r1',
+          sessionId: 's1',
+          toolName: 'get_weather',
+          args: { city: 'Paris', toolName: 'get_weather' },
+          status: 'done',
+          eventId: 'call_1',
+          output: 'sunny in Paris',
+        },
+      },
+      { event: 'message', data: { content: 'Sunny in ' } },
+      { event: 'message', data: { content: 'Paris.' } },
+      {
+        event: 'reasoning',
+        data: {
+          sessionId: 's1',
+          requestId: 'r1',
+          reasoning: '',
+          isComplete: true,
+        },
+      },
+      { event: 'done', data: {} },
+    ]);
+    expect(calls).toBe(2);
+  });
+
+  // `on_tool_start` carries the call's arguments object as is, so an
+  // argument named `input` is the tool's own and must stay on the card.
+  it.each([
+    ['an ordinary argument', { city: 'Paris' }],
+    ['an object argument named input', { input: { city: 'Paris' } }],
+    ['a string argument named input', { input: 'Paris' }],
+  ])('puts %s on the card unchanged', async (_label, args) => {
+    const bodies = [
+      sse(
+        [
+          {
+            role: 'assistant',
+            content: '',
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_1',
+                type: 'function',
+                function: { name: 'echo', arguments: JSON.stringify(args) },
+              },
+            ],
+          },
+        ],
+        { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      ),
+      ANSWER,
+    ];
+    let calls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        const body = bodies[calls] ?? ANSWER;
+        calls += 1;
+        return new Response(body, {
+          headers: { 'content-type': 'text/event-stream' },
+        });
+      }),
+    );
+    const echo = tool(async () => 'ok', {
+      name: 'echo',
+      description: 'Echo.',
+      schema: z.object({
+        city: z.string().optional(),
+        input: z.union([z.string(), z.object({ city: z.string() })]).optional(),
+      }),
+    });
+    const agent = createAgent({
+      model: createLlmAdapter({ OPEN_ROUTER_API_KEY: 'sk-test' }).get('main'),
+      tools: [echo],
+    });
+    const sseText = await new Response(
+      createSseTurnStream({
+        events: agent.streamEvents(
+          { messages: [new HumanMessage('Echo.')] },
+          { version: 'v2' },
+        ),
+        sessionId: 's1',
+        requestId: 'r1',
+        abortController: new AbortController(),
+      }),
+    ).text();
+    const cards = sseText
+      .split('\n\n')
+      .filter((f) => f.startsWith('event: tool_call'))
+      .map(
+        (f) =>
+          JSON.parse(f.slice(f.indexOf('data: ') + 6)) as {
+            status: string;
+            args: Record<string, unknown>;
+          },
+      );
+    expect(cards.map((c) => c.status)).toEqual(['isRunning', 'done']);
+    for (const card of cards)
+      expect(card.args).toEqual({ ...args, toolName: 'echo' });
   });
 });

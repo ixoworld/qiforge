@@ -1,6 +1,6 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { LangChainTracer } from '@langchain/core/tracers/tracer_langchain';
-import { ChatOpenAI } from '@langchain/openai';
+import { ChatOpenAICompletions } from '@langchain/openai';
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_MODEL_ID,
@@ -13,9 +13,9 @@ import {
   resolveLangsmithTracing,
 } from '../core/llm';
 
-function expectChatOpenAI(model: BaseChatModel): ChatOpenAI {
-  expect(model).toBeInstanceOf(ChatOpenAI);
-  if (!(model instanceof ChatOpenAI)) throw new Error('unreachable');
+function expectCompletions(model: BaseChatModel): ChatOpenAICompletions {
+  expect(model).toBeInstanceOf(ChatOpenAICompletions);
+  if (!(model instanceof ChatOpenAICompletions)) throw new Error('unreachable');
   return model;
 }
 
@@ -24,7 +24,7 @@ describe('createLlmAdapter provider selection', () => {
     const adapter = createLlmAdapter({ OPEN_ROUTER_API_KEY: 'or-key' });
     expect(adapter.defaultModelId).toBe(DEFAULT_MODEL_ID);
     expect(adapter.providerConfig.baseURL).toBe(OPENROUTER_BASE_URL);
-    const model = expectChatOpenAI(adapter.get('main'));
+    const model = expectCompletions(adapter.get('main'));
     expect(model.model).toBe(DEFAULT_MODEL_ID);
     expect(model.clientConfig.baseURL).toBe(OPENROUTER_BASE_URL);
     expect(model.modelKwargs).toMatchObject({ require_parameters: true });
@@ -51,18 +51,18 @@ describe('createLlmAdapter provider selection', () => {
       NEBIUS_MODEL_MAP.subagent,
     );
 
-    const guard = expectChatOpenAI(adapter.get('guard'));
+    const guard = expectCompletions(adapter.get('guard'));
     expect(guard.model).toBe(NEBIUS_MODEL_MAP.guard);
     expect(guard.temperature).toBe(0);
     expect(guard.clientConfig.baseURL).toBe(NEBIUS_BASE_URL);
     // No OpenRouter wire extras on the Nebius branch.
     expect(guard.modelKwargs?.require_parameters).toBeUndefined();
 
-    const main = expectChatOpenAI(adapter.get('main'));
+    const main = expectCompletions(adapter.get('main'));
     expect(main.temperature).toBe(0.8);
     // params.model still wins.
     expect(
-      expectChatOpenAI(adapter.get('main', { model: 'custom/model' })).model,
+      expectCompletions(adapter.get('main', { model: 'custom/model' })).model,
     ).toBe('custom/model');
   });
 

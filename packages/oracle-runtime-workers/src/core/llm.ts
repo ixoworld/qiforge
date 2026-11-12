@@ -1,6 +1,6 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { LangChainTracer } from '@langchain/core/tracers/tracer_langchain';
-import { ChatOpenAI } from '@langchain/openai';
+import { ChatOpenAICompletions } from '@langchain/openai';
 import { Client } from 'langsmith';
 import type { ChatOpenAIFields, Logger, ModelRole } from '../plugin-api/types';
 import {
@@ -493,13 +493,72 @@ export const OPENROUTER_MODEL_MAP: Record<ProviderModelRole, string> = {
   embedding: 'text-embedding-3-small',
 };
 
-/** OpenRouter fallback models for the 'main' role (via `models`, sorted by latency). */
+/** OpenRouter fallback models for the 'main' role (via `models`). */
 export const OPENROUTER_MAIN_FALLBACKS: readonly string[] = [
   'qwen/qwen3-235b-a22b-thinking-2507',
   'google/gemini-2.5-flash-lite',
 ];
 
 export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
+
+/**
+ * OpenAI's GPT-5.6 models on OpenRouter. Every call to one of them, on any
+ * role, is pinned to the providers that keep the prompt cache (see
+ * {@link openRouterProviderRouting}).
+ */
+export const OPENROUTER_GPT_5_6_IDS: readonly string[] = [
+  'openai/gpt-5.6-luna',
+  'openai/gpt-5.6-terra',
+  'openai/gpt-5.6-sol',
+];
+
+/** The `provider` routing preferences a call sends to OpenRouter. */
+export type OpenRouterProviderRouting =
+  | { order: string[]; allow_fallbacks: true }
+  | { sort: 'latency' };
+
+/**
+ * The `provider` field of a call to `modelId` on `role` on OpenRouter.
+ *
+ * A GPT-5.6 model goes to OpenAI first, then Azure: both keep a repeated
+ * prompt prefix cached between calls seconds apart, while the faster Amazon
+ * Bedrock endpoint that latency sorting picks for `openai/gpt-5.6-luna` keeps
+ * it only some of the time, and a miss costs about 11 times a hit.
+ * `allow_fallbacks` keeps a turn answering when both are down: OpenRouter then
+ * uses the model's other providers (Bedrock, without the cache), and after
+ * them the `models` fallback list. A fallback model OpenAI and Azure do not
+ * serve is routed by OpenRouter's default routing, since `order` names none
+ * of its providers and OpenRouter ignores `sort` whenever `order` is set.
+ *
+ * The pin applies on every role. Any other model's `main` call is sent to its
+ * lowest-latency provider; its calls on the other roles carry no `provider`
+ * field and get OpenRouter's default routing.
+ */
+export function openRouterProviderRouting(
+  modelId: string,
+  role: ModelRole,
+): { provider?: OpenRouterProviderRouting } {
+  if (OPENROUTER_GPT_5_6_IDS.includes(modelId))
+    return { provider: { order: ['openai', 'azure'], allow_fallbacks: true } };
+  return role === 'main' ? { provider: { sort: 'latency' } } : {};
+}
+
+/**
+ * The request-body field that turns on prompt caching for an Anthropic model
+ * on OpenRouter: one top-level `cache_control` makes OpenRouter cache the
+ * longest stable prefix (tools, system message, history) and move the
+ * breakpoint forward as the thread grows. Anthropic caches only on request;
+ * every other model id gets nothing, so its request is unchanged. The cache
+ * lives five minutes; a cache write costs 1.25× the input price and a read
+ * 0.1×.
+ */
+export function openRouterPromptCacheKwargs(modelId: string): {
+  cache_control?: { type: 'ephemeral' };
+} {
+  return modelId.startsWith('anthropic/')
+    ? { cache_control: { type: 'ephemeral' } }
+    : {};
+}
 
 /**
  * Attribution headers OpenRouter asks callers to send. Shared by the chat
@@ -780,26 +839,37 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 /**
  * Build the platform LLM adapter from validated config, selecting the
- * provider by `LLM_PROVIDER` (`openrouter` default | `nebius`). `ChatOpenAI`
- * speaks to both OpenAI-compatible endpoints over `fetch`, so it runs
- * unchanged on Workers. Every model is created with `maxRetries: 2` and the
+ * provider by `LLM_PROVIDER` (`openrouter` default | `nebius`).
+ * `ChatOpenAICompletions` speaks to both OpenAI-compatible endpoints over
+ * `fetch`, so it runs unchanged on Workers. It always calls Chat Completions:
+ * `ChatOpenAI` sends any model id containing `gpt-5.6` (the default
+ * `openai/gpt-5.6-luna` among them) to the Responses API, a different request
+ * body and stream shape that `useResponsesApi: false` cannot turn off. Every
+ * model is created with `maxRetries: 2` and the
  * stream liveness guard (`src/llm/stream-liveness.ts`) as its `fetch`, with
  * the platform lane's budgets (`LLM_HEADERS_TIMEOUT_MS`,
  * `LLM_STREAM_IDLE_TIMEOUT_MS`, `LLM_STREAM_RETRIES`).
  *
  * OpenRouter role handling mirrors the Node provider:
  *   - `main` → `DEFAULT_MODEL` (or the catalog default), with the OpenRouter
- *     `models` fallback array and `provider.sort: 'latency'`; reasoning
- *     effort from `MAIN_REASONING_EFFORT`.
+ *     `models` fallback array; reasoning effort from `MAIN_REASONING_EFFORT`.
+ *   - provider routing from {@link openRouterProviderRouting}: a GPT-5.6
+ *     model, on any role, is pinned to OpenAI, then Azure; any other model
+ *     gets `sort: 'latency'` on `main` and no `provider` field elsewhere.
  *   - `summarizer` → the same model as `main` (no fallback array), with the
  *     helper calls' `medium` reasoning effort.
  *   - every other role → the fixed map; unknown roles fall back to `subagent`.
  *   - `params.model` always wins over the role default.
  *
  * Reasoning goes through `modelKwargs` (spread verbatim into the request
- * body), never ChatOpenAI's top-level `reasoning` field: that field is
- * dropped for OpenRouter-prefixed ids, and a top-level `reasoning.summary`
- * silently reroutes the call to the Responses API.
+ * body), never the top-level `reasoning` field: that field is dropped for
+ * OpenRouter-prefixed ids.
+ *
+ * A model whose id (the role default or `params.model`) is an Anthropic one
+ * also gets {@link openRouterPromptCacheKwargs}. The `main` fallback models
+ * are not Anthropic: when OpenRouter falls back from an Anthropic model, the
+ * same body, `cache_control` included, goes to the fallback, which accepts
+ * it; a non-Anthropic `main` sends no `cache_control` to its fallbacks.
  *
  * Nebius mirrors the Node provider's second branch: the fixed
  * {@link NEBIUS_MODEL_MAP} (no `DEFAULT_MODEL` participation, no fallback
@@ -838,12 +908,7 @@ export function createLlmAdapter(
         : modelForRole(role);
 
     const fallbackKwargs: Record<string, unknown> =
-      role === 'main'
-        ? {
-            models: [...OPENROUTER_MAIN_FALLBACKS],
-            provider: { sort: 'latency' },
-          }
-        : {};
+      role === 'main' ? { models: [...OPENROUTER_MAIN_FALLBACKS] } : {};
 
     // `MAIN_REASONING_EFFORT` is for the reply only; helper calls (the
     // summarizer included, although it runs on the main model) reason at
@@ -865,7 +930,7 @@ export function createLlmAdapter(
     )) {
       if (typeof value === 'string') overrideHeaders[key] = value;
     }
-    return new ChatOpenAI({
+    return new ChatOpenAICompletions({
       temperature: 0.8,
       maxRetries: 2,
       ...livenessModelFields(liveness),
@@ -889,7 +954,9 @@ export function createLlmAdapter(
         require_parameters: true,
         include_reasoning: true,
         ...fallbackKwargs,
+        ...openRouterProviderRouting(model, role),
         reasoning: reasoningKwargs,
+        ...openRouterPromptCacheKwargs(model),
         ...asRecord(paramsModelKwargs),
       },
     });
@@ -944,7 +1011,7 @@ function createNebiusAdapter(
       `[llm] creating model — provider=nebius, role=${String(role)}, model=${model}`,
     );
     const configuration = asRecord(paramsConfiguration);
-    return new ChatOpenAI({
+    return new ChatOpenAICompletions({
       // Cold for classification (guard), platform default otherwise.
       temperature: role === 'guard' ? 0 : 0.8,
       maxRetries: 2,
@@ -982,11 +1049,16 @@ function createNebiusAdapter(
  * runtime's `modules/messages/langsmith-tracing.ts`.
  *
  * One deliberate difference: on Node, `LANGSMITH_TRACING=true` relies on
- * LangChain's env-driven auto-attached tracer. Workers has no `process.env`,
- * so the callback manager never auto-attaches anything — here BOTH modes
- * attach an explicit `LangChainTracer` whose `Client` is constructed from the
- * Worker env (`LANGSMITH_API_KEY` / `LANGSMITH_ENDPOINT`) and memoised per
- * isolate, so every tracer shares one batched upload queue:
+ * LangChain's env-driven auto-attached tracer. Here BOTH modes attach an
+ * explicit `LangChainTracer` whose `Client` is constructed from the Worker
+ * env (`LANGSMITH_API_KEY` / `LANGSMITH_ENDPOINT`) and memoised per isolate,
+ * so every tracer shares one batched upload queue. LangChain's callback
+ * manager would attach its own tracer (default client, none of the
+ * redaction below) to any run that does not carry this one when
+ * `LANGSMITH_TRACING` or a sibling switch is `true` in `process.env`, which
+ * `nodejs_compat` fills from the Worker's vars and secrets; the runtime's
+ * entry removes those switches from `process.env` when the isolate loads
+ * (`removeLangChainTracingSwitches`, `tracing-env.ts`).
  *
  *  - **Global** — `LANGSMITH_TRACING === 'true'`: every turn is traced.
  *  - **Selective** — `LANGSMITH_TRACED_DIDS` allowlist (`*` = everyone):
@@ -1168,6 +1240,16 @@ function langsmithClientFor(apiKey: string, endpoint?: string): Client {
       ...(endpoint && { apiUrl: endpoint }),
       hideInputs: traceValues,
       hideOutputs: traceValues,
+      // Everything else a run uploads that the client lets us clean: its
+      // `error` text (a tool error can quote a signed link) and its
+      // metadata. `hideInputs` / `hideOutputs` take precedence over it for
+      // inputs and outputs.
+      anonymizer: redactSignedLinks,
+      // No per-run `runtime` block and no `LANGSMITH_*` / `LANGCHAIN_*`
+      // values from `process.env` (which workerd fills from vars and
+      // secrets) in each run's metadata: `LANGSMITH_TRACED_DIDS` would put
+      // the other traced users' DIDs on every run.
+      omitTracedRuntimeInfo: true,
       batchSizeBytesLimit: TRACE_BATCH_BYTES,
     });
     langsmithClients.set(key, client);

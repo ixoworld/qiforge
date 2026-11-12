@@ -70,7 +70,7 @@ export const createSafetyGuardrailMiddleware = (
         if (!state.messages || state.messages.length === 0) return;
 
         const lastMessage = state.messages[state.messages.length - 1];
-        if (lastMessage.type !== 'ai') return;
+        if (!lastMessage || lastMessage.type !== 'ai') return;
 
         const aiMessage = lastMessage as AIMessage;
         if (aiMessage.tool_calls && aiMessage.tool_calls.length > 0) return;

@@ -1,6 +1,5 @@
 import { ToolMessage } from '@langchain/core/messages';
 import { Command } from '@langchain/langgraph';
-import { withoutStructuredCopy } from './mcp-result';
 import { capToolResult, type ResultCapConfig } from './middlewares/result-cap';
 import { tool } from '@langchain/core/tools';
 import type { StructuredTool } from 'langchain';
@@ -126,7 +125,7 @@ export function wrapPluginTool(
       );
       if (pluginName !== undefined)
         requireToolPlane(ctx, pluginName, pluginTool);
-      const output = withoutStructuredCopy(await pluginTool.handler(args, ctx));
+      const output = await pluginTool.handler(args, ctx);
       // A tool's own message (a result that says the tool did not run) is
       // returned whole, never capped into text.
       if (

@@ -613,9 +613,11 @@ const USER_CONTEXT_PROGRESS_STEP = 'Recalling your memories…';
  * return as an empty section (which renders nothing). The checkpointed
  * value then marks a landed gather (see `hasUserContext`) even for a user
  * with no memory yet, so the thread's later turns do not count as first
- * contact; and the written value is the whole context under a merging
- * reducer (the `MainAgentGraphState` annotation's) as well as under the
- * last-value channel the agent declares (`userContextStateMiddleware`).
+ * contact. The agent's `userContext` channel is the last-value field
+ * `userContextStateMiddleware` declares (`createAgent` does not build
+ * channels from the `MainAgentGraphState` annotation, so its merging
+ * reducer never runs): the written value replaces the previous context
+ * whole, and every slot present keeps that replacement complete.
  */
 function withEverySlot(context: UserContextData): UserContextData {
   const out: UserContextData = { ...context };

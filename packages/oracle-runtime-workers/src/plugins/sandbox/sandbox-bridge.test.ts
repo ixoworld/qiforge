@@ -13,6 +13,7 @@ import {
   hasShellUnsafeChars,
   MAX_SANDBOX_TRANSFER_BYTES,
   readSandboxFile,
+  readSandboxResult,
   SANDBOX_MCP_TIMEOUT_MS,
   SANDBOX_NO_FILE_SENTINEL,
   SANDBOX_TOO_LARGE_SENTINEL,
@@ -23,8 +24,8 @@ import type { SandboxMcpClientFactory, SandboxMcpTool } from './sandbox.plugin';
 const upstreamCalls: unknown[][] = [];
 
 vi.mock('@langchain/mcp-adapters', () => {
-  class MultiServerMCPClient {
-    async getTools() {
+  class MCPAdapter {
+    async listTools() {
       return [
         {
           name: 'sandbox_run',
@@ -39,13 +40,13 @@ vi.mock('@langchain/mcp-adapters', () => {
     }
     async close(): Promise<void> {}
   }
-  return { MultiServerMCPClient };
+  return { MCPAdapter };
 });
 
 describe('defaultSandboxMcpClientFactory', () => {
   it('gives every upstream call the sandbox timeout as its MCP request timeout', async () => {
     upstreamCalls.length = 0;
-    const client = defaultSandboxMcpClientFactory({ mcpServers: {} });
+    const client = defaultSandboxMcpClientFactory({ servers: {} });
     const [run] = await client.getTools();
 
     expect(await run?.invoke({ code: 'sleep 90' })).toBe('ok');
@@ -234,4 +235,72 @@ describe('sandbox path quoting', () => {
       expect(cmd.replaceAll(quoted, '')).not.toContain(p);
     },
   );
+});
+
+describe('readSandboxResult', () => {
+  const failed = JSON.stringify({
+    success: false,
+    exitCode: 1,
+    output: 'denied',
+  });
+  const passed = JSON.stringify({ success: true, exitCode: 0, output: 'hi' });
+
+  it.each([
+    ['a plain string', failed],
+    ['one text block', { type: 'text', text: failed }],
+    [
+      'a summary beside the structured value',
+      [
+        { type: 'text', text: 'Write failed' },
+        { type: 'text', text: failed },
+      ],
+    ],
+    [
+      'several blocks',
+      [
+        { type: 'text', text: 'stderr: permission denied' },
+        { type: 'text', text: failed },
+        { type: 'text', text: 'done' },
+      ],
+    ],
+  ])('reads a failure from %s', (_shape, result) => {
+    expect(readSandboxResult(result)).toMatchObject({
+      ok: false,
+      output: 'denied',
+    });
+  });
+
+  it.each([
+    ['a plain string', passed],
+    ['one text block', { type: 'text', text: passed }],
+    [
+      'a summary beside the structured value',
+      [
+        { type: 'text', text: 'Ran' },
+        { type: 'text', text: passed },
+      ],
+    ],
+  ])('reads a success and its stdout from %s', (_shape, result) => {
+    expect(readSandboxResult(result)).toMatchObject({ ok: true, output: 'hi' });
+  });
+
+  it('gives texts that hold no envelope as the output, joined', () => {
+    expect(
+      readSandboxResult([
+        { type: 'text', text: 'line one' },
+        { type: 'text', text: 'line two' },
+      ]),
+    ).toEqual({
+      ok: true,
+      output: 'line one\nline two',
+      text: 'line one\nline two',
+    });
+  });
+
+  it('reads an object result as its own envelope', () => {
+    expect(readSandboxResult({ success: false, output: 'x' })).toMatchObject({
+      ok: false,
+      output: 'x',
+    });
+  });
 });

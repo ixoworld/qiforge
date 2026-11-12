@@ -34,6 +34,10 @@ export interface ByoFallbackNoticePayload {
   providerLabel?: string;
   /** `model_unavailable` only: the provider-native id the provider refused. */
   model?: string;
+  /** `model_unavailable` only: the HTTP status the provider answered. */
+  status?: number;
+  /** `model_unavailable` only: the provider's error code, when it sent one. */
+  code?: string;
   reason: ByoFallbackReason;
   retryable: false;
   timestamp: string;
@@ -42,6 +46,9 @@ export interface ByoFallbackNoticePayload {
 export interface ByoFallbackNoticeOptions {
   /** `model_unavailable`: the provider-native model id that was refused. */
   modelId?: string;
+  /** `model_unavailable`: the provider's HTTP status and error code. */
+  status?: number;
+  code?: string;
 }
 
 /** Catalog label of a provider-native BYO model id, else the id itself. */
@@ -94,6 +101,10 @@ export function buildByoFallbackNotice(
     ...(provider && { provider }),
     ...(providerLabel && { providerLabel }),
     ...(modelId && { model: modelId }),
+    ...(reason === 'model_unavailable' &&
+      opts?.status !== undefined && { status: opts.status }),
+    ...(reason === 'model_unavailable' &&
+      opts?.code !== undefined && { code: opts.code }),
     reason,
     retryable: false,
     timestamp: new Date().toISOString(),
@@ -139,8 +150,20 @@ interface ErrorParts {
   text: string;
 }
 
+/**
+ * `@langchain/openai` appends "Troubleshooting URL: …/<CODE>/" to the message
+ * of the errors it recognises by status alone — every HTTP 404 gets
+ * `MODEL_NOT_FOUND`, whatever the provider said. That is LangChain's guess,
+ * not provider evidence, so it is cut off before any text matching.
+ */
+function withoutLangChainHint(message: string): string {
+  return message.replace(/\s*Troubleshooting URL:\s*\S+\s*$/, '');
+}
+
 function extractErrorParts(error: unknown): ErrorParts {
-  const text = error instanceof Error ? error.message : String(error);
+  const text = withoutLangChainHint(
+    error instanceof Error ? error.message : String(error),
+  );
   const parts: ErrorParts = { text };
   if (error && typeof error === 'object') {
     const record = error as Record<string, unknown>;
@@ -345,9 +368,6 @@ const MODEL_UNAVAILABLE_CODES: ReadonlySet<string> = new Set([
  */
 const MODEL_UNAVAILABLE_TEXT =
   /model_not_found|unsupported[_ ]model|model\b[^.\n]{0,120}\b(?:does not exist|is not supported|not available)/i;
-/** LangChain's code for a 400 about the request's tool messages. */
-const INVALID_TOOL_RESULTS = 'INVALID_TOOL_RESULTS';
-
 export interface ModelUnavailableOptions {
   /**
    * The failing call had already produced output (text, reasoning or a tool
@@ -358,16 +378,18 @@ export interface ModelUnavailableOptions {
 }
 
 /**
- * Whether a BYO model call failed because the user's provider does not
- * serve the requested model — the ChatGPT backend answers an immediate
- * `400` with an empty body for a model id the subscription does not offer.
+ * Whether a BYO model call failed because the user's provider says it does
+ * not serve the requested model.
  *
- * Positive: an explicit model code or text (`model_not_found`, "does not
- * exist", "unsupported model", "is not supported") on a 400/403/404 or a
- * status-less error; or a bare HTTP 400/404 that is nothing else this module
- * or LangChain recognises (not a context overflow, not a malformed
- * tool-result history, not a billing/auth/rate/timeout/network/server
- * text). Never once the call produced output (`afterOutput`).
+ * Positive-only: the provider has to name the model as the problem, with an
+ * explicit code (`model_not_found`, `unsupported_model`) or text ("does not
+ * exist", "is not supported", "not available", "unsupported model") on a
+ * 400/403/404 or a status-less error. A bare HTTP 400 or 404, an empty body,
+ * or a body about something else (a malformed request field, a context
+ * overflow, a tool-result history, billing, auth, rate limit) is NOT this
+ * case: the evidence does not say the model is the problem, so the turn keeps
+ * its ordinary error handling. Never once the call produced output
+ * (`afterOutput`).
  */
 export function isModelUnavailableError(
   error: unknown,
@@ -391,17 +413,19 @@ export function isModelUnavailableError(
     return false;
   }
   if (code && MODEL_UNAVAILABLE_CODES.has(code)) return true;
-  if (MODEL_UNAVAILABLE_TEXT.test(text)) return true;
-  if (status !== 400 && status !== 404) return false;
-  if (
-    error &&
-    typeof error === 'object' &&
-    'lc_error_code' in error &&
-    error.lc_error_code === INVALID_TOOL_RESULTS
-  ) {
-    return false;
-  }
-  return detectKind(parts) === 'unknown';
+  return MODEL_UNAVAILABLE_TEXT.test(text);
+}
+
+/** What the provider said, for the notice and the log (never the body). */
+export function upstreamEvidence(error: unknown): {
+  status?: number;
+  code?: string;
+} {
+  const { status, code } = extractErrorParts(error);
+  return {
+    ...(status !== undefined && { status }),
+    ...(code !== undefined && { code }),
+  };
 }
 
 const OPERATOR_FAULT_KINDS: ReadonlySet<LlmErrorKind> = new Set([

@@ -1,8 +1,8 @@
-import { MultiServerMCPClient } from '@langchain/mcp-adapters';
+import { MCPAdapter } from '@langchain/mcp-adapters';
 import type { RuntimeContext } from '../../plugin-api/types';
 import { base64ToBytes } from '../base64';
 import { withCallTimeout } from '../mcp-call-timeout';
-import { adaptMcpClientTools } from '../mcp-tool-adapter';
+import { adaptMcpClientTools, mcpAdapterConfig } from '../mcp-tool-adapter';
 import { createDefaultAuthBuilder, SANDBOX_RUN_TOOL_NAME } from './sandbox-mcp';
 import type {
   SandboxMcpClientFactory,
@@ -50,7 +50,7 @@ export const SANDBOX_NOT_AUTHORIZED_MESSAGE =
   "You haven't authorized the sandbox yet — grant sandbox access in the portal so I can move files between it and your files.";
 
 /**
- * Default sandbox MCP-client factory. Wraps a real `MultiServerMCPClient` in
+ * Default sandbox MCP-client factory. Wraps a real `MCPAdapter` in
  * the minimal {@link SandboxMcpClientLike} surface the bridge needs, adapting
  * each upstream tool into a plain {@link SandboxMcpTool} (JSON-Schema →
  * Zod via the shared adapter). Tests inject a stub instead so no real MCP
@@ -59,10 +59,10 @@ export const SANDBOX_NOT_AUTHORIZED_MESSAGE =
 export const defaultSandboxMcpClientFactory: SandboxMcpClientFactory = (
   config,
 ) => {
-  const client = new MultiServerMCPClient(config);
+  const client = new MCPAdapter(config);
   const wrapper: SandboxMcpClientLike = {
     getTools: async () =>
-      adaptMcpClientTools(await client.getTools(), console, {
+      adaptMcpClientTools(await client.listTools(), console, {
         requestTimeoutMs: SANDBOX_MCP_TIMEOUT_MS,
       }),
     close: () => client.close(),
@@ -152,32 +152,51 @@ export interface SandboxOutcome {
   text: string;
 }
 
+/** The texts a tool result carries: a string, a text block, or a list of blocks. */
+function resultTexts(result: unknown): string[] {
+  if (typeof result === 'string') return [result];
+  if (Array.isArray(result)) return result.flatMap(resultTexts);
+  if (isRecord(result) && typeof result.text === 'string') return [result.text];
+  return [];
+}
+
+function parsedRecord(text: string): Record<string, unknown> | undefined {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
- * Read a sandbox MCP result defensively. The upstream returns either a JSON
- * envelope (`{ success, exitCode, output, ... }`) or a bare string; both are
- * handled. `output` is the captured stdout when present, otherwise the whole
- * stringified result.
+ * Read a sandbox MCP result defensively. The adapter hands over the JSON
+ * envelope (`{ success, exitCode, output, ... }`) as a string, or as one of
+ * several text blocks (a summary beside the structured value, see
+ * `keepStructuredContent`, or a multi-block result); the envelope is the
+ * first text that parses to an object, and an object result is its own
+ * envelope. `output` is the captured stdout when present, otherwise the
+ * result's texts joined by newlines.
  *
  * ASSUMPTION (verify against a live sandbox): stdout lives in the `output`
  * field and `success` / `exitCode` are top-level — the shape the sandbox
  * manifest documents.
  */
 export function readSandboxResult(result: unknown): SandboxOutcome {
-  const text = typeof result === 'string' ? result : safeStringify(result);
+  const texts = resultTexts(result);
+  const text = texts.length > 0 ? texts.join('\n') : safeStringify(result);
 
-  let envelope: unknown = isRecord(result) ? result : undefined;
-  if (typeof result === 'string') {
-    try {
-      envelope = JSON.parse(result);
-    } catch {
-      envelope = undefined;
-    }
+  let envelope: Record<string, unknown> | undefined;
+  for (const one of texts) {
+    envelope = parsedRecord(one);
+    if (envelope) break;
   }
+  if (texts.length === 0 && isRecord(result)) envelope = result;
 
   let output: string | undefined;
   let success: boolean | undefined;
   let exitCode: number | undefined;
-  if (isRecord(envelope)) {
+  if (envelope) {
     if (typeof envelope.output === 'string') output = envelope.output;
     if (typeof envelope.success === 'boolean') success = envelope.success;
     if (typeof envelope.exitCode === 'number') exitCode = envelope.exitCode;
@@ -215,17 +234,13 @@ export async function getSandboxBridge(
     return { error: SANDBOX_NOT_AUTHORIZED_MESSAGE };
   }
 
-  const client = mcpClientFactory({
-    mcpServers: {
-      sandbox: {
-        type: 'http',
-        url: sandboxMcpUrl,
-        transport: 'http',
-        headers,
-      },
-    },
-    useStandardContentBlocks: true,
-  });
+  const client = mcpClientFactory(
+    mcpAdapterConfig('sandbox', {
+      url: sandboxMcpUrl,
+      headers,
+      toolNames: 'bare',
+    }),
+  );
 
   const close = async (): Promise<void> => {
     try {

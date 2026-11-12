@@ -218,6 +218,11 @@ the tool schema: …` — grep the tail for it when a model keeps "creating"
   things that never appear;
 - a tool that threw is `status: 'error'` from `on_tool_error`, as before.
 
+A `tool_call` / `action_call` frame's `args` are the tool's own arguments as
+the model sent them (`tool_call` adds `toolName`), e.g.
+`{ city: 'Paris', toolName: 'get_weather' }`. Before `@langchain/core` 1.2.12
+they arrived as `{ input: '<arguments as a JSON string>', toolName }`.
+
 `GET /messages/:id` lists the thread's full history from the saver, not the
 agent's live context: after the summarization middleware condensed the
 context, every earlier message still lists (Node parity) and only the
@@ -459,6 +464,18 @@ interrupted`). This ends the loop of a turn that resets the isolate on
 browser …; running it again`). A sent one follows the read / write rule
   ([frontend bridge](frontend-bridge.md#on-workers-restarts-and-hibernation)).
   Marks written before the column existed count as sent.
+- **Finished calls keep their result.** The main agent runs each tool call
+  of a step as its own graph task (`createAgent` `version: 'v2'`, as the
+  sub-agents do), so a call's result is checkpointed as a pending write as
+  soon as it returns. A step reset after some of its calls finished resumes
+  with only the unfinished ones: a finished write keeps its real result (no
+  "outcome unknown"), a finished read is not run again; the marks above
+  apply to the calls that were in flight. Each task carries only its tool
+  call, not a copy of the state (measured: 3 compact task packets of
+  ~310 bytes each and about 2 KB more written per three-call turn than with
+  one task for all calls, the same heap). A step checkpointed by a build
+  with one tools task for every call (`v1`) and resumed on this one still
+  runs as one task, under the marks alone.
 - **Task runs.** A scheduled run cut off by a reset is resumed like any
   other and its result delivered once by the scheduler
   (`completeRecoveredRun`); it is closed as interrupted only after the
@@ -583,10 +600,14 @@ in the checkpoint write after the turn's last model call):
 - **One task per tool call.** `createAgent` used to send each tool call to
   the tools node as its own graph task carrying a copy of the whole state,
   serialized into the checkpoint writes and into every traced tools-node
-  run. The main agent now runs every call of a message in one tools node
-  (`version: 'v1'` in `src/core/main-agent.ts`), in parallel through the
-  tool scheduler's lanes as before; tool side effects are guarded by
-  `turn_tool_marks`, not by per-call checkpoints.
+  run. For a while the main agent ran every call of a message in one tools
+  node (`version: 'v1'`) for that reason. Since langchain 1.5.19 a task
+  carries only its tool call (`{ lg_tool_call }`) and the tool reads the
+  state from the graph, so the main agent is back on one task per call
+  (`version: 'v2'` in `src/core/main-agent.ts`) for per-call checkpoints
+  (see "Finished calls keep their result" under durable runs); on a
+  1.2 MB, 183-message thread a three-call turn measured the same retained
+  heap and peak as `v1` within 1.4 MiB.
 - **Traces.** Every traced graph, node and middleware run carried the whole
   thread, and the LangSmith client serialized each one for upload, in
   batches of up to 24 MiB from a queue of up to 1 GiB. A trace now keeps the
@@ -722,6 +743,57 @@ full history for the rest of this turn`); it never replaces the
   end on UTF-8 character boundaries; `offset`, `length` and `next` say
   where a page really ended. Optionally add an R2 lifecycle rule on the
   `results/` prefix as a belt on top of the sweep.
+- **Prompt caching.** OpenAI models cache a repeated prompt prefix on their
+  own; their requests, and those of every other non-Anthropic model, carry
+  no caching field. Anthropic models cache only when asked, so every call
+  to an `anthropic/…` id on OpenRouter (`anthropic/claude-sonnet-5`,
+  `anthropic/claude-opus-4.8`; the deployment default or a per-request
+  choice, on any role) carries one top-level
+  `cache_control: {"type": "ephemeral"}` (`openRouterPromptCacheKwargs`,
+  `src/core/llm.ts`): OpenRouter caches the longest stable prefix (tools,
+  system message, history) and moves the breakpoint forward as the thread
+  grows. Anthropic's cache lives 5 minutes. A cache write costs 1.25 times
+  the input price and a read 0.1 times, so a cold turn with a single model
+  call pays about 25% more for its prompt, and the calls after it within
+  5 minutes about a tenth (Sonnet 5, a 14k-token prefix: $0.028 a call
+  uncached, $0.035 writing, $0.003 reading). OpenRouter reports the tokens
+  as `cached_tokens` and `cache_write_tokens`, both inside `prompt_tokens`.
+  When OpenRouter falls back from an Anthropic `main` model, the fallback
+  gets the same body and accepts the field. A BYO Anthropic key talks to
+  Anthropic's OpenAI-compatible endpoint, which does not support prompt
+  caching, and gets no `cache_control`. `CONTEXT_CACHE_COLD_MS` (35
+  minutes) was measured on OpenAI: an Anthropic thread idle for 5 to 35
+  minutes has lost its cache but still counts as warm.
+- **Provider routing.** Every call to a GPT-5.6 model on OpenRouter
+  (`openai/gpt-5.6-luna`, `-terra`, `-sol`; `OPENROUTER_GPT_5_6_IDS`), on
+  any role (`main`, and the summarizer, skills and sub-agent roles that run
+  luna by default, or any role given a GPT-5.6 id), carries
+  `provider: {"order": ["openai", "azure"], "allow_fallbacks": true}`
+  (`openRouterProviderRouting`, `src/core/llm.ts`). Any other model's `main`
+  call carries `provider: {"sort": "latency"}`; its calls on the other roles
+  (session titles and the guard on Llama, vision on Gemini, routing on
+  gpt-oss) carry no `provider` field and get OpenRouter's default routing.
+  Attachment extraction's raw request uses the fixed `vision` model and
+  carries none either. Latency sorting sent `gpt-5.6-luna` to Amazon
+  Bedrock, where a repeat of an 8.3k-token prefix seconds later hit the
+  cache on 0 of 5, 2 of 10, 6 of 12 and 5 of 5 calls in four runs, against
+  every call on OpenAI and on Azure (Nov 9 2026); a miss costs about 11
+  times a hit ($0.0021 against $0.00019). OpenAI
+  adds about 0.1 s to a non-streamed call and 0.4 s to the first streamed
+  token against Bedrock; Azure adds 1.3 s, so it is second. `terra` and
+  `sol` already went to OpenAI under latency sorting. With
+  `allow_fallbacks`, a call goes to the model's other providers (Bedrock,
+  without the cache) when OpenAI and Azure are both down, and then to the
+  `models` fallback list. `order` names no provider of the fallback models,
+  and OpenRouter ignores `sort` when `order` is set, so a fallback model is
+  routed by OpenRouter's default routing (load balancing by price and
+  uptime). The base slugs `openai` and `azure` leave out OpenAI's `flex`
+  and `fast` tier endpoints and the regional Azure endpoints, which cost 10%
+  more. Every OpenRouter call also sends a top-level
+  `require_parameters: true`, which is not an OpenRouter request field and
+  has no effect. OpenRouter's `provider.require_parameters` would refuse
+  every GPT-5.6 call with a 404, because no GPT-5.6 endpoint accepts
+  `temperature`.
 - **Stale results.** On a cold turn (one that opens at least
   `CONTEXT_CACHE_COLD_MS` after the turn before it) tool results older than
   the last `CONTEXT_STALE_RESULT_TURNS` finished turns become one-line stubs,
@@ -2021,27 +2093,56 @@ Responses-API id, a streaming turn delivering chunks as they are produced.
 ## BYO model the provider refuses
 
 The pre-turn checks (credential present, token fresh, backend reachable)
-cannot tell whether the user's provider serves the selected model. The
-ChatGPT backend answers a model id the subscription does not offer with an
-immediate `400` and an empty body (logged as
-`[byo-chatgpt] backend 400 Bad Request: <empty body>`); an API-key provider
-answers `404 model_not_found` or a "does not exist" text. Every BYO model the
-adapter hands out (`createByoLlmAdapter`) is wrapped in
-`ByoModelFallbackChatModel` (`src/llm/byo-model-fallback.ts`), which turns
-that into a fallback instead of a failed turn:
+cannot tell whether the user's provider serves the selected model, and the
+account's model listing (below) is advisory: it can lag the provider. Every
+BYO model the adapter hands out (`createByoLlmAdapter`) is wrapped in
+`ByoModelFallbackChatModel` (`src/llm/byo-model-fallback.ts`), which turns a
+refusal that names the model into a fallback instead of a failed turn.
 
+**Which models the picker offers.** `GET /byo-llm/status` lists, per connected
+provider, the curated models (`BYO_PROVIDER_MODELS`) narrowed to the ones the
+account's own listing contains: `GET https://api.openai.com/v1/models` for an
+OpenAI key, `GET <backend>/models?client_version=0.167.0` for a ChatGPT
+subscription (the Codex client's catalog call, through the same proxy as the
+model calls; the backend filters by plan and by `minimal_client_version`).
+The listing is read when the credential is connected, and again by `status`
+when none is kept (24 h) or with `?refresh=true`; it is kept per user and
+provider in the object's storage (`models:<provider>:<did>`), not inside the
+credential secret, whose shape is shared with the Portal. When it cannot be
+read (provider unreachable, HTTP error, unexpected shape, expired
+subscription) or the provider has none (Anthropic, Gemini, DeepSeek), the
+curated list is shown unchecked: `modelSource: 'catalog'` and a
+`modelSourceNote` say why, and a failure is retried after 5 minutes. With a
+listing, `modelSource: 'account'`; a provider whose list holds none of the
+curated models shows none. The ChatGPT endpoint was read from the Codex source,
+not yet exercised against a live subscription from this runtime.
+
+- **Long tool call ids.** The Responses API rejects a `call_id` over 64
+  characters, and stored history can hold longer ones: another provider's
+  id, or a sub-agent's forwarded call, which the runtime renames
+  `<parent call id>_<call id>` (`filterForwardedMessages`). The ChatGPT
+  lane's fetch (`byo-call-ids.ts`) replaces each over-long `input[].call_id`
+  in the outgoing body with `call_` + the base64url SHA-256 of the id
+  (48 characters, identical on every send, one per distinct id so a call and
+  its output still match). The stored messages, tool marks and transcript
+  keep the original id; a request where the replacement would equal another
+  call id is refused. Before this, such a 400 was shown as "doesn't offer
+  this model".
 - **When it fires.** A BYO model call fails before the provider produced any
   output (text, reasoning or a tool call) with an error
   `isModelUnavailableError` (`src/llm/provider-error.ts`) accepts: an explicit
   `model_not_found` / `unsupported_model` code or a "does not exist", "is not
-  supported", "unsupported model" text on a 400/403/404 or status-less error,
-  or a bare HTTP 400/404 that is nothing else known (not a context overflow,
-  not LangChain's `INVALID_TOOL_RESULTS`, not a billing / auth / rate-limit /
-  timeout / network / server text). A failure after output keeps the old
-  behaviour (`error` frame, `done { failed: true }`).
+  supported", "unsupported model", "not available" text naming the model, on a
+  400/403/404 or status-less error. A bare HTTP 400/404, an empty body, or a
+  body about something else (a field too long, a context overflow, a
+  tool-result history, billing, auth, rate limit) is not a refusal: the turn
+  fails as before. `@langchain/openai` appends "Troubleshooting URL: …/
+  MODEL_NOT_FOUND/" to every 404; it is cut off before matching. A failure
+  after output keeps the old behaviour (`error` frame, `done { failed: true }`).
 - **What the client sees.** The same `error`-channel notice the pre-turn
   fallbacks send — `kind: 'byo_fallback'`, `reason: 'model_unavailable'`,
-  `source: 'byo'`, `retryable: false`, plus `model` (the refused id) — e.g.
+  `source: 'byo'`, `retryable: false`, plus `model` (the refused id) and the
+  provider's `status` and `code` — e.g.
   "Your ChatGPT subscription doesn't offer GPT-5.6 Terra, so this reply used
   the platform model instead. Pick another model in your Personal Agent
   settings." (API-key providers: "Your OpenAI API account doesn't offer …";
@@ -2150,9 +2251,16 @@ that can handle the requested parameters` is the memory engine's own
   its pre-loaded context; the object's own cache (5 min by default) has the
   same effect for later sessions, and `search_memory_engine` always asks the
   engine.
-- Optional MCP tool parameters lose their enums before the model sees them
-  (`@langchain/mcp-adapters` simplifies `anyOf: [<real>, null]`);
-  `GET /debug/memory-schema` shows the schema as delivered.
+- MCP tool input schemas reach the model as the server declares them
+  (`@langchain/mcp-adapters` 2 no longer simplifies them), so optional
+  parameters keep their enums. Zod cannot express `not`, `if`/`then`/`else`
+  or `unevaluatedProperties`, so `mcpToolZodSchema` drops them (the
+  properties a `then` or `else` declares join the schema as optional ones)
+  and the model sees every property; the adapter still validates the
+  arguments against the full schema. A schema that still cannot be
+  converted falls back to a permissive one and logs a
+  `schema not convertible to Zod` warning. `GET /debug/memory-schema` shows
+  the memory schema as delivered.
 - Firecrawl: the IXO-hosted server serves Streamable HTTP at `/v2/mcp`;
   `/mcp` is a plain 404 from the ingress.
 - Crypto snapshots are not transactional with Olm ratchet advances (a hard

@@ -1,12 +1,27 @@
 import type { CallbackManagerForLLMRun } from '@langchain/core/callbacks/manager';
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { AIMessageChunk, type BaseMessage } from '@langchain/core/messages';
+import {
+  AIMessage,
+  AIMessageChunk,
+  HumanMessage,
+  ToolMessage,
+  type BaseMessage,
+} from '@langchain/core/messages';
 import { ChatGenerationChunk, type ChatResult } from '@langchain/core/outputs';
 import { tool } from '@langchain/core/tools';
 import { FakeListChatModel } from '@langchain/core/utils/testing';
-import { ChatOpenAI } from '@langchain/openai';
+import {
+  BaseChatOpenAI,
+  ChatOpenAI,
+  ChatOpenAICompletions,
+} from '@langchain/openai';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import {
+  createLlmAdapter,
+  NEBIUS_BASE_URL,
+  OPENROUTER_BASE_URL,
+} from '../core/llm';
 import type { LlmAdapter } from '../core/runtime-context';
 import type { Logger } from '../plugin-api/types';
 import { createByoLlmAdapter } from './byo-adapter';
@@ -21,6 +36,8 @@ import {
   CHATGPT_BACKEND_BASE_URL,
   chatGptBackendFromEnv,
   DEEPSEEK_BASE_URL,
+  GEMINI_OPENAI_COMPAT_BASE_URL,
+  OPENAI_API_BASE_URL,
 } from './byo-client';
 
 function expectChatOpenAI(model: BaseChatModel): ChatOpenAI {
@@ -29,12 +46,25 @@ function expectChatOpenAI(model: BaseChatModel): ChatOpenAI {
   return model;
 }
 
-/** A BYO-served role: the refusal wrapper around the user's ChatOpenAI. */
-function expectByoChatOpenAI(model: BaseChatModel): ChatOpenAI {
+/** A BYO-served role: the refusal wrapper around the user's own model. */
+function byoModelOf(model: BaseChatModel): BaseChatModel {
   expect(model).toBeInstanceOf(ByoModelFallbackChatModel);
   if (!(model instanceof ByoModelFallbackChatModel))
     throw new Error('unreachable');
-  return expectChatOpenAI(model.byoModel);
+  return model.byoModel;
+}
+
+/** The ChatGPT lane: `ChatOpenAI` on the Responses API. */
+function expectByoChatOpenAI(model: BaseChatModel): ChatOpenAI {
+  return expectChatOpenAI(byoModelOf(model));
+}
+
+/** An API-key lane: Chat Completions, whatever the model id. */
+function expectByoCompletions(model: BaseChatModel): ChatOpenAICompletions {
+  const byo = byoModelOf(model);
+  expect(byo).toBeInstanceOf(ChatOpenAICompletions);
+  if (!(byo instanceof ChatOpenAICompletions)) throw new Error('unreachable');
+  return byo;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -68,6 +98,27 @@ const CHATGPT_CRED: ByoCredential = {
   },
 };
 
+/**
+ * The requests one call of a ChatGPT-lane model sends, answered with the
+ * backend's empty 400 (the call then fails; only the requests matter).
+ */
+async function chatGptRequests(model: ChatOpenAI): Promise<Request[]> {
+  const requests: Request[] = [];
+  vi.stubGlobal(
+    'fetch',
+    async (input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push(new Request(input, init));
+      return new Response(null, { status: 400 });
+    },
+  );
+  try {
+    await model.invoke('hi').catch(() => undefined);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+  return requests;
+}
+
 describe('createByoLlmAdapter', () => {
   it('serves main on the turn model with the user key, stripping params.model', () => {
     const { adapter: platform, calls } = platformStub();
@@ -75,7 +126,7 @@ describe('createByoLlmAdapter', () => {
       credential: OPENAI_CRED,
       mainModelId: 'gpt-5.6-terra',
     });
-    const model = expectByoChatOpenAI(
+    const model = expectByoCompletions(
       byo.get('main', { model: 'byo:openai/gpt-5.6-terra' }),
     );
     expect(model.model).toBe('gpt-5.6-terra');
@@ -120,8 +171,10 @@ describe('createByoLlmAdapter', () => {
       credential: OPENAI_CRED,
       mainModelId: 'gpt-5.6-sol',
     });
-    expect(expectByoChatOpenAI(byo.get('subagent')).model).toBe('gpt-5.6-luna');
-    expect(expectByoChatOpenAI(byo.get('session-title')).model).toBe(
+    expect(expectByoCompletions(byo.get('subagent')).model).toBe(
+      'gpt-5.6-luna',
+    );
+    expect(expectByoCompletions(byo.get('session-title')).model).toBe(
       'gpt-5.6-luna',
     );
   });
@@ -149,7 +202,7 @@ describe('createByoLlmAdapter', () => {
 
   it('wires provider base URLs for OpenAI-compatible providers', () => {
     const { adapter: platform } = platformStub();
-    const deepseek = expectByoChatOpenAI(
+    const deepseek = expectByoCompletions(
       createByoLlmAdapter(platform, {
         credential: { provider: 'deepseek', apiKey: 'sk-ds' },
         mainModelId: 'deepseek-v4-pro',
@@ -157,7 +210,7 @@ describe('createByoLlmAdapter', () => {
     );
     expect(deepseek.clientConfig.baseURL).toBe(DEEPSEEK_BASE_URL);
 
-    const anthropic = expectByoChatOpenAI(
+    const anthropic = expectByoCompletions(
       createByoLlmAdapter(platform, {
         credential: { provider: 'anthropic', apiKey: 'sk-ant' },
         mainModelId: 'claude-sonnet-5',
@@ -170,7 +223,7 @@ describe('createByoLlmAdapter', () => {
     expect(anthropic.temperature).toBeUndefined();
   });
 
-  it('builds the ChatGPT backend client: Responses API, streaming, account header', () => {
+  it('builds the ChatGPT backend client: Responses API, streaming, account header', async () => {
     const { adapter: platform } = platformStub();
     const model = expectByoChatOpenAI(
       createByoLlmAdapter(platform, {
@@ -185,18 +238,25 @@ describe('createByoLlmAdapter', () => {
     expect(model.zdrEnabled).toBe(true);
     expect(model.temperature).toBeUndefined();
     expect(model.clientConfig.baseURL).toBe(CHATGPT_BACKEND_BASE_URL);
-    const headers = asRecord(model.clientConfig.defaultHeaders);
-    expect(headers['ChatGPT-Account-ID']).toBe('acct_123');
-    expect(headers.originator).toBe('codex_cli_rs');
-    expect(headers['session-id']).toBeTruthy();
-    expect(headers['session-id']).toBe(headers.session_id);
+    // The headers ride on the lane's fetch, never in the model's
+    // constructor arguments (a traced run uploads those).
+    expect(model.clientConfig.defaultHeaders).toBeUndefined();
+    const [request] = await chatGptRequests(model);
+    expect(request?.url).toBe(`${CHATGPT_BACKEND_BASE_URL}/responses`);
+    expect(request?.headers.get('ChatGPT-Account-ID')).toBe('acct_123');
+    expect(request?.headers.get('originator')).toBe('codex_cli_rs');
+    expect(request?.headers.get('session-id')).toBeTruthy();
+    expect(request?.headers.get('session-id')).toBe(
+      request?.headers.get('session_id'),
+    );
+    expect(request?.headers.get('authorization')).toBe('Bearer access-token');
     expect(model.modelKwargs).toMatchObject({
       store: false,
       include: ['reasoning.encrypted_content'],
     });
   });
 
-  it('routes the ChatGPT lane through a configured backend proxy with its gate header', () => {
+  it('routes the ChatGPT lane through a configured backend proxy with its gate header', async () => {
     const { adapter: platform } = platformStub();
     const byo = createByoLlmAdapter(platform, {
       credential: CHATGPT_CRED,
@@ -207,15 +267,11 @@ describe('createByoLlmAdapter', () => {
       },
     });
     const model = expectByoChatOpenAI(byo.get('main'));
-    const configuration = asRecord(
-      asRecord(model.clientConfig).baseURL === undefined
-        ? asRecord((model as unknown as { clientConfig: unknown }).clientConfig)
-        : model.clientConfig,
-    );
-    expect(configuration.baseURL).toBe('https://chatgpt.proxy.example');
-    const headers = asRecord(configuration.defaultHeaders);
-    expect(headers['X-Proxy-Auth']).toBe('Bearer shared-secret');
-    expect(headers['ChatGPT-Account-ID']).toBe('acct_123');
+    expect(model.clientConfig.baseURL).toBe('https://chatgpt.proxy.example');
+    const [request] = await chatGptRequests(model);
+    expect(request?.url).toBe('https://chatgpt.proxy.example/responses');
+    expect(request?.headers.get('X-Proxy-Auth')).toBe('Bearer shared-secret');
+    expect(request?.headers.get('ChatGPT-Account-ID')).toBe('acct_123');
     // Without a config the real backend is used and no gate header is sent.
     const plain = expectByoChatOpenAI(
       createByoLlmAdapter(platform, {
@@ -223,11 +279,10 @@ describe('createByoLlmAdapter', () => {
         mainModelId: 'gpt-5.6-terra',
       }).get('main'),
     );
-    const plainConfig = asRecord(plain.clientConfig);
-    expect(plainConfig.baseURL).toBe(CHATGPT_BACKEND_BASE_URL);
-    expect(
-      asRecord(plainConfig.defaultHeaders)['X-Proxy-Auth'],
-    ).toBeUndefined();
+    expect(plain.clientConfig.baseURL).toBe(CHATGPT_BACKEND_BASE_URL);
+    const [plainRequest] = await chatGptRequests(plain);
+    expect(plainRequest?.headers.get('X-Proxy-Auth')).toBeNull();
+    expect(plainRequest?.headers.get('ChatGPT-Account-ID')).toBe('acct_123');
   });
 
   it('parses the backend override from the environment', () => {
@@ -362,13 +417,164 @@ class FailingPlatformModel extends BaseChatModel {
   }
 }
 
+describe('createByoLlmAdapter — base URLs the environment cannot change', () => {
+  const requests: Array<{ url: string; authorization: string | null }> = [];
+
+  beforeEach(() => {
+    requests.length = 0;
+    // workerd fills `process.env` from vars and secrets; LangChain and the
+    // openai SDK read these when a model names no base URL.
+    vi.stubEnv('OPENAI_BASE_URL', 'https://elsewhere.example/v1');
+    vi.stubEnv('OPENAI_API_BASE', 'https://elsewhere.example/v1');
+    vi.stubEnv('LANGSMITH_GATEWAY', 'true');
+    vi.stubGlobal(
+      'fetch',
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(input, init);
+        requests.push({
+          url: request.url,
+          authorization: request.headers.get('authorization'),
+        });
+        return Response.json({
+          id: 'chatcmpl-1',
+          object: 'chat.completion',
+          created: 1,
+          model: 'gpt-5.6-terra',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: 'ok' },
+              finish_reason: 'stop',
+            },
+          ],
+        });
+      },
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it("sends a BYO OpenAI call, with the user's key, to api.openai.com", async () => {
+    const { adapter: platform } = platformStub();
+    const model = byoModelOf(
+      createByoLlmAdapter(platform, {
+        credential: OPENAI_CRED,
+        mainModelId: 'gpt-5.6-terra',
+      }).get('main'),
+    );
+    await model.invoke('hi');
+    expect(requests).toEqual([
+      {
+        url: `${OPENAI_API_BASE_URL}/chat/completions`,
+        authorization: 'Bearer sk-user',
+      },
+    ]);
+  });
+
+  it('keeps every other lane and the platform adapters on their own base URL', () => {
+    const { adapter: platform } = platformStub();
+    const byoBaseUrl = (credential: ByoCredential, mainModelId: string) => {
+      const model = byoModelOf(
+        createByoLlmAdapter(platform, { credential, mainModelId }).get('main'),
+      );
+      if (!(model instanceof BaseChatOpenAI)) throw new Error('unreachable');
+      return model.clientConfig.baseURL;
+    };
+    expect(
+      byoBaseUrl({ provider: 'deepseek', apiKey: 'k' }, 'deepseek-v4-pro'),
+    ).toBe(DEEPSEEK_BASE_URL);
+    expect(
+      byoBaseUrl({ provider: 'gemini', apiKey: 'k' }, 'gemini-3-pro'),
+    ).toBe(GEMINI_OPENAI_COMPAT_BASE_URL);
+    expect(
+      byoBaseUrl({ provider: 'anthropic', apiKey: 'k' }, 'claude-sonnet-5'),
+    ).toBe(ANTHROPIC_OPENAI_COMPAT_BASE_URL);
+    expect(byoBaseUrl(CHATGPT_CRED, 'gpt-5.6-terra')).toBe(
+      CHATGPT_BACKEND_BASE_URL,
+    );
+    const platformBaseUrl = (env: Parameters<typeof createLlmAdapter>[0]) => {
+      const model = createLlmAdapter(env).get('main');
+      if (!(model instanceof BaseChatOpenAI)) throw new Error('unreachable');
+      return model.clientConfig.baseURL;
+    };
+    expect(platformBaseUrl({ OPEN_ROUTER_API_KEY: 'k' })).toBe(
+      OPENROUTER_BASE_URL,
+    );
+    expect(
+      platformBaseUrl({
+        OPEN_ROUTER_API_KEY: '',
+        LLM_PROVIDER: 'nebius',
+        NEBIUS_API_KEY: 'k',
+      }),
+    ).toBe(NEBIUS_BASE_URL);
+  });
+});
+
+describe('ChatGPT lane — stored tool call ids over the backend’s limit', () => {
+  const LONG_ID = `toolu_${'b'.repeat(66)}`;
+
+  async function outgoingCallIds(): Promise<string[]> {
+    const model = expectByoChatOpenAI(
+      createByoLlmAdapter(platformStub().adapter, {
+        credential: CHATGPT_CRED,
+        mainModelId: 'gpt-5.6-terra',
+      }).get('main'),
+    );
+    const bodies: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (typeof init?.body === 'string') bodies.push(init.body);
+        return new Response(null, { status: 400 });
+      },
+    );
+    const history = [
+      new HumanMessage('look it up'),
+      new AIMessage({
+        content: '',
+        tool_calls: [{ id: LONG_ID, name: 'lookup', args: { q: 'x' } }],
+      }),
+      new ToolMessage({ content: 'found', tool_call_id: LONG_ID }),
+      new HumanMessage('thanks'),
+    ];
+    try {
+      await model.invoke(history).catch(() => undefined);
+      // The stored messages keep their own id.
+      expect(
+        history[1] instanceof AIMessage && history[1].tool_calls?.[0]?.id,
+      ).toBe(LONG_ID);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    const parsed: { input: Array<{ call_id?: string }> } = JSON.parse(
+      bodies[0] ?? '{"input":[]}',
+    );
+    return parsed.input.flatMap((item) =>
+      item.call_id === undefined ? [] : [item.call_id],
+    );
+  }
+
+  it('sends a call id within 64 characters, the same for the call and its output, and the same on every conversion', async () => {
+    expect(LONG_ID).toHaveLength(72);
+    const first = await outgoingCallIds();
+    expect(first).toHaveLength(2);
+    expect(first[0]).toBe(first[1]);
+    expect(first[0]!.length).toBeLessThanOrEqual(64);
+    expect(first[0]).not.toBe(LONG_ID);
+    expect(await outgoingCallIds()).toEqual(first);
+  });
+});
+
 describe('createByoLlmAdapter — model refused by the provider', () => {
   const backendCalls: Array<{ url: string; body: unknown }> = [];
 
   beforeEach(() => {
     backendCalls.length = 0;
-    // The ChatGPT backend's answer for a model the subscription does not
-    // serve: an immediate 400 with an empty body.
+    // The backend's answer for a model the subscription does not serve: a
+    // 400 whose body names the model as the problem.
     vi.stubGlobal(
       'fetch',
       async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -376,7 +582,13 @@ describe('createByoLlmAdapter — model refused by the provider', () => {
           input instanceof Request ? input.url : new URL(String(input)).href;
         const body = typeof init?.body === 'string' ? init.body : '';
         backendCalls.push({ url, body: body ? JSON.parse(body) : undefined });
-        return new Response(null, { status: 400 });
+        return Response.json(
+          {
+            detail:
+              "The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account.",
+          },
+          { status: 400 },
+        );
       },
     );
   });
@@ -433,6 +645,24 @@ describe('createByoLlmAdapter — model refused by the provider', () => {
     ).toEqual([
       expect.stringContaining('refused model "gpt-6-luna" (HTTP 400)'),
     ]);
+  });
+
+  it('does not fall back on a bare 400: the call fails, no notice, no platform call', async () => {
+    vi.stubGlobal('fetch', async () => new Response(null, { status: 400 }));
+    const { adapter: platform, roles } = recordingPlatform('platform reply');
+    const byo = createByoLlmAdapter(platform, {
+      credential: CHATGPT_CRED,
+      mainModelId: 'gpt-6-luna',
+    });
+    const outcome = await collectEvents(
+      byo.get('main', { model: 'byo:chatgpt/gpt-6-luna' }),
+      'hi',
+    ).then(
+      (events) => ({ events }),
+      (error: unknown) => ({ error }),
+    );
+    expect(outcome).toHaveProperty('error');
+    expect(roles).toEqual([]);
   });
 
   it('sends every later call of the turn for that model to the platform model', async () => {

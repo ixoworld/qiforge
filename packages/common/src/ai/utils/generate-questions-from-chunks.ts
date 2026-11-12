@@ -100,8 +100,7 @@ export const generateQuestionsFromChunks = async (
     presence_penalty: 0,
     store: false,
   });
-  const json = response.choices[0]?.message
-    .parsed as unknown as QuestionGeneratorOutput;
+  const json = response.choices[0]?.message.parsed as QuestionGeneratorOutput;
   return json.json_output;
 };
 

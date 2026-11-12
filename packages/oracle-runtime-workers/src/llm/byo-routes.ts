@@ -7,6 +7,8 @@
  *
  * Routes (identical to the Nest controller):
  *   GET    /byo-llm/status                    — per-provider connection status
+ *                                              and picker models (the account's
+ *                                              own when the provider lists them)
  *   POST   /byo-llm/chatgpt/device/start      — start the device-auth flow
  *   POST   /byo-llm/chatgpt/device/poll       — poll the device grant once
  *   GET    /byo-llm/chatgpt/authorize-url     — pasted-redirect fallback URL
@@ -151,6 +153,7 @@ export async function handleByoRequest(
         await byo.holdUnpersistedChatGptTokens(userDid, result.tokens);
       }
       logger.log(`[byo] ChatGPT subscription connected for ${userDid}`);
+      await byo.discoverModels(userDid, 'chatgpt');
       return json({
         status: 'connected',
         defaultModelId: toByoModelId('chatgpt', BYO_DEFAULT_MODEL.chatgpt),
@@ -205,6 +208,7 @@ export async function handleByoRequest(
         await byo.holdUnpersistedChatGptTokens(userDid, tokens);
       }
       logger.log(`[byo] ChatGPT subscription connected for ${userDid}`);
+      await byo.discoverModels(userDid, 'chatgpt');
       return json({
         connected: true,
         defaultModelId: toByoModelId('chatgpt', BYO_DEFAULT_MODEL.chatgpt),

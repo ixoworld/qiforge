@@ -191,7 +191,7 @@ The link sits in fewer places than an artefact link: the checkpoint (`ToolMessag
 ### Creation
 
 - **`create_artifact`** (`src/artifacts/tool.ts`) is bound only on chat turns, and only when storage and a public origin are configured. It takes `title`, `content` (Markdown, up to 200,000 characters), `message` (up to 1,000 characters: the conclusions, decisions and next actions, so the user has them without opening the document) and an optional `followUp`. Its description reserves it for a document or file the user asked for, or genuinely document-length output.
-  - It is a **return-direct** tool: the run ends after it, with no second model call.
+  - It is a **return-direct** tool: the run ends after a call that succeeded, with no second model call. A call that failed (arguments that fail its schema, a storage error) comes back to the model as an error `ToolMessage` and the run goes on, so the model can correct the call or answer in chat. A failed call with valid arguments still adds its message and question to the Reply Plan, before whatever the model writes next.
   - LangChain ends a step only when the step's _last_ tool call is return-direct. When the model calls it together with other tools, an `afterModel` hook (`src/core/middlewares/return-direct-first.ts`) moves it first, so the run continues and the model sees every result.
 - **Spills** are artefacts the shaper creates from a document-length step.
 
