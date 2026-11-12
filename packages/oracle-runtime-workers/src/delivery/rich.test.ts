@@ -20,7 +20,9 @@ import {
   chooseFormat,
   choicesText,
   linkButtonPart,
+  displayLink,
   linkButtonText,
+  safeHttpsUrl,
   parseChoiceId,
   renderCapabilityOf,
   richPartsOf,
@@ -319,6 +321,165 @@ describe('linkButtonPart', () => {
       linkButtonPart({ ...input, fallback: 'Exactly this: https://x' }, ALL)
         .part?.text,
     ).toBe('Exactly this: https://x');
+  });
+});
+
+describe('link safety: parse once, check the parsed URL, send its href', () => {
+  const AUTH: RenderCapability = {
+    ...ALL,
+    linkOrigins: ['https://dev.auth.ixo.earth', 'https://img.example'],
+  };
+  const button = (url: string, imageUrl?: string) =>
+    linkButtonPart(
+      {
+        body: 'Allow this.',
+        url,
+        label: 'allow',
+        ...(imageUrl ? { imageUrl } : {}),
+      },
+      AUTH,
+    );
+  const fallbackOf = (url: string) =>
+    linkButtonText({ body: 'Allow this.', url, label: 'allow' });
+
+  it('a backslash host trick is refused; the text shows the WHATWG href, never the raw string', () => {
+    const raw = 'https://dev.auth.ixo.earth\\@evil.example/';
+    // WHATWG reads it as a path on the approved host; another parser may
+    // read userinfo + evil.example. The raw string never goes out.
+    expect(new URL(raw).origin).toBe('https://dev.auth.ixo.earth');
+    expect(button(raw)).toEqual({
+      part: null,
+      reason: 'the link is not a plain https link',
+    });
+    expect(fallbackOf(raw)).toBe(
+      'Allow this.\n\nAllow: https://dev.auth.ixo.earth/@evil.example/',
+    );
+    expect(fallbackOf(raw)).not.toContain('\\');
+  });
+
+  it('userinfo is refused; the text shows where the link really goes, without it', () => {
+    const raw = 'https://dev.auth.ixo.earth@evil.example/';
+    expect(button(raw).part).toBeNull();
+    expect(fallbackOf(raw)).toBe('Allow this.\n\nAllow: https://evil.example/');
+    expect(button('https://user:pass@dev.auth.ixo.earth/').part).toBeNull();
+  });
+
+  it.each([
+    ['a tab', 'https://dev.auth.ixo.earth/a\tb'],
+    ['a newline', 'https://dev.auth.ixo.earth/a\nb'],
+    ['a space', 'https://dev.auth.ixo.earth/a b'],
+    ['a leading space', ' https://dev.auth.ixo.earth/'],
+    ['a NUL', 'https://dev.auth.ixo.earth/\u0000'],
+    ['a right-to-left override', 'https://dev.auth.ixo.earth/\u202e'],
+    ['a zero-width space', 'https://dev\u200b.auth.ixo.earth/'],
+    ['a no-break space', 'https://dev.auth.ixo.earth/\u00a0'],
+  ])('%s is refused', (_name, raw) => {
+    expect(safeHttpsUrl(raw)).toBeNull();
+    expect(button(raw).part).toBeNull();
+  });
+
+  it('mixed case and a default port are approved and sent as the normalised href', () => {
+    const built = button(
+      'HTTPS://DEV.Auth.IXO.earth:443/Path?q=1',
+      'HTTPS://IMG.example/A.jpg',
+    );
+    expect(built.part).toMatchObject({
+      kind: 'link_button',
+      text: 'Allow this.\n\nImage: https://img.example/A.jpg\n\nAllow: https://dev.auth.ixo.earth/Path?q=1',
+      link: {
+        url: 'https://dev.auth.ixo.earth/Path?q=1',
+        imageUrl: 'https://img.example/A.jpg',
+      },
+    });
+  });
+
+  it('a trailing-dot host and an IDN look-alike are not the approved origin', () => {
+    expect(button('https://dev.auth.ixo.earth./x').reason).toBe(
+      'the link is not on an approved site',
+    );
+    // Cyrillic "е": the parsed ASCII origin is punycode.
+    const lookAlike = 'https://d\u0435v.auth.ixo.earth/x';
+    expect(safeHttpsUrl(lookAlike)?.origin).toMatch(/^https:\/\/xn--/);
+    expect(button(lookAlike).reason).toBe(
+      'the link is not on an approved site',
+    );
+  });
+
+  it.each([
+    [
+      'http',
+      'http://dev.auth.ixo.earth/x',
+      'Allow this.\n\nAllow: http://dev.auth.ixo.earth/x',
+    ],
+    ['javascript:', 'javascript:alert(1)', 'Allow this.'],
+    ['data:', 'data:text/html,<b>x</b>', 'Allow this.'],
+    ['ftp', 'ftp://dev.auth.ixo.earth/x', 'Allow this.'],
+  ])(
+    '%s is refused; the text shows an http(s) href only',
+    (_name, raw, text) => {
+      expect(button(raw).part).toBeNull();
+      expect(fallbackOf(raw)).toBe(text);
+      expect(displayLink(raw)).toBe(raw.startsWith('http:') ? raw : null);
+    },
+  );
+
+  it('an image link with whitespace or another scheme is refused', () => {
+    expect(
+      button('https://dev.auth.ixo.earth/x', 'https://img.example/a b.jpg')
+        .reason,
+    ).toContain('image');
+    expect(
+      button('https://dev.auth.ixo.earth/x', 'data:image/png;base64,AAAA')
+        .reason,
+    ).toContain('image');
+  });
+
+  it('cards: links and images are checked the same way and sent as hrefs', () => {
+    const item = (url: string, imageUrl: string): CardItem => ({
+      title: 'One',
+      body: 'Text',
+      imageUrl,
+      link: { url, label: 'view' },
+    });
+    const ok = cardsPart(
+      {
+        body: 'Look:',
+        items: [
+          item('HTTPS://Dev.Auth.ixo.earth/a', 'HTTPS://IMG.example/1.jpg'),
+        ],
+      },
+      AUTH,
+    );
+    expect(ok.part).toMatchObject({
+      kind: 'cards',
+      cards: {
+        items: [
+          {
+            imageUrl: 'https://img.example/1.jpg',
+            link: { url: 'https://dev.auth.ixo.earth/a' },
+          },
+        ],
+      },
+    });
+    expect(ok.part.text).toContain('View: https://dev.auth.ixo.earth/a');
+    for (const [url, image] of [
+      [
+        'https://dev.auth.ixo.earth\\@evil.example/',
+        'https://img.example/1.jpg',
+      ],
+      ['https://dev.auth.ixo.earth@evil.example/', 'https://img.example/1.jpg'],
+      ['https://dev.auth.ixo.earth/a', 'https://img.example/1 .jpg'],
+      ['https://dev.auth.ixo.earth/a', 'javascript:alert(1)'],
+    ]) {
+      const built = cardsPart(
+        { body: 'Look:', items: [item(url!, image!)] },
+        AUTH,
+      );
+      expect(built.part.kind).toBe('text');
+      expect(built.part.text).not.toContain('\\');
+      expect(built.part.text).not.toContain('javascript:');
+      expect(built.part.text).not.toContain('dev.auth.ixo.earth@');
+    }
   });
 });
 

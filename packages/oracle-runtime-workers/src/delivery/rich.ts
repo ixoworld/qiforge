@@ -137,15 +137,56 @@ function lineBreaks(text: string): number {
   return (text.match(/\r\n|[\r\n\u2028\u2029]/g) ?? []).length;
 }
 
-/** An https link without credentials, at most `RICH_LIMITS.url` characters. */
-export function isPublicHttpsUrl(value: string): boolean {
-  if (value.length > RICH_LIMITS.url) return false;
+/**
+ * Characters that make one link string read differently by different
+ * parsers (WHATWG drops or rewrites them; WhatsApp's client, the gateway or
+ * a browser may not): a backslash, any whitespace, control or format
+ * character (bidi marks, zero-width characters).
+ */
+const AMBIGUOUS_LINK = /[\\\s\p{Cc}\p{Cf}]/u;
+
+/**
+ * A link a button, a card or an image header may carry: the raw string has
+ * no ambiguous character, it parses once as https without credentials, and
+ * its `href` stays within `RICH_LIMITS.url`. Every check (the origin
+ * included) runs on the returned URL, and only its `href` is ever sent, so
+ * what was checked is what goes out. Null otherwise.
+ */
+export function safeHttpsUrl(raw: string): URL | null {
+  if (raw.length > RICH_LIMITS.url || AMBIGUOUS_LINK.test(raw)) return null;
+  let url: URL;
   try {
-    const url = new URL(value);
-    return url.protocol === 'https:' && !url.username && !url.password;
+    url = new URL(raw);
   } catch {
-    return false;
+    return null;
   }
+  if (url.protocol !== 'https:' || url.username || url.password) return null;
+  return url.href.length > RICH_LIMITS.url ? null : url;
+}
+
+/** Whether `raw` passes `safeHttpsUrl`. */
+export function isPublicHttpsUrl(raw: string): boolean {
+  return safeHttpsUrl(raw) !== null;
+}
+
+/**
+ * A link as a text version shows it: the parsed, normalised `href` without
+ * credentials (so `https://good@evil.example/` shows as
+ * `https://evil.example/`, where it really goes), for http and https only.
+ * Null for anything else (`javascript:`, `data:`, unparseable): a text
+ * version never repeats an odd raw string.
+ */
+export function displayLink(raw: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+  url.username = '';
+  url.password = '';
+  return url.href;
 }
 
 /** Why a link cannot be a button on this turn, or null when it can. */
@@ -156,18 +197,32 @@ export function linkRefusal(
 ): string | null {
   if (!render.kinds.includes('link_button'))
     return 'link buttons are not available here';
-  if (!isPublicHttpsUrl(url)) return 'the link is not an https link';
-  if (!render.linkOrigins.includes(new URL(url).origin))
+  const parsed = safeHttpsUrl(url);
+  if (!parsed) return 'the link is not a plain https link';
+  // `origin` of the parsed URL: lower-case, punycode (ASCII) host, so a
+  // look-alike or a trailing-dot host never matches an approved origin.
+  if (!render.linkOrigins.includes(parsed.origin))
     return 'the link is not on an approved site';
   if (!render.linkLabels.includes(label))
     return `the label "${label}" is not one of the fixed labels`;
   return null;
 }
 
-/** `Label: url`, or the bare link for an unknown label. */
-function labelledLink(label: string, url: string): string {
+/**
+ * `Label: url` (the bare link for an unknown label), the link as
+ * `displayLink` shows it; nothing when it shows none.
+ */
+function labelledLink(label: string, url: string): string[] {
+  const link = displayLink(url);
+  if (!link) return [];
   const shown = Object.hasOwn(LINK_LABELS, label) ? LINK_LABELS[label] : null;
-  return shown ? `${shown}: ${url}` : url;
+  return [shown ? `${shown}: ${link}` : link];
+}
+
+/** `Image: url` as `displayLink` shows it; nothing when it shows none. */
+function imageLine(url: string | undefined): string[] {
+  const link = url === undefined ? null : displayLink(url);
+  return link ? [`Image: ${link}`] : [];
 }
 
 // ── Text renderings ─────────────────────────────────────────────────────
@@ -193,8 +248,8 @@ export function linkButtonText(input: {
 }): string {
   return [
     input.body,
-    ...(input.imageUrl ? [`Image: ${input.imageUrl}`] : []),
-    labelledLink(input.label, input.url),
+    ...imageLine(input.imageUrl),
+    ...labelledLink(input.label, input.url),
   ].join('\n\n');
 }
 
@@ -209,8 +264,8 @@ export function cardsText(intro: string, items: readonly CardItem[]): string {
       [
         `${i + 1}. **${item.title}**`,
         ...(item.body ? [item.body] : []),
-        `Image: ${item.imageUrl}`,
-        labelledLink(item.link.label, item.link.url),
+        ...imageLine(item.imageUrl),
+        ...labelledLink(item.link.label, item.link.url),
       ].join('\n'),
     ),
   ].join('\n\n');
@@ -399,7 +454,6 @@ export function linkButtonPart(
   render: RenderCapability | undefined,
 ): { part: RichContent; reason: null } | { part: null; reason: string } {
   const body = input.body.trim();
-  const text = input.fallback ?? linkButtonText({ ...input, body });
   if (!render)
     return { part: null, reason: 'rich messages are not available here' };
   const refused = linkRefusal(input.url, input.label, render);
@@ -409,18 +463,31 @@ export function linkButtonPart(
       part: null,
       reason: `the text must be 1 to ${RICH_LIMITS.body} characters`,
     };
-  if (input.imageUrl !== undefined && !isPublicHttpsUrl(input.imageUrl))
-    return { part: null, reason: 'the image link is not an https link' };
+  const image =
+    input.imageUrl === undefined ? undefined : safeHttpsUrl(input.imageUrl);
+  if (image === null)
+    return { part: null, reason: 'the image link is not a plain https link' };
+  // What was checked is what is sent: the parsed `href`s, also in the
+  // default text version.
+  const url = safeHttpsUrl(input.url)!.href;
+  const imageUrl = image?.href;
   return {
     reason: null,
     part: {
       kind: 'link_button',
-      text,
+      text:
+        input.fallback ??
+        linkButtonText({
+          body,
+          url,
+          label: input.label,
+          ...(imageUrl ? { imageUrl } : {}),
+        }),
       link: {
         body,
-        url: input.url,
+        url,
         label: input.label,
-        ...(input.imageUrl ? { imageUrl: input.imageUrl } : {}),
+        ...(imageUrl ? { imageUrl } : {}),
       },
     },
   };
@@ -460,7 +527,7 @@ export function cardsRefusal(
     } else if (codePointLength(cardText) > RICH_LIMITS.body)
       return `card ${n}: title and text together must stay within ${RICH_LIMITS.body - 3} characters`;
     if (!isPublicHttpsUrl(item.imageUrl))
-      return `card ${n}: the image link is not an https link`;
+      return `card ${n}: the image link is not a plain https link`;
     const link = linkRefusal(item.link.url, item.link.label, render);
     if (link) return `card ${n}: ${link}`;
   }
@@ -488,9 +555,19 @@ export function cardsPart(
     ? cardsRefusal(intro, items, render)
     : 'rich messages are not available here';
   if (refused) return { part: { kind: 'text', text }, reason: refused };
+  // Every link passed `safeHttpsUrl`: send (and show) the parsed `href`s.
+  const sent = items.map((item) => ({
+    ...item,
+    imageUrl: safeHttpsUrl(item.imageUrl)!.href,
+    link: { ...item.link, url: safeHttpsUrl(item.link.url)!.href },
+  }));
   return {
     reason: null,
-    part: { kind: 'cards', text, cards: { body: intro, items } },
+    part: {
+      kind: 'cards',
+      text: cardsText(intro, sent),
+      cards: { body: intro, items: sent },
+    },
   };
 }
 
