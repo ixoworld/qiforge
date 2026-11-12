@@ -798,6 +798,46 @@ describe('a link already in the text is not repeated', () => {
     expect(textHasLink('No link here.', 'https://example.com')).toBe(false);
   });
 
+  it('only a plain link counts: an odd raw form always gets the normalised line', () => {
+    const userinfo = 'https://dev.auth.ixo.earth@evil.example/';
+    expect(textHasLink(`Go: ${userinfo}`, userinfo)).toBe(false);
+    expect(
+      linkButtonText({ body: `Go: ${userinfo}`, url: userinfo, label: 'open' }),
+    ).toBe(`Go: ${userinfo}\n\nOpen: https://evil.example/`);
+    const backslash = 'https://dev.auth.ixo.earth\\@evil.example/';
+    expect(textHasLink(`Go: ${backslash}`, backslash)).toBe(false);
+    expect(
+      linkButtonText({
+        body: `Go: ${backslash}`,
+        url: backslash,
+        label: 'open',
+      }),
+    ).toBe(
+      `Go: ${backslash}\n\nOpen: https://dev.auth.ixo.earth/@evil.example/`,
+    );
+    const mixed = 'HTTPS://Example.COM/a';
+    expect(textHasLink(`Go: ${mixed}`, mixed)).toBe(false);
+    expect(
+      linkButtonText({ body: `Go: ${mixed}`, url: mixed, label: 'open' }),
+    ).toBe(`Go: ${mixed}\n\nOpen: https://example.com/a`);
+    // The plain case: no duplicate.
+    expect(
+      linkButtonText({
+        body: 'Go: https://example.com/a',
+        url: 'https://example.com/a',
+        label: 'open',
+      }),
+    ).toBe('Go: https://example.com/a');
+    // Cards follow the same rule.
+    const card: CardItem = {
+      title: 'One',
+      body: `More: ${userinfo}`,
+      imageUrl: 'https://img.example/1.jpg',
+      link: { url: userinfo, label: 'view' },
+    };
+    expect(cardsText('Look:', [card])).toContain('View: https://evil.example/');
+  });
+
   it('the text version of a link button adds no second line for a link the body holds', () => {
     expect(
       linkButtonText({

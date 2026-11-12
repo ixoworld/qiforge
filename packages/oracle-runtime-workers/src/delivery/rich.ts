@@ -258,16 +258,32 @@ export function linkButtonText(input: {
 }
 
 /**
- * Whether `text` already holds the link (as given, or as its normalised
- * `href` with or without a trailing slash): a text version then does not
- * add it again.
+ * Whether `text` already shows the link exactly as a text version would
+ * (its normalised `href`, with or without the trailing slash), so the
+ * text version need not add it again. Only for a plain link: one that
+ * parses as http(s) without user or password and whose raw form is its
+ * `href` (or its `href` without the root slash). For anything else (a
+ * userinfo link, a backslash or mixed-case form) the normalised line is
+ * always added: a duplicate is acceptable, a misleading single link is not.
  */
 export function textHasLink(text: string, url: string | undefined): boolean {
   if (!url) return false;
-  const href = displayLink(url);
-  const forms = [url, ...(href ? [href, href.replace(/\/$/, '')] : [])];
-  return forms.some((form) => {
-    if (!form) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (
+    (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') ||
+    parsed.username ||
+    parsed.password
+  )
+    return false;
+  const href = parsed.href;
+  const bare = href.endsWith('/') ? href.slice(0, -1) : href;
+  if (url !== href && url !== bare) return false;
+  return [href, bare].some((form) => {
     // A whole link only: "https://a.example" is not in "https://a.example/b".
     for (
       let at = text.indexOf(form);
