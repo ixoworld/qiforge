@@ -7,12 +7,16 @@
  * version, so the history reads the same on every surface.
  */
 import { ToolMessage } from '@langchain/core/messages';
+import { createMiddleware, type AgentMiddleware } from 'langchain';
 import { z } from 'zod';
 import { tool } from '../plugin-api/tool-helper';
 import type { PluginTool } from '../plugin-api/types';
 import {
   cardsPart,
   choicesPart,
+  chooseFormat,
+  codePointLength,
+  richPartsOf,
   isSingleLine,
   LINK_LABELS,
   linkButtonPart,
@@ -71,6 +75,83 @@ export function richToolTextOf(artifact: unknown): string | null {
   return typeof text === 'string' && text.trim() ? text : null;
 }
 
+/**
+ * Why a set of options would go out as text only because a title or
+ * description is too long, naming each with its length; null when it fits
+ * a format, or when no interactive format could carry it anyway (more than
+ * 10 options, or neither buttons nor a list available here).
+ */
+export function titlesTooLong(
+  options: readonly { title: string; description?: string }[],
+  render: RenderCapability,
+): string | null {
+  const trimmed = options.map((o) => ({
+    title: o.title.trim(),
+    ...(o.description?.trim() ? { description: o.description.trim() } : {}),
+  }));
+  if (chooseFormat(trimmed, render) !== 'text') return null;
+  const buttons = render.kinds.includes('reply_buttons');
+  const list = render.kinds.includes('list');
+  if (trimmed.length > RICH_LIMITS.listRows || (!buttons && !list)) return null;
+  // The limit the set is aiming at: buttons for 2–3 options without a
+  // description where buttons exist, else a list.
+  const aim =
+    buttons &&
+    (!list ||
+      (trimmed.length <= RICH_LIMITS.buttonOptions &&
+        trimmed.every((o) => o.description === undefined)))
+      ? RICH_LIMITS.buttonTitle
+      : RICH_LIMITS.rowTitle;
+  const long = [
+    ...trimmed
+      .filter((o) => codePointLength(o.title) > aim)
+      .map(
+        (o) => `title "${o.title}" is ${codePointLength(o.title)} characters`,
+      ),
+    ...trimmed
+      .filter(
+        (o) =>
+          o.description !== undefined &&
+          codePointLength(o.description) > RICH_LIMITS.rowDescription,
+      )
+      .map(
+        (o) =>
+          `the description of "${o.title}" is ${codePointLength(o.description ?? '')} characters`,
+      ),
+  ];
+  if (long.length === 0) return null;
+  return `${long.join('; ')}. Titles must be ${RICH_LIMITS.buttonTitle} characters or fewer for buttons (2–3 options) or ${RICH_LIMITS.rowTitle} or fewer for a list; put extra detail in description (${RICH_LIMITS.rowDescription} or fewer).`;
+}
+
+/**
+ * Ends the reply once `offer_choices` sent its choices message: the
+ * question is the reply's last message. Runs before the next model call, so
+ * a call sent back for shorter titles (no message went out) lets the model
+ * call again.
+ */
+export function createChoicesEndMiddleware(): AgentMiddleware {
+  return createMiddleware({
+    name: 'ChoicesEndMiddleware',
+    beforeModel: {
+      canJumpTo: ['end'],
+      hook: (state): { jumpTo: 'end' } | undefined => {
+        const messages: unknown[] = state.messages;
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const message = messages[i];
+          if (!ToolMessage.isInstance(message)) break;
+          if (
+            message.name === OFFER_CHOICES_TOOL &&
+            (richPartsOf(message.artifact).length > 0 ||
+              richToolTextOf(message.artifact) !== null)
+          )
+            return { jumpTo: 'end' };
+        }
+        return undefined;
+      },
+    },
+  });
+}
+
 const labelsLine = (render: RenderCapability) =>
   render.linkLabels.map((key) => `"${key}" (${LINK_LABELS[key]})`).join(', ');
 
@@ -96,7 +177,10 @@ export function buildRichMessageTools(
   const labelKey = z.string().describe(`One of: ${labelsLine(render)}.`);
 
   if (canChoose) {
+    // Per turn: whether a choices message went out, and whether a call was
+    // already sent back for shorter titles (one retry at most, never a loop).
     let offered = false;
+    let retried = false;
     const schema = z.object({
       question: z
         .string()
@@ -117,7 +201,7 @@ export function buildRichMessageTools(
                 'Optional short id (letters, digits, _ or -) you will recognise when it is tapped; default: its position.',
               ),
             title: line(100).describe(
-              'What the person taps. Up to 20 characters shows as a button, up to 24 in a list.',
+              'What the person taps: a few words, 20 characters or fewer ("Find jobs", "My wallet", "Get help"); at most 24 in a list. Put the rest in description.',
             ),
             description: line(200)
               .optional()
@@ -133,12 +217,20 @@ export function buildRichMessageTools(
         ),
     });
     tools.push({
-      returnDirect: true,
+      // It ends the reply once a choices message went out
+      // (`createChoicesEndMiddleware`), not on every call: a call sent back
+      // for shorter titles must let the model call again.
+      returnDirect: false,
       tool: tool(
         async (rawArgs, ctx) => {
           const args = schema.parse(rawArgs);
           if (offered)
             return 'Not sent: only one choices message is sent per reply, and one was sent already.';
+          const tooLong = retried ? null : titlesTooLong(args.options, render);
+          if (tooLong) {
+            retried = true;
+            return `Not sent yet: ${tooLong} Call offer_choices again now with shorter titles (the same options, a few words each, extra detail in description); write nothing else first. If a title cannot be shorter, call it again as it is and the options go out as a numbered list.`;
+          }
           const built = choicesPart(
             {
               body: args.question,
@@ -171,7 +263,8 @@ export function buildRichMessageTools(
         {
           name: OFFER_CHOICES_TOOL,
           description: [
-            'Ask the person to pick one of a set of options, shown as tappable reply buttons or a list menu where the chat supports them, and as a numbered list everywhere else. The runtime picks the format: 2–3 short options (titles up to 20 characters, no descriptions) become buttons; up to 10 options, or any with a description, become a list (titles up to 24, descriptions up to 72 characters); anything larger is sent as a numbered list. Nothing is cut.',
+            'Ask the person to pick one of a set of options, shown as tappable reply buttons or a list menu where the chat supports them, and as a numbered list everywhere else.',
+            'Titles are what the person taps: write them like "Find jobs", "My wallet", "Get help": 20 characters or fewer, never a sentence; use description (72 characters or fewer) for the rest. 2–3 options with titles of 20 or fewer and no descriptions become buttons; up to 10 options with titles of 24 or fewer become a list. A call whose titles are too long is sent back once so you can shorten them; nothing is ever cut. More than 10 options go out as a numbered list.',
             'Use it whenever your reply would end with a numbered or bulleted list of options for the person to pick one from: a menu of what you can help with or what to do next, a pick-one question (which job, which plan, which day), a yes/no confirmation. This includes menus that other instructions tell you to show as a numbered list: where buttons cannot be shown, the person receives exactly that numbered list. Keep each title short (the option itself, not a sentence). Never use it for open questions (a name, an amount, a description of their situation).',
             'It ends your reply: write anything you need to say first, in the same step, then call it with the question. Do not write the question or the options in your text. At most one per reply.',
           ].join('\n\n'),

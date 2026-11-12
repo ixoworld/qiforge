@@ -30,7 +30,9 @@ import {
 } from './rich';
 import {
   buildRichMessageTools,
+  createChoicesEndMiddleware,
   OFFER_CHOICES_TOOL,
+  titlesTooLong,
   SEND_CARDS_TOOL,
   SEND_LINK_BUTTON_TOOL,
 } from './rich-tools';
@@ -592,6 +594,156 @@ describe('cardsPart', () => {
   });
 });
 
+describe('offer_choices: one chance to shorten titles', () => {
+  const ctx = (id: string) => makeRuntimeContext({ toolCallId: id });
+  const fresh = () =>
+    buildRichMessageTools(ALL).find((t) => t.tool.name === OFFER_CHOICES_TOOL)!
+      .tool;
+  const MENU = {
+    question: 'What would you like help with?',
+    options: [
+      { id: 'opportunities', title: 'Find jobs and opportunities' },
+      { id: 'wallet', title: 'Check my wallet' },
+      { id: 'help', title: 'Get help or carry on' },
+    ],
+  };
+
+  it('sends a call back once, naming each long title and the limits; the same call again goes out as text', async () => {
+    const tool = fresh();
+    const first = await tool.handler(MENU, ctx('c1'));
+    expect(typeof first).toBe('string');
+    expect(first).toContain('Not sent yet');
+    expect(first).toContain(
+      'title "Find jobs and opportunities" is 27 characters',
+    );
+    expect(first).toContain(
+      '20 characters or fewer for buttons (2–3 options) or 24 or fewer for a list',
+    );
+    expect(first).toContain('description (72 or fewer)');
+    const second = toolMessage(await tool.handler(MENU, ctx('c2')));
+    expect(JSON.parse(String(second.content))).toMatchObject({
+      status: 'asked',
+      format: 'text',
+    });
+    expect(await tool.handler(MENU, ctx('c3'))).toContain(
+      'only one choices message',
+    );
+  });
+
+  it('a shortened second call goes out as buttons', async () => {
+    const tool = fresh();
+    await tool.handler(MENU, ctx('c1'));
+    const second = toolMessage(
+      await tool.handler(
+        {
+          ...MENU,
+          options: [
+            {
+              id: 'opportunities',
+              title: 'Find jobs',
+              description: 'Jobs and opportunities',
+            },
+            { id: 'wallet', title: 'My wallet' },
+            { id: 'help', title: 'Get help' },
+          ],
+        },
+        ctx('c2'),
+      ),
+    );
+    // A description moves it to a list: still interactive.
+    expect(JSON.parse(String(second.content)).format).toBe('list');
+    const plain = fresh();
+    await plain.handler(MENU, ctx('c1'));
+    const buttons = toolMessage(
+      await plain.handler(
+        { ...MENU, options: opts('Find jobs', 'My wallet', 'Get help') },
+        ctx('c2'),
+      ),
+    );
+    expect(JSON.parse(String(buttons.content)).format).toBe('buttons');
+  });
+
+  it('never sends back what no interactive format could carry, or what already fits', async () => {
+    const many = {
+      question: 'Which?',
+      options: opts(...'ABCDEFGHIJK'.split('')),
+    };
+    expect(
+      JSON.parse(
+        String(toolMessage(await fresh().handler(many, ctx('c1'))).content),
+      ).format,
+    ).toBe('text');
+    const fits = { question: 'Which?', options: opts('Yes', 'No') };
+    expect(
+      JSON.parse(
+        String(toolMessage(await fresh().handler(fits, ctx('c1'))).content),
+      ).format,
+    ).toBe('buttons');
+    // Only a list here: 21–24 characters fit.
+    const listOnly = buildRichMessageTools({ ...ALL, kinds: ['list'] })[0]!
+      .tool;
+    expect(
+      JSON.parse(
+        String(
+          toolMessage(
+            await listOnly.handler(
+              { question: 'Which?', options: opts(s(24), 'No') },
+              ctx('c1'),
+            ),
+          ).content,
+        ),
+      ).format,
+    ).toBe('list');
+  });
+
+  it('titlesTooLong aims at buttons for 2–3 options without descriptions, else at a list', () => {
+    expect(
+      titlesTooLong(opts(s(21), 'No'), { ...ALL, kinds: ['reply_buttons'] }),
+    ).toContain('is 21 characters');
+    // Buttons and a list: 21–24 fits a list, so nothing to send back.
+    expect(titlesTooLong(opts(s(21), 'No'), ALL)).toBeNull();
+    expect(titlesTooLong(opts(s(25), 'B', 'C', 'D'), ALL)).toContain(
+      'is 25 characters',
+    );
+    expect(
+      titlesTooLong([{ title: 'A', description: s(73) }, { title: 'B' }], ALL),
+    ).toContain('the description of "A" is 73 characters');
+    expect(
+      titlesTooLong(opts(s(30), 'B'), { ...ALL, kinds: ['link_button'] }),
+    ).toBeNull();
+  });
+
+  it('the reply ends only after a choices message went out', () => {
+    const hook = createChoicesEndMiddleware().beforeModel;
+    const run = (messages: BaseMessage[]) =>
+      typeof hook === 'function'
+        ? hook({ messages }, {})
+        : hook?.hook({ messages }, {});
+    const call = new AIMessage({
+      content: '',
+      tool_calls: [{ id: 'c1', name: OFFER_CHOICES_TOOL, args: {} }],
+    });
+    const sent = new ToolMessage({
+      tool_call_id: 'c1',
+      name: OFFER_CHOICES_TOOL,
+      content: '{}',
+      artifact: { richParts: [], text: 'Which?\n\n1. A\n2. B' },
+    });
+    const sentBack = new ToolMessage({
+      tool_call_id: 'c1',
+      name: OFFER_CHOICES_TOOL,
+      content: 'Not sent yet: …',
+    });
+    expect(run([new HumanMessage('hi'), call, sent])).toEqual({
+      jumpTo: 'end',
+    });
+    expect(run([new HumanMessage('hi'), call, sentBack])).toBeUndefined();
+    expect(
+      run([new HumanMessage('hi'), new AIMessage('Hello')]),
+    ).toBeUndefined();
+  });
+});
+
 describe('the rich-message tools', () => {
   const ctx = (id: string) => makeRuntimeContext({ toolCallId: id });
   const byName = (render: RenderCapability) =>
@@ -614,7 +766,8 @@ describe('the rich-message tools', () => {
     expect([
       ...byName({ kinds: [], linkLabels: [], linkOrigins: [] }).keys(),
     ]).toEqual([]);
-    expect(byName(ALL).get(OFFER_CHOICES_TOOL)?.returnDirect).toBe(true);
+    // It ends the reply through ChoicesEndMiddleware once it sent something.
+    expect(byName(ALL).get(OFFER_CHOICES_TOOL)?.returnDirect).toBe(false);
     expect(byName(ALL).get(SEND_LINK_BUTTON_TOOL)?.returnDirect).toBe(false);
   });
 

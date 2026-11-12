@@ -92,7 +92,11 @@ import { computeSubAgentToolName, scopeToolCallIds } from './subagent-as-tool';
 import { resolveTurnToolAccess, withoutWithheldExamples } from './tool-access';
 import { wrapPluginTool } from './wrap-plugin-tool';
 import { renderRichSection, renderSurfaceSection } from '../delivery/prompt';
-import { RICH_MESSAGE_TOOLS } from '../delivery/rich-tools';
+import {
+  createChoicesEndMiddleware,
+  OFFER_CHOICES_TOOL,
+  RICH_MESSAGE_TOOLS,
+} from '../delivery/rich-tools';
 import { createReturnDirectFirstMiddleware } from './middlewares/return-direct-first';
 import { CREATE_ARTIFACT_TOOL } from '../artifacts/tool';
 import { SEND_FILE_TOOL } from '../plugins/sandbox/send-file';
@@ -915,6 +919,10 @@ export async function createMainAgent(
     ...(hooks?.middlewares ?? []),
     ...(returnDirectNames.size > 0
       ? [createReturnDirectFirstMiddleware(returnDirectNames)]
+      : []),
+    // The reply ends once `offer_choices` sent its question.
+    ...(turnTools.some(({ tool }) => tool.name === OFFER_CHOICES_TOOL)
+      ? [createChoicesEndMiddleware()]
       : []),
     // Innermost but one: sees the request as it goes to the provider, except
     // the images the recall middleware below adds inside it. Prunes old tool
