@@ -1,5 +1,41 @@
 # @ixo/oracle-runtime-workers
 
+## 0.52.0
+
+### Minor Changes
+
+- [#540](https://github.com/ixoworld/qiforge/pull/540) [`2f812c9`](https://github.com/ixoworld/qiforge/commit/2f812c9a98e19a102f3137e3f18a3574d101ac5a) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Model calls that OpenAI accepts, cheaper fallbacks, a record per call, and no silence when the model fails.
+
+  - **Tool-schema guard.** OpenAI and Azure compile every function parameter's `pattern` with Python's `re` and refuse the whole request when one does not compile (a Unicode property escape `\p{L}` from a zod `.regex(/…/u)`, a JavaScript named group, `\k<…>`, `[^]`, …). The platform model now leaves such a pattern out of the schema the model is shown (the tool still validates its arguments against its own schema), and warns once per isolate naming the tool and field. Accepted patterns are sent unchanged. The rules were measured on 79 patterns against OpenAI and Azure.
+  - **Fallbacks.** The `main` role's OpenRouter fallbacks are now `google/gemini-3.1-flash-lite`, then `google/gemini-2.5-flash-lite` (was Qwen3-235B Thinking, uncached on its one provider at ~10× the cost). Per oracle: `OPENROUTER_MAIN_FALLBACKS` (comma list or `none`) and `OPENROUTER_PROVIDER_ORDER` (provider slugs for the default model, or `none`).
+  - **No reasoning or raw tool output in a chat reply.** Text inside `<think>`/`<thinking>`/`<reasoning>` tags (or before an unmatched closer) is removed, and a model step whose text quotes a JSON tool result verbatim is not delivered.
+  - **Per-call routing record.** One `[llm-call] {…}` line per platform model call: generation id, requested and served model, provider, fallback (model or provider), prompt / cached / cache-write / output / reasoning tokens, cost, duration, error class. After a fallback or an error, `[llm-call-attempts] {…}` lists every provider OpenRouter tried (read in the background). The record is on the reply as `response_metadata.model_call` and is handed to the new `OraclePlugin.onModelCall(call, ctx)` hook for analytics.
+  - **Usage counted once.** A streamed reply's `response_metadata.usage` (tokens and cost) was exactly twice the real value; it is now the provider's own.
+  - **Busy reply on channel turns.** When a channel turn fails because the model could not be reached (provider errors, key limit 402/403, timeout), the person gets one short message (`channelFailureReply` plugin hook, else `CHANNEL_BUSY_REPLY`, else an English default), at most once per chat per 10 minutes, with the cause logged.
+
+### Patch Changes
+
+- [#538](https://github.com/ixoworld/qiforge/pull/538) [`7859803`](https://github.com/ixoworld/qiforge/commit/785980349fd34a693a5c080b4a90d33bed09353a) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - A tapped WhatsApp button is read as the option the person chose again. The
+  turn marks the person's message with the tapped-choice note
+  (`channel_choice_note`), but saving the turn's first checkpoint dropped it:
+  the message serializer keeps only an allowlist of `additional_kwargs` and
+  writes the result back onto the live message, so every tool afterwards saw
+  the note and the title as one text and rejected the answer. The note is now
+  on the allowlist (broken since 0.50.0, when button taps arrived).
+
+  `userContent` also takes the notes off in the reverse of the order the turn
+  adds them: a tap that quotes the message it was on carries the quoted-reply
+  note outside the choice note, and the choice note stayed in the person's
+  words.
+
+  Two other markers the runtime sets and reads after a checkpoint were dropped
+  the same way and are kept now: `forwardedFrom` on a sub-agent's forwarded
+  calls (since 0.41.3 the parent model saw them again from the next step on)
+  and `capped` on a capped tool result (a pruned result pointed `read_result`
+  at the tool call id instead of the saved result).
+
+- [#539](https://github.com/ixoworld/qiforge/pull/539) [`fcaf7b9`](https://github.com/ixoworld/qiforge/commit/fcaf7b97a3d4188fef44855e05b06e9c4bce8213) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Matrix room turns no longer run out of Cloudflare's loop budget ("Subrequest depth limit exceeded"). A Durable Object's outgoing calls are charged to its newest incoming request, so the gateway and a user object calling each other spent about four hops per room turn until a user chatting in a room had their model, memory and gateway calls refused. Work the gateway hands to a user object (a room turn, closing the status card, a group summary) now starts from an alarm invocation of the user object, which carries the full budget; a gateway read or transaction-pinned send that is still refused is retried once from a fresh invocation, and a turn that fails on the limit logs a `[loop-limit]` warning (the gateway's failure log now includes the reason).
+
 ## 0.51.1
 
 ### Patch Changes
