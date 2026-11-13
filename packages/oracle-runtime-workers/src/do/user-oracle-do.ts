@@ -226,6 +226,7 @@ import type {
   RequestAdmissionResult,
   RequestDisposition,
 } from '../plugin-api/request-admission';
+import type { ChannelFailureInfo } from '../plugin-api/oracle-plugin';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { AmbientServices, LlmAdapter } from '../core/runtime-context';
 import { chatGptBackendFromEnv } from '../llm/byo-client';
@@ -508,6 +509,9 @@ import {
   busyReplyDue,
   busyReplyKey,
   busyReplyText,
+  CHANNEL_EMPTY_REPLY_DEFAULT,
+  EMPTY_REPLY_KIND,
+  emptyReplyNudge,
   modelFailureOf,
 } from '../channels/busy-reply';
 import { artifactStorageConfig } from '../artifacts/config';
@@ -522,6 +526,7 @@ import { resolveDeliveryProfile } from '../delivery/profile';
 import {
   draftReplyPlan,
   failedRunFiles,
+  hasDeliverableReply,
   materializeReplyPlan,
   turnSteps,
 } from '../delivery/plan';
@@ -7206,12 +7211,41 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             sessionId,
             requestId: req.requestId,
           });
-        const events = agent.streamEvents(freshInput ? stateInput : null, {
-          ...config,
-          version: 'v2',
-        });
+        // A channel turn whose reply came out empty (no text, no rich
+        // part) asks the model once more, on the same thread, before the
+        // turn ends (channels/busy-reply.ts).
+        const retryEmpty = req.client === 'channel' && delivery.kind === 'chat';
+        let nudged = false;
+        const streamTurn = async function* (
+          this: void,
+        ): AsyncIterable<unknown> {
+          yield* tapMessages(
+            agent.streamEvents(freshInput ? stateInput : null, {
+              ...config,
+              version: 'v2',
+            }),
+            capture,
+          );
+          if (
+            !retryEmpty ||
+            live.abort.signal.aborted ||
+            hasDeliverableReply(capture, delivery.limits, live.continuation)
+          )
+            return;
+          nudged = true;
+          console.warn(
+            `[channels] run ${live.runId}: the model's reply was empty (${EMPTY_REPLY_KIND}); asking it once more`,
+          );
+          yield* tapMessages(
+            agent.streamEvents(
+              { messages: [emptyReplyNudge()] },
+              { ...config, version: 'v2' },
+            ),
+            capture,
+          );
+        };
         const outcome = await runTurnFrames({
-          events: tapMessages(events, capture),
+          events: streamTurn(),
           sink: live.buffer,
           sessionId,
           requestId: req.requestId,
@@ -7254,10 +7288,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         // model's own text on every surface: stored results (task runs, the
         // run record, the Matrix ledger) never hold a chat rendering whose
         // links expire.
-        const plan =
+        const built =
           completed && delivery.kind === 'chat'
             ? await this.replyPlanOf(live, req, capture, delivery)
             : undefined;
+        // Still empty after the retry: the oracle's short line, never
+        // silence (channels/busy-reply.ts).
+        const plan =
+          built && built.parts.length === 0 && retryEmpty
+            ? await this.emptyReplyPlan(live, req, nudged)
+            : built;
         // `send_file` always needs another model step, which can fail. A
         // gateway reads a plan only off a `finished` run, so a run that failed
         // after sending files finishes with them; the row keeps the error.
@@ -7593,6 +7633,65 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         );
         return null;
       }
+    }
+
+    /**
+     * The plan of a channel run whose reply stayed empty: the oracle's short
+     * line (a plugin's `channelFailureReply`, told `empty_reply`, else
+     * `CHANNEL_BUSY_REPLY`, else `CHANNEL_EMPTY_REPLY_DEFAULT`). Logged with
+     * its own code, so an empty reply is never read as a model outage.
+     */
+    private async emptyReplyPlan(
+      live: LiveRun,
+      req: TurnRequest,
+      nudged: boolean,
+    ): Promise<ReplyPlan> {
+      const failure: ChannelFailureInfo = { kind: EMPTY_REPLY_KIND };
+      const plugins = this.core.plugins.filter(
+        (plugin) => typeof plugin.channelFailureReply === 'function',
+      );
+      let text = CHANNEL_EMPTY_REPLY_DEFAULT;
+      try {
+        const ctx =
+          plugins.length > 0
+            ? await this.pluginHookContext(
+                req,
+                live.runId,
+                AbortSignal.timeout(5_000),
+              )
+            : undefined;
+        text = await busyReplyText(
+          ctx
+            ? plugins.map(
+                (plugin) => () => plugin.channelFailureReply?.(ctx, failure),
+              )
+            : [],
+          typeof this.core.validatedEnv.CHANNEL_BUSY_REPLY === 'string'
+            ? this.core.validatedEnv.CHANNEL_BUSY_REPLY
+            : undefined,
+          (message) => console.warn(message),
+          CHANNEL_EMPTY_REPLY_DEFAULT,
+        );
+      } catch (error) {
+        console.warn(
+          `[channels] run ${live.runId}: could not read the fallback line; sending the default: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      const plan: ReplyPlan = {
+        v: 1,
+        parts: [{ partId: EMPTY_REPLY_KIND, kind: 'text', text }],
+      };
+      try {
+        await this.runStore!.setPlan(live.runId, JSON.stringify(plan));
+      } catch (error) {
+        console.warn(
+          `[channels] run ${live.runId}: could not store the fallback plan: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      console.warn(
+        `[channels] run ${live.runId}: the model's reply was empty${nudged ? ' after a retry' : ''} (${EMPTY_REPLY_KIND}); sent the fallback line`,
+      );
+      return plan;
     }
 
     /**
@@ -8675,6 +8774,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             userDid: req.identity.userDid,
             client: req.client,
             env: langsmithEnvFromWorkerEnv(this.env),
+            // This object's own tracing client: one shared across the
+            // isolate's objects uploads with another object's I/O.
+            owner: this,
           });
       // Capability router: from what is left to load this turn (the build
       // works that out from the turn's tools), the plugins this message needs.

@@ -1193,6 +1193,15 @@ export interface ResolveLangsmithTracingArgs {
   /** Ingress surface, so latency can be sliced per client in LangSmith. */
   client: 'portal' | 'matrix' | 'slack' | 'channel';
   env: LangsmithTracingEnv;
+  /**
+   * Who owns the tracing client: a Durable Object passes itself. Workers
+   * runs several Durable Objects in one isolate, and the I/O objects one
+   * of them creates (the client's upload streams and requests) cannot be
+   * used by another ("Cannot perform I/O on behalf of a different Durable
+   * Object"), so each object gets its own client. Left out: one client per
+   * isolate (a plain Worker).
+   */
+  owner?: object;
 }
 
 export interface LangsmithTracingDecision {
@@ -1314,13 +1323,32 @@ function traceValues(values: Record<string, unknown>): Record<string, unknown> {
 const TRACE_BATCH_BYTES = 4 * 1024 * 1024;
 
 /**
- * One `langsmith` Client per (apiKey, endpoint) per isolate. Tracer instances
- * are per-turn and cheap; the client owns the batched upload queue, so
- * sharing it is what keeps tracing off the hot path.
+ * One `langsmith` Client per (apiKey, endpoint) per owner: per Durable
+ * Object (see `ResolveLangsmithTracingArgs.owner`), else per isolate.
+ * Tracer instances are per-turn and cheap; the client owns the batched
+ * upload queue, so sharing it across an owner's turns is what keeps tracing
+ * off the hot path. A client is never shared between Durable Objects: its
+ * queue's uploads would run in one object with I/O made by another.
  */
-const langsmithClients = new Map<string, Client>();
+const isolateLangsmithClients = new Map<string, Client>();
+const ownedLangsmithClients = new WeakMap<object, Map<string, Client>>();
 
-function langsmithClientFor(apiKey: string, endpoint?: string): Client {
+function langsmithClientsOf(owner: object | undefined): Map<string, Client> {
+  if (!owner) return isolateLangsmithClients;
+  let clients = ownedLangsmithClients.get(owner);
+  if (!clients) {
+    clients = new Map();
+    ownedLangsmithClients.set(owner, clients);
+  }
+  return clients;
+}
+
+function langsmithClientFor(
+  apiKey: string,
+  endpoint: string | undefined,
+  owner: object | undefined,
+): Client {
+  const langsmithClients = langsmithClientsOf(owner);
   const key = `${apiKey}\n${endpoint ?? ''}`;
   let client = langsmithClients.get(key);
   if (!client) {
@@ -1365,7 +1393,7 @@ function parseTracedDids(raw: string | undefined): ReadonlySet<string> {
 export function resolveLangsmithTracing(
   args: ResolveLangsmithTracingArgs,
 ): LangsmithTracingDecision {
-  const { userDid, client, env } = args;
+  const { userDid, client, env, owner } = args;
 
   // `user_id` duplicates the DID under the key LangSmith examples use for
   // user-scoped filtering; `user_did` is the self-describing key.
@@ -1391,7 +1419,7 @@ export function resolveLangsmithTracing(
     metadata,
     callbacks: [
       new LangChainTracer({
-        client: langsmithClientFor(env.apiKey, env.endpoint),
+        client: langsmithClientFor(env.apiKey, env.endpoint, owner),
         ...(env.project && { projectName: env.project }),
       }),
     ],

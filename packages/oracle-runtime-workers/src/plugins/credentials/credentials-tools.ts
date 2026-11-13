@@ -76,6 +76,7 @@ import {
   identityOutcomeOf,
   knowsPermission,
   lastLinkState,
+  latestLinkRecord,
   noteLinkSeen,
   noteLinkTold,
   notePermissionAnswerTold,
@@ -88,11 +89,13 @@ import {
   readPermissionRecord,
   recordLink,
   recordPermission,
+  toldInReview,
   writeGrantsCache,
   writeLinkCache,
   writePendingAction,
   writePermissionCache,
   type IdentityOutcome,
+  type LinkRecord,
   type PermissionAnswer,
   type PermissionRecord,
 } from './person-state';
@@ -102,6 +105,7 @@ import {
   LINK_STATUSES,
   SelfLinksClient,
   type LinkFailure,
+  type LinkState,
   type LinkStatus,
 } from './self-client';
 import { SelfTime, whenItEnds } from './times';
@@ -286,7 +290,10 @@ export const ActionStatusInput = z
     ref: z
       .string()
       .regex(/^[A-Za-z0-9_-]{1,128}$/)
-      .describe('The linkId credentials_request_action returned.'),
+      .optional()
+      .describe(
+        'The linkId credentials_request_action returned. Leave it out for the newest link made for this person.',
+      ),
   })
   .strict();
 
@@ -2350,7 +2357,7 @@ export function createCredentials(deps: CredentialsToolsDeps): {
       name: 'credentials_request_action',
       description: [
         'Do not call this before the person has allowed the card. It is for service-action items only, never for credential-check items (those need no action: use credentials_check). Carry out a catalogued action the person allowed (on the card from credentials_request_permissions or credentials_request_action_permission). For "self.identity-check" (one card is enough: it holds the link, the offer and the consent) it asks Self for a link where they start an identity check (it works once and ends after about 15 minutes; the first device that opens it keeps it).',
-        'Send the `message` (it holds the link) as it is. Keep the linkId to read progress with credentials_action_status. A new call replaces a link nobody has opened yet (the old one stops working), so call it again only when they need a new link. status "already_open": their check is in progress (review: true: a person reviews it; saving: true: it passed and their proof is still being saved); relay the message and read progress with that linkId only when they write. error "already_verified": they are already verified and no link is needed; go on with the task you were doing (a next step you were given comes first, and nothing else); call credentials_check only if this oracle itself needs to read a claim from the credential for its own decision.',
+        'Send the `message` (it holds the link) as it is. Keep the linkId to read progress with credentials_action_status. Never call this to answer "is it done?", "how is it going?" or "I finished": that is credentials_action_status. It reads their newest link first and makes a new one only when that one ended (passed, failed, expired, stopped): while it is open it answers it instead, status "sent" with again: true (the same link, still unopened) or status "already_open" (opened but not started, linkStatus "opened"; or their check is in progress: review: true: a person reviews it; saving: true: it passed and their proof is still being saved); relay the message and read progress with credentials_action_status only when they write. error "already_verified": they are already verified and no link is needed; go on with the task you were doing (a next step you were given comes first, and nothing else); call credentials_check only if this oracle itself needs to read a claim from the credential for its own decision.',
         'context (self.identity-check only): "next_step" when the check is the next step of a task already under way (after a reward claim, or right after they allowed the card; the message then opens with "Next, ..."), otherwise leave it out ("standalone").',
         'For any other entry id it answers status "granted" with the capabilities the person allowed (ids, capabilities, audiences and ends; never tokens) so another plugin or you can act on them. If they have not allowed it yet the answer says so: ask for permission first.',
         'When what they allowed earlier no longer matches what the service needs now, it sends the card again by itself and answers status "sent" with a permissionId and a `message` asking for their OK once more: send it as it is and call this again once they allowed it. WhatsApp only.',
@@ -2361,7 +2368,12 @@ export function createCredentials(deps: CredentialsToolsDeps): {
 
   /**
    * `self.identity-check`: a link from Self, made with the `link` and
-   * `offer` grants of the allowed card.
+   * `offer` grants of the allowed card. State-aware: the person's newest
+   * link is read at Self first, and while it is still open its own answer
+   * comes back instead of a new link (the same link again while nobody
+   * opened it; its progress once it was opened or a check started). A new
+   * link is made only when there is none, or the last one ended (passed,
+   * failed, expired, stopped), or it is about to end.
    */
   async function identityLink(
     ctx: RuntimeContext,
@@ -2373,6 +2385,10 @@ export function createCredentials(deps: CredentialsToolsDeps): {
     context: (typeof LINK_CONTEXTS)[number],
   ) {
     const requestKey = await requestKeyOf(ctx, `action:${action}`);
+    const opening =
+      context === 'next_step'
+        ? 'Next, you need to do your identity check. Open this link.'
+        : 'To do your identity check, open this link.';
     try {
       return await withGrants(
         ctx,
@@ -2390,13 +2406,18 @@ export function createCredentials(deps: CredentialsToolsDeps): {
             ctx.logger.warn('[credentials] the allowed card lacks a grant');
             return refusal('internal_error', MESSAGES.ourSide);
           }
-          const created = await selfClient(
-            ctx,
-            ready,
-            deps,
-            link,
-            deadline,
-          ).createLink({ offerConsent: offer.token, requestKey });
+          const self = selfClient(ctx, ready, deps, link, deadline);
+          const previous = await latestLinkRecord(kv);
+          if (previous) {
+            const open = await stillOpen(ctx, kv, self, previous);
+            if (open) return open;
+          }
+          const channel = ctx.session.channel?.provider;
+          const created = await self.createLink({
+            offerConsent: offer.token,
+            requestKey,
+            ...(channel ? { channel } : {}),
+          });
           // Kept with the card whose grants made it, so an identity-check
           // event for it is recognised and knows what came next.
           const inUse = ActionRecord.safeParse(
@@ -2406,37 +2427,13 @@ export function createCredentials(deps: CredentialsToolsDeps): {
             kv,
             created.linkId,
             inUse.success ? inUse.data.permissionId : undefined,
+            { url: created.url, expiresAt: created.expiresAt },
           );
-          const ends = endsFor(ctx, created.expiresAt);
-          const opening =
-            context === 'next_step'
-              ? 'Next, you need to do your identity check. Open this link.'
-              : 'To do your identity check, open this link.';
-          return said(
-            {
-              message: `${opening} ${ID_CHECK_STEPS} ${
-                ends
-                  ? `The link works once and ends ${ends}: ${created.url}`
-                  : `The link works once: ${created.url}`
-              }`,
-              hint: 'Send `message` as it is. Keep the linkId to read progress. A new link replaces one nobody has opened yet, so do not call this again to resend.',
-              button: {
-                body: `${opening} ${ID_CHECK_STEPS} ${
-                  ends
-                    ? `The link works once and ends ${ends}.`
-                    : 'The link works once.'
-                }`,
-                url: created.url,
-                label: 'start_check',
-              },
-            },
-            {
-              status: 'sent',
-              url: created.url,
-              linkId: created.linkId,
-              expiresAt: created.expiresAt,
-            },
-          );
+          return linkMessage(ctx, opening, {
+            linkId: created.linkId,
+            url: created.url,
+            expiresAt: created.expiresAt,
+          });
         },
         cards,
         'credentials_request_action',
@@ -2453,29 +2450,171 @@ export function createCredentials(deps: CredentialsToolsDeps): {
           open.status === 'in_progress'
             ? await lastLinkState(kv, open.linkId)
             : null;
-        const saving = isSaving(open) || last?.saving === true;
-        const review = !saving && (isInReview(open) || last?.review === true);
-        if (review) await noteLinkSeen(kv, open.linkId, 'in_review');
-        return said(
-          saving
-            ? MESSAGES.saving
-            : review
-              ? MESSAGES.inReview
-              : {
-                  message: checkInProgress(endsFor(ctx, open.expiresAt)),
-                  hint: `Its link cannot be sent again; read progress with this linkId when they write. ${NO_LATER_MESSAGE}`,
-                },
-          {
-            status: 'already_open',
-            linkId: open.linkId,
-            linkStatus: open.status,
-            ...(saving ? { saving: true } : review ? { review: true } : {}),
-            expiresAt: open.expiresAt,
-          },
-        );
+        return await openCheckAnswer(ctx, kv, {
+          ...open,
+          ...(isSaving(open) || last?.saving === true ? { saving: true } : {}),
+          ...(isInReview(open) || last?.review === true
+            ? { review: true }
+            : {}),
+        });
       }
       return failed(ctx, 'credentials_request_action', error, now());
     }
+  }
+
+  /** The message of an identity-check link (a new one, or the same one again). */
+  function linkMessage(
+    ctx: RuntimeContext,
+    opening: string,
+    link: { linkId: string; url: string; expiresAt: number },
+    again = false,
+  ) {
+    const ends = endsFor(ctx, link.expiresAt);
+    const first = again
+      ? "You haven't opened your identity check link yet. Here it is again."
+      : opening;
+    return said(
+      {
+        message: `${first} ${ID_CHECK_STEPS} ${
+          ends
+            ? `The link works once and ends ${ends}: ${link.url}`
+            : `The link works once: ${link.url}`
+        }`,
+        hint: again
+          ? 'Their link is still open and nobody opened it: this is the same link, sent again (no new link was made). Send `message` as it is. For "is it done?" or "how is it going?" use credentials_action_status, not this tool.'
+          : 'Send `message` as it is. Keep the linkId to read progress with credentials_action_status. Calling this again while the link is open answers the same link or its progress, never a new link; for "is it done?" or "how is it going?" use credentials_action_status.',
+        button: {
+          body: `${first} ${ID_CHECK_STEPS} ${
+            ends
+              ? `The link works once and ends ${ends}.`
+              : 'The link works once.'
+          }`,
+          url: link.url,
+          label: 'start_check',
+        },
+      },
+      {
+        status: 'sent',
+        ...(again ? { again: true } : {}),
+        url: link.url,
+        linkId: link.linkId,
+        expiresAt: link.expiresAt,
+      },
+    );
+  }
+
+  /**
+   * The answer for the person's newest link when it is still open, or null
+   * when a new link is due (it ended, is about to end, or cannot be read: a
+   * new link then replaces one nobody started, and Self itself refuses one
+   * while a check is in progress).
+   */
+  async function stillOpen(
+    ctx: RuntimeContext,
+    kv: UserKvSurface,
+    self: SelfLinksClient,
+    previous: LinkRecord,
+  ) {
+    let state: LinkState;
+    try {
+      state =
+        (await readLinkCache(kv, previous.linkId, now())) ??
+        (await self.linkStatus(previous.linkId));
+    } catch (error) {
+      ctx.logger.warn(
+        `[credentials] identity link: the last link's status is unread (${
+          error instanceof CredentialsServiceError
+            ? `${error.service}_${error.status}_${error.code}`
+            : describeError(error)
+        }); asking Self for a new one`,
+      );
+      return null;
+    }
+    // Before the cache write, which marks an outcome read as seen.
+    const wasToldReview = toldInReview(previous);
+    await writeLinkCache(kv, state, now());
+    const nowSeconds = Math.floor(now() / 1000);
+    if (state.status === 'in_progress')
+      return openCheckAnswer(ctx, kv, state, wasToldReview);
+    // A link about to end is not reused: a new one gets a full window.
+    if (state.expiresAt <= nowSeconds + 60) return null;
+    if (state.status === 'sent' && previous.url) {
+      ctx.logger.log(
+        '[credentials] identity link: the last link is still unopened; sending it again',
+      );
+      return linkMessage(
+        ctx,
+        '',
+        { linkId: state.linkId, url: previous.url, expiresAt: state.expiresAt },
+        true,
+      );
+    }
+    if (state.status === 'opened') {
+      ctx.logger.log(
+        '[credentials] identity link: the last link is opened, no check started; answering its status',
+      );
+      const ends = endsFor(ctx, state.expiresAt);
+      return said(
+        {
+          message: ends
+            ? `You opened the link but haven't started the check yet. Please go back to the page you opened and start it before it ends ${ends}. If you closed that page, ask me again after that and I'll send a new link.`
+            : "You opened the link but haven't started the check yet. Please go back to the page you opened and start it.",
+          hint: `Their link is open on the device that opened it (it cannot be opened again elsewhere), so no new link was made. Send \`message\` as it is. ${NO_LATER_MESSAGE}`,
+        },
+        {
+          status: 'already_open',
+          linkId: state.linkId,
+          linkStatus: state.status,
+          expiresAt: state.expiresAt,
+        },
+      );
+    }
+    // Passed, failed, expired, cancelled, or unopened with no URL kept.
+    return null;
+  }
+
+  /**
+   * The answer for a link whose check is in progress: being saved, in
+   * review (the first notice, or "still being checked" once they were told),
+   * or still going.
+   */
+  async function openCheckAnswer(
+    ctx: RuntimeContext,
+    kv: UserKvSurface,
+    open: {
+      linkId: string;
+      status: LinkStatus;
+      expiresAt: number;
+      review?: true;
+      saving?: true;
+    },
+    wasToldReview?: boolean,
+  ) {
+    const saving = isSaving(open) || open.saving === true;
+    const review = !saving && (isInReview(open) || open.review === true);
+    const told =
+      review &&
+      (wasToldReview ?? toldInReview(await readLinkRecord(kv, open.linkId)));
+    if (review) await noteLinkSeen(kv, open.linkId, 'in_review');
+    return said(
+      saving
+        ? MESSAGES.saving
+        : review
+          ? told
+            ? MESSAGES.stillInReview
+            : MESSAGES.inReview
+          : {
+              message: checkInProgress(endsFor(ctx, open.expiresAt)),
+              hint: `Its link cannot be sent again; read progress with credentials_action_status when they write. ${NO_LATER_MESSAGE}`,
+            },
+      {
+        status: 'already_open',
+        linkId: open.linkId,
+        linkStatus: open.status,
+        ...(saving ? { saving: true } : review ? { review: true } : {}),
+        expiresAt: open.expiresAt,
+      },
+    );
   }
 
   /**
@@ -2548,6 +2687,15 @@ export function createCredentials(deps: CredentialsToolsDeps): {
           message: MESSAGES.unknownAction.message,
           hint: 'Only self.identity-check has progress to read here; use credentials_permission_status for any other entry.',
         });
+      const ref = args.ref ?? (await latestLinkRecord(kv))?.linkId;
+      if (!ref)
+        return refusal('not_found', {
+          message: "I haven't sent you an identity check link yet.",
+          hint: 'No identity-check link was made for this person here. Offer one with credentials_request_action only if they want to do the check.',
+        });
+      // Whether they were already told it is in review, before a read
+      // below marks that outcome seen.
+      const wasToldReview = toldInReview(await readLinkRecord(kv, ref));
       const stateAnswer = (state: {
         linkId: string;
         status: LinkStatus;
@@ -2564,7 +2712,9 @@ export function createCredentials(deps: CredentialsToolsDeps): {
           saving
             ? MESSAGES.saving
             : review
-              ? MESSAGES.inReview
+              ? wasToldReview
+                ? MESSAGES.stillInReview
+                : MESSAGES.inReview
               : state.status === 'failed'
                 ? failedWording(state)
                 : LINK_WORDING[state.status],
@@ -2581,8 +2731,8 @@ export function createCredentials(deps: CredentialsToolsDeps): {
       try {
         // At most 6 calls a minute per link; the status read last is kept
         // 5 s (a final one for good), so most calls never reach Self.
-        const allowed = await chargeLinkStatus(kv, args.ref, now());
-        const kept = await readLinkCache(kv, args.ref, now());
+        const allowed = await chargeLinkStatus(kv, ref, now());
+        const kept = await readLinkCache(kv, ref, now());
         if (!allowed)
           return kept
             ? stateAnswer(kept)
@@ -2598,9 +2748,7 @@ export function createCredentials(deps: CredentialsToolsDeps): {
           async (grants) => {
             const link = grantFor(grants, 'link', LINK_CAPABILITY);
             if (!link) return refusal('internal_error', MESSAGES.ourSide);
-            return selfClient(ctx, ready, deps, link, deadline).linkStatus(
-              args.ref,
-            );
+            return selfClient(ctx, ready, deps, link, deadline).linkStatus(ref);
           },
           liveCards(ctx, ready, kv, deadline),
           'credentials_action_status',
@@ -2615,7 +2763,7 @@ export function createCredentials(deps: CredentialsToolsDeps): {
     {
       name: 'credentials_action_status',
       description:
-        'Read the progress of an action credentials_request_action started: for "self.identity-check" pass the linkId as ref (sent, opened, in_progress, passed, failed, expired, cancelled; in_progress with review: true means a person from support reviews it, which can take a while; in_progress with saving: true means it passed and their proof is still being saved, which can take a minute; failed with failure: "error" means a problem on our side, not about them, and failure: "too_many_attempts" means they used up their tries; without failure they were not verified). No personal data comes back. Only call it when the person writes and you need the answer; do not poll in a loop (at most 6 a minute per link; an answer is kept 5 seconds). You can never message them first. WhatsApp only.',
+        'Read the progress of an action credentials_request_action started. Use this, never credentials_request_action, whenever the person asks about an identity check they were sent ("is it done?", "how is it going?", "did it work?", "I finished", "it doesn\'t work"). For "self.identity-check" pass the linkId as ref (or leave ref out for their newest link) (sent, opened, in_progress, passed, failed, expired, cancelled; in_progress with review: true means a person from support reviews it, which can take a while; in_progress with saving: true means it passed and their proof is still being saved, which can take a minute; failed with failure: "error" means a problem on our side, not about them, and failure: "too_many_attempts" means they used up their tries; without failure they were not verified). No personal data comes back. Only call it when the person writes and you need the answer; do not poll in a loop (at most 6 a minute per link; an answer is kept 5 seconds). You can never message them first. WhatsApp only.',
       schema: ActionStatusInput,
       effect: 'read',
     },

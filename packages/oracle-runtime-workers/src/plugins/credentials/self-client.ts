@@ -143,15 +143,20 @@ export class SelfLinksClient {
   /**
    * One open link for the person. `offerConsent` is the person's delegation
    * to Self's issuer DID (`credentials/offer`), which Self keeps so it can
-   * offer the credential when the check passes.
+   * offer the credential when the check passes. `channel` (optional) names
+   * the chat the link is sent in (`whatsapp`), so Self's pages say "go back
+   * to your chat" only for a link that came from one; a Self that does not
+   * read it ignores it, and without it Self's pages stay neutral.
    */
   async createLink(input: {
     offerConsent: string;
     requestKey: string;
+    channel?: string;
   }): Promise<CreatedLink> {
     const json = {
       offerConsent: input.offerConsent,
       requestKey: input.requestKey,
+      ...(input.channel ? { channel: input.channel } : {}),
     };
     const bodySha256 = await jsonBodySha256(json);
     const answer = await callService({

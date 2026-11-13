@@ -435,6 +435,14 @@ const LinkRecordSchema = z.object({
   linkId: z.string(),
   /** The card whose grants made the link, when known. */
   permissionId: z.string().optional().catch(undefined),
+  /**
+   * The link Self answered (it keeps only a hash of its token), so the same
+   * link can be sent again while nobody opened it. It is the person's own
+   * link, already in their chat. Older rows have none.
+   */
+  url: z.string().url().optional().catch(undefined),
+  /** Unix seconds: when Self ends the link unless a check started. */
+  expiresAt: z.number().optional().catch(undefined),
   /** The outcome a tool already read in the chat. */
   seen: z.enum(IDENTITY_OUTCOMES).optional().catch(undefined),
   /** The outcome an identity-check event already told, and its request id. */
@@ -464,16 +472,39 @@ async function updateLinks(
   );
 }
 
-/** Remember an identity-check link made for this person (and the card it came from). */
+/**
+ * Remember an identity-check link made for this person (the card it came
+ * from, its URL and end), as their newest link.
+ */
 export async function recordLink(
   kv: UserKvSurface,
   linkId: string,
   permissionId?: string,
+  link?: { url: string; expiresAt: number },
 ): Promise<void> {
   await updateLinks(kv, (links) => [
     ...links.filter((x) => x.linkId !== linkId),
-    { linkId, ...(permissionId ? { permissionId } : {}) },
+    {
+      linkId,
+      ...(permissionId ? { permissionId } : {}),
+      ...(link ? { url: link.url, expiresAt: link.expiresAt } : {}),
+    },
   ]);
+}
+
+/** The newest identity-check link this person's kv recorded, or null. */
+export async function latestLinkRecord(
+  kv: UserKvSurface,
+): Promise<LinkRecord | null> {
+  const parsed = LinkRecords.safeParse(
+    await kv.get(CREDENTIALS_KV_NAMESPACE, LINKS_KEY),
+  );
+  return parsed.success ? (parsed.data.at(-1) ?? null) : null;
+}
+
+/** Whether the person was already told this link's check is in review. */
+export function toldInReview(record: LinkRecord | null): boolean {
+  return record?.seen === 'in_review' || record?.told?.status === 'in_review';
 }
 
 /** The link as this person's kv recorded it, or null (not made here for them). */
