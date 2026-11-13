@@ -2478,6 +2478,35 @@ N s ago, so nothing is sent`. An event turn reaches the oracle only while the
 person's WhatsApp window is open, and the gateway checks the window again
 before sending. A tool or runtime failure keeps the run `failed`.
 
+### Channel turns whose reply came out empty
+
+A channel turn (a message, a tap or an event) whose model run ended with
+nothing to send (no text, no rich part, no file: the model answered a tool
+result with an empty message; three such turns on the Yo mainnet oracle on
+13 Nov 2026, one person waited 40 minutes) is never left silent
+(`src/channels/busy-reply.ts`). The model is asked once more on the same
+thread with a hidden note (a delivery notice: the transcript, memory and
+session titles skip it), and its answer is sent. When that answer is empty
+too, the person gets the oracle's short line: a plugin's
+`channelFailureReply` told `kind: "empty_reply"`, else `CHANNEL_BUSY_REPLY`,
+else "Sorry, I couldn't finish my reply just now. Please send your message
+again." There is no cooldown: it is one line per turn. Lines: `[channels]
+run …: the model's reply was empty (empty_reply); asking it once more` and
+`…: the model's reply was empty after a retry (empty_reply); sent the
+fallback line`. An event turn reaches the oracle only while the person's
+WhatsApp window is open, and the gateway checks the window again before
+sending.
+
+### Tracing clients are per Durable Object
+
+Each user object has its own LangSmith client (`resolveLangsmithTracing`
+with `owner`). Workers runs several Durable Objects in one isolate, and a
+client shared between them uploaded one object's runs with I/O another
+object created: `Cannot perform I/O on behalf of a different Durable Object
+… (I/O type: Writable)` and `Error queueing run for tracing` (22 lines in one
+turn on the Yo mainnet oracle, 13 Nov 2026 15:56Z; the reply was delivered,
+only that trace was incomplete).
+
 ## Write claims and turn usage
 
 `turn_write_claims` (in the user's run ledger, next to `turn_runs` and

@@ -43,7 +43,11 @@ export type PluginRouteMethod = PluginRoute['method'];
 
 /** Why a channel turn failed, as `channelFailureReply` is told. */
 export interface ChannelFailureInfo {
-  /** The failure's class: `rate_limit`, `billing`, `auth`, `timeout`, `server`, `network` or `unknown`. */
+  /**
+   * The failure's class: `rate_limit`, `billing`, `auth`, `timeout`,
+   * `server`, `network` or `unknown` when the model could not be reached;
+   * `empty_reply` when the model answered, twice, with nothing to send.
+   */
   kind: string;
   /** The provider's HTTP status, when there was one. */
   status?: number;
@@ -196,7 +200,9 @@ export abstract class OraclePlugin {
    * language the plugin keeps for the person. The first plugin to return
    * a non-empty text decides; otherwise `CHANNEL_BUSY_REPLY`, else a short
    * English default. Sent at most once per chat per 10 minutes. Must not
-   * call a model: the model is what failed.
+   * call a model: the model is what failed. Also asked (`failure.kind`
+   * `empty_reply`, no cooldown) when a turn's reply stayed empty after the
+   * runtime asked the model once more.
    */
   channelFailureReply?(
     ctx: RuntimeContext,

@@ -24,8 +24,10 @@
  * language, when the plugin keeps one), else `CHANNEL_BUSY_REPLY`, else
  * {@link CHANNEL_BUSY_REPLY_DEFAULT}.
  */
+import { HumanMessage } from '@langchain/core/messages';
 import { modelCallOf } from '../llm/model-call';
 import type { ChannelFailureInfo } from '../plugin-api/oracle-plugin';
+import { CHANNEL_DELIVERY_NOTICE_KWARG } from './replies';
 
 export const CHANNEL_BUSY_REPLY_DEFAULT =
   "Sorry, I'm a bit busy right now. Please try again in a few minutes.";
@@ -59,13 +61,17 @@ export function busyReplyDue(
   );
 }
 
-/** The text to send: a plugin's, the deployment's, or the default. */
+/**
+ * The text to send: a plugin's, the deployment's, or `fallback` (the busy
+ * reply's default unless given).
+ */
 export async function busyReplyText(
   candidates: ReadonlyArray<
     () => string | undefined | Promise<string | undefined>
   >,
   configured: string | undefined,
   warn: (message: string) => void,
+  fallback: string = CHANNEL_BUSY_REPLY_DEFAULT,
 ): Promise<string> {
   for (const candidate of candidates) {
     try {
@@ -77,5 +83,46 @@ export async function busyReplyText(
       );
     }
   }
-  return configured?.trim() || CHANNEL_BUSY_REPLY_DEFAULT;
+  return configured?.trim() || fallback;
+}
+
+// ---------------------------------------------------------------------------
+// Empty replies.
+//
+// A channel turn whose model run ended with nothing to send (no text and no
+// rich part: the model answered a tool result with an empty message) is
+// never left silent. The model is asked once more, with
+// {@link emptyReplyNudge} as a hidden note on the same thread; when that is
+// empty too, the person gets the same short line as the busy reply (the
+// plugin's `channelFailureReply`, told `kind: "empty_reply"`, else
+// `CHANNEL_BUSY_REPLY`, else {@link CHANNEL_EMPTY_REPLY_DEFAULT}). No
+// cooldown: it is one line per turn the person or an event started. An
+// event turn is answered the same way: the gateway delivers an event turn
+// only while the person's 24-hour WhatsApp window is open and checks the
+// window again before it sends anything.
+
+/** The `ChannelFailureInfo.kind` (and log code) of an empty model reply. */
+export const EMPTY_REPLY_KIND = 'empty_reply';
+
+/** The line sent when the model's reply stayed empty, unless a plugin or the deployment set one. */
+export const CHANNEL_EMPTY_REPLY_DEFAULT =
+  "Sorry, I couldn't finish my reply just now. Please send your message again.";
+
+/** What the model is told when its reply had nothing in it for the person. */
+export const EMPTY_REPLY_NUDGE =
+  '[Runtime note, not a message from the user: your last step ended without any message for the person, so they received nothing. Reply to them now, in the language you were using with them: send what the last tool result says to tell them, or answer their last message. Do not call a tool again unless that is the only way to answer. Do not mention this note.]';
+
+/**
+ * The hidden note that asks the model once more. It rides as a delivery
+ * notice, so every reader that shows the person's words (the transcript,
+ * memory, session titles) skips it.
+ */
+export function emptyReplyNudge(at: Date = new Date()): HumanMessage {
+  return new HumanMessage({
+    content: EMPTY_REPLY_NUDGE,
+    additional_kwargs: {
+      timestamp: at.toISOString(),
+      [CHANNEL_DELIVERY_NOTICE_KWARG]: EMPTY_REPLY_NUDGE,
+    },
+  });
 }

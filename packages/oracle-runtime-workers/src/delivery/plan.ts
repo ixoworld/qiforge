@@ -135,6 +135,29 @@ export function turnSteps(messages: readonly BaseMessage[]): {
   return { steps, toolResults, toolArtifacts };
 }
 
+/**
+ * Whether the turn that ended the thread has anything to send: text, a rich
+ * part, a file or a plugin's standalone message. False when the model ended
+ * on an empty message (the channel path then asks it once more).
+ */
+export function hasDeliverableReply(
+  messages: readonly BaseMessage[],
+  limits: ChatLimits,
+  continuation?: string | null,
+): boolean {
+  const { steps, toolResults, toolArtifacts } = turnSteps(messages);
+  return (
+    draftReplyPlan({
+      steps,
+      toolResults,
+      toolArtifacts,
+      continuation: continuation ?? null,
+      limits,
+      canSpill: true,
+    }).length > 0
+  );
+}
+
 /** One short paragraph of prose: what a model says before it calls a tool. */
 export function isNarration(text: string): boolean {
   return (

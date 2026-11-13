@@ -93,10 +93,27 @@ Rules the tools keep:
 - A link's status is kept 5 s before Self is asked again (a final status for
   good), and `credentials_action_status` answers at most 6 calls a minute per
   link (Self's own limits: 2000 links a minute per oracle, 6000 status reads
-  a minute per oracle and 30 a minute per oracle and link). A new
-  `credentials_request_action` replaces a link nobody has opened yet (the old
-  URL stops working); Self answers 409 `link_active` only while a check is in
-  progress, and that link is continued, not recreated.
+  a minute per oracle and 30 a minute per oracle and link).
+- `credentials_request_action` is state-aware: it reads the person's newest
+  link at Self first and makes a new one only when there is none, or that
+  one ended (`passed`, `failed`, `expired`, `cancelled`), is about to end
+  (within a minute) or cannot be read. While it is open the tool answers it
+  instead: `sent` (nobody opened it) sends the same link and button again
+  (`status: "sent"`, `again: true`; the URL is kept in the person's kv with
+  the link); `opened` (no check started) says to go back to the page they
+  opened (`already_open`, `linkStatus: "opened"`: the link cannot be opened
+  on another device); `in_progress` answers its progress (`already_open`,
+  with `review` or `saving`). Self itself replaces a link nobody started a
+  check on, and answers 409 `link_active` only while a check is in
+  progress; that link is continued, not recreated. Both tool descriptions
+  point "is it done?" / "how is it going?" at `credentials_action_status`,
+  whose `ref` may be left out for the newest link. On 13 Nov 2026 the Yo
+  agent sent a new link instead of the status three times, once replacing a
+  link the person had already opened.
+- On a channel turn the link is made with `channel: "<provider>"`
+  (`whatsapp`) in Self's create body, so Self's pages say "go back to your
+  chat" only for a link that came from one. A Self that does not read the
+  field ignores it.
 - An end the person reads (the link's, an open check's) is their local time
   when the runtime knows their zone (`ctx.user.timezone`: "It works once and
   ends at 18:05"), else relative to now, since WhatsApp gives no zone: "It
@@ -160,7 +177,11 @@ only when they write. The status kept for 5 s in the person's kv keeps the
 flag. When Self refuses a new link because a check is open (`409
 link_active`), the same review words are used when the 409 says
 `review: true`, or when the status read last for that link was in review;
-otherwise "Your identity check is already in progress ...".
+otherwise "Your identity check is already in progress ...". Once the person
+was told it is in review (by a tool or the in-review event), later answers
+say it is still being checked, that there is nothing more to do and that a
+person looks at it within 48 hours (Self's own expectation), instead of the
+first "Thanks, your identity check is sent ..." notice again.
 
 ### Passed, proof being saved
 

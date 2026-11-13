@@ -1021,6 +1021,9 @@ describe('identity-check events', () => {
     expect(await readLinkRecord(kv, 'lnk_1')).toEqual({
       linkId: 'lnk_1',
       permissionId: 'card_1',
+      // Kept so the same unopened link can be sent again.
+      url: 'https://dev.self.ixo.earth/l/tok',
+      expiresAt: (NOW + 15 * 60_000) / 1000,
     });
   });
 

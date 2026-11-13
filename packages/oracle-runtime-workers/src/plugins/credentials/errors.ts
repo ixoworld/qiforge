@@ -144,6 +144,16 @@ export const MESSAGES = {
       "Thanks, your identity check is sent. Someone from our support team will look at it. Please check back later. You can ask me anytime, and I'll check how it's going.",
     hint: `A person reviews it; nothing tells you when it is done and you cannot message them first. ${NO_LATER_MESSAGE} Do not send a new link. Read the status again only when they write.`,
   },
+  /**
+   * In review, once the person was already told so (by a tool or the event):
+   * not the first notice again. Self tells the person a reviewer looks at it
+   * within 48 hours.
+   */
+  stillInReview: {
+    message:
+      "Your identity check is still being checked by our support team. There's nothing more you need to do. A person will look at it within 48 hours. You can ask me anytime, and I'll check how it's going.",
+    hint: `They were already told it is in review: send this message as it is, and do not repeat the first "Thanks, your identity check is sent" notice. ${NO_LATER_MESSAGE} Do not send a new link. Read the status again only when they write.`,
+  },
   /** Self's `saving: true` beside `in_progress`: approved, the proof not saved yet. */
   saving: {
     message:
