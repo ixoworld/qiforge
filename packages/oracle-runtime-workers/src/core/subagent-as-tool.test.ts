@@ -9,8 +9,16 @@ import { tool } from '@langchain/core/tools';
 import { FakeToolCallingModel, type AgentMiddleware } from 'langchain';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import { GraphInterrupt } from '@langchain/langgraph';
+import { UNCERTAIN_WRITE_NOTE } from './middlewares/tool-error-result';
+import {
+  createToolExecutionMiddleware,
+  uncertainWriteToolResult,
+} from './middlewares/tool-execution';
 import { createToolRepetitionGuardMiddleware } from './middlewares/tool-repetition-guard';
-import { HarnessLimitError } from './turn-budget';
+import { makeClaimStore } from './test-fixtures';
+import { ToolScheduler } from './tool-scheduler';
+import { isHarnessLimitError, TurnBudget } from './turn-budget';
 import {
   createSubagentAsTool,
   filterForwardedMessages,
@@ -204,7 +212,7 @@ describe('createSubagentAsTool', () => {
       expect(results[0]?.content).toBe(`fetch_page failed: ${blockedError}`);
       expect(innerSaw).toHaveLength(1);
       expect(innerSaw[0]).toHaveProperty('name', 'ToolException');
-      expect(log.warn).toHaveBeenCalledWith(
+      expect(log.log).toHaveBeenCalledWith(
         `[tool-error] Research Agent: fetch_page (c1) threw; the error is its result: ${blockedError}`,
       );
     });
@@ -254,7 +262,7 @@ describe('createSubagentAsTool', () => {
       );
     });
 
-    it('still ends the turn when the tool aborted it', async () => {
+    it('still ends the turn when the tool aborted it, without handing the abort to the model', async () => {
       const controller = new AbortController();
       const aborting = tool(
         async () => {
@@ -270,23 +278,71 @@ describe('createSubagentAsTool', () => {
       const model = new FakeToolCallingModel({
         toolCalls: [[{ name: 'fetch_page', args: {}, id: 'c1' }], []],
       });
+      const log = logger();
+      const onComplete = vi.fn();
       const subagent = createSubagentAsTool(
-        specWith(model, { tools: [aborting] }),
+        specWith(model, { tools: [aborting], logger: log }),
+        { onComplete },
       );
       await expect(
         subagent.invoke({ task: 'x' }, { signal: controller.signal }),
       ).rejects.toThrow();
+      expect(onComplete).not.toHaveBeenCalled();
+      expect(log.log).not.toHaveBeenCalledWith(
+        expect.stringContaining('[tool-error]'),
+      );
     });
 
-    it('still ends the turn when it ran out of budget', async () => {
-      const limit = new HarnessLimitError(
-        'budget_exhausted',
-        'tools',
-        'Tool budget exhausted',
+    it('still ends the turn when the execution middleware finds it out of budget', async () => {
+      let ran = 0;
+      const model = new FakeToolCallingModel({
+        toolCalls: [
+          [
+            {
+              name: 'fetch_page',
+              args: { url: 'https://a.example' },
+              id: 'c1',
+            },
+          ],
+          [
+            {
+              name: 'fetch_page',
+              args: { url: 'https://b.example' },
+              id: 'c2',
+            },
+          ],
+          [],
+        ],
+      });
+      // One tool attempt allowed: the second call's reserve throws inside
+      // the execution middleware, so it arrives wrapped in a MiddlewareError.
+      const execution = createToolExecutionMiddleware({
+        budget: new TurnBudget({ tools: 1, durationMs: 60_000 }, () => 0),
+        scheduler: new ToolScheduler(),
+        laneOf: () => 'read',
+        effectOf: () => 'read',
+        runId: 'run-1',
+        sessionId: 'session-1',
+      });
+      const onComplete = vi.fn();
+      const subagent = createSubagentAsTool(
+        specWith(model, {
+          tools: [fetchPage(() => (ran += 1))],
+          dispatchMiddleware: () => [execution],
+        }),
+        { onComplete },
       );
-      const overBudget = tool(
+      await expect(subagent.invoke({ task: 'x' })).rejects.toSatisfy(
+        (error: unknown) => isHarnessLimitError(error),
+      );
+      expect(ran).toBe(1);
+      expect(onComplete).not.toHaveBeenCalled();
+    });
+
+    it('never hands a LangGraph interrupt from an inner tool to the model', async () => {
+      const interrupting = tool(
         async () => {
-          throw limit;
+          throw new GraphInterrupt([]);
         },
         {
           name: 'fetch_page',
@@ -297,12 +353,125 @@ describe('createSubagentAsTool', () => {
       const model = new FakeToolCallingModel({
         toolCalls: [[{ name: 'fetch_page', args: {}, id: 'c1' }], []],
       });
+      const log = logger();
+      let seen: BaseMessage[] = [];
       const subagent = createSubagentAsTool(
-        specWith(model, { tools: [overBudget] }),
+        specWith(model, { tools: [interrupting], logger: log }),
+        {
+          onComplete: (messages) => {
+            seen = messages;
+          },
+        },
       );
-      await expect(subagent.invoke({ task: 'x' })).rejects.toThrow(
-        'Tool budget exhausted',
+      // Standalone (no parent run), LangGraph ends the graph at the
+      // interrupt; nested in a parent run it throws out of the dispatch,
+      // which re-throws graph bubble-ups. Either way the call gets no result
+      // and the model is not asked again.
+      await subagent.invoke({ task: 'x' });
+      expect(seen.some((m) => ToolMessage.isInstance(m))).toBe(false);
+      expect(seen.filter((m) => AIMessage.isInstance(m))).toHaveLength(1);
+      expect(log.log).not.toHaveBeenCalledWith(
+        expect.stringContaining('[tool-error]'),
       );
+    });
+
+    it('reports a schema rejection to the sub-agent, which carries on', async () => {
+      const model = new FakeToolCallingModel({
+        toolCalls: [
+          [{ name: 'fetch_page', args: { url: 42 }, id: 'c1' }],
+          [
+            {
+              name: 'fetch_page',
+              args: { url: 'https://open.example' },
+              id: 'c2',
+            },
+          ],
+          [],
+        ],
+      });
+      let seen: BaseMessage[] = [];
+      const subagent = createSubagentAsTool(
+        specWith(model, {
+          tools: [fetchPage()],
+          dispatchMiddleware: () => [createToolRepetitionGuardMiddleware()],
+        }),
+        {
+          onComplete: (messages) => {
+            seen = messages;
+          },
+        },
+      );
+      const result = String(await subagent.invoke({ task: 'x' }));
+      expect(result).not.toMatch(/^Error running/);
+      const first = seen.find(
+        (m): m is ToolMessage =>
+          ToolMessage.isInstance(m) && m.tool_call_id === 'c1',
+      );
+      expect(first?.status).toBe('error');
+      expect(String(first?.content)).toMatch(
+        /^Invalid arguments for fetch_page: /,
+      );
+      expect(String(first?.content)).not.toMatch(/\n\s+at |kwargs/);
+      expect(result).toContain('content of https://open.example');
+    });
+
+    it('keeps the claim of a write whose outcome is unknown and refuses the identical write', async () => {
+      let sent = 0;
+      const send = tool(
+        async () => {
+          sent += 1;
+          throw new TypeError('fetch failed');
+        },
+        {
+          name: 'send_payment',
+          description: 'sends a payment',
+          schema: z.object({ to: z.string() }),
+        },
+      );
+      const model = new FakeToolCallingModel({
+        toolCalls: [
+          [{ name: 'send_payment', args: { to: 'bob' }, id: 'c1' }],
+          [{ name: 'send_payment', args: { to: 'bob' }, id: 'c2' }],
+          [],
+        ],
+      });
+      const claims = makeClaimStore();
+      const execution = createToolExecutionMiddleware({
+        budget: new TurnBudget({ tools: 5, durationMs: 60_000 }, () => 0),
+        scheduler: new ToolScheduler(),
+        laneOf: () => 'write',
+        effectOf: () => 'write',
+        runId: 'run-1',
+        sessionId: 'session-1',
+        claims: claims.store,
+      });
+      let seen: BaseMessage[] = [];
+      const subagent = createSubagentAsTool(
+        specWith(model, {
+          tools: [send],
+          effectOf: () => 'write',
+          dispatchMiddleware: (dispatch) => [
+            scopeToolCallIds(execution, dispatch),
+          ],
+        }),
+        {
+          onComplete: (messages) => {
+            seen = messages;
+          },
+        },
+      );
+      await subagent.invoke({ task: 'pay bob' });
+      expect(sent).toBe(1);
+      const [first, second] = seen.filter((m): m is ToolMessage =>
+        ToolMessage.isInstance(m),
+      );
+      expect(first?.status).toBe('error');
+      expect(first?.content).toBe(
+        `send_payment failed: fetch failed\n\n${UNCERTAIN_WRITE_NOTE}`,
+      );
+      expect(second?.status).toBe('error');
+      expect(second?.content).toBe(uncertainWriteToolResult('send_payment'));
+      expect(claims.rows.size).toBe(1);
     });
   });
 
@@ -463,5 +632,27 @@ describe('filterForwardedMessages', () => {
       ['tool', 'parent-1'],
     ]);
     expect((forwarded[1] as ToolMessage).tool_call_id).toBe('parent-1_s1');
+  });
+
+  it('keeps a failed call failed', () => {
+    const [, result] = filterForwardedMessages(
+      [
+        new AIMessage({
+          content: '',
+          tool_calls: [
+            { id: 's1', name: 'submit_section', args: {}, type: 'tool_call' },
+          ],
+        }),
+        new ToolMessage({
+          tool_call_id: 's1',
+          name: 'submit_section',
+          content: 'submit_section failed: section too long',
+          status: 'error',
+        }),
+      ],
+      new Set(['submit_section']),
+      'parent-1',
+    );
+    expect(ToolMessage.isInstance(result) && result.status).toBe('error');
   });
 });

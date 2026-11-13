@@ -13,14 +13,11 @@ import {
   type StructuredTool,
 } from 'langchain';
 import { createDanglingToolCallRepairMiddleware } from './middlewares/dangling-tool-calls';
-import {
-  createToolErrorResultMiddleware,
-  errorSummary,
-} from './middlewares/tool-error-result';
+import { createToolErrorResultMiddleware } from './middlewares/tool-error-result';
 import { isHarnessLimitError } from './turn-budget';
 import { z } from 'zod';
 import type { Logger } from '../plugin-api/types';
-import { NOOP_LOGGER } from './utils';
+import { errorSummary, NOOP_LOGGER } from './utils';
 
 /**
  * Spec for an agent that runs as a one-shot sub-agent (called by a parent
@@ -46,10 +43,18 @@ export interface AgentSpec {
   middleware?: AgentMiddleware[];
   /**
    * Middlewares built per dispatch, placed before `middleware` (outermost
-   * after the dangling-call repair). `dispatch` names this dispatch: the
-   * parent's tool-call id, or a fresh id when the parent call has none.
+   * after the dangling-call repair and the tool-error layer). `dispatch`
+   * names this dispatch: the parent's tool-call id, or a fresh id when the
+   * parent call has none.
    */
   dispatchMiddleware?: (dispatch: string) => AgentMiddleware[];
+  /**
+   * Effect of an inner tool by name. A write whose thrown failure leaves its
+   * outcome unknown is reported as such to the sub-agent's model
+   * (`createToolErrorResultMiddleware`). Unset, or a name it does not know:
+   * a write.
+   */
+  effectOf?: (toolName: string) => 'read' | 'write';
   userDid: string;
   sessionId: string;
   /** Appended to thread_id to scope the agent's conversation (e.g. a room ID). */
@@ -202,6 +207,9 @@ export function filterForwardedMessages(
           content: toolMsg.content,
           tool_call_id: newId,
           ...(toolMsg.name ? { name: toolMsg.name } : {}),
+          // A failed call stays failed in the parent's history (the UI shows
+          // a call's state from it): an inner tool's error is a result now.
+          ...(toolMsg.status ? { status: toolMsg.status } : {}),
           additional_kwargs: { [FORWARDED_FROM_KEY]: idPrefix },
         }),
       );
@@ -372,6 +380,7 @@ export function createSubagentAsTool(
             createToolErrorResultMiddleware({
               agentName: spec.name,
               ...(config.signal ? { signal: config.signal } : {}),
+              ...(spec.effectOf ? { effectOf: spec.effectOf } : {}),
               logger,
             }),
             ...(spec.dispatchMiddleware?.(dispatch) ?? []),
@@ -415,7 +424,10 @@ export function createSubagentAsTool(
         return buildResult(messages, config.toolCall?.id ?? '');
       } catch (err) {
         // An aborted turn, one out of budget, or a LangGraph control signal
-        // (interrupt, drain) propagates (the parent graph stops); anything
+        // (interrupt, drain, parent command) propagates (the parent graph
+        // stops), as on the main agent, whose tool layers re-throw them too;
+        // the runtime offers no resume of an interrupt raised inside a
+        // sub-agent, so a tool there must not call `interrupt()`. Anything
         // else is the sub-agent's own failure (its model call, its setup),
         // reported to the parent as its result. A failing inner tool is not
         // one: its error is the tool's result (createToolErrorResultMiddleware).

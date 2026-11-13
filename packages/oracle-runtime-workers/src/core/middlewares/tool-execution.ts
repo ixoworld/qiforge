@@ -34,8 +34,7 @@ import type { ToolLane, ToolScheduler } from '../tool-scheduler';
 import { findProviderStall } from '../../llm/stream-liveness';
 import { isFrontendCallNotSent } from '../../realtime/frontend-call-registry';
 import { isHarnessLimitError, type TurnBudget } from '../turn-budget';
-import { NOOP_LOGGER } from '../utils';
-import { errorSummary } from './tool-error-result';
+import { errorSummary, NOOP_LOGGER } from '../utils';
 
 export type WriteClaim =
   | { status: 'claimed' }
@@ -320,8 +319,10 @@ export function createToolExecutionMiddleware(
       budget.check(options.signal);
       // Every completed call leaves a trace (a sub-agent's inner tools
       // included), timed from when it got its slot; a call that threw, a
-      // warning (an outer layer may turn the error into a result the model
-      // reads, and nothing else logs it).
+      // warning: the one line naming the call, its time and the error, each
+      // attempt (the layer that hands the error to the model logs its own
+      // line: `[tool-retry]` on the main agent, `[tool-error]` in a
+      // sub-agent).
       const run = async (): Promise<Awaited<ReturnType<typeof handler>>> => {
         const started = Date.now();
         let output: Awaited<ReturnType<typeof handler>>;

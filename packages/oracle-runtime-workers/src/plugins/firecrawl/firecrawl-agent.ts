@@ -97,6 +97,6 @@ export function createFirecrawlSubAgent(tools: PluginTool[]): PluginSubAgent {
     // setup): a failed search or fetch is handed to the agent as that
     // tool's result, and its reply says what it found and what it could not.
     failureHint:
-      'The Firecrawl Agent could not finish this task; the error above says why. That does not mean every web source is out of reach: call it once more with a shorter, more specific task, or fetch a specific page or feed with code (load the `sandbox` capability if it is not in your tool list and use `sandbox_run`), or use another capability that can answer. Tell the user only if none of these works.',
+      'The Firecrawl Agent could not finish this task; the error above says why. That does not mean every web source is out of reach. If the error looks temporary (a timeout, a server error), you may call it once more with a shorter, more specific task; otherwise fetch a specific page or feed with code (load the `sandbox` capability if it is not in your tool list and use `sandbox_run`), or use another capability that can answer. Tell the user only if none of these works.',
   };
 }
