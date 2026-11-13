@@ -135,6 +135,40 @@ export function turnSteps(messages: readonly BaseMessage[]): {
   return { steps, toolResults, toolArtifacts };
 }
 
+const comparable = (text: string): string =>
+  text.replace(/\s+/g, ' ').trim().toLowerCase();
+
+/**
+ * A step's text without what its rich message already says. The rich
+ * message's question goes out with its buttons, so text that is all inside
+ * it ("What would you like to do?" twice) is dropped, and text that ends by
+ * opening it ("Hi there! What would you like to do?" before the question
+ * "What would you like to do?") keeps only the sentences before it.
+ * Whitespace and case do not count, and only whole words match; text that
+ * only mentions the question in the middle is kept as it is.
+ */
+export function withoutRichRepeat(
+  text: string,
+  richSays: readonly string[],
+): string {
+  const says = richSays.map(comparable).filter((s) => s.length > 0);
+  const own = comparable(text);
+  if (says.length === 0 || own.length === 0) return text;
+  // Padded with spaces so only whole words match ("ok." is not in "book.").
+  const padded = says.map((s) => ` ${s} `);
+  if (padded.some((s) => s.includes(` ${own} `))) return '';
+  // Where a sentence or line starts: after ".", "!", "?", "…" or a newline.
+  const starts = [...text.matchAll(/[.!?…]\s+|\n+/g)].map(
+    (m) => m.index + m[0].length,
+  );
+  for (const start of starts) {
+    const tail = comparable(text.slice(start));
+    if (tail.length > 0 && padded.some((s) => s.startsWith(` ${tail} `)))
+      return text.slice(0, start).trim();
+  }
+  return text;
+}
+
 /** One short paragraph of prose: what a model says before it calls a tool. */
 export function isNarration(text: string): boolean {
   return (
@@ -224,7 +258,18 @@ export function draftReplyPlan(input: {
       sendsRich[i] === true;
   }
   steps.forEach((step, i) => {
-    const text = texts[i] ?? '';
+    // What this step's rich messages say: the model often writes their
+    // question as its text too, and the person would get it twice.
+    const richSays = step.toolCalls
+      .filter((call) => RICH_MESSAGE_TOOLS.has(call.name))
+      .flatMap((call) => {
+        const artifact = input.toolArtifacts?.get(call.id);
+        return [
+          ...richPartsOf(artifact).map((part) => part.text),
+          richToolTextOf(artifact) ?? '',
+        ];
+      });
+    const text = withoutRichRepeat(texts[i] ?? '', richSays);
     const narration =
       step.toolCalls.length > 0 &&
       saysMore[i] === true &&
