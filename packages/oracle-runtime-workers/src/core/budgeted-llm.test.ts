@@ -1,9 +1,10 @@
 import { FakeListChatModel } from '@langchain/core/utils/testing';
 import { HumanMessage } from '@langchain/core/messages';
-import type { ChatResult } from '@langchain/core/outputs';
+import type { ChatGeneration, ChatResult } from '@langchain/core/outputs';
 import { AIMessage } from '@langchain/core/messages';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { LlmAdapter } from './runtime-context';
+import { attachModelCall } from '../llm/model-call';
 import { budgetedLlm } from './budgeted-llm';
 import { estimateContentTokens } from './context-budget';
 import { HarnessLimitError, TurnBudget } from './turn-budget';
@@ -369,5 +370,52 @@ describe('budgetedLlm call trace', () => {
     turn.abort();
     expect(vi.getTimerCount()).toBe(0);
     model.finish();
+  });
+});
+
+describe('budgetedLlm: model-call records', () => {
+  const record = {
+    role: 'main',
+    requestedModel: 'openai/gpt-5.6-luna',
+    servedModel: 'google/gemini-3.1-flash-lite',
+    fallback: true,
+    modelFallback: true,
+    providerFallback: false,
+    durationMs: 900,
+    ok: true,
+  };
+
+  it('hands each call to onModelCall once, from the reply or from the error', () => {
+    const calls: unknown[] = [];
+    const metered = budgetedLlm(
+      adapterOf(new FakeListChatModel({ responses: ['hi'] })),
+      {
+        budget: new TurnBudget({ tools: 10, durationMs: 60_000 }, () => 0),
+        outputReserveTokens: 100,
+        onModelCall: (call) => calls.push(call),
+      },
+    );
+    const handler = metered.callback;
+    const generation: ChatGeneration = {
+      text: '',
+      message: new AIMessage({
+        content: 'hi',
+        response_metadata: { model_call: record },
+      }),
+    };
+    const output = { generations: [[generation]] };
+    // Reported through both registrations: counted once.
+    handler.handleLLMEnd?.(output, 'run-1');
+    handler.handleLLMEnd?.(output, 'run-1');
+    const error = new Error('403');
+    attachModelCall(error, { ...record, ok: false, errorKind: 'auth' });
+    handler.handleLLMError?.(new Error('wrapped', { cause: error }), 'run-2');
+    // A model that keeps no record (a BYO model) reports nothing.
+    const plain: ChatGeneration = { text: '', message: new AIMessage('hi') };
+    handler.handleLLMEnd?.({ generations: [[plain]] }, 'run-3');
+    expect(calls).toEqual([
+      record,
+      { ...record, ok: false, errorKind: 'auth' },
+    ]);
   });
 });

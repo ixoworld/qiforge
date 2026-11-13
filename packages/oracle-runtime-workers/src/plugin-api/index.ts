@@ -12,10 +12,16 @@ export type {
   RequestDisposition,
 } from './request-admission';
 export type {
+  ChannelFailureInfo,
   PluginEnv,
   PluginRoute,
   PluginRouteMethod,
 } from './oracle-plugin';
+export {
+  MODEL_CALL_METADATA_KEY,
+  modelCallOf,
+  type ModelCallRecord,
+} from '../llm/model-call';
 export {
   IDENTITY_CHECK_EVENT_STATUSES,
   MAX_CHANNEL_EVENT_TEXT,

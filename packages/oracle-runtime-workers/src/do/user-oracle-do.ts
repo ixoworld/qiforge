@@ -450,6 +450,16 @@ import {
 } from '../core/domain-context';
 import { DomainContextStore } from './domain-context-store';
 import { buildRuntimeContext, EVENT_NAMES } from '../core/runtime-context';
+import {
+  fetchGenerationAttempts,
+  type ModelCallRecord,
+} from '../llm/model-call';
+import {
+  busyReplyDue,
+  busyReplyKey,
+  busyReplyText,
+  modelFailureOf,
+} from '../channels/busy-reply';
 import { artifactStorageConfig } from '../artifacts/config';
 import {
   ArtifactStore,
@@ -7064,12 +7074,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           outcome.status === 'failed' && delivery.kind === 'chat'
             ? await this.filesOfFailedRun(live, sessionId, delivery)
             : null;
+        // A channel turn the model could not answer gets one short message
+        // instead of silence (channels/busy-reply.ts); the row keeps the
+        // error.
+        const busyPlan =
+          outcome.status === 'failed' &&
+          !filesPlan &&
+          delivery.kind === 'chat' &&
+          req.client === 'channel'
+            ? await this.busyReplyPlan(live, req, outcome.error)
+            : null;
         const text =
           (live.continuation ?? '') +
           (completed ? lastAiText(capture) : outcome.fullText);
         return {
           status:
-            outcome.status === 'completed' || filesPlan
+            outcome.status === 'completed' || filesPlan || busyPlan
               ? 'finished'
               : outcome.status === 'aborted'
                 ? 'aborted'
@@ -7077,6 +7097,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           text,
           ...(plan ? { plan } : {}),
           ...(filesPlan ? { plan: filesPlan } : {}),
+          ...(busyPlan ? { plan: busyPlan } : {}),
           ...(messageId ? { messageId } : {}),
           toolCalls,
           ...(outcome.status === 'failed' ? { error: outcome.error } : {}),
@@ -7105,6 +7126,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     ): Promise<ReplyPlan> {
       const artifacts = this.artifacts?.canShare ? this.artifacts : null;
       const { steps, toolResults, toolArtifacts } = turnSteps(capture);
+      const withheld = steps.filter((step) => step.withheld).length;
+      if (withheld > 0)
+        console.warn(
+          `[delivery] run ${live.runId}: ${withheld} model step(s) not delivered: their text quoted a tool result verbatim (reasoning, not a reply)`,
+        );
       const draft = draftReplyPlan({
         steps,
         toolResults,
@@ -7186,6 +7212,193 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       } catch (error) {
         console.warn(
           `[delivery] run ${live.runId}: could not read the files of a failed run: ${error instanceof Error ? error.name : 'unknown'}`,
+        );
+        return null;
+      }
+    }
+
+    /**
+     * The runtime context a plugin hook outside the agent gets for a turn
+     * (`onModelCall`, `channelFailureReply`): the turn's user and session,
+     * the person's kv, the ambient services.
+     */
+    private async pluginHookContext(
+      req: TurnRequest,
+      runId: string,
+      signal: AbortSignal,
+    ) {
+      const ambient = this.ambient;
+      if (!ambient) return undefined;
+      return buildRuntimeContext(
+        {
+          context: {
+            user: {
+              did: req.identity.userDid,
+              matrixUserId: req.identity.matrixUserId ?? '',
+              ucanDelegation: await this.turnDelegation(req.identity),
+              timezone: req.identity.timezone,
+              currentTime: new Date().toISOString(),
+            },
+            session: {
+              id: req.sessionId,
+              client: req.client,
+              requestId: req.requestId,
+              runId,
+              ...(req.channel?.bindingRevision
+                ? {
+                    channel: {
+                      provider: req.channel.provider,
+                      bindingId: req.channel.bindingId,
+                      bindingRevision: req.channel.bindingRevision,
+                    },
+                  }
+                : {}),
+            },
+          },
+          signal,
+        },
+        ambient,
+        { messages: [], loadedPlugins: new Set() },
+      );
+    }
+
+    /**
+     * What happens with each model call's record during a turn, after the
+     * call, in the background: after a fallback or a failure, OpenRouter's
+     * record of every provider it tried is logged
+     * (`[llm-call-attempts] {…}`); then each plugin's `onModelCall` gets it.
+     */
+    private modelCallObserver(
+      req: TurnRequest,
+      runId: string,
+      signal: AbortSignal,
+    ): (call: ModelCallRecord) => void {
+      let hookContext: ReturnType<typeof this.pluginHookContext> | undefined;
+      const observers = this.core.plugins.filter(
+        (plugin) => typeof plugin.onModelCall === 'function',
+      );
+      return (call) => {
+        const work: Promise<unknown>[] = [];
+        const { providerConfig } = this.core.llm;
+        if (
+          call.generationId?.startsWith('gen-') &&
+          (call.fallback || !call.ok) &&
+          providerConfig.apiKey
+        )
+          work.push(
+            fetchGenerationAttempts({
+              apiKey: providerConfig.apiKey,
+              baseURL: providerConfig.baseURL,
+              generationId: call.generationId,
+            })
+              .then((attempts) =>
+                console.log(
+                  `[llm-call-attempts] ${JSON.stringify({
+                    generationId: call.generationId,
+                    role: call.role,
+                    requestedModel: call.requestedModel,
+                    ...(call.servedModel
+                      ? { servedModel: call.servedModel }
+                      : {}),
+                    ok: call.ok,
+                    attempts: attempts ?? null,
+                  })}`,
+                ),
+              )
+              .catch((error: unknown) =>
+                console.warn(
+                  `[llm-call-attempts] ${call.generationId}: could not read the generation record: ${error instanceof Error ? error.message : String(error)}`,
+                ),
+              ),
+          );
+        if (observers.length > 0) {
+          hookContext ??= this.pluginHookContext(req, runId, signal);
+          const context = hookContext;
+          work.push(
+            (async () => {
+              const ctx = await context;
+              if (!ctx) return;
+              for (const plugin of observers) {
+                try {
+                  await plugin.onModelCall?.(call, ctx);
+                } catch (error) {
+                  console.warn(
+                    `[llm-call] plugin ${plugin.name}: onModelCall failed: ${error instanceof Error ? error.message : String(error)}`,
+                  );
+                }
+              }
+            })().catch((error: unknown) =>
+              console.warn(
+                `[llm-call] model-call hooks skipped: ${error instanceof Error ? error.message : String(error)}`,
+              ),
+            ),
+          );
+        }
+        if (work.length > 0) this.ctx.waitUntil(Promise.all(work));
+      };
+    }
+
+    /**
+     * The plan of a channel run the model could not answer: the busy reply,
+     * an empty plan when one already went to this chat within the cooldown,
+     * or null when the failure was not the model's (channels/busy-reply.ts).
+     */
+    private async busyReplyPlan(
+      live: LiveRun,
+      req: TurnRequest,
+      error: unknown,
+    ): Promise<ReplyPlan | null> {
+      const failure = modelFailureOf(error);
+      const bindingId = req.channel?.bindingId;
+      if (!failure || !bindingId) return null;
+      const cause = `${failure.kind}${failure.status !== undefined ? ` ${failure.status}` : ''}`;
+      try {
+        const key = busyReplyKey(bindingId);
+        const now = Date.now();
+        const last = await this.ctx.storage.get<number>(key);
+        if (!busyReplyDue(last, now)) {
+          console.warn(
+            `[channels] run ${live.runId}: the model could not answer (${cause}); a busy reply went to this chat ${Math.round((now - (last ?? now)) / 1000)} s ago, so nothing is sent`,
+          );
+          const empty: ReplyPlan = { v: 1, parts: [] };
+          await this.runStore!.setPlan(live.runId, JSON.stringify(empty));
+          return empty;
+        }
+        const plugins = this.core.plugins.filter(
+          (plugin) => typeof plugin.channelFailureReply === 'function',
+        );
+        const ctx =
+          plugins.length > 0
+            ? await this.pluginHookContext(
+                req,
+                live.runId,
+                AbortSignal.timeout(5_000),
+              )
+            : undefined;
+        const text = await busyReplyText(
+          ctx
+            ? plugins.map(
+                (plugin) => () => plugin.channelFailureReply?.(ctx, failure),
+              )
+            : [],
+          typeof this.core.validatedEnv.CHANNEL_BUSY_REPLY === 'string'
+            ? this.core.validatedEnv.CHANNEL_BUSY_REPLY
+            : undefined,
+          (message) => console.warn(message),
+        );
+        const plan: ReplyPlan = {
+          v: 1,
+          parts: [{ partId: 'busy_reply', kind: 'text', text }],
+        };
+        await this.runStore!.setPlan(live.runId, JSON.stringify(plan));
+        await this.ctx.storage.put(key, now);
+        console.warn(
+          `[channels] run ${live.runId}: the model could not answer (${cause}); sent the busy reply`,
+        );
+        return plan;
+      } catch (storeError) {
+        console.warn(
+          `[channels] run ${live.runId}: could not prepare the busy reply: ${storeError instanceof Error ? storeError.message : String(storeError)}`,
         );
         return null;
       }
@@ -8380,6 +8593,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         outputReserveTokens: contextBudget.outputReserveTokens,
         signal: abortController.signal,
         logger: console,
+        onModelCall: this.modelCallObserver(
+          req,
+          run.runId,
+          abortController.signal,
+        ),
       });
       const deadline = setTimeout(() => {
         if (abortController.signal.aborted) return;

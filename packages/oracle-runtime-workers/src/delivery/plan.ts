@@ -30,6 +30,11 @@ import { contentToText } from '../do/transcript';
 import { CREATE_ARTIFACT_TOOL, createArtifactParts } from '../artifacts/tool';
 import { turnCarryOf, turnStart } from '../core/middlewares/turn-boundary';
 import { SEND_FILE_TOOL, sentFile } from '../plugins/sandbox/send-file';
+import {
+  echoesToolOutput,
+  jsonToolOutputs,
+  withoutReasoningTags,
+} from './leak-guard';
 import { isBlank, shapeStep, splitText, type SpillShape } from './shaper';
 import { MAX_STANDALONE_MESSAGES, standaloneMessagesOf } from './standalone';
 import { richPartsOf } from './rich';
@@ -46,6 +51,11 @@ import type {
 export interface TurnStep {
   text: string;
   toolCalls: Array<{ id: string; name: string; args: unknown }>;
+  /**
+   * The step's text was not delivered because it held a tool result of the
+   * thread verbatim (`leak-guard.ts`); `text` is empty then.
+   */
+  withheld?: 'tool_output';
 }
 
 export type DraftPart =
@@ -93,6 +103,13 @@ export function turnSteps(messages: readonly BaseMessage[]): {
     });
     toolArtifacts.set(id, call.artifact);
   }
+  // Every JSON tool result of the thread: a step that quotes one is the
+  // model thinking aloud, not writing to the person (`leak-guard.ts`).
+  const toolOutputs = jsonToolOutputs(
+    messages
+      .filter((message) => ToolMessage.isInstance(message))
+      .map((message) => contentToText(message.content)),
+  );
   for (const message of messages.slice(start)) {
     if (ToolMessage.isInstance(message)) {
       toolResults.set(message.tool_call_id, contentToText(message.content));
@@ -103,13 +120,16 @@ export function turnSteps(messages: readonly BaseMessage[]): {
     // Extraction-lane attachment text rides as hidden AI messages.
     if (!AIMessage.isInstance(message) || message.additional_kwargs?.attachment)
       continue;
+    const text = withoutReasoningTags(contentToText(message.content).trim());
+    const echoed = echoesToolOutput(text, toolOutputs);
     steps.push({
-      text: contentToText(message.content).trim(),
+      text: echoed ? '' : text,
       toolCalls: (message.tool_calls ?? []).map((call) => ({
         id: call.id ?? '',
         name: call.name,
         args: call.args,
       })),
+      ...(echoed ? { withheld: 'tool_output' as const } : {}),
     });
   }
   return { steps, toolResults, toolArtifacts };
