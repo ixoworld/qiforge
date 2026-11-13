@@ -526,6 +526,54 @@ browser …; running it again`). A sent one follows the read / write rule
   `CREATE INDEX IF NOT EXISTS` on the first boot that has them), at one
   index entry per run-row update.
 
+### Turns: the loop limit
+
+Cloudflare refuses a call once a request chain has looped back into the
+Workers runtime 16 times. The refusal is the error `Subrequest depth limit
+exceeded. This request looped back into the Workers runtime too many times.`
+on a Durable Object RPC, and an HTTP `503` with the body `error code: 1019`
+on a fetch to a Worker-backed host (OpenRouter, the memory engine). A Durable
+Object's outgoing calls are charged to its newest in-flight incoming request,
+so the gateway and a user object that keep calling each other ratchet each
+other down. Measured on devnet (runtime 0.51.1, a user sending a message a
+few seconds after each reply in one thread): the budget left when a turn
+reached the user object went 13 → 9 → 14 (a user-object alarm happened to
+be the newest request) → 10 → 6 → 2 → 0, four hops per turn (dispatch,
+the turn's status-card post, closing the card gateway → user, its post back);
+from then on every turn's gateway calls, memory lookup and model call were
+refused in milliseconds and the user got `Sorry — something went wrong…`.
+Mainnet hit it in Matrix rooms only (Nov 9–13 2026, three users, about 90
+turns), never on Portal turns, which start from a browser request.
+
+Since the fix, work the gateway hands to a user object — a room turn
+(`runTurn` with an event id), closing a status card (`finishWorkStatus`), a
+group summary (`summarizeGroupMessages`) — waits until an alarm invocation
+of the user object has been delivered (`src/do/fresh-invocation.ts`): the
+alarm is a top-level event with the full budget, and from then on the
+work's calls are charged to it. The alarm hands the work a lease and keeps
+itself open (`waitUntil`) until the lease ends. A wake armed only for the
+gate re-arms the pending deadline and skips the full housekeeping tick. The
+wait is normally a few milliseconds; after 3 s (an alarm handler that is
+still running, e.g. a flush upload) the work carries on where it is and
+logs `[loop-limit] no alarm within 3000 ms for …`.
+
+Safety nets and what the logs say:
+
+- `[loop-limit] gateway.<method> was refused by Cloudflare's loop limit;
+retrying once from a fresh invocation` — a user object → gateway call was
+  refused and retried once after a new alarm (a refused call never reached
+  the gateway, so the retry cannot send twice). Calls that carry a stream
+  (owner-copy uploads) are not retried.
+- `[loop-limit] turn <requestId> (<client>) failed: …` — a turn still failed
+  on a refusal; the gateway posts the "Sorry — something went wrong…" notice
+  in the thread and the gateway log line `turn <requestId> failed: <reason>`
+  now carries the reason.
+- Any other `Subrequest depth limit exceeded` / `error code: 1019` in the
+  logs means a new call path back into the gateway or the user object that
+  bypasses the gate: find who called whom (the gateway's `[matrix-bot] turn
+…` line is logged inside the request it was charged to) and route the work
+  through the gate.
+
 ### Transcript: paging
 
 `GET /sessions/:id/messages?limit=20&before=<cursor>&after=<cursor>` reads a
@@ -2283,6 +2331,7 @@ that can handle the requested parameters` is the memory engine's own
 | A plugin with `requires` is refused although the user authorized it; `[UCAN] the delegation expired at …` | `GET /debug/delegation` (the stored delegation's expiry)                                                                              | Validity is checked at use: an expired stored delegation grants nothing even while the object stays warm. The user re-authorizes (a new delegation).                                                         |
 | An admin tool (or its whole plugin) is missing for a user; `[main-agent] admin tools withheld from <did>` | `GET /debug/delegation`; the grants the user issued                                                                                   | Expected without the grant: the user delegates `admin-tool/invoke` on `ixo:qiforge:admin-tool/<plugin>[/<tool>]` (architecture → Admin-plane tools).                                                         |
 | `Network connection lost` on a gateway RPC                                                                | Gateway just restarted                                                                                                                | Expected once per restart; waited sends retry by themselves.                                                                                                                                                 |
+| `Subrequest depth limit exceeded` or `error code: 1019` in a turn                                         | `[loop-limit]` lines; which request the failing call was charged to                                                                   | Cloudflare's loop limit; see [the loop limit](#turns-the-loop-limit). Route the new call path through the fresh-invocation gate.                                                                             |
 
 ## Model calls: liveness and the call trace
 

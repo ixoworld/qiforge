@@ -102,6 +102,27 @@ describe('WorkStatusProducer', () => {
     expect(producer.has('req-1')).toBe(false);
   });
 
+  it('finish resolves once the closing frame has been posted (a lease waits on it)', async () => {
+    const { producer, posted, flush } = makeProducer();
+    producer.beginTurn(TURN);
+    producer.emit('req-1', 'routing'); // in flight (held)
+    let settled = false;
+    const closed = producer.finish('req-1', 'done').then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    await flush();
+    await closed;
+    expect(settled).toBe(true);
+    expect(posted.map((p) => p.content.props['phase'])).toEqual([
+      'routing',
+      'done',
+    ]);
+    // Nothing to close: resolves at once.
+    await expect(producer.finish('unknown', 'done')).resolves.toBeUndefined();
+  });
+
   it('coalesces frames staged behind an in-flight post, never dropping the terminal one', async () => {
     const { producer, posted, flush } = makeProducer();
     producer.beginTurn(TURN);

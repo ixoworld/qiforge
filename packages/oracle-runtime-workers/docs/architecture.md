@@ -973,6 +973,27 @@ and an object stops hibernating or a request dies with an opaque error.
   no-op store instead. Tools register cleanups with `RuntimeContext.onTurnEnd`. With debug
   routes on, `GET /debug/realtime` → `pendingTimers` lists every live timer
   with its creation stack.
+- **Gateway work starts from a fresh invocation.** Cloudflare refuses a call
+  once a chain of Worker and Durable Object invocations has looped back into
+  the Workers runtime 16 times ("loop limit", error 1019; the refusal reads
+  `Subrequest depth limit exceeded. This request looped back into the
+Workers runtime too many times.`). Each DO RPC, service-binding call and
+  fetch to a Worker-backed host (OpenRouter, the memory engine, other IXO
+  Workers) spends one; a Matrix homeserver fetch does not. A Durable
+  Object's outgoing calls are charged to its **newest** in-flight incoming
+  request, whatever code makes them (workerd `IoContext::getIoChannelFactory()`
+  → `getCurrentIncomingRequest()`), and an object with work pending keeps its
+  last request current until the next arrives. The gateway and the user
+  objects call each other, so without care their budgets ratchet down about
+  four hops per Matrix turn until the turn's model and gateway calls are
+  refused. Rule: work another object hands to the user object (a room turn,
+  closing a status card, a group summary) first waits for an alarm
+  invocation of the user object (`src/do/fresh-invocation.ts`) — the alarm
+  is the object's only top-level event and carries the full budget. Any new
+  gateway → user RPC whose handler calls out again must go through the same
+  gate; never call back into the caller from inside its own request chain
+  when the work can be handed over instead. See
+  [operations](operations.md#turns-the-loop-limit).
 - **No MCP client may outlive a call.** A streamable-HTTP MCP client keeps a
   server→client stream open for as long as it exists, which counts as
   in-flight I/O: the object never hibernates and is billed around the

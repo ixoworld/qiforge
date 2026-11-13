@@ -3107,3 +3107,35 @@ describe('user-wide run listings and Stop', () => {
     });
   });
 });
+
+describe('work the gateway hands over starts from a fresh invocation (loop limit)', () => {
+  it('closing a status card waits for an alarm, which releases it and skips the full tick', async () => {
+    await withObject('fresh-invocation-finish', {}, async (h) => {
+      await h.ready();
+      await h.settle();
+      const later = Date.now() + 3_600_000;
+      await h.storage.put('meta:housekeepingAt', later);
+      await h.storage.setAlarm(later);
+      const ticks = recordCalls(h.host, 'persistAccess');
+
+      let finished = false;
+      const call = h.call('finishWorkStatus', 'req-1', 'done').then(() => {
+        finished = true;
+      });
+      // The gate armed the alarm for now and holds the call until it fires.
+      await vi.waitFor(async () => {
+        expect(await h.storage.getAlarm()).toBeLessThanOrEqual(Date.now());
+      });
+      expect(finished).toBe(false);
+
+      await h.fireAlarm();
+      await call;
+      expect(finished).toBe(true);
+      // A wake only for the gate: no full housekeeping tick, and the alarm
+      // is back on the deadline that was pending.
+      expect(ticks).toHaveLength(0);
+      expect(await h.storage.getAlarm()).toBe(later);
+      await h.settle();
+    });
+  });
+});

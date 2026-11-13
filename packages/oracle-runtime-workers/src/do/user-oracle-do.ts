@@ -357,6 +357,11 @@ import {
 } from '../tasks/scheduler';
 import { decodeRoomStateContent } from '../matrix/room-state-codec';
 import { freshStub } from './fresh-stub';
+import {
+  FreshInvocationGate,
+  isLoopLimitError,
+  withLoopLimitRetry,
+} from './fresh-invocation';
 import { WorkStatusProducer } from '../matrix/work-status';
 import { fetchUserMatrixServerName } from '../matrix/user-homeserver';
 import { createWorkStatusMiddleware } from '../core/middlewares/work-status';
@@ -1085,6 +1090,18 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /**
+     * Work the Matrix gateway hands over (a room turn, closing a status card,
+     * a group summary) starts under an alarm invocation of this object, so
+     * its calls get Cloudflare's full loop budget instead of the remains of
+     * the gateway ↔ user call chain (see fresh-invocation.ts).
+     */
+    private readonly freshInvocations = new FreshInvocationGate({
+      armNow: () => this.requestAlarm(Date.now()),
+      keepAlive: (work) => this.ctx.waitUntil(work),
+      warn: (message) => console.warn(message),
+    });
+
+    /**
      * Woken with hibernated sockets attached: build the realtime endpoint
      * NOW so it re-adopts them and taps the event router before any turn
      * runs. Left lazy, a turn arriving on a fresh instance (nothing touched
@@ -1400,10 +1417,19 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * preferences, ambient adapter) keep working across gateway restarts.
      */
     private get gateway(): DurableObjectStub<MatrixGatewayObject> {
-      return freshStub(() =>
-        this.env.MATRIX_GATEWAY.get(
-          this.env.MATRIX_GATEWAY.idFromName(this.env.ORACLE_DID),
+      // A call the loop limit refuses is retried once from a fresh
+      // invocation (fresh-invocation.ts); the gate makes that rare.
+      return withLoopLimitRetry(
+        freshStub(() =>
+          this.env.MATRIX_GATEWAY.get(
+            this.env.MATRIX_GATEWAY.idFromName(this.env.ORACLE_DID),
+          ),
         ),
+        {
+          name: 'gateway',
+          refresh: (label) => this.freshInvocations.enter(label),
+          warn: (message) => console.warn(message),
+        },
       );
     }
 
@@ -2781,6 +2807,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * due and re-arms at the earliest future deadline.
      */
     async alarm(): Promise<void> {
+      // Gateway work waiting for a fresh invocation runs under this alarm
+      // from here on (fresh-invocation.ts). First, before any await.
+      const released = this.freshInvocations.release();
       // Realtime heartbeat first, on the bare object: a round only needs
       // the hibernated sockets and their attachments. When nothing else is
       // due yet, re-arm and return WITHOUT opening the database — that is
@@ -2832,6 +2861,26 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       ) {
         await this.requestAlarm(
           Math.min(nextPingAt, housekeepingAt, recoveryAt ?? Infinity),
+        );
+        return;
+      }
+      // A wake armed only to hand gateway work a fresh invocation: when
+      // nothing else is due, re-arm for what is and skip the full tick.
+      if (
+        released > 0 &&
+        housekeepingAt !== undefined &&
+        housekeepingAt > wakeAt + 1000 &&
+        (keepAliveAt === null || keepAliveAt > wakeAt + 1000) &&
+        (recoveryAt === null || recoveryAt > wakeAt + 1000) &&
+        (nextPingAt === null || nextPingAt > wakeAt + 1000)
+      ) {
+        await this.requestAlarm(
+          Math.min(
+            housekeepingAt,
+            keepAliveAt ?? Infinity,
+            recoveryAt ?? Infinity,
+            nextPingAt ?? Infinity,
+          ),
         );
         return;
       }
@@ -5570,9 +5619,18 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       requestId: string,
       phase: 'done' | 'superseded',
     ): Promise<void> {
-      this.workStatus?.finish(requestId, phase);
+      // The gateway calls this at the end of every room turn; the card's
+      // closing post goes back to the gateway, so it starts from a fresh
+      // invocation too (fresh-invocation.ts). The RPC returns once the
+      // frame is queued; the lease holds until it is posted.
+      const lease = await this.freshInvocations.enter(
+        `status card ${requestId}`,
+      );
+      const posted = this.workStatus?.finish(requestId, phase);
       for (const [sessionId, inFlight] of this.matrixTurns)
         if (inFlight === requestId) this.matrixTurns.delete(sessionId);
+      if (posted) void posted.finally(() => lease.end());
+      else lease.end();
     }
 
     /**
@@ -5713,6 +5771,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * always run.
      */
     async runTurn(req: TurnRequest): Promise<TurnResult> {
+      // A room turn comes from the gateway (task turns carry no event id and
+      // start from this object's own alarm): start it from a fresh
+      // invocation before its first call out (fresh-invocation.ts).
+      if (req.client !== 'matrix' || !req.eventId)
+        return this.runTurnInPlace(req);
+      const lease = await this.freshInvocations.enter(
+        `room turn ${req.requestId}`,
+      );
+      try {
+        return await this.runTurnInPlace(req);
+      } finally {
+        lease.end();
+      }
+    }
+
+    private async runTurnInPlace(req: TurnRequest): Promise<TurnResult> {
       await this.ready(req.identity);
       const eventId = req.client === 'matrix' ? req.eventId : undefined;
       const ledger = this.matrixLedger;
@@ -5818,6 +5892,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             : outcome.error !== undefined
               ? String(outcome.error)
               : `turn ${outcome.status}`;
+        if (outcome.status === 'failed' && isLoopLimitError(outcome.error))
+          console.warn(
+            `[loop-limit] turn ${req.requestId} (${req.client}) failed: Cloudflare's loop limit refused one of its calls — ${reason}`,
+          );
         throw new Error(reason);
       }
       card?.emit(req.requestId, 'delivering');
@@ -9283,15 +9361,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     async summarizeGroupMessages(messages: JsonString): Promise<string | null> {
       const parsed: unknown = JSON.parse(messages);
       if (!Array.isArray(parsed) || parsed.length === 0) return null;
-      const model = (this.ambient?.llm ?? this.core.llm).get('session-title', {
-        temperature: 0.2,
-        maxTokens: 800,
-      });
-      return summarizeObservedMessages(
-        model,
-        parsed as ObservedMessage[],
-        console,
-      );
+      // Called by the gateway; the model call goes out from a fresh
+      // invocation (fresh-invocation.ts).
+      const lease = await this.freshInvocations.enter('group summary');
+      try {
+        const model = (this.ambient?.llm ?? this.core.llm).get(
+          'session-title',
+          { temperature: 0.2, maxTokens: 800 },
+        );
+        return await summarizeObservedMessages(
+          model,
+          parsed as ObservedMessage[],
+          console,
+        );
+      } finally {
+        lease.end();
+      }
     }
 
     /**
