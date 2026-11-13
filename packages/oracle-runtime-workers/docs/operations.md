@@ -2291,16 +2291,34 @@ stream liveness guard ([configuration](configuration.md#model-call-liveness)).
 The trace never carries message content, tokens or credentials — only the
 role, the model id, the tags and timings.
 
-| Line                                                                                          | Level | Meaning                                                                                                               |
-| --------------------------------------------------------------------------------------------- | ----- | --------------------------------------------------------------------------------------------------------------------- |
-| `[llm] start role=<role> model=<id> tags=<tags>`                                              | debug | A call admitted by the turn budget.                                                                                   |
-| `[llm] end role=… model=… in N ms` / `[llm] error role=… model=… in N ms`                     | debug | The call returned or failed.                                                                                          |
-| `[llm] role=… model=… still running after N s`                                                | info  | Every 60 s while a call is open. A working long call shows it too: pair it with the absence of a stall line below.    |
-| `[llm] <label>: first byte after N ms`                                                        | debug | Time to the first body byte (`<label>` is `<lane> <role> <model>`, e.g. `openrouter subagent openai/gpt-5.6-luna`).   |
-| `[llm] <label>: no response for N s, retrying (attempt k)` / `no bytes for N s, retrying (…)` | warn  | A stall before anything reached the caller; the identical request is re-sent.                                         |
-| `[llm] <label>: no response/no bytes for N s; giving up after k attempts`                     | warn  | The retries are spent; the call fails (`kind: timeout`, "The model did not start responding").                        |
-| `[llm] <label>: no bytes for N s after B bytes (… s into the call); failing it — …`           | warn  | A stall mid-reply. Never retried: the call fails at once (`kind: timeout`, "The model stopped responding mid-reply"). |
-| `[tool-execution] <tool> (<callId>): ok in N ms` / `returned an error in N ms`                | debug | A tool call (a sub-agent's inner tools included) completed, timed from when it got its slot.                          |
+| Line                                                                                                                  | Level | Meaning                                                                                                               |
+| --------------------------------------------------------------------------------------------------------------------- | ----- | --------------------------------------------------------------------------------------------------------------------- |
+| `[llm] start role=<role> model=<id> tags=<tags>`                                                                      | debug | A call admitted by the turn budget.                                                                                   |
+| `[llm] end role=… model=… in N ms` / `[llm] error role=… model=… in N ms`                                             | debug | The call returned or failed.                                                                                          |
+| `[llm] role=… model=… still running after N s`                                                                        | info  | Every 60 s while a call is open. A working long call shows it too: pair it with the absence of a stall line below.    |
+| `[llm] <label>: first byte after N ms`                                                                                | debug | Time to the first body byte (`<label>` is `<lane> <role> <model>`, e.g. `openrouter subagent openai/gpt-5.6-luna`).   |
+| `[llm] <label>: no response for N s, retrying (attempt k)` / `no bytes for N s, retrying (…)`                         | warn  | A stall before anything reached the caller; the identical request is re-sent.                                         |
+| `[llm] <label>: no response/no bytes for N s; giving up after k attempts`                                             | warn  | The retries are spent; the call fails (`kind: timeout`, "The model did not start responding").                        |
+| `[llm] <label>: no bytes for N s after B bytes (… s into the call); failing it — …`                                   | warn  | A stall mid-reply. Never retried: the call fails at once (`kind: timeout`, "The model stopped responding mid-reply"). |
+| `[tool-execution] <tool> (<callId>): ok in N ms` / `returned an error in N ms`                                        | debug | A tool call (a sub-agent's inner tools included) completed, timed from when it got its slot.                          |
+| `[tool-execution] <tool> (<callId>): threw after N ms[ (turn aborted)]: <first line>`                                 | warn  | A tool call threw (an MCP `isError` result arrives this way). An outer layer usually hands the error to the model.    |
+| `[tool-error] <sub-agent>: <tool> (<callId>) threw; the error is its result[ (write, outcome unknown)]: <first line>` | info  | Inside a sub-agent: the thrown error became the call's error result; the sub-agent carries on (see below).            |
+| `<sub-agent>: the sub-agent failed: <first line>`                                                                     | warn  | The sub-agent itself failed (its model call, its setup); the parent reads `Error running <name>: …` + its hint.       |
+
+A tool that throws never ends its agent. On the main agent the outer
+`toolRetryMiddleware` turns the error into an error result; inside a
+sub-agent `createToolErrorResultMiddleware` does (LangChain's
+`toolErrorMiddleware`, the outermost tool layer of each dispatch, so the
+marks, the repetition guard and the write claims see the thrown error
+first). Both let a turn out of budget and LangGraph's interrupt / drain /
+parent command through; the sub-agent layer lets the turn's abort through
+too (on the main agent the aborted turn stops at its next model call). A
+schema rejection reads `Invalid arguments for <tool>: <reason>` on both. A
+sub-agent's write whose failure leaves its outcome unknown (timeout,
+dropped connection, 5xx) says so in its result and keeps its claim. So one
+failed fetch (a site that refuses a Firecrawl scrape) leaves the sub-agent
+its other results. Log lines carry an error's first line, cut to 300
+characters, and a schema rejection without its arguments.
 
 A stall looks like this in the tail: `[llm] start …`, one or more `still
 running` heartbeats, then a `no bytes` warning and `[llm] error … in N ms`

@@ -2,7 +2,6 @@ import { getRetryable } from '@langchain/core/errors';
 import {
   createAgent,
   createMiddleware,
-  ToolInvocationError,
   toolRetryMiddleware,
   type AgentMiddleware,
   type StructuredTool,
@@ -42,6 +41,10 @@ import { capabilityGateState } from './middlewares/capability-gate';
 import { createContextGuardMiddleware } from './middlewares/context-guard';
 import { repetitionCapsFromEnv } from './middlewares/tool-repetition-guard';
 import {
+  invalidArgumentsText,
+  isToolInvocationError,
+} from './middlewares/tool-error-result';
+import {
   createAttachmentRecallMiddleware,
   createByoHistorySanitizerMiddleware,
   createCapabilityGateMiddleware,
@@ -52,21 +55,6 @@ import {
   createToolRepetitionGuardMiddleware,
   createToolValidationMiddleware,
 } from './middlewares';
-
-/**
- * The model's arguments failed the tool's schema (LangChain's ToolNode
- * throws `ToolInvocationError` before the tool runs). Matched by class AND by
- * name / message shape: a bundle can carry the class twice (ESM and CJS
- * entry points), and then `instanceof` is false for the very error it names.
- */
-function isToolInvocationError(error: unknown): boolean {
-  if (error instanceof ToolInvocationError) return true;
-  if (!(error instanceof Error)) return false;
-  return (
-    error.name === 'ToolInvocationError' ||
-    /^Error invoking tool '.+' with kwargs /.test(error.message)
-  );
-}
 import {
   composePrompt,
   formatDateContext,
@@ -87,6 +75,7 @@ import {
 import { MainAgentGraphState } from './state';
 import { toolEffectOf } from './middlewares/tool-marks';
 import { isHarnessLimitError } from './turn-budget';
+import { errorSummary } from './utils';
 import { collectSubAgentsWithFallback } from './sub-agent-fallback';
 import { computeSubAgentToolName, scopeToolCallIds } from './subagent-as-tool';
 import { resolveTurnToolAccess, withoutWithheldExamples } from './tool-access';
@@ -672,6 +661,7 @@ export async function createMainAgent(
     fallbackContext,
     subAgents: subAgentEntries,
     dispatchMiddleware,
+    effectOf: (name) => innerToolEffects.get(name) ?? 'write',
     ...(resultCap ? { resultCap } : {}),
     // Sub-agents know who the user is and see the same domain context: the
     // identity section and the domain block on their prompt, the domain
@@ -777,19 +767,13 @@ export async function createMainAgent(
     if (isHarnessLimitError(error)) throw error;
     const rejected = isToolInvocationError(error);
     ambient.logger.warn(
-      `[tool-retry] ${rejected ? 'tool call rejected by the tool schema' : 'tool failed'}: ${error.message.split('\n')[0] ?? error.message}`,
+      `[tool-retry] ${rejected ? 'tool call rejected by the tool schema' : 'tool failed'}: ${errorSummary(error)}`,
     );
     if (!rejected) return error.message;
     // The model (and the Portal's card) get the reason, not the kwargs
     // dump — `Error invoking tool 'x' with kwargs {…} with error: Error:
-    // Received tool input did not match expected schema` stays in the tail.
-    const toolName = /^Error invoking tool '([^']+)'/.exec(error.message)?.[1];
-    const reason =
-      error.message
-        .split(' with error: ')
-        .at(-1)
-        ?.replace(/^Error: /, '') ?? error.message;
-    return `Invalid arguments for ${toolName ?? 'the tool'}: ${reason}. Check the tool's parameter schema and call it again with corrected arguments.`;
+    // Received tool input did not match expected schema`.
+    return invalidArgumentsText(error);
   };
 
   const middleware = [

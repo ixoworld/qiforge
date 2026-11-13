@@ -34,7 +34,7 @@ import type { ToolLane, ToolScheduler } from '../tool-scheduler';
 import { findProviderStall } from '../../llm/stream-liveness';
 import { isFrontendCallNotSent } from '../../realtime/frontend-call-registry';
 import { isHarnessLimitError, type TurnBudget } from '../turn-budget';
-import { NOOP_LOGGER } from '../utils';
+import { errorSummary, NOOP_LOGGER } from '../utils';
 
 export type WriteClaim =
   | { status: 'claimed' }
@@ -318,10 +318,22 @@ export function createToolExecutionMiddleware(
       // more slots. The slot wait itself ends with the abort signal.
       budget.check(options.signal);
       // Every completed call leaves a trace (a sub-agent's inner tools
-      // included), timed from when it got its slot.
+      // included), timed from when it got its slot; a call that threw, a
+      // warning: the one line naming the call, its time and the error, each
+      // attempt (the layer that hands the error to the model logs its own
+      // line: `[tool-retry]` on the main agent, `[tool-error]` in a
+      // sub-agent).
       const run = async (): Promise<Awaited<ReturnType<typeof handler>>> => {
         const started = Date.now();
-        const output = await handler(request);
+        let output: Awaited<ReturnType<typeof handler>>;
+        try {
+          output = await handler(request);
+        } catch (error) {
+          logger.warn(
+            `[tool-execution] ${toolName} (${callId}): threw after ${Date.now() - started} ms${options.signal?.aborted ? ' (turn aborted)' : ''}: ${errorSummary(error)}`,
+          );
+          throw error;
+        }
         const ms = Date.now() - started;
         logger.debug?.(
           ToolMessage.isInstance(output) && output.status === 'error'
