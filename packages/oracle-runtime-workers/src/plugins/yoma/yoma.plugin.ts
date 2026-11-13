@@ -63,6 +63,7 @@ import {
   sectionBelowMinimum,
   setAnswer,
   submittableData,
+  todayLine,
   typedAnswer,
   viewAt,
   visibleQuestions,
@@ -164,6 +165,10 @@ const formSchema = z.strictObject({
   form: z.enum(['application', 'claim']),
   collectionId: collectionIdSchema,
   field: z.string().min(1).max(300).optional().describe('answer, skip'),
+  allOptional: z
+    .boolean()
+    .optional()
+    .describe('skip: every optional question still to come'),
   reply: z.string().min(1).max(4000).optional().describe('answer: as written'),
   value: z
     .union([z.string().max(2000), z.number()])
@@ -414,8 +419,6 @@ const HOW: Partial<Record<FormQuestion['input'], string>> = {
   'pick-many': 'pick one or more',
   'yes-no': 'yes or no',
   number: 'number (value)',
-  date: 'date (value YYYY-MM-DD)',
-  datetime: 'date and time (value YYYY-MM-DD HH:mm)',
   email: 'email (value)',
   phone: 'phone (value)',
   url: 'link (value)',
@@ -431,6 +434,11 @@ function howToAnswer(
   if (view.input === 'file')
     return `${view.acceptedTypes?.includes('image') ? 'photo' : 'file'} sent here${view.allowMultiple ? ' (several ok)' : ''}`;
   if (view.input === 'web-only') return `web only: ${jamboLink(job)}`;
+  // Asked in plain words; the model works out the value (today's date given).
+  if (view.input === 'date')
+    return `date in their own words; you send value YYYY-MM-DD (today ${todayLine()})`;
+  if (view.input === 'datetime')
+    return `date and time in their own words; you send value YYYY-MM-DD HH:mm (today ${todayLine()})`;
   return HOW[view.input] ?? 'own words';
 }
 
@@ -461,7 +469,7 @@ function questionView(
 }
 
 function stepView(model: Model, step: FormStep, draft: Draft) {
-  const progress = progressOf(model, draft.skipped);
+  const progress = progressOf(model, draft.skipped, draft.skipOptional);
   if (step.kind === 'question')
     return {
       status: step.question.input === 'web-only' ? 'web_only' : 'in_progress',
@@ -675,8 +683,8 @@ const OPERATING_GUIDE = [
   '### Yoma',
   '- Say programme, job, application, logging work, tap Confirm; never claim collection, protocol, bid, DID, token or chain.',
   '- Like Jambo: `programmes` (3 a message: name, who, where), then `programme_jobs` for their pick (what, pay if any).',
-  '- `yoma_form`: `next`, then `answer` each reply, one plain question a message, options numbered. Pass the reply as written, plus `value` for dates, numbers, phones, emails. On `unclear`/`invalid`, ask again using `say`.',
-  '- Files: ask them to send it, then `answer` with the caption or "[photo]"; on `file_expired` ask for it again. Pins arrive as "📍 lat, long". `skip` optional questions; on `more_items` ask if there is another, then `section`.',
+  '- `yoma_form`: `next`, then `answer` each reply, one plain question a message, options numbered. Pass the reply as written, plus `value` for dates, numbers, phones, emails. Dates: ask in plain words and work out `value` yourself ("yesterday"); never ask for a format. On `unclear`/`invalid`, ask again using `say`.',
+  '- Files: ask them to send it, then `answer` with the caption or "[photo]"; on `file_expired` ask for it again. Pins arrive as "📍 lat, long". `skip` optional questions (`allOptional: true` when they want to skip all of them); on `more_items` ask if there is another, then `section`.',
   '- On `done`: `review` (each `page`), read it back, then `submit` with `confirmed: true` only on their clear yes to it in their next message (a card; `can_log_work`: they can log work). On `apply_first`, apply first. Say sent only once `next`/`my_drafts` says submitted; after a sent claim `next` starts the next one. On `lastCard`, say why; offer to resend.',
   `- ${STATUS_RULE} \`my_work\`: approved? paid?`,
   `- ${DATA_RULE}`,
@@ -1053,7 +1061,10 @@ export class YomaPlugin extends OraclePlugin {
             ? tryModel(form.value, draft.data)
             : undefined;
         return model
-          ? { ...line, progress: progressOf(model, draft.skipped) }
+          ? {
+              ...line,
+              progress: progressOf(model, draft.skipped, draft.skipOptional),
+            }
           : line;
       }),
     );
@@ -1233,7 +1244,9 @@ export class YomaPlugin extends OraclePlugin {
       discard: ['confirmed'],
     };
     const missing = (need[input.action] ?? []).filter(
-      (key) => input[key] === undefined,
+      (key) =>
+        input[key] === undefined &&
+        !(input.action === 'skip' && key === 'field' && input.allOptional),
     );
     return missing.length
       ? `${input.action} needs ${missing.join(' and ')}.`
@@ -1353,6 +1366,17 @@ export class YomaPlugin extends OraclePlugin {
         return this.answer(input, ctx, kv, call, draft, model, template.value);
       case 'skip':
         return this.applyStored(kv, input, template.value, (m, current) => {
+          // "Skip all the optional ones": kept on the draft, so every later
+          // optional question is passed over too.
+          if (input.allOptional)
+            return {
+              next: {
+                ...current,
+                skipOptional: true,
+                updatedAt: new Date().toISOString(),
+              },
+              extra: { skipped: 'every optional question still to come' },
+            };
           const view = viewAt(m, input.field!);
           if (!view)
             return {

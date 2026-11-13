@@ -64,6 +64,8 @@ const draftSchema = z.object({
   /** Answers in SurveyJS's data shape. File questions hold a placeholder until submit. */
   data: z.record(z.string(), z.unknown()),
   skipped: z.array(z.string()),
+  /** They asked to skip every optional question still to come; answered ones are kept. */
+  skipOptional: z.boolean().optional(),
   closedSections: z.array(z.string()),
   evidence: z.array(evidenceSchema).max(MAX_EVIDENCE),
   /** Sends tried so far (cleared cards and failed sends): part of the next card's request key. */

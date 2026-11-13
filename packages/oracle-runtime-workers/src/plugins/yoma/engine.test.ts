@@ -16,8 +16,10 @@ import {
   openModel,
   parseNumber,
   parsePin,
+  progressOf,
   sectionBelowMinimum,
   setAnswer,
+  todayLine,
   typedAnswer,
   viewAt,
   visibleQuestions,
@@ -364,6 +366,18 @@ describe('typed answers', () => {
     ).toBe(false);
   });
 
+  it('has the model work out a date from their words, with today given, and never ask them for a format', () => {
+    const now = new Date('2026-11-02T10:00:00Z');
+    expect(todayLine(now)).toBe('Monday 2026-11-02 (UTC)');
+    for (const input of ['date', 'datetime'] as const) {
+      const typed = typedAnswer(view(input), 'yesterday', undefined, now);
+      expect(typed.ok).toBe(false);
+      if (typed.ok) throw new Error('unreachable');
+      expect(typed.say).toContain('today is Monday 2026-11-02 (UTC)');
+      expect(typed.say).toContain('Never ask them to type a format');
+    }
+  });
+
   it('reads numbers as people write them, and refuses an ambiguous or non-number', () => {
     expect(parseNumber('12')).toBe(12);
     expect(parseNumber(' 1 500 ')).toBe(1500);
@@ -541,6 +555,27 @@ describe('the order of asking', () => {
     expect(
       nextStep(model, { skipped: [], closedSections: ['shops'] }),
     ).toMatchObject({ kind: 'question', question: { path: 'after' } });
+  });
+
+  it('passes over every optional question still to come once they skip all of them, and still asks the required ones', () => {
+    const model = openModel(
+      formOf(
+        { type: 'text', name: 'nickname' },
+        { type: 'text', name: 'name', isRequired: true },
+        { type: 'comment', name: 'notes' },
+      ),
+    );
+    const state = { skipped: [], closedSections: [], skipOptional: true };
+    expect(nextStep(model, state)).toMatchObject({
+      question: { path: 'name' },
+    });
+    answer(model, 'name', 'Lebo');
+    expect(nextStep(model, state)).toEqual({ kind: 'done' });
+    expect(progressOf(model, [], true)).toEqual({ answered: 3, total: 3 });
+    // Without it, each optional question is asked in turn.
+    expect(nextStep(model, progress)).toMatchObject({
+      question: { path: 'nickname' },
+    });
   });
 
   it('asks a skipped question again once it becomes required, and never hides that it is missing', () => {
