@@ -552,20 +552,36 @@ of the user object has been delivered (`src/do/fresh-invocation.ts`): the
 alarm is a top-level event with the full budget, and from then on the
 work's calls are charged to it. The alarm hands the work a lease and keeps
 itself open (`waitUntil`) until the lease ends. A wake armed only for the
-gate re-arms the pending deadline and skips the full housekeeping tick. The
-wait is normally a few milliseconds; after 3 s (an alarm handler that is
-still running, e.g. a flush upload) the work carries on where it is and
-logs `[loop-limit] no alarm within 3000 ms for …`.
+gate re-arms the pending deadline and skips the full housekeeping tick (and
+never boots a bare object). The room turn is claimed by event id before it
+waits, so a gateway replay of the same message attaches to it.
+`finishWorkStatus` answers the gateway at once and makes the card's closing
+post in the background, so it never holds one of the gateway's turn slots.
+The wait is normally a few milliseconds (devnet: the budget at the turn's
+first call out was 16 on every turn, against 13 → 0 before).
+
+Known limits:
+
+- While an alarm handler of the object is running (a scheduled task's turn,
+  a flush upload) no new alarm can be delivered: gateway work then runs
+  where it is at once and logs `[loop-limit] an alarm handler is running; …`.
+  If the alarm cannot be armed or does not come within 3 s it logs
+  `[loop-limit] no alarm within 3000 ms for …` and also runs where it is.
+- Between the gateway's call arriving and the alarm (milliseconds) that call
+  is the object's newest request, so other work the object does in that
+  window is charged to it. A Stop from the Portal for a room turn still
+  waiting for its alarm finds no run to stop.
 
 Safety nets and what the logs say:
 
 - `[loop-limit] gateway.<method> was refused by Cloudflare's loop limit;
 retrying once from a fresh invocation` — a user object → gateway call was
-  refused and retried once after a new alarm (a refused call never reached
-  the gateway, so the retry cannot send twice). Calls that carry a stream
-  (owner-copy uploads) are not retried.
+  refused and retried once after a new alarm. Only reads and sends that
+  carry a transaction id (the homeserver deduplicates them) are retried: the
+  same refusal can come back from a call the gateway itself made after it
+  had started work. Calls that carry a stream are never retried.
 - `[loop-limit] turn <requestId> (<client>) failed: …` — a turn still failed
-  on a refusal; the gateway posts the "Sorry — something went wrong…" notice
+  on a refusal (either form); the gateway posts the "Sorry — something went wrong…" notice
   in the thread and the gateway log line `turn <requestId> failed: <reason>`
   now carries the reason.
 - Any other `Subrequest depth limit exceeded` / `error code: 1019` in the

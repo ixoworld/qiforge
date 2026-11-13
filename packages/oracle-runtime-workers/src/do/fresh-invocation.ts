@@ -33,20 +33,38 @@
 /** Matches the loop-limit refusal (the runtime gives it no code or flag). */
 export const LOOP_LIMIT_MESSAGE = 'Subrequest depth limit exceeded';
 
-/** Whether `err` — or a cause in its chain — is Cloudflare's loop-limit refusal. */
-export function isLoopLimitError(err: unknown): boolean {
+/**
+ * The same refusal as an HTTP answer: a fetch to a Worker-backed host
+ * (OpenRouter, the memory engine) gets `503` with this body.
+ */
+export const LOOP_LIMIT_HTTP_BODY = 'error code: 1019';
+
+function messagesOf(err: unknown): string[] {
+  const messages: string[] = [];
   let current: unknown = err;
   for (let depth = 0; depth < 8 && current !== undefined; depth += 1) {
-    const message =
-      current instanceof Error
-        ? current.message
-        : typeof current === 'string'
-          ? current
-          : '';
-    if (message.includes(LOOP_LIMIT_MESSAGE)) return true;
+    if (current instanceof Error) messages.push(current.message);
+    else if (typeof current === 'string') messages.push(current);
     current = current instanceof Error ? current.cause : undefined;
   }
-  return false;
+  return messages;
+}
+
+/** Whether `err` — or a cause in its chain — is the loop-limit refusal of a DO / service call. */
+export function isLoopLimitError(err: unknown): boolean {
+  return messagesOf(err).some((m) => m.includes(LOOP_LIMIT_MESSAGE));
+}
+
+/**
+ * Whether a failure was caused by the loop limit in either form (an RPC
+ * refusal or a `503 error code: 1019` from a Worker-backed host). For logs:
+ * the HTTP form may come from deep inside a call that already did work, so
+ * it never justifies a retry.
+ */
+export function mentionsLoopLimit(err: unknown): boolean {
+  return messagesOf(err).some(
+    (m) => m.includes(LOOP_LIMIT_MESSAGE) || m.includes(LOOP_LIMIT_HTTP_BODY),
+  );
 }
 
 /** How long a caller waits for the alarm before it carries on where it is. */
@@ -56,7 +74,7 @@ export const FRESH_INVOCATION_TIMEOUT_MS = 3000;
  * Upper bound on how long one lease holds the alarm invocation open, so a
  * lease that is never ended cannot pin the object for ever.
  */
-export const FRESH_LEASE_MAX_MS = 15 * 60_000;
+export const FRESH_LEASE_MAX_MS = 30 * 60_000;
 
 export interface FreshLease {
   /** The work now runs under an alarm invocation (false: the wait timed out). */
@@ -70,6 +88,11 @@ export interface FreshInvocationOptions {
   armNow: () => Promise<void>;
   /** Hold the current invocation open until `work` settles (`ctx.waitUntil`). */
   keepAlive: (work: Promise<unknown>) => void;
+  /**
+   * An alarm handler of this object is running: no new alarm can be
+   * delivered until it returns, so waiting would only cost the timeout.
+   */
+  alarmRunning?: () => boolean;
   warn?: (message: string) => void;
   timeoutMs?: number;
   maxLeaseMs?: number;
@@ -86,10 +109,11 @@ function carriesStream(args: readonly unknown[]): boolean {
 
 /**
  * Wrap an RPC handle so a call the loop limit refused is retried once from a
- * fresh invocation. A refused call never reached its target, so the retry
- * cannot run anything twice. Calls carrying a stream are not retried (the
- * stream may already be consumed), nor is `fetch`; other properties pass
- * through untouched.
+ * fresh invocation. Only the methods `retryable` admits are retried — reads,
+ * and sends that carry a transaction id — because the refusal can also come
+ * back from a call the target itself made after it had started work. Calls
+ * carrying a stream are never retried (the stream may already be consumed),
+ * nor is `fetch`; other properties pass through untouched.
  */
 export function withLoopLimitRetry<T extends object>(
   handle: T,
@@ -97,6 +121,11 @@ export function withLoopLimitRetry<T extends object>(
     name: string;
     refresh: (label: string) => Promise<FreshLease>;
     warn: (message: string) => void;
+    /**
+     * Whether a call may be repeated: a read, or a send that carries a
+     * transaction id (the homeserver deduplicates it). Defaults to none.
+     */
+    retryable?: (method: string, args: readonly unknown[]) => boolean;
   },
 ): T {
   return new Proxy(handle, {
@@ -119,7 +148,12 @@ export function withLoopLimitRetry<T extends object>(
         try {
           return await call();
         } catch (err) {
-          if (!isLoopLimitError(err) || carriesStream(args)) throw err;
+          if (
+            !isLoopLimitError(err) ||
+            carriesStream(args) ||
+            !(opts.retryable?.(prop, args) ?? false)
+          )
+            throw err;
           opts.warn(
             `[loop-limit] ${opts.name}.${prop} was refused by Cloudflare's loop limit; retrying once from a fresh invocation`,
           );
@@ -136,7 +170,6 @@ export function withLoopLimitRetry<T extends object>(
 }
 
 interface Waiter {
-  label: string;
   resolve: (fresh: boolean) => void;
   timer: ReturnType<typeof setTimeout> | undefined;
   /** Settles when the lease ends (or after `maxLeaseMs`). */
@@ -167,6 +200,12 @@ export class FreshInvocationGate {
    * carries on in the caller's invocation (as before this gate existed).
    */
   async enter(label: string): Promise<FreshLease> {
+    if (this.opts.alarmRunning?.()) {
+      this.opts.warn?.(
+        `[loop-limit] an alarm handler is running; ${label} runs in the invocation that delivered it`,
+      );
+      return { fresh: false, end: () => undefined };
+    }
     let ended = false;
     let endLease: () => void = () => undefined;
     let leaseTimer: ReturnType<typeof setTimeout> | undefined;
@@ -180,7 +219,7 @@ export class FreshInvocationGate {
     const freshPromise = new Promise<boolean>((resolve) => {
       settle = resolve;
     });
-    const waiter: Waiter = { label, resolve: settle, timer: undefined, held };
+    const waiter: Waiter = { resolve: settle, timer: undefined, held };
     this.waiting.add(waiter);
     waiter.timer = setTimeout(() => {
       if (!this.waiting.delete(waiter)) return;

@@ -3109,32 +3109,117 @@ describe('user-wide run listings and Stop', () => {
 });
 
 describe('work the gateway hands over starts from a fresh invocation (loop limit)', () => {
-  it('closing a status card waits for an alarm, which releases it and skips the full tick', async () => {
+  const HOUSEKEEPING_KEY = 'meta:housekeepingAt';
+
+  it('closing a status card answers at once; the post waits for an alarm, which skips the full tick', async () => {
     await withObject('fresh-invocation-finish', {}, async (h) => {
       await h.ready();
       await h.settle();
       const later = Date.now() + 3_600_000;
-      await h.storage.put('meta:housekeepingAt', later);
+      await h.storage.put(HOUSEKEEPING_KEY, later);
       await h.storage.setAlarm(later);
       const ticks = recordCalls(h.host, 'persistAccess');
-
-      let finished = false;
-      const call = h.call('finishWorkStatus', 'req-1', 'done').then(() => {
-        finished = true;
+      const card = h.field('workStatus') as {
+        beginTurn: (turn: object) => void;
+        emit: (requestId: string, phase: string) => void;
+      };
+      card.beginTurn({
+        requestId: 'req-1',
+        roomId: '!room:mx',
+        threadId: '$thread',
+        sessionId: 'thread:$thread',
+        forEventId: '$msg',
       });
-      // The gate armed the alarm for now and holds the call until it fires.
+      card.emit('req-1', 'routing');
+      await vi.waitFor(() =>
+        expect(h.gateway.sendEvent).toHaveBeenCalledTimes(1),
+      );
+
+      // The RPC returns before the closing post; the post waits for an alarm.
+      await h.call('finishWorkStatus', 'req-1', 'done');
       await vi.waitFor(async () => {
         expect(await h.storage.getAlarm()).toBeLessThanOrEqual(Date.now());
       });
-      expect(finished).toBe(false);
+      expect(h.gateway.sendEvent).toHaveBeenCalledTimes(1);
 
       await h.fireAlarm();
-      await call;
-      expect(finished).toBe(true);
+      await h.settle();
+      expect(h.gateway.sendEvent).toHaveBeenCalledTimes(2);
+      expect(String(h.gateway.sendEvent.mock.calls[1]?.[2])).toContain(
+        '"phase":"done"',
+      );
       // A wake only for the gate: no full housekeeping tick, and the alarm
       // is back on the deadline that was pending.
       expect(ticks).toHaveLength(0);
       expect(await h.storage.getAlarm()).toBe(later);
+    });
+  });
+
+  it('a room turn waits for the alarm and a second dispatch of the same event attaches to it; Portal turns do not wait', async () => {
+    await withObject('fresh-invocation-claim', {}, async (h) => {
+      await h.ready();
+      await h.settle();
+      await h.storage.put(HOUSEKEEPING_KEY, Date.now() + 3_600_000);
+      const ran: string[] = [];
+      Object.defineProperty(h.host, 'runTurnInPlace', {
+        value: async (req: { requestId: string; eventId?: string }) => {
+          ran.push(req.requestId);
+          return {
+            sessionId: 's',
+            requestId: req.requestId,
+            text: 'hi',
+            toolCalls: [],
+          };
+        },
+      });
+      const identity = { userDid: USER_DID };
+      const room = (requestId: string) => ({
+        identity,
+        sessionId: 's',
+        message: 'hello',
+        client: 'matrix',
+        eventId: '$E',
+        roomId: '!room:mx',
+        requestId,
+      });
+      const first = h.call('runTurn', room('r1'));
+      const replay = h.call('runTurn', room('r2'));
+      await vi.waitFor(async () => {
+        expect(await h.storage.getAlarm()).toBeLessThanOrEqual(Date.now());
+      });
+      expect(ran).toEqual([]);
+
+      await h.fireAlarm();
+      const [a, b] = await Promise.all([first, replay]);
+      expect(ran).toEqual(['r1']);
+      expect(a).toEqual(b);
+
+      // Not a room turn: runs at once, no alarm needed.
+      await h.call('runTurn', {
+        ...room('r3'),
+        client: 'portal',
+        eventId: undefined,
+      });
+      expect(ran).toEqual(['r1', 'r3']);
+      await h.settle();
+    });
+  });
+
+  it('a gate wake does not boot a bare object', async () => {
+    await withObject('fresh-invocation-bare', {}, async (h) => {
+      const gate = h.field('freshInvocations') as {
+        enter: (label: string) => Promise<{ fresh: boolean; end: () => void }>;
+      };
+      const entered = gate.enter('group summary');
+      await vi.waitFor(async () => {
+        expect(await h.storage.getAlarm()).not.toBeNull();
+      });
+      await h.fireAlarm();
+      const lease = await entered;
+      expect(lease.fresh).toBe(true);
+      lease.end();
+      expect(h.db()).toBeNull();
+      expect(await h.storage.getAlarm()).toBeNull();
       await h.settle();
     });
   });

@@ -2,13 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   FreshInvocationGate,
   isLoopLimitError,
+  mentionsLoopLimit,
   withLoopLimitRetry,
 } from './fresh-invocation';
 
 const REFUSAL =
   'Subrequest depth limit exceeded. This request looped back into the Workers runtime too many times.';
 
-function makeGate(opts: { armFails?: boolean; timeoutMs?: number } = {}) {
+function makeGate(
+  opts: { armFails?: boolean; timeoutMs?: number; alarmRunning?: boolean } = {},
+) {
   const kept: Array<Promise<unknown>> = [];
   const warnings: string[] = [];
   let arms = 0;
@@ -18,6 +21,7 @@ function makeGate(opts: { armFails?: boolean; timeoutMs?: number } = {}) {
       if (opts.armFails) throw new Error('storage down');
     },
     keepAlive: (work) => kept.push(work),
+    alarmRunning: () => opts.alarmRunning ?? false,
     warn: (m) => warnings.push(m),
     timeoutMs: opts.timeoutMs ?? 3000,
     maxLeaseMs: 60_000,
@@ -36,6 +40,11 @@ describe('isLoopLimitError', () => {
     expect(isLoopLimitError(REFUSAL)).toBe(true);
     expect(isLoopLimitError(new Error('Network connection lost'))).toBe(false);
     expect(isLoopLimitError(undefined)).toBe(false);
+    // The HTTP form is for logs only, never for a retry.
+    expect(isLoopLimitError(new Error('503 error code: 1019'))).toBe(false);
+    expect(mentionsLoopLimit(new Error('503 error code: 1019'))).toBe(true);
+    expect(mentionsLoopLimit(new Error(REFUSAL))).toBe(true);
+    expect(mentionsLoopLimit(new Error('503 Service Unavailable'))).toBe(false);
   });
 });
 
@@ -110,6 +119,15 @@ describe('FreshInvocationGate', () => {
     expect(warnings.join('\n')).toMatch(/could not arm the alarm/);
   });
 
+  it('does not wait (or arm) while an alarm handler is running: none can be delivered until it returns', async () => {
+    const { gate, warnings, arms } = makeGate({ alarmRunning: true });
+    const lease = await gate.enter('room turn r4');
+    expect(lease.fresh).toBe(false);
+    expect(arms()).toBe(0);
+    expect(gate.pending).toBe(0);
+    expect(warnings.join('\n')).toMatch(/an alarm handler is running/);
+  });
+
   it('a lease never ended stops holding the alarm after the cap', async () => {
     const { gate, kept, warnings } = makeGate();
     const entered = gate.enter('forgotten');
@@ -168,6 +186,7 @@ describe('withLoopLimitRetry', () => {
       name: 'gateway',
       refresh: r.refresh,
       warn: (m) => warnings.push(m),
+      retryable: () => true,
     });
     await expect(wrapped.sendEvent('!r')).resolves.toBe('$event-in-!r');
     expect(calls()).toBe(2);
@@ -185,6 +204,7 @@ describe('withLoopLimitRetry', () => {
       name: 'gateway',
       refresh: r.refresh,
       warn: () => undefined,
+      retryable: () => true,
     });
     await expect(wrapped.sendEvent('!r')).rejects.toThrow(/Subrequest depth/);
     expect(calls()).toBe(2);
@@ -198,6 +218,7 @@ describe('withLoopLimitRetry', () => {
       name: 'gateway',
       refresh: r.refresh,
       warn: () => undefined,
+      retryable: () => true,
     });
     await expect(wrapped.sendEvent('!r')).rejects.toThrow(
       /Network connection lost/,
@@ -207,6 +228,20 @@ describe('withLoopLimitRetry', () => {
       /Subrequest depth/,
     );
     expect(other.calls()).toBe(2);
+    expect(r.labels).toEqual([]);
+  });
+
+  it('does not retry a method the caller did not admit (it may have done work)', async () => {
+    const { target, calls } = handle(1);
+    const r = refresher();
+    const wrapped = withLoopLimitRetry(target, {
+      name: 'gateway',
+      refresh: r.refresh,
+      warn: () => undefined,
+      retryable: (method) => method !== 'sendEvent',
+    });
+    await expect(wrapped.sendEvent('!r')).rejects.toThrow(/Subrequest depth/);
+    expect(calls()).toBe(1);
     expect(r.labels).toEqual([]);
   });
 });
