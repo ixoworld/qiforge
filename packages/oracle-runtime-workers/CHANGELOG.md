@@ -1,5 +1,11 @@
 # @ixo/oracle-runtime-workers
 
+## 0.51.0
+
+### Minor Changes
+
+- [#534](https://github.com/ixoworld/qiforge/pull/534) [`220f694`](https://github.com/ixoworld/qiforge/commit/220f69409dfbd0815962ecbcb8d14e0f13bcce58) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Rich messages on channel event turns: an event turn (a permission card answered, an identity check updated) may now carry `render`, and its run gets exactly what a message turn with `render` gets: `offer_choices`, `send_link_button`, `send_cards`, plugin rich parts through `renderOf(ctx)` / `withRichParts` (the credentials plugin's Allow and Start check buttons), the same plan parts, and taps on choices it offers. Turn results list the new `rich_events` feature so a gateway can tell this runtime from 0.50.0, which refuses `render` with an event. `choice` stays refused on an event turn.
+
 ## 0.50.0
 
 ### Minor Changes
