@@ -117,7 +117,9 @@ export function isDeliveryNoticeMessage(message: BaseMessage): boolean {
  * that treats a human message as the person's own words (the transcript,
  * memory indexing, the evidence a proposal is checked against) goes through
  * here, so quoted text or a gateway's notice is never taken for something
- * the person typed.
+ * the person typed. The notes come off outermost first, the reverse of the
+ * order a channel turn adds them in (user-oracle-do.ts): time, guide,
+ * quoted reply, tapped choice, delivery notice.
  */
 export function userContent(
   content: MessageContent,
@@ -130,9 +132,9 @@ export function userContent(
           stripTurnTimeNote(content, kwargs?.[TURN_TIME_NOTE_KWARG]),
           kwargs?.[TURN_GUIDE_NOTE_KWARG],
         ),
-        kwargs?.[CHANNEL_CHOICE_NOTE_KWARG],
+        kwargs?.[CHANNEL_REPLY_NOTE_KWARG],
       ),
-      kwargs?.[CHANNEL_REPLY_NOTE_KWARG],
+      kwargs?.[CHANNEL_CHOICE_NOTE_KWARG],
     ),
     kwargs?.[CHANNEL_DELIVERY_NOTICE_KWARG],
   );

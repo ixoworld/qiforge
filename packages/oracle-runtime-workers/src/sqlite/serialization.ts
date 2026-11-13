@@ -18,9 +18,15 @@ import {
 } from '../core/operating-guides';
 import { TURN_TIME_NOTE_KWARG } from '../core/turn-time-note';
 import {
+  CHANNEL_CHOICE_NOTE_KWARG,
   CHANNEL_DELIVERY_NOTICE_KWARG,
   CHANNEL_REPLY_NOTE_KWARG,
 } from '../channels/replies';
+import {
+  CAPPED_META_KEY,
+  type CappedResultMeta,
+} from '../core/middlewares/result-cap';
+import { FORWARDED_FROM_KEY } from '../core/subagent-as-tool';
 
 /**
  * `additional_kwargs` key of the tool calls a mid-turn summary carries for
@@ -271,6 +277,12 @@ export interface CleanAdditionalKwargs {
   turn_time_note?: string;
   /** The exact quoted-reply note after it (see channels/replies.ts). */
   channel_reply_note?: string;
+  /** The exact tapped-choice note of a channel message (see channels/replies.ts). */
+  channel_choice_note?: string;
+  /** The parent call a forwarded sub-agent message came from (core/subagent-as-tool.ts). */
+  forwardedFrom?: string;
+  /** The result-cap marker of a capped tool result (core/middlewares/result-cap.ts). */
+  capped?: CappedResultMeta;
   /** Where a channel message came from, and what it replied to, as the turn recorded them. */
   'org.ixo.qi.origin'?: unknown;
   'org.ixo.qi.reply'?: unknown;
@@ -335,6 +347,16 @@ function extractReasoning(additionalKwargs: Record<string, unknown>): {
     : { reasoning };
 }
 
+/** A well-formed result-cap marker, copied field by field. */
+function cappedMeta(value: unknown): CappedResultMeta | undefined {
+  if (!isRecord(value) || typeof value.size !== 'number') return undefined;
+  return {
+    ...(typeof value.id === 'string' ? { id: value.id } : {}),
+    size: value.size,
+    shown: typeof value.shown === 'number' ? value.shown : 0,
+  };
+}
+
 /** The newest entries of a carry list whose JSON fits `TURN_CARRY_MAX_CHARS`. */
 function cappedTurnCarry(value: unknown): unknown[] | undefined {
   if (!Array.isArray(value)) return undefined;
@@ -382,6 +404,19 @@ export function cleanAdditionalKwargs(
   const replyNote = additionalKwargs[CHANNEL_REPLY_NOTE_KWARG];
   if (typeof replyNote === 'string')
     cleaned[CHANNEL_REPLY_NOTE_KWARG] = replyNote;
+  // Kept for the same reason: without it a tapped option reads as
+  // "<note>\n\n<title>" to every tool that takes the person's answer.
+  const choiceNote = additionalKwargs[CHANNEL_CHOICE_NOTE_KWARG];
+  if (typeof choiceNote === 'string')
+    cleaned[CHANNEL_CHOICE_NOTE_KWARG] = choiceNote;
+  // Kept so the parent model keeps leaving a sub-agent's forwarded calls
+  // out of its requests (`withoutForwarded`).
+  const forwardedFrom = additionalKwargs[FORWARDED_FROM_KEY];
+  if (typeof forwardedFrom === 'string')
+    cleaned[FORWARDED_FROM_KEY] = forwardedFrom;
+  // Kept so a pruned result still names the saved result `read_result` reads.
+  const capped = cappedMeta(additionalKwargs[CAPPED_META_KEY]);
+  if (capped !== undefined) cleaned[CAPPED_META_KEY] = capped;
   // Kept so the message stays hidden wherever user messages are shown.
   const deliveryNotice = additionalKwargs[CHANNEL_DELIVERY_NOTICE_KWARG];
   if (typeof deliveryNotice === 'string')

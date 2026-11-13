@@ -6,12 +6,15 @@ import {
   ChannelFileNotice,
   ChannelTurnBody,
 } from './contract';
-import { withTurnTimeNote } from '../core/turn-time-note';
+import { TURN_GUIDE_NOTE_KWARG } from '../core/operating-guides';
+import { TURN_TIME_NOTE_KWARG, withTurnTimeNote } from '../core/turn-time-note';
 import {
   CHANNEL_CHOICE_NOTE_KWARG,
   CHANNEL_DELIVERY_NOTICE_KWARG,
+  CHANNEL_REPLY_NOTE_KWARG,
   channelChoiceNote,
   channelDeliveryNote,
+  channelReplyNote,
   userContent,
 } from './replies';
 
@@ -352,6 +355,39 @@ describe('channelChoiceNote', () => {
       }),
     ).toBe('Medium');
     expect(channelChoiceNote(undefined)).toBeUndefined();
+  });
+
+  it('is stripped when the tap also quotes the message it was on, with the notes stacked as the turn builds them', () => {
+    const choice = channelChoiceNote({
+      id: 'oc:3f9a01c2:yes',
+      key: 'yes',
+      title: 'Yes',
+      question: 'Are you 18 or older?',
+    })!;
+    const reply = channelReplyNote({
+      kind: 'resolved',
+      requestId: 'wa:prior',
+      author: 'oracle',
+      text: 'Are you 18 or older?',
+    })!;
+    const time = 'Current time: 2026-11-13T09:00:00Z (Friday)';
+    const guide = '[From the runtime: guide]';
+    // The order user-oracle-do.ts builds a channel turn's content in.
+    const content = withTurnTimeNote(
+      withTurnTimeNote(
+        withTurnTimeNote(withTurnTimeNote('Yes', choice), reply),
+        guide,
+      ),
+      time,
+    );
+    expect(
+      userContent(content, {
+        [TURN_TIME_NOTE_KWARG]: time,
+        [TURN_GUIDE_NOTE_KWARG]: guide,
+        [CHANNEL_REPLY_NOTE_KWARG]: reply,
+        [CHANNEL_CHOICE_NOTE_KWARG]: choice,
+      }),
+    ).toBe('Yes');
   });
 });
 
