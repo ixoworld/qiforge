@@ -5,7 +5,8 @@ import { CHANNEL_DELIVERY_NOTICE_KWARG } from '../channels/replies';
 import { createRuntimeCore } from '../core';
 import { createNoopAmbient } from '../core/runtime-context';
 import { makeEnv, makePlugin } from '../core/test-fixtures';
-import type { DeliveryProfile } from '../delivery/types';
+import { resolveDeliveryProfile } from '../delivery/profile';
+import type { DeliveryProfile, RenderCapability } from '../delivery/types';
 import type { ChannelEventResult } from '../plugin-api/channel-events';
 import { DoSqliteDatabase } from '../sqlite/database';
 import { SessionsStore } from '../sqlite/sessions-store';
@@ -67,6 +68,7 @@ async function withEventHost(
     prepareTurn: ReturnType<typeof vi.fn>;
     attempt: (resumed: boolean) => Promise<{ outcome: unknown; live: LiveRun }>;
   }) => Promise<void>,
+  turn: TurnRequest = eventTurn,
 ): Promise<void> {
   const stub = env.SQLITE_TEST.get(env.SQLITE_TEST.idFromName(name));
   await runInDurableObject(stub, async (_instance, state) => {
@@ -127,7 +129,7 @@ async function withEventHost(
       requestId: eventTurn.requestId,
       client: 'channel',
       status: 'running',
-      request: JSON.stringify(storedRunRequest(eventTurn)),
+      request: JSON.stringify(storedRunRequest(turn)),
       checkpointId: null,
       instanceId: 'test',
     });
@@ -250,6 +252,31 @@ describe('UserOracleDO permission events', () => {
         await attempt(true);
         expect(handler).toHaveBeenCalledTimes(1);
       },
+    );
+  });
+
+  it("keeps the turn's render on an event that goes to the agent, so its surface can show rich parts", async () => {
+    const render: RenderCapability = {
+      kinds: ['reply_buttons', 'list', 'link_button', 'card', 'carousel'],
+      linkLabels: ['allow', 'start_check'],
+      linkOrigins: ['https://dev.self.ixo.earth'],
+    };
+    await withEventHost(
+      'event-agent-render',
+      async () => ({ kind: 'agent', note: NOTE }),
+      async ({ prepareTurn, attempt }) => {
+        await attempt(false);
+        expect(prepareTurn).toHaveBeenCalledTimes(1);
+        const req = (prepareTurn.mock.calls[0] as unknown[])[0] as TurnRequest;
+        expect(req.channel?.render).toEqual(render);
+        expect(req.channel?.eventNote).toBe(NOTE);
+        expect(resolveDeliveryProfile(req)).toMatchObject({
+          kind: 'chat',
+          surface: 'whatsapp',
+          render,
+        });
+      },
+      { ...eventTurn, channel: { ...eventTurn.channel!, render } },
     );
   });
 
