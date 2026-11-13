@@ -526,6 +526,70 @@ browser …; running it again`). A sent one follows the read / write rule
   `CREATE INDEX IF NOT EXISTS` on the first boot that has them), at one
   index entry per run-row update.
 
+### Turns: the loop limit
+
+Cloudflare refuses a call once a request chain has looped back into the
+Workers runtime 16 times. The refusal is the error `Subrequest depth limit
+exceeded. This request looped back into the Workers runtime too many times.`
+on a Durable Object RPC, and an HTTP `503` with the body `error code: 1019`
+on a fetch to a Worker-backed host (OpenRouter, the memory engine). A Durable
+Object's outgoing calls are charged to its newest in-flight incoming request,
+so the gateway and a user object that keep calling each other ratchet each
+other down. Measured on devnet (runtime 0.51.1, a user sending a message a
+few seconds after each reply in one thread): the budget left when a turn
+reached the user object went 13 → 9 → 14 (a user-object alarm happened to
+be the newest request) → 10 → 6 → 2 → 0, four hops per turn (dispatch,
+the turn's status-card post, closing the card gateway → user, its post back);
+from then on every turn's gateway calls, memory lookup and model call were
+refused in milliseconds and the user got `Sorry — something went wrong…`.
+Mainnet hit it in Matrix rooms only (Nov 9–13 2026, three users, about 90
+turns), never on Portal turns, which start from a browser request.
+
+Since the fix, work the gateway hands to a user object — a room turn
+(`runTurn` with an event id), closing a status card (`finishWorkStatus`), a
+group summary (`summarizeGroupMessages`) — waits until an alarm invocation
+of the user object has been delivered (`src/do/fresh-invocation.ts`): the
+alarm is a top-level event with the full budget, and from then on the
+work's calls are charged to it. The alarm hands the work a lease and keeps
+itself open (`waitUntil`) until the lease ends. A wake armed only for the
+gate re-arms the pending deadline and skips the full housekeeping tick (and
+never boots a bare object). The room turn is claimed by event id before it
+waits, so a gateway replay of the same message attaches to it.
+`finishWorkStatus` answers the gateway at once and makes the card's closing
+post in the background, so it never holds one of the gateway's turn slots.
+The wait is normally a few milliseconds (devnet: the budget at the turn's
+first call out was 16 on every turn, against 13 → 0 before).
+
+Known limits:
+
+- While an alarm handler of the object is running (a scheduled task's turn,
+  a flush upload) no new alarm can be delivered: gateway work then runs
+  where it is at once and logs `[loop-limit] an alarm handler is running; …`.
+  If the alarm cannot be armed or does not come within 3 s it logs
+  `[loop-limit] no alarm within 3000 ms for …` and also runs where it is.
+- Between the gateway's call arriving and the alarm (milliseconds) that call
+  is the object's newest request, so other work the object does in that
+  window is charged to it. A Stop from the Portal for a room turn still
+  waiting for its alarm finds no run to stop.
+
+Safety nets and what the logs say:
+
+- `[loop-limit] gateway.<method> was refused by Cloudflare's loop limit;
+retrying once from a fresh invocation` — a user object → gateway call was
+  refused and retried once after a new alarm. Only reads and sends that
+  carry a transaction id (the homeserver deduplicates them) are retried: the
+  same refusal can come back from a call the gateway itself made after it
+  had started work. Calls that carry a stream are never retried.
+- `[loop-limit] turn <requestId> (<client>) failed: …` — a turn still failed
+  on a refusal (either form); the gateway posts the "Sorry — something went wrong…" notice
+  in the thread and the gateway log line `turn <requestId> failed: <reason>`
+  now carries the reason.
+- Any other `Subrequest depth limit exceeded` / `error code: 1019` in the
+  logs means a new call path back into the gateway or the user object that
+  bypasses the gate: find who called whom (the gateway's `[matrix-bot] turn
+…` line is logged inside the request it was charged to) and route the work
+  through the gate.
+
 ### Transcript: paging
 
 `GET /sessions/:id/messages?limit=20&before=<cursor>&after=<cursor>` reads a
@@ -2283,6 +2347,7 @@ that can handle the requested parameters` is the memory engine's own
 | A plugin with `requires` is refused although the user authorized it; `[UCAN] the delegation expired at …` | `GET /debug/delegation` (the stored delegation's expiry)                                                                              | Validity is checked at use: an expired stored delegation grants nothing even while the object stays warm. The user re-authorizes (a new delegation).                                                         |
 | An admin tool (or its whole plugin) is missing for a user; `[main-agent] admin tools withheld from <did>` | `GET /debug/delegation`; the grants the user issued                                                                                   | Expected without the grant: the user delegates `admin-tool/invoke` on `ixo:qiforge:admin-tool/<plugin>[/<tool>]` (architecture → Admin-plane tools).                                                         |
 | `Network connection lost` on a gateway RPC                                                                | Gateway just restarted                                                                                                                | Expected once per restart; waited sends retry by themselves.                                                                                                                                                 |
+| `Subrequest depth limit exceeded` or `error code: 1019` in a turn                                         | `[loop-limit]` lines; which request the failing call was charged to                                                                   | Cloudflare's loop limit; see [the loop limit](#turns-the-loop-limit). Route the new call path through the fresh-invocation gate.                                                                             |
 
 ## Model calls: liveness and the call trace
 

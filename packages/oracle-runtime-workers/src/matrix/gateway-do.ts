@@ -980,7 +980,14 @@ export class MatrixGatewayDO
           'warn',
           `turn ${requestId}: the user object lost this turn in a reset and will not re-run it; asking the user to retry`,
         );
-      else this.log('error', `turn ${requestId} failed`, err);
+      // The message first: an error that crossed the RPC boundary logs a
+      // stack without it.
+      else
+        this.log(
+          'error',
+          `turn ${requestId} failed: ${err instanceof Error ? err.message : String(err)}`,
+          err,
+        );
       try {
         await this.sendNotice(turn.roomId, TURN_FAILED_NOTICE, {
           threadId: turn.threadId,
@@ -1006,7 +1013,7 @@ export class MatrixGatewayDO
         (err: unknown) =>
           this.log(
             'warn',
-            `turn ${requestId}: could not close the status card`,
+            `turn ${requestId}: could not close the status card: ${err instanceof Error ? err.message : String(err)}`,
             err,
           ),
       );

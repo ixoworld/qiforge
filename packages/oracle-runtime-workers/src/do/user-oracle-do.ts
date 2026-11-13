@@ -357,6 +357,56 @@ import {
 } from '../tasks/scheduler';
 import { decodeRoomStateContent } from '../matrix/room-state-codec';
 import { freshStub } from './fresh-stub';
+import {
+  FreshInvocationGate,
+  mentionsLoopLimit,
+  withLoopLimitRetry,
+} from './fresh-invocation';
+
+/** Gateway reads the user object may repeat (see `withLoopLimitRetry`). */
+const GATEWAY_READS: ReadonlySet<string> = new Set([
+  'ensureStarted',
+  'resolveUserRoom',
+  'getRoomState',
+  'getRoomStateEvent',
+  'groupChatRoomInfo',
+  'getTopicRoomState',
+  'getTopicEvent',
+  'getTopicHistory',
+  'eventMediaInfo',
+  'getOracleSecretsKey',
+  'getOracleSigningMnemonic',
+  'channelMemoryRecall',
+  'channelMemorySearch',
+  'status',
+  'listOutbox',
+]);
+
+/**
+ * A refused gateway call the user object retries once: a read, or a send
+ * that carries a transaction id (`sendEvent`'s and `sendText`'s last
+ * argument), which the homeserver deduplicates.
+ */
+function retryableGatewayCall(
+  method: string,
+  args: readonly unknown[],
+): boolean {
+  // With `rejected` it logs the plugins device in again: not a read.
+  if (method === 'botCredentials')
+    return !(
+      typeof args[0] === 'object' &&
+      args[0] !== null &&
+      Reflect.get(args[0], 'rejected')
+    );
+  if (GATEWAY_READS.has(method)) return true;
+  if (method !== 'sendEvent' && method !== 'sendText') return false;
+  const opts = args[method === 'sendEvent' ? 3 : 2];
+  return (
+    typeof opts === 'object' &&
+    opts !== null &&
+    typeof Reflect.get(opts, 'txnId') === 'string'
+  );
+}
 import { WorkStatusProducer } from '../matrix/work-status';
 import { fetchUserMatrixServerName } from '../matrix/user-homeserver';
 import { createWorkStatusMiddleware } from '../core/middlewares/work-status';
@@ -1095,6 +1145,19 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /**
+     * Work the Matrix gateway hands over (a room turn, closing a status card,
+     * a group summary) starts under an alarm invocation of this object, so
+     * its calls get Cloudflare's full loop budget instead of the remains of
+     * the gateway ↔ user call chain (see fresh-invocation.ts).
+     */
+    private readonly freshInvocations = new FreshInvocationGate({
+      armNow: () => this.requestAlarm(Date.now()),
+      keepAlive: (work) => this.ctx.waitUntil(work),
+      alarmRunning: () => this.alarmsRunning > 0,
+      warn: (message) => console.warn(message),
+    });
+
+    /**
      * Woken with hibernated sockets attached: build the realtime endpoint
      * NOW so it re-adopts them and taps the event router before any turn
      * runs. Left lazy, a turn arriving on a fresh instance (nothing touched
@@ -1293,6 +1356,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private reauthPrompter: ReauthPrompter | null = null;
     /** Room turns running right now, by Matrix event id: a gateway that asks again attaches instead of re-running. */
     private readonly matrixTurnRuns = new Map<string, Promise<TurnResult>>();
+    /** Room turns by event id from the moment the gateway's call arrives (see `runTurn`). */
+    private readonly roomTurnClaims = new Map<string, Promise<TurnResult>>();
 
     /** Session-history → memory-engine indexing (built lazily, see `scheduleHistoryIndexing`). */
     private historyIndexer: SessionHistoryIndexer | null = null;
@@ -1410,10 +1475,20 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * preferences, ambient adapter) keep working across gateway restarts.
      */
     private get gateway(): DurableObjectStub<MatrixGatewayObject> {
-      return freshStub(() =>
-        this.env.MATRIX_GATEWAY.get(
-          this.env.MATRIX_GATEWAY.idFromName(this.env.ORACLE_DID),
+      // A call the loop limit refuses is retried once from a fresh
+      // invocation (fresh-invocation.ts); the gate makes that rare.
+      return withLoopLimitRetry(
+        freshStub(() =>
+          this.env.MATRIX_GATEWAY.get(
+            this.env.MATRIX_GATEWAY.idFromName(this.env.ORACLE_DID),
+          ),
         ),
+        {
+          name: 'gateway',
+          refresh: (label) => this.freshInvocations.enter(label),
+          warn: (message) => console.warn(message),
+          retryable: retryableGatewayCall,
+        },
       );
     }
 
@@ -2791,14 +2866,34 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * due and re-arms at the earliest future deadline.
      */
     async alarm(): Promise<void> {
+      // Gateway work waiting for a fresh invocation runs under this alarm
+      // from here on (fresh-invocation.ts). First, before any await.
+      const released = this.freshInvocations.release();
+      this.alarmsRunning += 1;
+      try {
+        await this.alarmTick(released);
+      } finally {
+        this.alarmsRunning -= 1;
+      }
+    }
+
+    /** Alarm handlers in progress (the gate cannot get a new one meanwhile). */
+    private alarmsRunning = 0;
+
+    private async alarmTick(released: number): Promise<void> {
       // Realtime heartbeat first, on the bare object: a round only needs
       // the hibernated sockets and their attachments. When nothing else is
       // due yet, re-arm and return WITHOUT opening the database — that is
       // what lets a user with an open tab cost a few milliseconds every
-      // PING_INTERVAL_MS instead of a resident object.
+      // PING_INTERVAL_MS instead of a resident object. A wake for the gate
+      // only runs the round when it is due.
       const wakeAt = Date.now();
-      const nextPingAt =
-        this.ctx.getWebSockets().length > 0 ? this.realtime.pingTick() : null;
+      let nextPingAt: number | null = null;
+      if (this.ctx.getWebSockets().length > 0) {
+        const due = released > 0 ? this.realtime.nextPingAt() : null;
+        nextPingAt =
+          due !== null && due > wakeAt + 1000 ? due : this.realtime.pingTick();
+      }
       const housekeepingAt =
         await this.ctx.storage.get<number>(META_HOUSEKEEPING_AT);
       // Runs in flight in THIS instance need the keep-alive re-armed; a
@@ -2845,6 +2940,38 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         );
         return;
       }
+      // A wake armed only to hand gateway work a fresh invocation: when
+      // nothing else is due, re-arm for what is and skip the full tick.
+      if (
+        released > 0 &&
+        housekeepingAt !== undefined &&
+        housekeepingAt > wakeAt + 1000 &&
+        (keepAliveAt === null || keepAliveAt > wakeAt + 1000) &&
+        (recoveryAt === null || recoveryAt > wakeAt + 1000) &&
+        (nextPingAt === null || nextPingAt > wakeAt + 1000)
+      ) {
+        await this.requestAlarm(
+          Math.min(
+            housekeepingAt,
+            keepAliveAt ?? Infinity,
+            recoveryAt ?? Infinity,
+            nextPingAt ?? Infinity,
+          ),
+        );
+        return;
+      }
+      // The same for a bare object (evicted or never booted, so no
+      // housekeeping deadline): the gate's wake must not boot it — the room
+      // turn boots it itself; a group summary needs no user file.
+      if (
+        released > 0 &&
+        !this.db &&
+        housekeepingAt === undefined &&
+        keepAliveAt === null &&
+        recoveryAt === null &&
+        nextPingAt === null
+      )
+        return;
 
       // A full tick from here on. Deadlines armed while it runs (the boot
       // below included) are kept by the housekeeping write at its end.
@@ -3065,12 +3192,17 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         !this.dirty &&
         this.db &&
         deadlines.length === 0 &&
-        (this.runs?.size ?? 0) === 0
+        (this.runs?.size ?? 0) === 0 &&
+        // Gateway work released by this alarm or waiting for the next one
+        // has not booted the object yet (it records no access until then).
+        released === 0 &&
+        this.freshInvocations.pending === 0
       ) {
         const db = this.db;
         const outcome = await evictIdleWorkingCopy({
           ownerCopyIsCurrent: () => this.ownerCopyIsCurrent(db),
-          stillIdle: () => this.stillIdle(db),
+          stillIdle: async () =>
+            this.freshInvocations.pending === 0 && (await this.stillIdle(db)),
           dropHandles: () => this.dropInMemoryState(),
           wipe: () => {
             const wipe = this.wipeWorkingCopy(db);
@@ -5580,9 +5712,26 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       requestId: string,
       phase: 'done' | 'superseded',
     ): Promise<void> {
-      this.workStatus?.finish(requestId, phase);
+      // The gateway calls this at the end of every room turn and waits for
+      // it, holding one of its turn slots: answer at once. The card's
+      // closing post goes back to the gateway, so it is made from a fresh
+      // invocation (fresh-invocation.ts), in the background.
       for (const [sessionId, inFlight] of this.matrixTurns)
         if (inFlight === requestId) this.matrixTurns.delete(sessionId);
+      const card = this.workStatus;
+      if (!card?.has(requestId)) return;
+      this.ctx.waitUntil(
+        (async () => {
+          const lease = await this.freshInvocations.enter(
+            `status card ${requestId}`,
+          );
+          try {
+            await card.finish(requestId, phase);
+          } finally {
+            lease.end();
+          }
+        })(),
+      );
     }
 
     /**
@@ -5723,6 +5872,43 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * always run.
      */
     async runTurn(req: TurnRequest): Promise<TurnResult> {
+      // A room turn comes from the gateway (task turns carry no event id and
+      // start from this object's own alarm): start it from a fresh
+      // invocation before its first call out (fresh-invocation.ts).
+      if (req.client !== 'matrix' || !req.eventId)
+        return this.runTurnInPlace(req);
+      const eventId = req.eventId;
+      // Claimed before the first await: a second dispatch of the same event
+      // (a gateway replay after a reset) while this one waits for its alarm
+      // must attach, not pass the ledger check alongside it.
+      const claimed = this.roomTurnClaims.get(eventId);
+      if (claimed) {
+        console.log(
+          `[user-do] turn for ${eventId} is already claimed; the gateway asked again and attaches to it`,
+        );
+        return claimed;
+      }
+      const turn = (async (): Promise<TurnResult> => {
+        const lease = await this.freshInvocations.enter(
+          `room turn ${req.requestId}`,
+        );
+        try {
+          return await this.runTurnInPlace(req);
+        } finally {
+          lease.end();
+        }
+      })();
+      this.roomTurnClaims.set(eventId, turn);
+      void turn
+        .finally(() => {
+          if (this.roomTurnClaims.get(eventId) === turn)
+            this.roomTurnClaims.delete(eventId);
+        })
+        .catch(() => undefined);
+      return turn;
+    }
+
+    private async runTurnInPlace(req: TurnRequest): Promise<TurnResult> {
       await this.ready(req.identity);
       const eventId = req.client === 'matrix' ? req.eventId : undefined;
       const ledger = this.matrixLedger;
@@ -5769,7 +5955,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           return result;
         })
         .finally(() => {
-          this.matrixTurnRuns.delete(eventId);
+          if (this.matrixTurnRuns.get(eventId) === run)
+            this.matrixTurnRuns.delete(eventId);
         });
       this.matrixTurnRuns.set(eventId, run);
       // The turn's I/O belongs to this RPC's request context. If the gateway
@@ -5794,7 +5981,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       if (card && req.roomId && req.eventId) {
         const previous = this.matrixTurns.get(req.sessionId);
         if (previous && previous !== req.requestId)
-          card.finish(previous, 'superseded');
+          void card.finish(previous, 'superseded');
         this.matrixTurns.set(req.sessionId, req.requestId);
         card.beginTurn({
           requestId: req.requestId,
@@ -5828,6 +6015,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             : outcome.error !== undefined
               ? String(outcome.error)
               : `turn ${outcome.status}`;
+        if (outcome.status === 'failed' && mentionsLoopLimit(outcome.error))
+          console.warn(
+            `[loop-limit] turn ${req.requestId} (${req.client}) failed: Cloudflare's loop limit refused one of its calls — ${reason}`,
+          );
         throw new Error(reason);
       }
       card?.emit(req.requestId, 'delivering');
@@ -9501,15 +9692,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     async summarizeGroupMessages(messages: JsonString): Promise<string | null> {
       const parsed: unknown = JSON.parse(messages);
       if (!Array.isArray(parsed) || parsed.length === 0) return null;
-      const model = (this.ambient?.llm ?? this.core.llm).get('session-title', {
-        temperature: 0.2,
-        maxTokens: 800,
-      });
-      return summarizeObservedMessages(
-        model,
-        parsed as ObservedMessage[],
-        console,
-      );
+      // Called by the gateway; the model call goes out from a fresh
+      // invocation (fresh-invocation.ts).
+      const lease = await this.freshInvocations.enter('group summary');
+      try {
+        const model = (this.ambient?.llm ?? this.core.llm).get(
+          'session-title',
+          { temperature: 0.2, maxTokens: 800 },
+        );
+        return await summarizeObservedMessages(
+          model,
+          parsed as ObservedMessage[],
+          console,
+        );
+      } finally {
+        lease.end();
+      }
     }
 
     /**
