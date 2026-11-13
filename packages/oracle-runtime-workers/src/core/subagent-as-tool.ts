@@ -6,13 +6,17 @@ import {
   type BaseMessage,
 } from '@langchain/core/messages';
 import { tool } from '@langchain/core/tools';
-import { Command } from '@langchain/langgraph';
+import { Command, isGraphBubbleUp } from '@langchain/langgraph';
 import {
   createAgent,
   type AgentMiddleware,
   type StructuredTool,
 } from 'langchain';
 import { createDanglingToolCallRepairMiddleware } from './middlewares/dangling-tool-calls';
+import {
+  createToolErrorResultMiddleware,
+  errorSummary,
+} from './middlewares/tool-error-result';
 import { isHarnessLimitError } from './turn-budget';
 import { z } from 'zod';
 import type { Logger } from '../plugin-api/types';
@@ -356,10 +360,20 @@ export function createSubagentAsTool(
           model: spec.model,
           tools: innerTools,
           systemPrompt: spec.systemPrompt,
-          // Sub-agent threads are checkpointed too, so an interrupted tool
-          // call in one would poison its later invocations the same way.
           middleware: [
+            // Sub-agent threads are checkpointed too, so an interrupted tool
+            // call in one would poison its later invocations the same way.
             createDanglingToolCallRepairMiddleware(),
+            // Outside every other tool layer (the run's tool marks, the
+            // repetition guard, the execution middleware, the plugin's
+            // own): a tool that throws hands its error to the sub-agent's
+            // model as the call's result instead of ending the sub-agent,
+            // and each inner layer still sees the thrown error first.
+            createToolErrorResultMiddleware({
+              agentName: spec.name,
+              ...(config.signal ? { signal: config.signal } : {}),
+              logger,
+            }),
             ...(spec.dispatchMiddleware?.(dispatch) ?? []),
             ...(spec.middleware ?? []),
           ],
@@ -400,10 +414,18 @@ export function createSubagentAsTool(
 
         return buildResult(messages, config.toolCall?.id ?? '');
       } catch (err) {
-        // An aborted turn, or one out of budget, propagates (the parent
-        // graph stops); anything else is the sub-agent's failure, reported
-        // to the parent as its result.
-        if (config.signal?.aborted || isHarnessLimitError(err)) throw err;
+        // An aborted turn, one out of budget, or a LangGraph control signal
+        // (interrupt, drain) propagates (the parent graph stops); anything
+        // else is the sub-agent's own failure (its model call, its setup),
+        // reported to the parent as its result. A failing inner tool is not
+        // one: its error is the tool's result (createToolErrorResultMiddleware).
+        if (
+          config.signal?.aborted ||
+          isHarnessLimitError(err) ||
+          isGraphBubbleUp(err)
+        )
+          throw err;
+        logger.warn(`${spec.name}: the sub-agent failed: ${errorSummary(err)}`);
         const message = err instanceof Error ? err.message : String(err);
         const hint = spec.failureHint ? ` ${spec.failureHint}` : '';
         return `Error running ${spec.name}: ${message}${hint}`;

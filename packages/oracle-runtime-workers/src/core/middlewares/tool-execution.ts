@@ -35,6 +35,7 @@ import { findProviderStall } from '../../llm/stream-liveness';
 import { isFrontendCallNotSent } from '../../realtime/frontend-call-registry';
 import { isHarnessLimitError, type TurnBudget } from '../turn-budget';
 import { NOOP_LOGGER } from '../utils';
+import { errorSummary } from './tool-error-result';
 
 export type WriteClaim =
   | { status: 'claimed' }
@@ -318,10 +319,20 @@ export function createToolExecutionMiddleware(
       // more slots. The slot wait itself ends with the abort signal.
       budget.check(options.signal);
       // Every completed call leaves a trace (a sub-agent's inner tools
-      // included), timed from when it got its slot.
+      // included), timed from when it got its slot; a call that threw, a
+      // warning (an outer layer may turn the error into a result the model
+      // reads, and nothing else logs it).
       const run = async (): Promise<Awaited<ReturnType<typeof handler>>> => {
         const started = Date.now();
-        const output = await handler(request);
+        let output: Awaited<ReturnType<typeof handler>>;
+        try {
+          output = await handler(request);
+        } catch (error) {
+          logger.warn(
+            `[tool-execution] ${toolName} (${callId}): threw after ${Date.now() - started} ms${options.signal?.aborted ? ' (turn aborted)' : ''}: ${errorSummary(error)}`,
+          );
+          throw error;
+        }
         const ms = Date.now() - started;
         logger.debug?.(
           ToolMessage.isInstance(output) && output.status === 'error'

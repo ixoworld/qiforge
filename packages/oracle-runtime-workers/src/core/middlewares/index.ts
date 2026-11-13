@@ -44,3 +44,5 @@ export type {
   WriteClaim,
   WriteClaimStore,
 } from './tool-execution';
+export { createToolErrorResultMiddleware } from './tool-error-result';
+export type { ToolErrorResultOptions } from './tool-error-result';

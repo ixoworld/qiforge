@@ -47,6 +47,10 @@ const WORKFLOW_GUIDELINES = `
 3. If the search result contains the answer, extract it and STOP.
 4. Only scrape a URL if the search snippet was incomplete and you need the full page.
 5. Return findings with citations. If data is unavailable, say so — don't keep searching.
+6. A failed call comes back as that tool's result (e.g. a site that blocks
+   scraping, a 403, a timeout). Say which page could not be read, then answer
+   from the results you already have, or scrape one other result instead. One
+   failed page does not mean web search is unavailable.
 `.trim();
 
 const formatToolDocs = (tools: PluginTool[]): string => {
@@ -89,7 +93,10 @@ export function createFirecrawlSubAgent(tools: PluginTool[]): PluginSubAgent {
     tools,
     model: 'subagent',
     middlewares: [],
+    // Read only when the Firecrawl Agent itself failed (its model call, its
+    // setup): a failed search or fetch is handed to the agent as that
+    // tool's result, and its reply says what it found and what it could not.
     failureHint:
-      'Web search is unavailable, but this is not the end of the request: a page or feed can still be fetched with code. Load the `sandbox` capability if it is not in your tool list and fetch the URL with `sandbox_run`, or use another capability that can answer. Tell the user only if none can.',
+      'The Firecrawl Agent could not finish this task; the error above says why. That does not mean every web source is out of reach: call it once more with a shorter, more specific task, or fetch a specific page or feed with code (load the `sandbox` capability if it is not in your tool list and use `sandbox_run`), or use another capability that can answer. Tell the user only if none of these works.',
   };
 }

@@ -2,7 +2,6 @@ import { getRetryable } from '@langchain/core/errors';
 import {
   createAgent,
   createMiddleware,
-  ToolInvocationError,
   toolRetryMiddleware,
   type AgentMiddleware,
   type StructuredTool,
@@ -41,6 +40,7 @@ import { planCapabilityContext, renderGuideNote } from './operating-guides';
 import { capabilityGateState } from './middlewares/capability-gate';
 import { createContextGuardMiddleware } from './middlewares/context-guard';
 import { repetitionCapsFromEnv } from './middlewares/tool-repetition-guard';
+import { isToolInvocationError } from './middlewares/tool-error-result';
 import {
   createAttachmentRecallMiddleware,
   createByoHistorySanitizerMiddleware,
@@ -52,21 +52,6 @@ import {
   createToolRepetitionGuardMiddleware,
   createToolValidationMiddleware,
 } from './middlewares';
-
-/**
- * The model's arguments failed the tool's schema (LangChain's ToolNode
- * throws `ToolInvocationError` before the tool runs). Matched by class AND by
- * name / message shape: a bundle can carry the class twice (ESM and CJS
- * entry points), and then `instanceof` is false for the very error it names.
- */
-function isToolInvocationError(error: unknown): boolean {
-  if (error instanceof ToolInvocationError) return true;
-  if (!(error instanceof Error)) return false;
-  return (
-    error.name === 'ToolInvocationError' ||
-    /^Error invoking tool '.+' with kwargs /.test(error.message)
-  );
-}
 import {
   composePrompt,
   formatDateContext,
