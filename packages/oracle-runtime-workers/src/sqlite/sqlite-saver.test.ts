@@ -33,9 +33,15 @@ import {
   withTurnTimeNote,
 } from '../core/turn-time-note';
 import {
+  CHANNEL_CHOICE_NOTE_KWARG,
   CHANNEL_DELIVERY_NOTICE_KWARG,
   CHANNEL_REPLY_NOTE_KWARG,
+  channelChoiceNote,
+  userContent,
 } from '../channels/replies';
+import { CAPPED_META_KEY, cappedMetaOf } from '../core/middlewares/result-cap';
+import { withoutForwarded } from '../core/middlewares/dangling-tool-calls';
+import { FORWARDED_FROM_KEY } from '../core/subagent-as-tool';
 import {
   TURN_GUIDE_NOTE_KWARG,
   USAGE_CARRIED_KWARG,
@@ -850,6 +856,138 @@ describe('the turn time note kwarg', () => {
     expect(
       cleanAdditionalKwargs({ ...base, other: 'nope' }, true, 'O'),
     ).toEqual({ msgFromMatrixRoom: true, oracleName: 'O', ...base });
+  });
+});
+
+describe('runtime kwargs read after a checkpoint', () => {
+  const TS = '2026-11-13T08:00:00.000Z';
+
+  function loaded(
+    tuple: CheckpointTuple | undefined,
+    id: string,
+  ): BaseMessage | undefined {
+    const value = tuple?.checkpoint.channel_values['messages'];
+    const list: unknown[] = Array.isArray(value) ? value : [];
+    return list.find(
+      (m): m is BaseMessage =>
+        (m instanceof HumanMessage ||
+          m instanceof AIMessage ||
+          m instanceof ToolMessage) &&
+        m.id === id,
+    );
+  }
+
+  it('a tapped choice keeps its note on the live message and after reload, so tools read the title', async () => {
+    await runInDurableObject(stub('saver-choice-note'), async (_i, state) => {
+      const db = await DoSqliteDatabase.open(state, 'choice.db');
+      const saver = new SqliteSaver(db);
+      const note = channelChoiceNote({
+        id: 'oc:1:basic',
+        question: 'Which plan?',
+        key: 'basic',
+        title: 'Basic',
+      });
+      expect(note).toBeDefined();
+      const tapped = new HumanMessage({
+        id: 'h-tap',
+        content: withTurnTimeNote('Basic', note ?? ''),
+        additional_kwargs: { timestamp: TS, [CHANNEL_CHOICE_NOTE_KWARG]: note },
+      });
+      await put(saver, 'choice', [tapped]);
+
+      // The live object the rest of the turn (tools, middlewares) reads.
+      expect(tapped.additional_kwargs[CHANNEL_CHOICE_NOTE_KWARG]).toBe(note);
+      expect(userContent(tapped.content, tapped.additional_kwargs)).toBe(
+        'Basic',
+      );
+
+      const back = loaded(await saver.getTuple(config('choice')), 'h-tap');
+      expect(back?.additional_kwargs[CHANNEL_CHOICE_NOTE_KWARG]).toBe(note);
+      expect(userContent(back?.content ?? '', back?.additional_kwargs)).toBe(
+        'Basic',
+      );
+      await db.close();
+    });
+  });
+
+  it('a forwarded sub-agent call and a capped tool result keep their markers on the live message and after reload', async () => {
+    await runInDurableObject(stub('saver-runtime-marks'), async (_i, state) => {
+      const db = await DoSqliteDatabase.open(state, 'marks.db');
+      const saver = new SqliteSaver(db);
+      const forwardedCall = new AIMessage({
+        id: 'a-fwd',
+        content: '',
+        tool_calls: [{ id: 'sub_1', name: 'submit_section', args: {} }],
+        additional_kwargs: { [FORWARDED_FROM_KEY]: 'sub' },
+      });
+      const forwardedResult = new ToolMessage({
+        id: 't-fwd',
+        tool_call_id: 'sub_1',
+        name: 'submit_section',
+        content: 'ok',
+        additional_kwargs: { [FORWARDED_FROM_KEY]: 'sub' },
+      });
+      const meta = { id: 'res_1', size: 90_000, shown: 20_000 };
+      const capped = new ToolMessage({
+        id: 't-cap',
+        tool_call_id: 'c1',
+        name: 'search',
+        content: 'head … tail',
+        additional_kwargs: { [CAPPED_META_KEY]: meta, timestamp: TS },
+      });
+      const live = [forwardedCall, forwardedResult, capped];
+      await put(saver, 'marks', live);
+
+      const tuple = await saver.getTuple(config('marks'));
+      const reloaded = live.map((m) => loaded(tuple, m.id ?? ''));
+      for (const [fwdCall, fwdResult, cap] of [live, reloaded]) {
+        expect(fwdCall?.additional_kwargs[FORWARDED_FROM_KEY]).toBe('sub');
+        expect(fwdResult?.additional_kwargs[FORWARDED_FROM_KEY]).toBe('sub');
+        expect(cap && cappedMetaOf(cap)).toEqual(meta);
+      }
+      expect(
+        withoutForwarded(
+          reloaded.filter((m): m is BaseMessage => m !== undefined),
+        ).map((m) => m.id),
+      ).toEqual(['t-cap']);
+      await db.close();
+    });
+  });
+
+  it('still takes provider response kwargs off the live AI message and keeps its stamped timestamp across puts', async () => {
+    await runInDurableObject(
+      stub('saver-provider-kwargs'),
+      async (_i, state) => {
+        const db = await DoSqliteDatabase.open(state, 'provider.db');
+        const saver = new SqliteSaver(db);
+        const message = new AIMessage({
+          id: 'a-raw',
+          content: 'answer',
+          additional_kwargs: {
+            __raw_response: { choices: [{ delta: { content: 'answer' } }] },
+            tool_calls: [
+              {
+                id: 'raw_1',
+                type: 'function',
+                function: { name: 'search', arguments: '{' },
+              },
+            ],
+          },
+        });
+        await put(saver, 'provider', [message]);
+        expect(message.additional_kwargs.__raw_response).toBeUndefined();
+        expect(message.additional_kwargs.tool_calls).toBeUndefined();
+        const stamped = message.additional_kwargs.timestamp;
+        expect(typeof stamped).toBe('string');
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        await put(saver, 'provider', [message], 1);
+        expect(message.additional_kwargs.timestamp).toBe(stamped);
+        const back = loaded(await saver.getTuple(config('provider')), 'a-raw');
+        expect(back?.additional_kwargs.timestamp).toBe(stamped);
+        expect(back?.additional_kwargs.__raw_response).toBeUndefined();
+        await db.close();
+      },
+    );
   });
 });
 
