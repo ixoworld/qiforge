@@ -256,6 +256,28 @@ export const baseEnvSchema = z.object({
     .min(0)
     .default(LLM_MAX_OUTPUT_TOKENS_DEFAULT),
   /**
+   * The reply model's OpenRouter fallback models (`models`), comma-separated,
+   * tried in order once every provider of the requested model failed; `none`
+   * sends no fallback. Unset: `OPENROUTER_MAIN_FALLBACKS` in src/core/llm.ts
+   * (Gemini 3.1 Flash Lite, then Gemini 2.5 Flash Lite).
+   */
+  OPENROUTER_MAIN_FALLBACKS: z.string().optional(),
+  /**
+   * The providers OpenRouter tries first for the default model
+   * (`DEFAULT_MODEL`), comma-separated provider slugs in order (`openai,azure`),
+   * with the others still allowed after them; `none` sends no pin. Unset: the
+   * built-in routing (GPT-5.6 models pinned to `openai,azure`).
+   */
+  OPENROUTER_PROVIDER_ORDER: z.string().optional(),
+  /**
+   * The short message a channel user (WhatsApp) gets when their turn fails
+   * because the model could not be reached (provider errors, the key's
+   * limit, a timeout), at most once per chat per 10 minutes. A plugin's
+   * `channelFailureReply` (e.g. in the person's language) comes first.
+   * Unset: `CHANNEL_BUSY_REPLY_DEFAULT` (src/channels/busy-reply.ts).
+   */
+  CHANNEL_BUSY_REPLY: z.string().trim().min(1).max(500).optional(),
+  /**
    * LangGraph `recursionLimit` for one turn — the super-steps (a model call,
    * a batch of tool calls, a middleware hook) a turn may take before it fails
    * with `GraphRecursionError`. Default 600 (the Node runtime hard-codes 200);

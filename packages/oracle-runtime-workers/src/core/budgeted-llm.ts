@@ -21,6 +21,7 @@
 import { BaseCallbackHandler } from '@langchain/core/callbacks/base';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { LLMResult } from '@langchain/core/outputs';
+import { modelCallOf, type ModelCallRecord } from '../llm/model-call';
 import type { ChatOpenAIFields, Logger, ModelRole } from '../plugin-api/types';
 import {
   estimateContentTokens,
@@ -45,6 +46,12 @@ export interface BudgetedLlmOptions {
   signal?: AbortSignal;
   /** Receives the per-call trace (`[llm] start` / `end` / still running). */
   logger?: Logger;
+  /**
+   * Each call's record (`model-call.ts`), once, when the call ended or
+   * failed: read off the reply's `response_metadata.model_call` or the
+   * error. A call whose model keeps no record (a BYO model) is not reported.
+   */
+  onModelCall?: (call: ModelCallRecord) => void;
 }
 
 export interface BudgetedLlm extends LlmAdapter {
@@ -173,6 +180,8 @@ class TurnBudgetHandler extends BaseCallbackHandler {
     }
   >();
   private readonly logger: Logger;
+  /** Calls already handed to `onModelCall` (a call can reach the handler twice). */
+  private readonly reported = new Set<string>();
   private readonly onAbort = (): void => this.closeAll();
 
   constructor(private readonly options: BudgetedLlmOptions) {
@@ -263,8 +272,26 @@ class TurnBudgetHandler extends BaseCallbackHandler {
     this.traceStart(runId, extraParams, tags, metadata);
   }
 
+  private report(runId: string, source: unknown): void {
+    const { onModelCall } = this.options;
+    if (!onModelCall || this.reported.has(runId)) return;
+    const call = modelCallOf(source);
+    if (!call) return;
+    this.reported.add(runId);
+    try {
+      onModelCall(call);
+    } catch (error) {
+      this.logger.warn(
+        `[llm] model-call observer failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   handleLLMEnd(output: LLMResult, runId: string): void {
     this.traceEnd(runId, 'end');
+    const generation: unknown = output.generations[0]?.[0];
+    if (generation && typeof generation === 'object' && 'message' in generation)
+      this.report(runId, generation.message);
     const reservation = this.reservations.get(runId);
     if (reservation === undefined) return;
     this.reservations.delete(runId);
@@ -273,8 +300,9 @@ class TurnBudgetHandler extends BaseCallbackHandler {
       this.options.budget.settleModel(reservation.tokens, reported);
   }
 
-  handleLLMError(_error: unknown, runId: string): void {
+  handleLLMError(error: unknown, runId: string): void {
     this.traceEnd(runId, 'error');
+    this.report(runId, error);
     const reservation = this.reservations.get(runId);
     this.reservations.delete(runId);
     // A failed call keeps its reservation: the provider may have consumed

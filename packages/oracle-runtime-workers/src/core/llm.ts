@@ -1,8 +1,8 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { LangChainTracer } from '@langchain/core/tracers/tracer_langchain';
-import { ChatOpenAICompletions } from '@langchain/openai';
 import { Client } from 'langsmith';
 import type { ChatOpenAIFields, Logger, ModelRole } from '../plugin-api/types';
+import { PlatformChatModel } from '../llm/platform-chat-model';
 import {
   livenessFetchFor,
   livenessModelFields,
@@ -493,11 +493,37 @@ export const OPENROUTER_MODEL_MAP: Record<ProviderModelRole, string> = {
   embedding: 'text-embedding-3-small',
 };
 
-/** OpenRouter fallback models for the 'main' role (via `models`). */
+/**
+ * OpenRouter fallback models for the 'main' role (via `models`), unless the
+ * deployment sets `OPENROUTER_MAIN_FALLBACKS`. Both keep a repeated prompt
+ * prefix cached (Google's implicit caching), accept the tool schemas the
+ * runtime sends, and have a 1M-token window. OpenRouter moves to them only
+ * when every provider of the requested model failed.
+ */
 export const OPENROUTER_MAIN_FALLBACKS: readonly string[] = [
-  'qwen/qwen3-235b-a22b-thinking-2507',
+  'google/gemini-3.1-flash-lite',
   'google/gemini-2.5-flash-lite',
 ];
+
+/** The provider order every GPT-5.6 call is pinned to (see {@link openRouterProviderRouting}). */
+export const OPENROUTER_GPT_5_6_PROVIDER_ORDER: readonly string[] = [
+  'openai',
+  'azure',
+];
+
+/**
+ * A comma-separated list setting (`OPENROUTER_MAIN_FALLBACKS`,
+ * `OPENROUTER_PROVIDER_ORDER`): unset or blank → undefined (the built-in
+ * value), `none` → an empty list, anything else → its trimmed entries.
+ */
+export function parseListSetting(raw: unknown): string[] | undefined {
+  if (typeof raw !== 'string' || raw.trim() === '') return undefined;
+  if (raw.trim().toLowerCase() === 'none') return [];
+  return raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
 
 export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 
@@ -517,8 +543,21 @@ export type OpenRouterProviderRouting =
   | { order: string[]; allow_fallbacks: true }
   | { sort: 'latency' };
 
+/** A deployment's own provider order (`OPENROUTER_PROVIDER_ORDER`). */
+export interface ProviderOrderSetting {
+  /** The deployment's default model: the one the setting is for. */
+  defaultModelId: string;
+  /** The providers to try first, in order; empty = no pin. */
+  order: readonly string[];
+}
+
 /**
  * The `provider` field of a call to `modelId` on `role` on OpenRouter.
+ *
+ * A deployment that sets `OPENROUTER_PROVIDER_ORDER` decides it for its
+ * default model (`DEFAULT_MODEL`) on every role: the listed providers first,
+ * in order, with `allow_fallbacks` (`none` sends no pin). Every other call
+ * follows the rules below.
  *
  * A GPT-5.6 model goes to OpenAI first, then Azure: both keep a repeated
  * prompt prefix cached between calls seconds apart, while the faster Amazon
@@ -537,9 +576,20 @@ export type OpenRouterProviderRouting =
 export function openRouterProviderRouting(
   modelId: string,
   role: ModelRole,
+  setting?: ProviderOrderSetting,
 ): { provider?: OpenRouterProviderRouting } {
+  if (setting && modelId === setting.defaultModelId) {
+    if (setting.order.length > 0)
+      return { provider: { order: [...setting.order], allow_fallbacks: true } };
+    return role === 'main' ? { provider: { sort: 'latency' } } : {};
+  }
   if (OPENROUTER_GPT_5_6_IDS.includes(modelId))
-    return { provider: { order: ['openai', 'azure'], allow_fallbacks: true } };
+    return {
+      provider: {
+        order: [...OPENROUTER_GPT_5_6_PROVIDER_ORDER],
+        allow_fallbacks: true,
+      },
+    };
   return role === 'main' ? { provider: { sort: 'latency' } } : {};
 }
 
@@ -612,10 +662,10 @@ export const NEBIUS_MODEL_MAP: Record<ProviderModelRole, string> = {
  * no context budget is derived for them.
  */
 const NON_CATALOG_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
-  // OpenRouter role map and `main` fallbacks.
+  // OpenRouter role map and `main` fallbacks (Gemini 3.1 Flash Lite is in
+  // the catalog).
   'openai/gpt-oss-120b': 131_072,
   'meta-llama/llama-3.1-8b-instruct': 131_072,
-  'qwen/qwen3-235b-a22b-thinking-2507': 131_072,
   'google/gemini-2.5-flash-lite': 1_048_576,
   // BYO provider-native ids (`BYO_ROLE_MODELS`, `BYO_PROVIDER_MODELS` in
   // `src/llm/byo-catalog.ts`) the curated catalog does not list. The
@@ -680,6 +730,17 @@ export interface LlmEnv {
   TURN_TIMEOUT_MS?: number;
   /** Most tokens one call may generate; 0 = the model's own limit. */
   LLM_MAX_OUTPUT_TOKENS?: number;
+  /**
+   * The `main` role's fallback models, comma-separated (`none` = no
+   * fallback); unset = {@link OPENROUTER_MAIN_FALLBACKS}.
+   */
+  OPENROUTER_MAIN_FALLBACKS?: string;
+  /**
+   * The providers OpenRouter tries first for the default model, in order,
+   * comma-separated (`none` = no pin); unset = the built-in routing
+   * ({@link openRouterProviderRouting}).
+   */
+  OPENROUTER_PROVIDER_ORDER?: string;
 }
 
 /** The liveness-related env keys, as validated config (numbers) or raw Worker env (strings). */
@@ -780,6 +841,22 @@ export function llmEnvFromWorkerEnv(env: Record<string, unknown>): LlmEnv {
     NEBIUS_API_KEY: str('NEBIUS_API_KEY'),
     ...platformStreamLivenessEnv(env),
     ...outputCapEnv(env),
+    ...routingEnv(env),
+  };
+}
+
+/** `OPENROUTER_MAIN_FALLBACKS` and `OPENROUTER_PROVIDER_ORDER` of `env`, when set as strings. */
+export function routingEnv(env: {
+  OPENROUTER_MAIN_FALLBACKS?: unknown;
+  OPENROUTER_PROVIDER_ORDER?: unknown;
+}): Pick<LlmEnv, 'OPENROUTER_MAIN_FALLBACKS' | 'OPENROUTER_PROVIDER_ORDER'> {
+  return {
+    ...(typeof env.OPENROUTER_MAIN_FALLBACKS === 'string'
+      ? { OPENROUTER_MAIN_FALLBACKS: env.OPENROUTER_MAIN_FALLBACKS }
+      : {}),
+    ...(typeof env.OPENROUTER_PROVIDER_ORDER === 'string'
+      ? { OPENROUTER_PROVIDER_ORDER: env.OPENROUTER_PROVIDER_ORDER }
+      : {}),
   };
 }
 
@@ -885,6 +962,13 @@ export function createLlmAdapter(
   const mainEffort = env.MAIN_REASONING_EFFORT ?? 'medium';
   const headers = openRouterAttributionHeaders(env.ORACLE_NAME);
   const outputCap = outputCapModelFields(env);
+  const mainFallbacks = parseListSetting(env.OPENROUTER_MAIN_FALLBACKS) ?? [
+    ...OPENROUTER_MAIN_FALLBACKS,
+  ];
+  const configuredOrder = parseListSetting(env.OPENROUTER_PROVIDER_ORDER);
+  const providerOrder: ProviderOrderSetting | undefined = configuredOrder
+    ? { defaultModelId, order: configuredOrder }
+    : undefined;
 
   const modelForRole = (role: ModelRole): string => {
     if (role === 'main' || role === 'summarizer') return defaultModelId;
@@ -908,7 +992,9 @@ export function createLlmAdapter(
         : modelForRole(role);
 
     const fallbackKwargs: Record<string, unknown> =
-      role === 'main' ? { models: [...OPENROUTER_MAIN_FALLBACKS] } : {};
+      role === 'main' && mainFallbacks.length > 0
+        ? { models: [...mainFallbacks] }
+        : {};
 
     // `MAIN_REASONING_EFFORT` is for the reply only; helper calls (the
     // summarizer included, although it runs on the main model) reason at
@@ -930,7 +1016,7 @@ export function createLlmAdapter(
     )) {
       if (typeof value === 'string') overrideHeaders[key] = value;
     }
-    return new ChatOpenAICompletions({
+    const chat = new PlatformChatModel({
       temperature: 0.8,
       maxRetries: 2,
       ...livenessModelFields(liveness),
@@ -953,12 +1039,14 @@ export function createLlmAdapter(
       modelKwargs: {
         include_reasoning: true,
         ...fallbackKwargs,
-        ...openRouterProviderRouting(model, role),
+        ...openRouterProviderRouting(model, role, providerOrder),
         reasoning: reasoningKwargs,
         ...openRouterPromptCacheKwargs(model),
         ...asRecord(paramsModelKwargs),
       },
     });
+    chat.reporting = { role: String(role), logger };
+    return chat;
   };
 
   return {
@@ -1010,7 +1098,7 @@ function createNebiusAdapter(
       `[llm] creating model — provider=nebius, role=${String(role)}, model=${model}`,
     );
     const configuration = asRecord(paramsConfiguration);
-    return new ChatOpenAICompletions({
+    const chat = new PlatformChatModel({
       // Cold for classification (guard), platform default otherwise.
       temperature: role === 'guard' ? 0 : 0.8,
       maxRetries: 2,
@@ -1031,6 +1119,8 @@ function createNebiusAdapter(
         }),
       },
     });
+    chat.reporting = { role: String(role), logger };
+    return chat;
   };
 
   return {

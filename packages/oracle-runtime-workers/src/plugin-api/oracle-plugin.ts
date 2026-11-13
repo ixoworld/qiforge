@@ -4,6 +4,7 @@ import type {
   RequestAdmissionResult,
 } from './request-admission';
 import type { ChannelEventResult, OracleChannelEvent } from './channel-events';
+import type { ModelCallRecord } from '../llm/model-call';
 import type { z } from 'zod';
 import type { PluginRoute } from '../shell/app';
 import type {
@@ -39,6 +40,14 @@ export type { PluginRoute };
 
 /** HTTP methods a plugin route can be mounted on. */
 export type PluginRouteMethod = PluginRoute['method'];
+
+/** Why a channel turn failed, as `channelFailureReply` is told. */
+export interface ChannelFailureInfo {
+  /** The failure's class: `rate_limit`, `billing`, `auth`, `timeout`, `server`, `network` or `unknown`. */
+  kind: string;
+  /** The provider's HTTP status, when there was one. */
+  status?: number;
+}
 
 /**
  * Base class every plugin implements. Identical to the Node runtime's contract
@@ -165,6 +174,34 @@ export abstract class OraclePlugin {
     event: OracleChannelEvent,
     ctx: RuntimeContext,
   ): Promise<ChannelEventResult>;
+
+  /**
+   * Every platform model call of a turn (any role: the reply, the summary,
+   * a sub-agent, a plugin's own `ctx.llm` call), once it ended or failed:
+   * requested and served model, provider, whether a fallback answered,
+   * tokens, cost, duration and the error's class. For analytics: the record
+   * holds no message content, tool arguments or user ids. Called in the
+   * background after the call, never delaying the turn; a hook that throws
+   * is logged and ignored. `ctx.user` / `ctx.session` are the turn's.
+   */
+  onModelCall?(
+    call: ModelCallRecord,
+    ctx: RuntimeContext,
+  ): void | Promise<void>;
+
+  /**
+   * The short message a channel user (WhatsApp) gets instead of silence
+   * when their turn failed because the model could not be reached
+   * (provider errors, the platform key's limit, a timeout), e.g. in the
+   * language the plugin keeps for the person. The first plugin to return
+   * a non-empty text decides; otherwise `CHANNEL_BUSY_REPLY`, else a short
+   * English default. Sent at most once per chat per 10 minutes. Must not
+   * call a model: the model is what failed.
+   */
+  channelFailureReply?(
+    ctx: RuntimeContext,
+    failure: ChannelFailureInfo,
+  ): string | undefined | Promise<string | undefined>;
 
   /**
    * Read-only accessors this plugin exposes to other plugins via `ctx.shared`.

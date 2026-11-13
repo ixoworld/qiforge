@@ -2334,6 +2334,85 @@ The client may resubmit; nothing is resubmitted for it. A tool whose own
 model call stalls fails with an outcome treated as unknown, so a write it
 was making keeps its claim (below).
 
+## Model calls: routing record, fallbacks and analytics
+
+Every platform model call (OpenRouter or Nebius, any role) logs one line when
+it ends or fails (`src/llm/platform-chat-model.ts`, `src/llm/model-call.ts`):
+
+```
+[llm-call] {"role":"main","requestedModel":"openai/gpt-5.6-luna","servedModel":"openai/gpt-5.6-luna","provider":"OpenAI","generationId":"gen-…","fallback":false,"modelFallback":false,"providerFallback":false,"promptTokens":37000,"cachedTokens":31500,"cacheWriteTokens":0,"outputTokens":105,"reasoningTokens":30,"costUsd":0.0021,"durationMs":2400,"ok":true,"finishReason":"stop"}
+```
+
+- `servedModel` / `provider` are what OpenRouter reports on the stream (the
+  model and upstream provider that answered). `modelFallback` is true when a
+  model of the `models` list answered (`OPENROUTER_MAIN_FALLBACKS`),
+  `providerFallback` when the requested model answered from a provider other
+  than the first of `provider.order` (e.g. Amazon Bedrock after OpenAI and
+  Azure); `fallback` is either.
+- A failed call logs the same line at `warn`, with `ok: false`, `errorKind`
+  (`rate_limit`, `billing`, `auth`, `timeout`, `server`, `network`,
+  `unknown`), `errorStatus`, `errorCode` and `detail` (the provider's message,
+  cut to 300 characters).
+- After a fallback or a failure that has a generation id, the turn reads
+  OpenRouter's generation record in the background (`waitUntil`, 3 s and 7 s
+  after the call, never delaying the reply) and logs each provider OpenRouter
+  tried:
+  `[llm-call-attempts] {"generationId":"gen-…","attempts":[{"provider":"OpenAI","status":400,…},{"provider":"Azure","status":400,…},{"provider":"Amazon Bedrock","status":200,…}]}`.
+  A `400` on the first providers is a request the provider refuses (our bug);
+  a `429` or `5xx` is capacity.
+- The stored reply carries the record as `response_metadata.model_call`
+  (LangSmith shows it on the run), and `response_metadata.usage` is the
+  provider's usage once. Before 0.52.0 it was exactly twice the real value
+  (tokens and cost): OpenRouter's last streamed chunk carries the usage with
+  a choice, and LangChain added it to the message twice. `usage_metadata`
+  was always right.
+- Plugins get each record of a turn through `OraclePlugin.onModelCall(call,
+ctx)`, in the background (for an analytics sink). The record holds no
+  message content, tool arguments or user ids.
+
+### Tool schemas OpenAI refuses
+
+OpenAI and Azure compile each function parameter's `pattern` with Python's
+`re` and refuse the whole request when one does not compile (HTTP 400
+`invalid_function_parameters`, "… is not a 'regex'"): a Unicode property
+escape (`\p{L}`, from a zod `.regex(/…/u)`), a JavaScript named group
+(`(?<name>…)`), `\k<name>`, `\cX`, `[^]`, a variable-width look-behind, a
+`\u{…}` escape. On OpenRouter the call then goes to the model's other
+providers and its fallback models. The platform model leaves such a pattern
+out of the schema the model is shown (the tool still checks its arguments
+against its own schema, the pattern included) and logs once per isolate:
+
+`[tool-schema] tool "set_chat_language": the pattern of properties.language is not shown to the model (bad escape \p; OpenAI and Azure refuse the whole request for it); the tool still checks it when called. Pattern: …`
+
+A pattern Python compiles is sent unchanged. The rules were measured on
+79 patterns against OpenAI and Azure (`src/llm/python-regex.test.ts`).
+
+### Reasoning and tool output never reach a chat
+
+A chat reply (WhatsApp, Matrix) never carries text inside `<think>`,
+`<thinking>` or `<reasoning>` tags, before an unmatched closing tag or
+after an unclosed opening one, and a model step whose text quotes a JSON tool
+result of the thread verbatim is not delivered at all (`src/delivery/leak-guard.ts`;
+`[delivery] run …: N model step(s) not delivered: …`). On 13 Nov 2026 a
+fallback model's provider split its stream wrongly and its thinking, quoting
+the turn's tool result, went to a person as the reply.
+
+### Channel turns the model could not answer
+
+When a channel turn fails because its model call failed (every provider and
+fallback failed, the key's limit `402`/`403`, a timeout), the person gets one
+short message instead of silence (`src/channels/busy-reply.ts`): a plugin's
+`channelFailureReply` (in the person's language), else `CHANNEL_BUSY_REPLY`,
+else "Sorry, I'm a bit busy right now. Please try again in a few minutes."
+At most one per chat (channel binding) per 10 minutes; a failure inside that
+time ends the run with nothing to send (and no gateway failure reply). The
+run ends `finished` with the message as its plan, its row keeps the error,
+and nothing is retried. Lines: `[channels] run …: the model could not answer
+(<kind> <status>); sent the busy reply` or `…; a busy reply went to this chat
+N s ago, so nothing is sent`. An event turn reaches the oracle only while the
+person's WhatsApp window is open, and the gateway checks the window again
+before sending. A tool or runtime failure keeps the run `failed`.
+
 ## Write claims and turn usage
 
 `turn_write_claims` (in the user's run ledger, next to `turn_runs` and
