@@ -222,11 +222,12 @@ describe('the delivery note the model reads', () => {
 });
 
 describe('turn features', () => {
-  it('advertise delivery notices, permission events and rich messages', () => {
+  it('advertise delivery notices, permission events, rich messages and rich events', () => {
     expect(CHANNEL_TURN_FEATURES).toEqual([
       'delivery_notice',
       'permission_event',
       'rich_messages',
+      'rich_events',
     ]);
   });
 });
@@ -278,7 +279,7 @@ describe('ChannelTurnBody with rich messages', () => {
     ).toBe(false);
   });
 
-  it('refuses render and choice with a notice or an event', () => {
+  it('refuses render and choice with a notice; an event takes render, never choice', () => {
     const withNotice = {
       ...noticeTurn,
       sessionPolicy: 'continue',
@@ -305,9 +306,29 @@ describe('ChannelTurnBody with rich messages', () => {
       event,
     };
     expect(ChannelTurnBody.safeParse(eventTurn).success).toBe(true);
-    expect(ChannelTurnBody.safeParse({ ...eventTurn, render }).success).toBe(
-      false,
-    );
+    const withRender = ChannelTurnBody.safeParse({ ...eventTurn, render });
+    expect(withRender.success).toBe(true);
+    expect(withRender.data?.render).toEqual(render);
+    const identityTurn = {
+      ...eventTurn,
+      requestId: 'identity:link_1:passed',
+      event: {
+        kind: 'identity_check_updated' as const,
+        linkId: 'link_1',
+        status: 'passed' as const,
+      },
+      render,
+    };
+    expect(ChannelTurnBody.safeParse(identityTurn).success).toBe(true);
+    const tapped = ChannelTurnBody.safeParse({
+      ...eventTurn,
+      render,
+      choice: { id: 'oc:3f9a01c2:small' },
+    });
+    expect(tapped.success).toBe(false);
+    expect(tapped.error?.issues.map((issue) => issue.path)).toEqual([
+      ['choice'],
+    ]);
   });
 });
 

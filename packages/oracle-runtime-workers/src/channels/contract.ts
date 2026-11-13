@@ -299,17 +299,21 @@ const ChannelTurnFields = z.strictObject({
   notice: ChannelFileNotice.optional(),
   /**
    * An event instead of a message from the person (`ChannelEvent`): no
-   * message, files, quote, notice or session; `sessionPolicy: 'continue'`;
-   * the request id is `channelEventRequestId(event)`. Sent only to a runtime
-   * whose turn results list `permission_event` in `features` (both kinds).
+   * message, files, quote, notice, session or tapped `choice`;
+   * `sessionPolicy: 'continue'`; the request id is
+   * `channelEventRequestId(event)`. It may carry `render`, so the answer to
+   * an event can hold the same rich parts as any answer. Sent only to a
+   * runtime whose turn results list `permission_event` in `features` (both
+   * kinds).
    */
   event: ChannelEvent.optional(),
   /**
    * What the gateway can show beyond text for this binding (reply buttons,
    * lists, link buttons, cards), and the link-button labels and link origins
-   * it accepts. Sent only to a runtime whose turn results list
-   * `rich_messages`, and only with a message (never with a notice or an
-   * event). Absent: the reply is text only.
+   * it accepts. With a message: sent only to a runtime whose turn results
+   * list `rich_messages`. With an event: only to one that lists both
+   * `rich_messages` and `rich_events` (0.50.0 refuses it there). Never with
+   * a notice. Absent: the reply is text only.
    */
   render: RenderCapabilityWire.optional(),
   /**
@@ -333,7 +337,7 @@ export const ChannelTurnBody = ChannelTurnFields.superRefine((body, ctx) => {
       'replyTo',
       'notice',
       'sessionId',
-      'render',
+      // An event has no tap; `render` is allowed (`rich_events`).
       'choice',
     ] as const)
       if (body[field] !== undefined)
@@ -397,11 +401,15 @@ export type ChannelTurnInput = z.infer<typeof ChannelTurnBody>;
  * may carry `render` (what the gateway can show) and `choice` (a tapped
  * option); its plan may then hold `choices`, `link_button` and `cards`
  * parts (a runtime without it refuses either field with 400).
+ * `rich_events`: an event turn may carry `render` too, and its answer is
+ * planned exactly like a message turn's (0.50.0 lists `rich_messages`
+ * without it and refuses `render` with an event with 400).
  */
 export const CHANNEL_TURN_FEATURES = [
   'delivery_notice',
   'permission_event',
   'rich_messages',
+  'rich_events',
 ] as const;
 export type ChannelTurnFeature = (typeof CHANNEL_TURN_FEATURES)[number];
 

@@ -1228,6 +1228,7 @@ describe('delivery notices', () => {
       'delivery_notice',
       'permission_event',
       'rich_messages',
+      'rich_events',
     ]);
     expect(first.result.status).toBe('running');
     const polled = await stub.poll(message);
@@ -1235,12 +1236,18 @@ describe('delivery notices', () => {
       'delivery_notice',
       'permission_event',
       'rich_messages',
+      'rich_events',
     ]);
     await stub.fail(first.result.runId);
     const failed = await stub.poll(message);
     expect(failed?.ok && failed.result).toMatchObject({
       status: 'failed',
-      features: ['delivery_notice', 'permission_event', 'rich_messages'],
+      features: [
+        'delivery_notice',
+        'permission_event',
+        'rich_messages',
+        'rich_events',
+      ],
     });
     const second = await stub.submit({ ...message, requestId: 'wa:two' });
     if (!second.ok) throw new Error('Turn rejected');
@@ -1251,7 +1258,12 @@ describe('delivery notices', () => {
       ok: true,
       result: {
         status: 'finished',
-        features: ['delivery_notice', 'permission_event', 'rich_messages'],
+        features: [
+          'delivery_notice',
+          'permission_event',
+          'rich_messages',
+          'rich_events',
+        ],
       },
     });
   });
@@ -1267,7 +1279,12 @@ describe('delivery notices', () => {
     expect(noticed.result).toMatchObject({
       status: 'running',
       sessionId: first.result.sessionId,
-      features: ['delivery_notice', 'permission_event', 'rich_messages'],
+      features: [
+        'delivery_notice',
+        'permission_event',
+        'rich_messages',
+        'rich_events',
+      ],
     });
     expect(noticed.result.runId).not.toBe(first.result.runId);
     const request = JSON.parse(
@@ -1408,7 +1425,12 @@ describe('delivery notices', () => {
     expect(answered.result).toMatchObject({
       status: 'running',
       sessionId: first.result.sessionId,
-      features: ['delivery_notice', 'permission_event', 'rich_messages'],
+      features: [
+        'delivery_notice',
+        'permission_event',
+        'rich_messages',
+        'rich_events',
+      ],
     });
     const request = JSON.parse(
       (await stub.run(answered.result.runId))!.request,
@@ -1449,6 +1471,142 @@ describe('delivery notices', () => {
     });
   });
 
+  it('rich events: an event turn carries render like a message turn, its reply holds every rich part, and a tap on its choices counts', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('rich-events');
+    const render = {
+      v: 1 as const,
+      kinds: ['reply_buttons', 'list', 'link_button', 'card', 'carousel'],
+      linkLabels: ['allow', 'start_check'],
+      linkOrigins: ['https://dev.self.ixo.earth'],
+    };
+    const first = await stub.submit({ ...message, render });
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.finish(first.result.runId, undefined, 'Here is the card.');
+    await stub.deliverReply();
+    const normalised = {
+      kinds: ['reply_buttons', 'list', 'link_button', 'card', 'carousel'],
+      linkLabels: ['allow', 'start_check'],
+      linkOrigins: ['https://dev.self.ixo.earth'],
+    };
+    const runOf = async (runId: string) =>
+      JSON.parse((await stub.run(runId))!.request) as {
+        channel: Record<string, unknown>;
+      };
+    // The message turn's render, as the agent's surface reads it.
+    expect((await runOf(first.result.runId)).channel.render).toEqual(
+      normalised,
+    );
+    // Both event kinds take the same render, never a tapped choice.
+    const permission: ChannelTurnInput = {
+      ...message,
+      message: undefined,
+      requestId: 'permission:card_1:allowed',
+      sessionPolicy: 'continue',
+      event: {
+        kind: 'permission_answered',
+        permissionId: 'card_1',
+        status: 'allowed',
+      },
+      render,
+    };
+    const identity: ChannelTurnInput = {
+      ...permission,
+      requestId: 'identity:link_1:passed',
+      event: {
+        kind: 'identity_check_updated',
+        linkId: 'link_1',
+        status: 'passed',
+      },
+    };
+    const answered = await stub.submit(permission);
+    if (!answered.ok) throw new Error(`Event refused: ${answered.code}`);
+    expect(answered.result.sessionId).toBe(first.result.sessionId);
+    const eventRun = await runOf(answered.result.runId);
+    expect(eventRun.channel.render).toEqual(normalised);
+    expect(eventRun.channel).not.toHaveProperty('choice');
+    // Every kind of part an answer to a message can hold.
+    const choices = {
+      body: 'What next?',
+      style: 'buttons' as const,
+      options: [
+        { id: 'oc:5e1f2a3b:check', title: 'Start the check' },
+        { id: 'oc:5e1f2a3b:later', title: 'Later' },
+      ],
+    };
+    const plan: ReplyPlan = {
+      v: 1,
+      parts: [
+        { partId: 'p1', kind: 'text', text: 'Thanks, you allowed it.' },
+        {
+          partId: 'p2',
+          kind: 'link_button',
+          text: 'Open this link: https://dev.self.ixo.earth/l/tok',
+          link: {
+            body: 'Open this link.',
+            url: 'https://dev.self.ixo.earth/l/tok',
+            label: 'start_check',
+          },
+        },
+        {
+          partId: 'p3',
+          kind: 'cards',
+          text: 'Your check: https://dev.self.ixo.earth/l/tok',
+          cards: {
+            body: 'Your check:',
+            items: [
+              {
+                title: 'Identity check',
+                body: 'Takes 2 minutes',
+                imageUrl: 'https://dev.self.ixo.earth/card.png',
+                link: {
+                  url: 'https://dev.self.ixo.earth/l/tok',
+                  label: 'start_check',
+                },
+              },
+            ],
+          },
+        },
+        {
+          partId: 'p4',
+          kind: 'choices',
+          text: 'What next?\n\n1. Start the check\n2. Later',
+          choices,
+        },
+      ],
+    };
+    await stub.finish(answered.result.runId, plan, '');
+    // The choices an event's reply offers are kept like a message reply's.
+    expect(await stub.recordChoices(answered.result.sessionId, plan)).toBe(1);
+    const polled = await stub.poll(permission);
+    expect(polled?.ok && polled.result).toMatchObject({
+      status: 'finished',
+      plan,
+    });
+    await stub.deliverReply();
+    // A later tap on a button the event's reply offered is resolved.
+    const tap = await stub.submit({
+      ...message,
+      requestId: 'wa:tap-after-event',
+      message: 'Start the check',
+      sessionPolicy: 'continue',
+      render,
+      choice: { id: 'oc:5e1f2a3b:check' },
+    });
+    if (!tap.ok) throw new Error(`Tap refused: ${tap.code}`);
+    expect(tap.result.sessionId).toBe(first.result.sessionId);
+    expect((await runOf(tap.result.runId)).channel.choice).toEqual({
+      id: 'oc:5e1f2a3b:check',
+      key: 'check',
+      title: 'Start the check',
+      question: 'What next?',
+    });
+    const updated = await stub.submit(identity);
+    if (!updated.ok) throw new Error(`Event refused: ${updated.code}`);
+    expect((await runOf(updated.result.runId)).channel.render).toEqual(
+      normalised,
+    );
+  });
+
   it('replays by request id: the same notice again is the same run, a changed one a conflict', async () => {
     const stub = env.CHANNEL_TURNS_TEST.getByName('notice-replay');
     const first = await stub.submit(message);
@@ -1467,7 +1625,12 @@ describe('delivery notices', () => {
         runId: a.result.runId,
         status: 'finished',
         text: 'Fixed.',
-        features: ['delivery_notice', 'permission_event', 'rich_messages'],
+        features: [
+          'delivery_notice',
+          'permission_event',
+          'rich_messages',
+          'rich_events',
+        ],
       },
     });
     expect(await stub.count()).toBe(2);

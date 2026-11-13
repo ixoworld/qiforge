@@ -112,7 +112,9 @@ same reply reads as normal text on Matrix, the Portal and any other client.
 in `features`. A gateway that has seen it sends a `render` object with each
 message turn: the element kinds it can show, the link-button labels it knows,
 and the link origins its deployment approves (gateway configuration, not the
-oracle's). Only then does the model get the tools below, plus a "Buttons in
+oracle's). Turn results also list `rich_events`: a gateway that has seen both
+sends `render` with event turns too (a permission card answered, an identity
+check updated), so a reply to an event can use the same tools and helpers. Only then does the model get the tools below, plus a "Buttons in
 this chat" prompt section placed after your own instructions. The first turn
 after a runtime or gateway deploy is therefore plain text; the next ones are
 rich.
