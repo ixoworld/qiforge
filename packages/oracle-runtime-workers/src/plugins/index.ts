@@ -68,6 +68,7 @@ export * from './agui';
 export * from './ixo-transaction';
 export * from './ixo-chain';
 export * from './pod-creator';
+export * from './oracle-payments';
 export * from './credentials';
 
 export const memoryPlugin = new MemoryPlugin();

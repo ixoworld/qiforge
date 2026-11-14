@@ -18,6 +18,7 @@ import type {
   PluginSubAgent,
   PluginTool,
   RuntimeContext,
+  TurnScope,
 } from './types';
 
 /**
@@ -123,6 +124,13 @@ export abstract class OraclePlugin {
    * plugin explicitly wraps one in a tool.
    */
   getDecisions?(ctx: PluginContext): DecisionRegistration[];
+
+  /**
+   * Narrow this turn before anything is collected — see {@link TurnScope}.
+   * Runs once per `createMainAgent`, before `getRequestTools`. A hook that
+   * throws fails CLOSED: the turn is restricted to this plugin's own tools.
+   */
+  getTurnScope?(rtCtx: RuntimeContext): Promise<TurnScope | undefined>;
 
   /**
    * Request-time tool contributions. Called once per `createMainAgent`

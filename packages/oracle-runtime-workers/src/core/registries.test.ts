@@ -276,6 +276,56 @@ describe('ToolRegistry', () => {
   });
 });
 
+describe('ToolRegistry.collectTurnScope', () => {
+  it('intersects allowlists, keeps the first commerce answer and joins overlays', async () => {
+    const reg = new ToolRegistry();
+    reg.register(
+      makePlugin({
+        name: 'payments',
+        getTurnScope: async () => ({
+          commerce: { mode: 'support' },
+          allowPlugins: ['payments', 'memory', 'weather'],
+          promptOverlay: 'front desk',
+        }),
+      }),
+    );
+    reg.register(
+      makePlugin({
+        name: 'compliance',
+        getTurnScope: async () => ({
+          allowPlugins: ['payments', 'memory'],
+          promptOverlay: 'be careful',
+        }),
+      }),
+    );
+    expect(await reg.collectTurnScope(makeRuntimeContext())).toEqual({
+      commerce: { mode: 'support' },
+      allowPlugins: ['payments', 'memory'],
+      promptOverlay: 'front desk\n\nbe careful',
+    });
+  });
+
+  it('fails closed: a throwing hook restricts the turn to its own plugin', async () => {
+    const reg = new ToolRegistry();
+    reg.register(
+      makePlugin({
+        name: 'payments',
+        getTurnScope: async () => {
+          throw new Error('kv unavailable');
+        },
+      }),
+    );
+    const error = vi.fn();
+    const scope = await reg.collectTurnScope(
+      makeRuntimeContext({
+        logger: { log: vi.fn(), warn: vi.fn(), error, debug: vi.fn() },
+      }),
+    );
+    expect(scope).toEqual({ allowPlugins: ['payments'] });
+    expect(String(error.mock.calls[0]?.[0])).toContain('kv unavailable');
+  });
+});
+
 describe('SubAgentRegistry', () => {
   it('collects, exposes wrapped names per plugin and detects collisions', async () => {
     const reg = new SubAgentRegistry();
