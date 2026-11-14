@@ -1,5 +1,11 @@
 # @ixo/oracle-runtime-workers
 
+## 0.56.0
+
+### Minor Changes
+
+- [#548](https://github.com/ixoworld/qiforge/pull/548) [`0b12cf0`](https://github.com/ixoworld/qiforge/commit/0b12cf070303e910e48f79d3e7508cdd242c438b) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Matrix gateway: the planned recycle after a number of sends is off by default (`MATRIX_RECYCLE_AFTER_SENDS` default 0, was 300). It was added against a fake-indexeddb leak of ~250 KB per encrypted send, which the bot SDK has pruned since its first release (`cryptoStoreTransactions` in `/matrix/status` stays at a handful). The recycle restarts the bot in the same isolate, so it never returned the crypto WASM's memory, and under steady load it fired every few minutes, cancelling sends still waiting in the scheduler and holding every gateway call until the bot was back. Set `MATRIX_RECYCLE_AFTER_SENDS` to a positive count to opt back in; other restarts (send watchdog, device rotation, Cloudflare resets) are unchanged.
+
 ## 0.55.0
 
 ### Minor Changes
