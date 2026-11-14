@@ -1,5 +1,11 @@
 # @ixo/oracle-runtime-workers
 
+## 0.56.1
+
+### Patch Changes
+
+- [#550](https://github.com/ixoworld/qiforge/pull/550) [`146f6f3`](https://github.com/ixoworld/qiforge/commit/146f6f3f8f246087392b83cbb734ad17a1fa0892) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Matrix gateway: bot SDK 0.7.1. A restart of the gateway bot (planned recycle, send watchdog, token rejection) that a gateway call raced used to start a second bot beside the stop and leave its sync loop running for the life of the isolate, each with its own Matrix client and crypto machine. On the Yo mainnet gateway 9–15 of them piled up per isolate and it was killed four times for exceeding the 128 MB memory limit (IXO-6552). Starts and stops are now serialised in the SDK, a second loop is never left running, and `/matrix/status` shows `syncLoops` (1 while running).
+
 ## 0.56.0
 
 ### Minor Changes
