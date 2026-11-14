@@ -1236,3 +1236,399 @@ describe('identity-check events', () => {
     expect(warnings.join('\n')).toContain('identity check event: self_unread');
   });
 });
+
+describe('identity-check starts: tries left and when they can try again', () => {
+  const iso = (seconds: number) => new Date(NOW + seconds * 1000).toISOString();
+  const FIVE_HOURS = 5 * 3600;
+  const atLimit = {
+    resetsAt: iso(FIVE_HOURS),
+    retryAfterSeconds: FIVE_HOURS,
+    startsLeft: 0,
+    startsMax: 3,
+    windowHours: 6,
+  };
+  const statusRoutes = (body: Record<string, unknown>) => ({
+    [`GET ${LIST_URL}`]: () => json({ permissions: [allowedCard] }),
+    [`GET ${LINKS}/lnk_1`]: () =>
+      json({
+        linkId: 'lnk_1',
+        updatedAt: '2026-11-11T09:00:00.000Z',
+        expiresAt: '2026-11-11T09:15:00.000Z',
+        ...body,
+      }),
+  });
+  const status = async (body: Record<string, unknown>) => {
+    const { adapter } = recordingUcan();
+    const { tools: t } = tools(statusRoutes(body));
+    return (await run(
+      t.credentials_action_status,
+      { action: 'self.identity-check', ref: 'lnk_1' },
+      channelCtx(adapter),
+    )) as Record<string, unknown> & { message: string; hint: string };
+  };
+  const eventReply = async (body: Record<string, unknown>) => {
+    const { adapter } = recordingUcan();
+    const { fetchImpl } = routedFetch(statusRoutes(body));
+    const kv = createMemoryUserKv();
+    await recordLink(kv, 'lnk_1', 'card_1');
+    const kit = createCredentials({
+      cfg: testConfig(),
+      oracle: { name: '' },
+      verifier: null,
+      memo: new VerifierEntryMemo(),
+      fetchImpl,
+      sleep: async () => undefined,
+      now: () => NOW,
+    });
+    const answer = await kit.identityCheckEvent(
+      {
+        kind: 'identity_check_updated',
+        linkId: 'lnk_1',
+        status: 'failed',
+        requestId: 'identity:lnk_1:failed',
+      },
+      channelCtx(adapter, { kv }),
+    );
+    if (answer.kind !== 'reply') throw new Error(`not a reply: ${answer.kind}`);
+    return answer;
+  };
+
+  describe('a new link refused with 429 daily_limit', () => {
+    const create = async (
+      body: Record<string, unknown>,
+      headers: Record<string, string> = {},
+    ) => {
+      const { adapter } = recordingUcan();
+      const { tools: t, calls } = tools({
+        [`GET ${LIST_URL}`]: () => json({ permissions: [allowedCard] }),
+        [`POST ${LINKS}`]: () =>
+          json(
+            {
+              error: {
+                code: 'daily_limit',
+                message:
+                  'You can start up to 3 verifications a day. Please try again tomorrow.',
+                retryable: false,
+              },
+              ...body,
+            },
+            429,
+            headers,
+          ),
+      });
+      const answer = (await run(
+        t.credentials_request_action,
+        { action: 'self.identity-check' },
+        channelCtx(adapter),
+      )) as Record<string, unknown> & { message: string; hint: string };
+      return { answer, posts: calls.filter((c) => c.method === 'POST') };
+    };
+
+    it("today's Self (resetsAt + Retry-After): when they can try again, from resetsAt", async () => {
+      const wait = 23 * 3600 + 20 * 60;
+      const { answer, posts } = await create(
+        { resetsAt: iso(wait) },
+        { 'retry-after': String(wait) },
+      );
+      expect(answer).toMatchObject({
+        error: 'daily_limit',
+        message:
+          "You've used all your tries for now. You can try again in about 23 hours. Just message me then and I'll send you a new link.",
+        limit: {
+          code: 'daily_limit',
+          resetsAt: iso(wait),
+          retryAfterSeconds: wait,
+          tryAgain: 'in about 23 hours',
+          startsLeft: 0,
+        },
+      });
+      expect(answer.message).not.toContain('in a minute');
+      expect(answer.message).not.toContain('Too many requests');
+      expect(answer.hint).toContain(
+        'Do not create, offer or promise a new link',
+      );
+      // A Retry-After of hours is not waited out: one call only.
+      expect(posts).toHaveLength(1);
+    });
+
+    it("Self's new fields: the number of tries and the wait", async () => {
+      const { answer } = await create(atLimit, {
+        'retry-after': String(FIVE_HOURS),
+      });
+      expect(answer).toMatchObject({
+        error: 'daily_limit',
+        message:
+          "You've used your 3 tries for now. You can try again in about 5 hours. Just message me then and I'll send you a new link.",
+        limit: { startsMax: 3, windowHours: 6, tryAgain: 'in about 5 hours' },
+      });
+    });
+
+    it('no time from Self: "later today", never "in a minute"', async () => {
+      const { answer } = await create({});
+      expect(answer.message).toBe(
+        "You've used all your tries for now. You can try again later today. Just message me then and I'll send you a new link.",
+      );
+    });
+  });
+
+  describe('a failed check: the tries left', () => {
+    it.each([
+      [2, 'You can try 2 more times.'],
+      [1, 'You can try 1 more time.'],
+    ])('startsLeft %i', async (startsLeft, sentence) => {
+      const answer = await status({
+        status: 'failed',
+        failure: 'too_many_attempts',
+        startsLeft,
+        startsMax: 3,
+      });
+      expect(answer).toMatchObject({
+        status: 'failed',
+        failure: 'too_many_attempts',
+        startsLeft,
+        message: `Your identity check ran out of tries. Please ask me for a new link to try again. ${sentence}`,
+      });
+      expect(answer).not.toHaveProperty('limit');
+      expect(answer.hint).toContain(`startsLeft ${startsLeft}`);
+    });
+
+    it('startsLeft 0: when they can try again instead of a new link', async () => {
+      const answer = await status({
+        status: 'failed',
+        failure: 'too_many_attempts',
+        ...atLimit,
+      });
+      expect(answer).toMatchObject({
+        status: 'failed',
+        startsLeft: 0,
+        limit: { tryAgain: 'in about 5 hours', resetsAt: iso(FIVE_HOURS) },
+        message:
+          "Your identity check ran out of tries. You've used your 3 tries for now. You can try again in about 5 hours. Just message me then and I'll send you a new link.",
+      });
+      expect(answer.message).not.toContain('ask me for a new link');
+      expect(answer.hint).toContain('do not say they were refused');
+      expect(answer.hint).toContain(
+        'Do not create, offer or promise a new link',
+      );
+    });
+
+    it('a plain "not verified" with 0 left: the same wait', async () => {
+      const answer = await status({ status: 'failed', ...atLimit });
+      expect(answer.message).toBe(
+        "Sorry, your identity check didn't pass. You've used your 3 tries for now. You can try again in about 5 hours. Just message me then and I'll send you a new link.",
+      );
+    });
+
+    it('0 left but the reset has passed: the usual words', async () => {
+      const answer = await status({
+        status: 'failed',
+        failure: 'too_many_attempts',
+        startsLeft: 0,
+        resetsAt: iso(-60),
+      });
+      expect(answer.message).toBe(
+        'Your identity check ran out of tries. Please ask me for a new link to try again.',
+      );
+      expect(answer).not.toHaveProperty('limit');
+    });
+
+    it('Self says nothing about starts: exactly the words as before', async () => {
+      const answer = await status({
+        status: 'failed',
+        failure: 'too_many_attempts',
+      });
+      expect(answer.message).toBe(
+        'Your identity check ran out of tries. Please ask me for a new link to try again.',
+      );
+      expect(answer).not.toHaveProperty('startsLeft');
+    });
+  });
+
+  describe('the photo limit', () => {
+    const PHOTOS =
+      'Your identity check stopped because all the photo tries on that link were used. Please ask me for a new link to try again.';
+    it.each([
+      [{ failure: 'too_many_attempts', failureReason: 'too_many_photos' }],
+      [{ failure: 'too_many_photos' }],
+    ])('%o: its own words and a new link', async (fields) => {
+      const answer = await status({ status: 'failed', ...fields });
+      expect(answer).toMatchObject({
+        status: 'failed',
+        failure: 'too_many_photos',
+        message: PHOTOS,
+      });
+      expect(answer.hint).toContain('Offer them a new link');
+      expect(answer.hint).toContain('do not say they were refused');
+    });
+
+    it('an unknown failureReason keeps "too_many_attempts"', async () => {
+      const answer = await status({
+        status: 'failed',
+        failure: 'too_many_attempts',
+        failureReason: 'too_many_videos',
+      });
+      expect(answer).toMatchObject({ failure: 'too_many_attempts' });
+    });
+
+    it('with 1 start left, and with none', async () => {
+      expect(
+        (
+          await status({
+            status: 'failed',
+            failure: 'too_many_attempts',
+            failureReason: 'too_many_photos',
+            startsLeft: 1,
+          })
+        ).message,
+      ).toBe(`${PHOTOS} You can try 1 more time.`);
+      expect(
+        (
+          await status({
+            status: 'failed',
+            failure: 'too_many_photos',
+            ...atLimit,
+          })
+        ).message,
+      ).toBe(
+        "Your identity check stopped because all the photo tries on that link were used. You've used your 3 tries for now. You can try again in about 5 hours. Just message me then and I'll send you a new link.",
+      );
+    });
+  });
+
+  describe('the failed event', () => {
+    it('carries the structured facts for a plugin that words it itself', async () => {
+      const answer = await eventReply({
+        status: 'failed',
+        failure: 'too_many_attempts',
+        startsLeft: 2,
+        startsMax: 3,
+        windowHours: 6,
+      });
+      expect(answer.text).toBe(
+        'Your identity check ran out of tries. Please ask me for a new link to try again. You can try 2 more times.',
+      );
+      expect(answer.facts).toEqual({
+        outcome: 'failed',
+        failure: 'too_many_attempts',
+        startsLeft: 2,
+        startsMax: 3,
+        windowHours: 6,
+      });
+      expect(answer.note).toContain(`they were told: "${answer.text}"`);
+    });
+
+    it('no start left: the wait, and atLimit with the reset', async () => {
+      const answer = await eventReply({
+        status: 'failed',
+        failure: 'too_many_attempts',
+        ...atLimit,
+      });
+      expect(answer.text).toBe(
+        "Your identity check ran out of tries. You've used your 3 tries for now. You can try again in about 5 hours. Just message me then and I'll send you a new link.",
+      );
+      expect(answer.facts).toEqual({
+        outcome: 'failed',
+        failure: 'too_many_attempts',
+        startsLeft: 0,
+        startsMax: 3,
+        windowHours: 6,
+        atLimit: true,
+        resetsAt: iso(FIVE_HOURS),
+        retryAfterSeconds: FIVE_HOURS,
+        tryAgain: 'in about 5 hours',
+      });
+      expect(answer.note).toContain(
+        'Do not create, offer or promise a new link',
+      );
+    });
+
+    it('the photo limit, and Self saying nothing about starts', async () => {
+      const photos = await eventReply({
+        status: 'failed',
+        failure: 'too_many_attempts',
+        failureReason: 'too_many_photos',
+      });
+      expect(photos.facts).toEqual({
+        outcome: 'failed',
+        failure: 'too_many_photos',
+      });
+      expect(photos.note).toContain('they used up the photo tries');
+      const plain = await eventReply({ status: 'failed' });
+      expect(plain.text).toBe("Sorry, your identity check didn't pass.");
+      expect(plain.facts).toEqual({
+        outcome: 'failed',
+        failure: 'not_verified',
+      });
+    });
+  });
+
+  it('an unstarted link while no start is left: the wait, never the same link again or a new one', async () => {
+    const { adapter } = recordingUcan();
+    const kv = createMemoryUserKv();
+    await recordLink(kv, 'lnk_1', 'card_1', {
+      url: 'https://dev.self.ixo.earth/l/tok',
+      expiresAt: NOW / 1000 + 600,
+    });
+    const { tools: t, calls } = tools({
+      [`GET ${LIST_URL}`]: () => json({ permissions: [allowedCard] }),
+      [`GET ${LINKS}/lnk_1`]: () =>
+        json({
+          linkId: 'lnk_1',
+          status: 'sent',
+          updatedAt: iso(-60),
+          expiresAt: iso(600),
+          limit: { code: 'daily_limit', resetsAt: iso(40 * 60) },
+        }),
+    });
+    const ctx = channelCtx(adapter, { kv });
+    const answer = (await run(
+      t.credentials_request_action,
+      { action: 'self.identity-check' },
+      ctx,
+    )) as Record<string, unknown>;
+    expect(answer).toMatchObject({
+      error: 'daily_limit',
+      message:
+        "You've used all your tries for now. You can try again in about 40 minutes. Just message me then and I'll send you a new link.",
+    });
+    expect(JSON.stringify(answer)).not.toContain('/l/tok');
+    expect(calls.filter((c) => c.method === 'POST')).toHaveLength(0);
+    // The status tool says the same.
+    await expect(
+      run(
+        t.credentials_action_status,
+        { action: 'self.identity-check', ref: 'lnk_1' },
+        { ...ctx, toolCallId: 'call-2' },
+      ),
+    ).resolves.toMatchObject({
+      status: 'sent',
+      startsLeft: 0,
+      limit: { tryAgain: 'in about 40 minutes' },
+    });
+  });
+
+  it('a new link: startsLeft for the agent, and a hint when it is the last try', async () => {
+    const { adapter } = recordingUcan();
+    const { tools: t } = tools({
+      [`GET ${LIST_URL}`]: () => json({ permissions: [allowedCard] }),
+      [`POST ${LINKS}`]: () =>
+        json(
+          {
+            linkId: 'lnk_1',
+            url: 'https://dev.self.ixo.earth/l/tok',
+            expiresAt: (NOW + 15 * 60_000) / 1000,
+            startsLeft: 1,
+            startsMax: 3,
+          },
+          201,
+        ),
+    });
+    const answer = (await run(
+      t.credentials_request_action,
+      { action: 'self.identity-check' },
+      channelCtx(adapter),
+    )) as Record<string, unknown> & { hint: string };
+    expect(answer).toMatchObject({ status: 'sent', startsLeft: 1 });
+    expect(answer.hint).toContain('last identity-check try for now');
+  });
+});

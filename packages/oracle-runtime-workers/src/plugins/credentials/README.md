@@ -58,7 +58,7 @@ Ask for everything in one request:
 | `credentials_permission_status`         | The card's status (`pending`, `allowed`, `declined`, `expired`, `stopped`) and `items[]`: each item's `index`, `kind`, `state` and, once allowed, what was granted (consent ids; grant ids, capabilities, audiences and ends; never for an item the Hub marks `current: false`, which carries `current: false` instead and makes the answer "I need your OK once more for this."). Never a token.                                                                                                                                                                                                                                                                                                                   |
 | `credentials_check`                     | Checks a credential at the Credentials worker and returns `valid` (with only the fields asked for), `invalid`, `revoked`, `expired`, `none` or `pending`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `credentials_request_action`            | Carries out an allowed action. For `self.identity-check`: a link from Self where the person starts an identity check, using the `link`/`offer` grants of that item in the one card; optional `context`: `"next_step"` (the check is the next step of a task already under way) or `"standalone"` (default), which only changes the message's first words. For any other entry: `granted`, listing the capabilities allowed (no tokens) so the agent or another plugin can act. When what the person allowed is out of date (`current: false`) it sends ONE card again itself: `{ status: "sent", permissionId, url }` asking for their OK once more. `already_verified`: see [Already verified](#already-verified). |
-| `credentials_action_status`             | The progress of an identity-check link (`sent`, `opened`, `in_progress`, `passed`, `failed`, `expired`, `cancelled`; `in_progress` with `review: true` while a person reviews the check, or `saving: true` once it passed and the proof is still being saved; `failed` with `failure: "error"` or `"too_many_attempts"` when it was not a decision about the person). No personal data.                                                                                                                                                                                                                                                                                                                             |
+| `credentials_action_status`             | The progress of an identity-check link (`sent`, `opened`, `in_progress`, `passed`, `failed`, `expired`, `cancelled`; `in_progress` with `review: true` while a person reviews the check, or `saving: true` once it passed and the proof is still being saved; `failed` with `failure: "error"`, `"too_many_attempts"` or `"too_many_photos"` when it was not a decision about the person; `startsLeft` and `limit` from Self's start limit, see [Tries left and when to try again](#tries-left-and-when-to-try-again)). No personal data.                                                                                                                                                                           |
 
 Every answer is plain data plus two texts: `message`, in the second person,
 for the person and ready to send as it is, and `hint`, guidance for the agent
@@ -204,23 +204,80 @@ Self adds `failure` beside `status: "failed"` (the same style and place as
 `review` and `saving`) when the check did not end with a decision about
 the person:
 
-| `failure`           | Meaning                           | Words                                                                                            |
-| ------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------ |
-| absent              | A real "not verified" outcome     | Sorry, your identity check didn't pass.                                                          |
-| `error`             | A system failure on our side      | Sorry, something went wrong with your identity check. Please ask me for a new link to try again. |
-| `too_many_attempts` | The person used up their attempts | Your identity check ran out of tries. Please ask me for a new link to try again.                 |
+| `failure`           | Meaning                            | Words                                                                                                                      |
+| ------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| absent              | A real "not verified" outcome      | Sorry, your identity check didn't pass.                                                                                    |
+| `error`             | A system failure on our side       | Sorry, something went wrong with your identity check. Please ask me for a new link to try again.                           |
+| `too_many_attempts` | The person used up their attempts  | Your identity check ran out of tries. Please ask me for a new link to try again.                                           |
+| `too_many_photos`   | The person used up the photo tries | Your identity check stopped because all the photo tries on that link were used. Please ask me for a new link to try again. |
 
-It is read leniently: only those two values beside `failed` count; absent,
+Self sends the photo limit as `failure: "too_many_attempts"` with
+`failureReason: "too_many_photos"` (so an older client still reads "used up
+their tries"); the plugin reads that pair, or `failure: "too_many_photos"`
+itself, as `too_many_photos`. Any other `failureReason` is ignored.
+
+It is read leniently: only those values beside `failed` count; absent,
 any other value or type, or any other status is "absent" (the plain
 "didn't pass" words), never a parse failure. A known value is kept in the
 5 s status cache with the failed status, so a later read says the same
 thing, and is answered as `failure` by `credentials_action_status`. The
 hints: for `error`, it was a problem on our side, not about them, never say
 they failed or were not verified, offer a new link; for
-`too_many_attempts`, they used up their tries, never say they were
-refused, offer a new link; for all three, never promise a message. The
-`failed` identity-check event uses the same three sentences, chosen from
-Self's answer when the link is read again (`IDENTITY_FAILED_WORDING`).
+`too_many_attempts` and `too_many_photos`, they used up their tries, never
+say they were refused, offer a new link; for all, never promise a message.
+The `failed` identity-check event uses the same sentences, chosen from
+Self's answer when the link is read again (`IDENTITY_FAILED_WORDING`), with
+the tries left added as below.
+
+### Tries left and when to try again
+
+Self lets a person start only a few identity checks in a rolling window (3
+in 6 hours; 3 in 24 hours before that). A start counts when they tap Start
+on the link page, not when a link is made. When none is left, Self refuses a
+new link with `429 daily_limit`, `resetsAt` (ISO 8601) and `Retry-After`,
+and the status of a link that could not be started carries `limit: { code,
+resetsAt }`. A newer Self adds, on the refusal, the link status and a created
+link, `resetsAt`, `retryAfterSeconds`, `startsLeft` (0 to `startsMax`),
+`startsMax` (3) and `windowHours` (6). Every field is read leniently (absent,
+a wrong type or out of range is unknown), so both shapes work
+(`startsOf`, `starts.ts`). A wait given only in seconds becomes a time when
+it is read, so a kept status still tells the right wait later.
+
+The wait is said as a friendly duration computed at the time of speaking,
+never as a raw time (`friendlyWait`):
+
+| Time left           | Words                                 |
+| ------------------- | ------------------------------------- |
+| up to 1 minute      | in a minute                           |
+| under 5 minutes     | in a few minutes                      |
+| 5 to 14 minutes     | in about N minutes (rounded up)       |
+| 15 to 89 minutes    | in about N minutes (up to the next 5) |
+| 90 minutes and more | in about N hours (rounded)            |
+| unknown             | later today                           |
+
+- **No start left** (`429 daily_limit` on a new link, `startsLeft: 0` or
+  `limit` on the status, while the reset is ahead): "You've used your 3 tries
+  for now. You can try again in about 5 hours. Just message me then and I'll
+  send you a new link." ("all your tries" without `startsMax`). After a
+  failed check the failure's first sentence comes first ("Your identity check
+  ran out of tries. You've used your 3 tries for now. ..."). The answer has
+  `limit: { code, resetsAt, retryAfterSeconds, tryAgain, startsLeft: 0,
+startsMax?, windowHours? }`, and the hint says: do not create, offer or
+  promise a new link before then, never "in a minute", "tomorrow" only if
+  true, and when they ask again call the tool again for the time left then.
+  An unstarted link whose start was refused is not sent again
+  (`credentials_request_action` answers `error: "daily_limit"`).
+- **Starts left after a failed check**: the usual words, then "You can try 2
+  more times." / "You can try 1 more time."; `startsLeft` in the answer.
+- **A new link**: `startsLeft` in the answer when Self says it; at 1, the
+  hint says this is their last try for now.
+- **Self says nothing**: exactly the words as before.
+
+The failed `identity_check_updated` reply carries the same facts as
+`facts` (`IdentityFailedFacts`: `outcome`, `failure`, `startsLeft?`,
+`startsMax?`, `windowHours?`, and with `atLimit: true` `resetsAt`,
+`retryAfterSeconds`, `tryAgain`) for a plugin that words the reply itself
+(the Yo agent adds its selfie tips); the runtime never sends them.
 
 ### Already verified
 
@@ -306,8 +363,10 @@ same `permission_event` capability). The plugin:
    `credentials_check` only if this oracle needs a claim for its own
    decision); `failed` -> "Sorry, your identity check didn't pass." (the
    model is told to offer a new link only if they want to try again), or
-   the `error` / `too_many_attempts` words when Self's `failure` says so
-   (see [Failed: why](#failed-why));
+   the `error` / `too_many_attempts` / `too_many_photos` words when Self's
+   `failure` says so (see [Failed: why](#failed-why)), with the tries left
+   or, when none is left, when they can try again (see
+   [Tries left and when to try again](#tries-left-and-when-to-try-again));
    `in_review` -> the in-review message. Both are sent without the model.
 
 ### Cards of other plugins (the Yo agent)
@@ -431,6 +490,11 @@ plugin tells the person a time in exactly the same words:
 - `whenItEnds(unixSeconds, { timeZone?, nowMs })`: what follows "ends": "at
   18:05" in the person's zone when it is known, else `relativeTime`; null
   once it has passed.
+- `friendlyWait(seconds)`, `startsLeftSentence(n)`, `limitSentence(starts,
+waitSeconds)`, `limitWait(starts, nowMs)` and `startsOf(body, nowMs)`: the
+  start-limit words above, so a plugin that rewords a failed check says the
+  tries left and the wait in the same words (`failedAnswer(failure, starts,
+nowMs)` gives the whole failed answer).
 - `SelfTime` (a zod schema) and `selfTimeSeconds(raw)`: a time as Self
   answers it (ISO 8601 with a zone, or Unix seconds), always Unix seconds
   afterwards; `selfTimeSeconds` is null for anything else.
@@ -528,9 +592,11 @@ sequenceDiagram
   a zone (`2026-11-10T06:34:12.000Z`); Unix seconds are accepted too, and
   both are Unix seconds in every answer the tools give. Self's errors are
   `{ error: { code, message, retryable }, ...data }`: the plugin reads the
-  `code` (`already_verified`, `link_active`, `rate_limited`,
+  `code` (`already_verified`, `link_active`, `daily_limit`, `rate_limited`,
   `offer_consent_invalid`, …), never the message; a body without a code is
-  `http_<status>`.
+  `http_<status>`. `daily_limit` (no identity-check start left) is worded
+  with when they can try again, never as the generic "Too many requests
+  right now" of other 429s.
 - **Credentials worker**: self-signed invocations, `credentials/verify` on
   `ixo:credentials`, bound to `{ method, path }`.
 
@@ -639,7 +705,16 @@ next step; after `allowed` and `already_verified` nothing adds a
 identity-check events: the link kept with its card, passed (default and
 `verifiedNext` words), failed, in review, Self's state followed over the
 event's, a check still going, an unknown link, a duplicate, the same event
-again, an outcome already learned in the chat, and Self unreadable.
+again, an outcome already learned in the chat, and Self unreadable. Its
+start-limit block covers a new link refused with `429 daily_limit` (today's
+`resetsAt` + `Retry-After`, Self's new fields, no time at all), a failed
+check with 2, 1 and 0 starts left (and 0 with its reset passed, and no
+start fields at all: the words as before), the photo limit (both shapes, an
+unknown `failureReason`, with 1 and 0 left), the failed event's `facts`, an
+unstarted link while no start is left, and `startsLeft` on a new link.
+`starts.test.ts` has the wait-words table (never "in a minute" past a
+minute, never minutes before the real time, never "1 hours"), the lenient
+reading of both shapes, and `refusalFor` recomputing the wait each time.
 `src/do/channel-events.test.ts` runs the event turn in the user object
 (an empty reply, a fixed reply without the model and the hidden note, the
 agent with the note, one decision across a restart, a plugin that throws),

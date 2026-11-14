@@ -9,6 +9,7 @@ import {
   type PermissionState,
 } from './hub-client';
 import { Failure, LINK_STATUSES, type LinkState } from './self-client';
+import { StartsSchema } from './starts';
 
 /**
  * What the plugin remembers about one person in their own kv (namespace
@@ -358,6 +359,8 @@ const CachedLink = z.object({
     saving: z.literal(true).optional().catch(undefined),
     /** Why Self says a check `failed`; older rows have none. */
     failure: Failure,
+    /** What Self said about the person's starts; older rows have none. */
+    starts: StartsSchema.optional().catch(undefined),
   }),
 });
 

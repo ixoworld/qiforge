@@ -6,6 +6,7 @@ export {
   createCredentials,
   createCredentialsTools,
   createPermissionEventHandler,
+  failedAnswer,
   IDENTITY_EVENT_TEXT,
   IDENTITY_FAILED_WORDING,
   LINK_CONTEXTS,
@@ -16,8 +17,20 @@ export {
   WHATSAPP_PROVIDER,
   whatsAppBinding,
   type CredentialsToolsDeps,
+  type IdentityFailedFacts,
+  type IdentityFailedKind,
   type SupportedAction,
 } from './credentials-tools';
+export {
+  friendlyWait,
+  limitSentence,
+  limitWait,
+  START_LIMIT_CODE,
+  startsLeftSentence,
+  startsOf,
+  type LimitFacts,
+  type Starts,
+} from './starts';
 export {
   CREDENTIALS_DEFAULT_URLS,
   credentialsConfigSchema,
@@ -81,6 +94,8 @@ export {
   hubReasonOf,
   isInReview,
   isSaving,
+  limitAnswer,
+  limitHint,
   NO_LATER_MESSAGE,
   refusalFor,
   type CredentialsRefusal,
