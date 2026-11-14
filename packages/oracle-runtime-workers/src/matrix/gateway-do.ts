@@ -149,8 +149,22 @@ const SENDER_CHECK_RETRY_MS = 60_000;
 const PENDING_INVITE_GRACE_MS = 5_000;
 /** Room turns in flight at once (each ends in an encrypted reply). */
 const DEFAULT_TURN_CONCURRENCY = 4;
-/** Idle recycle of the object after this many sends (0 disables). */
-const DEFAULT_RECYCLE_AFTER_SENDS = 300;
+/**
+ * Planned recycle of the object after this many sends: 0 = off (default).
+ * `MATRIX_RECYCLE_AFTER_SENDS` opts back in.
+ *
+ * It was 300, against fake-indexeddb keeping every finished transaction
+ * (~250 KB per encrypted send). The SDK prunes those transactions now
+ * (`cryptoStoreTransactions` in `/matrix/status` stays at a handful): with
+ * the recycle off, a local gateway carried 2,000 encrypted sends in one
+ * instance with no transaction kept and no memory growth.
+ *
+ * The recycle restarts the bot in the same isolate, so the crypto WASM's
+ * memory is never returned. Under steady load it fired every few minutes:
+ * each restart cancelled sends still waiting in the scheduler and held every
+ * gateway call until the bot was back, sometimes for minutes.
+ */
+export const DEFAULT_RECYCLE_AFTER_SENDS = 0;
 const LOGIN_RETRY_ATTEMPTS = 3;
 const LOGIN_RETRY_MAX_MS = 30_000;
 
@@ -532,6 +546,7 @@ export class MatrixGatewayDO
       MATRIX_SEND_RATE_PER_SECOND: env.MATRIX_SEND_RATE_PER_SECOND,
       MATRIX_SEND_BURST: env.MATRIX_SEND_BURST,
       MATRIX_SEND_CONCURRENCY: env.MATRIX_SEND_CONCURRENCY,
+      // Off unless the deployment sets a positive count (see the constant).
       MATRIX_RECYCLE_AFTER_SENDS:
         env.MATRIX_RECYCLE_AFTER_SENDS ?? String(DEFAULT_RECYCLE_AFTER_SENDS),
       MATRIX_HOT_ROOMS: env.MATRIX_HOT_ROOMS,

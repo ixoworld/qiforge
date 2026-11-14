@@ -462,8 +462,8 @@ an E2EE Matrix bot on Workers:
   outbox that survives restarts, poison-row eviction after three hung
   attempts;
 - resumable catch-up of rooms that had events while the bot was down;
-- invite handling, room upgrades, hot-room memory bounds, the idle recycle
-  and the one-time-key conflict detector.
+- invite handling, room upgrades, hot-room memory bounds, an opt-in idle
+  recycle (off in the gateway) and the one-time-key conflict detector.
 
 The subclass adds only what is specific to the oracle:
 

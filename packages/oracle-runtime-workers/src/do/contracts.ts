@@ -132,7 +132,7 @@ export interface OracleWorkerEnv {
   GROUP_CHAT_ACTIVE_THREAD_TTL_MS?: string;
   GROUP_CHAT_REQUIRE_POWER_LEVEL?: string;
   GROUP_CHAT_ROOM_INFO_TTL_MS?: string;
-  /** Idle recycle of the gateway object after this many sends (default 300; 0 disables). */
+  /** Opt-in planned restart of the gateway bot after this many sends, once idle (default 0 = off). */
   MATRIX_RECYCLE_AFTER_SENDS?: string;
   /** Rooms kept fully built in memory (SDK default 64; idle rooms are released). */
   MATRIX_HOT_ROOMS?: string;

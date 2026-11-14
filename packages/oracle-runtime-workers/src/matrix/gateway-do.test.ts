@@ -7,12 +7,22 @@
  * lookup with its deadline.
  */
 import { env, runInDurableObject } from 'cloudflare:test';
-import { MatrixBotDO, type BotMessage } from '@ixo/matrix-bot-workers-sdk';
+import {
+  MatrixBotDO,
+  shouldRecycle,
+  withDefaults,
+  type BotMessage,
+  type MatrixBotOptions,
+} from '@ixo/matrix-bot-workers-sdk';
 import { MatrixError } from 'matrix-js-sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SqliteTestDO } from '../sqlite/test-do';
 import type { JsonString, OracleWorkerEnv, TurnResult } from '../do/contracts';
-import { BACKGROUND_SEND_CONCURRENCY, MatrixGatewayDO } from './gateway-do';
+import {
+  BACKGROUND_SEND_CONCURRENCY,
+  DEFAULT_RECYCLE_AFTER_SENDS,
+  MatrixGatewayDO,
+} from './gateway-do';
 import type { GateDecision } from './group-chat';
 import { insertInboxRow, listInboxRows, MAX_TURN_REPLAYS } from './inbox-store';
 import type { IngestTurn } from './ingest';
@@ -108,6 +118,10 @@ class TestGateway extends MatrixGatewayDO {
 
   deliver(message: BotMessage): Promise<void> {
     return this.onMessage(message);
+  }
+
+  botOptions(): Promise<MatrixBotOptions> {
+    return this.resolveOptions();
   }
 
   restartReplay(): Promise<void> {
@@ -557,6 +571,71 @@ describe('health and status', () => {
         (await gw.fetch(new Request('https://matrix-gateway/other'))).status,
       ).toBe(404);
     });
+  });
+});
+
+describe('planned recycle', () => {
+  /** Signals far past any threshold: busy, recent inbound, pending rows. */
+  const overdue = {
+    sendsSinceBoot: 100_000,
+    sendsBusy: 6,
+    msSinceLastInbound: 0,
+    pendingDurable: 12,
+  };
+  /** Idle signals past a 300-send threshold. */
+  const idle = {
+    sendsSinceBoot: 301,
+    sendsBusy: 0,
+    msSinceLastInbound: 60_000,
+    pendingDurable: 0,
+  };
+  const policyOf = (resolved: { recycleAfterSends: number }) => ({
+    afterSends: resolved.recycleAfterSends,
+    quietForMs: 15_000,
+  });
+
+  it('is off by default: no send count, idle or overdue, recycles the bot', async () => {
+    expect(DEFAULT_RECYCLE_AFTER_SENDS).toBe(0);
+    await withGateway('gw-recycle-default', async (gw) => {
+      const resolved = withDefaults(await gw.botOptions());
+      expect(resolved.recycleAfterSends).toBe(0);
+      expect(shouldRecycle(idle, policyOf(resolved))).toBe(false);
+      expect(shouldRecycle(overdue, policyOf(resolved))).toBe(false);
+    });
+  });
+
+  it('MATRIX_RECYCLE_AFTER_SENDS=0 is off as well', async () => {
+    await withGateway(
+      'gw-recycle-zero',
+      async (gw) => {
+        const resolved = withDefaults(await gw.botOptions());
+        expect(resolved.recycleAfterSends).toBe(0);
+        expect(shouldRecycle(overdue, policyOf(resolved))).toBe(false);
+      },
+      { MATRIX_RECYCLE_AFTER_SENDS: '0' },
+    );
+  });
+
+  it('a positive MATRIX_RECYCLE_AFTER_SENDS opts back in', async () => {
+    await withGateway(
+      'gw-recycle-opt-in',
+      async (gw) => {
+        const resolved = withDefaults(await gw.botOptions());
+        expect(resolved.recycleAfterSends).toBe(300);
+        expect(shouldRecycle(idle, policyOf(resolved))).toBe(true);
+        expect(
+          shouldRecycle({ ...idle, sendsSinceBoot: 299 }, policyOf(resolved)),
+        ).toBe(false);
+        // Five thresholds in, it recycles under load too.
+        expect(
+          shouldRecycle(
+            { ...overdue, sendsSinceBoot: 1_500 },
+            policyOf(resolved),
+          ),
+        ).toBe(true);
+      },
+      { MATRIX_RECYCLE_AFTER_SENDS: '300' },
+    );
   });
 });
 
