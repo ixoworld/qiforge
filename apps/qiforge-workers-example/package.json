@@ -32,7 +32,7 @@
     "test:e2e:pod": "tsx test/e2e-pod-creator.ts"
   },
   "dependencies": {
-    "@ixo/matrix-bot-workers-sdk": "0.7.0",
+    "@ixo/matrix-bot-workers-sdk": "0.7.1",
     "@ixo/oracle-runtime-workers": "workspace:*",
     "hono": "^4.13.4",
     "zod": "^4.4.3"
