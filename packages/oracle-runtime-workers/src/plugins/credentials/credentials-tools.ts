@@ -46,6 +46,7 @@ import {
   hubReasonOf,
   isInReview,
   isSaving,
+  limitAnswer,
   NO_LATER_MESSAGE,
   type CredentialsRefusal,
   type Wording,
@@ -108,6 +109,12 @@ import {
   type LinkState,
   type LinkStatus,
 } from './self-client';
+import {
+  START_LIMIT_CODE,
+  startsLeftSentence,
+  type LimitFacts,
+  type Starts,
+} from './starts';
 import { SelfTime, whenItEnds } from './times';
 import {
   buildCredentialRequest,
@@ -1165,8 +1172,11 @@ export const IDENTITY_EVENT_TEXT = {
 /**
  * The fixed words for a `failed` check, by Self's `failure`: absent
  * (`not_verified`) is a real "not verified"; `error` was a problem on our
- * side; `too_many_attempts` means they used up their tries. The status
- * read and the event answer use the same words.
+ * side; `too_many_attempts` means they used up their tries;
+ * `too_many_photos` means they used up the photo tries. The status read and
+ * the event answer use the same words. These are the words when Self says
+ * nothing about the person's starts; with `startsLeft` see
+ * {@link failedAnswer}.
  */
 export const IDENTITY_FAILED_WORDING = {
   not_verified: {
@@ -1183,24 +1193,138 @@ export const IDENTITY_FAILED_WORDING = {
       'Your identity check ran out of tries. Please ask me for a new link to try again.',
     hint: `They used up their tries on that link: do not say they were refused or not verified. Offer them a new link to try again. ${NO_LATER_MESSAGE}`,
   },
+  too_many_photos: {
+    message:
+      'Your identity check stopped because all the photo tries on that link were used. Please ask me for a new link to try again.',
+    hint: `They used up the photo tries on that link (too many photos were taken or sent): do not say they were refused or not verified. Offer them a new link to try again; a tip that may help: good light, the whole ID card in the frame, no glare, and the phone held still. ${NO_LATER_MESSAGE}`,
+  },
 } as const satisfies Record<LinkFailure | 'not_verified', Wording>;
 
-/** The words for a failed check, from Self's `failure` (only beside `failed`). */
-function failedWording(state: { status: LinkStatus; failure?: LinkFailure }) {
-  return IDENTITY_FAILED_WORDING[
-    state.status === 'failed' && state.failure ? state.failure : 'not_verified'
-  ];
+export type IdentityFailedKind = keyof typeof IDENTITY_FAILED_WORDING;
+
+/** The first sentence of each failed message, before its next step. */
+const FAILED_OPENING: Record<IdentityFailedKind, string> = {
+  not_verified: IDENTITY_FAILED_WORDING.not_verified.message,
+  error: 'Sorry, something went wrong with your identity check.',
+  too_many_attempts: 'Your identity check ran out of tries.',
+  too_many_photos:
+    'Your identity check stopped because all the photo tries on that link were used.',
+};
+
+/** What the agent must never say about each failure (the hints' first part). */
+const FAILED_WHY: Record<IdentityFailedKind, string> = {
+  not_verified: 'Their identity check did not pass.',
+  error:
+    'It was a problem on our side, not about them: do not say they failed or were not verified.',
+  too_many_attempts:
+    'They used up their tries on that link: do not say they were refused or not verified.',
+  too_many_photos:
+    'They used up the photo tries on that link: do not say they were refused or not verified.',
+};
+
+/**
+ * The structured facts behind a failed identity check's words, for a plugin
+ * that words the reply itself (the event reply's `facts`). Never sent.
+ */
+export interface IdentityFailedFacts {
+  outcome: 'failed';
+  failure: IdentityFailedKind;
+  /** Starts left in the window, when Self said. */
+  startsLeft?: number;
+  startsMax?: number;
+  windowHours?: number;
+  /** True while no start is left: no new link until `resetsAt`. */
+  atLimit?: true;
+  /** ISO 8601 (UTC), with `atLimit`, when Self said. */
+  resetsAt?: string;
+  /** Seconds left until `resetsAt` when this was said. */
+  retryAfterSeconds?: number;
+  /** The wait as the person was told it ("in about 5 hours"), with `atLimit`. */
+  tryAgain?: string;
+}
+
+/**
+ * The words for a failed check, from Self's `failure` and what it said about
+ * the person's starts, as of `nowMs`:
+ * - no start left (and its reset still ahead): the failure's first sentence,
+ *   then when they can try again ("You've used your 3 tries for now. You can
+ *   try again in about 5 hours. ..."), and a hint never to offer a new link
+ *   before then;
+ * - starts left: the usual words, then "You can try 2 more times.";
+ * - Self said nothing: the usual words ({@link IDENTITY_FAILED_WORDING}).
+ */
+export function failedAnswer(
+  failure: LinkFailure | undefined,
+  starts: Starts | undefined,
+  nowMs: number,
+): {
+  kind: IdentityFailedKind;
+  wording: Wording;
+  limit?: LimitFacts;
+  facts: IdentityFailedFacts;
+} {
+  const kind: IdentityFailedKind = failure ?? 'not_verified';
+  const counts = {
+    ...(starts?.startsMax !== undefined ? { startsMax: starts.startsMax } : {}),
+    ...(starts?.windowHours !== undefined
+      ? { windowHours: starts.windowHours }
+      : {}),
+  };
+  const limited = limitAnswer(starts, nowMs);
+  if (limited) {
+    const { limit } = limited;
+    return {
+      kind,
+      wording: {
+        message: `${FAILED_OPENING[kind]} ${limited.message}`,
+        hint: `${FAILED_WHY[kind]} ${limited.hint}`,
+      },
+      limit,
+      facts: {
+        outcome: 'failed',
+        failure: kind,
+        startsLeft: 0,
+        ...counts,
+        atLimit: true,
+        ...(limit.resetsAt
+          ? {
+              resetsAt: limit.resetsAt,
+              retryAfterSeconds: limit.retryAfterSeconds,
+            }
+          : {}),
+        tryAgain: limit.tryAgain,
+      },
+    };
+  }
+  const base = IDENTITY_FAILED_WORDING[kind];
+  const left = starts?.startsLeft;
+  if (left !== undefined && left > 0)
+    return {
+      kind,
+      wording: {
+        message: `${base.message} ${startsLeftSentence(left)}`,
+        hint: `${base.hint} They have ${left} more identity-check ${left === 1 ? 'try' : 'tries'} for now (startsLeft ${left}).`,
+      },
+      facts: { outcome: 'failed', failure: kind, startsLeft: left, ...counts },
+    };
+  return {
+    kind,
+    wording: base,
+    facts: { outcome: 'failed', failure: kind, ...counts },
+  };
 }
 
 const IDENTITY_NOTE_START =
   '[Identity check update, checked with Self; this is not a message from the user.';
 
-const FAILED_NOTE: Record<keyof typeof IDENTITY_FAILED_WORDING, string> = {
+const FAILED_NOTE: Record<IdentityFailedKind, string> = {
   not_verified: 'Their identity check did not pass',
   error:
     'Their identity check ended because of a problem on our side, not a decision about them',
   too_many_attempts:
     'Their identity check ended because they used up their tries',
+  too_many_photos:
+    'Their identity check ended because they used up the photo tries',
 };
 
 /** The note and wording for an identity check's outcome as Self reports it. */
@@ -1208,6 +1332,8 @@ function identityAnswer(
   outcome: IdentityOutcome,
   verifiedNext: string | undefined,
   failure: LinkFailure | undefined,
+  starts: Starts | undefined,
+  nowMs: number,
 ): ChannelEventResult {
   if (outcome === 'passed')
     return {
@@ -1215,12 +1341,13 @@ function identityAnswer(
       note: `${IDENTITY_NOTE_START} Their identity check passed. Start your reply with exactly this sentence: "${IDENTITY_EVENT_TEXT.passed}" ${nextStepSentence(verifiedNext, 'asked for the check', `go on with the task you were on, the one that needed the identity check (${CHECK_ONLY_FOR_OWN_DECISION})`)} ${NO_LATER_MESSAGE}]`,
     };
   if (outcome === 'failed') {
-    const why = failure ?? 'not_verified';
-    const { message, hint } = IDENTITY_FAILED_WORDING[why];
+    const answer = failedAnswer(failure, starts, nowMs);
+    const { message, hint } = answer.wording;
     return {
       kind: 'reply',
       text: message,
-      note: `${IDENTITY_NOTE_START} ${FAILED_NOTE[why]}; they were told: "${message}" ${hint}]`,
+      note: `${IDENTITY_NOTE_START} ${FAILED_NOTE[answer.kind]}; they were told: "${message}" ${hint}]`,
+      facts: { ...answer.facts },
     };
   }
   const text = IDENTITY_EVENT_TEXT.in_review;
@@ -2357,7 +2484,7 @@ export function createCredentials(deps: CredentialsToolsDeps): {
       name: 'credentials_request_action',
       description: [
         'Do not call this before the person has allowed the card. It is for service-action items only, never for credential-check items (those need no action: use credentials_check). Carry out a catalogued action the person allowed (on the card from credentials_request_permissions or credentials_request_action_permission). For "self.identity-check" (one card is enough: it holds the link, the offer and the consent) it asks Self for a link where they start an identity check (it works once and ends after about 15 minutes; the first device that opens it keeps it).',
-        'Send the `message` (it holds the link) as it is. Keep the linkId to read progress with credentials_action_status. Never call this to answer "is it done?", "how is it going?" or "I finished": that is credentials_action_status. It reads their newest link first and makes a new one only when that one ended (passed, failed, expired, stopped): while it is open it answers it instead, status "sent" with again: true (the same link, still unopened) or status "already_open" (opened but not started, linkStatus "opened"; or their check is in progress: review: true: a person reviews it; saving: true: it passed and their proof is still being saved); relay the message and read progress with credentials_action_status only when they write. error "already_verified": they are already verified and no link is needed; go on with the task you were doing (a next step you were given comes first, and nothing else); call credentials_check only if this oracle itself needs to read a claim from the credential for its own decision.',
+        'Send the `message` (it holds the link) as it is. Keep the linkId to read progress with credentials_action_status. Never call this to answer "is it done?", "how is it going?" or "I finished": that is credentials_action_status. It reads their newest link first and makes a new one only when that one ended (passed, failed, expired, stopped): while it is open it answers it instead, status "sent" with again: true (the same link, still unopened) or status "already_open" (opened but not started, linkStatus "opened"; or their check is in progress: review: true: a person reviews it; saving: true: it passed and their proof is still being saved); relay the message and read progress with credentials_action_status only when they write. error "daily_limit": they used all their identity-check tries for now; its message says when they can try again (limit.tryAgain, limit.resetsAt): send it as it is, never offer a new link before then and never say "in a minute"; if they ask again later, call this again for the time left then. error "already_verified": they are already verified and no link is needed; go on with the task you were doing (a next step you were given comes first, and nothing else); call credentials_check only if this oracle itself needs to read a claim from the credential for its own decision.',
         'context (self.identity-check only): "next_step" when the check is the next step of a task already under way (after a reward claim, or right after they allowed the card; the message then opens with "Next, ..."), otherwise leave it out ("standalone").',
         'For any other entry id it answers status "granted" with the capabilities the person allowed (ids, capabilities, audiences and ends; never tokens) so another plugin or you can act on them. If they have not allowed it yet the answer says so: ask for permission first.',
         'When what they allowed earlier no longer matches what the service needs now, it sends the card again by itself and answers status "sent" with a permissionId and a `message` asking for their OK once more: send it as it is and call this again once they allowed it. WhatsApp only.',
@@ -2433,6 +2560,9 @@ export function createCredentials(deps: CredentialsToolsDeps): {
             linkId: created.linkId,
             url: created.url,
             expiresAt: created.expiresAt,
+            ...(created.starts?.startsLeft !== undefined
+              ? { startsLeft: created.starts.startsLeft }
+              : {}),
           });
         },
         cards,
@@ -2466,10 +2596,19 @@ export function createCredentials(deps: CredentialsToolsDeps): {
   function linkMessage(
     ctx: RuntimeContext,
     opening: string,
-    link: { linkId: string; url: string; expiresAt: number },
+    link: {
+      linkId: string;
+      url: string;
+      expiresAt: number;
+      startsLeft?: number;
+    },
     again = false,
   ) {
     const ends = endsFor(ctx, link.expiresAt);
+    const last =
+      link.startsLeft === 1
+        ? ' This is their last identity-check try for now (startsLeft 1): if it does not pass, they cannot start another one until Self allows it again.'
+        : '';
     const first = again
       ? "You haven't opened your identity check link yet. Here it is again."
       : opening;
@@ -2482,7 +2621,7 @@ export function createCredentials(deps: CredentialsToolsDeps): {
         }`,
         hint: again
           ? 'Their link is still open and nobody opened it: this is the same link, sent again (no new link was made). Send `message` as it is. For "is it done?" or "how is it going?" use credentials_action_status, not this tool.'
-          : 'Send `message` as it is. Keep the linkId to read progress with credentials_action_status. Calling this again while the link is open answers the same link or its progress, never a new link; for "is it done?" or "how is it going?" use credentials_action_status.',
+          : `Send \`message\` as it is. Keep the linkId to read progress with credentials_action_status. Calling this again while the link is open answers the same link or its progress, never a new link; for "is it done?" or "how is it going?" use credentials_action_status.${last}`,
         button: {
           body: `${first} ${ID_CHECK_STEPS} ${
             ends
@@ -2499,6 +2638,9 @@ export function createCredentials(deps: CredentialsToolsDeps): {
         url: link.url,
         linkId: link.linkId,
         expiresAt: link.expiresAt,
+        ...(link.startsLeft !== undefined
+          ? { startsLeft: link.startsLeft }
+          : {}),
       },
     );
   }
@@ -2536,6 +2678,17 @@ export function createCredentials(deps: CredentialsToolsDeps): {
     const nowSeconds = Math.floor(now() / 1000);
     if (state.status === 'in_progress')
       return openCheckAnswer(ctx, kv, state, wasToldReview);
+    // No start is left (Self refused a start on this link): a new link
+    // would be refused too, and this one cannot be started before then.
+    if (state.status === 'sent' || state.status === 'opened') {
+      const limited = limitAnswer(state.starts, now());
+      if (limited) {
+        ctx.logger.log(
+          '[credentials] identity link: no start left; answering when they can try again',
+        );
+        return { error: START_LIMIT_CODE, ...limited };
+      }
+    }
     // A link about to end is not reused: a new one gets a full window.
     if (state.expiresAt <= nowSeconds + 60) return null;
     if (state.status === 'sent' && previous.url) {
@@ -2658,7 +2811,7 @@ export function createCredentials(deps: CredentialsToolsDeps): {
       message: 'Your identity check is done. You are verified.',
       hint: `The check is done. Go on with the task you were doing (a next step you were given comes first); ${CHECK_ONLY_FOR_OWN_DECISION}.`,
     },
-    // Chosen by Self's `failure`: see `failedWording`.
+    // Chosen by Self's `failure` and the starts left: see `failedAnswer`.
     failed: IDENTITY_FAILED_WORDING.not_verified,
     expired: {
       message: 'That link has ended.',
@@ -2696,18 +2849,23 @@ export function createCredentials(deps: CredentialsToolsDeps): {
       // Whether they were already told it is in review, before a read
       // below marks that outcome seen.
       const wasToldReview = toldInReview(await readLinkRecord(kv, ref));
-      const stateAnswer = (state: {
-        linkId: string;
-        status: LinkStatus;
-        updatedAt: number;
-        expiresAt: number;
-        review?: true;
-        saving?: true;
-        failure?: LinkFailure;
-      }) => {
+      const stateAnswer = (state: LinkState) => {
         const saving = isSaving(state);
         const review = !saving && isInReview(state);
         const failure = state.status === 'failed' ? state.failure : undefined;
+        // Failed: the words by Self's `failure` and the starts left; a
+        // link still unstarted while no start is left: when they can try
+        // again (it cannot be started before then).
+        const failedWords =
+          state.status === 'failed'
+            ? failedAnswer(failure, state.starts, now())
+            : null;
+        const blocked =
+          state.status === 'sent' || state.status === 'opened'
+            ? limitAnswer(state.starts, now())
+            : null;
+        const limit = failedWords?.limit ?? blocked?.limit;
+        const startsLeft = limit ? 0 : state.starts?.startsLeft;
         return said(
           saving
             ? MESSAGES.saving
@@ -2715,14 +2873,18 @@ export function createCredentials(deps: CredentialsToolsDeps): {
               ? wasToldReview
                 ? MESSAGES.stillInReview
                 : MESSAGES.inReview
-              : state.status === 'failed'
-                ? failedWording(state)
-                : LINK_WORDING[state.status],
+              : failedWords
+                ? failedWords.wording
+                : blocked
+                  ? { message: blocked.message, hint: blocked.hint }
+                  : LINK_WORDING[state.status],
           {
             linkId: state.linkId,
             status: state.status,
             ...(saving ? { saving: true } : review ? { review: true } : {}),
             ...(failure ? { failure } : {}),
+            ...(startsLeft !== undefined ? { startsLeft } : {}),
+            ...(limit ? { limit } : {}),
             updatedAt: state.updatedAt,
             expiresAt: state.expiresAt,
           },
@@ -2763,7 +2925,7 @@ export function createCredentials(deps: CredentialsToolsDeps): {
     {
       name: 'credentials_action_status',
       description:
-        'Read the progress of an action credentials_request_action started. Use this, never credentials_request_action, whenever the person asks about an identity check they were sent ("is it done?", "how is it going?", "did it work?", "I finished", "it doesn\'t work"). For "self.identity-check" pass the linkId as ref (or leave ref out for their newest link) (sent, opened, in_progress, passed, failed, expired, cancelled; in_progress with review: true means a person from support reviews it, which can take a while; in_progress with saving: true means it passed and their proof is still being saved, which can take a minute; failed with failure: "error" means a problem on our side, not about them, and failure: "too_many_attempts" means they used up their tries; without failure they were not verified). No personal data comes back. Only call it when the person writes and you need the answer; do not poll in a loop (at most 6 a minute per link; an answer is kept 5 seconds). You can never message them first. WhatsApp only.',
+        'Read the progress of an action credentials_request_action started. Use this, never credentials_request_action, whenever the person asks about an identity check they were sent ("is it done?", "how is it going?", "did it work?", "I finished", "it doesn\'t work"). For "self.identity-check" pass the linkId as ref (or leave ref out for their newest link) (sent, opened, in_progress, passed, failed, expired, cancelled; in_progress with review: true means a person from support reviews it, which can take a while; in_progress with saving: true means it passed and their proof is still being saved, which can take a minute; failed with failure: "error" means a problem on our side, not about them, failure: "too_many_attempts" means they used up their tries and failure: "too_many_photos" means they used up the photo tries; without failure they were not verified; startsLeft is how many identity checks they can still start for now, and limit (startsLeft 0) means none until limit.resetsAt: never offer a new link before then). No personal data comes back. Only call it when the person writes and you need the answer; do not poll in a loop (at most 6 a minute per link; an answer is kept 5 seconds). You can never message them first. WhatsApp only.',
       schema: ActionStatusInput,
       effect: 'read',
     },
@@ -2845,7 +3007,13 @@ export function createCredentials(deps: CredentialsToolsDeps): {
     const card = record.permissionId
       ? await readPermissionRecord(kv, record.permissionId)
       : null;
-    return identityAnswer(outcome, card?.verifiedNext, state.failure);
+    return identityAnswer(
+      outcome,
+      card?.verifiedNext,
+      state.failure,
+      state.starts,
+      now(),
+    );
   }
 
   return {

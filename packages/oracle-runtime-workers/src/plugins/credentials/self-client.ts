@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { CredentialsServiceError } from './errors';
 import { callService, type FetchLike } from './http';
 import { canonicalJson, jsonBodySha256 } from './hub-client';
+import { startsOf, type Starts } from './starts';
 import { SelfTime } from './times';
 
 /**
@@ -42,7 +43,10 @@ const CreatedLink = z.object({
   url: z.string().url(),
   expiresAt: SelfTime,
 });
-export type CreatedLink = z.infer<typeof CreatedLink>;
+export type CreatedLink = z.infer<typeof CreatedLink> & {
+  /** What Self said about the person's identity-check starts (`startsLeft`, …). */
+  starts?: Starts;
+};
 
 /**
  * Self's `review: true` beside `status: "in_progress"`: the check waits for
@@ -61,10 +65,15 @@ const Saving = z.literal(true).optional().catch(undefined);
 
 /**
  * Why a check ended `failed`, when it was not a decision about the person:
- * `error` (a system failure) or `too_many_attempts` (they used up their
- * tries). Absent: the person was not verified.
+ * `error` (a system failure), `too_many_attempts` (they used up their
+ * tries) or `too_many_photos` (they used up the photo tries of the check).
+ * Absent: the person was not verified.
  */
-export const LINK_FAILURES = ['error', 'too_many_attempts'] as const;
+export const LINK_FAILURES = [
+  'error',
+  'too_many_attempts',
+  'too_many_photos',
+] as const;
 export type LinkFailure = (typeof LINK_FAILURES)[number];
 
 /**
@@ -75,6 +84,12 @@ export type LinkFailure = (typeof LINK_FAILURES)[number];
  */
 export const Failure = z.enum(LINK_FAILURES).optional().catch(undefined);
 
+/**
+ * Self's `failureReason` beside `failure: "too_many_attempts"`: which tries
+ * ran out. Only `too_many_photos` is known; anything else is absent.
+ */
+const FailureReason = z.literal('too_many_photos').optional().catch(undefined);
+
 const LinkState = z
   .object({
     linkId: z.string().regex(LINK_ID),
@@ -84,14 +99,30 @@ const LinkState = z
     review: Review,
     saving: Saving,
     failure: Failure,
+    failureReason: FailureReason,
   })
-  .transform(({ review, saving, failure, ...state }) => ({
-    ...state,
-    ...(review && state.status === 'in_progress' ? { review } : {}),
-    ...(saving && state.status === 'in_progress' ? { saving } : {}),
-    ...(failure && state.status === 'failed' ? { failure } : {}),
-  }));
-export type LinkState = z.infer<typeof LinkState>;
+  .transform(({ review, saving, failure, failureReason, ...state }) => {
+    // The photo tries ran out: Self says `too_many_attempts` with
+    // `failureReason: "too_many_photos"` (so an older client still reads
+    // "used up their tries"), or `too_many_photos` itself.
+    const why =
+      failure === 'too_many_attempts' && failureReason === 'too_many_photos'
+        ? failureReason
+        : failure;
+    return {
+      ...state,
+      ...(review && state.status === 'in_progress' ? { review } : {}),
+      ...(saving && state.status === 'in_progress' ? { saving } : {}),
+      ...(why && state.status === 'failed' ? { failure: why } : {}),
+    };
+  });
+export type LinkState = z.infer<typeof LinkState> & {
+  /**
+   * What Self said about the person's identity-check starts: `startsLeft`
+   * after a failed check, or `limit` while a start on the link was refused.
+   */
+  starts?: Starts;
+};
 
 /** Mints one invocation from the person's link delegation, bound by `facts`. */
 export type MintFromDelegation = (
@@ -174,6 +205,7 @@ export class SelfLinksClient {
     });
     const parsed = CreatedLink.safeParse(answer.body);
     if (!parsed.success) this.invalid();
+    const starts = startsOf(answer.body, this.nowMs());
     // The link the agent shares must be Self's own.
     const url = new URL(parsed.data.url);
     if (
@@ -182,7 +214,11 @@ export class SelfLinksClient {
       url.password
     )
       this.invalid();
-    return parsed.data;
+    return { ...parsed.data, ...(starts ? { starts } : {}) };
+  }
+
+  private nowMs(): number {
+    return (this.opts.now ?? Date.now)();
   }
 
   /** A link's status only; Self never answers personal data here. */
@@ -207,7 +243,8 @@ export class SelfLinksClient {
     });
     const parsed = LinkState.safeParse(answer.body);
     if (!parsed.success || parsed.data.linkId !== linkId) this.invalid();
-    return parsed.data;
+    const starts = startsOf(answer.body, this.nowMs());
+    return { ...parsed.data, ...(starts ? { starts } : {}) };
   }
 
   private transport() {

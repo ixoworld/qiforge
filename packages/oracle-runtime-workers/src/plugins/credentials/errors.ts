@@ -12,6 +12,15 @@
  * person.
  */
 
+import {
+  limitFacts,
+  limitSentence,
+  limitWait,
+  startsOf,
+  START_LIMIT_CODE,
+  type LimitFacts,
+  type Starts,
+} from './starts';
 import { selfTimeSeconds, whenItEnds } from './times';
 
 export type CredentialsService = 'hub' | 'credentials' | 'self';
@@ -53,6 +62,8 @@ export interface CredentialsRefusal {
   message: string;
   /** To the agent: what to do next. Never sent. */
   hint?: string;
+  /** `daily_limit`: when they can try again, for the agent. Never sent. */
+  limit?: LimitFacts;
 }
 
 /** One answer: the person's sentence and, when useful, the agent's next step. */
@@ -214,6 +225,34 @@ export const MESSAGES = {
     hint: 'Only the configured issuers of the type are accepted; leave issuers out to use them.',
   },
 } as const satisfies Record<string, Wording>;
+
+/** The agent's hint while no identity-check start is left. */
+export function limitHint(facts: LimitFacts): string {
+  const until = facts.resetsAt
+    ? `until ${facts.resetsAt} (${facts.tryAgain}, ${facts.retryAfterSeconds} s from now)`
+    : 'for a while (Self did not say until when; tell them "later today")';
+  return `They have no identity-check tries left ${until}. Send \`message\` as it is. Do not create, offer or promise a new link before then, and do not ask them to say "new link" now. Never say "in a minute", and say "tomorrow" only if that time really is tomorrow for them. If they ask again later, call credentials_request_action (or credentials_action_status) again: it answers the time left as of then; never reuse this wait. ${NO_LATER_MESSAGE}`;
+}
+
+/**
+ * The answer while no identity-check start is left: when they can try
+ * again as a friendly duration from `nowMs`, the facts for the agent and
+ * the hint. Null while the limit does not hold (no limit, or its reset has
+ * passed).
+ */
+export function limitAnswer(
+  starts: Starts | undefined,
+  nowMs: number,
+): { message: string; hint: string; limit: LimitFacts } | null {
+  const wait = limitWait(starts, nowMs);
+  if (wait === null) return null;
+  const limit = limitFacts(starts, wait);
+  return {
+    message: limitSentence(starts, wait),
+    hint: limitHint(limit),
+    limit,
+  };
+}
 
 /** A refusal from a wording. */
 export function refusal(error: string, wording: Wording): CredentialsRefusal {
@@ -404,6 +443,20 @@ export function refusalFor(
       return refusal(code, MESSAGES.permissionEnded);
     case 'not_found':
       return refusal(code, MESSAGES.notFound);
+    case START_LIMIT_CODE: {
+      // No identity-check start is left: when they can try again, from
+      // Self's `resetsAt`, else its `retryAfterSeconds` / `Retry-After`,
+      // else "later today". Never the generic "in a minute".
+      const nowMs = opts.nowMs ?? Date.now();
+      const starts = startsOf(error.body, nowMs, error.retryAfterSeconds, code);
+      const answer = limitAnswer(starts, nowMs) ?? {
+        // Self refused, yet its reset already passed: try again shortly.
+        message:
+          "You've used all your tries for now. Please ask me again in a few minutes.",
+        hint: `Self refused a new identity-check link (no tries left) but its reset time has passed. ${NO_LATER_MESSAGE}`,
+      };
+      return { error: code, ...answer };
+    }
     default:
       break;
   }
