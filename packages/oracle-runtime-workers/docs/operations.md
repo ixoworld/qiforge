@@ -1507,10 +1507,19 @@ becomes a turn (`src/matrix/group-chat.ts`):
   the Node runtime builds it. A decoupled
   deployment (users on one homeserver, the bot on another) resolves nothing
   otherwise. Room ids are cached per user for 30 minutes.
-- Room state right after an invite: `getRoomState` answers a 403 (not yet a
-  member) by accepting the pending invite and retrying for up to 5 s, so a
-  membership check that lands before the sync loop has joined a just-created
-  page room does not fail closed.
+- Room state right after an invite: `getRoomState`, `getRoomStateEvent` and
+  `sendStateEvent` answer a 403 (not yet a member) by accepting the pending
+  invite and retrying for up to 5 s, so a membership check, or the
+  delegation a new user's Hub deposit writes (`POST /delegation`), that
+  lands before the sync loop has joined a just-created room does not fail.
+  This happens while the bot restarts: an invite seen in the restart's first
+  sync is tried four times in about 3.5 s before the client is marked
+  running, gives up, and is joined only when the start finishes (the start
+  joins pending invites last), and a start sometimes takes 30 to 250 s after
+  its first sync (mainnet Yo, 14 Nov 2026: 194 starts in 10 h, median 1.3 s,
+  slowest 248 s). A call that still fails logs a warning
+  `[matrix-bot] <call> in <room> failed: <homeserver message>`; a join made
+  this way logs `[matrix-bot] <call>: joined <room> and trying again`.
 - Dedicated task rooms are created by the gateway (`createDedicatedRoom`:
   private, the user invited, a summary posted) for `before-action` tasks,
   on the `auto` heuristic or `dedicatedRoom: 'yes'`; replies there reach the

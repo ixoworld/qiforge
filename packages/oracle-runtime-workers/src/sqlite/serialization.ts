@@ -19,6 +19,7 @@ import {
 import { TURN_TIME_NOTE_KWARG } from '../core/turn-time-note';
 import {
   CHANNEL_CHOICE_NOTE_KWARG,
+  CHANNEL_PROVIDER_SENT_AT_KWARG,
   CHANNEL_DELIVERY_NOTICE_KWARG,
   CHANNEL_REPLY_NOTE_KWARG,
 } from '../channels/replies';
@@ -279,6 +280,8 @@ export interface CleanAdditionalKwargs {
   channel_reply_note?: string;
   /** The exact tapped-choice note of a channel message (see channels/replies.ts). */
   channel_choice_note?: string;
+  /** The provider's send time of a channel message, epoch ms (see channels/replies.ts). */
+  channel_provider_sent_at?: number;
   /** The parent call a forwarded sub-agent message came from (core/subagent-as-tool.ts). */
   forwardedFrom?: string;
   /** The result-cap marker of a capped tool result (core/middlewares/result-cap.ts). */
@@ -409,6 +412,15 @@ export function cleanAdditionalKwargs(
   const choiceNote = additionalKwargs[CHANNEL_CHOICE_NOTE_KWARG];
   if (typeof choiceNote === 'string')
     cleaned[CHANNEL_CHOICE_NOTE_KWARG] = choiceNote;
+  // Kept so a plugin can tell when the person sent an earlier message
+  // (two messages in a row against an answer to the next question).
+  const providerSentAt = additionalKwargs[CHANNEL_PROVIDER_SENT_AT_KWARG];
+  if (
+    typeof providerSentAt === 'number' &&
+    Number.isSafeInteger(providerSentAt) &&
+    providerSentAt >= 0
+  )
+    cleaned[CHANNEL_PROVIDER_SENT_AT_KWARG] = providerSentAt;
   // Kept so the parent model keeps leaving a sub-agent's forwarded calls
   // out of its requests (`withoutForwarded`).
   const forwardedFrom = additionalKwargs[FORWARDED_FROM_KEY];

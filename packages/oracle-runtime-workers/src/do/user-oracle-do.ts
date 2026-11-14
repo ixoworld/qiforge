@@ -15,6 +15,7 @@ import {
   channelChoiceNote,
   channelReplyNote,
   CHANNEL_CHOICE_NOTE_KWARG,
+  CHANNEL_PROVIDER_SENT_AT_KWARG,
   CHANNEL_REPLY_NOTE_KWARG,
   isDeliveryNoticeMessage,
 } from '../channels/replies';
@@ -9143,6 +9144,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                     ...(req.channel.attachments?.length
                       ? { attachments: req.channel.attachments }
                       : {}),
+                    ...(req.channel.providerSentAt !== undefined
+                      ? { providerSentAt: req.channel.providerSentAt }
+                      : {}),
                   },
                 }
               : {}),
@@ -9233,6 +9237,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           ...(timeNote ? { [TURN_TIME_NOTE_KWARG]: timeNote } : {}),
           ...(replyNote ? { [CHANNEL_REPLY_NOTE_KWARG]: replyNote } : {}),
           ...(choiceNote ? { [CHANNEL_CHOICE_NOTE_KWARG]: choiceNote } : {}),
+          ...(req.channel?.providerSentAt !== undefined
+            ? { [CHANNEL_PROVIDER_SENT_AT_KWARG]: req.channel.providerSentAt }
+            : {}),
           ...(noticeNote
             ? { [CHANNEL_DELIVERY_NOTICE_KWARG]: noticeNote }
             : {}),

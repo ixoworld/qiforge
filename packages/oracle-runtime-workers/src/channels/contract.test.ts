@@ -5,6 +5,9 @@ import {
   CHANNEL_TURN_FEATURES,
   ChannelFileNotice,
   ChannelTurnBody,
+  PROVIDER_SENT_AT_MAX_AGE_MS,
+  PROVIDER_SENT_AT_MAX_AHEAD_MS,
+  plausibleProviderSentAt,
 } from './contract';
 import { TURN_GUIDE_NOTE_KWARG } from '../core/operating-guides';
 import { TURN_TIME_NOTE_KWARG, withTurnTimeNote } from '../core/turn-time-note';
@@ -231,7 +234,57 @@ describe('turn features', () => {
       'permission_event',
       'rich_messages',
       'rich_events',
+      'provider_sent_at',
     ]);
+  });
+});
+
+describe('ChannelTurnBody with providerSentAt', () => {
+  it('accepts an epoch-ms send time on a message turn', () => {
+    expect(
+      ChannelTurnBody.safeParse({ ...turn, providerSentAt: 1_763_100_000_000 })
+        .success,
+    ).toBe(true);
+  });
+
+  it('refuses a send time that is not a non-negative integer', () => {
+    for (const bad of [-1, 1.5, '1763100000000', Number.MAX_SAFE_INTEGER + 2])
+      expect(
+        ChannelTurnBody.safeParse({ ...turn, providerSentAt: bad }).success,
+      ).toBe(false);
+  });
+
+  it('refuses it with an event, which is valid without it', () => {
+    const event = {
+      ...turn,
+      message: undefined,
+      requestId: 'permission:card_1:allowed',
+      sessionPolicy: 'continue',
+      event: {
+        kind: 'permission_answered',
+        permissionId: 'card_1',
+        status: 'allowed',
+      },
+    };
+    expect(ChannelTurnBody.safeParse(event).success).toBe(true);
+    expect(
+      ChannelTurnBody.safeParse({ ...event, providerSentAt: 1_763_100_000_000 })
+        .success,
+    ).toBe(false);
+  });
+
+  it('keeps only a believable send time', () => {
+    const now = 1_763_100_000_000;
+    expect(plausibleProviderSentAt(undefined, now)).toBeUndefined();
+    expect(plausibleProviderSentAt(now - 2_000, now)).toBe(now - 2_000);
+    expect(plausibleProviderSentAt(now + 60_000, now)).toBe(now + 60_000);
+    expect(
+      plausibleProviderSentAt(now + PROVIDER_SENT_AT_MAX_AHEAD_MS + 1, now),
+    ).toBeUndefined();
+    expect(
+      plausibleProviderSentAt(now - PROVIDER_SENT_AT_MAX_AGE_MS - 1, now),
+    ).toBeUndefined();
+    expect(plausibleProviderSentAt(0, now)).toBeUndefined();
   });
 });
 

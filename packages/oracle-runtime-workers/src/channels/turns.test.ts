@@ -1220,6 +1220,46 @@ describe('delivery notices', () => {
     notice,
   });
 
+  it("keeps a believable provider send time on the run's channel record, and drops an implausible one", async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('provider-sent-at');
+    const sentAt = Date.now() - 3_000;
+    const first = await stub.submit({
+      ...message,
+      requestId: 'wa:sent',
+      providerSentAt: sentAt,
+    });
+    if (!first.ok) throw new Error('Turn rejected');
+    const stored = JSON.parse(
+      (await stub.run(first.result.runId))!.request,
+    ) as {
+      channel: Record<string, unknown>;
+    };
+    expect(stored.channel.providerSentAt).toBe(sentAt);
+    // An hour ahead of the runtime's clock is not believed; the turn runs.
+    const ahead = await stub.submit({
+      ...message,
+      requestId: 'wa:ahead',
+      providerSentAt: Date.now() + 3_600_000,
+    });
+    if (!ahead.ok) throw new Error('Turn rejected');
+    const aheadRun = JSON.parse(
+      (await stub.run(ahead.result.runId))!.request,
+    ) as {
+      channel: Record<string, unknown>;
+    };
+    expect(aheadRun.channel).not.toHaveProperty('providerSentAt');
+    // Without it, as before.
+    const plain = await stub.submit({ ...message, requestId: 'wa:no-sent' });
+    if (!plain.ok) throw new Error('Turn rejected');
+    expect(
+      (
+        JSON.parse((await stub.run(plain.result.runId))!.request) as {
+          channel: Record<string, unknown>;
+        }
+      ).channel,
+    ).not.toHaveProperty('providerSentAt');
+  });
+
   it('every turn result advertises delivery notices, on submit and on every poll', async () => {
     const stub = env.CHANNEL_TURNS_TEST.getByName('notice-features');
     const first = await stub.submit(message);
@@ -1229,6 +1269,7 @@ describe('delivery notices', () => {
       'permission_event',
       'rich_messages',
       'rich_events',
+      'provider_sent_at',
     ]);
     expect(first.result.status).toBe('running');
     const polled = await stub.poll(message);
@@ -1237,6 +1278,7 @@ describe('delivery notices', () => {
       'permission_event',
       'rich_messages',
       'rich_events',
+      'provider_sent_at',
     ]);
     await stub.fail(first.result.runId);
     const failed = await stub.poll(message);
@@ -1247,6 +1289,7 @@ describe('delivery notices', () => {
         'permission_event',
         'rich_messages',
         'rich_events',
+        'provider_sent_at',
       ],
     });
     const second = await stub.submit({ ...message, requestId: 'wa:two' });
@@ -1263,6 +1306,7 @@ describe('delivery notices', () => {
           'permission_event',
           'rich_messages',
           'rich_events',
+          'provider_sent_at',
         ],
       },
     });
@@ -1284,6 +1328,7 @@ describe('delivery notices', () => {
         'permission_event',
         'rich_messages',
         'rich_events',
+        'provider_sent_at',
       ],
     });
     expect(noticed.result.runId).not.toBe(first.result.runId);
@@ -1430,6 +1475,7 @@ describe('delivery notices', () => {
         'permission_event',
         'rich_messages',
         'rich_events',
+        'provider_sent_at',
       ],
     });
     const request = JSON.parse(
@@ -1630,6 +1676,7 @@ describe('delivery notices', () => {
           'permission_event',
           'rich_messages',
           'rich_events',
+          'provider_sent_at',
         ],
       },
     });

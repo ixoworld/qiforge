@@ -35,6 +35,7 @@ import {
 import {
   CHANNEL_CHOICE_NOTE_KWARG,
   CHANNEL_DELIVERY_NOTICE_KWARG,
+  CHANNEL_PROVIDER_SENT_AT_KWARG,
   CHANNEL_REPLY_NOTE_KWARG,
   channelChoiceNote,
   userContent,
@@ -905,6 +906,44 @@ describe('runtime kwargs read after a checkpoint', () => {
       expect(back?.additional_kwargs[CHANNEL_CHOICE_NOTE_KWARG]).toBe(note);
       expect(userContent(back?.content ?? '', back?.additional_kwargs)).toBe(
         'Basic',
+      );
+      await db.close();
+    });
+  });
+
+  it("a channel message keeps the provider's send time on the live message and after reload", async () => {
+    await runInDurableObject(stub('saver-sent-at'), async (_i, state) => {
+      const db = await DoSqliteDatabase.open(state, 'sent-at.db');
+      const saver = new SqliteSaver(db);
+      const sentAt = 1_763_100_000_000;
+      const message = new HumanMessage({
+        id: 'h-sent',
+        content: 'and I sell vetkoek',
+        additional_kwargs: {
+          timestamp: TS,
+          [CHANNEL_PROVIDER_SENT_AT_KWARG]: sentAt,
+        },
+      });
+      const odd = new HumanMessage({
+        id: 'h-odd',
+        content: 'x',
+        additional_kwargs: {
+          timestamp: TS,
+          [CHANNEL_PROVIDER_SENT_AT_KWARG]: '2026-11-14T10:00:00Z',
+        },
+      });
+      await put(saver, 'sent-at', [message, odd]);
+      expect(message.additional_kwargs[CHANNEL_PROVIDER_SENT_AT_KWARG]).toBe(
+        sentAt,
+      );
+      const back = loaded(await saver.getTuple(config('sent-at')), 'h-sent');
+      expect(back?.additional_kwargs[CHANNEL_PROVIDER_SENT_AT_KWARG]).toBe(
+        sentAt,
+      );
+      // Only a number is kept.
+      const oddBack = loaded(await saver.getTuple(config('sent-at')), 'h-odd');
+      expect(oddBack?.additional_kwargs).not.toHaveProperty(
+        CHANNEL_PROVIDER_SENT_AT_KWARG,
       );
       await db.close();
     });

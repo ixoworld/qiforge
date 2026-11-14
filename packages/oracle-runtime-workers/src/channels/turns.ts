@@ -10,6 +10,7 @@ import { renderCapabilityOf } from '../delivery/rich';
 import { ChannelChoices } from './choices';
 import {
   CHANNEL_TURN_FEATURES,
+  plausibleProviderSentAt,
   ChannelError,
   type ChannelControlResult,
   StoredChannelControlResult,
@@ -1933,6 +1934,16 @@ export class ChannelTurns {
       console.log(
         `[channels] run ${runId}: render ${input.render ? `[${input.render.kinds.join(',')}] ${input.render.linkLabels.length} labels ${input.render.linkOrigins.length} origins` : 'none'}${input.choice ? `; tap ${choice ? 'matched an offered choice' : 'not an offered choice, read as text'}` : ''}`,
       );
+    // The person's send time as the provider gives it, when believable.
+    const providerSentAt = input.event
+      ? undefined
+      : plausibleProviderSentAt(input.providerSentAt, this.now());
+    if (input.providerSentAt !== undefined)
+      console.log(
+        providerSentAt === undefined
+          ? `[channels] run ${runId}: providerSentAt ignored (implausible)`
+          : `[channels] run ${runId}: providerSentAt ${this.now() - providerSentAt} ms before the turn`,
+      );
     const started = await this.host.begin(runId, {
       identity,
       sessionId: session,
@@ -1957,6 +1968,7 @@ export class ChannelTurns {
         ...(input.event ? { channelEvent: input.event } : {}),
         ...(input.render ? { render: renderCapabilityOf(input.render) } : {}),
         ...(choice ? { choice } : {}),
+        ...(providerSentAt !== undefined ? { providerSentAt } : {}),
       },
     });
     this.kick();
