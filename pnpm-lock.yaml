@@ -145,8 +145,8 @@ importers:
   apps/qiforge-workers-example:
     dependencies:
       '@ixo/matrix-bot-workers-sdk':
-        specifier: 0.7.0
-        version: 0.7.0(typescript@5.9.3)
+        specifier: 0.7.1
+        version: 0.7.1(typescript@5.9.3)
       '@ixo/oracle-runtime-workers':
         specifier: workspace:*
         version: link:../../packages/oracle-runtime-workers
@@ -708,8 +708,8 @@ importers:
         specifier: workspace:*
         version: link:../ixo-transaction
       '@ixo/matrix-bot-workers-sdk':
-        specifier: 0.7.0
-        version: 0.7.0(typescript@5.9.3)
+        specifier: 0.7.1
+        version: 0.7.1(typescript@5.9.3)
       '@ixo/matrix-crdt':
         specifier: ^1.2.5
         version: 1.3.2(lib0@0.2.117)(matrix-js-sdk@42.2.0)(y-protocols@1.0.7(yjs@13.6.32))(yjs@13.6.32)
@@ -3490,8 +3490,8 @@ packages:
     resolution: {integrity: sha512-Uf4HflULYYrWudPEdzzFBTpXhMd0Flo0IbNdcMt3T+YGQBQl5xzzv8RCN8FWWz02YrWBzPO73ZsaSgn6cUFMBA==}
     engines: {node: '>=22.0.0'}
 
-  '@ixo/matrix-bot-workers-sdk@0.7.0':
-    resolution: {integrity: sha512-n3aGP51NbAaWPkvNQnwzmEiSBSHpQ4YOCMXmsLOat9s5EZ8DSkvVbonoz6OmUKMh1kE74gHD7PB2SyeJMJU29A==}
+  '@ixo/matrix-bot-workers-sdk@0.7.1':
+    resolution: {integrity: sha512-jxfzbYxRQvrwtvllNQWR7PAuU5cq+ZvL4bFdGnsWy02tCMSuDkW2/onXyp5Sr4pC8gs5i6cJ6CPsVinQVUzdWg==}
     engines: {node: '>=22'}
     peerDependencies:
       typescript: '>=5.0.0'
@@ -15806,7 +15806,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@ixo/matrix-bot-workers-sdk@0.7.0(typescript@5.9.3)':
+  '@ixo/matrix-bot-workers-sdk@0.7.1(typescript@5.9.3)':
     dependencies:
       '@matrix-org/matrix-sdk-crypto-wasm': 18.6.0
       '@noble/hashes': 1.8.0
