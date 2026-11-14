@@ -8,6 +8,7 @@
  */
 import { env, runInDurableObject } from 'cloudflare:test';
 import { MatrixBotDO, type BotMessage } from '@ixo/matrix-bot-workers-sdk';
+import { MatrixError } from 'matrix-js-sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SqliteTestDO } from '../sqlite/test-do';
 import type { JsonString, OracleWorkerEnv, TurnResult } from '../do/contracts';
@@ -771,4 +772,90 @@ describe('plugin device credentials', () => {
       expect(hs.logins()).toBe(2);
     });
   });
+});
+
+describe('room state in a room the oracle is only invited to', () => {
+  const notJoined = () =>
+    new MatrixError({ errcode: 'M_FORBIDDEN', error: 'User not in room' }, 403);
+
+  async function withPlainGateway(
+    name: string,
+    fn: (gw: MatrixGatewayDO) => Promise<void>,
+  ): Promise<void> {
+    const stub = env.SQLITE_TEST.get(env.SQLITE_TEST.idFromName(name));
+    await runInDurableObject(stub, async (_i: SqliteTestDO, state) => {
+      const gw = new MatrixGatewayDO(state, gatewayEnv({ LOG_LEVEL: 'warn' }));
+      try {
+        await fn(gw);
+      } finally {
+        await gw.stop().catch(() => undefined);
+      }
+    });
+  }
+
+  it('a state write refused as not joined joins the room and is written (a new user during a bot restart)', async () => {
+    await withPlainGateway('state-write-join', async (gw) => {
+      const send = vi
+        .spyOn(MatrixBotDO.prototype, 'sendStateEvent')
+        .mockRejectedValueOnce(notJoined())
+        .mockResolvedValueOnce('$state');
+      const join = vi.spyOn(gw, 'joinRoom').mockResolvedValue(ROOM);
+      await expect(
+        gw.sendStateEvent(ROOM, 'ixo.room.state', '{}', 'ucan_delegation'),
+      ).resolves.toBe('$state');
+      expect(join).toHaveBeenCalledWith(ROOM);
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(send).toHaveBeenLastCalledWith(
+        ROOM,
+        'ixo.room.state',
+        '{}',
+        'ucan_delegation',
+      );
+    });
+  });
+
+  it('a state read refused as not joined joins and reads again', async () => {
+    await withPlainGateway('state-read-join', async (gw) => {
+      vi.spyOn(MatrixBotDO.prototype, 'getRoomStateEvent')
+        .mockRejectedValueOnce(notJoined())
+        .mockResolvedValueOnce('{"a":1}');
+      const join = vi.spyOn(gw, 'joinRoom').mockResolvedValue(ROOM);
+      await expect(
+        gw.getRoomStateEvent(ROOM, 'ixo.room.state', 'ucan_delegation'),
+      ).resolves.toBe('{"a":1}');
+      expect(join).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('any other failure is thrown at once, with its message logged', async () => {
+    await withPlainGateway('state-write-other', async (gw) => {
+      vi.spyOn(MatrixBotDO.prototype, 'sendStateEvent').mockRejectedValue(
+        new Error('M_LIMIT_EXCEEDED: Too many requests'),
+      );
+      const join = vi.spyOn(gw, 'joinRoom').mockResolvedValue(ROOM);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      await expect(
+        gw.sendStateEvent(ROOM, 'ixo.room.state', '{}', 'ucan_delegation'),
+      ).rejects.toThrow('M_LIMIT_EXCEEDED');
+      expect(join).not.toHaveBeenCalled();
+      expect(
+        warn.mock.calls.some((call) =>
+          String(call[0]).includes('Too many requests'),
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('gives up after the grace period when joining does not help', async () => {
+    await withPlainGateway('state-write-never', async (gw) => {
+      vi.spyOn(MatrixBotDO.prototype, 'sendStateEvent').mockRejectedValue(
+        notJoined(),
+      );
+      vi.spyOn(gw, 'joinRoom').mockRejectedValue(new Error('not invited'));
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      await expect(
+        gw.sendStateEvent(ROOM, 'ixo.room.state', '{}', 'ucan_delegation'),
+      ).rejects.toBeInstanceOf(MatrixError);
+    });
+  }, 15_000);
 });

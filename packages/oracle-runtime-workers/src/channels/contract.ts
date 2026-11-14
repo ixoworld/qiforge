@@ -323,6 +323,14 @@ const ChannelTurnFields = z.strictObject({
    */
   choice: z.strictObject({ id: z.string().min(1).max(256) }).optional(),
   /**
+   * When the person sent this message according to the provider (WhatsApp's
+   * own timestamp on the inbound message), in epoch ms. Sent only to a
+   * runtime whose turn results list `provider_sent_at`, and only with a
+   * message: never with a notice or an event. A value the runtime cannot
+   * believe (`plausibleProviderSentAt`) is ignored, not refused.
+   */
+  providerSentAt: z.number().int().nonnegative().safe().optional(),
+  /**
    * Which kind of oracle the gateway believes it addresses. `companion` is
    * the legacy value; the gateway sends `oracle`. Both are accepted.
    */
@@ -339,6 +347,7 @@ export const ChannelTurnBody = ChannelTurnFields.superRefine((body, ctx) => {
       'sessionId',
       // An event has no tap; `render` is allowed (`rich_events`).
       'choice',
+      'providerSentAt',
     ] as const)
       if (body[field] !== undefined)
         ctx.addIssue({
@@ -369,7 +378,13 @@ export const ChannelTurnBody = ChannelTurnFields.superRefine((body, ctx) => {
       });
     return;
   }
-  for (const field of ['attachments', 'replyTo', 'render', 'choice'] as const)
+  for (const field of [
+    'attachments',
+    'replyTo',
+    'render',
+    'choice',
+    'providerSentAt',
+  ] as const)
     if (body[field] !== undefined)
       ctx.addIssue({
         code: 'custom',
@@ -404,14 +419,43 @@ export type ChannelTurnInput = z.infer<typeof ChannelTurnBody>;
  * `rich_events`: an event turn may carry `render` too, and its answer is
  * planned exactly like a message turn's (0.50.0 lists `rich_messages`
  * without it and refuses `render` with an event with 400).
+ * `provider_sent_at`: a message turn may carry `providerSentAt`, the
+ * provider's send time of the person's message (a runtime without it
+ * refuses the field with 400).
  */
 export const CHANNEL_TURN_FEATURES = [
   'delivery_notice',
   'permission_event',
   'rich_messages',
   'rich_events',
+  'provider_sent_at',
 ] as const;
 export type ChannelTurnFeature = (typeof CHANNEL_TURN_FEATURES)[number];
+
+/** How far ahead of this runtime's clock a provider send time may be (clock skew). */
+export const PROVIDER_SENT_AT_MAX_AHEAD_MS = 5 * 60_000;
+/**
+ * How old a provider send time may be. WhatsApp's service window is 24
+ * hours and the gateway admits nothing older; this leaves room for a
+ * message retried late.
+ */
+export const PROVIDER_SENT_AT_MAX_AGE_MS = 48 * 3_600_000;
+
+/**
+ * The turn's `providerSentAt` when it is believable at `now` (epoch ms):
+ * not more than `PROVIDER_SENT_AT_MAX_AHEAD_MS` in the future and not older
+ * than `PROVIDER_SENT_AT_MAX_AGE_MS`. Anything else is dropped, so a
+ * gateway's clock fault never fails a turn and never reaches a plugin.
+ */
+export function plausibleProviderSentAt(
+  value: number | undefined,
+  now: number,
+): number | undefined {
+  if (value === undefined || !Number.isSafeInteger(value)) return undefined;
+  if (value > now + PROVIDER_SENT_AT_MAX_AHEAD_MS) return undefined;
+  if (value < now - PROVIDER_SENT_AT_MAX_AGE_MS) return undefined;
+  return value;
+}
 
 export const ChannelOrigin = z.strictObject({
   v: z.literal(1),

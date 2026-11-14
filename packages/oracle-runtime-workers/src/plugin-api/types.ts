@@ -750,6 +750,17 @@ export interface RuntimeContext<TConfig = MergedConfig> {
        * attachment pipeline; this is the raw list for tools that keep them.
        */
       attachments?: readonly ChannelAttachment[];
+      /**
+       * When the person sent this turn's message according to the provider
+       * (WhatsApp's own timestamp), in epoch ms; whole seconds under both
+       * WhatsApp transports. Absent when the gateway sent none (it sends it
+       * only to a runtime that lists `provider_sent_at`), on an event or
+       * notice turn, or when the value was implausible. The same value is on
+       * the turn's human message as `additional_kwargs.channel_provider_sent_at`
+       * (`CHANNEL_PROVIDER_SENT_AT_KWARG`), so history readers see it for
+       * earlier messages too.
+       */
+      providerSentAt?: number;
     };
     roomId?: string;
     /**

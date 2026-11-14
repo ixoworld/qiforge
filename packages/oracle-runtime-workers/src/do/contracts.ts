@@ -469,6 +469,12 @@ export interface TurnRequest {
      */
     render?: RenderCapability;
     /**
+     * When the person sent this message according to the provider (epoch
+     * ms), already checked by the channel host (`plausibleProviderSentAt`).
+     * Stored with the run, so a resumed run reads the same.
+     */
+    providerSentAt?: number;
+    /**
      * The option the person tapped, checked against the choices offered in
      * this session: the model reads a note naming it with the message.
      */

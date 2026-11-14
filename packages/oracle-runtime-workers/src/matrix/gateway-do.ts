@@ -1472,17 +1472,68 @@ export class MatrixGatewayDO
   }
 
   override async getRoomState(roomId: string): Promise<JsonString> {
+    return this.joinedRetry(roomId, 'getRoomState', () =>
+      super.getRoomState(roomId),
+    );
+  }
+
+  override async getRoomStateEvent(
+    roomId: string,
+    type: string,
+    stateKey?: string,
+  ): Promise<JsonString | null> {
+    return this.joinedRetry(roomId, `getRoomStateEvent(${type})`, () =>
+      super.getRoomStateEvent(roomId, type, stateKey),
+    );
+  }
+
+  override async sendStateEvent(
+    roomId: string,
+    type: string,
+    content: JsonString,
+    stateKey?: string,
+  ): Promise<string> {
+    return this.joinedRetry(roomId, `sendStateEvent(${type})`, () =>
+      super.sendStateEvent(roomId, type, content, stateKey),
+    );
+  }
+
+  /**
+   * A room-state read or write in a room the oracle may not have joined
+   * yet. 403 = not a member: the oracle was invited seconds ago (a user's
+   * new room, a page room) and the sync loop has not accepted the invite —
+   * for example while the bot restarts, when rooms created meanwhile are
+   * joined only after its first sync. The invite is accepted here and the
+   * call tried again, for up to `PENDING_INVITE_GRACE_MS`. The join fails
+   * quietly for a room the oracle is not invited to. A call that still
+   * fails is logged with the homeserver's own message before it is thrown.
+   */
+  private async joinedRetry<T>(
+    roomId: string,
+    what: string,
+    call: () => Promise<T>,
+  ): Promise<T> {
     const deadline = Date.now() + PENDING_INVITE_GRACE_MS;
+    let joined = false;
     for (;;) {
       try {
-        return await super.getRoomState(roomId);
+        return await call();
       } catch (err) {
-        // 403 = not a member. If the oracle was only just invited (a page
-        // room created by the user seconds ago), accept the invite here
-        // instead of waiting for the sync loop, then read again. The join
-        // fails quietly for a room we are not invited to.
-        if (!isForbidden(err) || Date.now() > deadline) throw err;
-        await this.joinRoom(roomId).catch(() => undefined);
+        if (!isForbidden(err) || Date.now() > deadline) {
+          this.log(
+            'warn',
+            `${what} in ${roomId} failed${joined ? ' after joining' : ''}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          throw err;
+        }
+        await this.joinRoom(roomId).then(
+          () => {
+            if (!joined)
+              this.log('info', `${what}: joined ${roomId} and trying again`);
+            joined = true;
+          },
+          () => undefined,
+        );
         await sleep(250);
       }
     }
