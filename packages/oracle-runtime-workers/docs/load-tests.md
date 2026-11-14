@@ -163,3 +163,27 @@ them now lives in `@ixo/matrix-bot-workers-sdk`.
   threshold was tried; once the leak was fixed, one instance carried 1,873
   sends across four 20-user stress sets with 0 kills, and the forced reset
   was the only user-visible blip. The recycle is idle-only now.
+
+## The planned recycle turned off (2026-11-14)
+
+The gateway recycled itself every 300 sends (`MATRIX_RECYCLE_AFTER_SENDS`)
+since the per-send leak above. Under the Yo campaign on mainnet that meant a
+restart every 2–4 minutes, cancelled sends at nearly every one, and restarts
+that sometimes took 20–248 s. Before turning it off by default, the leak was
+measured again with the recycle off, on the local harness (`wrangler dev` of
+the example worker, one workerd for shell, user objects and gateway),
+encrypted custom events through `POST /debug/matrix/event` from six users:
+
+| Measure                                        | Result                                                                              |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------- |
+| sends in one gateway instance                  | 2,000 (run 1) and 3,092 (run 2), same `instanceId` throughout, no `planned recycle` |
+| `cryptoStoreTransactions` at every 15 s sample | 0                                                                                   |
+| `wasmHeapBytes`                                | 1.6 MB at boot, 1.9 MB from the first hundred sends on, flat                        |
+| workerd RSS, run 1 (whole process)             | 560–600 MB from 500 to 1,943 sends, 326 MB once idle                                |
+| memory-limit resets                            | 0                                                                                   |
+
+With the old leak 1,500 more sends would have added ~375 MB. On mainnet the Yo
+gateway's `/matrix/status` showed `cryptoStoreTransactions` 0 at 108 and 152
+sends since boot. An in-place restart keeps the crypto WASM's memory (it only
+grows inside one isolate), so the recycle was never the answer to WASM growth;
+the default is now 0 and a positive value opts back in.

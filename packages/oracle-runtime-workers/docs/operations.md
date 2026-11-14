@@ -1317,12 +1317,23 @@ transient error.
 
 The gateway shares its isolate's 128 MB with the crypto WASM and every event
 being encrypted, and a crypto WASM's linear memory only grows inside one
-isolate. Two things keep it healthy: the encryption gate plus
-`MATRIX_TURN_CONCURRENCY` bound concurrent encryption sources, and after
-`MATRIX_RECYCLE_AFTER_SENDS` sends (default 300) the SDK recycles the object —
-only when nothing is in flight and no message arrived for 15 s, so nobody
-notices. The log line `planned recycle: N sends since boot` precedes every
-intentional instance change; an instance change without one is a kill worth
+isolate. The encryption gate plus `MATRIX_TURN_CONCURRENCY` bound concurrent
+encryption sources, and the SDK prunes fake-indexeddb's finished transactions
+(the ~250 KB per encrypted send that once killed the object every 300 sends);
+`cryptoStoreTransactions` in `/matrix/status` is the guard and stays at a
+handful whatever the number of sends.
+
+The planned recycle after `MATRIX_RECYCLE_AFTER_SENDS` sends is **off by
+default** (0). It restarts the bot in the same isolate, so it returns none of
+the crypto WASM's memory, and under steady load (300 sends every few minutes)
+it cancelled sends still waiting in the scheduler and held every gateway call
+until the bot was back, sometimes for minutes. With it off, a local gateway
+carried 2,000 encrypted sends in one instance with `cryptoStoreTransactions`
+at 0 and no growth in the worker's memory. Set a positive count only to bring
+it back on purpose; it then waits until nothing is in flight and no message
+arrived for 15 s, or forces itself at five times the count. The log line
+`planned recycle: N sends since boot` precedes such a restart; any other
+instance change (`/matrix/status` `instanceId`) is a reset or a kill worth
 investigating. Cloudflare's GraphQL analytics
 (`durableObjectsInvocationsAdaptiveGroups`, dimension `status`) show
 `exceededMemory` counts per five minutes and are the acceptance check after
