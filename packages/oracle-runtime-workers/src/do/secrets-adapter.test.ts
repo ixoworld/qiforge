@@ -1,7 +1,7 @@
 /**
  * The runtime's own LLM credentials share the user's oracle room with the
- * secrets the user stores for tools. Plugins see only the latter: the sandbox
- * forwards every secret it sees to code the model writes.
+ * secrets the user stores for tools. Plugins see only the latter, and the
+ * sandbox reads one only after a trusted host authorizes that invocation.
  */
 import { describe, expect, it } from 'vitest';
 import { BYO_SECRET_NAMES, isRuntimeOnlySecret } from '../llm/byo-catalog';

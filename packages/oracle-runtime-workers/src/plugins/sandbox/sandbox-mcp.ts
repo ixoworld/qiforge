@@ -31,7 +31,7 @@ export interface SandboxHeaderInputs {
   skillsServiceUrl?: string;
   /** Oracle operator secrets — mapped to `x-os-{key}` headers. */
   oracleSecrets: Record<string, string>;
-  /** Per-room user secrets — mapped to `x-us-{key}` headers. */
+  /** Per-room user secrets approved for this invocation. */
   userSecrets: Record<string, string>;
 }
 
@@ -43,7 +43,7 @@ export interface SandboxHeaderInputs {
  * 2. Mint an `ixo:sandbox` UCAN invocation → `Authorization: Bearer ...`.
  * 3. Optionally mint a parallel `ixo:skills` invocation →
  *    `X-Skills-Invocation: ...` (forwarded by sandbox to the skills service).
- * 4. Layer oracle + user secrets as `x-os-*` / `x-us-*` headers.
+ * 4. Layer oracle + invocation-approved user secrets as `x-os-*` / `x-us-*`.
  *
  * UCAN-only — no Matrix-OpenID fallback. If minting fails for any reason
  * (no signing key, no cached delegation, did:web unresolved) the returned

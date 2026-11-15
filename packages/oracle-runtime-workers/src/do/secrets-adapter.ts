@@ -9,9 +9,9 @@
  *
  * The runtime's own LLM credentials (BYO API keys, the ChatGPT OAuth tokens
  * with their refresh token) share the room but are not the user's tool
- * secrets: plugins neither list nor read them. The sandbox forwards every
- * secret it sees to code the model writes, where a prompt injection could
- * send it anywhere. The BYO service reads them from the service directly.
+ * secrets: plugins neither list nor read them. The sandbox defaults to no
+ * room secrets and reads only names approved for an invocation by a trusted
+ * host authorizer. The BYO service reads its credentials directly.
  */
 import type { SecretsAdapter } from '../core/runtime-context';
 import { isRuntimeOnlySecret } from '../llm/byo-catalog';

@@ -67,7 +67,7 @@ const manifest: PluginManifest = {
   summary:
     'Per-user Linux box: `sandbox_run` runs shell or python, `sandbox_write_file` writes under `/workspace/data/`.',
   whenToUse: [
-    "Execute a skill — call `sandbox_run` with `cid` so user + oracle secrets are injected; the skill folder mounts read-only at `/workspace/skills/<skill-name>/` (use the absolute paths from `load_skill`'s `skillFiles`).",
+    "Execute a skill — call `sandbox_run` with `cid` so host-approved user secrets and oracle secrets are injected; the skill folder mounts read-only at `/workspace/skills/<skill-name>/` (use the absolute paths from `load_skill`'s `skillFiles`).",
     'Read a skill file (SKILL.md, scripts, configs) — call `sandbox_run` with `cid` and shell: `cat /workspace/skills/<skill-name>/SKILL.md`, `ls /workspace/skills/<skill-name>/`, `grep -r "<pattern>" /workspace/skills/<skill-name>/`, or `sed -n "1,80p" <file>` for a line range. There is no dedicated `read_skill` tool.',
     'Hit a JSON/REST API — write curl or python in `sandbox_run`. Never use a web scraper for `/api/`, `/v1/`, `/v2/`, `/v3/` endpoints.',
     'Generate or transform a file the user (or a later turn) will re-read — write it to `/workspace/data/output/<name>` (alias `/workspace/output/`). It is pushed to durable storage after the call; a later turn must `load_artifact` it back before reading.',
@@ -99,7 +99,7 @@ const manifest: PluginManifest = {
     {
       user: 'Run the price-forecast skill on the Q3 sales data.',
       thought:
-        'The CSV came from an earlier turn, so it is in durable storage but almost certainly NOT on the box — pull it down first. Then run the skill with its CID so user + oracle secrets are injected, and write the forecast to /workspace/data/output/ so it is archived for later.',
+        'The CSV came from an earlier turn, so it is in durable storage but almost certainly NOT on the box — pull it down first. Then run the skill with its CID so host-approved user secrets and oracle secrets are injected, and write the forecast to /workspace/data/output/ so it is archived for later.',
       tool: 'load_artifact',
       args: {
         path: '/output/q3-sales.csv',
@@ -182,10 +182,17 @@ export type SandboxMcpClientFactory = (
 ) => SandboxMcpClientLike;
 
 /**
- * How long a request's lazily-connected MCP client survives after its last
- * invocation before being closed (a later call reconnects).
+ * Trusted host decision for the room secrets one sandbox invocation needs.
+ * Tool input is model-controlled and may inform the decision, but it must not
+ * be treated as approval: implementations must consult a host-owned consent or
+ * policy record before returning a secret name. Without an authorizer, room
+ * secrets are never read or forwarded.
  */
-const SANDBOX_IDLE_CLIENT_CLOSE_MS = 5 * 60 * 1000;
+export type SandboxUserSecretAuthorizer = (request: {
+  readonly toolName: string;
+  readonly input: unknown;
+  readonly context: RuntimeContext;
+}) => readonly string[] | Promise<readonly string[]>;
 
 export interface SandboxPluginOptions {
   /**
@@ -200,6 +207,12 @@ export interface SandboxPluginOptions {
    * standing up a real `MCPAdapter`.
    */
   mcpClientFactory?: SandboxMcpClientFactory;
+  /**
+   * Return the room-secret names approved for one invocation. The callback is
+   * a trusted security boundary and must verify host-owned consent rather than
+   * accepting names from model-controlled tool input. Defaults to no secrets.
+   */
+  authorizeUserSecrets?: SandboxUserSecretAuthorizer;
   /**
    * Opt-in to the upstream `oracle_*` management tools (`oracle_list`,
    * `oracle_get`, `oracle_health`, `oracle_stop`, `oracle_restart`,
@@ -239,14 +252,14 @@ const SANDBOX_TOOL_DEFS_TTL_MS = 5 * 60 * 1000;
  * the `artifact_*` family, `load_skill`, and the `oracle_*`
  * management tools — to the main agent. Each tool flows through verbatim
  * (name, description, schema all from upstream); the plugin's only job is to
- * authenticate the MCP connection and forward operator + per-user secrets in
- * the request headers.
+ * authenticate the MCP connection and forward operator secrets plus any room
+ * secrets a trusted host policy approves for the specific invocation.
  *
- * Headers are minted ONCE per request and include:
+ * Each MCP connection's headers include:
  *   - `Authorization: Bearer <ixo:sandbox UCAN invocation>` + `X-Auth-Type: ucan`
  *   - `X-Skills-Invocation` (when `SKILLS_CAPSULES_BASE_URL` is configured)
  *   - `x-os-<name>` for each entry in `ORACLE_SECRETS`
- *   - `x-us-<name>` for each per-room secret loaded from `ctx.secrets`
+ *   - `x-us-<name>` only for room secrets approved by `authorizeUserSecrets`
  *
  * Tools are discovered per request via {@link getRequestTools} because the
  * MCP client has to be authenticated as the in-flight user.
@@ -272,6 +285,7 @@ export class SandboxPlugin extends OraclePlugin {
 
   private readonly authBuilder: SandboxAuthBuilder;
   private readonly mcpClientFactory: SandboxMcpClientFactory;
+  private readonly authorizeUserSecrets: SandboxUserSecretAuthorizer | null;
   private readonly includeOracleManagementTools: boolean;
 
   constructor(opts: SandboxPluginOptions = {}) {
@@ -282,6 +296,7 @@ export class SandboxPlugin extends OraclePlugin {
     // unclosable.
     this.mcpClientFactory =
       opts.mcpClientFactory ?? defaultSandboxMcpClientFactory;
+    this.authorizeUserSecrets = opts.authorizeUserSecrets ?? null;
     this.includeOracleManagementTools =
       opts.includeOracleManagementTools ?? false;
   }
@@ -343,12 +358,15 @@ export class SandboxPlugin extends OraclePlugin {
         !this.defsRefreshInFlight.has(sandboxMcpUrl)
       ) {
         this.defsRefreshInFlight.add(sandboxMcpUrl);
-        void this.connectWithFullHeaders({
-          sandboxMcpUrl,
-          skillsServiceUrl,
-          oracleSecrets,
-          rtCtx,
-        })
+        void this.connectWithHeaders(
+          {
+            sandboxMcpUrl,
+            skillsServiceUrl,
+            oracleSecrets,
+            rtCtx,
+          },
+          {},
+        )
           .then(async ({ client, tools }) => {
             // Defs are plain data — the refresh connection has nothing left
             // to serve once they're snapshotted.
@@ -382,14 +400,12 @@ export class SandboxPlugin extends OraclePlugin {
       return this.toPluginTools(lazyUpstream, rtCtx);
     }
 
-    const userSecrets = await rtCtx.secrets.getAll();
-
     const headers = await this.authBuilder(
       {
         sandboxMcpUrl,
         skillsServiceUrl,
         oracleSecrets,
-        userSecrets,
+        userSecrets: {},
       },
       rtCtx,
     );
@@ -444,11 +460,10 @@ export class SandboxPlugin extends OraclePlugin {
   }
 
   /**
-   * Bind cached definitions to lazily-connected upstream tools. The full
-   * connection chain (secrets fetch → header mint → MCP connect →
-   * tools/list) runs once, on the first actual invocation, and is shared by
-   * every sandbox tool in the request — turns that never call the sandbox
-   * pay zero sandbox round-trips.
+   * Bind cached definitions to lazily-connected upstream tools. Every actual
+   * invocation gets a short-lived connection carrying only the room secrets
+   * approved for that tool and input. Discovery connections carry none, and
+   * turns that never call the sandbox pay zero invocation round-trips.
    */
   private buildLazyUpstreamTools(
     defs: SandboxToolDef[],
@@ -459,96 +474,75 @@ export class SandboxPlugin extends OraclePlugin {
       rtCtx: RuntimeContext;
     },
   ): SandboxMcpTool[] {
-    let connection: Promise<{
-      client: SandboxMcpClientLike;
-      byName: Map<string, SandboxMcpTool>;
-    }> | null = null;
-    let idleTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const closeConnection = (): void => {
-      const current = connection;
-      connection = null;
-      if (idleTimer !== null) {
-        clearTimeout(idleTimer);
-        idleTimer = null;
-      }
-      if (!current) return;
-      void current.then(({ client }) => client.close()).catch(() => undefined);
-    };
-
-    // There is no request-end hook on the tool path, so idle-close is what
-    // bounds the client's lifetime — without it every turn that touched the
-    // sandbox leaked a connected client for the life of the isolate. A later
-    // invocation simply reconnects.
-    // Close when the turn ends; the idle timer is only the fallback for
-    // hosts without a turn-end hook (a pending timer keeps a Durable Object
-    // resident and blocks hibernation).
-    const onTurnEnd = args.rtCtx.onTurnEnd;
-    const scheduleIdleClose = (): void => {
-      if (onTurnEnd) return;
-      if (idleTimer !== null) clearTimeout(idleTimer);
-      idleTimer = setTimeout(closeConnection, SANDBOX_IDLE_CLIENT_CLOSE_MS);
-    };
-    let closeRegistered = false;
-    const registerTurnEndClose = (): void => {
-      if (!onTurnEnd || closeRegistered) return;
-      closeRegistered = true;
-      onTurnEnd(() => closeConnection());
-    };
-
-    const connect = (): NonNullable<typeof connection> => {
-      if (!connection) {
-        registerTurnEndClose();
-        connection = this.connectWithFullHeaders(args).then(
-          ({ client, tools }) => ({
-            client,
-            byName: new Map(tools.map((t) => [t.name, t])),
-          }),
-        );
-        // A failed connect must not poison the rest of the run — clear the
-        // memo so a later invocation retries with a fresh client.
-        connection.catch(() => {
-          connection = null;
-        });
-      }
-      return connection;
-    };
-
     return defs.map((def) => ({
       name: def.name,
       description: def.description,
       schema: def.schema,
       invoke: async (input: unknown) => {
-        const { byName } = await connect();
-        const upstream = byName.get(def.name);
-        if (!upstream) {
-          scheduleIdleClose();
-          throw new Error(
-            `sandbox MCP no longer exposes "${def.name}" — cached definition is stale, retry shortly.`,
-          );
-        }
+        const userSecrets = await this.getAuthorizedUserSecrets(
+          def.name,
+          input,
+          args.rtCtx,
+        );
+        const { client, tools } = await this.connectWithHeaders(
+          args,
+          userSecrets,
+        );
+        let closePromise: Promise<void> | null = null;
+        const closeClient = (): Promise<void> => {
+          closePromise ??= client.close().catch(() => undefined);
+          return closePromise;
+        };
         try {
+          const upstream = tools.find((tool) => tool.name === def.name);
+          if (!upstream) {
+            throw new Error(
+              `sandbox MCP no longer exposes "${def.name}" — cached definition is stale, retry shortly.`,
+            );
+          }
           return await withCallTimeout(
             () => upstream.invoke(input),
             SANDBOX_MCP_TIMEOUT_MS,
             `sandbox tool ${def.name}`,
-            closeConnection,
+            closeClient,
           );
         } finally {
-          scheduleIdleClose();
+          await closeClient();
         }
       },
     }));
   }
 
-  private async connectWithFullHeaders(args: {
-    sandboxMcpUrl: string;
-    skillsServiceUrl: string | undefined;
-    oracleSecrets: Record<string, string>;
-    rtCtx: RuntimeContext;
-  }): Promise<{ client: SandboxMcpClientLike; tools: SandboxMcpTool[] }> {
+  private async getAuthorizedUserSecrets(
+    toolName: string,
+    input: unknown,
+    context: RuntimeContext,
+  ): Promise<Record<string, string>> {
+    if (!this.authorizeUserSecrets) return {};
+    const approved = await this.authorizeUserSecrets({
+      toolName,
+      input,
+      context,
+    });
+    const names = [...new Set(approved)];
+    if (names.length === 0) return {};
+    const values = await context.secrets.getValues(names);
+    const allowed = new Set(names);
+    return Object.fromEntries(
+      Object.entries(values).filter(([name]) => allowed.has(name)),
+    );
+  }
+
+  private async connectWithHeaders(
+    args: {
+      sandboxMcpUrl: string;
+      skillsServiceUrl: string | undefined;
+      oracleSecrets: Record<string, string>;
+      rtCtx: RuntimeContext;
+    },
+    userSecrets: Record<string, string>,
+  ): Promise<{ client: SandboxMcpClientLike; tools: SandboxMcpTool[] }> {
     const { sandboxMcpUrl, skillsServiceUrl, oracleSecrets, rtCtx } = args;
-    const userSecrets = await rtCtx.secrets.getAll();
 
     const headers = await this.authBuilder(
       { sandboxMcpUrl, skillsServiceUrl, oracleSecrets, userSecrets },
