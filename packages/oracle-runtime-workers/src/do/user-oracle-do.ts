@@ -430,6 +430,12 @@ import {
   type IndexableSession,
 } from '../memory/session-history-indexer';
 import {
+  HISTORY_BACKLOG_FIRST_DELAY_MS,
+  HISTORY_BACKLOG_PER_TICK,
+  HISTORY_BACKLOG_SEED_SESSIONS,
+  HistoryBacklog,
+} from '../memory/history-backlog';
+import {
   USER_CONTEXT_SLOTS,
   UserContextFetcher,
   type UserContextFetchOutcome,
@@ -754,6 +760,8 @@ const FLUSH_FAILURES_ERROR_THRESHOLD = 3;
  * more for anyone who comes back within that window.
  */
 const IDLE_EVICT_MS = 5 * 24 * 60 * 60 * 1000;
+/** The history catch-up never asks for the next housekeeping tick sooner than this. */
+const HISTORY_CATCH_UP_MIN_WAIT_MS = 60_000;
 /**
  * A stream of requests to a loaded object persists its last access at most
  * this often. The idle checks read the in-memory value as well, so what an
@@ -3100,6 +3108,19 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         }
       }
 
+      // Session history the memory engine does not have yet and no live
+      // trigger is coming for: a few sessions per tick, in the background.
+      // Before the eviction check, so a person who went quiet is uploaded
+      // before their copy goes (its deadline keeps the copy meanwhile).
+      try {
+        const historyAt = await this.historyCatchUp();
+        if (historyAt !== null) deadlines.push(Math.max(historyAt, now + 1000));
+      } catch (err) {
+        console.warn(
+          `[user-do] history catch-up failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
       // Action cards: look up recorded transactions the chain has not
       // confirmed yet, close cards claimed and never executed, post the
       // receipts that are due, drop old cards. It runs after the flush and
@@ -4464,10 +4485,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // now and let the background indexer read the snapshot.
       const doomed = await this.sessions!.getSession(sessionId);
       if (doomed && !sessionId.startsWith(TASK_SESSION_PREFIX)) {
-        this.historySnapshots.set(sessionId, {
-          session: doomed,
-          messages: await this.historyMessages(sessionId),
-        });
+        const messages = await this.historyMessages(sessionId);
+        // Read the row again after the transcript: a pass that moved the
+        // count meanwhile must not have its parts sent a second time.
+        const latest = (await this.sessions!.getSession(sessionId)) ?? doomed;
+        this.historySnapshots.set(sessionId, { session: latest, messages });
         this.scheduleHistoryIndexing(sessionId);
       }
       const deleted = await this.sessions!.deleteSession(sessionId);
@@ -5280,12 +5302,73 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       opts: { afterQuietMs?: number } = {},
     ): void {
       if (sessionId.startsWith(TASK_SESSION_PREFIX)) return;
+      const indexer = this.ensureHistoryIndexer();
+      if (!indexer) return;
+      // On the durable record before the pass starts, so the housekeeping
+      // catch-up uploads the session if the pass never happens or fails (a
+      // deleted session's snapshot is gone after this pass: not recorded).
+      const noted =
+        indexer.active && !this.historySnapshots.has(sessionId)
+          ? this.historyBacklog
+              .note(
+                sessionId,
+                Date.now() +
+                  (opts.afterQuietMs ?? 0) +
+                  HISTORY_BACKLOG_FIRST_DELAY_MS,
+              )
+              .catch((err: unknown) => {
+                console.warn(
+                  `[user-do] could not record session ${sessionId} for the history catch-up: ${err instanceof Error ? err.message : String(err)}`,
+                );
+              })
+          : Promise.resolve();
+      // A deleted session's snapshot is its transcript's last chance: it is
+      // indexed even while the session backs off after a failure.
+      const work = noted.then(async (): Promise<void> => {
+        if (opts.afterQuietMs !== undefined)
+          await indexer.processAfterQuiet(sessionId, opts.afterQuietMs);
+        else if (this.historySnapshots.has(sessionId))
+          await indexer.process(sessionId, { ignoreBackoff: true });
+        else await indexer.process(sessionId);
+      });
+      this.ctx.waitUntil(
+        work
+          .catch((err: unknown) => {
+            console.error(
+              `[user-do] session-history indexing failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          })
+          .finally(() => {
+            if (this.historySnapshots.has(sessionId)) {
+              this.historySnapshots.delete(sessionId);
+            }
+          }),
+      );
+    }
+
+    private historyBacklogStore: HistoryBacklog | null = null;
+
+    /** Sessions with history the memory engine may not have yet (memory/history-backlog.ts). */
+    private get historyBacklog(): HistoryBacklog {
+      this.historyBacklogStore ??= new HistoryBacklog(
+        this.ctx.storage,
+        console,
+      );
+      return this.historyBacklogStore;
+    }
+
+    /**
+     * The session-history indexer, built on first use; null before the
+     * object has booted (no identity, no session store).
+     */
+    private ensureHistoryIndexer(): SessionHistoryIndexer | null {
+      if (this.historyIndexer) return this.historyIndexer;
       const ambient = this.ambient;
       const userDid = this.userDid;
-      if (!ambient || !this.sessions || !userDid) return;
+      if (!ambient || !this.sessions || !userDid) return null;
       // The store/saver are looked up per call, not captured: a working-copy
       // reset re-opens the database while a run is in flight.
-      this.historyIndexer ??= new SessionHistoryIndexer({
+      this.historyIndexer = new SessionHistoryIndexer({
         memoryEngineUrl: (() => {
           const v = this.core.validatedEnv['MEMORY_ENGINE_URL'];
           return typeof v === 'string' && v.length > 0 ? v : undefined;
@@ -5313,9 +5396,35 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             : this.historyPage(id, after, limit);
         },
         setProcessedCount: async (id, count) => {
-          if (this.historySnapshots.has(id)) return; // deleted: nothing to advance
-          await this.sessions?.setLastProcessedCount(id, count);
+          const snapshot = this.historySnapshots.get(id);
+          if (snapshot) {
+            // Deleted: no row to advance, but a retry within the pass must
+            // resume after what the engine already took.
+            snapshot.session = {
+              ...snapshot.session,
+              lastProcessedCount: count,
+            };
+            return;
+          }
+          // During a working-copy reset there is no store: fail the attempt
+          // rather than let the indexer believe the count moved.
+          const sessions = this.sessions;
+          if (!sessions)
+            throw new Error(
+              'the session store is not open (working-copy reset)',
+            );
+          await sessions.setLastProcessedCount(id, count);
           this.markDirty();
+        },
+        onPassEnd: async (id, end) => {
+          if (this.historySnapshots.has(id)) {
+            await this.historyBacklog.forget(id);
+            return;
+          }
+          const at = await this.historyBacklog.record(id, end);
+          // Wake the housekeeping catch-up for it (a few times at most: the
+          // record drops a session that keeps failing without progress).
+          if (at !== null) await this.requestHousekeeping(at);
         },
         resolveUserRoom: () =>
           this.gateway.resolveUserRoom(userDid).catch(() => null),
@@ -5342,28 +5451,81 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         },
         logger: console,
       });
-      const indexer = this.historyIndexer;
-      // A deleted session's snapshot is its transcript's last chance: it is
-      // indexed even while the session backs off after a failure.
-      const work =
-        opts.afterQuietMs !== undefined
-          ? indexer.processAfterQuiet(sessionId, opts.afterQuietMs)
-          : this.historySnapshots.has(sessionId)
-            ? indexer.process(sessionId, { ignoreBackoff: true })
-            : indexer.process(sessionId);
-      this.ctx.waitUntil(
-        work
+      return this.historyIndexer;
+    }
+
+    /** The catch-up's background run, while one is going (one at a time). */
+    private historyCatchUpRun: Promise<void> | null = null;
+
+    /**
+     * Housekeeping catch-up of session history (memory/history-backlog.ts):
+     * starts one background run over up to `HISTORY_BACKLOG_PER_TICK`
+     * recorded sessions that are due and returns when the record is next due
+     * (a deadline, at least a minute out: it keeps the working copy until the
+     * record is empty). The run is in the background so the alarm handler
+     * ends at once — a running handler keeps the fresh-invocation gate from
+     * getting its alarm — and a tick while it runs starts nothing. Called
+     * from a full tick only, i.e. on a booted object; an evicted object is
+     * never woken for it.
+     */
+    private async historyCatchUp(): Promise<number | null> {
+      const now = Date.now();
+      if (this.historyCatchUpRun) return now + HISTORY_CATCH_UP_MIN_WAIT_MS;
+      const indexer = this.ensureHistoryIndexer();
+      if (!indexer || !this.sessions) return null;
+      const backlog = this.historyBacklog;
+      if (!indexer.active) {
+        await backlog.clear();
+        return null;
+      }
+      if (!(await backlog.seeded())) {
+        const { sessions } = await this.sessions.listSessions(
+          undefined,
+          HISTORY_BACKLOG_SEED_SESSIONS,
+          0,
+          TASK_SESSION_PREFIX,
+        );
+        const added = await backlog.seed(
+          sessions.map((s) => ({
+            sessionId: s.sessionId,
+            lastUpdatedAt: Date.parse(s.lastUpdatedAt),
+          })),
+        );
+        if (added > 0)
+          console.log(
+            `[history-indexer] ${this.userDid}: looking at the ${added} most recent conversations once for history the memory engine does not have yet`,
+          );
+      }
+      const { taken, next } = await backlog.takeDue(
+        HISTORY_BACKLOG_PER_TICK,
+        (id) => this.runs?.activeForSession(id) !== undefined,
+      );
+      if (taken.length > 0) {
+        const run = (async () => {
+          for (const id of taken) {
+            if (id.startsWith(TASK_SESSION_PREFIX)) {
+              await backlog.forget(id);
+              continue;
+            }
+            // The record's own schedule applies, not the in-memory backoff
+            // of live triggers. Never rejects.
+            await indexer.process(id, { ignoreBackoff: true });
+          }
+        })()
           .catch((err: unknown) => {
-            console.error(
-              `[user-do] session-history indexing failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+            console.warn(
+              `[user-do] history catch-up run failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
             );
           })
           .finally(() => {
-            if (this.historySnapshots.has(sessionId)) {
-              this.historySnapshots.delete(sessionId);
-            }
-          }),
-      );
+            this.historyCatchUpRun = null;
+          });
+        this.historyCatchUpRun = run;
+        this.ctx.waitUntil(run);
+      }
+      return next === null
+        ? null
+        : Math.max(next, now + HISTORY_CATCH_UP_MIN_WAIT_MS);
     }
 
     /**
