@@ -1,10 +1,10 @@
 /**
  * `MatrixGatewayDO` on real Durable Object storage (the SQLite test object's
  * state), with the homeserver and the user objects scripted: who a room
- * message is attributed to (the verified room alias), what happens when the
- * homeserver fails while a message is prepared, the inbox replay caps, the
- * in-memory memos, the cheap status/health surface and the media event
- * lookup with its deadline.
+ * message is attributed to (the sender DID, never the room alias), what
+ * happens when the homeserver fails while a message is prepared, the inbox
+ * replay caps, the in-memory memos, the cheap status/health surface and the
+ * media event lookup with its deadline.
  */
 import { env, runInDurableObject } from 'cloudflare:test';
 import {
@@ -259,7 +259,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('attribution: the room alias must be verified', () => {
+describe('sender attribution and room alias verification', () => {
   it("a sender on a foreign server in a room claiming the victim's alias (resolving elsewhere) is unmapped and wakes no user object", async () => {
     await withGateway('gw-alias-elsewhere', async (gw, state) => {
       gw.hs.aliasState.set(ROOM, VICTIM_ALIAS);
@@ -294,16 +294,14 @@ describe('attribution: the room alias must be verified', () => {
     });
   });
 
-  it("a legacy sender on the alias's own server, in the room the alias resolves to, still gets their turn", async () => {
+  it("a non-DID sender on the alias's own server never gets the room owner's turn", async () => {
     await withGateway('gw-alias-legit', async (gw, state) => {
       gw.hs.aliasState.set(ROOM, VICTIM_ALIAS);
       gw.hs.directory.set(VICTIM_ALIAS, ROOM);
       await gw.deliver(message('@legacy:ixo.test'));
       await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
-      expect(gw.turns.map((t) => [t.userDid, t.matrixUserId])).toEqual([
-        [VICTIM_DID, '@legacy:ixo.test'],
-      ]);
-      expect(gw.sent).toEqual([{ kind: 'text', roomId: ROOM, body: 'reply' }]);
+      expect(gw.turns).toEqual([]);
+      expect(gw.sent).toEqual([]);
       expect(listInboxRows(state.storage.sql)).toEqual([]);
     });
   });
@@ -312,18 +310,22 @@ describe('attribution: the room alias must be verified', () => {
     await withGateway('gw-alias-memo', async (gw) => {
       gw.hs.aliasState.set(ROOM, VICTIM_ALIAS);
       gw.hs.directory.set(VICTIM_ALIAS, ROOM);
-      await gw.deliver(message('@legacy:ixo.test'));
-      await gw.deliver(message('@legacy:ixo.test'));
+      await gw.deliver(message('@did-ixo-ixo1victim:ixo.test'));
+      await gw.deliver(message('@did-ixo-ixo1victim:ixo.test'));
       expect(gw.resolveCalls).toBe(1);
       // The alias is re-pointed elsewhere and the room's alias event arrives.
       gw.hs.directory.set(VICTIM_ALIAS, '!another:ixo.test');
       await gw.aliasEvent(ROOM);
-      await gw.deliver(message('@legacy:ixo.test'));
+      await gw.deliver(message('@did-ixo-ixo1victim:ixo.test'));
       expect(gw.resolveCalls).toBe(2);
       await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
-      // The first two (two bare messages: two threads) ran; the third, sent
-      // after the alias moved away, was unmapped.
-      expect(gw.turns.map((t) => t.userDid)).toEqual([VICTIM_DID, VICTIM_DID]);
+      // All three DID-authenticated messages run under their sender; moving
+      // the alias cannot change that identity.
+      expect(gw.turns.map((t) => t.userDid)).toEqual([
+        VICTIM_DID,
+        VICTIM_DID,
+        VICTIM_DID,
+      ]);
     });
   });
 
@@ -340,15 +342,15 @@ describe('attribution: the room alias must be verified', () => {
   });
 });
 
-describe('the verified alias is used as verified', () => {
-  it('an alias event arriving while the alias is checked does not cost a legacy sender their turn', async () => {
+describe('the verified alias is used as room metadata', () => {
+  it('an alias event arriving while the alias is checked does not cost a DID sender their turn', async () => {
     await withGateway('gw-alias-event-midway', async (gw, state) => {
       gw.hs.aliasState.set(ROOM, VICTIM_ALIAS);
       gw.hs.directory.set(VICTIM_ALIAS, ROOM);
       // An alt_aliases edit (or any alias event) lands while the directory
       // lookup is in flight: the memo is invalidated under the check.
       gw.beforeResolve = () => gw.aliasEvent(ROOM);
-      await gw.deliver(message('@legacy:ixo.test'));
+      await gw.deliver(message('@did-ixo-ixo1victim:ixo.test'));
       await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
       expect(gw.turns.map((t) => t.userDid)).toEqual([VICTIM_DID]);
       expect(listInboxRows(state.storage.sql)).toEqual([]);
@@ -365,7 +367,7 @@ describe('the verified alias is used as verified', () => {
       });
       gw.beforeResolve = () => held;
       const delivered = gw.deliver(
-        message('@legacy:ixo.test', {
+        message('@did-ixo-ixo1victim:ixo.test', {
           content: {
             msgtype: 'm.text',
             body: 'and this?',
@@ -389,7 +391,7 @@ describe('homeserver failures while a message is prepared', () => {
       gw.hs.aliasState.set(ROOM, VICTIM_ALIAS);
       gw.hs.directory.set(VICTIM_ALIAS, ROOM);
       gw.hs.resolveFailures = 1;
-      const msg = message('@legacy:ixo.test');
+      const msg = message('@did-ixo-ixo1victim:ixo.test');
       await gw.deliver(msg);
       await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
       expect(gw.turns).toEqual([]);

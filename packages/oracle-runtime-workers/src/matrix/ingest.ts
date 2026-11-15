@@ -78,7 +78,7 @@ export interface IngestDeps {
   /**
    * The Matrix server name the user's DID document registers, lowercased;
    * null when it is not known. Synchronous like `canonicalAlias`: the gateway
-   * resolves it before the offer. A message whose attributed identity was
+   * resolves it before the offer. A message whose sender identity was
    * minted on any other server is dropped (`'foreign'`); with no known server
    * there is no verdict (`'unverified'`) and the gateway keeps the message
    * for a later attempt.
@@ -151,9 +151,8 @@ export function serverNameOf(matrixId: string): string | null {
 export interface UserAttribution {
   userDid: string;
   /**
-   * The server the identity came from: the sender's for a DID-shaped sender,
-   * the alias's for a non-DID sender attributed to the room's owner. It must
-   * be the user's registered homeserver — anyone can register
+   * The server the sender identity came from. It must be the user's
+   * registered homeserver — anyone can register
    * `@did-ixo-<someone>` on a server of their own, and a Matrix localpart
    * says nothing about who controls the DID.
    */
@@ -161,18 +160,14 @@ export interface UserAttribution {
 }
 
 /**
- * Who is the user for this message? The canonical alias names the room's
- * owner; the sender's localpart names the speaker. They agree in a 1:1
- * oracle room. When the speaker is DID-shaped but differs from the room
- * owner (a third member invited into the room), the SPEAKER wins — a turn
- * must never run inside another user's object. A non-DID sender in an
- * owner's room is attributed to the owner (legacy / non-DID accounts), but
- * only when the sender's account lives on the alias's own server: an
- * account on any other server is someone else, whatever the room says.
+ * Who is the user for this message? Only a DID-shaped sender localpart names
+ * the speaker. The room alias is metadata and must never supply or replace
+ * the sender's identity: a turn must not run inside another user's object.
+ * Non-DID senders therefore remain unmapped until an explicit, verified
+ * account-to-DID binding exists.
  *
- * `alias` must be one the caller verified (the alias resolves to this very
- * room on its homeserver — `room-alias.ts`): a room's canonical-alias state
- * is written by its members and proves nothing on its own.
+ * `alias` and `oracleDid` remain in the options for caller compatibility and
+ * room metadata handling, but are intentionally not identity inputs.
  */
 export function attributeUser(opts: {
   alias: string | null;
@@ -183,12 +178,7 @@ export function attributeUser(opts: {
   if (fromSender) {
     return { userDid: fromSender, server: serverNameOf(opts.sender) };
   }
-  if (!opts.alias) return null;
-  const fromAlias = userDidFromRoomAlias(opts.alias, opts.oracleDid);
-  const aliasServer = serverNameOf(opts.alias);
-  if (!fromAlias || !aliasServer) return null;
-  if (serverNameOf(opts.sender) !== aliasServer) return null;
-  return { userDid: fromAlias, server: aliasServer };
+  return null;
 }
 
 /** The DID `attributeUser` names, without the server it came from. */

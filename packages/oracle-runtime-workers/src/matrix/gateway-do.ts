@@ -630,8 +630,8 @@ export class MatrixGatewayDO
     const sql = this.inboxSql();
     insertInboxRow(sql, inbound, Date.now());
     try {
-      // The thread (a quote-reply chain walk) and the sender's identity (the
-      // verified alias, then the user's registered homeserver) are
+      // The thread (a quote-reply chain walk) and the room/sender checks (the
+      // verified alias plus the sender DID's registered homeserver) are
       // independent lookups: they run side by side.
       const [alias, threadRootId] = await Promise.all([
         this.attributionFor(inbound),
@@ -698,11 +698,10 @@ export class MatrixGatewayDO
   }
 
   /**
-   * The room's verified alias, with the homeserver of the user the message
-   * is then attributed to looked up for the sender check. The alias is
-   * handed on as checked here: re-reading the memo later could find it
-   * expired or invalidated meanwhile, and a legacy sender would read as
-   * unmapped. Throws when the alias could not be checked.
+   * The room's verified alias, with the homeserver of the DID-shaped sender
+   * looked up for the sender check. The alias is handed on as room metadata;
+   * it never supplies sender identity. Throws when the alias could not be
+   * checked.
    */
   private async attributionFor(
     inbound: InboundMessage,
@@ -713,8 +712,8 @@ export class MatrixGatewayDO
   }
 
   /**
-   * Look up the registered homeserver of the user a message is attributed
-   * to, for the pipeline's sender check. A DID document that names no
+   * Look up the registered homeserver of the DID-shaped sender, for the
+   * pipeline's sender check. A DID document that names no
    * homeserver answers the oracle's own server. A Blocksync failure answers
    * the last cached server even when it has expired; with nothing cached the
    * memo is cleared, so the pipeline gives no verdict (`'unverified'`) and
@@ -1167,10 +1166,9 @@ export class MatrixGatewayDO
       );
     for (const row of plan.replay) {
       try {
-        // Without an alias verdict a legacy sender would read as unmapped
-        // and the row would be dropped: the row waits for the next retry
-        // instead (its attempts were bumped above, so an outage still ends
-        // in the "try again" notice).
+        // Without an alias verdict the room metadata is not yet verified, so
+        // the row waits for the next retry instead (its attempts were bumped
+        // above, so an outage still ends in the "try again" notice).
         // A failed homeserver lookup leaves no verdict: the offer answers
         // 'unverified' and the row stays for the next replay.
         const inbound = inboundOfRow(row);
