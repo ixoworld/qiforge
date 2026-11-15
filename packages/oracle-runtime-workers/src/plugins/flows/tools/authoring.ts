@@ -47,6 +47,7 @@ import {
   resolveFlowRef,
   withFlowDoc,
   withFlowsCompileClient,
+  withWritableFlowDoc,
 } from '../flow-doc';
 import { readStep } from '../read';
 import { flowSpecToBaseUcan } from '../translator';
@@ -264,7 +265,7 @@ function buildCreateTemplateTool(
           flowId,
           ownerDid: ctx.user.did,
         });
-        await withFlowsCompileClient(ctx, matrixClient, (client) =>
+        await withFlowsCompileClient(ctx, roomId, matrixClient, (client) =>
           setupFlowFromBaseUcan({
             plan,
             roomId,
@@ -273,8 +274,11 @@ function buildCreateTemplateTool(
           }),
         );
         if (needsPostCompile(flow.steps))
-          await withFlowDoc(ctx, roomId, matrixClient, async (doc) =>
-            applyPostCompile(doc, flow.steps),
+          await withWritableFlowDoc(
+            ctx,
+            roomId,
+            matrixClient,
+            async (doc) => applyPostCompile(doc, flow.steps),
           );
 
         return { ok: true, flowRef: roomId };
@@ -376,7 +380,7 @@ function buildAddStepTool(matrixClient: MatrixClient | undefined): PluginTool {
             ownerDid: existing.ownerDid,
           },
         );
-        await withFlowsCompileClient(ctx, matrixClient, (client) =>
+        await withFlowsCompileClient(ctx, roomId, matrixClient, (client) =>
           setupFlowFromBaseUcan({
             plan,
             roomId,
@@ -389,7 +393,7 @@ function buildAddStepTool(matrixClient: MatrixClient | undefined): PluginTool {
         // One load for every post-compile pass: restore the order (with the
         // new step in place), move its block next to its neighbours, and
         // write what the compiler does not.
-        await withFlowDoc(ctx, roomId, matrixClient, async (doc) => {
+        await withWritableFlowDoc(ctx, roomId, matrixClient, async (doc) => {
           doc.transact(() => {
             const orderArr = doc.getArray<string>('qi.flow.order');
             const merged = readOrder(doc);
@@ -513,8 +517,11 @@ export function buildAuthoringTools(
       async (args, ctx: RuntimeContext) => {
         try {
           const { flowRef, stepId } = removeSchema.parse(args);
-          await withFlowDoc(ctx, flowRef, matrixClient, async (doc, roomId) =>
-            removeStep(doc, roomId, stepId),
+          await withWritableFlowDoc(
+            ctx,
+            flowRef,
+            matrixClient,
+            async (doc, roomId) => removeStep(doc, roomId, stepId),
           );
           return ok;
         } catch (err) {
@@ -532,8 +539,11 @@ export function buildAuthoringTools(
       async (args, ctx: RuntimeContext) => {
         try {
           const { flowRef, stepId, toIndex } = reorderSchema.parse(args);
-          await withFlowDoc(ctx, flowRef, matrixClient, async (doc) =>
-            reorderStep(doc, stepId, toIndex),
+          await withWritableFlowDoc(
+            ctx,
+            flowRef,
+            matrixClient,
+            async (doc) => reorderStep(doc, stepId, toIndex),
           );
           return ok;
         } catch (err) {
@@ -550,8 +560,11 @@ export function buildAuthoringTools(
       async (args, ctx: RuntimeContext) => {
         try {
           const { flowRef, title, goal } = metaSchema.parse(args);
-          await withFlowDoc(ctx, flowRef, matrixClient, async (doc) =>
-            updateFlowMeta(doc, { title, goal }),
+          await withWritableFlowDoc(
+            ctx,
+            flowRef,
+            matrixClient,
+            async (doc) => updateFlowMeta(doc, { title, goal }),
           );
           return ok;
         } catch (err) {
@@ -569,18 +582,23 @@ export function buildAuthoringTools(
         try {
           const { flowRef, fromStep, field, toStep, input } =
             connectSchema.parse(args);
-          await withFlowDoc(ctx, flowRef, matrixClient, async (doc, roomId) => {
-            const current = readStep(doc, roomId, toStep);
-            if (!current)
-              throw new FlowError(
-                'step_not_found',
-                `No step "${toStep}" in this flow.`,
-              );
-            setStepInputs(doc, toStep, {
-              ...(current.inputs ?? {}),
-              [input]: `{{${fromStep}.output.${field}}}`,
-            });
-          });
+          await withWritableFlowDoc(
+            ctx,
+            flowRef,
+            matrixClient,
+            async (doc, roomId) => {
+              const current = readStep(doc, roomId, toStep);
+              if (!current)
+                throw new FlowError(
+                  'step_not_found',
+                  `No step "${toStep}" in this flow.`,
+                );
+              setStepInputs(doc, toStep, {
+                ...(current.inputs ?? {}),
+                [input]: `{{${fromStep}.output.${field}}}`,
+              });
+            },
+          );
           return ok;
         } catch (err) {
           return toToolError(err);
@@ -597,8 +615,11 @@ export function buildAuthoringTools(
       async (args, ctx: RuntimeContext) => {
         try {
           const { flowRef, stepId, patch } = updateStepSchema.parse(args);
-          await withFlowDoc(ctx, flowRef, matrixClient, async (doc) =>
-            applyStepPatch(doc, stepId, patch),
+          await withWritableFlowDoc(
+            ctx,
+            flowRef,
+            matrixClient,
+            async (doc) => applyStepPatch(doc, stepId, patch),
           );
           return ok;
         } catch (err) {

@@ -1,9 +1,10 @@
 /**
  * Connect to a flow's Matrix-backed Y.Doc and run a unit of work against it,
- * then dispose. This is the only place the plugin touches Matrix; every read
- * and mutation goes through `withFlowDoc`. We reuse the editor plugin's
- * provider, config builder, and matrix-client resolver verbatim — the flows
- * plugin never re-implements the connection.
+ * then dispose. This is the only place the plugin touches Matrix; reads use
+ * `withFlowDoc`, while mutations use `withWritableFlowDoc` or the guarded
+ * compiler client. We reuse the editor plugin's provider, config builder, and
+ * matrix-client resolver verbatim — the flows plugin never re-implements the
+ * connection.
  *
  * `flowRef` IS the Matrix room id (opaque to the agent). The default flow
  * (when the agent omits `ref`) is the one bound to `state.editorRoomId`.
@@ -11,6 +12,7 @@
 import type { Doc as YDoc } from 'yjs';
 import type { MatrixClient } from 'matrix-js-sdk';
 import {
+  DOC_UPDATE_EVENT_TYPE,
   DocWriteGuard,
   MatrixProviderManager,
   type AppConfig,
@@ -18,7 +20,10 @@ import {
 } from '../editor/provider';
 import { buildBlocknoteToolsConfig } from '../editor/editor-config';
 import { resolveEditorMatrixClient } from '../editor/editor-mx';
-import { isUserInRoom } from '../editor/room-membership';
+import {
+  canUserSendRoomEvent,
+  isUserInRoom,
+} from '../editor/room-membership';
 import type { RuntimeContext } from '../../plugin-api/types';
 import { FlowError } from './errors';
 
@@ -62,6 +67,26 @@ export async function requireRoomMembership(
   }
 }
 
+/** Refuse a privileged write unless the requester could send it directly. */
+async function requireRoomWriteAccess(
+  rtCtx: RuntimeContext,
+  roomId: string,
+): Promise<void> {
+  if (
+    !(await canUserSendRoomEvent(
+      rtCtx,
+      roomId,
+      rtCtx.user.matrixUserId,
+      DOC_UPDATE_EVENT_TYPE,
+    ))
+  ) {
+    throw new FlowError(
+      'needs_access',
+      'Your Matrix power level is below this flow\'s write threshold.',
+    );
+  }
+}
+
 /**
  * The tool error for a write that did not reach the room:
  *  - refused as forbidden → `needs_access` (nothing was written);
@@ -97,9 +122,12 @@ function writeFailureError(failure: DocWriteFailure): FlowError {
  */
 export async function withFlowsCompileClient<T>(
   rtCtx: RuntimeContext,
+  roomId: string,
   injectedClient: MatrixClient | undefined,
   fn: (client: MatrixClient) => Promise<T>,
 ): Promise<T> {
+  await requireRoomMembership(rtCtx, roomId);
+  await requireRoomWriteAccess(rtCtx, roomId);
   const client = await resolveEditorMatrixClient({
     ...(await readMatrixCreds(rtCtx)),
     matrixClient: injectedClient,
@@ -152,10 +180,11 @@ function buildAppConfig(creds: MatrixCreds, roomId: string): AppConfig {
 }
 
 /**
- * Resolve the flow ref, enforce the room-membership guard (fail closed), open
- * the room's Y.Doc, run `fn`, wait until every change `fn` made has reached
- * the room, and always dispose the provider — on success, on a tool error,
- * on abort and on a timeout.
+ * Resolve the flow ref, enforce room membership and, for mutation callers,
+ * requester write authority (both fail closed), open the room's Y.Doc, run
+ * `fn`, wait until every change `fn` made has reached the room, and always
+ * dispose the provider — on success, on a tool error, on abort and on a
+ * timeout.
  *
  * `fn` returning is not success on its own: Y.Doc edits apply locally at
  * once and reach Matrix later. A forbidden write is `needs_access`; one
@@ -163,15 +192,17 @@ function buildAppConfig(creds: MatrixCreds, roomId: string): AppConfig {
  * acknowledged (server errors, network, or the flush timeout ran out) is
  * `write_not_saved` — see {@link writeFailureError}.
  */
-export async function withFlowDoc<T>(
+async function useFlowDoc<T>(
   rtCtx: RuntimeContext,
   ref: string | undefined,
   injectedClient: MatrixClient | undefined,
+  requireWriteAccess: boolean,
   fn: (doc: YDoc, roomId: string) => Promise<T>,
 ): Promise<T> {
   rtCtx.abortSignal.throwIfAborted();
   const roomId = resolveFlowRef(rtCtx, ref);
   await requireRoomMembership(rtCtx, roomId);
+  if (requireWriteAccess) await requireRoomWriteAccess(rtCtx, roomId);
 
   const creds = await readMatrixCreds(rtCtx);
   const matrixClient = await resolveEditorMatrixClient({
@@ -191,4 +222,24 @@ export async function withFlowDoc<T>(
   } finally {
     await manager.dispose();
   }
+}
+
+/** Open a membership-authorized flow for a read-only operation. */
+export function withFlowDoc<T>(
+  rtCtx: RuntimeContext,
+  ref: string | undefined,
+  injectedClient: MatrixClient | undefined,
+  fn: (doc: YDoc, roomId: string) => Promise<T>,
+): Promise<T> {
+  return useFlowDoc(rtCtx, ref, injectedClient, false, fn);
+}
+
+/** Open a flow only after checking the requester's current write authority. */
+export function withWritableFlowDoc<T>(
+  rtCtx: RuntimeContext,
+  ref: string | undefined,
+  injectedClient: MatrixClient | undefined,
+  fn: (doc: YDoc, roomId: string) => Promise<T>,
+): Promise<T> {
+  return useFlowDoc(rtCtx, ref, injectedClient, true, fn);
 }

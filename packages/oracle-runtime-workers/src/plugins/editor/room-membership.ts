@@ -23,7 +23,116 @@ const DEFAULT_TTL_MS = 60_000;
 const cache = new Map<string, MembershipEntry>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function optionalRecord(
+  source: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> | undefined | null {
+  const descriptor = Object.getOwnPropertyDescriptor(source, key);
+  if (!descriptor) return undefined;
+  return isRecord(descriptor.value) ? descriptor.value : null;
+}
+
+function optionalPowerLevel(
+  source: Record<string, unknown>,
+  key: string,
+  fallback: number,
+): number | undefined {
+  const descriptor = Object.getOwnPropertyDescriptor(source, key);
+  if (!descriptor) return fallback;
+  const value = descriptor.value;
+  return typeof value === 'number' && Number.isSafeInteger(value)
+    ? value
+    : undefined;
+}
+
+/**
+ * Whether a joined user may send a non-state event of `eventType` according
+ * to a current room-state snapshot. Missing power-level state uses Matrix's
+ * default of level zero for both users and events; malformed or duplicate
+ * authority state fails closed.
+ */
+export function canUserSendEventInState(
+  state: ReadonlyArray<unknown>,
+  matrixUserId: string,
+  eventType: string,
+): boolean {
+  let joined = false;
+  let membershipSeen = false;
+  let powerLevels: Record<string, unknown> | undefined;
+  let powerLevelsSeen = false;
+
+  for (const event of state) {
+    if (!isRecord(event)) continue;
+
+    if (
+      event.type === 'm.room.member' &&
+      event.state_key === matrixUserId
+    ) {
+      if (membershipSeen) return false;
+      membershipSeen = true;
+      const content = event.content;
+      joined = isRecord(content) && content.membership === 'join';
+    }
+
+    if (
+      event.type === 'm.room.power_levels' &&
+      event.state_key === ''
+    ) {
+      if (powerLevelsSeen) return false;
+      powerLevelsSeen = true;
+      if (!isRecord(event.content)) return false;
+      powerLevels = event.content;
+    }
+  }
+
+  if (!joined) return false;
+  if (!powerLevels) return true;
+
+  const usersDefault = optionalPowerLevel(powerLevels, 'users_default', 0);
+  const eventsDefault = optionalPowerLevel(powerLevels, 'events_default', 0);
+  const users = optionalRecord(powerLevels, 'users');
+  const events = optionalRecord(powerLevels, 'events');
+  if (
+    usersDefault === undefined ||
+    eventsDefault === undefined ||
+    users === null ||
+    events === null
+  ) {
+    return false;
+  }
+
+  const userLevel = users
+    ? optionalPowerLevel(users, matrixUserId, usersDefault)
+    : usersDefault;
+  const required = events
+    ? optionalPowerLevel(events, eventType, eventsDefault)
+    : eventsDefault;
+  return userLevel !== undefined && required !== undefined
+    ? userLevel >= required
+    : false;
+}
+
+/**
+ * Read current room authority and fail closed unless the requester is joined
+ * and may send `eventType` directly. This deliberately bypasses the membership
+ * cache so every requested mutation observes one current authority snapshot.
+ */
+export async function canUserSendRoomEvent(
+  ctx: Pick<RuntimeContext, 'matrix'>,
+  roomId: string,
+  matrixUserId: string | undefined,
+  eventType: string,
+): Promise<boolean> {
+  if (!roomId || !matrixUserId || !eventType) return false;
+  try {
+    const snapshot = await ctx.matrix.getRoomState(roomId);
+    return canUserSendEventInState(snapshot.state, matrixUserId, eventType);
+  } catch {
+    return false;
+  }
 }
 
 /** Joined member ids from a room-state snapshot's event array. */

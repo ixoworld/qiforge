@@ -71,11 +71,15 @@ function addCustomBlock(
   });
 }
 
-function sessionFor(doc: Y.Doc): DocumentSession {
+function sessionFor(
+  doc: Y.Doc,
+  authorizeWrite: () => Promise<boolean> = async () => true,
+): DocumentSession {
   return {
     doc,
     writer: { writeFailure: undefined, flush: async () => undefined },
     matrixClient: { getUserId: () => null, getStateEvent: async () => ({}) },
+    authorizeWrite,
     roomId: ROOM,
     alias: undefined,
     isFlow: false,
@@ -93,10 +97,10 @@ function countingOpener(doc: Y.Doc): CountingOpener {
   const counter: CountingOpener = {
     opens: 0,
     disposes: 0,
-    open: async () => {
+    open: async (params) => {
       counter.opens += 1;
       return {
-        session: sessionFor(doc),
+        session: sessionFor(doc, params.authorizeWrite),
         dispose: async () => {
           counter.disposes += 1;
         },
@@ -108,6 +112,7 @@ function countingOpener(doc: Y.Doc): CountingOpener {
 
 const PARAMS = {
   matrixClient: createClient({ baseUrl: 'https://mx.test.example' }),
+  authorizeWrite: async () => true,
   appConfig: {
     ...buildBlocknoteToolsConfig({
       baseUrl: 'https://mx.test.example',
@@ -200,6 +205,29 @@ describe('locked blocks survive delete_block and move_block', () => {
       },
     );
     expect(readDocumentBlocks(doc)).toEqual([]);
+  });
+});
+
+describe('requester write authority', () => {
+  it('refuses an edit before mutation when requester authority is denied', async () => {
+    const doc = await docFromMarkdown('unchanged');
+    const id = readDocumentBlocks(doc)[0]?.id ?? '';
+    const documents = sharedDocumentSource(
+      { ...PARAMS, authorizeWrite: async () => false },
+      countingOpener(doc).open,
+    );
+    const tools = Object.fromEntries(
+      createContentTools({ documents }).map((t) => [t.name, t]),
+    );
+
+    expect(await call(tools.read_document, {})).toMatchObject({ ok: true });
+    expect(
+      await call(tools.edit_block, {
+        edits: [{ block_id: id, text: 'unauthorized' }],
+      }),
+    ).toMatchObject({ ok: false, code: 'needs_access' });
+    expect(readDocumentBlocks(doc)[0]?.text).toBe('unchanged');
+    await documents.close();
   });
 });
 
