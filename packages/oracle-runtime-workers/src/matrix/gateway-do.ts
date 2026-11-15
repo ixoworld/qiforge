@@ -495,6 +495,8 @@ export class MatrixGatewayDO
   /** Inbox rows whose sender check had no verdict, waiting for `unverifiedRetry`. */
   private readonly unverifiedEvents = new Set<string>();
   private unverifiedRetry: ReturnType<typeof setTimeout> | null = null;
+  /** Typing-refresh intervals of the turns in flight (cleared with their turn, or when this instance is superseded). */
+  private readonly typingTimers = new Set<ReturnType<typeof setInterval>>();
   /** Group rooms: the gate and the per-room channel memory (see group-chat.ts). */
   private groupChatService: GroupChatService | null = null;
 
@@ -691,6 +693,8 @@ export class MatrixGatewayDO
     if (this.unverifiedRetry) return;
     this.unverifiedRetry = setTimeout(() => {
       this.unverifiedRetry = null;
+      // A newer instance of this object took over: its start replays the inbox.
+      if (this.supersededReason !== null) return;
       const only = new Set(this.unverifiedEvents);
       this.unverifiedEvents.clear();
       this.scheduleInboxReplay(only);
@@ -879,6 +883,10 @@ export class MatrixGatewayDO
   }
 
   private async dispatchTurn(turn: IngestTurn): Promise<void> {
+    // A reset with unchanged code leaves this instance running for seconds
+    // beside the one that replaced it. From then on it dispatches nothing:
+    // the inbox row stays, and the live instance's start replays it.
+    if (this.supersededReason !== null) return;
     // In flight from the moment the turn exists, not only once it holds a
     // gate slot: an in-place restart replays the inbox, and a row still
     // queued behind the gate must not be offered (and charged) again.
@@ -894,6 +902,7 @@ export class MatrixGatewayDO
   }
 
   private async dispatchTurnNow(turn: IngestTurn): Promise<void> {
+    if (this.supersededReason !== null) return;
     const requestId = crypto.randomUUID();
     // Group rooms: the Node gate — answer a mention, a reply to the bot, or
     // a thread the bot is in; stay silent otherwise (the message is still
@@ -924,6 +933,9 @@ export class MatrixGatewayDO
           displayName: turn.matrixUserId,
         };
       });
+    // Replaced while the gate ran (its failure falls back to "answer"): the
+    // live instance decides, from the inbox row this one leaves in place.
+    if (this.supersededReason !== null) return;
     if (!decision.respond) {
       this.log(
         'info',
@@ -944,12 +956,32 @@ export class MatrixGatewayDO
         (err: unknown) =>
           this.log('debug', `turn ${requestId}: typing notice failed`, err),
       );
-      typing = setInterval(() => {
+      const typingTimer = setInterval(() => {
+        // Replaced by a newer instance: this interval ends itself here (the
+        // turn it belongs to may never settle in a dead instance).
+        if (this.supersededReason !== null) {
+          clearInterval(typingTimer);
+          this.typingTimers.delete(typingTimer);
+          return;
+        }
         this.setTyping(turn.roomId, true, TYPING_TIMEOUT_MS).catch(
           () => undefined,
         );
       }, TYPING_REFRESH_MS);
+      typing = typingTimer;
+      this.typingTimers.add(typingTimer);
       const result = await this.runTurn(turn, requestId, decision);
+      // Replaced while the turn ran: the reply is the live instance's to
+      // send. The inbox row is still there, its replay asks the user's
+      // object for the same turn, and that object serves the finished reply
+      // from its ledger — so nothing is sent, deleted or apologised for here.
+      if (this.supersededReason !== null) {
+        this.log(
+          'info',
+          `turn ${requestId}: this gateway instance was replaced while the turn ran; the live instance delivers the reply`,
+        );
+        return;
+      }
       if (result.replayed)
         this.log(
           'info',
@@ -983,6 +1015,9 @@ export class MatrixGatewayDO
       // has ended, the inbox row has done its job.
       deleteInboxRows(this.inboxSql(), turn.eventIds);
     } catch (err) {
+      // Whatever failed, a replaced instance reports nothing and keeps the
+      // inbox row: the live instance replays the turn.
+      if (this.supersededReason !== null) return;
       // A turn aborted because a newer message on the same thread superseded
       // it is not a failure: the new turn answers, the old card says so.
       if (isAbortError(err)) {
@@ -1020,18 +1055,25 @@ export class MatrixGatewayDO
       // Told the user (or could not): either way this turn is over.
       deleteInboxRows(this.inboxSql(), turn.eventIds);
     } finally {
-      if (typing) clearInterval(typing);
-      await this.setTyping(turn.roomId, false).catch(() => undefined);
-      // Close the card on every exit — reply posted, empty reply, thrown
-      // error — so no turn can leave a spinner running in the room.
-      await this.finishWorkStatus(turn.userDid, requestId).catch(
-        (err: unknown) =>
-          this.log(
-            'warn',
-            `turn ${requestId}: could not close the status card: ${err instanceof Error ? err.message : String(err)}`,
-            err,
-          ),
-      );
+      if (typing) {
+        clearInterval(typing);
+        this.typingTimers.delete(typing);
+      }
+      // The card and the typing notice are the live instance's once this one
+      // was replaced (its replay of the turn re-opens and closes them).
+      if (this.supersededReason === null) {
+        await this.setTyping(turn.roomId, false).catch(() => undefined);
+        // Close the card on every exit — reply posted, empty reply, thrown
+        // error — so no turn can leave a spinner running in the room.
+        await this.finishWorkStatus(turn.userDid, requestId).catch(
+          (err: unknown) =>
+            this.log(
+              'warn',
+              `turn ${requestId}: could not close the status card: ${err instanceof Error ? err.message : String(err)}`,
+              err,
+            ),
+        );
+      }
     }
   }
 
@@ -1110,6 +1152,8 @@ export class MatrixGatewayDO
 
   /** `only`: replay just these rows (the unverified-sender retry); omitted, every row. */
   private scheduleInboxReplay(only?: ReadonlySet<string>): void {
+    // The inbox belongs to the live instance of this object.
+    if (this.supersededReason !== null) return;
     if (this.inboxReplayRunning) {
       // A full replay already listed every row; a targeted one may not have,
       // so the rows asked for here wait for the next retry.
@@ -1132,6 +1176,7 @@ export class MatrixGatewayDO
    * stored reply, attach to the running turn, or refuse — never a second run.
    */
   private async replayInbox(only?: ReadonlySet<string>): Promise<void> {
+    if (this.supersededReason !== null) return;
     const sql = this.inboxSql();
     const rows = listInboxRows(sql).filter(
       (row) => !only || only.has(row.eventId),
@@ -1158,6 +1203,8 @@ export class MatrixGatewayDO
           err,
         );
       }
+      // Replaced while the notice was sent: the rows are the live instance's.
+      if (this.supersededReason !== null) return;
       deleteInboxRows(sql, [row.eventId]);
     }
     if (plan.replay.length > 0)
@@ -1166,6 +1213,7 @@ export class MatrixGatewayDO
         plan.replay.map((row) => row.eventId),
       );
     for (const row of plan.replay) {
+      if (this.supersededReason !== null) return;
       try {
         // Without an alias verdict a legacy sender would read as unmapped
         // and the row would be dropped: the row waits for the next retry
@@ -1208,6 +1256,24 @@ export class MatrixGatewayDO
     // Worded like the platform's own reset so RPC callers classify it as
     // transient (see `isTransientGatewayError`), exactly as in production.
     this.ctx.abort('gateway reset requested by the debug route');
+  }
+
+  /**
+   * This instance was replaced by a newer instance of the same object in the
+   * isolate (a reset that kept the isolate) and has stood down. Its own
+   * timers go with it — the debounce buffers, the sender-check retry, the
+   * typing refreshes of turns in flight — so nothing of it dispatches a turn,
+   * touches the inbox or calls the homeserver again. Memory only: storage and
+   * the client are already out of reach here.
+   */
+  protected override onSuperseded(_reason: string): void {
+    this.ingest?.clear();
+    this.debouncing.clear();
+    if (this.unverifiedRetry) clearTimeout(this.unverifiedRetry);
+    this.unverifiedRetry = null;
+    this.unverifiedEvents.clear();
+    for (const timer of this.typingTimers) clearInterval(timer);
+    this.typingTimers.clear();
   }
 
   override async stop(): Promise<void> {

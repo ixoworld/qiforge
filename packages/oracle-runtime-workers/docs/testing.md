@@ -283,10 +283,12 @@ devices). `stress-users.mts` phases: 1 = everyone
 creates sessions at once, 2 = everyone runs N turns in parallel, 2b = half
 the users create sessions while the other half chat, 3 = synchronized
 bursts, 4 = reads. `PHASES=2,2b TURNS=4` is the quick run; the numbers to
-compare are in [load tests](load-tests.md). Watch the gateway alongside:
+compare are in [load tests](load-tests.md). Watch the gateway alongside,
+through its status route and the stored Workers Logs (not `wrangler tail`:
+attaching a tail resets the gateway about five minutes later, see
+[operations](operations.md)):
 
 ```bash
-pnpm exec wrangler tail <gateway script> --format json > tail.jsonl
 GET /matrix/status   # instanceId unchanged, sendScheduler.failed 0, rateLimited 0
 ```
 
