@@ -247,7 +247,7 @@ describe('proof-chain shape limits', () => {
     expect(result.proofChain).toHaveLength(13);
   });
 
-  it('bounds validateDelegation() too', async () => {
+  it('bounds verifyDelegation() too', async () => {
     const server = await keygen();
     const validator = await createUCANValidator({
       serverDid: server.did,
@@ -265,7 +265,7 @@ describe('proof-chain shape limits', () => {
       capabilities: [{ can: 'test/read' as const, with: RESOURCE }],
       proofs: [aToB],
     });
-    const result = await validator.validateDelegation(
+    const result = await validator.verifyDelegation(
       await serializeDelegation(bToServer),
     );
     expect(result.error?.code).toBe('INVALID_FORMAT');
@@ -476,14 +476,14 @@ describe('proof-chain shape limits', () => {
     expect(result.ok).toBe(false);
     expect(result.error?.code).toBe('UNAUTHORIZED');
 
-    // Same for a delegation handed to validateDelegation().
+    // Same for a delegation handed to verifyDelegation().
     const toServer = await Client.delegate({
       issuer: agent.signer,
       audience: ed25519.Verifier.parse(server.did),
       capabilities: [{ can: 'test/read' as const, with: RESOURCE }],
       proofs: [rootToAgent.cid],
     });
-    const delegated = await validator.validateDelegation(
+    const delegated = await validator.verifyDelegation(
       await serializeDelegation(toServer),
     );
     expect(delegated.ok).toBe(false);
@@ -779,7 +779,7 @@ describe('universal resource ucan:*', () => {
     expect(result.error?.message).toMatch(/ucan:\*/);
   });
 
-  it('applies to validateDelegation() as well', async () => {
+  it('applies to verifyDelegation() as well', async () => {
     const server = await keygen();
     const validator = await createUCANValidator({
       serverDid: server.did,
@@ -792,7 +792,7 @@ describe('universal resource ucan:*', () => {
       audience: ed25519.Verifier.parse(server.did),
       capabilities: [{ can: 'test/read' as const, with: 'ucan:*' as const }],
     });
-    const result = await validator.validateDelegation(
+    const result = await validator.verifyDelegation(
       await serializeDelegation(delegation),
     );
     expect(result.error?.code).toBe('UNAUTHORIZED');
@@ -851,7 +851,7 @@ describe('DID resolution is memoised per validation', () => {
     expect(calls.filter((d) => d === ownerDid)).toHaveLength(2);
   });
 
-  it('memoises in validateDelegation() too', async () => {
+  it('memoises in verifyDelegation() too', async () => {
     const server = await keygen();
     const ownerKey = await keygen();
     const agent = await keygen();
@@ -882,7 +882,7 @@ describe('DID resolution is memoised per validation', () => {
       capabilities: [{ can: 'test/read' as const, with: RESOURCE }],
       proofs: [g1, g2],
     });
-    const result = await validator.validateDelegation(
+    const result = await validator.verifyDelegation(
       await serializeDelegation(toServer),
     );
     expect(result.ok).toBe(true);

@@ -100,38 +100,30 @@ app.post('/employees', async (req, res) => {
 });
 ```
 
-### 3b. Validate a Delegation
+### 3b. Validate or Verify a Delegation
 
-Use `validateDelegation()` to verify a standalone delegation token — e.g. when a client sends a delegation in a header alongside a traditional auth mechanism. This verifies the cryptographic signature chain, audience, and expiration without requiring a capability definition.
+Use `validateDelegation()` when the delegation's capability will authorize an operation. It requires the same capability definition and resource as `validate()`, and enforces configured roots plus resource and caveat attenuation.
 
 ```typescript
-app.use(async (req, res, next) => {
+app.post('/delegated-employees', async (req, res) => {
   const delegationHeader = req.headers['x-ucan-delegation'];
-  if (!delegationHeader) return next();
+  if (!delegationHeader) return res.sendStatus(401);
 
-  const result = await validator.validateDelegation(delegationHeader);
+  const result = await validator.validateDelegation(
+    delegationHeader,
+    EmployeesRead,
+    'myapp:company/acme',
+  );
 
   if (!result.ok) {
-    console.warn(
-      `Delegation invalid: [${result.error?.code}] ${result.error?.message}`,
-    );
-    return next();
+    return res.status(403).json({ error: result.error });
   }
 
-  // result.invoker — issuer DID (who granted the delegation)
-  // result.capability — first capability in the delegation
-  // result.expiration — effective expiration across the proof chain
-  // result.proofChain — e.g. ["did:ixo:root", "did:ixo:user"]
-
-  req.ucanDelegation = {
-    issuer: result.invoker,
-    capability: result.capability,
-    expiration: result.expiration,
-  };
-
-  next();
+  res.json({ issuer: result.invoker, capability: result.capability });
 });
 ```
+
+Use `verifyDelegation()` only when a traditional authentication flow needs the signed issuer identity independently of capability authorization. It verifies signatures, audience, validity windows, chain consistency, canonical CIDs, and revocation, but deliberately does not return a `capability`.
 
 ### 4. Create & Use a Delegation (Client)
 
@@ -226,10 +218,11 @@ Create a framework-agnostic validator.
 
 #### Methods
 
-| Method                                                          | Description                                                                                             |
-| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `validate(invocationBase64, capabilityDef, resource, options?)` | Validate an invocation against a capability definition; `options.expect` pins the authorised capability |
-| `validateDelegation(delegationBase64)`                          | Validate a standalone delegation (signature, audience, chain)                                           |
+| Method                                                                        | Description                                                                                              |
+| ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `validate(invocationBase64, capabilityDef, resource, options?)`               | Validate an invocation against a capability definition; `options.expect` pins the authorised capability |
+| `validateDelegation(delegationBase64, capabilityDef, resource)`               | Authorize a delegation under configured roots and capability attenuation                                |
+| `verifyDelegation(delegationBase64)`                                           | Verify delegation signatures and envelope metadata without authorizing capabilities                      |
 
 **`validate()`** validates a full invocation — checks signature, capability matching, caveats, replay protection, and resource authorization.
 
@@ -240,11 +233,13 @@ Create a framework-agnostic validator.
 - Every UCAN in the archive (the invocation and every embedded proof) must sit under its **canonical CID**: the CID derived from its signed form alone (dag-cbor, sha2-256, CIDv1), else `INVALID_FORMAT`. A CAR archive's CIDs are written by its sender and covered by no signature, and the signature is checked over the payload re-formatted from the decoded fields, so without this rule one signed token could be re-sent under other CIDs (another hash, its JWT form, a re-spelled JWT, a CBOR block with an empty `nnc`) and pass the replay store as new, or carry a revoked proof past the revocation checker. UCANs in the JWT representation are therefore refused; tokens minted with `@ixo/ucan` or ucanto are unaffected.
 - The invocation's (canonical) CID is reserved in the replay store before verification starts, released again if validation fails, and kept until the invocation's own expiry (plus one minute) when it succeeds; a token without expiry keeps the store's default TTL. An invocation without a CID is refused.
 
-**`validateDelegation()`** validates a standalone delegation token — verifies the cryptographic signature of every delegation in the proof chain, checks audience matches `serverDid`, validates the validity window over every proof (the earliest expiry and the latest not-before; a not-before in the future fails with `UNAUTHORIZED`), requires every UCAN in the archive to carry its canonical CID (as `validate()` does, else `INVALID_FORMAT`), and ensures chain consistency (each proof's audience matches the child delegation's issuer). Supports `did:key` issuers natively and non-`did:key` issuers (e.g. `did:ixo`) via the configured `didResolver`.
+**`validateDelegation()`** authorizes a standalone delegation with ucanto's `claim()`, using the supplied capability definition and resource. It enforces `rootIssuers` (including the documented resource-scoped and explicit wildcard policies), verifies the selected proof path, rejects resource or caveat widening through the definition's derivation rules, and returns only the capability that was actually authorized.
+
+**`verifyDelegation()`** verifies the cryptographic signature of every delegation in the proof chain, checks audience matches `serverDid`, validates the validity window over every proof (the earliest expiry and the latest not-before; a not-before in the future fails with `UNAUTHORIZED`), requires every UCAN in the archive to carry its canonical CID (else `INVALID_FORMAT`), and ensures chain consistency. It supports all configured DID resolvers, but does not apply `rootIssuers` or capability attenuation and therefore omits `capability` from its result.
 
 #### `ValidateResult`
 
-Both methods return a `ValidateResult`:
+The authorization methods return a `ValidateResult`; `verifyDelegation()` returns the same metadata without `capability`:
 
 | Field            | Type                                     | Description                                                                                           |
 | ---------------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------- |
@@ -324,7 +319,7 @@ replay reservation, so a rejected or unverifiable request never burns an invocat
 | `getDelegationCid(delegationOrCar)`  | Canonical CID — what a revocation targets |
 
 `getDelegationCid` returns the CID the archive states, which is the canonical one for every token
-minted with `@ixo/ucan` or ucanto, and for every token `validate()` / `validateDelegation()` accept.
+minted with `@ixo/ucan` or ucanto, and for every token the validator or verifier accepts.
 A service that reads delegations **outside** the validator (for example to record a revocation from
 an uploaded token) should check them with the exported canonical-form helpers first:
 

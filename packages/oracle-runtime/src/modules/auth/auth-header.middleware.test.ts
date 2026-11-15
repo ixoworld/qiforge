@@ -15,6 +15,9 @@ vi.mock('@ixo/ucan', () => ({
   createUCANValidator: vi.fn(),
   createIxoDIDResolver: vi.fn(() => ({})),
   defineCapability: vi.fn(() => ({})),
+  parseDelegation: vi.fn(async () => ({
+    capabilities: [{ can: '*', with: 'ixo:oracle' }],
+  })),
 }));
 
 const mockedCreateUCANValidator = vi.mocked(createUCANValidator);
@@ -76,8 +79,8 @@ const FAIL_RESULT: ValidateResult = {
 };
 
 /**
- * Build a fully-typed `UCANValidator` mock. `validate` backs invocation auth,
- * `validateDelegation` backs delegation auth — set whichever a test needs.
+ * Build a fully-typed `UCANValidator` mock. `validate` backs invocation auth;
+ * delegation auth first verifies identity and then authorizes its capability.
  */
 function makeValidator(opts: {
   delegation?: ValidateResult;
@@ -86,6 +89,12 @@ function makeValidator(opts: {
   return {
     serverDid: ORACLE_DID,
     validateDelegation: async () => opts.delegation ?? FAIL_RESULT,
+    verifyDelegation: async () => {
+      const result = opts.delegation ?? FAIL_RESULT;
+      if (!result.ok) return result;
+      const { capability: _capability, ...verification } = result;
+      return verification;
+    },
     validate: async () => opts.invocation ?? FAIL_RESULT,
   };
 }
@@ -193,10 +202,15 @@ describe('AuthHeaderMiddleware (UCAN-only)', () => {
   it('validates delegation and populates req.authData on miss', async () => {
     const expiration = Math.floor(Date.now() / 1000) + 600;
     mockedCreateUCANValidator.mockResolvedValueOnce({
+      verifyDelegation: vi.fn(async () => ({
+        ok: true,
+        invoker: USER_DID,
+        expiration,
+      })),
       validateDelegation: vi.fn(async () => ({
         ok: true,
         invoker: USER_DID,
-        capability: { resource: 'r', action: 'a' },
+        capability: { can: '*', with: 'ixo:oracle' },
         expiration,
       })),
     } as unknown as Awaited<ReturnType<typeof createUCANValidator>>);
@@ -213,6 +227,9 @@ describe('AuthHeaderMiddleware (UCAN-only)', () => {
     expect(req.authData.did).toBe(USER_DID);
     expect(req.authData.ucanDelegation.issuer).toBe(USER_DID);
     expect(req.authData.ucanDelegation.audience).toBe(ORACLE_DID);
+    expect(req.authData.ucanDelegation.capabilities).toEqual([
+      { can: '*', with: 'ixo:oracle' },
+    ]);
     expect(req.authData.ucanDelegation.expiration).toBe(expiration);
     const legacyField2 = ['user', 'OpenId', 'Token'].join('');
     expect(
@@ -228,7 +245,7 @@ describe('AuthHeaderMiddleware (UCAN-only)', () => {
 
   it('rejects with 401 when delegation validation fails', async () => {
     mockedCreateUCANValidator.mockResolvedValueOnce({
-      validateDelegation: vi.fn(async () => ({
+      verifyDelegation: vi.fn(async () => ({
         ok: false,
         error: { code: 'BAD_SIG', message: 'bad signature' },
       })),
