@@ -2626,6 +2626,37 @@ object created: `Cannot perform I/O on behalf of a different Durable Object
 turn on the Yo mainnet oracle, 13 Nov 2026 15:56Z; the reply was delivered,
 only that trace was incomplete).
 
+### A gateway reset can leave the old instance running: it stands down
+
+A Durable Object reset with unchanged code (a `wrangler tail` or dashboard
+live log attaching, detaching or reconnecting; a platform reset) builds the
+new gateway instance in the same isolate while the old one runs on for
+seconds: Cloudflare lets its in-flight work finish as long as it stays away
+from storage. Until bot SDK 0.7.3 the old instance's 30 s crypto flush could
+run once after the new instance had restored the crypto store and attach
+itself to the new instance's store; every later crypto write then tried to
+save through the dead instance's storage handle: `[matrix-bot] flush(dirty)
+failed: Cannot perform I/O on behalf of a different Durable Object … (I/O
+type: ActorCacheInterface)`, every two seconds until the next reset (2,525
+lines in a week on four gateways, 8–15 Nov 2026). The live instance's own
+saves were not affected; the refused ones wrote nothing.
+
+From 0.7.3 a replaced instance stands down: one `warn` line, `[matrix-bot]
+instance <id> stood down: superseded by instance <id> of this Durable
+Object. It saves nothing more and has stopped syncing.` It ends its sync
+loop and timers, closes its crypto machine, and never writes the crypto
+store, the sync token or the alarm again. The gateway's own timers go with
+it (`onSuperseded`): debounce buffers, the sender-check retry, the typing
+refresh. A turn that was in flight on it sends no reply and no failure
+notice and keeps its inbox row; the live instance replays the row and the
+user's object serves the finished reply from its ledger (`turn …: this
+gateway instance was replaced while the turn ran; the live instance
+delivers the reply`).
+
+Do not keep `wrangler tail` running on a gateway: every attach, detach and
+reconnect is a reset about five minutes later (deferred code updates). Read
+the stored Workers Logs instead.
+
 ## Write claims and turn usage
 
 `turn_write_claims` (in the user's run ledger, next to `turn_runs` and

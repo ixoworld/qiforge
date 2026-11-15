@@ -524,6 +524,76 @@ describe('inbox replay', () => {
   });
 });
 
+describe('a gateway instance replaced by a newer one (a reset that keeps the isolate)', () => {
+  // Production, Nov 2026: a Durable Object reset with unchanged code builds
+  // the new instance in the same isolate while the old one runs on for
+  // seconds. The old instance's timers (debounce buffers, the sender-check
+  // retry, typing refreshes) and its turns in flight are not cancelled by
+  // the reset; each of them must end without dispatching, sending, or
+  // touching the inbox the live instance replays.
+  it('dispatches nothing more, sends nothing, keeps the inbox rows; the new instance replays and answers them', async () => {
+    const stub = env.SQLITE_TEST.get(
+      env.SQLITE_TEST.idFromName('gw-superseded'),
+    );
+    await runInDurableObject(stub, async (_i: SqliteTestDO, state) => {
+      const old = new TestGateway(state, gatewayEnv());
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((r) => {
+        release = r;
+      });
+      old.turnResult = async () => {
+        await held;
+        return { sessionId: 's', requestId: 'r', text: 'reply', toolCalls: [] };
+      };
+      // One turn in flight on the old instance…
+      const first = message('@did-ixo-ixo1a:ixo.test');
+      await old.deliver(first);
+      await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
+      expect(old.turns).toHaveLength(1);
+      // …and one message still in its debounce buffer when the reset lands.
+      const second = message('@did-ixo-ixo1b:ixo.test');
+      await old.deliver(second);
+      expect(listInboxRows(state.storage.sql)).toHaveLength(2);
+
+      const live = new TestGateway(state, gatewayEnv());
+      try {
+        // The old instance's debounce timer fires: nothing is dispatched.
+        await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 150));
+        expect(old.turns).toHaveLength(1);
+        // Its turn in flight comes back from the user object: no reply, no
+        // "something went wrong" notice, and the inbox row stays.
+        release();
+        await new Promise((r) => setTimeout(r, 100));
+        expect(old.sent).toEqual([]);
+        expect(
+          listInboxRows(state.storage.sql)
+            .map((r) => r.eventId)
+            .sort(),
+        ).toEqual([...first.eventIds, ...second.eventIds].sort());
+        // A replay asked of the old instance does nothing either.
+        await old.restartReplay();
+        await new Promise((r) => setTimeout(r, 50));
+        expect(old.turns).toHaveLength(1);
+
+        // The live instance replays both rows and answers each once.
+        await live.restartReplay();
+        await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 200));
+        expect(live.turns.map((t) => t.eventIds[0]).sort()).toEqual(
+          [...first.eventIds, ...second.eventIds].sort(),
+        );
+        expect(live.sent).toEqual([
+          { kind: 'text', roomId: ROOM, body: 'reply' },
+          { kind: 'text', roomId: ROOM, body: 'reply' },
+        ]);
+        expect(old.sent).toEqual([]);
+        expect(listInboxRows(state.storage.sql)).toEqual([]);
+      } finally {
+        await live.stop().catch(() => undefined);
+      }
+    });
+  });
+});
+
 describe('memos in front of storage', () => {
   it('two room lookups for a DID with no registered homeserver: one Blocksync request, no storage read the second time', async () => {
     await withGateway(

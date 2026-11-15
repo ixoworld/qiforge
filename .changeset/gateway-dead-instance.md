@@ -1,0 +1,5 @@
+---
+'@ixo/oracle-runtime-workers': patch
+---
+
+A gateway instance that was replaced by a newer one never saves, sends or dispatches again. After a Durable Object reset with unchanged code (a `wrangler tail` or live log attaching, a platform reset) Cloudflare builds the new instance in the same isolate while the old one runs on for seconds. With bot SDK 0.7.3 the old instance stands down the moment it sees it was replaced, and its crypto saves can no longer go through the wrong instance (the `Cannot perform I/O on behalf of a different Durable Object` errors: 2,525 in a week across four gateways). In the gateway itself the old instance's own timers end with it: debounce buffers, the sender-check retry and the typing refresh of a turn in flight. A turn that was in flight on the old instance sends no reply and no failure notice and leaves its inbox row in place; the live instance replays it, and the user's object serves the finished reply from its ledger. Bumps `@ixo/matrix-bot-workers-sdk` to 0.7.3.
