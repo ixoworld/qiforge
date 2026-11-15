@@ -124,7 +124,7 @@ it per client IP:
 
 | Field                                                                                             | Meaning                                                                                                                                                                                                                                         |
 | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `running`, `syncState`, `lastSyncAt`, `syncs`, `syncFailures`, `syncLoops`                        | The sync loop. `syncFailures` climbing = homeserver trouble. `syncLoops` is 1 while running (2 only during a device rotation); more is a leaked loop (fixed in bot SDK 0.7.1). |
+| `running`, `syncState`, `lastSyncAt`, `syncs`, `syncFailures`, `syncLoops`                        | The sync loop. `syncFailures` climbing = homeserver trouble. `syncLoops` is 1 while running (2 only during a device rotation); more is a leaked loop (fixed in bot SDK 0.7.1).                                                                  |
 | `deviceId`, `deviceRotations`, `resumedSync`                                                      | The current device; rotations since the object was created; whether this start resumed from a token.                                                                                                                                            |
 | `instanceId`, `instanceUptimeMs`                                                                  | A changing instance id with a short uptime means the object was killed or redeployed (see below).                                                                                                                                               |
 | `lastStart` (`restoreMs`, `cryptoInitMs`, `syncMs`, `totalMs`)                                    | Timings of the last boot.                                                                                                                                                                                                                       |
@@ -1368,7 +1368,11 @@ catch-up, but it stalls sends for ~30 s.
   `device_id`, the old snapshot discarded, room keys restored from the
   account backup, the old device drained and logged out. Each rotation costs
   a fresh boot with a backup restore. `POST /debug/matrix/rotate-device`
-  does it on demand.
+  does it on demand. A rotation requested while the bot is still starting
+  waits for that start and then rotates (bot SDK 0.7.2); before, it left
+  the old device on the homeserver with its keys. After a rotation the
+  account's device list should hold one gateway device (plus the plugin
+  device).
 - **Media never sits in the gateway.** Attachment media (Portal and Matrix
   files, channel files' room copies, image recall) never crosses it: the
   gateway answers only the media event's small JSON (`eventMediaInfo`: the
