@@ -1809,10 +1809,105 @@ chunks stay SSE-only.
 
 Background work is bounded: the session-history indexer runs under
 `ctx.waitUntil` with at most two attempts, 3 s apart, each with a 20 s
-timeout on the memory-engine request; a failed session is retried on the
-next session create because its watermark did not move. Task-run sessions
+timeout on the memory-engine request; see
+[Session history uploads](#session-history-uploads-to-the-memory-engine)
+for the request rules, refusals and the catch-up. Task-run sessions
 (`task:<id>`) are never indexed: a session create indexes the user's most
 recent conversation, skipping task runs.
+
+### Session history uploads to the memory engine
+
+`src/memory/session-history-indexer.ts` sends a session's messages after its
+`last_processed_count` to `POST <MEMORY_ENGINE_URL>/messages` (triggers: a
+session create indexes the previous session, a delete, the last realtime
+disconnect, a channel session quiet for `CHANNEL_HISTORY_INDEX_DEBOUNCE_MS`,
+and the housekeeping catch-up below).
+
+Request rules (the engine's, `memory-engine-workers` docs/API.md): at most
+**50 messages per request, counted after the conversation filter**
+(`MEMORY_UPLOAD_MAX_MESSAGES`; tool results and flagged replies are not
+sent), at most 16 KiB of content per message
+(`MEMORY_UPLOAD_MAX_MESSAGE_BYTES`) and a body of at most 512 KiB (half the
+engine's 1 MiB cap). A longer backlog goes up as consecutive requests
+("parts"), oldest first; a part always holds whole transcript messages and
+the count advances after each accepted part, so a failure in part N keeps
+parts 1..N-1 and the next pass resumes at N. A message over 16 KiB is split
+into pieces marked `[part i/n] `; past 8 pieces (about 128 KiB) the rest is
+cut and the last piece ends `[message cut here: N more bytes not stored]`.
+Labels are cut to the engine's 500 characters. Every message carries a
+`uuid` (UUIDv8 over the session, the message's position and its text): a
+part sent again after a lost answer is stored once by the Workers engine,
+which deduplicates on it (the old engine ignores it).
+
+Before this fix a part was 200 transcript messages counted before the filter:
+any chat that passed about 50 messages without a quiet period was refused
+whole (`422 MESSAGES_INVALID` "Array must contain at most 50 element(s)"),
+retried, never advanced, and every later message of that session stayed out
+of memory (mainnet Yo, Nov 13–15 2026: 555 refusals, 222 sessions).
+
+Refusals follow the engine's error contract (`retryable`, `retry_after_ms`,
+and `reason` / `index` / `limit` when the engine sends them):
+
+| Refusal                                                                                            | What the indexer does                                                                                                                                                                                                                                                                                                                                                                                            |
+| -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| count rule (`reason` `too_many:messages`, or "at most N element(s)/items")                         | sends at most N (else half) per request from then on (for the object's life) and goes on                                                                                                                                                                                                                                                                                                                         |
+| 413 `BODY_TOO_LARGE` / `body_too_large`                                                            | lowers the body size (strictly, by a tenth at least) and goes on                                                                                                                                                                                                                                                                                                                                                 |
+| 413 `EPISODE_TOO_LARGE` / `too_large:messages[].content`                                           | splits messages at the engine's limit (strictly smaller, by a tenth at least) and goes on                                                                                                                                                                                                                                                                                                                        |
+| other content refusal (422 `MESSAGES_INVALID` / `BODY_INVALID`, 400 `BAD_JSON`, code-less 422/413) | narrows down to the message (the one `index` names, else by halving) and **skips it with a warning** and advances, so it cannot block the session — but only with evidence that the refusal is about that message: a request accepted since the last skip, else the messages after it accepted in one request. Otherwise (an engine refusing every request for a shared reason) the pass stops and skips nothing |
+| `retryable: true`, a 429 (`QUEUE_FULL`, `USER_RATE_LIMITED`, `BUDGET_EXCEEDED`, …)                 | waits `retry_after_ms` / `Retry-After` (else 1 s, 2 s) and resends the same part: ≤ 3 tries, ≤ 10 s a wait, ≤ 30 s a pass; a longer wait ends the pass with that wait as the backoff floor                                                                                                                                                                                                                       |
+| plain 5xx, network error, timeout                                                                  | the pass's two attempts (3 s apart), resending the same part                                                                                                                                                                                                                                                                                                                                                     |
+| anything else non-retryable (401/403 auth, 400 entity headers, 404, 507, 508 `CALLER_DEPTH`, …)    | stops the pass at once: the same request is not retried, nothing is skipped, the count stays                                                                                                                                                                                                                                                                                                                     |
+| the engine's DID document cannot be read (engine down)                                             | a failed pass (backoff, backlog kept), not a skip; only a missing delegation (the mint fails) is a skip                                                                                                                                                                                                                                                                                                          |
+
+A pass also stops starting requests after 100 requests or 60 s; the rest
+follows on the next pass. After a failed pass the session backs off (1 min
+doubling to 1 h; a pass that moved the count starts again at 1 min).
+
+**Catch-up.** Every trigger writes `history:backlog:<sessionId>` to the
+object's storage before its pass; a pass that leaves a backlog (failed,
+deferred, out of budget) keeps it with a next time (5 min after progress,
+else doubling from 10 min to 6 h, never sooner than the engine's
+`retry_after_ms`) and arms the housekeeping alarm for it; a pass that
+reaches the end removes it. Each full housekeeping tick starts one
+background run (never two at once) over up to 3 due sessions (a session
+with a run in progress waits) and keeps the recorded deadline, at least a
+minute out, so an idle copy is not evicted before its history is uploaded.
+Taking a session counts as an attempt, so a pass that never reports (the
+isolate died, a call hung) counts too; after 8 attempts in a row without
+progress the session is dropped from the record (`… dropping it from the
+catch-up`): about a day at most. Its count stays, and its next trigger
+uploads from there. The first full tick after the upgrade records the 5
+most recent conversations updated in the last 14 days once
+(`meta:historyBacklogSeeded`), so sessions stuck before the fix are uploaded
+even if the person never writes again. A session with nothing new sends
+nothing, but on a fresh instance its pass reads the transcript from the
+start (the resume cursor lives in memory only). An evicted object is never
+woken for it: the catch-up runs on ticks the object has anyway or that a
+pass armed.
+
+Recovery of a stuck session: its count is where the refusals left it, so the
+next pass — the person's next message (after the quiet period), a session
+create or end, or the catch-up (the first full tick after the upgrade: a
+recently active user's daily flush, at the latest the idle-eviction tick
+5 days after their last message) — uploads the whole backlog in parts of 50.
+
+Log lines (counts and sizes only, never content; the engine's `detail` only
+from a body with a `code`):
+
+- `[history-indexer] session <id>: part <k> accepted (<n> messages from <m> transcript messages, <bytes> bytes; lastProcessedCount → <count>)`
+- `[history-indexer] session <id>: backlog done, <n> messages in <k> parts[, <s> transcript messages skipped] (lastProcessedCount <from> → <to>)` — info, when a pass that needed more than one part reaches the end; a one-part pass logs `indexed session <id> into the memory engine (lastProcessedCount <from> → <to>)`.
+- `[history-indexer] memory engine refused an upload for session <id> (<status> <code> reason=… retryable=… retry_after_ms=… detail="…"; rule=<count|body|message|invalid|retry|stop>): <n> messages from <m> transcript messages, <bytes> bytes, largest message <b> bytes; <what happens next>` — warn.
+- `[history-indexer] stopping the pass for session <id>: …` and `giving up on session <id> … (lastProcessedCount <from> → <to>, <k> parts accepted this pass); next try in <s>s at the earliest` — the pass ended with a backlog.
+- `[history-indexer] session <id>: pass budget spent (…); the rest follows on the next pass`.
+- `[history-indexer] <userDid>: looking at the <n> most recent conversations once …` — the one-time seed.
+
+Known limits: a message split into pieces gets piece ids that depend on the
+limits in force, so if the engine's answer to such a part is lost and the
+part is sent again after the indexer learned a lower limit (or on a fresh
+instance), its pieces can be stored twice. The memory-echo filter
+(`conversationReader`) starts afresh on each page the live path reads, so a
+reply that repeats a memory search can still be sent when a page boundary
+falls inside its turn.
 
 ## Anonymous response feedback
 

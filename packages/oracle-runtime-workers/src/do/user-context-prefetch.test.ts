@@ -151,8 +151,14 @@ function batchResults(facts: Partial<Record<UserContextSlot, string>>) {
 
 class FakeEngine {
   readonly requests: EngineRequest[] = [];
-  /** The message contents of each session-history upload (`POST /messages`). */
+  /** The message contents of each accepted session-history upload (`POST /messages`). */
   readonly uploads: string[][] = [];
+  /** The message `uuid`s of each accepted upload. */
+  readonly uploadIds: string[][] = [];
+  /** Uploads refused for holding more than `maxMessages` (the engine's rule). */
+  refusedUploads = 0;
+  /** The engine's per-request message limit (`MAX_MESSAGES_PER_REQUEST`). */
+  maxMessages = 50;
   mode: EngineMode = { kind: 'answer' };
   facts: Partial<Record<UserContextSlot, string>> = {
     identity: FAVOURITE_SEA,
@@ -188,23 +194,26 @@ class FakeEngine {
         );
       }
     }
+    let tooMany = false;
     if (url.pathname === '/messages') {
       const body: unknown = await request.json();
       const list: unknown =
         typeof body === 'object' && body !== null
           ? Reflect.get(body, 'messages')
           : undefined;
-      this.uploads.push(
-        Array.isArray(list)
-          ? list.map((m: unknown) =>
-              String(
-                typeof m === 'object' && m !== null
-                  ? Reflect.get(m, 'content')
-                  : m,
-              ),
-            )
-          : [],
-      );
+      const field = (m: unknown, key: string): string =>
+        String(typeof m === 'object' && m !== null ? Reflect.get(m, key) : m);
+      if (Array.isArray(list) && list.length > this.maxMessages) {
+        tooMany = true;
+        this.refusedUploads += 1;
+      } else {
+        this.uploads.push(
+          Array.isArray(list) ? list.map((m) => field(m, 'content')) : [],
+        );
+        this.uploadIds.push(
+          Array.isArray(list) ? list.map((m) => field(m, 'uuid')) : [],
+        );
+      }
     }
     this.requests.push({
       pathname: url.pathname,
@@ -217,8 +226,22 @@ class FakeEngine {
     });
     if (url.pathname === '/.well-known/did.json')
       return Response.json({ id: ENGINE_DID });
-    // Session-history upload (the history indexer).
-    if (url.pathname === '/messages') return Response.json({ ok: true });
+    // Session-history upload (the history indexer), refused whole above the
+    // engine's per-request limit as the memory engine does.
+    if (url.pathname === '/messages')
+      return tooMany
+        ? Response.json(
+            {
+              detail: `messages: Array must contain at most ${this.maxMessages} element(s)`,
+              code: 'MESSAGES_INVALID',
+              retryable: false,
+            },
+            { status: 422 },
+          )
+        : Response.json(
+            { message: 'Messages added to processing queue', success: true },
+            { status: 202 },
+          );
     if (url.pathname !== BATCH_PATH)
       return new Response('not stubbed', { status: 404 });
     const mode = this.mode;
@@ -729,6 +752,16 @@ async function userObject(
     /** Hand the session's transcript to the history indexer. */
     indexHistory: (sessionId: string) =>
       call('scheduleHistoryIndexing', sessionId),
+    /** One housekeeping alarm, as Cloudflare delivers it. */
+    alarm: () => call('alarm'),
+    /** The session's history-indexing watermark (`last_processed_count`). */
+    processedCount: async (sessionId: string) =>
+      (await sessions().getSession(sessionId))?.lastProcessedCount ?? 0,
+    /** The session's transcript length, as the indexer counts it. */
+    historyLength: async (sessionId: string) => {
+      const read: unknown = await call('historyMessages', sessionId);
+      return Array.isArray(read) ? read.length : -1;
+    },
     /** Let a supplied-context profile through (no persisted task needed). */
     allowSuppliedContext: () =>
       Reflect.set(host, 'taskScheduler', {
@@ -1339,6 +1372,41 @@ describe('user-context prefetch in a user-object turn', () => {
       expect(uploads).toHaveLength(1);
       expect(uploads[0]?.entityDid).toBe(ENTITY_DID);
       expect(await o.status('s1')).toMatchObject({ cached: false });
+    });
+  });
+
+  it('a long unindexed conversation goes up from the housekeeping alarm in parts of at most 50, each message once', async () => {
+    await withObject('history-catch-up', {}, async (o) => {
+      // 32 Portal turns and no trigger (a Portal session is indexed on the
+      // next session create or the last disconnect): the state a person who
+      // stopped writing leaves behind.
+      for (let i = 0; i < 32; i += 1) await o.turn('s-long', `long-r${i}`);
+      await o.drain();
+      expect(o.engine.uploads).toHaveLength(0);
+      const length = await o.historyLength('s-long');
+      expect(length).toBeGreaterThanOrEqual(64);
+
+      // The first housekeeping tick finds the recent session once and
+      // uploads it in the background.
+      await o.alarm();
+      await o.drain();
+      expect(o.engine.refusedUploads).toBe(0);
+      expect(o.engine.uploads.length).toBeGreaterThanOrEqual(2);
+      for (const part of o.engine.uploads)
+        expect(part.length).toBeLessThanOrEqual(50);
+      const sent = o.engine.uploads.flat();
+      expect(
+        sent.filter((m) => m === 'What do you know about me?'),
+      ).toHaveLength(32);
+      const ids = o.engine.uploadIds.flat();
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(await o.processedCount('s-long')).toBe(length);
+
+      // Nothing is left on the record: the next tick sends nothing.
+      const before = o.engine.uploads.length;
+      await o.alarm();
+      await o.drain();
+      expect(o.engine.uploads).toHaveLength(before);
     });
   });
 
