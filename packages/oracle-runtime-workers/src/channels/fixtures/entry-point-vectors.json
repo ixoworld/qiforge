@@ -1,0 +1,1907 @@
+{
+  "description": "ChannelEntryPoint test vectors (the gateway's output, camelCase). Every 'valid' entry must parse; every 'invalid' entry must be refused as a whole by the runtime. Shared with the channel gateway, which copies this file; keep the two copies identical.",
+  "valid": [
+    {
+      "name": "the Meta referral of 17 Nov 2026, mapped",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "only the required fields",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 0,
+        "sourceType": "ad",
+        "sourceId": "1"
+      }
+    },
+    {
+      "name": "a video ad: videoUrl and thumbnailUrl, no imageUrl, no click id (Status placement)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "video",
+        "welcomeMessageText": "Hi! Please let us know how we can help you.",
+        "videoUrl": "https://video.xx.fbcdn.net/v/t42.1790-2/ad.mp4?oe=6B01DE60",
+        "thumbnailUrl": "https://scontent.xx.fbcdn.net/v/t15.5256-10/ad.jpg"
+      }
+    },
+    {
+      "name": "headline at 256 code points (512 UTF-16 units)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "body at 2048 code points",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "welcomeMessageText at 1024 code points",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+      }
+    },
+    {
+      "name": "text with newline and tab",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Line one\n\tLine two",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "a link at 2048 UTF-16 units",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "an upper-case https scheme",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "HTTPS://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "sourceId at 32 digits",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "11111111111111111111111111111111",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "sourceType at 32 characters",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "mediaType with an underscore",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "carousel_item",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "ctwaClid at 512 characters",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "sentAt at the largest safe integer",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 9007199254740991,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "invisible format characters pass: zero-width space",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat\u200bwith us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "invisible format characters pass: a tag character",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us\udb40\udc41",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "an unknown key",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you.",
+        "welcome_message": {
+          "text": "Hi"
+        }
+      }
+    },
+    {
+      "name": "a snake_case key",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you.",
+        "source_id": "1"
+      }
+    },
+    {
+      "name": "kind is not ad",
+      "entryPoint": {
+        "kind": "post",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "provider is not meta",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "google",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "sourceId missing",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "sourceType missing",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "sentAt missing",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "sourceId with a letter",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "12a",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "sourceId empty",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "sourceId at 33 digits",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "111111111111111111111111111111111",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "sourceId as a number",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": 120252638173670,
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "sourceType upper case",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "Ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "sourceType at 33 characters",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "mediaType with a slash",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image/jpeg",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "sentAt negative",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": -1,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "sentAt fractional",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1.5,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "sentAt as a string",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": "1763380000000",
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "sentAt above the largest safe integer",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 9007199254740993,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "ctwaClid with a space",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "has space",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "ctwaClid empty",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "ctwaClid at 513 characters",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "a link over 2048 UTF-16 units",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "an http link",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "http://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "a javascript: link",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "javascript:alert(1)",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "a data: link",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you.",
+        "videoUrl": "data:text/html,hi"
+      }
+    },
+    {
+      "name": "a link without a scheme",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you.",
+        "thumbnailUrl": "fb.me/91x4AM4CH"
+      }
+    },
+    {
+      "name": "a link that does not parse",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "a link with a space",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/a b",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "a link with a leading space",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": " https://fb.me/a",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "a link with a newline",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/a\nb",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "a link with a tab",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/a\tb",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "a link with a C1 control",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/a\u0085b",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "a link that is a number",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": 42,
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "headline at 257 code points",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89\ud83c\udf89",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "body at 2049 code points",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "welcomeMessageText at 1025 code points",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+      }
+    },
+    {
+      "name": "headline empty",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "body blank",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": " \n\t ",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "headline as a number",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": 7,
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "headline with NUL (C0)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat \u0000with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "body with NUL (C0)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Chat \u0000with us",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "welcomeMessageText with NUL (C0)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Chat \u0000with us"
+      }
+    },
+    {
+      "name": "headline with U+001F (C0)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat \u001fwith us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "body with U+001F (C0)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Chat \u001fwith us",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "welcomeMessageText with U+001F (C0)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Chat \u001fwith us"
+      }
+    },
+    {
+      "name": "headline with carriage return (C0)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat \rwith us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "body with carriage return (C0)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Chat \rwith us",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "welcomeMessageText with carriage return (C0)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Chat \rwith us"
+      }
+    },
+    {
+      "name": "headline with vertical tab (C0)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat \u000bwith us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "body with vertical tab (C0)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Chat \u000bwith us",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "welcomeMessageText with vertical tab (C0)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Chat \u000bwith us"
+      }
+    },
+    {
+      "name": "headline with DEL",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat \u007fwith us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "body with DEL",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Chat \u007fwith us",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "welcomeMessageText with DEL",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Chat \u007fwith us"
+      }
+    },
+    {
+      "name": "headline with NEL (C1)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat \u0085with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "body with NEL (C1)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Chat \u0085with us",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "welcomeMessageText with NEL (C1)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Chat \u0085with us"
+      }
+    },
+    {
+      "name": "headline with U+009F (C1)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat \u009fwith us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "body with U+009F (C1)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Chat \u009fwith us",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "welcomeMessageText with U+009F (C1)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Chat \u009fwith us"
+      }
+    },
+    {
+      "name": "headline with ARABIC LETTER MARK U+061C (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat \u061cwith us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "body with ARABIC LETTER MARK U+061C (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Chat \u061cwith us",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "welcomeMessageText with ARABIC LETTER MARK U+061C (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Chat \u061cwith us"
+      }
+    },
+    {
+      "name": "headline with LRM U+200E (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat \u200ewith us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "body with LRM U+200E (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Chat \u200ewith us",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "welcomeMessageText with LRM U+200E (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Chat \u200ewith us"
+      }
+    },
+    {
+      "name": "headline with RLM U+200F (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat \u200fwith us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "body with RLM U+200F (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Chat \u200fwith us",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "welcomeMessageText with RLM U+200F (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Chat \u200fwith us"
+      }
+    },
+    {
+      "name": "headline with LRE U+202A (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat \u202awith us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "body with LRE U+202A (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Chat \u202awith us",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "welcomeMessageText with LRE U+202A (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Chat \u202awith us"
+      }
+    },
+    {
+      "name": "headline with RLE U+202B (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat \u202bwith us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "body with RLE U+202B (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Chat \u202bwith us",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "welcomeMessageText with RLE U+202B (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Chat \u202bwith us"
+      }
+    },
+    {
+      "name": "headline with PDF U+202C (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat \u202cwith us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "body with PDF U+202C (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Chat \u202cwith us",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "welcomeMessageText with PDF U+202C (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Chat \u202cwith us"
+      }
+    },
+    {
+      "name": "headline with LRO U+202D (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat \u202dwith us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "body with LRO U+202D (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Chat \u202dwith us",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "welcomeMessageText with LRO U+202D (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Chat \u202dwith us"
+      }
+    },
+    {
+      "name": "headline with RLO U+202E (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat \u202ewith us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "body with RLO U+202E (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Chat \u202ewith us",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "welcomeMessageText with RLO U+202E (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Chat \u202ewith us"
+      }
+    },
+    {
+      "name": "headline with LRI U+2066 (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat \u2066with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "body with LRI U+2066 (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Chat \u2066with us",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "welcomeMessageText with LRI U+2066 (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Chat \u2066with us"
+      }
+    },
+    {
+      "name": "headline with RLI U+2067 (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat \u2067with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "body with RLI U+2067 (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Chat \u2067with us",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "welcomeMessageText with RLI U+2067 (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Chat \u2067with us"
+      }
+    },
+    {
+      "name": "headline with FSI U+2068 (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat \u2068with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "body with FSI U+2068 (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Chat \u2068with us",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "welcomeMessageText with FSI U+2068 (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Chat \u2068with us"
+      }
+    },
+    {
+      "name": "headline with PDI U+2069 (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat \u2069with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "body with PDI U+2069 (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Chat \u2069with us",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Hi! Please let us know how we can help you."
+      }
+    },
+    {
+      "name": "welcomeMessageText with PDI U+2069 (bidi)",
+      "entryPoint": {
+        "kind": "ad",
+        "provider": "meta",
+        "sentAt": 1763380000000,
+        "sourceType": "ad",
+        "sourceId": "120252638173670287",
+        "sourceUrl": "https://fb.me/91x4AM4CH",
+        "headline": "Chat with us",
+        "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+        "mediaType": "image",
+        "imageUrl": "https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60",
+        "ctwaClid": "AfjK-4OyWoOufgO2Ynmcx_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9x_Y-9",
+        "welcomeMessageText": "Chat \u2069with us"
+      }
+    }
+  ]
+}

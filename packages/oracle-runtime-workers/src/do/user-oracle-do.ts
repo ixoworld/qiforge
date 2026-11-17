@@ -56,6 +56,7 @@ import { actionOutcome } from '@ixo/ixo-transaction/action-proposals';
 import {
   ActionProposalConflict,
   ActionProposalStore,
+  receiptChannel,
   type ProposalCommand,
 } from '../action-proposals/store';
 import type {
@@ -4690,7 +4691,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               sessionId: request.sessionId,
               roomId,
               client: request.client,
-              ...(request.channel ? { channel: request.channel } : {}),
+              ...receiptChannel(request.channel),
             }
           : null;
       const p = await topics.create(subject, origin);
@@ -4795,7 +4796,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           sessionId: request.sessionId,
           roomId,
           client: request.client,
-          ...(request.channel ? { channel: request.channel } : {}),
+          ...receiptChannel(request.channel),
         };
       }
       const proposal = await store.create(subject, origin);
@@ -7252,6 +7253,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                   ...(req.roomKind ? { roomKind: req.roomKind } : {}),
                   ...(req.eventId ? { eventId: req.eventId } : {}),
                   ...(req.threadId ? { threadId: req.threadId } : {}),
+                  // A channel turn's binding and ad entry point, so a plugin
+                  // can record the ad even when it answers the turn itself
+                  // (a direct read builds no agent). Plugin code only.
+                  ...(req.channel?.bindingRevision
+                    ? {
+                        channel: {
+                          provider: req.channel.provider,
+                          bindingId: req.channel.bindingId,
+                          bindingRevision: req.channel.bindingRevision,
+                          ...(req.channel.entryPoint
+                            ? { entryPoint: req.channel.entryPoint }
+                            : {}),
+                        },
+                      }
+                    : {}),
                 },
                 message: req.message,
                 metadata: admissionMetadata(req.metadata),
@@ -9308,6 +9324,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                       : {}),
                     ...(req.channel.providerSentAt !== undefined
                       ? { providerSentAt: req.channel.providerSentAt }
+                      : {}),
+                    // Plugin code only: unlike `providerSentAt`, never on
+                    // the human message (content or kwargs) or in a log.
+                    ...(req.channel.entryPoint
+                      ? { entryPoint: req.channel.entryPoint }
                       : {}),
                   },
                 }

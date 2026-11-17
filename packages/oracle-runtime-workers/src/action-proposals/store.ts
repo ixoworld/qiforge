@@ -13,12 +13,43 @@ import {
 import type { DoSqliteDatabase } from '../sqlite/database';
 import type { TurnRequest } from '../do/contracts';
 
+/**
+ * What a receipt keeps of the originating turn's channel: what its replay
+ * into the oracle room reads (`origin` of the mirror event), nothing of the
+ * person's message, files or ad entry point.
+ */
+export type ActionReceiptChannel = Pick<
+  NonNullable<TurnRequest['channel']>,
+  'provider' | 'bindingId' | 'bindingRevision' | 'remoteMessageRef'
+>;
+
 export type ActionReceiptOrigin = {
   sessionId: string;
   roomId: string;
   client: TurnRequest['client'];
-  channel?: TurnRequest['channel'];
+  channel?: ActionReceiptChannel;
 };
+
+/**
+ * The channel fields a receipt origin stores, taken one by one from the
+ * turn's channel. Rows written before the narrowing hold the whole channel;
+ * the replay reads only these fields, so they read the same.
+ */
+export function receiptChannel(
+  channel: TurnRequest['channel'],
+): { channel: ActionReceiptChannel } | Record<string, never> {
+  if (!channel) return {};
+  return {
+    channel: {
+      provider: channel.provider,
+      bindingId: channel.bindingId,
+      ...(channel.bindingRevision !== undefined
+        ? { bindingRevision: channel.bindingRevision }
+        : {}),
+      remoteMessageRef: channel.remoteMessageRef,
+    },
+  };
+}
 
 export class ActionProposalConflict extends Error {
   constructor(message: string) {

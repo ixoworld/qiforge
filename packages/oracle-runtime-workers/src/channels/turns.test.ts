@@ -1260,6 +1260,44 @@ describe('delivery notices', () => {
     ).not.toHaveProperty('providerSentAt');
   });
 
+  it("keeps the ad entry point on the run's channel record, so a resumed run reads the same", async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('entry-point');
+    const entryPoint = {
+      kind: 'ad' as const,
+      provider: 'meta' as const,
+      sentAt: Date.now() - 2_000,
+      sourceType: 'ad',
+      sourceId: '120252638173670287',
+      sourceUrl: 'https://fb.me/91x4AM4CH',
+      headline: 'Chat with us',
+      ctwaClid: 'AfjK-4OyWoOufgO2Ynmc',
+    };
+    const first = await stub.submit({
+      ...message,
+      requestId: 'wa:ad',
+      entryPoint,
+    });
+    if (!first.ok) throw new Error('Turn rejected');
+    const stored = JSON.parse(
+      (await stub.run(first.result.runId))!.request,
+    ) as {
+      message: string;
+      channel: Record<string, unknown>;
+    };
+    expect(stored.channel.entryPoint).toEqual(entryPoint);
+    // The person's words are the message; the ad is beside them, never in them.
+    expect(stored.message).toBe(message.message);
+    const plain = await stub.submit({ ...message, requestId: 'wa:no-ad' });
+    if (!plain.ok) throw new Error('Turn rejected');
+    expect(
+      (
+        JSON.parse((await stub.run(plain.result.runId))!.request) as {
+          channel: Record<string, unknown>;
+        }
+      ).channel,
+    ).not.toHaveProperty('entryPoint');
+  });
+
   it('every turn result advertises delivery notices, on submit and on every poll', async () => {
     const stub = env.CHANNEL_TURNS_TEST.getByName('notice-features');
     const first = await stub.submit(message);
@@ -1270,6 +1308,7 @@ describe('delivery notices', () => {
       'rich_messages',
       'rich_events',
       'provider_sent_at',
+      'entry_point',
     ]);
     expect(first.result.status).toBe('running');
     const polled = await stub.poll(message);
@@ -1279,6 +1318,7 @@ describe('delivery notices', () => {
       'rich_messages',
       'rich_events',
       'provider_sent_at',
+      'entry_point',
     ]);
     await stub.fail(first.result.runId);
     const failed = await stub.poll(message);
@@ -1290,6 +1330,7 @@ describe('delivery notices', () => {
         'rich_messages',
         'rich_events',
         'provider_sent_at',
+        'entry_point',
       ],
     });
     const second = await stub.submit({ ...message, requestId: 'wa:two' });
@@ -1307,6 +1348,7 @@ describe('delivery notices', () => {
           'rich_messages',
           'rich_events',
           'provider_sent_at',
+          'entry_point',
         ],
       },
     });
@@ -1329,6 +1371,7 @@ describe('delivery notices', () => {
         'rich_messages',
         'rich_events',
         'provider_sent_at',
+        'entry_point',
       ],
     });
     expect(noticed.result.runId).not.toBe(first.result.runId);
@@ -1476,6 +1519,7 @@ describe('delivery notices', () => {
         'rich_messages',
         'rich_events',
         'provider_sent_at',
+        'entry_point',
       ],
     });
     const request = JSON.parse(
@@ -1677,6 +1721,7 @@ describe('delivery notices', () => {
           'rich_messages',
           'rich_events',
           'provider_sent_at',
+          'entry_point',
         ],
       },
     });

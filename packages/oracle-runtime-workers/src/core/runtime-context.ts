@@ -1,4 +1,7 @@
-import type { ChannelAttachment } from '../channels/contract';
+import type {
+  ChannelAttachment,
+  ChannelEntryPoint,
+} from '../channels/contract';
 import {
   UNAVAILABLE_DECISION_EVALUATOR,
   type DecisionEvaluateOptions,
@@ -342,6 +345,8 @@ export interface RuntimeSessionContext {
     bindingRevision: number;
     /** Files sent with this message (see `RuntimeContext.session.channel`). */
     attachments?: readonly ChannelAttachment[];
+    /** The ad that brought the person here (see `RuntimeContext.session.channel`). */
+    entryPoint?: Readonly<ChannelEntryPoint>;
   };
   roomId?: string;
   surface?: SessionSurface;

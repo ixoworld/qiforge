@@ -10,6 +10,7 @@ import type {
   ChannelAttachment,
   ChannelControlInput,
   ChannelControlOutcome,
+  ChannelEntryPoint,
   ChannelFileNotice,
   ChannelEvent,
   ChannelReplyContext,
@@ -474,6 +475,14 @@ export interface TurnRequest {
      * Stored with the run, so a resumed run reads the same.
      */
     providerSentAt?: number;
+    /**
+     * The ad the person tapped to reach the chat, as the channel contract
+     * checked it (`ChannelEntryPoint`). Stored with the run, so a resumed
+     * run reads the same. Handed to plugin code only
+     * (`ctx.session.channel.entryPoint`): never to the model, the
+     * message's `additional_kwargs`, the oracle room or a log.
+     */
+    entryPoint?: ChannelEntryPoint;
     /**
      * The option the person tapped, checked against the choices offered in
      * this session: the model reads a note naming it with the message.
