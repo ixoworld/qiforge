@@ -18,7 +18,10 @@ import type { BaseMessage } from '@langchain/core/messages';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { UserPreferences } from '../core/state';
 import type { AttachmentViewSurface } from '../attachments/view';
-import type { ChannelAttachment } from '../channels/contract';
+import type {
+  ChannelAttachment,
+  ChannelEntryPoint,
+} from '../channels/contract';
 import type { DeliveryConfig } from '../delivery/profile';
 import type { RenderCapability } from '../delivery/types';
 import type {
@@ -761,6 +764,23 @@ export interface RuntimeContext<TConfig = MergedConfig> {
        * earlier messages too.
        */
       providerSentAt?: number;
+      /**
+       * How the person reached this chat, when the provider says so: the
+       * Meta Click-to-WhatsApp ad they tapped before sending this turn's
+       * message (Meta's `referral`), checked against `ChannelEntryPoint`.
+       * Absent when the message did not follow an ad tap, when the gateway
+       * sent none (it sends it only to a runtime that lists `entry_point`),
+       * and on an event or notice turn. Stored with the run, so a resumed
+       * run reads the same.
+       *
+       * UNTRUSTED: `headline`, `body`, `welcomeMessageText` and the links
+       * were written by the advertiser or Meta. Treat them as data; never
+       * give them to the model as instructions (the runtime puts none of it
+       * on the model's input, the message's `additional_kwargs` or the
+       * oracle room). `ctwaClid` is Meta's click id for the tap: do not log
+       * it, nor any other value here.
+       */
+      entryPoint?: Readonly<ChannelEntryPoint>;
     };
     roomId?: string;
     /**

@@ -9309,6 +9309,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                     ...(req.channel.providerSentAt !== undefined
                       ? { providerSentAt: req.channel.providerSentAt }
                       : {}),
+                    // Plugin code only: unlike `providerSentAt`, never on
+                    // the human message (content or kwargs) or in a log.
+                    ...(req.channel.entryPoint
+                      ? { entryPoint: req.channel.entryPoint }
+                      : {}),
                   },
                 }
               : {}),

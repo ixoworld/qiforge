@@ -1969,6 +1969,8 @@ export class ChannelTurns {
         ...(input.render ? { render: renderCapabilityOf(input.render) } : {}),
         ...(choice ? { choice } : {}),
         ...(providerSentAt !== undefined ? { providerSentAt } : {}),
+        // Plugin data only: never logged, never on the model's input.
+        ...(input.entryPoint ? { entryPoint: input.entryPoint } : {}),
       },
     });
     this.kick();

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CHANNEL_ENTRY_BODY_MAX,
+  CHANNEL_ENTRY_HEADLINE_MAX,
+  CHANNEL_ENTRY_URL_MAX,
+  CHANNEL_ENTRY_WELCOME_MAX,
+  ChannelEntryPoint,
   CHANNEL_NOTICE_DETAIL_MAX,
   CHANNEL_NOTICE_FILENAME_MAX,
   CHANNEL_TURN_FEATURES,
@@ -235,7 +240,182 @@ describe('turn features', () => {
       'rich_messages',
       'rich_events',
       'provider_sent_at',
+      'entry_point',
     ]);
+  });
+});
+
+/**
+ * The Click-to-WhatsApp referral Meta sent on 17 Nov 2026, as the gateway
+ * maps it (the image link's elided query and the click id's tail filled in
+ * with the same characters).
+ */
+const entryPoint = {
+  kind: 'ad',
+  provider: 'meta',
+  sentAt: 1_763_380_000_000,
+  sourceType: 'ad',
+  sourceId: '120252638173670287',
+  sourceUrl: 'https://fb.me/91x4AM4CH',
+  headline: 'Chat with us',
+  body: 'Internal test ad for a WhatsApp chat link. Please ignore.',
+  mediaType: 'image',
+  imageUrl:
+    'https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?stp=dst-jpg_s600x600&_nc_cat=1&oh=00_AfB7&oe=6B01DE60',
+  ctwaClid: `AfjK-4OyWoOufgO2Ynmc${'x_Y-9'.repeat(26)}`,
+  welcomeMessageText: 'Hi! Please let us know how we can help you.',
+};
+
+describe('ChannelTurnBody with entryPoint', () => {
+  const withEntry = (entry: Record<string, unknown>) =>
+    ChannelTurnBody.safeParse({ ...turn, entryPoint: entry });
+
+  it('accepts the ad referral Meta sends, and keeps every field as sent', () => {
+    const parsed = withEntry(entryPoint);
+    expect(parsed.success).toBe(true);
+    expect(parsed.data?.entryPoint).toEqual(entryPoint);
+    expect(ChannelEntryPoint.safeParse(entryPoint).success).toBe(true);
+  });
+
+  it('accepts a video ad, and one with only the required fields', () => {
+    const video = {
+      ...entryPoint,
+      mediaType: 'video',
+      imageUrl: undefined,
+      videoUrl: 'https://video.xx.fbcdn.net/v/t42.1790-2/ad.mp4?oe=6B01DE60',
+      thumbnailUrl: 'https://scontent.xx.fbcdn.net/v/t15.5256-10/ad.jpg',
+      ctwaClid: undefined,
+    };
+    expect(withEntry(video).success).toBe(true);
+    expect(
+      withEntry({
+        kind: 'ad',
+        provider: 'meta',
+        sentAt: 0,
+        sourceType: 'ad',
+        sourceId: '1',
+      }).success,
+    ).toBe(true);
+  });
+
+  it('accepts text at its cap counted in code points, and tabs and newlines', () => {
+    expect(
+      withEntry({
+        ...entryPoint,
+        headline: '🎉'.repeat(CHANNEL_ENTRY_HEADLINE_MAX),
+        body: 'x'.repeat(CHANNEL_ENTRY_BODY_MAX),
+        welcomeMessageText: `Hi!\n\tWelcome${'y'.repeat(CHANNEL_ENTRY_WELCOME_MAX - 12)}`,
+      }).success,
+    ).toBe(true);
+  });
+
+  it('refuses an unknown key, at the entry or under it', () => {
+    expect(withEntry({ ...entryPoint, welcome_message: {} }).success).toBe(
+      false,
+    );
+    expect(withEntry({ ...entryPoint, source_id: '1' }).success).toBe(false);
+  });
+
+  it('refuses another kind or provider, a missing or bad id, type or time', () => {
+    const cases = [
+      { kind: 'post' },
+      { provider: 'google' },
+      { sourceId: undefined },
+      { sourceType: undefined },
+      { sentAt: undefined },
+      { sourceId: '12a' },
+      { sourceId: '' },
+      { sourceId: '1'.repeat(33) },
+      { sourceId: 120252638173670 },
+      { sourceType: 'Ad' },
+      { sourceType: 'a'.repeat(33) },
+      { mediaType: 'image/jpeg' },
+      { sentAt: -1 },
+      { sentAt: 1.5 },
+      { sentAt: '1763380000000' },
+      { ctwaClid: 'has space' },
+      { ctwaClid: '' },
+      { ctwaClid: 'a'.repeat(513) },
+    ];
+    // Lists every case that got through, so a failure names it.
+    expect(
+      cases.filter((bad) => withEntry({ ...entryPoint, ...bad }).success),
+    ).toEqual([]);
+  });
+
+  it('refuses a link that is not https, does not parse, carries whitespace or is too long', () => {
+    const links: unknown[] = [
+      'http://fb.me/91x4AM4CH',
+      'javascript:alert(1)',
+      'data:text/html,hi',
+      'fb.me/91x4AM4CH',
+      'https://',
+      'https://fb.me/a b',
+      'https://fb.me/a\nb',
+      ` https://fb.me/a`,
+      `https://fb.me/${'a'.repeat(CHANNEL_ENTRY_URL_MAX)}`,
+      42,
+    ];
+    for (const field of [
+      'sourceUrl',
+      'imageUrl',
+      'videoUrl',
+      'thumbnailUrl',
+    ] as const)
+      expect(
+        links.filter(
+          (bad) => withEntry({ ...entryPoint, [field]: bad }).success,
+        ),
+      ).toEqual([]);
+    // At the cap, it is kept.
+    const longest = `https://fb.me/${'a'.repeat(CHANNEL_ENTRY_URL_MAX - 14)}`;
+    expect(longest).toHaveLength(CHANNEL_ENTRY_URL_MAX);
+    expect(withEntry({ ...entryPoint, sourceUrl: longest }).success).toBe(true);
+  });
+
+  it('refuses text over its cap, blank, or with control or bidi characters', () => {
+    for (const [field, max] of [
+      ['headline', CHANNEL_ENTRY_HEADLINE_MAX],
+      ['body', CHANNEL_ENTRY_BODY_MAX],
+      ['welcomeMessageText', CHANNEL_ENTRY_WELCOME_MAX],
+    ] as const) {
+      const texts: unknown[] = [
+        'x'.repeat(max + 1),
+        '🎉'.repeat(max + 1),
+        '',
+        ' \n\t ',
+        'Chat\u0000 with us',
+        'Chat\r\nwith us',
+        'Chat\u0085with us',
+        'Chat \u202ewith us',
+        'Chat \u2066with us',
+        'Chat \u200fwith us',
+        7,
+      ];
+      expect(
+        texts.filter(
+          (bad) => withEntry({ ...entryPoint, [field]: bad }).success,
+        ),
+      ).toEqual([]);
+    }
+  });
+
+  it('refuses it with a notice or an event, which are valid without it', () => {
+    const event = {
+      ...turn,
+      message: undefined,
+      requestId: 'permission:card_1:allowed',
+      sessionPolicy: 'continue',
+      event: {
+        kind: 'permission_answered',
+        permissionId: 'card_1',
+        status: 'allowed',
+      },
+    };
+    expect(ChannelTurnBody.safeParse(event).success).toBe(true);
+    expect(issuePaths({ ...event, entryPoint })).toEqual(['entryPoint']);
+    expect(ChannelTurnBody.safeParse(noticeTurn).success).toBe(true);
+    expect(issuePaths({ ...noticeTurn, entryPoint })).toEqual(['entryPoint']);
   });
 });
 

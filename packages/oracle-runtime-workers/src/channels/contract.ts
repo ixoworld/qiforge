@@ -268,6 +268,101 @@ export function channelEventRequestId(event: ChannelEvent): string {
     : `identity:${event.linkId}:${event.status}`;
 }
 
+/** The longest link an entry point keeps, in UTF-16 units (a longer one is refused, never cut). */
+export const CHANNEL_ENTRY_URL_MAX = 2048;
+/** The most code points an ad's headline carries. */
+export const CHANNEL_ENTRY_HEADLINE_MAX = 256;
+/** The most code points an ad's primary text carries. */
+export const CHANNEL_ENTRY_BODY_MAX = 2048;
+/** The most code points an ad's welcome message carries. */
+export const CHANNEL_ENTRY_WELCOME_MAX = 1024;
+
+/**
+ * Characters entry-point text never holds: control characters other than
+ * tab and newline (`\p{Cc}`: C0, DEL, C1) and the bidi controls
+ * (`\p{Bidi_Control}`: U+061C, U+200E, U+200F, U+202A–U+202E,
+ * U+2066–U+2069). The gateway strips them before it sends the text.
+ */
+function hasEntryControl(value: string): boolean {
+  for (const char of value)
+    if (
+      (/\p{Cc}/u.test(char) && char !== '\n' && char !== '\t') ||
+      /\p{Bidi_Control}/u.test(char)
+    )
+      return true;
+  return false;
+}
+
+/** Ad text: at most `max` code points, not blank, no controls. */
+const entryText = (max: number) =>
+  codePoints(max)
+    .refine((value) => value.trim() !== '', { message: 'must not be blank' })
+    .refine((value) => !hasEntryControl(value), {
+      message: 'must not carry control characters',
+    });
+
+/** An `https:` link that `new URL` parses, without whitespace or control characters. */
+const entryUrl = z
+  .string()
+  .max(CHANNEL_ENTRY_URL_MAX)
+  .refine(
+    (value) => {
+      if (/[\s\p{Cc}]/u.test(value)) return false;
+      try {
+        return new URL(value).protocol === 'https:';
+      } catch {
+        return false;
+      }
+    },
+    { message: 'must be an https URL' },
+  );
+
+/** Meta's `source_type` and `media_type`: lower-case letters and `_`. */
+const ENTRY_KIND = /^[a-z_]{1,32}$/;
+
+/**
+ * How the person reached this chat, when the provider says: Meta's
+ * `referral` object on an inbound WhatsApp message that followed a tap on
+ * a Click-to-WhatsApp ad, every field validated and capped by the gateway
+ * and checked again here (a body that breaks a rule is refused, never
+ * repaired). Every text and link in it was written by the advertiser or
+ * Meta: untrusted data, never instructions. `ctwaClid` is Meta's click id
+ * for that tap: never log it.
+ */
+export const ChannelEntryPoint = z.strictObject({
+  kind: z.literal('ad'),
+  /** The ad network. */
+  provider: z.literal('meta'),
+  /** When the message that carried it was sent, in epoch ms. */
+  sentAt: z.number().int().nonnegative().safe(),
+  /** Meta's `source_type` (`ad` for a Click-to-WhatsApp ad). */
+  sourceType: z.string().regex(ENTRY_KIND),
+  /** Meta's `source_id`: the ad id, digits. */
+  sourceId: z.string().regex(/^[0-9]{1,32}$/),
+  /** Meta's `source_url`: the link the person tapped. */
+  sourceUrl: entryUrl.optional(),
+  /** The ad's headline. */
+  headline: entryText(CHANNEL_ENTRY_HEADLINE_MAX).optional(),
+  /** The ad's primary text. */
+  body: entryText(CHANNEL_ENTRY_BODY_MAX).optional(),
+  /** Meta's `media_type` (`image`, `video`). */
+  mediaType: z.string().regex(ENTRY_KIND).optional(),
+  /** The ad's image, a time-limited Meta CDN link. */
+  imageUrl: entryUrl.optional(),
+  /** The ad's video, a time-limited Meta CDN link. */
+  videoUrl: entryUrl.optional(),
+  /** The video ad's thumbnail, a time-limited Meta CDN link. */
+  thumbnailUrl: entryUrl.optional(),
+  /** Meta's click id for the tap (absent for WhatsApp Status placements). Never log it. */
+  ctwaClid: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{1,512}$/)
+    .optional(),
+  /** The ad's welcome message (`welcome_message.text`). */
+  welcomeMessageText: entryText(CHANNEL_ENTRY_WELCOME_MAX).optional(),
+});
+export type ChannelEntryPoint = z.infer<typeof ChannelEntryPoint>;
+
 /**
  * Every field of a channel turn. `ChannelTurnBody` adds the rules that tie
  * `message`, `notice` and `event` together; this object is what other
@@ -331,6 +426,14 @@ const ChannelTurnFields = z.strictObject({
    */
   providerSentAt: z.number().int().nonnegative().safe().optional(),
   /**
+   * The ad the person tapped to reach this chat (`ChannelEntryPoint`).
+   * Sent only to a runtime whose turn results list `entry_point`, and only
+   * with a message: never with a notice or an event. Untrusted advertiser
+   * text: plugin code reads it (`ctx.session.channel.entryPoint`); it never
+   * reaches the model, the oracle room or a log.
+   */
+  entryPoint: ChannelEntryPoint.optional(),
+  /**
    * Which kind of oracle the gateway believes it addresses. `companion` is
    * the legacy value; the gateway sends `oracle`. Both are accepted.
    */
@@ -348,6 +451,7 @@ export const ChannelTurnBody = ChannelTurnFields.superRefine((body, ctx) => {
       // An event has no tap; `render` is allowed (`rich_events`).
       'choice',
       'providerSentAt',
+      'entryPoint',
     ] as const)
       if (body[field] !== undefined)
         ctx.addIssue({
@@ -384,6 +488,7 @@ export const ChannelTurnBody = ChannelTurnFields.superRefine((body, ctx) => {
     'render',
     'choice',
     'providerSentAt',
+    'entryPoint',
   ] as const)
     if (body[field] !== undefined)
       ctx.addIssue({
@@ -422,6 +527,9 @@ export type ChannelTurnInput = z.infer<typeof ChannelTurnBody>;
  * `provider_sent_at`: a message turn may carry `providerSentAt`, the
  * provider's send time of the person's message (a runtime without it
  * refuses the field with 400).
+ * `entry_point`: a message turn may carry `entryPoint`, the ad the person
+ * tapped to reach the chat (a runtime without it refuses the field with
+ * 400).
  */
 export const CHANNEL_TURN_FEATURES = [
   'delivery_notice',
@@ -429,6 +537,7 @@ export const CHANNEL_TURN_FEATURES = [
   'rich_messages',
   'rich_events',
   'provider_sent_at',
+  'entry_point',
 ] as const;
 export type ChannelTurnFeature = (typeof CHANNEL_TURN_FEATURES)[number];
 

@@ -33,6 +33,8 @@ export {
   type PermissionAnsweredEvent,
   type PermissionEventStatus,
 } from './channel-events';
+/** The ad a channel turn's person tapped (`ctx.session.channel.entryPoint`); untrusted data. */
+export type { ChannelEntryPoint } from '../channels/contract';
 export { defineOraclePlugin } from './define-plugin';
 export type { DefineOraclePluginInput } from './define-plugin';
 export { tool } from './tool-helper';

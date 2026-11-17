@@ -1306,6 +1306,109 @@ describe('turn preparation wiring', () => {
     });
   });
 
+  it("hands a channel turn's ad entry point to plugin code only, the same on a resumed attempt", async () => {
+    const entryPoint = {
+      kind: 'ad' as const,
+      provider: 'meta' as const,
+      sentAt: Date.now() - 2_000,
+      sourceType: 'ad',
+      sourceId: '120252638173670287',
+      sourceUrl: 'https://fb.me/91x4AM4CH',
+      headline: 'Chat with us',
+      body: 'Internal test ad for a WhatsApp chat link. Please ignore.',
+      mediaType: 'image',
+      imageUrl:
+        'https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?oe=6B01DE60',
+      ctwaClid: 'AfjK-4OyWoOufgO2Ynmc',
+      welcomeMessageText: 'Hi! Please let us know how we can help you.',
+    };
+    const channelTurn: TurnRequest = {
+      identity: { userDid: USER_DID },
+      sessionId: 's1',
+      message: 'Hi, I saw your ad',
+      client: 'channel',
+      requestId: 'wa:ad',
+      channel: {
+        provider: 'whatsapp',
+        bindingId: 'chb_ad',
+        bindingRevision: 2,
+        remoteMessageRef: `hmac:${'b'.repeat(64)}`,
+        providerSentAt: entryPoint.sentAt,
+        entryPoint,
+      },
+    };
+    const seen: unknown[] = [];
+    const reader = makePlugin({ name: 'ad-reader' });
+    reader.getRequestTools = (ctx) => {
+      seen.push(ctx.session.channel);
+      return [];
+    };
+    await withObject('turn-entry-point', { plugins: [reader] }, async (h) => {
+      await bootedForTurns(h);
+      const prepared = await h.call(
+        'prepareTurn',
+        channelTurn,
+        { message: channelTurn.message },
+        attemptRun(),
+      );
+      expect(seen).toEqual([
+        {
+          provider: 'whatsapp',
+          bindingId: 'chb_ad',
+          bindingRevision: 2,
+          providerSentAt: entryPoint.sentAt,
+          entryPoint,
+        },
+      ]);
+      // Nothing of the ad reaches the model's input (the message, its
+      // kwargs, the rest of the graph input) or the trace metadata.
+      const message = inputMessage(prepared);
+      expect(visibleText(message)).toBe(channelTurn.message);
+      if (typeof prepared !== 'object' || prepared === null)
+        throw new Error('no prepared turn');
+      const graphInput = JSON.stringify(Reflect.get(prepared, 'stateInput'));
+      // The graph config carries it only in `context`, the runtime context
+      // plugin code reads; never in what LangSmith records with a run.
+      const config: unknown = Reflect.get(prepared, 'config');
+      if (typeof config !== 'object' || config === null)
+        throw new Error('no graph config');
+      const traced = JSON.stringify({
+        metadata: Reflect.get(config, 'metadata'),
+        configurable: Reflect.get(config, 'configurable'),
+      });
+      for (const value of [
+        entryPoint.sourceId,
+        entryPoint.sourceUrl,
+        entryPoint.headline,
+        entryPoint.body,
+        entryPoint.imageUrl,
+        entryPoint.ctwaClid,
+        entryPoint.welcomeMessageText,
+      ]) {
+        expect(graphInput).not.toContain(value);
+        expect(traced).not.toContain(value);
+      }
+      expect(JSON.stringify(message.additional_kwargs)).not.toContain(
+        'entryPoint',
+      );
+      await disposeTurn(h, prepared);
+
+      // A resumed attempt reads the request back from the run row.
+      const stored = JSON.parse(
+        JSON.stringify(storedRunRequest(channelTurn)),
+      ) as ReturnType<typeof storedRunRequest>;
+      const resumed = await h.call(
+        'prepareTurn',
+        stored.turn,
+        { message: channelTurn.message },
+        { ...attemptRun('run-2'), resumed: true },
+      );
+      expect(seen).toHaveLength(2);
+      expect(seen[1]).toEqual(seen[0]);
+      await disposeTurn(h, resumed);
+    });
+  });
+
   it("keeps a supplied-context task's input exactly as supplied", async () => {
     await withObject('turn-time-note-supplied', {}, async (h) => {
       await bootedForTurns(h);
