@@ -102,6 +102,37 @@ A message turn may carry `providerSentAt`: when the person sent the message acco
 
 The value rides with the run (`channel.providerSentAt`, so a resumed run reads the same) and reaches plugins and tools twice: as `ctx.session.channel.providerSentAt` for this turn, and on the turn's human message as `additional_kwargs.channel_provider_sent_at` (`CHANNEL_PROVIDER_SENT_AT_KWARG`, a number, kept through the checkpoint save), so a plugin reading history sees it for earlier messages too. It lets an oracle tell a message sent before its last reply went out (two messages in a row) from an answer to that reply: the runtime's own message times are when each turn started, and a message sent while a turn ran starts only after it. The runtime does not know when its reply was delivered; the gateway does not pass delivery statuses on.
 
+### Ad entry point
+
+A message turn may carry `entryPoint`: how the person reached the chat, when the provider says so. Today that is Meta's `referral` object on an inbound WhatsApp message sent right after a tap on a Click-to-WhatsApp ad, every field mapped to camelCase:
+
+```json
+{
+  "kind": "ad",
+  "provider": "meta",
+  "sentAt": 1763380000000,
+  "sourceType": "ad",
+  "sourceId": "120252638173670287",
+  "sourceUrl": "https://fb.me/91x4AM4CH",
+  "headline": "Chat with us",
+  "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+  "mediaType": "image",
+  "imageUrl": "https://…fbcdn.net/…jpg?…&oe=6B01DE60",
+  "ctwaClid": "AfjK-4OyWoOufgO2Ynmc…",
+  "welcomeMessageText": "Hi! Please let us know how we can help you."
+}
+```
+
+Every turn result lists `entry_point`, and a gateway sends the field only to a runtime that lists it; runtimes before it answer a body that carries it with `400 invalid_request`. It is refused with a notice or an event (`400`). `ChannelEntryPoint` (`src/channels/contract.ts`) is a strict object, so an unknown key is a `400`, and the runtime checks the gateway's caps again rather than repairing anything:
+
+- `kind` is `ad`, `provider` is `meta`, `sentAt` is the epoch ms of the message that carried it (a non-negative safe integer).
+- `sourceType` matches `^[a-z_]{1,32}$` and `sourceId` (the ad id) `^[0-9]{1,32}$`; both are required. `mediaType` (`image`, `video`) matches `^[a-z_]{1,32}$`.
+- `sourceUrl`, `imageUrl`, `videoUrl`, `thumbnailUrl`: `https:` links that `new URL` parses, at most 2,048 UTF-16 units, without whitespace or control characters. A video ad carries `videoUrl` and `thumbnailUrl` instead of `imageUrl`; Meta's CDN links expire after a few days.
+- `headline` (at most 256 code points), `body` (2,048) and `welcomeMessageText` (Meta's `welcome_message.text`, 1,024): not blank, with no control character other than tab and newline (`\p{Cc}`) and no bidi control (`\p{Bidi_Control}`).
+- `ctwaClid`, Meta's click id for the tap, matches `^[A-Za-z0-9_-]{1,512}$`; Meta omits it for WhatsApp Status placements.
+
+The value rides with the run (`channel.entryPoint`, so a resumed run reads the same) and reaches plugin code once: as `ctx.session.channel.entryPoint` on the turn's runtime context (request-time tools, sub-agents and middlewares, and tools when they run). Unlike `providerSentAt` it is not put on the turn's human message: not in its content, not in its `additional_kwargs`, so not in the checkpoint or a history read. It is not mirrored to the oracle room (the mirror carries only `org.ixo.qi.origin`), not in the LangSmith metadata, and the runtime logs nothing of it. Every text and link in it was written by the advertiser or Meta: a plugin treats it as data and never gives it to the model as instructions, and logs none of it (the click id least of all). Event turns, `onModelCall` and `channelFailureReply` never see it.
+
 Topic deliverables (Matrix topics), provider identifiers, and caller-supplied user identities are not accepted. The body limit is 64,000 bytes. Text is limited to 16,000 characters.
 
 ### Delivery notices
@@ -164,7 +195,7 @@ The runtime admits it like a notice turn (no user message mirrored, never quoted
 
 ## Responses and retries
 
-An admitted turn returns `202` with `requestId`, `runId`, `sessionId`, and a `queued`, `running`, or `recovering` status. Every turn response also carries `sessionTitle`, the title of `sessionId` at response time (null while untitled), so a gateway can tell the person when a turn ran in a different session than the one it sent, and `features`, what this runtime supports beyond the base contract (`["delivery_notice", "permission_event", "rich_messages", "rich_events", "provider_sent_at"]`: see [delivery notices](#delivery-notices), [channel events](#channel-events), [rich messages](#rich-messages) and [provider send time](#provider-send-time)); a gateway that predates the field ignores it. A terminal turn returns `200` with its terminal status. A `finished` turn also contains `text` and, when available, `messageId`.
+An admitted turn returns `202` with `requestId`, `runId`, `sessionId`, and a `queued`, `running`, or `recovering` status. Every turn response also carries `sessionTitle`, the title of `sessionId` at response time (null while untitled), so a gateway can tell the person when a turn ran in a different session than the one it sent, and `features`, what this runtime supports beyond the base contract (`["delivery_notice", "permission_event", "rich_messages", "rich_events", "provider_sent_at", "entry_point"]`: see [delivery notices](#delivery-notices), [channel events](#channel-events), [rich messages](#rich-messages), [provider send time](#provider-send-time) and [ad entry point](#ad-entry-point)); a gateway that predates the field ignores it. A terminal turn returns `200` with its terminal status. A `finished` turn also contains `text` and, when available, `messageId`.
 
 `finished` is the only successful terminal status. A chat run that fails after `send_file` still ends as `finished`, with those files and a line saying the rest is missing, because its files exist nowhere else. Its `text` may be empty after a tool-only completion; the gateway must complete delivery without sending an empty provider message. An absent `messageId` does not mean the turn should be retried.
 
