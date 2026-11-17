@@ -1,5 +1,11 @@
 # @ixo/oracle-runtime-workers
 
+## 0.56.4
+
+### Patch Changes
+
+- [#561](https://github.com/ixoworld/qiforge/pull/561) [`ac41f6b`](https://github.com/ixoworld/qiforge/commit/ac41f6b5b0d130b741e066e4f3e4f497d099efbf) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - A first turn now waits up to 4 s for the memory prefetch (`USER_CONTEXT_PREFETCH_CAP_MS`, default 3000 before). The memory engine now lets its reranker use 2 s inside a prefetch batch instead of 1.5 s, because a slow reranker call is late, not lost, so a slow batch can take half a second longer. Only a slow prefetch waits longer: on mainnet 15 of 4,718 first turns in four days reached the 3 s cap, and 13 of those prefetches finished within 4 s. An oracle that sets `USER_CONTEXT_PREFETCH_CAP_MS` keeps its own value.
+
 ## 0.56.3
 
 ### Patch Changes
