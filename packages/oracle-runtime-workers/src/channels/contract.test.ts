@@ -14,6 +14,7 @@ import {
   PROVIDER_SENT_AT_MAX_AHEAD_MS,
   plausibleProviderSentAt,
 } from './contract';
+import vectors from './fixtures/entry-point-vectors.json';
 import { TURN_GUIDE_NOTE_KWARG } from '../core/operating-guides';
 import { TURN_TIME_NOTE_KWARG, withTurnTimeNote } from '../core/turn-time-note';
 import {
@@ -265,6 +266,60 @@ const entryPoint = {
   ctwaClid: `AfjK-4OyWoOufgO2Ynmc${'x_Y-9'.repeat(26)}`,
   welcomeMessageText: 'Hi! Please let us know how we can help you.',
 };
+
+describe('ChannelEntryPoint shared test vectors', () => {
+  // `fixtures/entry-point-vectors.json` is the copy the channel gateway
+  // checks its output against: both sides agree on every vector.
+  it.each(vectors.valid)('accepts $name', ({ entryPoint }) => {
+    expect(ChannelEntryPoint.safeParse(entryPoint).success).toBe(true);
+    expect(ChannelTurnBody.safeParse({ ...turn, entryPoint }).success).toBe(
+      true,
+    );
+  });
+
+  it.each(vectors.invalid)('refuses $name', ({ entryPoint }) => {
+    expect(ChannelEntryPoint.safeParse(entryPoint).success).toBe(false);
+    expect(ChannelTurnBody.safeParse({ ...turn, entryPoint }).success).toBe(
+      false,
+    );
+  });
+
+  it('covers every refused character class in every text field', () => {
+    const names = vectors.invalid.map((vector) => vector.name);
+    for (const field of ['headline', 'body', 'welcomeMessageText'])
+      for (const code of [
+        '0000',
+        '001F',
+        '007F',
+        '0085',
+        '009F',
+        '061C',
+        '200E',
+        '200F',
+        '202A',
+        '202B',
+        '202C',
+        '202D',
+        '202E',
+        '2066',
+        '2067',
+        '2068',
+        '2069',
+      ])
+        expect(
+          vectors.invalid.some(
+            (vector) =>
+              vector.name.startsWith(`${field} with`) &&
+              Object.values(vector.entryPoint).some(
+                (value) =>
+                  typeof value === 'string' &&
+                  value.includes(String.fromCharCode(parseInt(code, 16))),
+              ),
+          ),
+        ).toBe(true);
+    expect(new Set(names).size).toBe(names.length);
+  });
+});
 
 describe('ChannelTurnBody with entryPoint', () => {
   const withEntry = (entry: Record<string, unknown>) =>

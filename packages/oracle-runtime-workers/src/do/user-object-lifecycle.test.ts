@@ -37,7 +37,13 @@ import {
 } from '../channels/contract';
 
 import type { SqliteTestDO } from '../sqlite/test-do';
-import { AIMessage, HumanMessage } from '@langchain/core/messages';
+import {
+  AIMessage,
+  HumanMessage,
+  type BaseMessage,
+} from '@langchain/core/messages';
+import { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import type { ChatResult } from '@langchain/core/outputs';
 import { turnLimitsFromEnv } from '../core/turn-budget';
 import { SessionsStore, UNTITLED_SESSION } from '../sqlite/sessions-store';
 import { RunCoordinator, type LiveRun } from './run-coordinator';
@@ -1306,37 +1312,38 @@ describe('turn preparation wiring', () => {
     });
   });
 
+  const adEntryPoint = {
+    kind: 'ad' as const,
+    provider: 'meta' as const,
+    sentAt: Date.now() - 2_000,
+    sourceType: 'ad',
+    sourceId: '120252638173670287',
+    sourceUrl: 'https://fb.me/91x4AM4CH',
+    headline: 'Chat with us',
+    body: 'Internal test ad for a WhatsApp chat link. Please ignore.',
+    mediaType: 'image',
+    imageUrl:
+      'https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?oe=6B01DE60',
+    ctwaClid: 'AfjK-4OyWoOufgO2Ynmc',
+    welcomeMessageText: 'Hi! Please let us know how we can help you.',
+  };
+  const adTurn: TurnRequest = {
+    identity: { userDid: USER_DID },
+    sessionId: 's1',
+    message: 'Hi, I saw your ad',
+    client: 'channel',
+    requestId: 'wa:ad',
+    channel: {
+      provider: 'whatsapp',
+      bindingId: 'chb_ad',
+      bindingRevision: 2,
+      remoteMessageRef: `hmac:${'b'.repeat(64)}`,
+      providerSentAt: adEntryPoint.sentAt,
+      entryPoint: adEntryPoint,
+    },
+  };
+
   it("hands a channel turn's ad entry point to plugin code only, the same on a resumed attempt", async () => {
-    const entryPoint = {
-      kind: 'ad' as const,
-      provider: 'meta' as const,
-      sentAt: Date.now() - 2_000,
-      sourceType: 'ad',
-      sourceId: '120252638173670287',
-      sourceUrl: 'https://fb.me/91x4AM4CH',
-      headline: 'Chat with us',
-      body: 'Internal test ad for a WhatsApp chat link. Please ignore.',
-      mediaType: 'image',
-      imageUrl:
-        'https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?oe=6B01DE60',
-      ctwaClid: 'AfjK-4OyWoOufgO2Ynmc',
-      welcomeMessageText: 'Hi! Please let us know how we can help you.',
-    };
-    const channelTurn: TurnRequest = {
-      identity: { userDid: USER_DID },
-      sessionId: 's1',
-      message: 'Hi, I saw your ad',
-      client: 'channel',
-      requestId: 'wa:ad',
-      channel: {
-        provider: 'whatsapp',
-        bindingId: 'chb_ad',
-        bindingRevision: 2,
-        remoteMessageRef: `hmac:${'b'.repeat(64)}`,
-        providerSentAt: entryPoint.sentAt,
-        entryPoint,
-      },
-    };
     const seen: unknown[] = [];
     const reader = makePlugin({ name: 'ad-reader' });
     reader.getRequestTools = (ctx) => {
@@ -1347,8 +1354,8 @@ describe('turn preparation wiring', () => {
       await bootedForTurns(h);
       const prepared = await h.call(
         'prepareTurn',
-        channelTurn,
-        { message: channelTurn.message },
+        adTurn,
+        { message: adTurn.message },
         attemptRun(),
       );
       expect(seen).toEqual([
@@ -1356,14 +1363,14 @@ describe('turn preparation wiring', () => {
           provider: 'whatsapp',
           bindingId: 'chb_ad',
           bindingRevision: 2,
-          providerSentAt: entryPoint.sentAt,
-          entryPoint,
+          providerSentAt: adEntryPoint.sentAt,
+          entryPoint: adEntryPoint,
         },
       ]);
       // Nothing of the ad reaches the model's input (the message, its
       // kwargs, the rest of the graph input) or the trace metadata.
       const message = inputMessage(prepared);
-      expect(visibleText(message)).toBe(channelTurn.message);
+      expect(visibleText(message)).toBe(adTurn.message);
       if (typeof prepared !== 'object' || prepared === null)
         throw new Error('no prepared turn');
       const graphInput = JSON.stringify(Reflect.get(prepared, 'stateInput'));
@@ -1377,13 +1384,13 @@ describe('turn preparation wiring', () => {
         configurable: Reflect.get(config, 'configurable'),
       });
       for (const value of [
-        entryPoint.sourceId,
-        entryPoint.sourceUrl,
-        entryPoint.headline,
-        entryPoint.body,
-        entryPoint.imageUrl,
-        entryPoint.ctwaClid,
-        entryPoint.welcomeMessageText,
+        adEntryPoint.sourceId,
+        adEntryPoint.sourceUrl,
+        adEntryPoint.headline,
+        adEntryPoint.body,
+        adEntryPoint.imageUrl,
+        adEntryPoint.ctwaClid,
+        adEntryPoint.welcomeMessageText,
       ]) {
         expect(graphInput).not.toContain(value);
         expect(traced).not.toContain(value);
@@ -1393,19 +1400,106 @@ describe('turn preparation wiring', () => {
       );
       await disposeTurn(h, prepared);
 
-      // A resumed attempt reads the request back from the run row.
-      const stored = JSON.parse(
-        JSON.stringify(storedRunRequest(channelTurn)),
-      ) as ReturnType<typeof storedRunRequest>;
+      // A resumed attempt reads the request back from the run row, written
+      // by the channel host's own `begin` (the attempt it starts is a stub).
+      Reflect.set(h.host, 'runAttempt', async () => ({
+        status: 'finished',
+        text: '',
+      }));
+      const channelTurns: unknown = h.field('channelTurns');
+      if (typeof channelTurns !== 'object' || channelTurns === null)
+        throw new Error('no channel turns');
+      const channelHost: unknown = Reflect.get(channelTurns, 'host');
+      if (typeof channelHost !== 'object' || channelHost === null)
+        throw new Error('no channel host');
+      const begun: unknown = await Reflect.apply(
+        Reflect.get(channelHost, 'begin'),
+        channelHost,
+        ['run-ad', adTurn],
+      );
+      if (typeof begun !== 'object' || begun === null)
+        throw new Error('no run record');
+      const runStore = h.field('runStore');
+      if (!(runStore instanceof RunStore)) throw new Error('no run store');
+      const row = await runStore.get('run-ad');
+      if (!row) throw new Error('no stored run');
+      const stored = JSON.parse(row.request) as ReturnType<
+        typeof storedRunRequest
+      >;
+      expect(stored.turn.channel?.entryPoint).toEqual(adEntryPoint);
       const resumed = await h.call(
         'prepareTurn',
         stored.turn,
-        { message: channelTurn.message },
+        { message: adTurn.message },
         { ...attemptRun('run-2'), resumed: true },
       );
       expect(seen).toHaveLength(2);
       expect(seen[1]).toEqual(seen[0]);
       await disposeTurn(h, resumed);
+    });
+  });
+
+  it("never shows the ad to the model: the request the model gets holds the person's words only", async () => {
+    const requests: BaseMessage[][] = [];
+    class RecordingModel extends BaseChatModel {
+      _llmType(): string {
+        return 'recording';
+      }
+      override bindTools(): this {
+        return this;
+      }
+      async _generate(messages: BaseMessage[]): Promise<ChatResult> {
+        requests.push(messages);
+        const message = new AIMessage('Welcome!');
+        return { generations: [{ text: 'Welcome!', message }] };
+      }
+    }
+    const model = new RecordingModel({});
+    await withObject('turn-entry-point-model', {}, async (h) => {
+      await bootedForTurns(h);
+      const ambient = h.field('ambient');
+      if (typeof ambient !== 'object' || ambient === null)
+        throw new Error('not booted');
+      Reflect.set(h.host, 'ambient', { ...ambient, llm: { get: () => model } });
+      const prepared = await h.call(
+        'prepareTurn',
+        adTurn,
+        { message: adTurn.message },
+        attemptRun(),
+      );
+      if (typeof prepared !== 'object' || prepared === null)
+        throw new Error('no prepared turn');
+      const agent: unknown = Reflect.get(prepared, 'agent');
+      if (typeof agent !== 'object' || agent === null)
+        throw new Error('no agent');
+      await Reflect.apply(Reflect.get(agent, 'invoke'), agent, [
+        Reflect.get(prepared, 'stateInput'),
+        Reflect.get(prepared, 'config'),
+      ]);
+      expect(requests.length).toBeGreaterThan(0);
+      const seenByModel = JSON.stringify(
+        requests.map((messages) =>
+          messages.map((message) => ({
+            type: message.type,
+            content: message.content,
+            additional_kwargs: message.additional_kwargs,
+          })),
+        ),
+      );
+      // The system prompt and the person's words are there; the ad is not.
+      expect(requests[0]?.[0]?.type).toBe('system');
+      expect(seenByModel).toContain(adTurn.message);
+      for (const value of [
+        adEntryPoint.sourceId,
+        adEntryPoint.sourceUrl,
+        adEntryPoint.headline,
+        adEntryPoint.body,
+        adEntryPoint.imageUrl,
+        adEntryPoint.ctwaClid,
+        adEntryPoint.welcomeMessageText,
+      ])
+        expect(seenByModel).not.toContain(value);
+      await disposeTurn(h, prepared);
     });
   });
 
