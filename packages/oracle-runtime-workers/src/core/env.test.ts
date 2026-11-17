@@ -142,6 +142,8 @@ describe('validateEnv', () => {
     expect(result.config.MAIN_REASONING_EFFORT).toBe('medium');
     expect(result.config.UCAN_AUTH_MAX_TTL_SECONDS).toBe(900);
     expect(result.config.TURN_RECURSION_LIMIT).toBe(600);
+    // A first turn waits up to 4 s for the memory prefetch unless the oracle sets its own cap.
+    expect(result.config.USER_CONTEXT_PREFETCH_CAP_MS).toBe(4_000);
     expect(result.config.OWNER_STORE).toBeUndefined();
     expect(result.config.CORS_ORIGIN).toBe('*');
     // Durable Object namespaces never leak into plugin-visible config.

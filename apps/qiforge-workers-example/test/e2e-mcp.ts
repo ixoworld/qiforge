@@ -339,7 +339,7 @@ async function main(): Promise<void> {
       'a gather slower than the cap still fills the room for the next session',
       async () => {
         // A third memory write drops the room's cache; the engine then
-        // answers slower than the 3 s cap, so this first contact goes
+        // answers slower than the 4 s cap, so this first contact goes
         // without the block and the gather finishes in the background.
         const w = await client.stream(
           sessionId,
