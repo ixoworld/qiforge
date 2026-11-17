@@ -162,7 +162,7 @@ runtime since then exist only here; they are listed under
   `goals`, `interests`, `relationships`, `recent`) are fetched with one
   `POST /search-enhanced-batch` (the same six queries, limits and filters as
   Node, `recent` limited to the last 90 days), keyed by room in a 5-minute
-  cache, awaited for at most 3 s on a thread with no checkpointed context,
+  cache, awaited for at most 4 s (Node: 3 s) on a thread with no checkpointed context,
   and stale-while-revalidate: later turns of a thread never wait and never
   adopt a refreshed answer. The differences are under the divergences below.
 - **Per-room secrets**: the JWE scheme byte-compatible with

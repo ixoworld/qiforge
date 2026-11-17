@@ -924,7 +924,7 @@ Settings and the measured latencies are in
 [configuration](configuration.md#first-turn-memory-prefetch).
 
 - **Waiting.** A thread with no checkpointed `userContext` (first contact)
-  waits for the result for at most 3 s (`USER_CONTEXT_PREFETCH_CAP_MS`);
+  waits for the result for at most 4 s (`USER_CONTEXT_PREFETCH_CAP_MS`);
   after that the turn runs without it and the request keeps going in the
   background, so the room's cache has it for the next session. The thread
   that missed it stays on first contact and asks again on its next turn (a

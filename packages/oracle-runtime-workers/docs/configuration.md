@@ -409,7 +409,7 @@ example) per address; declare the dedicated binding to get the Node runtime's
 | Variable                            | Meaning                                                                                                                                                                                                                                                                                                                                                                              |
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `USER_CONTEXT_PREFETCH`             | `on` (default) or `off`. `off` makes no first-turn memory prefetch at all; the memory tools still work. Needs `MEMORY_ENGINE_URL` (the memory plugin's engine origin), `ORACLE_ENTITY_DID` and the user's `ixo:memory` delegation; without any of them no request is made. See [First-turn memory prefetch](#first-turn-memory-prefetch).                                            |
-| `USER_CONTEXT_PREFETCH_CAP_MS`      | How long a first turn waits for the prefetch. Default `3000`, `0` to `30000`. `0` never waits: the gather runs in the background and the turn uses the room's cached answer if there is one, otherwise none.                                                                                                                                                                         |
+| `USER_CONTEXT_PREFETCH_CAP_MS`      | How long a first turn waits for the prefetch. Default `4000`, `0` to `30000`. `0` never waits: the gather runs in the background and the turn uses the room's cached answer if there is one, otherwise none.                                                                                                                                                                         |
 | `USER_CONTEXT_CACHE_TTL_MS`         | How long a room's result is reused by later sessions. Default `300000` (5 min), `1000` to `3600000`.                                                                                                                                                                                                                                                                                 |
 | `CHANNEL_HISTORY_INDEX_DEBOUNCE_MS` | How long a channel session must be quiet after its last finished run before its new history is indexed (one upload per burst of messages). Default `180000` (3 min), `0` to `600000`; `0` indexes after every finished run. The wait is an in-memory timer that keeps the user object resident until it fires. See [channels](channels.md#quoted-replies-and-conversation-controls). |
 
@@ -1130,8 +1130,16 @@ episodes plus the Companion's public knowledge, uncached, from inside the
 cluster): the six-query batch takes p50 439 ms and p95 550 ms (a space of 183
 episodes: p50 362 ms), and 648 ms p50 from outside over the public URL. The
 engine replays identical queries from a 15 s cache. A cold open, the first
-request after the engine evicted an idle space (120 s), took 2.2 s. The 3 s
-default cap therefore fits a warm engine with margin and a cold open
-narrowly; lower it, or set `USER_CONTEXT_PREFETCH_CAP_MS=0`, to trade the first
-answer's memory for latency. Behaviour operators see:
+request after the engine evicted an idle space (120 s), took 2.2 s.
+
+The default cap is 4 s (3 s up to 0.56.3). The memory engine reranks each of
+the six queries and gives that step 2 s inside a batch (1.5 s before): a slow
+reranker call is late, not lost, and nearly all of them answer within 2 s. On
+mainnet the rest of the engine's work on a reranked batch takes 0.6 s at p50
+and 1.7 s at p95, and this runtime's signing and the network add about 0.35 s,
+so 3 s no longer covers a slow batch. Only a slow prefetch waits that long:
+between 13 and 17 November 2026, 15 of 4,718 first turns on mainnet (Yo and
+the Companion) reached the 3 s cap, and 13 of those prefetches finished within
+4 s (7 within 3.5 s). Lower the cap, or set `USER_CONTEXT_PREFETCH_CAP_MS=0`,
+to trade the first answer's memory for latency. Behaviour operators see:
 [operations](operations.md#turns-user-context-prefetch).

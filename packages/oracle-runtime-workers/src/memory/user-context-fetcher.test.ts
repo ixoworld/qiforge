@@ -13,6 +13,7 @@ import {
   capUserContextText,
   fitUserContextBudget,
   trimUserContextSlot,
+  USER_CONTEXT_BLOCKING_CAP_MS_DEFAULT,
   USER_CONTEXT_MAX_JSON_CHARS,
   USER_CONTEXT_MAX_TEXT_CHARS,
   UserContextFetcher,
@@ -893,6 +894,29 @@ describe('UserContextFetcher', () => {
       h.fetcher.fetch({ ...PARAMS, sessionId: 's2' }),
     ).resolves.toMatchObject({ kind: 'cached' });
     expect(h.calls).toHaveLength(1);
+  });
+
+  it('waits 4 s by default: an answer after 3.5 s is still used', async () => {
+    expect(USER_CONTEXT_BLOCKING_CAP_MS_DEFAULT).toBe(4_000);
+    const h = harness({ replies: ['hold'] });
+    const pending = h.fetcher.fetch(PARAMS);
+    await vi.advanceTimersByTimeAsync(3_500);
+    expect(h.held).toHaveLength(1);
+    h.held[0]!.resolve({ status: 200, body: SIX_SLOTS });
+    await expect(pending).resolves.toMatchObject({ kind: 'fresh' });
+    expect(h.logs.filter((line) => line.includes('exceeded'))).toEqual([]);
+  });
+
+  it('by default gives up waiting at 4 s, not before', async () => {
+    const h = harness({ replies: ['hold'] });
+    const pending = h.fetcher.fetch(PARAMS);
+    await vi.advanceTimersByTimeAsync(3_999);
+    expect(h.fetcher.status(PARAMS.roomId).lastOutcome).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toEqual({ kind: 'timeout', capMs: 4_000 });
+    expect(h.logs).toContain(
+      'warn [user-context] exceeded 4000ms cap for room=!room:x; continuing in the background',
+    );
   });
 
   it('with a zero cap never waits but still gathers in the background', async () => {
