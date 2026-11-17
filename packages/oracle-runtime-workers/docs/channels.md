@@ -104,6 +104,8 @@ The value rides with the run (`channel.providerSentAt`, so a resumed run reads t
 
 ### Ad entry point
 
+For oracle authors: there is nothing to configure. From `@ixo/oracle-runtime-workers` 0.57.0 every turn result advertises the `entry_point` feature, the gateway starts sending the ad, and plugin code reads it as `ctx.session.channel.entryPoint` (type `ChannelEntryPoint`, exported from the package); an oracle on an older runtime simply never receives it. See [recording the ad from a plugin](#recording-the-ad-from-a-plugin) for a working example.
+
 A message turn may carry `entryPoint`: how the person reached the chat, when the provider says so. Today that is Meta's `referral` object on an inbound WhatsApp message sent right after a tap on a Click-to-WhatsApp ad, every field mapped to camelCase. The gateway sends an ad once. It may hold an ad tapped before the person linked (up to 7 days) and attach it to the connect turn or the first later message, so `sentAt` is when the message that carried the ad was sent, not necessarily this turn's: a plugin uses `entryPoint.sentAt`, never `providerSentAt`, as the ad's time.
 
 ```json
@@ -136,6 +138,57 @@ Invisible format characters (zero-width characters, tag characters) pass these r
 The value rides with the run (`channel.entryPoint`, so a resumed run reads the same): in the user's own working database, which is exported to the user's owner store like all conversation data, so it leaves the runtime process that way. It reaches plugin code as `ctx.session.channel.entryPoint` on the turn's runtime context (request-time tools, sub-agents and middlewares, and tools when they run) on each attempt of the run, and at request admission (`RequestAdmissionContext.session.channel`, with the binding, so a handler that answers the turn itself can still record the ad). Request-time hooks run again on a resumed attempt, and admission runs again when an attempt stopped during it, so recording the ad must be idempotent (for example keyed on `sourceId`). Unlike `providerSentAt` it is not put on the turn's human message: not in its content, not in its `additional_kwargs`, so not in the checkpoint or a history read. It is not mirrored to the oracle room (the mirror carries only `org.ixo.qi.origin`), not in the LangSmith metadata, and the runtime logs nothing of it. Every text and link in it was written by the advertiser or Meta: a plugin treats it as data and never gives it to the model as instructions, and logs none of it (the click id least of all). Event turns, `onModelCall` and `channelFailureReply` never see it.
 
 It reaches plugin code only on turns where the agent is built or admission runs. A turn that becomes a [routing clarification](channel-routing.md) is answered without either, and a run cancelled or refused before the build (a stopped request, a missing delegation, a binding no longer active) never gets that far: the ad is not shown to any plugin, and since the gateway does not send it again, it is lost for that person. Admission does not run on a turn with files, so an ad that arrives with a photo reaches plugins only through the agent build.
+
+#### Recording the ad from a plugin
+
+`kind`, `provider`, `sentAt`, `sourceType` and `sourceId` are always present; every other field is optional. A request-time hook is the place to record it: it runs on every built turn with `ctx.kv`, the user's own rows. Key the record on `sourceId` so a retried attempt writes nothing new (add `sentAt` to the key to keep every tap instead of the first per ad), keep only what you need, and leave `ctwaClid` and the advertiser text out of logs and prompts:
+
+```ts
+import {
+  defineOraclePlugin,
+  type ChannelEntryPoint,
+} from '@ixo/oracle-runtime-workers';
+
+const ADS = 'ad-attribution/entry-points';
+
+/** What we keep: ids and the ad's time, no advertiser text, no click id. */
+type AdRecord = Pick<ChannelEntryPoint, 'sourceType' | 'sourceId' | 'sentAt'>;
+
+export const adAttribution = defineOraclePlugin({
+  name: 'ad-attribution',
+  version: '1.0.0',
+  manifest: {
+    title: 'Ad attribution',
+    summary: 'Records which ad brought the person to the chat.',
+    whenToUse: [],
+    visibility: 'silent',
+  },
+  async getRequestTools(ctx) {
+    const ad = ctx.session.channel?.entryPoint;
+    if (ad && ctx.kv) {
+      // Runs again on every attempt of the run: keyed on the ad id, the
+      // first write wins and a retry changes nothing.
+      await ctx.kv.update(
+        ADS,
+        ad.sourceId,
+        (current) => {
+          if (current !== undefined) return current;
+          const record: AdRecord = {
+            sourceType: ad.sourceType,
+            sourceId: ad.sourceId,
+            sentAt: ad.sentAt,
+          };
+          return record;
+        },
+        { maxEntries: 100 },
+      );
+    }
+    return []; // records only; adds no tools
+  },
+});
+```
+
+`RequestAdmissionContext` has no `ctx.kv`. A turn that admission passes is built next, so the hook above still sees the ad; only a plugin whose `getRequestAdmission` answers the turn itself (`handled`) must record the ad there, in its own store, before it returns.
 
 Topic deliverables (Matrix topics), provider identifiers, and caller-supplied user identities are not accepted. The body limit is 64,000 bytes. Text is limited to 16,000 characters.
 

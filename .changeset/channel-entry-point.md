@@ -19,7 +19,9 @@ routing clarification, or a run cancelled or refused before either, never
 shows it to a plugin, and the gateway sends an ad only once. The gateway may
 attach an ad tapped before the person linked to a later message, so the ad's
 time is `entryPoint.sentAt`, not the turn's. Hooks run again on a resumed
-attempt: record it idempotently.
+attempt: record it idempotently (keyed on `sourceId`). Oracles need no
+configuration beyond this version; `docs/channels.md#ad-entry-point` has a
+copy-paste plugin that records the ad in `ctx.kv`.
 
 It is stored with the run in the user's working database (exported to the
 owner store like all conversation data) and never put on the model's input,
