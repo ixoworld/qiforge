@@ -56,6 +56,7 @@ import { actionOutcome } from '@ixo/ixo-transaction/action-proposals';
 import {
   ActionProposalConflict,
   ActionProposalStore,
+  receiptChannel,
   type ProposalCommand,
 } from '../action-proposals/store';
 import type {
@@ -4690,7 +4691,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               sessionId: request.sessionId,
               roomId,
               client: request.client,
-              ...(request.channel ? { channel: request.channel } : {}),
+              ...receiptChannel(request.channel),
             }
           : null;
       const p = await topics.create(subject, origin);
@@ -4795,7 +4796,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           sessionId: request.sessionId,
           roomId,
           client: request.client,
-          ...(request.channel ? { channel: request.channel } : {}),
+          ...receiptChannel(request.channel),
         };
       }
       const proposal = await store.create(subject, origin);
