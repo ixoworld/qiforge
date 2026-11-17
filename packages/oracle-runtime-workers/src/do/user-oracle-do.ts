@@ -7253,6 +7253,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                   ...(req.roomKind ? { roomKind: req.roomKind } : {}),
                   ...(req.eventId ? { eventId: req.eventId } : {}),
                   ...(req.threadId ? { threadId: req.threadId } : {}),
+                  // A channel turn's binding and ad entry point, so a plugin
+                  // can record the ad even when it answers the turn itself
+                  // (a direct read builds no agent). Plugin code only.
+                  ...(req.channel?.bindingRevision
+                    ? {
+                        channel: {
+                          provider: req.channel.provider,
+                          bindingId: req.channel.bindingId,
+                          bindingRevision: req.channel.bindingRevision,
+                          ...(req.channel.entryPoint
+                            ? { entryPoint: req.channel.entryPoint }
+                            : {}),
+                        },
+                      }
+                    : {}),
                 },
                 message: req.message,
                 metadata: admissionMetadata(req.metadata),

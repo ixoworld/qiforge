@@ -12,6 +12,13 @@ import type { MergedConfig, RuntimeContext } from './types';
  * member would see one user's authorized data) or a scheduled task run.
  * `roomKind` is still passed so a handler can refuse anything it would not
  * show to the whole room.
+ *
+ * On a channel message turn `session.channel` holds the binding
+ * (`provider`, `bindingId`, `bindingRevision`) and, when the gateway sent
+ * one, the untrusted ad `entryPoint` (see `RuntimeContext.session.channel`),
+ * so a handler can record the ad even when it answers the turn itself and
+ * no agent is built. It carries no files: a turn with files is never
+ * admitted here.
  */
 export interface RequestAdmissionContext {
   readonly config: MergedConfig;
