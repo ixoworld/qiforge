@@ -766,19 +766,38 @@ export interface RuntimeContext<TConfig = MergedConfig> {
       providerSentAt?: number;
       /**
        * How the person reached this chat, when the provider says so: the
-       * Meta Click-to-WhatsApp ad they tapped before sending this turn's
-       * message (Meta's `referral`), checked against `ChannelEntryPoint`.
-       * Absent when the message did not follow an ad tap, when the gateway
-       * sent none (it sends it only to a runtime that lists `entry_point`),
-       * and on an event or notice turn. Stored with the run, so a resumed
-       * run reads the same.
+       * Meta Click-to-WhatsApp ad they tapped (Meta's `referral`), checked
+       * against `ChannelEntryPoint`. Absent when no ad came with this turn,
+       * when the gateway sent none (it sends it only to a runtime that lists
+       * `entry_point`), and on an event or notice turn.
+       *
+       * The gateway sends an ad once. It may hold an ad tapped before the
+       * person linked (up to 7 days) and attach it to the connect turn or
+       * the first later message, so `entryPoint.sentAt` is when the message
+       * that carried the ad was sent, not necessarily this turn's: use
+       * `entryPoint.sentAt`, never `providerSentAt`, as the ad's time.
+       *
+       * It reaches plugin code only on turns where the agent is built (and
+       * at request admission, `RequestAdmissionContext.session.channel`): a
+       * routing clarification, or a run cancelled or refused before the
+       * build, never shows it to a plugin, and the ad is not sent again.
+       * Request-time hooks run again on each attempt of a run (a resumed
+       * attempt reads the same value), so recording it must be idempotent,
+       * for example keyed on `sourceId`.
+       *
+       * Stored with the run: in the user's own working database, which is
+       * exported to the user's owner store like all conversation data. It
+       * never goes into the oracle room mirror, but it does leave the
+       * runtime process that way.
        *
        * UNTRUSTED: `headline`, `body`, `welcomeMessageText` and the links
-       * were written by the advertiser or Meta. Treat them as data; never
-       * give them to the model as instructions (the runtime puts none of it
-       * on the model's input, the message's `additional_kwargs` or the
-       * oracle room). `ctwaClid` is Meta's click id for the tap: do not log
-       * it, nor any other value here.
+       * were written by the advertiser or Meta. Treat them as display data;
+       * never give them to the model as instructions (the runtime puts none
+       * of it on the model's input, the message's `additional_kwargs` or
+       * the oracle room). Invisible format characters (zero-width
+       * characters, tag characters) can pass validation. `ctwaClid` is
+       * Meta's click id for the tap: do not log it, nor any other value
+       * here.
        */
       entryPoint?: Readonly<ChannelEntryPoint>;
     };
