@@ -1,5 +1,27 @@
 # @ixo/oracle-runtime-workers
 
+## 0.58.0
+
+### Minor Changes
+
+- [#565](https://github.com/ixoworld/qiforge/pull/565) [`6910777`](https://github.com/ixoworld/qiforge/commit/691077737bb907bb6e44050dea70a51eb05f1fb3) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Plugin hooks for usage metering and gating.
+
+  - `OraclePlugin.gateTurn(ctx)` (with `turnGate: { onFailure, timeoutMs }`) refuses a turn before anything of it exists, on every entry: a Portal request is answered with the refusal's status (e.g. 402) and `{ statusCode, message, code?, details?, requestId, refused: true }` (`TurnRefusalBody`; `refused: true` marks a gate's refusal, never an auth failure, so a client does not renew credentials on a refused 403), a Matrix room gets the message as a notice, a channel request a `turn_refused` refusal, a task run is skipped with the reason recorded (no failure counted). Gates run concurrently; the first refusal in plugin order wins; a gate that throws or times out fails open unless it declares `closed` (`503 turn_gate_unavailable`).
+  - `onModelCall` now receives a `ModelCallReport` for every model call the runtime makes for a person: `purpose` (`reply`, `summarization`, `subagent`, `plugin`, `attachment`, `title`, `group-summary`, `routing`, `decision`, `safety`, `other`), `paidBy` (`platform` or `user` for a bring-your-own-LLM call), `callId` and `startedAt`. Attachment extraction, `view_attachment`, memory document ingest, session titles, group summaries, the capability router, channel routing, `ctx.decisions` and BYO calls are reported now; before, only platform chat-model calls through the turn's adapter were.
+  - `OraclePlugin.onTurnUsage(usage, ctx)`: once per turn attempt, after its calls went through `onModelCall`, with the calls and the platform cost total.
+  - A gate may allow a turn on the person's own provider only: `{ allow: true, platformModels: 'deny' }` (the most restrictive allowance of several gates wins; stored with the run). That turn never touches the platform's model key: no platform fallback for a refused BYO model, roles the person's provider does not serve fail, no session title, files are not sent to the extraction model, no capability-router or channel-routing Decision, `ctx.decisions` unavailable; a turn that would not run on the person's provider fails before any model call.
+  - A refusal is answered with 402, 403, 429 or 503; any other status is answered as 403 (logged). A refused task run that ends its task (a one-shot) posts one notice in the task's room.
+  - `TurnRefusal.details` has two documented fields shown on every surface: `retryAfterSeconds` (1 to 86,400) and `action: { label, url }` (one call to action, https, label at most 40 characters); an invalid one is dropped from the refusal and logged. Portal answers carry `Retry-After` when `retryAfterSeconds` is set. A channel refusal is `{ code: "turn_refused", reason, message, retryAfterSeconds?, action? }` (`reason` = the plugin's `code`). A Matrix room gets one `m.notice` with the action as a link (`formatted_body`), in the message's thread; in a group room it mentions the refused person (`m.mentions`, matrix.to pill); at most one per (room, person, code) in 10 minutes, kept in the gateway's SQLite and cleared by an allowed turn. A task's refusal notice carries the action link too.
+  - A platform streamed call cut off after output started (an abort or an error before the provider's usage arrived) is reported with an estimate: `usageEstimated: true`, chars/4 prompt and output tokens, no cost. An abort no longer leaves a streamed call unreported.
+  - `onTurnUsage` also fires for an attempt that made calls without building the agent (an event turn a plugin decided, a build that failed after reading a file): every call with a run is in exactly one `onTurnUsage`, except for an attempt the object stops mid-way.
+  - `ctx.requestWake(at)` and `OraclePlugin.onWake(ctx)`: a plugin can have the person's object woken later (the housekeeping alarm) to finish pending work without a request; a pending wake is dropped when the idle copy is evicted.
+  - `ModelCallRecord` gains `paidBy` and `usageEstimated`. Exported types: `TurnGateContext`, `TurnGateResult`, `TurnGatePolicy`, `TurnRefusal`, `TurnTrigger`, `PlatformModelsPolicy`, `ModelCallReport`, `ModelCallPurpose`, `ModelCallPayer`, `TurnModelUsage`, `MODEL_CALL_PURPOSES`. See `docs/usage-metering.md`.
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @ixo/ixo-transaction@0.3.0
+
 ## 0.57.0
 
 ### Minor Changes
