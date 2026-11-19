@@ -285,6 +285,8 @@ export interface CreateAmbientInput {
   onTurnEnd?: (dispose: () => void | Promise<void>) => void;
   /** Keep-alive for un-awaited work (see `RuntimeContext.background`). */
   background?: (work: Promise<unknown>) => void;
+  /** Wake of the user's object for `onWake` (see `RuntimeContext.requestWake`). */
+  requestWake?: (at: number) => Promise<void>;
   config: Record<string, unknown>;
   identity: OracleIdentity;
   availablePlugins: ReadonlySet<string>;
@@ -320,6 +322,7 @@ export function createAmbientServices(
     ...(input.frontend ? { frontend: input.frontend } : {}),
     ...(input.onTurnEnd ? { onTurnEnd: input.onTurnEnd } : {}),
     ...(input.background ? { background: input.background } : {}),
+    ...(input.requestWake ? { requestWake: input.requestWake } : {}),
     config: input.config,
     identity: input.identity,
     availablePlugins: input.availablePlugins,

@@ -1,4 +1,7 @@
-import type { ChannelAttachment } from '../channels/contract';
+import type {
+  ChannelAttachment,
+  ChannelEntryPoint,
+} from '../channels/contract';
 import {
   UNAVAILABLE_DECISION_EVALUATOR,
   type DecisionEvaluateOptions,
@@ -39,6 +42,7 @@ import type {
   UcanMintOptions,
 } from '../plugin-api/types';
 import { UcanMintUnavailableError } from '../plugin-api/ucan-errors';
+import { withModelCallPurpose } from './model-call-reporter';
 import { NOOP_LOGGER, sweepExpired } from './utils';
 
 // ── Adapter interfaces (implemented by the Durable Object layer) ────────────
@@ -218,6 +222,8 @@ export interface AmbientServices {
   onTurnEnd?: (dispose: () => void | Promise<void>) => void;
   /** Host keep-alive for un-awaited work (`ctx.waitUntil` on Workers). */
   background?: (work: Promise<unknown>) => void;
+  /** Host wake of the person's object for `onWake` (`RuntimeContext.requestWake`). */
+  requestWake?: (at: number) => Promise<void>;
   /**
    * Records that the tool call `toolCallId` of this turn left the object
    * (`ctx.markDispatched`). Set per turn by a host that keeps write-ahead
@@ -346,6 +352,8 @@ export interface RuntimeSessionContext {
     bindingRevision: number;
     /** Files sent with this message (see `RuntimeContext.session.channel`). */
     attachments?: readonly ChannelAttachment[];
+    /** The ad that brought the person here (see `RuntimeContext.session.channel`). */
+    entryPoint?: Readonly<ChannelEntryPoint>;
   };
   roomId?: string;
   surface?: SessionSurface;
@@ -553,8 +561,10 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
         ambient.ucan.getServiceDelegation(userDid, opts),
     },
     decisions,
+    // A plugin's own model: its calls report as `plugin`.
     llm: {
-      get: (role, params) => ambient.llm.get(role, params),
+      get: (role, params) =>
+        ambient.llm.get(role, withModelCallPurpose(params, 'plugin')),
     },
     emit,
     logger: ambient.logger,
@@ -574,6 +584,7 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
     ...(ambient.attachments ? { attachments: ambient.attachments } : {}),
     ...(ambient.onTurnEnd ? { onTurnEnd: ambient.onTurnEnd } : {}),
     ...(ambient.background ? { background: ambient.background } : {}),
+    ...(ambient.requestWake ? { requestWake: ambient.requestWake } : {}),
     shared: EMPTY_SHARED,
     ...(toolCallId ? { toolCallId } : {}),
     ...(toolCallId && markDispatched
@@ -785,5 +796,6 @@ export function createNoopAmbient(
     ...(overrides.markDispatched
       ? { markDispatched: overrides.markDispatched }
       : {}),
+    ...(overrides.requestWake ? { requestWake: overrides.requestWake } : {}),
   };
 }

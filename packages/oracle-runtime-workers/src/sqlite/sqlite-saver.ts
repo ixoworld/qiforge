@@ -1195,6 +1195,15 @@ export class SqliteSaver extends BaseCheckpointSaver {
   /**
    * Normalize a message's `additional_kwargs` (assigned back onto it, the
    * shape every stored row has) and return them.
+   *
+   * The write-back reaches the live message the rest of the turn reads, so
+   * every kwarg the runtime sets and reads later in the turn or in a later
+   * turn must be on the `cleanAdditionalKwargs` allowlist; anything else is
+   * gone from the live message after the first checkpoint, not only from
+   * storage. The write-back itself stays: it keeps a stamped `timestamp`
+   * stable across puts and takes the provider's response kwargs
+   * (`__raw_response`, raw `tool_calls`, a Responses `reasoning` item) off
+   * the AI message before the next model call of the turn would resend them.
    */
   private normalizeKwargs(message: BaseMessage): CleanAdditionalKwargs {
     const original = message.additional_kwargs;

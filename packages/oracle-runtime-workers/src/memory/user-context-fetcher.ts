@@ -500,7 +500,7 @@ export interface UserContextFetcherDeps {
 }
 
 export interface UserContextFetcherOptions {
-  /** How long `fetch` waits for the gather (default 3 s; 0 = never wait). */
+  /** How long `fetch` waits for the gather (default 4 s; 0 = never wait). */
   blockingCapMs?: number;
   /** Positive cache lifetime per room (default 5 min). */
   cacheTtlMs?: number;
@@ -517,7 +517,16 @@ export interface UserContextFetcherOptions {
   maxCachedRooms?: number;
 }
 
-export const USER_CONTEXT_BLOCKING_CAP_MS_DEFAULT = 3_000;
+/**
+ * Default of `USER_CONTEXT_PREFETCH_CAP_MS`: how long a first turn waits for
+ * the prefetch. 4 s since the memory engine gives its reranker 2 s inside a
+ * prefetch batch (it was 1.5 s, and this cap 3 s): the rest of the engine's
+ * work on a batch takes up to 1.7 s at p95, and signing plus the network add
+ * about 0.35 s here. Only a slow prefetch waits this long. On mainnet 15 of
+ * 4,718 first turns in four days hit the 3 s cap, and 13 of those prefetches
+ * finished within 4 s (7 within 3.5 s).
+ */
+export const USER_CONTEXT_BLOCKING_CAP_MS_DEFAULT = 4_000;
 export const USER_CONTEXT_CACHE_TTL_MS_DEFAULT = 300_000;
 const DEFAULT_EMPTY_CACHE_TTL_MS = 30_000;
 const DEFAULT_FAILURE_TTL_MS = 60_000;

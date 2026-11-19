@@ -30,6 +30,7 @@ import {
   createLlmAdapter,
   openRouterAttributionHeaders,
   outputCapEnv,
+  routingEnv,
   platformStreamLivenessEnv,
   type OpenRouterLlmAdapter,
 } from './llm';
@@ -700,6 +701,7 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
       ORACLE_NAME: String(validated.config.ORACLE_NAME),
       ...platformStreamLivenessEnv(validated.config),
       ...outputCapEnv(validated.config),
+      ...routingEnv(validated.config),
     },
     logger,
   );

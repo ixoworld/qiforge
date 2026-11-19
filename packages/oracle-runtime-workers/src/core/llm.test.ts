@@ -1183,6 +1183,27 @@ describe('redactSignedLinks', () => {
       expect(redactSignedLinks(values)).toBe(values);
   });
 
+  it('gives each Durable Object its own tracing client (no I/O across objects), shared across its turns', () => {
+    const clientOf = (owner?: object): unknown =>
+      Reflect.get(
+        resolveLangsmithTracing({
+          userDid: 'did:ixo:user',
+          client: 'channel',
+          env: { apiKey: 'key', tracing: 'true' },
+          ...(owner ? { owner } : {}),
+        }).callbacks?.[0] ?? {},
+        'client',
+      );
+    const first = {};
+    const second = {};
+    expect(clientOf(first)).toBeDefined();
+    expect(clientOf(first)).toBe(clientOf(first));
+    expect(clientOf(second)).not.toBe(clientOf(first));
+    // Without an owner (a plain Worker): one client per isolate.
+    expect(clientOf()).toBe(clientOf());
+    expect(clientOf()).not.toBe(clientOf(first));
+  });
+
   it('is what every tracer client applies to inputs and outputs, after collapsing thread state', () => {
     const { callbacks } = resolveLangsmithTracing({
       userDid: 'did:ixo:user',

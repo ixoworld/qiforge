@@ -112,7 +112,9 @@ same reply reads as normal text on Matrix, the Portal and any other client.
 in `features`. A gateway that has seen it sends a `render` object with each
 message turn: the element kinds it can show, the link-button labels it knows,
 and the link origins its deployment approves (gateway configuration, not the
-oracle's). Only then does the model get the tools below, plus a "Buttons in
+oracle's). Turn results also list `rich_events`: a gateway that has seen both
+sends `render` with event turns too (a permission card answered, an identity
+check updated), so a reply to an event can use the same tools and helpers. Only then does the model get the tools below, plus a "Buttons in
 this chat" prompt section placed after your own instructions. The first turn
 after a runtime or gateway deploy is therefore plain text; the next ones are
 rich.
@@ -175,6 +177,7 @@ and the wire contract in [channels](docs/channels.md#rich-messages).
 | [topic-action-proposals](docs/topic-action-proposals.md) | Topic cards: discussion drafts and claim-access grants as multi-step journals with one-use permits                         |
 | [chain-tools](docs/chain-tools.md)                       | The bundled `ixo-chain` reader: live balances, the 30 lookup kinds, names from the IXO Names worker, retries and limits    |
 | [oracle-payments](docs/oracle-payments.md)               | Paid services: support/work modes, the contract gate, escrowed claims, `ctx.chain`                                         |
+| [usage-metering](docs/usage-metering.md)                 | For plugin authors: `gateTurn` (refuse a turn, e.g. 402), `onModelCall` on every model call, `onTurnUsage`, BYO `paidBy`   |
 | [testing](docs/testing.md)                               | Unit, harness e2e, the devnet feature matrix, stress                                                                       |
 | [load-tests](docs/load-tests.md)                         | Measurements and the findings that shaped the gateway                                                                      |
 

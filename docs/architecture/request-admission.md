@@ -1,6 +1,6 @@
 # Request admission
 
-Workers plugins can implement `getRequestAdmission(context)` to handle a bounded authenticated read before model selection, attachment interpretation, capability routing, agent construction, and summarization. The context contains a redacted configuration, verified user and session identity (including the Matrix `roomKind`, `eventId` and `threadId` when present), the message, optional bounded metadata, and a cancellation signal. It exposes no model or mutation tools.
+Workers plugins can implement `getRequestAdmission(context)` to handle a bounded authenticated read before model selection, attachment interpretation, capability routing, agent construction, and summarization. The context contains a redacted configuration, verified user and session identity (including the Matrix `roomKind`, `eventId` and `threadId` when present, and on a channel message turn `session.channel`: the binding and, when the gateway sent one, the untrusted ad `entryPoint`, see [ad entry point](../../packages/oracle-runtime-workers/docs/channels.md#ad-entry-point)), the message, optional bounded metadata, and a cancellation signal. It exposes no model or mutation tools.
 
 The configuration a handler sees is not the merged env: it holds the core settings without credentials (`OPEN_ROUTER_API_KEY`, `MATRIX_ORACLE_ADMIN_PASSWORD`, `MATRIX_RECOVERY_PHRASE` and `CLOUDFLARE_API_TOKEN` are removed) plus the keys the handler's own plugin declares in its `configSchema`. Keys owned by other plugins are left out. A plugin's own keys are passed through, secrets included, because the handler must reach the same authorized service as the plugin's read tool.
 
@@ -21,3 +21,7 @@ New flow conditions require `source` equal to `configured_input` or `runtime_out
 `readFlowDecisionContext(ctx, ref?)` returns the authenticated `FlowSpecRead` snapshot, including its resolved `ref`, through the existing Matrix room-membership guard. It does not invoke inference or mutate the flow. Hosts must select and redact the fields needed for their Decision variables rather than trust model-supplied draft state. Input, condition, and semantic-gate edits update both the editor blocks and compiled `qi.flow.nodes` consumed by the runner.
 
 Decision calls combine caller cancellation with turn cancellation. Already cancelled calls do not reach the provider, cancellation rejects even if a provider ignores the signal, and a result arriving after cancellation cannot become an accepted answer.
+
+## Request admission and the turn gate
+
+`OraclePlugin.gateTurn` (Workers runtime, `packages/oracle-runtime-workers/docs/usage-metering.md`) is a separate, earlier hook: it can only refuse a turn (with an HTTP status such as 402 on Portal requests), never answer it, and it runs on every entry, group rooms, task runs and turns with files included. Admission's contract above is unchanged: a turn the gate refused never reaches admission.

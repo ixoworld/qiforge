@@ -12,6 +12,12 @@
  * model on failure". (Document ingestion parses PDFs locally first:
  * `pdf-text.ts`.)
  */
+import {
+  buildModelCallRecord,
+  type CallObservation,
+  type ModelCallReport,
+  observeRawResponse,
+} from '../llm/model-call';
 import { bytesToBase64 } from '../plugins/base64';
 import { validateUrlTarget } from './download';
 import type { FileCategory } from './magic';
@@ -26,6 +32,18 @@ export interface ExtractionProvider {
   headers: Record<string, string>;
   /** The `vision` role's model id. */
   model: string;
+  /**
+   * Receives a report of each request sent to the provider (purpose
+   * `attachment`, platform-paid), once it answered or failed: the turn's
+   * `onModelCall` path. A request retried without `max_tokens` is two calls.
+   */
+  onModelCall?: (call: ModelCallReport) => void;
+  /**
+   * Set when the turn may not use the platform's models (a gate's
+   * `platformModels: 'deny'`): no request is sent and every extraction
+   * fails with this message, which the model sees in the file's place.
+   */
+  deniedReason?: string;
 }
 
 export interface ExtractionUsage {
@@ -157,6 +175,7 @@ async function chatCompletion(
   contentParts: Array<Record<string, unknown>>,
   opts: ExtractOptions,
 ): Promise<ExtractionResult> {
+  if (provider.deniedReason) throw new Error(provider.deniedReason);
   const fetchImpl = opts.fetchImpl ?? fetch;
   const controller = new AbortController();
   const onAbort = (): void => controller.abort();
@@ -164,7 +183,29 @@ async function chatCompletion(
   if (opts.signal?.aborted) controller.abort();
   const timer = setTimeout(onAbort, opts.timeoutMs ?? AI_PROCESS_TIMEOUT_MS);
   try {
-    const send = (withMaxTokens: boolean): Promise<Response> =>
+    const report = (
+      startedAt: number,
+      seen: CallObservation,
+      error?: unknown,
+    ): void => {
+      if (!provider.onModelCall) return;
+      try {
+        provider.onModelCall({
+          ...buildModelCallRecord(
+            { role: 'vision', requestedModel: provider.model },
+            seen,
+            Date.now() - startedAt,
+            error,
+          ),
+          purpose: 'attachment',
+          callId: crypto.randomUUID(),
+          startedAt,
+        });
+      } catch {
+        // Reporting never fails the extraction.
+      }
+    };
+    const post = (withMaxTokens: boolean): Promise<Response> =>
       fetchImpl(`${provider.baseURL.replace(/\/+$/, '')}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -181,23 +222,60 @@ async function chatCompletion(
         }),
         signal: controller.signal,
       });
-    let response = await send(true);
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => '');
+    // One request, reported however it ends: answered (with the provider's
+    // usage and cost), refused (its status) or failed on the way.
+    const send = async (
+      withMaxTokens: boolean,
+    ): Promise<{ response: Response; raw?: unknown; errorText?: string }> => {
+      const startedAt = Date.now();
+      let response: Response;
+      try {
+        response = await post(withMaxTokens);
+      } catch (error) {
+        report(startedAt, {}, error);
+        throw error;
+      }
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => '');
+        report(
+          startedAt,
+          {},
+          Object.assign(new Error(`HTTP ${response.status}`), {
+            status: response.status,
+          }),
+        );
+        return { response, errorText };
+      }
+      let raw: unknown;
+      try {
+        raw = await response.json();
+      } catch (error) {
+        report(startedAt, {}, error);
+        throw error;
+      }
+      const seen: CallObservation = {};
+      observeRawResponse(seen, raw);
+      report(startedAt, seen);
+      return { response, raw };
+    };
+    let sent = await send(true);
+    if (!sent.response.ok) {
+      const errorText = sent.errorText ?? '';
       // A provider that rejects `max_tokens` gets the request without it.
       if (
         opts.maxTokens !== undefined &&
-        response.status === 400 &&
+        sent.response.status === 400 &&
         /max_(completion_)?tokens/i.test(errorText)
       ) {
-        response = await send(false);
-      } else {
+        sent = await send(false);
+      }
+      if (!sent.response.ok) {
         throw new Error(
-          `AI processing failed (${response.status}): ${errorText.slice(0, MAX_ERROR_BODY_LENGTH)}`,
+          `AI processing failed (${sent.response.status}): ${(sent.errorText ?? '').slice(0, MAX_ERROR_BODY_LENGTH)}`,
         );
       }
     }
-    const raw: unknown = await response.json();
+    const raw: unknown = sent.raw;
     const result = raw as ChatCompletion;
     const choice = result.choices?.[0];
     return {

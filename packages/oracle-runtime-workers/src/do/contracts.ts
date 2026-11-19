@@ -10,6 +10,7 @@ import type {
   ChannelAttachment,
   ChannelControlInput,
   ChannelControlOutcome,
+  ChannelEntryPoint,
   ChannelFileNotice,
   ChannelEvent,
   ChannelReplyContext,
@@ -31,6 +32,7 @@ import type {
   ChannelTurnOutcome,
 } from '../channels/contract';
 import type { TaskExecutionProfile } from '../core/execution-profile';
+import type { TurnRefusal } from '../plugin-api/turn-gate';
 import type {
   CapabilityRouterMode,
   DecisionProviderName,
@@ -132,7 +134,7 @@ export interface OracleWorkerEnv {
   GROUP_CHAT_ACTIVE_THREAD_TTL_MS?: string;
   GROUP_CHAT_REQUIRE_POWER_LEVEL?: string;
   GROUP_CHAT_ROOM_INFO_TTL_MS?: string;
-  /** Idle recycle of the gateway object after this many sends (default 300; 0 disables). */
+  /** Opt-in planned restart of the gateway bot after this many sends, once idle (default 0 = off). */
   MATRIX_RECYCLE_AFTER_SENDS?: string;
   /** Rooms kept fully built in memory (SDK default 64; idle rooms are released). */
   MATRIX_HOT_ROOMS?: string;
@@ -486,6 +488,20 @@ export interface TurnRequest {
      */
     render?: RenderCapability;
     /**
+     * When the person sent this message according to the provider (epoch
+     * ms), already checked by the channel host (`plausibleProviderSentAt`).
+     * Stored with the run, so a resumed run reads the same.
+     */
+    providerSentAt?: number;
+    /**
+     * The ad the person tapped to reach the chat, as the channel contract
+     * checked it (`ChannelEntryPoint`). Stored with the run, so a resumed
+     * run reads the same. Handed to plugin code only
+     * (`ctx.session.channel.entryPoint`): never to the model, the
+     * message's `additional_kwargs`, the oracle room or a log.
+     */
+    entryPoint?: ChannelEntryPoint;
+    /**
      * The option the person tapped, checked against the choices offered in
      * this session: the model reads a note naming it with the message.
      */
@@ -525,6 +541,12 @@ export interface TurnRequest {
   multitask?: 'interrupt' | 'enqueue';
   /** The scheduler's run id when this turn executes a scheduled task. */
   taskRunId?: string;
+  /**
+   * Set by the pre-turn gate (`TurnGateResult.platformModels`): the turn
+   * may run on the person's own provider only. Stored with the run, so a
+   * queued or resumed attempt keeps it.
+   */
+  platformModels?: 'deny';
 }
 
 /** `GET /debug/context` — the context budget a model gets on this object. */
@@ -735,6 +757,28 @@ export interface TurnResult {
   toolCalls: Array<{ name: string; status: 'done' | 'error' }>;
   /** The stored reply of a turn that had already finished (a gateway asked again after a reset). */
   replayed?: boolean;
+  /**
+   * A plugin's `gateTurn` refused the turn before anything of it existed
+   * (`text` is empty, nothing was stored or run). A refusal is an outcome,
+   * not an error: it never travels as a thrown RPC exception. The gateway
+   * posts it as a notice (`src/matrix/refusal-notice.ts`); a task run is
+   * skipped with it recorded.
+   */
+  refused?: TurnRefusal;
+}
+
+/** The `TurnResult` of a turn a gate refused. */
+export function refusedTurnResult(
+  req: Pick<TurnRequest, 'sessionId' | 'requestId'>,
+  refused: TurnRefusal,
+): TurnResult {
+  return {
+    sessionId: req.sessionId,
+    requestId: req.requestId,
+    text: '',
+    toolCalls: [],
+    refused,
+  };
 }
 
 /**

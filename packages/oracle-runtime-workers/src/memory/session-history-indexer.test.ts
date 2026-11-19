@@ -16,12 +16,20 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Logger } from '../plugin-api/types';
 import { MEMORY_SEARCH_MCP_NAME } from '../plugins/memory/memory-tools';
 import {
+  classifyUploadRefusal,
   conversationReader,
+  historyMessageUuid,
+  MAX_PIECES_PER_MESSAGE,
+  MEMORY_UPLOAD_MAX_MESSAGE_BYTES,
+  MEMORY_UPLOAD_MAX_MESSAGES,
   pageOfMessages,
+  readUploadRefusal,
   SessionHistoryIndexer,
+  splitMessageContent,
   transformMessagesToMemoryEngineFormat,
   type HistoryMessage,
   type IndexableSession,
+  type PassEnd,
   type SessionHistoryIndexerDeps,
 } from './session-history-indexer';
 
@@ -50,13 +58,41 @@ interface Harness {
   messages: HistoryMessage[];
   /** The uploaded message contents, one list per request. */
   bodies(): string[][];
+  /** The uploaded message `uuid`s, one list per request. */
+  uuids(): string[][];
+  /** Every `onPassEnd` report. */
+  passEnds: PassEnd[];
+  /** Every logged line, by level. */
+  logs: { log: string[]; warn: string[]; error: string[] };
 }
+
+interface FakeResponse {
+  status: number;
+  body?: string;
+  headers?: Record<string, string>;
+}
+
+/** The engine's refusal body (error contract fields). */
+const refusal = (fields: Record<string, unknown>): string =>
+  JSON.stringify(fields);
+
+/** The Workers engine's answer to more than `limit` messages. */
+const TOO_MANY = (limit = 50): FakeResponse => ({
+  status: 422,
+  body: refusal({
+    detail: `messages: Array must contain at most ${limit} element(s)`,
+    code: 'MESSAGES_INVALID',
+    retryable: false,
+  }),
+});
 
 function harness(
   overrides: Partial<SessionHistoryIndexerDeps> & {
     session?: IndexableSession;
     messages?: HistoryMessage[];
-    responses?: Array<{ status: number; body?: string }>;
+    responses?: FakeResponse[];
+    /** Answers each request from what it carries (instead of `responses`). */
+    engine?: (messages: EngineMessage[], n: number) => FakeResponse;
   } = {},
 ): Harness {
   const calls: Harness['calls'] = [];
@@ -78,11 +114,18 @@ function harness(
   // The stored watermark, as the session row keeps it.
   let stored = session.lastProcessedCount;
   let n = 0;
+  const passEnds: PassEnd[] = [];
+  const logs: Harness['logs'] = { log: [], warn: [], error: [] };
   const fetchImpl: typeof fetch = async (url, init) => {
     calls.push({ url: String(url), init: init ?? {} });
-    const r = responses[Math.min(n, responses.length - 1)]!;
+    const r = overrides.engine
+      ? overrides.engine(sentMessages(init ?? {}), n)
+      : responses[Math.min(n, responses.length - 1)]!;
     n += 1;
-    return new Response(r.body ?? '', { status: r.status });
+    return new Response(r.body ?? '', {
+      status: r.status,
+      ...(r.headers ? { headers: r.headers } : {}),
+    });
   };
   const deps: SessionHistoryIndexerDeps = {
     memoryEngineUrl: 'https://memory.test/',
@@ -110,7 +153,14 @@ function harness(
       },
     },
     speakerLabels: async () => ({ user: 'Zed', oracle: 'Orin' }),
-    logger: SILENT,
+    logger: {
+      log: (line: string) => void logs.log.push(line),
+      warn: (line: string) => void logs.warn.push(line),
+      error: (line: string) => void logs.error.push(line),
+    },
+    onPassEnd: (_id, end) => {
+      passEnds.push(end);
+    },
     fetchImpl,
     sleep: async (ms) => {
       sleeps.push(ms);
@@ -125,24 +175,53 @@ function harness(
     sleeps,
     reads,
     messages,
-    bodies: () =>
-      calls.map((c) => {
-        const body: unknown = JSON.parse(String(c.init.body));
-        const list: unknown =
-          typeof body === 'object' && body !== null
-            ? Reflect.get(body, 'messages')
-            : undefined;
-        return Array.isArray(list)
-          ? list.map((m: unknown) =>
-              String(
-                typeof m === 'object' && m !== null
-                  ? Reflect.get(m, 'content')
-                  : m,
-              ),
-            )
-          : [];
-      }),
+    passEnds,
+    logs,
+    bodies: () => calls.map((c) => sentMessages(c.init).map((m) => m.content)),
+    uuids: () => calls.map((c) => sentMessages(c.init).map((m) => m.uuid)),
   };
+}
+
+interface EngineMessage {
+  content: string;
+  uuid: string;
+  role_type: string;
+  role: string;
+  source_description: string;
+}
+
+/** The messages one request carried. */
+function sentMessages(init: RequestInit): EngineMessage[] {
+  const body: unknown = JSON.parse(String(init.body));
+  const list: unknown =
+    typeof body === 'object' && body !== null
+      ? Reflect.get(body, 'messages')
+      : undefined;
+  if (!Array.isArray(list)) return [];
+  return list.map((m: unknown) => {
+    const field = (key: string): string => {
+      const v: unknown =
+        typeof m === 'object' && m !== null ? Reflect.get(m, key) : undefined;
+      return typeof v === 'string' ? v : '';
+    };
+    return {
+      content: field('content'),
+      uuid: field('uuid'),
+      role_type: field('role_type'),
+      role: field('role'),
+      source_description: field('source_description'),
+    };
+  });
+}
+
+/** `n` conversation messages, each followed by a tool result the filter drops. */
+function longChat(n: number): HistoryMessage[] {
+  const out: HistoryMessage[] = [];
+  for (let i = 0; i < n; i += 1) {
+    out.push({ type: i % 2 === 0 ? 'human' : 'ai', content: `m${i}` });
+    out.push({ type: 'tool', content: `tool ${i}` });
+  }
+  return out;
 }
 
 /** Let pending promise continuations (and zero-delay timers) run. */
@@ -326,7 +405,7 @@ describe('SessionHistoryIndexer', () => {
     }));
     const h = harness({
       messages,
-      chunkMaxMessages: 2,
+      maxMessagesPerRequest: 2,
       // The second upload fails on both attempts.
       responses: [
         { status: 200 },
@@ -345,25 +424,27 @@ describe('SessionHistoryIndexer', () => {
     expect(h.processed).toEqual([['s1', 2]]);
   });
 
-  it('splits chunks by content bytes, sending an oversized message alone', async () => {
+  it('splits parts by JSON body bytes', async () => {
     const h = harness({
       messages: [
-        { type: 'human', content: 'a'.repeat(6) },
-        { type: 'human', content: 'b'.repeat(6) },
-        { type: 'human', content: 'c'.repeat(30) },
+        { type: 'human', content: 'a'.repeat(1500) },
+        { type: 'human', content: 'b'.repeat(1500) },
+        { type: 'human', content: 'c'.repeat(1500) },
         { type: 'human', content: 'd' },
       ],
-      chunkMaxBytes: 16,
+      maxRequestBytes: 4096,
     });
     await expect(h.indexer.process('s1')).resolves.toBe('processed');
     expect(h.bodies().map((body) => body.map((c) => c[0]))).toEqual([
       ['a', 'b'],
-      ['c'],
-      ['d'],
+      ['c', 'd'],
     ]);
+    for (const call of h.calls)
+      expect(
+        new TextEncoder().encode(String(call.init.body)).byteLength,
+      ).toBeLessThanOrEqual(4096);
     expect(h.processed).toEqual([
       ['s1', 2],
-      ['s1', 3],
       ['s1', 4],
     ]);
   });
@@ -610,6 +691,618 @@ describe('SessionHistoryIndexer', () => {
     // One upload: the follow-up pass found nothing new.
     expect(h.calls).toHaveLength(1);
     expect(h.indexer.inFlightCount).toBe(0);
+  });
+});
+
+/** Every content sent across all requests, in order. */
+const allSent = (h: Harness): string[] => h.bodies().flat();
+
+describe('the engine request rules', () => {
+  it('never sends more than 50 messages per request, counted after the filter, in order and exactly once', async () => {
+    // 130 conversation messages, 260 transcript messages with the tool results.
+    const h = harness({ messages: longChat(130) });
+    await expect(h.indexer.process('s1')).resolves.toBe('processed');
+    expect(MEMORY_UPLOAD_MAX_MESSAGES).toBe(50);
+    expect(h.bodies().map((b) => b.length)).toEqual([50, 50, 30]);
+    expect(allSent(h)).toEqual(Array.from({ length: 130 }, (_, i) => `m${i}`));
+    // The count is in transcript messages and moves per accepted part.
+    expect(h.processed).toEqual([
+      ['s1', 100],
+      ['s1', 200],
+      ['s1', 260],
+    ]);
+    const ids = h.uuids().flat();
+    expect(new Set(ids).size).toBe(130);
+    for (const id of ids)
+      expect(id).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+    expect(h.logs.log.join('\n')).toContain(
+      'backlog done, 130 messages in 3 parts (lastProcessedCount 0 → 260)',
+    );
+    expect(h.passEnds).toEqual([
+      expect.objectContaining({ backlog: false, progressed: true }),
+    ]);
+  });
+
+  it('a failure in part N keeps parts before it; the next pass resumes at N with the same ids, no gap, no repeat', async () => {
+    let now = 0;
+    const h = harness({
+      messages: longChat(120),
+      now: () => now,
+      // Part 3 fails on both attempts of the first pass.
+      responses: [
+        { status: 202 },
+        { status: 202 },
+        { status: 503 },
+        { status: 503 },
+        { status: 202 },
+      ],
+    });
+    await expect(h.indexer.process('s1')).resolves.toBe('failed');
+    expect(h.processed).toEqual([
+      ['s1', 100],
+      ['s1', 200],
+    ]);
+    expect(h.passEnds).toEqual([
+      expect.objectContaining({ backlog: true, progressed: true }),
+    ]);
+    now += 60_000;
+    await expect(h.indexer.process('s1')).resolves.toBe('processed');
+    const bodies = h.bodies();
+    expect(bodies.map((b) => b.length)).toEqual([50, 50, 20, 20, 20]);
+    // The resend is the same request: same messages, same ids.
+    expect(h.uuids()[2]).toEqual(h.uuids()[4]);
+    expect(bodies[4]).toEqual(
+      Array.from({ length: 20 }, (_, i) => `m${100 + i}`),
+    );
+    expect(h.processed.at(-1)).toEqual(['s1', 240]);
+  });
+
+  it('derives ids from session, position and text: stable across indexers, different per message', async () => {
+    const a = await historyMessageUuid('s1', 4, 0, 'user', 'hello');
+    expect(await historyMessageUuid('s1', 4, 0, 'user', 'hello')).toBe(a);
+    expect(await historyMessageUuid('s1', 5, 0, 'user', 'hello')).not.toBe(a);
+    expect(await historyMessageUuid('s2', 4, 0, 'user', 'hello')).not.toBe(a);
+    expect(await historyMessageUuid('s1', 4, 1, 'user', 'hello')).not.toBe(a);
+    const first = harness({ messages: longChat(3) });
+    const second = harness({ messages: longChat(3) });
+    await first.indexer.process('s1');
+    await second.indexer.process('s1');
+    expect(first.uuids()).toEqual(second.uuids());
+  });
+
+  it('splits a message over the per-message limit into marked pieces, and cuts one too long for 8 pieces', async () => {
+    const long = 'word '.repeat(8_000); // 40,000 bytes
+    const huge = 'x'.repeat(200_000);
+    const h = harness({
+      messages: [
+        { type: 'human', content: long },
+        { type: 'ai', content: huge },
+      ],
+    });
+    await expect(h.indexer.process('s1')).resolves.toBe('processed');
+    const sent = allSent(h);
+    const enc = new TextEncoder();
+    for (const piece of sent)
+      expect(enc.encode(piece).byteLength).toBeLessThanOrEqual(
+        MEMORY_UPLOAD_MAX_MESSAGE_BYTES,
+      );
+    const longPieces = sent.filter((p) => p.includes('word'));
+    expect(longPieces).toHaveLength(3);
+    expect(longPieces[0]).toMatch(/^\[part 1\/3\] /);
+    expect(
+      longPieces.map((p) => p.replace(/^\[part \d\/\d\] /, '')).join(''),
+    ).toBe(long);
+    const hugePieces = sent.filter((p) => p.includes('xxx'));
+    expect(hugePieces).toHaveLength(MAX_PIECES_PER_MESSAGE);
+    expect(hugePieces.at(-1)).toMatch(
+      /\[message cut here: \d+ more bytes not stored\]$/,
+    );
+    // Both whole transcript messages are counted once their pieces are in.
+    expect(h.processed.at(-1)).toEqual(['s1', 2]);
+  });
+
+  it('cuts labels the engine would refuse (over 500 characters)', () => {
+    const [m] = transformMessagesToMemoryEngineFormat(
+      [{ type: 'human', content: 'hi' }],
+      't'.repeat(900),
+      'u'.repeat(900),
+      'Orin',
+    );
+    expect(m!.role).toHaveLength(500);
+    expect(m!.name).toHaveLength(500);
+    expect(m!.source_description).toHaveLength(500);
+  });
+});
+
+describe('splitMessageContent', () => {
+  it('keeps a short message whole and never cuts inside a character', () => {
+    expect(splitMessageContent('hello', 1024, 8)).toEqual(['hello']);
+    const text = '🙂'.repeat(1000); // 4,000 bytes
+    const pieces = splitMessageContent(text, 1024, 8);
+    expect(pieces.length).toBeGreaterThan(3);
+    const enc = new TextEncoder();
+    for (const piece of pieces) {
+      expect(enc.encode(piece).byteLength).toBeLessThanOrEqual(1024);
+      expect(piece).not.toContain('�');
+    }
+    expect(
+      pieces.map((p) => p.replace(/^\[part \d+\/\d+\] /, '')).join(''),
+    ).toBe(text);
+  });
+
+  it('prefers a line break near the end of a piece', () => {
+    const text = `${'a'.repeat(900)}\n${'b'.repeat(900)}`;
+    const [first] = splitMessageContent(text, 1024, 8);
+    expect(first).toBe(`[part 1/2] ${'a'.repeat(900)}\n`);
+  });
+});
+
+describe('the engine error contract', () => {
+  it('reads the contract fields and the known limit texts, and keeps no detail from a code-less body', async () => {
+    const workers = await readUploadRefusal(
+      new Response(
+        refusal({
+          detail: 'messages: Array must contain at most 50 element(s)',
+          code: 'MESSAGES_INVALID',
+          retryable: false,
+          reason: 'too_many:messages',
+          limit: 50,
+          actual: 120,
+        }),
+        { status: 422 },
+      ),
+    );
+    expect(workers).toMatchObject({
+      status: 422,
+      code: 'MESSAGES_INVALID',
+      retryable: false,
+      reason: 'too_many:messages',
+      limit: 50,
+      actual: 120,
+      countLimit: 50,
+    });
+    expect(classifyUploadRefusal(workers)).toBe('count');
+    // The old engine's pydantic error echoes the input: nothing of it is kept.
+    const old = await readUploadRefusal(
+      new Response(
+        JSON.stringify({
+          detail: [
+            {
+              type: 'too_long',
+              msg: 'List should have at most 50 items after validation, not 51',
+              input: [{ content: 'SECRET' }],
+            },
+          ],
+        }),
+        { status: 422 },
+      ),
+    );
+    expect(old.countLimit).toBe(50);
+    expect(old.detail).toBeUndefined();
+    expect(JSON.stringify(old)).not.toContain('SECRET');
+    expect(classifyUploadRefusal(old)).toBe('count');
+    const queueFull = await readUploadRefusal(
+      new Response(
+        refusal({ detail: 'x', code: 'QUEUE_FULL', retryable: true }),
+        { status: 429, headers: { 'Retry-After': '5' } },
+      ),
+    );
+    expect(queueFull.retryAfterMs).toBe(5000);
+    expect(classifyUploadRefusal(queueFull)).toBe('retry');
+  });
+
+  it.each([
+    [{ status: 413, code: 'EPISODE_TOO_LARGE', retryable: false }, 'message'],
+    [{ status: 413, code: 'BODY_TOO_LARGE', retryable: false }, 'body'],
+    [{ status: 413 }, 'body'],
+    [{ status: 422, code: 'MESSAGES_INVALID', retryable: false }, 'invalid'],
+    [{ status: 422 }, 'invalid'],
+    [{ status: 400, code: 'BAD_JSON', retryable: false }, 'invalid'],
+    [{ status: 400, code: 'ENTITY_HEADER_INVALID', retryable: false }, 'stop'],
+    [{ status: 401 }, 'stop'],
+    [{ status: 403, code: 'ENTITY_NOT_VOUCHED', retryable: false }, 'stop'],
+    [{ status: 508, code: 'CALLER_DEPTH', retryable: false }, 'stop'],
+    [{ status: 507, code: 'SPACE_TOO_LARGE', retryable: false }, 'stop'],
+    [{ status: 429, code: 'USER_RATE_LIMITED', retryable: true }, 'retry'],
+    [{ status: 500, code: 'INTERNAL', retryable: true }, 'retry'],
+    [{ status: 503 }, 'retry'],
+  ] as const)('%o → %s', (r, kind) => {
+    expect(classifyUploadRefusal(r)).toBe(kind);
+  });
+
+  it('learns a lower count limit from the refusal and goes on in smaller parts, never resending the refused request', async () => {
+    const h = harness({
+      messages: longChat(60),
+      engine: (messages) =>
+        messages.length > 20 ? TOO_MANY(20) : { status: 202 },
+    });
+    await expect(h.indexer.process('s1')).resolves.toBe('processed');
+    expect(h.bodies().map((b) => b.length)).toEqual([50, 20, 20, 20]);
+    expect(h.bodies().slice(1).flat()).toEqual(
+      Array.from({ length: 60 }, (_, i) => `m${i}`),
+    );
+    const warn = h.logs.warn.join('\n');
+    expect(warn).toContain('422 MESSAGES_INVALID');
+    expect(warn).toContain('rule=count');
+    expect(warn).toContain('50 messages from 100 transcript messages');
+    expect(warn).toContain('sending at most 20 messages per request');
+    // The indexer keeps the learned limit for later passes.
+    h.messages.push(...longChat(30));
+    await expect(h.indexer.process('s1')).resolves.toBe('processed');
+    expect(
+      h
+        .bodies()
+        .slice(4)
+        .map((b) => b.length),
+    ).toEqual([20, 10]);
+  });
+
+  it('uses the engine reason and limit fields when it sends them', async () => {
+    const h = harness({
+      messages: longChat(25),
+      engine: (messages) =>
+        messages.length > 10
+          ? {
+              status: 422,
+              body: refusal({
+                detail: 'messages: too many',
+                code: 'MESSAGES_INVALID',
+                retryable: false,
+                reason: 'too_many:messages',
+                limit: 10,
+                actual: messages.length,
+              }),
+            }
+          : { status: 202 },
+    });
+    await expect(h.indexer.process('s1')).resolves.toBe('processed');
+    expect(h.bodies().map((b) => b.length)).toEqual([25, 10, 10, 5]);
+    expect(h.logs.warn.join('\n')).toContain('reason=too_many:messages');
+  });
+
+  it('splits smaller when the engine refuses a message as too large (413 EPISODE_TOO_LARGE)', async () => {
+    const enc = new TextEncoder();
+    const text = 'abc '.repeat(1250); // 5,000 bytes
+    const h = harness({
+      messages: [
+        { type: 'human', content: 'short' },
+        { type: 'ai', content: text },
+      ],
+      engine: (messages) => {
+        const big = messages.findIndex(
+          (m) => enc.encode(m.content).byteLength > 2000,
+        );
+        return big >= 0
+          ? {
+              status: 413,
+              body: refusal({
+                detail: `messages[${big}].content is larger than 2000 bytes; split it into several messages`,
+                code: 'EPISODE_TOO_LARGE',
+                retryable: false,
+              }),
+            }
+          : { status: 202 };
+      },
+    });
+    await expect(h.indexer.process('s1')).resolves.toBe('processed');
+    expect(h.calls).toHaveLength(2);
+    const pieces = h.bodies()[1]!;
+    expect(pieces[0]).toBe('short');
+    expect(pieces.length).toBeGreaterThan(3);
+    expect(
+      pieces
+        .slice(1)
+        .map((p) => p.replace(/^\[part \d+\/\d+\] /, ''))
+        .join(''),
+    ).toBe(text);
+    expect(h.logs.warn.join('\n')).toContain(
+      'splitting messages at 2000 bytes',
+    );
+  });
+
+  it('skips one message the engine will never take, with a warning, and stores the rest exactly once', async () => {
+    const messages = longChat(12);
+    messages[10] = { type: 'human', content: 'POISON' };
+    const h = harness({
+      messages,
+      engine: (sent) =>
+        sent.some((m) => m.content === 'POISON')
+          ? {
+              status: 422,
+              body: refusal({
+                detail: 'messages.3.role_type: Invalid enum value',
+                code: 'MESSAGES_INVALID',
+                retryable: false,
+              }),
+            }
+          : { status: 202 },
+    });
+    await expect(h.indexer.process('s1')).resolves.toBe('processed');
+    const accepted = h.calls
+      .map((c, i) => ({ c, i }))
+      .filter(
+        ({ c }) => !sentMessages(c.init).some((m) => m.content === 'POISON'),
+      )
+      .flatMap(({ c }) => sentMessages(c.init).map((m) => m.content));
+    expect(accepted).toEqual(
+      Array.from({ length: 12 }, (_, i) => `m${i}`).filter((m) => m !== 'm5'),
+    );
+    expect(h.processed.at(-1)).toEqual(['s1', 24]);
+    // Halving narrows 24 transcript messages down in a dozen requests.
+    expect(h.calls.length).toBeLessThanOrEqual(12);
+    expect(h.logs.warn.join('\n')).toContain(
+      'skipping transcript message 10 (human) so the rest of the session is stored',
+    );
+    // The warning carries counts and sizes, never the content.
+    expect(h.logs.warn.join('\n')).not.toContain('POISON');
+  });
+
+  it('skips nothing when the engine refuses every request (a shared reason, not a message)', async () => {
+    const h = harness({
+      messages: longChat(20),
+      engine: () => ({ status: 422, body: refusal({ detail: 'nope' }) }),
+    });
+    await expect(h.indexer.process('s1')).resolves.toBe('failed');
+    expect(h.processed).toEqual([]);
+    // Halving down to one message, then one request after it to check.
+    expect(h.calls.length).toBeLessThanOrEqual(8);
+    expect(h.logs.warn.join('\n')).toContain(
+      'the refusal is not about this message; nothing skipped',
+    );
+    expect(h.logs.warn.join('\n')).not.toContain('skipping transcript message');
+    expect(h.passEnds).toEqual([
+      expect.objectContaining({ backlog: true, progressed: false }),
+    ]);
+  });
+
+  it('skips a refused first message once the messages after it are accepted', async () => {
+    const messages = longChat(6);
+    messages[0] = { type: 'human', content: 'POISON' };
+    const h = harness({
+      messages,
+      engine: (sent) =>
+        sent.some((m) => m.content === 'POISON')
+          ? {
+              status: 422,
+              body: refusal({
+                detail: 'bad',
+                code: 'MESSAGES_INVALID',
+                retryable: false,
+              }),
+            }
+          : { status: 202 },
+    });
+    await expect(h.indexer.process('s1')).resolves.toBe('processed');
+    expect(h.processed.at(-1)).toEqual(['s1', 12]);
+    expect(h.logs.warn.join('\n')).toContain(
+      'skipping transcript message 0 (human)',
+    );
+    const accepted = h
+      .bodies()
+      .filter((b) => !b.includes('POISON'))
+      .flat();
+    expect(accepted).toEqual(['m1', 'm2', 'm3', 'm4', 'm5']);
+  });
+
+  it('keeps a refused last message (nothing after it to confirm) and stops without skipping', async () => {
+    const messages = longChat(3);
+    messages.push({ type: 'human', content: 'POISON' });
+    const h = harness({
+      messages,
+      maxMessagesPerRequest: 1,
+      engine: (sent) =>
+        sent.some((m) => m.content === 'POISON')
+          ? {
+              status: 422,
+              body: refusal({
+                detail: 'bad',
+                code: 'MESSAGES_INVALID',
+                retryable: false,
+              }),
+            }
+          : { status: 202 },
+    });
+    // m0..m2 go up one by one; POISON is refused with an acceptance before
+    // it, which is evidence enough: skipped.
+    await expect(h.indexer.process('s1')).resolves.toBe('processed');
+    expect(h.processed.at(-1)).toEqual(['s1', 7]);
+    // Alone (nothing accepted before or after it): kept, pass stopped.
+    const alone = harness({
+      messages: [{ type: 'human', content: 'POISON' }],
+      engine: () => ({
+        status: 422,
+        body: refusal({
+          detail: 'bad',
+          code: 'MESSAGES_INVALID',
+          retryable: false,
+        }),
+      }),
+    });
+    await expect(alone.indexer.process('s1')).resolves.toBe('failed');
+    expect(alone.processed).toEqual([]);
+    expect(alone.calls).toHaveLength(1);
+  });
+
+  it('an engine whose DID cannot be resolved is a failure that keeps the backlog, not a skip', async () => {
+    const h = harness({
+      ucan: {
+        hasSigningKey: () => true,
+        resolveServiceDid: async () => null,
+        mintInvocation: async () => 'INVOCATION',
+      },
+    });
+    await expect(h.indexer.process('s1')).resolves.toBe('failed');
+    expect(h.calls).toHaveLength(0);
+    expect(h.passEnds).toEqual([expect.objectContaining({ backlog: true })]);
+  });
+
+  it('goes straight to the message the engine names (index)', async () => {
+    const messages = longChat(30);
+    messages[40] = { type: 'human', content: 'POISON' }; // message 20
+    const h = harness({
+      messages,
+      engine: (sent) => {
+        const at = sent.findIndex((m) => m.content === 'POISON');
+        return at >= 0
+          ? {
+              status: 422,
+              body: refusal({
+                detail: 'messages.x: bad',
+                code: 'MESSAGES_INVALID',
+                retryable: false,
+                reason: 'too_long:messages[].name',
+                index: at,
+              }),
+            }
+          : { status: 202 };
+      },
+    });
+    await expect(h.indexer.process('s1')).resolves.toBe('processed');
+    // All 30 (refused, index 20) → the 20 before it → the rest (refused,
+    // index 0) → POISON alone (refused, skipped) → the 9 after it.
+    expect(h.bodies().map((b) => b.length)).toEqual([30, 20, 10, 1, 9]);
+    expect(h.processed.at(-1)).toEqual(['s1', 60]);
+  });
+
+  it('waits as the engine says on a retryable refusal (429 QUEUE_FULL) and sends the same part again', async () => {
+    const h = harness({
+      messages: longChat(60),
+      responses: [
+        { status: 202 },
+        {
+          status: 429,
+          body: refusal({
+            detail: 'queued',
+            code: 'QUEUE_FULL',
+            retryable: true,
+          }),
+          headers: { 'Retry-After': '5' },
+        },
+        { status: 202 },
+      ],
+    });
+    await expect(h.indexer.process('s1')).resolves.toBe('processed');
+    expect(h.sleeps).toEqual([5000]);
+    expect(h.uuids()[1]).toEqual(h.uuids()[2]);
+    expect(h.minted).toHaveLength(3);
+    expect(allSent(h)).toHaveLength(70);
+  });
+
+  it('a wait longer than a pass may hold ends the pass at once, keeps what went up, and floors the backoff', async () => {
+    let now = 0;
+    const h = harness({
+      messages: longChat(60),
+      now: () => now,
+      responses: [
+        { status: 202 },
+        {
+          status: 429,
+          body: refusal({
+            detail: 'budget',
+            code: 'BUDGET_EXCEEDED',
+            retryable: true,
+            retry_after_ms: 3_600_000,
+          }),
+        },
+      ],
+    });
+    await expect(h.indexer.process('s1')).resolves.toBe('failed');
+    expect(h.calls).toHaveLength(2);
+    expect(h.sleeps).toEqual([]);
+    expect(h.processed).toEqual([['s1', 100]]);
+    expect(h.passEnds).toEqual([
+      expect.objectContaining({
+        backlog: true,
+        progressed: true,
+        retryAfterMs: 3_600_000,
+      }),
+    ]);
+    now += 3_599_000;
+    await expect(h.indexer.process('s1')).resolves.toBe('skipped');
+    expect(h.calls).toHaveLength(2);
+  });
+
+  it('bounds the waits for one part, then defers', async () => {
+    const h = harness({
+      responses: [
+        {
+          status: 503,
+          body: refusal({
+            detail: 'busy',
+            code: 'INTERNAL',
+            retryable: true,
+          }),
+        },
+      ],
+    });
+    await expect(h.indexer.process('s1')).resolves.toBe('failed');
+    expect(h.calls).toHaveLength(3);
+    expect(h.sleeps).toEqual([1000, 2000]);
+  });
+
+  it.each([
+    [401, refusal({ detail: 'UCAN validation failed' })],
+    [
+      400,
+      refusal({
+        detail: 'bad entity',
+        code: 'ENTITY_HEADER_INVALID',
+        retryable: false,
+      }),
+    ],
+    [508, refusal({ detail: 'depth', code: 'CALLER_DEPTH', retryable: false })],
+  ])(
+    'a non-retryable refusal that is not about the messages (%i) is sent once, skips nothing and keeps the count',
+    async (status, body) => {
+      const h = harness({ responses: [{ status, body }] });
+      await expect(h.indexer.process('s1')).resolves.toBe('failed');
+      expect(h.calls).toHaveLength(1);
+      expect(h.sleeps).toEqual([]);
+      expect(h.processed).toEqual([]);
+      expect(h.passEnds).toEqual([
+        expect.objectContaining({ backlog: true, progressed: false }),
+      ]);
+    },
+  );
+
+  it('caps a pass in requests and reports the backlog; the next pass continues', async () => {
+    const h = harness({ messages: longChat(150), maxRequestsPerPass: 2 });
+    await expect(h.indexer.process('s1')).resolves.toBe('processed');
+    expect(h.processed).toEqual([
+      ['s1', 100],
+      ['s1', 200],
+    ]);
+    expect(h.passEnds).toEqual([
+      expect.objectContaining({ backlog: true, progressed: true }),
+    ]);
+    await expect(h.indexer.process('s1')).resolves.toBe('processed');
+    expect(allSent(h)).toEqual(Array.from({ length: 150 }, (_, i) => `m${i}`));
+    expect(h.passEnds[1]).toMatchObject({ backlog: false, progressed: true });
+  });
+
+  it('reports no backlog when nothing is new or a prerequisite is missing', async () => {
+    const nothingNew = harness({
+      session: { title: 't', roomId: '!r', lastProcessedCount: 4 },
+    });
+    await nothingNew.indexer.process('s1');
+    expect(nothingNew.passEnds).toEqual([
+      expect.objectContaining({ backlog: false, progressed: false }),
+    ]);
+    const noDelegation = harness({
+      ucan: {
+        hasSigningKey: () => true,
+        resolveServiceDid: async () => 'did:web:memory.test',
+        mintInvocation: async () => {
+          throw new Error('no ixo:memory grant');
+        },
+      },
+    });
+    await expect(noDelegation.indexer.process('s1')).resolves.toBe('skipped');
+    expect(noDelegation.passEnds).toEqual([
+      expect.objectContaining({ backlog: false }),
+    ]);
   });
 });
 

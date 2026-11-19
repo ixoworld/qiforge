@@ -418,6 +418,95 @@ describe('durable channel requests', () => {
     },
   );
 
+  it('a request a plugin gate refuses leaves nothing behind and is admitted once allowed', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('gate-refused');
+    await stub.refuseTurns({ status: 402, message: 'Top up to continue.' });
+    expect(await stub.submit(message)).toEqual({
+      ok: false,
+      status: 402,
+      code: 'turn_refused',
+      message: 'Top up to continue.',
+    });
+    // The plugin's code is the `reason`; its retry delay and action ride
+    // along (each omitted when absent).
+    await stub.refuseTurns({
+      status: 402,
+      code: 'insufficient_credits',
+      message: "You're out of IXO credits. Top up to keep chatting.",
+      details: {
+        retryAfterSeconds: 3600,
+        action: { label: 'Top up credits', url: 'https://portal.example/c' },
+        other: 'portal only',
+      },
+    });
+    expect(await stub.submit(message)).toEqual({
+      ok: false,
+      status: 402,
+      code: 'turn_refused',
+      reason: 'insufficient_credits',
+      message: "You're out of IXO credits. Top up to keep chatting.",
+      retryAfterSeconds: 3600,
+      action: { label: 'Top up credits', url: 'https://portal.example/c' },
+    });
+    await stub.refuseTurns({
+      status: 503,
+      code: 'credits_check_unavailable',
+      message: 'Please try again in a minute.',
+      details: { retryAfterSeconds: 60 },
+    });
+    expect(await stub.submit(message)).toEqual({
+      ok: false,
+      status: 503,
+      code: 'turn_refused',
+      reason: 'credits_check_unavailable',
+      message: 'Please try again in a minute.',
+      retryAfterSeconds: 60,
+    });
+    // No run, no receipt, no session marker, nothing owed to the room.
+    expect(await stub.count()).toBe(0);
+    expect(await stub.receipt(message.requestId)).toBeNull();
+    expect((await stub.hostCalls()).createSession).toBe(0);
+    expect((await stub.mirrors()).user).toBe(0);
+    // The same request once the gate allows it.
+    await stub.refuseTurns(null);
+    expect(await stub.submit(message)).toMatchObject({
+      ok: true,
+      result: { status: 'running' },
+    });
+    expect(await stub.count()).toBe(1);
+  });
+
+  it('a request the gate restricts to the person’s provider is never classified and its run carries the restriction', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('gate-restricted');
+    await stub.configureRouting('on');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.finish(first.result.runId, undefined, 'Sunny.');
+    const inputsBefore = (await stub.routingInputs()).length;
+    await stub.restrictTurns('deny');
+    const next = await stub.submit({
+      ...message,
+      requestId: 'wa:restricted',
+      message: 'And something else entirely?',
+    });
+    if (!next.ok) throw new Error('Turn rejected');
+    // No routing Decision: it stays in the current conversation.
+    expect((await stub.routingInputs()).length).toBe(inputsBefore);
+    expect(next.result.sessionId).toBe(first.result.sessionId);
+    const request = JSON.parse((await stub.run(next.result.runId))!.request);
+    expect(request.platformModels).toBe('deny');
+    // Unrestricted again: the run carries no restriction.
+    await stub.finish(next.result.runId, undefined, 'Done.');
+    await stub.restrictTurns('allow');
+    const free = await stub.submit({ ...message, requestId: 'wa:free' });
+    if (!free.ok) throw new Error('Turn rejected');
+    // ... and is classified as usual (the restriction was what skipped it).
+    expect((await stub.routingInputs()).length).toBeGreaterThan(inputsBefore);
+    expect(
+      JSON.parse((await stub.run(free.result.runId))!.request),
+    ).not.toHaveProperty('platformModels');
+  });
+
   it('refuses a delegation whose expiry is unknown', async () => {
     const stub = env.CHANNEL_TURNS_TEST.getByName('delegation-no-expiry');
     await stub.setDelegation({ raw: 'grant' });
@@ -1220,6 +1309,84 @@ describe('delivery notices', () => {
     notice,
   });
 
+  it("keeps a believable provider send time on the run's channel record, and drops an implausible one", async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('provider-sent-at');
+    const sentAt = Date.now() - 3_000;
+    const first = await stub.submit({
+      ...message,
+      requestId: 'wa:sent',
+      providerSentAt: sentAt,
+    });
+    if (!first.ok) throw new Error('Turn rejected');
+    const stored = JSON.parse(
+      (await stub.run(first.result.runId))!.request,
+    ) as {
+      channel: Record<string, unknown>;
+    };
+    expect(stored.channel.providerSentAt).toBe(sentAt);
+    // An hour ahead of the runtime's clock is not believed; the turn runs.
+    const ahead = await stub.submit({
+      ...message,
+      requestId: 'wa:ahead',
+      providerSentAt: Date.now() + 3_600_000,
+    });
+    if (!ahead.ok) throw new Error('Turn rejected');
+    const aheadRun = JSON.parse(
+      (await stub.run(ahead.result.runId))!.request,
+    ) as {
+      channel: Record<string, unknown>;
+    };
+    expect(aheadRun.channel).not.toHaveProperty('providerSentAt');
+    // Without it, as before.
+    const plain = await stub.submit({ ...message, requestId: 'wa:no-sent' });
+    if (!plain.ok) throw new Error('Turn rejected');
+    expect(
+      (
+        JSON.parse((await stub.run(plain.result.runId))!.request) as {
+          channel: Record<string, unknown>;
+        }
+      ).channel,
+    ).not.toHaveProperty('providerSentAt');
+  });
+
+  it("keeps the ad entry point on the run's channel record, so a resumed run reads the same", async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('entry-point');
+    const entryPoint = {
+      kind: 'ad' as const,
+      provider: 'meta' as const,
+      sentAt: Date.now() - 2_000,
+      sourceType: 'ad',
+      sourceId: '120252638173670287',
+      sourceUrl: 'https://fb.me/91x4AM4CH',
+      headline: 'Chat with us',
+      ctwaClid: 'AfjK-4OyWoOufgO2Ynmc',
+    };
+    const first = await stub.submit({
+      ...message,
+      requestId: 'wa:ad',
+      entryPoint,
+    });
+    if (!first.ok) throw new Error('Turn rejected');
+    const stored = JSON.parse(
+      (await stub.run(first.result.runId))!.request,
+    ) as {
+      message: string;
+      channel: Record<string, unknown>;
+    };
+    expect(stored.channel.entryPoint).toEqual(entryPoint);
+    // The person's words are the message; the ad is beside them, never in them.
+    expect(stored.message).toBe(message.message);
+    const plain = await stub.submit({ ...message, requestId: 'wa:no-ad' });
+    if (!plain.ok) throw new Error('Turn rejected');
+    expect(
+      (
+        JSON.parse((await stub.run(plain.result.runId))!.request) as {
+          channel: Record<string, unknown>;
+        }
+      ).channel,
+    ).not.toHaveProperty('entryPoint');
+  });
+
   it('every turn result advertises delivery notices, on submit and on every poll', async () => {
     const stub = env.CHANNEL_TURNS_TEST.getByName('notice-features');
     const first = await stub.submit(message);
@@ -1228,6 +1395,9 @@ describe('delivery notices', () => {
       'delivery_notice',
       'permission_event',
       'rich_messages',
+      'rich_events',
+      'provider_sent_at',
+      'entry_point',
     ]);
     expect(first.result.status).toBe('running');
     const polled = await stub.poll(message);
@@ -1235,12 +1405,22 @@ describe('delivery notices', () => {
       'delivery_notice',
       'permission_event',
       'rich_messages',
+      'rich_events',
+      'provider_sent_at',
+      'entry_point',
     ]);
     await stub.fail(first.result.runId);
     const failed = await stub.poll(message);
     expect(failed?.ok && failed.result).toMatchObject({
       status: 'failed',
-      features: ['delivery_notice', 'permission_event', 'rich_messages'],
+      features: [
+        'delivery_notice',
+        'permission_event',
+        'rich_messages',
+        'rich_events',
+        'provider_sent_at',
+        'entry_point',
+      ],
     });
     const second = await stub.submit({ ...message, requestId: 'wa:two' });
     if (!second.ok) throw new Error('Turn rejected');
@@ -1251,7 +1431,14 @@ describe('delivery notices', () => {
       ok: true,
       result: {
         status: 'finished',
-        features: ['delivery_notice', 'permission_event', 'rich_messages'],
+        features: [
+          'delivery_notice',
+          'permission_event',
+          'rich_messages',
+          'rich_events',
+          'provider_sent_at',
+          'entry_point',
+        ],
       },
     });
   });
@@ -1267,7 +1454,14 @@ describe('delivery notices', () => {
     expect(noticed.result).toMatchObject({
       status: 'running',
       sessionId: first.result.sessionId,
-      features: ['delivery_notice', 'permission_event', 'rich_messages'],
+      features: [
+        'delivery_notice',
+        'permission_event',
+        'rich_messages',
+        'rich_events',
+        'provider_sent_at',
+        'entry_point',
+      ],
     });
     expect(noticed.result.runId).not.toBe(first.result.runId);
     const request = JSON.parse(
@@ -1408,7 +1602,14 @@ describe('delivery notices', () => {
     expect(answered.result).toMatchObject({
       status: 'running',
       sessionId: first.result.sessionId,
-      features: ['delivery_notice', 'permission_event', 'rich_messages'],
+      features: [
+        'delivery_notice',
+        'permission_event',
+        'rich_messages',
+        'rich_events',
+        'provider_sent_at',
+        'entry_point',
+      ],
     });
     const request = JSON.parse(
       (await stub.run(answered.result.runId))!.request,
@@ -1449,6 +1650,142 @@ describe('delivery notices', () => {
     });
   });
 
+  it('rich events: an event turn carries render like a message turn, its reply holds every rich part, and a tap on its choices counts', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('rich-events');
+    const render = {
+      v: 1 as const,
+      kinds: ['reply_buttons', 'list', 'link_button', 'card', 'carousel'],
+      linkLabels: ['allow', 'start_check'],
+      linkOrigins: ['https://dev.self.ixo.earth'],
+    };
+    const first = await stub.submit({ ...message, render });
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.finish(first.result.runId, undefined, 'Here is the card.');
+    await stub.deliverReply();
+    const normalised = {
+      kinds: ['reply_buttons', 'list', 'link_button', 'card', 'carousel'],
+      linkLabels: ['allow', 'start_check'],
+      linkOrigins: ['https://dev.self.ixo.earth'],
+    };
+    const runOf = async (runId: string) =>
+      JSON.parse((await stub.run(runId))!.request) as {
+        channel: Record<string, unknown>;
+      };
+    // The message turn's render, as the agent's surface reads it.
+    expect((await runOf(first.result.runId)).channel.render).toEqual(
+      normalised,
+    );
+    // Both event kinds take the same render, never a tapped choice.
+    const permission: ChannelTurnInput = {
+      ...message,
+      message: undefined,
+      requestId: 'permission:card_1:allowed',
+      sessionPolicy: 'continue',
+      event: {
+        kind: 'permission_answered',
+        permissionId: 'card_1',
+        status: 'allowed',
+      },
+      render,
+    };
+    const identity: ChannelTurnInput = {
+      ...permission,
+      requestId: 'identity:link_1:passed',
+      event: {
+        kind: 'identity_check_updated',
+        linkId: 'link_1',
+        status: 'passed',
+      },
+    };
+    const answered = await stub.submit(permission);
+    if (!answered.ok) throw new Error(`Event refused: ${answered.code}`);
+    expect(answered.result.sessionId).toBe(first.result.sessionId);
+    const eventRun = await runOf(answered.result.runId);
+    expect(eventRun.channel.render).toEqual(normalised);
+    expect(eventRun.channel).not.toHaveProperty('choice');
+    // Every kind of part an answer to a message can hold.
+    const choices = {
+      body: 'What next?',
+      style: 'buttons' as const,
+      options: [
+        { id: 'oc:5e1f2a3b:check', title: 'Start the check' },
+        { id: 'oc:5e1f2a3b:later', title: 'Later' },
+      ],
+    };
+    const plan: ReplyPlan = {
+      v: 1,
+      parts: [
+        { partId: 'p1', kind: 'text', text: 'Thanks, you allowed it.' },
+        {
+          partId: 'p2',
+          kind: 'link_button',
+          text: 'Open this link: https://dev.self.ixo.earth/l/tok',
+          link: {
+            body: 'Open this link.',
+            url: 'https://dev.self.ixo.earth/l/tok',
+            label: 'start_check',
+          },
+        },
+        {
+          partId: 'p3',
+          kind: 'cards',
+          text: 'Your check: https://dev.self.ixo.earth/l/tok',
+          cards: {
+            body: 'Your check:',
+            items: [
+              {
+                title: 'Identity check',
+                body: 'Takes 2 minutes',
+                imageUrl: 'https://dev.self.ixo.earth/card.png',
+                link: {
+                  url: 'https://dev.self.ixo.earth/l/tok',
+                  label: 'start_check',
+                },
+              },
+            ],
+          },
+        },
+        {
+          partId: 'p4',
+          kind: 'choices',
+          text: 'What next?\n\n1. Start the check\n2. Later',
+          choices,
+        },
+      ],
+    };
+    await stub.finish(answered.result.runId, plan, '');
+    // The choices an event's reply offers are kept like a message reply's.
+    expect(await stub.recordChoices(answered.result.sessionId, plan)).toBe(1);
+    const polled = await stub.poll(permission);
+    expect(polled?.ok && polled.result).toMatchObject({
+      status: 'finished',
+      plan,
+    });
+    await stub.deliverReply();
+    // A later tap on a button the event's reply offered is resolved.
+    const tap = await stub.submit({
+      ...message,
+      requestId: 'wa:tap-after-event',
+      message: 'Start the check',
+      sessionPolicy: 'continue',
+      render,
+      choice: { id: 'oc:5e1f2a3b:check' },
+    });
+    if (!tap.ok) throw new Error(`Tap refused: ${tap.code}`);
+    expect(tap.result.sessionId).toBe(first.result.sessionId);
+    expect((await runOf(tap.result.runId)).channel.choice).toEqual({
+      id: 'oc:5e1f2a3b:check',
+      key: 'check',
+      title: 'Start the check',
+      question: 'What next?',
+    });
+    const updated = await stub.submit(identity);
+    if (!updated.ok) throw new Error(`Event refused: ${updated.code}`);
+    expect((await runOf(updated.result.runId)).channel.render).toEqual(
+      normalised,
+    );
+  });
+
   it('replays by request id: the same notice again is the same run, a changed one a conflict', async () => {
     const stub = env.CHANNEL_TURNS_TEST.getByName('notice-replay');
     const first = await stub.submit(message);
@@ -1467,7 +1804,14 @@ describe('delivery notices', () => {
         runId: a.result.runId,
         status: 'finished',
         text: 'Fixed.',
-        features: ['delivery_notice', 'permission_event', 'rich_messages'],
+        features: [
+          'delivery_notice',
+          'permission_event',
+          'rich_messages',
+          'rich_events',
+          'provider_sent_at',
+          'entry_point',
+        ],
       },
     });
     expect(await stub.count()).toBe(2);

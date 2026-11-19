@@ -765,6 +765,7 @@ describe('createByoLlmAdapter — model refused by the provider', () => {
     const byoModel = new HalfwayFailingModel();
     const model = new ByoModelFallbackChatModel({
       provider: 'chatgpt',
+      role: 'main',
       modelId: 'gpt-6-luna',
       byo: byoModel,
       platform: () => platform.get('main'),

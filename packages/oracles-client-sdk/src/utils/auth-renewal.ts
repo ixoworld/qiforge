@@ -71,11 +71,34 @@ const NON_CREDENTIAL_403_CODES: ReadonlySet<string> = new Set([
   'VFS_AUTH_FAILED',
 ]);
 
-/** A refusal (401/403) that new user credentials may get through. */
+/**
+ * Whether a parsed error body is a turn refused by one of the oracle's
+ * plugin gates (`refused: true`, the runtime's `TurnRefusalBody`: e.g. a
+ * `402 insufficient_credits`, or a `403` for an account the plugin does not
+ * serve). Such an answer is never an authentication failure, whatever its
+ * status or code: new credentials cannot change it, so it is surfaced as it
+ * is instead of renewing them (which may ask the user for their PIN).
+ */
+export function isTurnRefusalBody(body: unknown): boolean {
+  return (
+    typeof body === 'object' &&
+    body !== null &&
+    'refused' in body &&
+    body.refused === true
+  );
+}
+
+/**
+ * A refusal (401/403) that new user credentials may get through. `refused`
+ * is the error body's `refused` field: `true` (a plugin gate refused the
+ * turn, see `isTurnRefusalBody`) is never a credential refusal.
+ */
 export function isCredentialRefusal(
   status: number | undefined,
   code?: unknown,
+  refused?: unknown,
 ): boolean {
+  if (refused === true) return false;
   if (status === 401) return true;
   if (status !== 403) return false;
   return !(typeof code === 'string' && NON_CREDENTIAL_403_CODES.has(code));
@@ -85,17 +108,17 @@ export function isCredentialRefusal(
 export async function isCredentialRefusalResponse(
   response: Response,
 ): Promise<boolean> {
-  if (response.status === 401) return true;
-  if (response.status !== 403) return false;
+  if (response.status !== 401 && response.status !== 403) return false;
   const body: unknown = await response
     .clone()
     .json()
     .catch(() => null);
+  if (isTurnRefusalBody(body)) return false;
   const code =
     typeof body === 'object' && body !== null && 'code' in body
       ? body.code
       : undefined;
-  return isCredentialRefusal(403, code);
+  return isCredentialRefusal(response.status, code);
 }
 
 /**

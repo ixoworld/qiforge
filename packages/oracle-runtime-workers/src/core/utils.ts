@@ -13,6 +13,46 @@ export const NOOP_LOGGER: Logger = Object.freeze({
 });
 
 /**
+ * The message of a thrown value: an Error's message, a string as it is, any
+ * other value as JSON (never "[object Object]"), or its `String()` when it
+ * has no JSON form.
+ */
+export function errorMessageOf(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  try {
+    return JSON.stringify(error) ?? String(error);
+  } catch {
+    return String(error);
+  }
+}
+
+/** Characters of an error's first line a log line carries. */
+export const ERROR_SUMMARY_MAX_CHARS = 300;
+
+/**
+ * An error for a log line: the first line of its message, cut to
+ * {@link ERROR_SUMMARY_MAX_CHARS}. A tool's schema rejection
+ * (`Error invoking tool 'x' with kwargs {…} with error: …`) is named by its
+ * tool and reason, without the arguments it dumps (large, and possibly the
+ * user's data).
+ */
+export function errorSummary(error: unknown): string {
+  const message = errorMessageOf(error);
+  const rejection =
+    /^Error invoking tool '([^']+)' with kwargs [\s\S]* with error: ([\s\S]*)$/.exec(
+      message,
+    );
+  const text = rejection
+    ? `Error invoking tool '${rejection[1]}': ${rejection[2]}`
+    : message;
+  const line = text.split('\n')[0] ?? text;
+  return line.length > ERROR_SUMMARY_MAX_CHARS
+    ? `${line.slice(0, ERROR_SUMMARY_MAX_CHARS)}…`
+    : line;
+}
+
+/**
  * A `console`-backed logger whose `child()` prefixes every record with the
  * bound context (`[plugin=weather]`). Suitable for Workers, where `console`
  * output is what `wrangler tail` and the dashboard show.

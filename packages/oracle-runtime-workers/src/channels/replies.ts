@@ -76,6 +76,15 @@ export function channelChoiceNote(
  */
 export const CHANNEL_DELIVERY_NOTICE_KWARG = 'channel_delivery_notice';
 
+/**
+ * `additional_kwargs` key holding the provider's send time of a channel
+ * message (epoch ms, a number): when the person sent it according to
+ * WhatsApp, as the turn's `providerSentAt` carried it. Kept through the
+ * checkpoint save (`cleanAdditionalKwargs`), so a plugin can compare any
+ * earlier message's send time with the replies around it.
+ */
+export const CHANNEL_PROVIDER_SENT_AT_KWARG = 'channel_provider_sent_at';
+
 /** What the person was told by the gateway, as the note repeats it to the model. */
 const FILE_FIXING_TEXT =
   "That file didn't pass our safety check. I'm making a safe version now.";
@@ -117,7 +126,9 @@ export function isDeliveryNoticeMessage(message: BaseMessage): boolean {
  * that treats a human message as the person's own words (the transcript,
  * memory indexing, the evidence a proposal is checked against) goes through
  * here, so quoted text or a gateway's notice is never taken for something
- * the person typed.
+ * the person typed. The notes come off outermost first, the reverse of the
+ * order a channel turn adds them in (user-oracle-do.ts): time, guide,
+ * quoted reply, tapped choice, delivery notice.
  */
 export function userContent(
   content: MessageContent,
@@ -130,9 +141,9 @@ export function userContent(
           stripTurnTimeNote(content, kwargs?.[TURN_TIME_NOTE_KWARG]),
           kwargs?.[TURN_GUIDE_NOTE_KWARG],
         ),
-        kwargs?.[CHANNEL_CHOICE_NOTE_KWARG],
+        kwargs?.[CHANNEL_REPLY_NOTE_KWARG],
       ),
-      kwargs?.[CHANNEL_REPLY_NOTE_KWARG],
+      kwargs?.[CHANNEL_CHOICE_NOTE_KWARG],
     ),
     kwargs?.[CHANNEL_DELIVERY_NOTICE_KWARG],
   );

@@ -10,8 +10,10 @@ import {
   channelAttachmentRef,
 } from '../attachments/channel';
 import type { AttachmentInput } from '../attachments/types';
+import { refusalAction, refusalRetryAfterSeconds } from '../core/turn-gate';
 import { RenderCapabilityWire } from '../delivery/rich';
 import type { ReplyPlan } from '../delivery/types';
+import type { TurnRefusal } from '../plugin-api/turn-gate';
 
 /**
  * A channel provider id (`whatsapp`, later others): lower-case, starts with a
@@ -268,6 +270,101 @@ export function channelEventRequestId(event: ChannelEvent): string {
     : `identity:${event.linkId}:${event.status}`;
 }
 
+/** The longest link an entry point keeps, in UTF-16 units (a longer one is refused, never cut). */
+export const CHANNEL_ENTRY_URL_MAX = 2048;
+/** The most code points an ad's headline carries. */
+export const CHANNEL_ENTRY_HEADLINE_MAX = 256;
+/** The most code points an ad's primary text carries. */
+export const CHANNEL_ENTRY_BODY_MAX = 2048;
+/** The most code points an ad's welcome message carries. */
+export const CHANNEL_ENTRY_WELCOME_MAX = 1024;
+
+/**
+ * Characters entry-point text never holds: control characters other than
+ * tab and newline (`\p{Cc}`: C0, DEL, C1) and the bidi controls
+ * (`\p{Bidi_Control}`: U+061C, U+200E, U+200F, U+202A–U+202E,
+ * U+2066–U+2069). The gateway strips them before it sends the text.
+ */
+function hasEntryControl(value: string): boolean {
+  for (const char of value)
+    if (
+      (/\p{Cc}/u.test(char) && char !== '\n' && char !== '\t') ||
+      /\p{Bidi_Control}/u.test(char)
+    )
+      return true;
+  return false;
+}
+
+/** Ad text: at most `max` code points, not blank, no controls. */
+const entryText = (max: number) =>
+  codePoints(max)
+    .refine((value) => value.trim() !== '', { message: 'must not be blank' })
+    .refine((value) => !hasEntryControl(value), {
+      message: 'must not carry control characters',
+    });
+
+/** An `https:` link that `new URL` parses, without whitespace or control characters. */
+const entryUrl = z
+  .string()
+  .max(CHANNEL_ENTRY_URL_MAX)
+  .refine(
+    (value) => {
+      if (/[\s\p{Cc}]/u.test(value)) return false;
+      try {
+        return new URL(value).protocol === 'https:';
+      } catch {
+        return false;
+      }
+    },
+    { message: 'must be an https URL' },
+  );
+
+/** Meta's `source_type` and `media_type`: lower-case letters and `_`. */
+const ENTRY_KIND = /^[a-z_]{1,32}$/;
+
+/**
+ * How the person reached this chat, when the provider says: Meta's
+ * `referral` object on an inbound WhatsApp message that followed a tap on
+ * a Click-to-WhatsApp ad, every field validated and capped by the gateway
+ * and checked again here (a body that breaks a rule is refused, never
+ * repaired). Every text and link in it was written by the advertiser or
+ * Meta: untrusted data, never instructions. `ctwaClid` is Meta's click id
+ * for that tap: never log it.
+ */
+export const ChannelEntryPoint = z.strictObject({
+  kind: z.literal('ad'),
+  /** The ad network. */
+  provider: z.literal('meta'),
+  /** When the message that carried it was sent, in epoch ms. */
+  sentAt: z.number().int().nonnegative().safe(),
+  /** Meta's `source_type` (`ad` for a Click-to-WhatsApp ad). */
+  sourceType: z.string().regex(ENTRY_KIND),
+  /** Meta's `source_id`: the ad id, digits. */
+  sourceId: z.string().regex(/^[0-9]{1,32}$/),
+  /** Meta's `source_url`: the link the person tapped. */
+  sourceUrl: entryUrl.optional(),
+  /** The ad's headline. */
+  headline: entryText(CHANNEL_ENTRY_HEADLINE_MAX).optional(),
+  /** The ad's primary text. */
+  body: entryText(CHANNEL_ENTRY_BODY_MAX).optional(),
+  /** Meta's `media_type` (`image`, `video`). */
+  mediaType: z.string().regex(ENTRY_KIND).optional(),
+  /** The ad's image, a time-limited Meta CDN link. */
+  imageUrl: entryUrl.optional(),
+  /** The ad's video, a time-limited Meta CDN link. */
+  videoUrl: entryUrl.optional(),
+  /** The video ad's thumbnail, a time-limited Meta CDN link. */
+  thumbnailUrl: entryUrl.optional(),
+  /** Meta's click id for the tap (absent for WhatsApp Status placements). Never log it. */
+  ctwaClid: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{1,512}$/)
+    .optional(),
+  /** The ad's welcome message (`welcome_message.text`). */
+  welcomeMessageText: entryText(CHANNEL_ENTRY_WELCOME_MAX).optional(),
+});
+export type ChannelEntryPoint = z.infer<typeof ChannelEntryPoint>;
+
 /**
  * Every field of a channel turn. `ChannelTurnBody` adds the rules that tie
  * `message`, `notice` and `event` together; this object is what other
@@ -299,17 +396,21 @@ const ChannelTurnFields = z.strictObject({
   notice: ChannelFileNotice.optional(),
   /**
    * An event instead of a message from the person (`ChannelEvent`): no
-   * message, files, quote, notice or session; `sessionPolicy: 'continue'`;
-   * the request id is `channelEventRequestId(event)`. Sent only to a runtime
-   * whose turn results list `permission_event` in `features` (both kinds).
+   * message, files, quote, notice, session or tapped `choice`;
+   * `sessionPolicy: 'continue'`; the request id is
+   * `channelEventRequestId(event)`. It may carry `render`, so the answer to
+   * an event can hold the same rich parts as any answer. Sent only to a
+   * runtime whose turn results list `permission_event` in `features` (both
+   * kinds).
    */
   event: ChannelEvent.optional(),
   /**
    * What the gateway can show beyond text for this binding (reply buttons,
    * lists, link buttons, cards), and the link-button labels and link origins
-   * it accepts. Sent only to a runtime whose turn results list
-   * `rich_messages`, and only with a message (never with a notice or an
-   * event). Absent: the reply is text only.
+   * it accepts. With a message: sent only to a runtime whose turn results
+   * list `rich_messages`. With an event: only to one that lists both
+   * `rich_messages` and `rich_events` (0.50.0 refuses it there). Never with
+   * a notice. Absent: the reply is text only.
    */
   render: RenderCapabilityWire.optional(),
   /**
@@ -318,6 +419,22 @@ const ChannelTurnFields = z.strictObject({
    * the choices offered in this session; an unknown id reads as text.
    */
   choice: z.strictObject({ id: z.string().min(1).max(256) }).optional(),
+  /**
+   * When the person sent this message according to the provider (WhatsApp's
+   * own timestamp on the inbound message), in epoch ms. Sent only to a
+   * runtime whose turn results list `provider_sent_at`, and only with a
+   * message: never with a notice or an event. A value the runtime cannot
+   * believe (`plausibleProviderSentAt`) is ignored, not refused.
+   */
+  providerSentAt: z.number().int().nonnegative().safe().optional(),
+  /**
+   * The ad the person tapped to reach this chat (`ChannelEntryPoint`).
+   * Sent only to a runtime whose turn results list `entry_point`, and only
+   * with a message: never with a notice or an event. Untrusted advertiser
+   * text: plugin code reads it (`ctx.session.channel.entryPoint`); it never
+   * reaches the model, the oracle room or a log.
+   */
+  entryPoint: ChannelEntryPoint.optional(),
   /**
    * Which kind of oracle the gateway believes it addresses. `companion` is
    * the legacy value; the gateway sends `oracle`. Both are accepted.
@@ -333,8 +450,10 @@ export const ChannelTurnBody = ChannelTurnFields.superRefine((body, ctx) => {
       'replyTo',
       'notice',
       'sessionId',
-      'render',
+      // An event has no tap; `render` is allowed (`rich_events`).
       'choice',
+      'providerSentAt',
+      'entryPoint',
     ] as const)
       if (body[field] !== undefined)
         ctx.addIssue({
@@ -365,7 +484,14 @@ export const ChannelTurnBody = ChannelTurnFields.superRefine((body, ctx) => {
       });
     return;
   }
-  for (const field of ['attachments', 'replyTo', 'render', 'choice'] as const)
+  for (const field of [
+    'attachments',
+    'replyTo',
+    'render',
+    'choice',
+    'providerSentAt',
+    'entryPoint',
+  ] as const)
     if (body[field] !== undefined)
       ctx.addIssue({
         code: 'custom',
@@ -397,13 +523,50 @@ export type ChannelTurnInput = z.infer<typeof ChannelTurnBody>;
  * may carry `render` (what the gateway can show) and `choice` (a tapped
  * option); its plan may then hold `choices`, `link_button` and `cards`
  * parts (a runtime without it refuses either field with 400).
+ * `rich_events`: an event turn may carry `render` too, and its answer is
+ * planned exactly like a message turn's (0.50.0 lists `rich_messages`
+ * without it and refuses `render` with an event with 400).
+ * `provider_sent_at`: a message turn may carry `providerSentAt`, the
+ * provider's send time of the person's message (a runtime without it
+ * refuses the field with 400).
+ * `entry_point`: a message turn may carry `entryPoint`, the ad the person
+ * tapped to reach the chat (a runtime without it refuses the field with
+ * 400).
  */
 export const CHANNEL_TURN_FEATURES = [
   'delivery_notice',
   'permission_event',
   'rich_messages',
+  'rich_events',
+  'provider_sent_at',
+  'entry_point',
 ] as const;
 export type ChannelTurnFeature = (typeof CHANNEL_TURN_FEATURES)[number];
+
+/** How far ahead of this runtime's clock a provider send time may be (clock skew). */
+export const PROVIDER_SENT_AT_MAX_AHEAD_MS = 5 * 60_000;
+/**
+ * How old a provider send time may be. WhatsApp's service window is 24
+ * hours and the gateway admits nothing older; this leaves room for a
+ * message retried late.
+ */
+export const PROVIDER_SENT_AT_MAX_AGE_MS = 48 * 3_600_000;
+
+/**
+ * The turn's `providerSentAt` when it is believable at `now` (epoch ms):
+ * not more than `PROVIDER_SENT_AT_MAX_AHEAD_MS` in the future and not older
+ * than `PROVIDER_SENT_AT_MAX_AGE_MS`. Anything else is dropped, so a
+ * gateway's clock fault never fails a turn and never reaches a plugin.
+ */
+export function plausibleProviderSentAt(
+  value: number | undefined,
+  now: number,
+): number | undefined {
+  if (value === undefined || !Number.isSafeInteger(value)) return undefined;
+  if (value > now + PROVIDER_SENT_AT_MAX_AHEAD_MS) return undefined;
+  if (value < now - PROVIDER_SENT_AT_MAX_AGE_MS) return undefined;
+  return value;
+}
 
 export const ChannelOrigin = z.strictObject({
   v: z.literal(1),
@@ -467,6 +630,7 @@ export interface ChannelTurnResponse {
 export type ChannelErrorStatus =
   | 400
   | 401
+  | 402
   | 403
   | 404
   | 409
@@ -501,6 +665,10 @@ export type ChannelErrorStatus =
  * | `room_unavailable`                | 409    | the oracle cannot use the user's oracle room (final)  |
  * | `response_expired`                | 410    | the run was pruned; the request cannot run again      |
  * | `request_too_large`               | 413    | the body is over 64 kB                                |
+ * | `turn_refused`                    | (any)  | a plugin refused the turn (`gateTurn`): final for the |
+ * |                                   |        | message; relay `message` (and `action` as a link) to  |
+ * |                                   |        | the person; `reason` is the plugin's code; the status |
+ * |                                   |        | is the plugin's: 402, 403, 429 or 503                 |
  * | `room_not_ready`                  | 428    | the user has no oracle room yet                       |
  * | `delegation_required`             | 428    | no usable delegation to this oracle (see below)       |
  * | `rate_limited`                    | 429    | too many requests for this user                       |
@@ -526,30 +694,110 @@ export type ChannelErrorCode =
   | 'response_expired'
   | 'request_too_large'
   | 'room_not_ready'
+  | 'turn_refused'
   | 'delegation_required'
   | 'rate_limited'
   | 'not_configured'
   | 'binding_check_unavailable'
   | 'unavailable';
 
+/**
+ * What a `turn_refused` refusal carries besides `message`: the plugin's
+ * `code` as `reason`, and the refusal's documented details (each omitted
+ * when absent).
+ */
+export interface ChannelRefusalDetails {
+  reason?: string;
+  retryAfterSeconds?: number;
+  action?: { label: string; url: string };
+}
+
 export type ChannelTurnOutcome =
   | { ok: true; result: ChannelTurnResponse }
-  | {
+  | ({
       ok: false;
       status: ChannelErrorStatus;
       code: ChannelErrorCode;
       message: string;
-    };
+    } & ChannelRefusalDetails);
 
 export class ChannelError extends Error {
   constructor(
     readonly status: ChannelErrorStatus,
     message: string,
     readonly code: ChannelErrorCode,
+    /** `turn_refused` only: the plugin's reason and details. */
+    readonly refusal: ChannelRefusalDetails = {},
   ) {
     super(message);
     this.name = 'ChannelError';
   }
+}
+
+/** The failed outcome a `ChannelError` is answered with. */
+export function channelErrorOutcome(
+  error: ChannelError,
+): Exclude<ChannelTurnOutcome, { ok: true }> {
+  return {
+    ok: false,
+    status: error.status,
+    code: error.code,
+    message: error.message,
+    ...channelRefusalFields(error.refusal),
+  };
+}
+
+/**
+ * The JSON body of a channel refusal: `{ code, message }`, plus `reason`,
+ * `retryAfterSeconds` and `action` on a `turn_refused` that carries them.
+ */
+export function channelErrorBody(
+  error: Pick<ChannelError, 'code' | 'message'> & ChannelRefusalDetails,
+): { code: ChannelErrorCode; message: string } & ChannelRefusalDetails {
+  return {
+    code: error.code,
+    message: error.message,
+    ...channelRefusalFields(error),
+  };
+}
+
+function channelRefusalFields(
+  details: ChannelRefusalDetails,
+): ChannelRefusalDetails {
+  return {
+    ...(details.reason !== undefined ? { reason: details.reason } : {}),
+    ...(details.retryAfterSeconds !== undefined
+      ? { retryAfterSeconds: details.retryAfterSeconds }
+      : {}),
+    ...(details.action
+      ? { action: { label: details.action.label, url: details.action.url } }
+      : {}),
+  };
+}
+
+/** The statuses a `turn_refused` is answered with (the gate's own). */
+const CHANNEL_TURN_REFUSAL_STATUSES = [402, 403, 429, 503] as const;
+
+/**
+ * The `turn_refused` error for a refusal of a plugin's `gateTurn`: its
+ * status (402, 403, 429 or 503; anything else 403), its message, its `code`
+ * as `reason`, its `retryAfterSeconds` and `action`.
+ */
+export function channelTurnRefusedError(refusal: TurnRefusal): ChannelError {
+  const retryAfterSeconds = refusalRetryAfterSeconds(refusal);
+  const action = refusalAction(refusal);
+  return new ChannelError(
+    CHANNEL_TURN_REFUSAL_STATUSES.find(
+      (allowed) => allowed === refusal.status,
+    ) ?? 403,
+    refusal.message,
+    'turn_refused',
+    {
+      ...(refusal.code ? { reason: refusal.code } : {}),
+      ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
+      ...(action ? { action: { label: action.label, url: action.url } } : {}),
+    },
+  );
 }
 
 /**

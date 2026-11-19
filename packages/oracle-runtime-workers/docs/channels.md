@@ -96,6 +96,100 @@ Alongside the run, the owner object posts the files as encrypted media events of
 - **Fail closed, and never the turn.** Only a Megolm-encrypted room gets a file: an unencrypted room, no plugin device, a setup that times out, a link the gateway no longer serves, a size or digest mismatch, an upload or send error or a deadline is logged once, without the link, and posts nothing; the turn reads the file from the gateway exactly as before. A homeserver `429` on an upload skips the turn's remaining files.
 - **Resumed attempts** post nothing: the first attempt did, or lost its uploads with the object. Tools still read the gateway's list (`ctx.session.channel.attachments`).
 
+### Provider send time
+
+A message turn may carry `providerSentAt`: when the person sent the message according to the provider (WhatsApp's own timestamp on the inbound message), in epoch milliseconds (a non-negative safe integer; whole seconds under both WhatsApp transports). Every turn result lists `provider_sent_at`, and a gateway sends the field only to a runtime that lists it; runtimes before it answer a body that carries it with `400 invalid_request`. It is refused with a notice or an event (`400`). A value more than 5 minutes ahead of the runtime's clock or more than 48 hours old (`plausibleProviderSentAt`) is ignored, not refused: the turn runs without it and logs `[channels] run <id>: providerSentAt ignored (implausible)`; a believable one logs how many ms before the turn it was sent.
+
+The value rides with the run (`channel.providerSentAt`, so a resumed run reads the same) and reaches plugins and tools twice: as `ctx.session.channel.providerSentAt` for this turn, and on the turn's human message as `additional_kwargs.channel_provider_sent_at` (`CHANNEL_PROVIDER_SENT_AT_KWARG`, a number, kept through the checkpoint save), so a plugin reading history sees it for earlier messages too. It lets an oracle tell a message sent before its last reply went out (two messages in a row) from an answer to that reply: the runtime's own message times are when each turn started, and a message sent while a turn ran starts only after it. The runtime does not know when its reply was delivered; the gateway does not pass delivery statuses on.
+
+### Ad entry point
+
+For oracle authors: there is nothing to configure. From `@ixo/oracle-runtime-workers` 0.57.0 every turn result advertises the `entry_point` feature, the gateway starts sending the ad, and plugin code reads it as `ctx.session.channel.entryPoint` (type `ChannelEntryPoint`, exported from the package); an oracle on an older runtime simply never receives it. See [recording the ad from a plugin](#recording-the-ad-from-a-plugin) for a working example.
+
+A message turn may carry `entryPoint`: how the person reached the chat, when the provider says so. Today that is Meta's `referral` object on an inbound WhatsApp message sent right after a tap on a Click-to-WhatsApp ad, every field mapped to camelCase. The gateway sends an ad once. It may hold an ad tapped before the person linked (up to 7 days) and attach it to the connect turn or the first later message, so `sentAt` is when the message that carried the ad was sent, not necessarily this turn's: a plugin uses `entryPoint.sentAt`, never `providerSentAt`, as the ad's time.
+
+```json
+{
+  "kind": "ad",
+  "provider": "meta",
+  "sentAt": 1763380000000,
+  "sourceType": "ad",
+  "sourceId": "120252638173670287",
+  "sourceUrl": "https://fb.me/91x4AM4CH",
+  "headline": "Chat with us",
+  "body": "Internal test ad for a WhatsApp chat link. Please ignore.",
+  "mediaType": "image",
+  "imageUrl": "https://…fbcdn.net/…jpg?…&oe=6B01DE60",
+  "ctwaClid": "AfjK-4OyWoOufgO2Ynmc…",
+  "welcomeMessageText": "Hi! Please let us know how we can help you."
+}
+```
+
+Every turn result lists `entry_point`, and a gateway sends the field only to a runtime that lists it; runtimes before it answer a body that carries it with `400 invalid_request`. It is refused with a notice or an event (`400`). `ChannelEntryPoint` (`src/channels/contract.ts`) is a strict object, so an unknown key is a `400`, and the runtime checks the gateway's caps again rather than repairing anything:
+
+- `kind` is `ad`, `provider` is `meta`, `sentAt` is the epoch ms of the message that carried it (a non-negative safe integer).
+- `sourceType` matches `^[a-z_]{1,32}$` and `sourceId` (the ad id) `^[0-9]{1,32}$`; both are required. `mediaType` (`image`, `video`) matches `^[a-z_]{1,32}$`.
+- `sourceUrl`, `imageUrl`, `videoUrl`, `thumbnailUrl`: `https:` links that `new URL` parses, at most 2,048 UTF-16 units, without whitespace or control characters. A video ad carries `videoUrl` and `thumbnailUrl` instead of `imageUrl`; Meta's CDN links expire after a few days.
+- `headline` (at most 256 code points), `body` (2,048) and `welcomeMessageText` (Meta's `welcome_message.text`, 1,024): not blank, with no control character other than tab and newline (`\p{Cc}`) and no bidi control (`\p{Bidi_Control}`).
+- `ctwaClid`, Meta's click id for the tap, matches `^[A-Za-z0-9_-]{1,512}$`; Meta omits it for WhatsApp Status placements.
+
+Invisible format characters (zero-width characters, tag characters) pass these rules: the text is untrusted display data, not checked prose.
+
+The value rides with the run (`channel.entryPoint`, so a resumed run reads the same): in the user's own working database, which is exported to the user's owner store like all conversation data, so it leaves the runtime process that way. It reaches plugin code as `ctx.session.channel.entryPoint` on the turn's runtime context (request-time tools, sub-agents and middlewares, and tools when they run) on each attempt of the run, and at request admission (`RequestAdmissionContext.session.channel`, with the binding, so a handler that answers the turn itself can still record the ad). Request-time hooks run again on a resumed attempt, and admission runs again when an attempt stopped during it, so recording the ad must be idempotent (for example keyed on `sourceId`). Unlike `providerSentAt` it is not put on the turn's human message: not in its content, not in its `additional_kwargs`, so not in the checkpoint or a history read. It is not mirrored to the oracle room (the mirror carries only `org.ixo.qi.origin`), not in the LangSmith metadata, and the runtime logs nothing of it. Every text and link in it was written by the advertiser or Meta: a plugin treats it as data and never gives it to the model as instructions, and logs none of it (the click id least of all). Event turns, `onModelCall` and `channelFailureReply` never see it.
+
+It reaches plugin code only on turns where the agent is built or admission runs. A turn that becomes a [routing clarification](channel-routing.md) is answered without either, and a run cancelled or refused before the build (a stopped request, a missing delegation, a binding no longer active) never gets that far: the ad is not shown to any plugin, and since the gateway does not send it again, it is lost for that person. Admission does not run on a turn with files, so an ad that arrives with a photo reaches plugins only through the agent build.
+
+#### Recording the ad from a plugin
+
+`kind`, `provider`, `sentAt`, `sourceType` and `sourceId` are always present; every other field is optional. A request-time hook is the place to record it: it runs on every built turn with `ctx.kv`, the user's own rows. Key the record on `sourceId` so a retried attempt writes nothing new (add `sentAt` to the key to keep every tap instead of the first per ad), keep only what you need, and leave `ctwaClid` and the advertiser text out of logs and prompts:
+
+```ts
+import {
+  defineOraclePlugin,
+  type ChannelEntryPoint,
+} from '@ixo/oracle-runtime-workers';
+
+const ADS = 'ad-attribution/entry-points';
+
+/** What we keep: ids and the ad's time, no advertiser text, no click id. */
+type AdRecord = Pick<ChannelEntryPoint, 'sourceType' | 'sourceId' | 'sentAt'>;
+
+export const adAttribution = defineOraclePlugin({
+  name: 'ad-attribution',
+  version: '1.0.0',
+  manifest: {
+    title: 'Ad attribution',
+    summary: 'Records which ad brought the person to the chat.',
+    whenToUse: [],
+    visibility: 'silent',
+  },
+  async getRequestTools(ctx) {
+    const ad = ctx.session.channel?.entryPoint;
+    if (ad && ctx.kv) {
+      // Runs again on every attempt of the run: keyed on the ad id, the
+      // first write wins and a retry changes nothing.
+      await ctx.kv.update(
+        ADS,
+        ad.sourceId,
+        (current) => {
+          if (current !== undefined) return current;
+          const record: AdRecord = {
+            sourceType: ad.sourceType,
+            sourceId: ad.sourceId,
+            sentAt: ad.sentAt,
+          };
+          return record;
+        },
+        { maxEntries: 100 },
+      );
+    }
+    return []; // records only; adds no tools
+  },
+});
+```
+
+`RequestAdmissionContext` has no `ctx.kv`. A turn that admission passes is built next, so the hook above still sees the ad; only a plugin whose `getRequestAdmission` answers the turn itself (`handled`) must record the ad there, in its own store, before it returns.
+
 Topic deliverables (Matrix topics), provider identifiers, and caller-supplied user identities are not accepted. The body limit is 64,000 bytes. Text is limited to 16,000 characters.
 
 ### Delivery notices
@@ -152,13 +246,13 @@ When the person answers a permission card in their wallet (a card the oracle ask
 
 A second kind, `identity_check_updated` (an identity check at Self went into review, passed or failed), uses the same envelope, authorization, capability (`permission_event` covers both kinds) and rules, with `"event": { "kind": "identity_check_updated", "linkId": "<Self link id>", "status": "in_review" | "passed" | "failed" }` and `"requestId": "identity:<linkId>:<status>"`.
 
-It is authorized like any channel turn (the same invocation, the request hash in its facts, the binding checked at the Auth Hub). `status` is `allowed`, `not_allowed` or `expired`; the body carries ids only, never text from the Hub. `requestId` must be `permission:<permissionId>:<status>`, so a resend is the same request and a second answer for the card a new one. No `message`, `attachments`, `replyTo`, `notice` or `sessionId`: the event runs in the binding's current session, with `sessionPolicy: "continue"`. It is answered like a turn (`202`, then poll); a `finished` result with an empty `text` and no plan means the runtime said nothing (send nothing).
+It is authorized like any channel turn (the same invocation, the request hash in its facts, the binding checked at the Auth Hub). `status` is `allowed`, `not_allowed` or `expired`; the body carries ids only, never text from the Hub. `requestId` must be `permission:<permissionId>:<status>`, so a resend is the same request and a second answer for the card a new one. No `message`, `attachments`, `replyTo`, `notice`, `sessionId` or `choice`: the event runs in the binding's current session, with `sessionPolicy: "continue"`. It may carry `render` when the runtime lists `rich_events` ([rich messages](#rich-messages)), and is then answered with the same rich parts as a message turn. It is answered like a turn (`202`, then poll); a `finished` result with an empty `text` and no plan means the runtime said nothing (send nothing).
 
-The runtime admits it like a notice turn (no user message mirrored, never quoted, not routed, not offered to request admission handlers, not a thread line) and, when its run starts, after any turn already running for the person, hands it to the plugins in order (`OraclePlugin.handleChannelEvent`, `src/core/channel-events.ts`). The first plugin that claims the card decides: `ignore` (the run finishes with an empty reply, nothing in the transcript), `reply` (a fixed text sent without the model) or `agent` (the model runs with the plugin's fixed note where the person's words would be). The decision and the note are stored with the run, so a restart reads the same. The note is recorded like a delivery notice (`additional_kwargs.channel_delivery_notice`), so nothing shows it as the person's words. A card no plugin claims, or a plugin that throws, ends with an empty reply. The credentials plugin reads the card at the Hub, or the link at Self, before it says anything; see [channel events](../src/plugins/credentials/README.md#channel-events).
+The runtime admits it like a notice turn (no user message mirrored, never quoted, not routed, not offered to request admission handlers, not a thread line) and, when its run starts, after any turn already running for the person, hands it to the plugins in order (`OraclePlugin.handleChannelEvent`, `src/core/channel-events.ts`). The first plugin that claims the card decides: `ignore` (the run finishes with an empty reply, nothing in the transcript), `reply` (a fixed text sent without the model; its optional `facts` are the structured facts behind the text, for a plugin that extends another and words the reply itself, such as the Yo agent on a failed identity check, and are never sent) or `agent` (the model runs with the plugin's fixed note where the person's words would be). The decision and the note are stored with the run, so a restart reads the same. The note is recorded like a delivery notice (`additional_kwargs.channel_delivery_notice`), so nothing shows it as the person's words. A card no plugin claims, or a plugin that throws, ends with an empty reply. The credentials plugin reads the card at the Hub, or the link at Self, before it says anything; see [channel events](../src/plugins/credentials/README.md#channel-events).
 
 ## Responses and retries
 
-An admitted turn returns `202` with `requestId`, `runId`, `sessionId`, and a `queued`, `running`, or `recovering` status. Every turn response also carries `sessionTitle`, the title of `sessionId` at response time (null while untitled), so a gateway can tell the person when a turn ran in a different session than the one it sent, and `features`, what this runtime supports beyond the base contract (`["delivery_notice", "permission_event", "rich_messages"]`: see [delivery notices](#delivery-notices), [channel events](#channel-events) and [rich messages](#rich-messages)); a gateway that predates the field ignores it. A terminal turn returns `200` with its terminal status. A `finished` turn also contains `text` and, when available, `messageId`.
+An admitted turn returns `202` with `requestId`, `runId`, `sessionId`, and a `queued`, `running`, or `recovering` status. Every turn response also carries `sessionTitle`, the title of `sessionId` at response time (null while untitled), so a gateway can tell the person when a turn ran in a different session than the one it sent, and `features`, what this runtime supports beyond the base contract (`["delivery_notice", "permission_event", "rich_messages", "rich_events", "provider_sent_at", "entry_point"]`: see [delivery notices](#delivery-notices), [channel events](#channel-events), [rich messages](#rich-messages), [provider send time](#provider-send-time) and [ad entry point](#ad-entry-point)); a gateway that predates the field ignores it. A terminal turn returns `200` with its terminal status. A `finished` turn also contains `text` and, when available, `messageId`.
 
 `finished` is the only successful terminal status. A chat run that fails after `send_file` still ends as `finished`, with those files and a line saying the rest is missing, because its files exist nowhere else. Its `text` may be empty after a tool-only completion; the gateway must complete delivery without sending an empty provider message. An absent `messageId` does not mean the turn should be retried.
 
@@ -182,29 +276,44 @@ A request refused in step 6 before its run began leaves no receipt: the same req
 
 Every refusal has the body `{ "code": "<code>", "message": "<text>" }`. A gateway maps it by `code` first and by status second. `428` (Precondition Required) means a precondition on the user's side is missing: the gateway tells the user what to fix and retries the same request once it is fixed; it is never treated as a transient outage. `503` is transient and may be retried with backoff. Two refusals report failures that retrying cannot fix, and are final: `409 room_unavailable` and `403 storage_unauthorized`. The gateway should answer them with its failure reply at once instead of retrying.
 
-| Status | `code`                             | Meaning                                                                                                                                                   |
-| ------ | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `400`  | `invalid_request`                  | Body missing, not UTF-8, not JSON, or not the request shape.                                                                                              |
-| `401`  | `unauthorized`                     | No valid user-rooted channel invocation (header, chain, grant or lifetime).                                                                               |
-| `403`  | `scope_mismatch`                   | The invocation does not cover this binding, provider, revision, oracle or body.                                                                           |
-| `403`  | `binding_inactive`                 | Auth Hub reports the binding inactive.                                                                                                                    |
-| `403`  | `identity_required`                | The binding check got no channel identity.                                                                                                                |
-| `403`  | `identity_mismatch`                | The channel identity does not match the request.                                                                                                          |
-| `403`  | `channel_grant_not_tool_authority` | A channel request carried a delegation.                                                                                                                   |
-| `403`  | `storage_unauthorized`             | Final. The user's file storage rejected the oracle's credentials (VFS 401/403) while the owner copy loaded. Do not retry; send the failure reply.         |
-| `404`  | `session_not_found`                | The session exists but is not this user's session in the user's oracle room.                                                                              |
-| `409`  | `request_conflict`                 | The request ID already belongs to another message body.                                                                                                   |
-| `409`  | `session_conflict`                 | The binding already has another session, or the named session is gone. Clear the stored session and resend the same request ID without `sessionId`.       |
-| `409`  | `room_not_encrypted`               | The user's oracle room is not end-to-end encrypted.                                                                                                       |
-| `409`  | `room_unavailable`                 | Final. The homeserver refuses the oracle in the user's oracle room (`M_FORBIDDEN`/403, the bot is not a member). Do not retry; send the failure reply.    |
-| `410`  | `response_expired`                 | The run was pruned; the request cannot execute again.                                                                                                     |
-| `413`  | `request_too_large`                | The body is over 64,000 bytes.                                                                                                                            |
-| `428`  | `delegation_required`              | No usable delegation: none, unknown expiry, under 900 s left, or no file-storage grant. Re-authorize.                                                     |
-| `428`  | `room_not_ready`                   | The user has no oracle room yet. Finish the oracle's setup.                                                                                               |
-| `429`  | `rate_limited`                     | Over the user's rate limit.                                                                                                                               |
-| `503`  | `not_configured`                   | Channels or Auth Hub binding validation are not configured (or `AUTH_HUB_URL` is not HTTPS).                                                              |
-| `503`  | `binding_check_unavailable`        | Auth Hub could not be reached or answered badly.                                                                                                          |
-| `503`  | `unavailable`                      | Anything else. The shell logs `[channels] turn failed unexpectedly: <name>: <message>` (the message bounded to 300 characters, nothing from the request). |
+| Status                  | `code`                             | Meaning                                                                                                                                                                                                                                  |
+| ----------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `400`                   | `invalid_request`                  | Body missing, not UTF-8, not JSON, or not the request shape.                                                                                                                                                                             |
+| `401`                   | `unauthorized`                     | No valid user-rooted channel invocation (header, chain, grant or lifetime).                                                                                                                                                              |
+| `403`                   | `scope_mismatch`                   | The invocation does not cover this binding, provider, revision, oracle or body.                                                                                                                                                          |
+| `403`                   | `binding_inactive`                 | Auth Hub reports the binding inactive.                                                                                                                                                                                                   |
+| `403`                   | `identity_required`                | The binding check got no channel identity.                                                                                                                                                                                               |
+| `403`                   | `identity_mismatch`                | The channel identity does not match the request.                                                                                                                                                                                         |
+| `403`                   | `channel_grant_not_tool_authority` | A channel request carried a delegation.                                                                                                                                                                                                  |
+| `403`                   | `storage_unauthorized`             | Final. The user's file storage rejected the oracle's credentials (VFS 401/403) while the owner copy loaded. Do not retry; send the failure reply.                                                                                        |
+| `404`                   | `session_not_found`                | The session exists but is not this user's session in the user's oracle room.                                                                                                                                                             |
+| `409`                   | `request_conflict`                 | The request ID already belongs to another message body.                                                                                                                                                                                  |
+| `409`                   | `session_conflict`                 | The binding already has another session, or the named session is gone. Clear the stored session and resend the same request ID without `sessionId`.                                                                                      |
+| `409`                   | `room_not_encrypted`               | The user's oracle room is not end-to-end encrypted.                                                                                                                                                                                      |
+| `409`                   | `room_unavailable`                 | Final. The homeserver refuses the oracle in the user's oracle room (`M_FORBIDDEN`/403, the bot is not a member). Do not retry; send the failure reply.                                                                                   |
+| `410`                   | `response_expired`                 | The run was pruned; the request cannot execute again.                                                                                                                                                                                    |
+| `413`                   | `request_too_large`                | The body is over 64,000 bytes.                                                                                                                                                                                                           |
+| `428`                   | `delegation_required`              | No usable delegation: none, unknown expiry, under 900 s left, or no file-storage grant. Re-authorize.                                                                                                                                    |
+| `428`                   | `room_not_ready`                   | The user has no oracle room yet. Finish the oracle's setup.                                                                                                                                                                              |
+| `402` `403` `429` `503` | `turn_refused`                     | Final for this message. A plugin refused the turn (`gateTurn`); the body carries `reason`, `retryAfterSeconds` and `action` when present (below). Send `message` to the person; nothing was recorded, the same request id may be resent. |
+| `429`                   | `rate_limited`                     | Over the user's rate limit.                                                                                                                                                                                                              |
+| `503`                   | `not_configured`                   | Channels or Auth Hub binding validation are not configured (or `AUTH_HUB_URL` is not HTTPS).                                                                                                                                             |
+| `503`                   | `binding_check_unavailable`        | Auth Hub could not be reached or answered badly.                                                                                                                                                                                         |
+| `503`                   | `unavailable`                      | Anything else. The shell logs `[channels] turn failed unexpectedly: <name>: <message>` (the message bounded to 300 characters, nothing from the request).                                                                                |
+
+A `turn_refused` body (HTTP status = the refusal's: `402` payment needed, `403` not allowed, `429` too many, `503` try again shortly):
+
+```json
+{
+  "code": "turn_refused",
+  "reason": "insufficient_credits",
+  "message": "You're out of IXO credits. Top up to keep chatting.",
+  "retryAfterSeconds": 60,
+  "action": { "label": "Top up credits", "url": "https://…" }
+}
+```
+
+`reason` is the plugin's `code` (stable, `[a-z][a-z0-9_]*`), `retryAfterSeconds` a whole number from 1 to 86,400, `action` one call to action (`url` https, `label` at most 40 characters); each is omitted when the refusal has none. `message` is plain text, complete on its own and safe to show: send it to the person as one reply, and `action` as a link button where the channel has one (else `\n\n<label>: <url>`). Log `reason`, never the person. The runtime keeps no per-sender throttle for channels: the gateway does (one reply per binding, sender and reason in 10 minutes; a successful turn clears it).
 
 ### Durability
 
@@ -1155,7 +1264,7 @@ Object.
 
 ## Rich messages
 
-A runtime whose turn results list `rich_messages` accepts two more fields on a **message** turn (never with `notice` or `event`; an older runtime refuses either with `400 invalid_request`):
+A runtime whose turn results list `rich_messages` accepts two more fields on a **message** turn (never with `notice`; an older runtime refuses either with `400 invalid_request`):
 
 - `render`: `{ "v": 1, "kinds": [...], "linkLabels": [...], "linkOrigins": [...] }`. `kinds` (at most 16) from `reply_buttons`, `list`, `link_button`, `card`, `carousel`; `linkLabels` (at most 32) label keys; `linkOrigins` (at most 32) https origins exactly as `URL.origin` prints them. Unknown kinds and labels, and origins that are not exact https origins, are ignored, so a newer gateway never breaks the turn.
 - `choice`: `{ "id": "<tapped id>" }` with `message` set to the tapped option's title and `sessionPolicy: "continue"`.
@@ -1171,5 +1280,7 @@ With `render`, a finished turn's plan may hold three more part kinds, each with 
 { "partId": "p4", "kind": "cards", "text": "…",
   "cards": { "body": "Near you:", "items": [{ "title": "…", "body": "…", "imageUrl": "https://…", "link": { "url": "https://…", "label": "register" } }] } }
 ```
+
+**On event turns** (`rich_events`). A runtime whose turn results also list `rich_events` accepts `render` on an event turn (both kinds), never `choice` (an event has no tap). The run then gets exactly what a message turn with that `render` gets: the same delivery profile, the rich-message tools and prompt section, plugin helpers that read `renderOf(ctx)` (the credentials plugin's Allow and Start check buttons), the same plan parts, and the choices its plan offers are kept for taps like any other. A plugin's `reply` decision stays one plain text, as a request-admission direct read does on a message turn. Runtime 0.50.0 lists `rich_messages` without `rich_events` and refuses `render` with an event (`400 invalid_request`), so a gateway sends it only when both are listed.
 
 `style` is `buttons` or `list` (a list also has `button`, the menu label). A `cards` part with one item is an image card, with 2–10 a carousel. Limits, labels and the runtime's rules are in [chat delivery](chat-delivery.md#rich-messages-buttons-lists-link-buttons-cards). The gateway re-checks every limit, the label and the link's origin against its own configuration, and sends `text` as a normal message when it cannot show a part.

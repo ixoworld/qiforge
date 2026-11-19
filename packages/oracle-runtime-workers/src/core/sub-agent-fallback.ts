@@ -1,3 +1,4 @@
+import { withModelCallPurpose } from './model-call-reporter';
 import type { AgentMiddleware, StructuredTool } from 'langchain';
 import type {
   PluginContext,
@@ -70,6 +71,11 @@ export interface CollectSubAgentsInput {
    * repetition guard.
    */
   dispatchMiddleware?: (dispatch: string) => AgentMiddleware[];
+  /**
+   * Effect of a sub-agent's inner tool by name (see `AgentSpec.effectOf`):
+   * a write whose failure leaves its outcome unknown is reported as such.
+   */
+  effectOf?: (toolName: string) => 'read' | 'write';
   /** The turn's result cap, applied to every wrapped sub-agent tool (see `wrapPluginTool`). */
   resultCap?: ResultCapConfig;
   /**
@@ -102,6 +108,7 @@ function defaultToAgentSpec(
   extraMiddleware?: AgentMiddleware[],
   resultCap?: ResultCapConfig,
   dispatchMiddleware?: (dispatch: string) => AgentMiddleware[],
+  effectOf?: (toolName: string) => 'read' | 'write',
 ): AgentSpec {
   const systemPrompt =
     typeof subAgent.systemPrompt === 'function'
@@ -126,7 +133,10 @@ function defaultToAgentSpec(
     }),
   );
 
-  const model = ambient.llm.get(subAgent.model ?? 'subagent');
+  const model = ambient.llm.get(
+    subAgent.model ?? 'subagent',
+    withModelCallPurpose(undefined, 'subagent'),
+  );
 
   // Normalize `forwardTools`:
   //   true       → all of this sub-agent's own tool names
@@ -149,6 +159,7 @@ function defaultToAgentSpec(
     model,
     middleware: [...(extraMiddleware ?? []), ...(subAgent.middlewares ?? [])],
     ...(dispatchMiddleware ? { dispatchMiddleware } : {}),
+    ...(effectOf ? { effectOf } : {}),
     userDid,
     sessionId,
     logger: ambient.logger,
@@ -182,6 +193,7 @@ export async function collectSubAgentsWithFallback(
     extraMiddleware,
     resultCap,
     dispatchMiddleware,
+    effectOf,
   } = input;
 
   const entries = subAgents ?? (await registry.collect(buildCtx, rtCtx));
@@ -204,6 +216,7 @@ export async function collectSubAgentsWithFallback(
               extraMiddleware,
               resultCap,
               dispatchMiddleware,
+              effectOf,
             );
         const withContext: AgentSpec = contextPrompt
           ? {

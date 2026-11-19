@@ -15,8 +15,11 @@ import {
   type ChannelControlOutcome,
   type ChannelTurnOutcome,
   ChannelError,
+  channelErrorOutcome,
+  channelTurnRefusedError,
   StaleSessionError,
 } from './contract';
+import type { TurnRefusal } from '../plugin-api/turn-gate';
 
 /** How the next room mirrors behave (`setMirror`). */
 type MirrorMode = 'ok' | 'transient' | 'forbidden' | 'hang';
@@ -51,6 +54,10 @@ export class ChannelTurnsTestDO extends DurableObject {
   private failNextBegin = false;
   private failNextAssertSession = false;
   private refuseNextRename = false;
+  /** What the turn gate answers new requests with (null: allow). */
+  private gateRefusal: TurnRefusal | null = null;
+  /** What the turn gate allows new requests with. */
+  private gatePlatformModels: 'allow' | 'deny' = 'allow';
 
   private async ready(): Promise<ChannelTurns> {
     if (this.turns) return this.turns;
@@ -95,6 +102,11 @@ export class ChannelTurnsTestDO extends DurableObject {
           await this.delegation(),
           Math.floor(this.nowMs / 1000),
         ),
+      gateTurn: async () => {
+        // As the user object does: the refusal as the gate checked it.
+        if (this.gateRefusal) throw channelTurnRefusedError(this.gateRefusal);
+        return this.gatePlatformModels;
+      },
       // Like the coordinator: only runs that have not ended are stopped.
       stopRuns: async (runIds) => {
         this.calls.stopRuns += 1;
@@ -330,13 +342,7 @@ export class ChannelTurnsTestDO extends DurableObject {
         ),
       };
     } catch (error) {
-      if (error instanceof ChannelError)
-        return {
-          ok: false,
-          status: error.status,
-          code: error.code,
-          message: error.message,
-        };
+      if (error instanceof ChannelError) return channelErrorOutcome(error);
       throw error;
     }
   }
@@ -352,13 +358,7 @@ export class ChannelTurnsTestDO extends DurableObject {
       );
       return { ok: true, result };
     } catch (error) {
-      if (error instanceof ChannelError)
-        return {
-          ok: false,
-          status: error.status,
-          code: error.code,
-          message: error.message,
-        };
+      if (error instanceof ChannelError) return channelErrorOutcome(error);
       throw error;
     }
   }
@@ -578,6 +578,14 @@ export class ChannelTurnsTestDO extends DurableObject {
       ))!.n;
     }
     return counts;
+  }
+
+  async refuseTurns(refusal: TurnRefusal | null): Promise<void> {
+    this.gateRefusal = refusal;
+  }
+
+  async restrictTurns(platformModels: 'allow' | 'deny'): Promise<void> {
+    this.gatePlatformModels = platformModels;
   }
 
   async blockSessionCreation(blocked: boolean): Promise<void> {

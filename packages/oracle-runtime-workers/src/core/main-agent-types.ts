@@ -20,7 +20,7 @@ import type {
 import type { ClientTool, ServerTool } from '@langchain/core/tools';
 import type { capabilityGateState } from './middlewares/capability-gate';
 import { z } from 'zod';
-import { ChannelAttachment } from '../channels/contract';
+import { ChannelAttachment, ChannelEntryPoint } from '../channels/contract';
 import type {
   ChatOpenAIFields,
   MergedConfig,
@@ -61,6 +61,7 @@ export const mainAgentRequestContextSchema = z.object({
         bindingId: z.string(),
         bindingRevision: z.number().int().positive(),
         attachments: z.array(ChannelAttachment).optional(),
+        entryPoint: ChannelEntryPoint.optional(),
       })
       .optional(),
     wsId: z.string().optional(),

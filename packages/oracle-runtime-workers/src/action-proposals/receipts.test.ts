@@ -21,7 +21,11 @@ import { storedRunRequest } from '../do/run-request';
 import { createUserOracleDO } from '../do/user-oracle-do';
 import { DoSqliteDatabase } from '../sqlite/database';
 import { NOW, OWNER, RECIPIENT, proposalSubject } from './fixtures/proposal';
-import { ActionProposalConflict, ActionProposalStore } from './store';
+import {
+  ActionProposalConflict,
+  ActionProposalStore,
+  receiptChannel,
+} from './store';
 import { resetChainNetworkCache } from './verify';
 
 async function call<T>(
@@ -162,6 +166,20 @@ async function harness(state: DurableObjectState) {
     async receiptState(id: string) {
       return (await this.receiptRow(id))?.state;
     },
+    async receiptOrigin(id: string): Promise<unknown> {
+      const row = await db.get<{ origin: string | null }>(
+        'SELECT origin FROM action_proposal_receipts WHERE proposal_id=?',
+        [id],
+      );
+      return row?.origin ? JSON.parse(row.origin) : null;
+    },
+    /** Writes an origin as a runtime before the narrowing stored it: the whole channel. */
+    async setReceiptOrigin(id: string, origin: unknown) {
+      await db.run(
+        'UPDATE action_proposal_receipts SET origin=? WHERE proposal_id=?',
+        [JSON.stringify(origin), id],
+      );
+    },
     async receiptRow(id: string) {
       return db.get<{ state: string; next_attempt: number; attempts: number }>(
         'SELECT state,next_attempt,attempts FROM action_proposal_receipts WHERE proposal_id=?',
@@ -241,6 +259,123 @@ describe('durable canonical action receipts', () => {
       await h.restart();
       expect(await h.drain()).toBeUndefined();
       expect(h.send).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('keeps only what the replay reads of the channel: no ad entry point, click id or files', async () => {
+    const entryPoint = {
+      kind: 'ad' as const,
+      provider: 'meta' as const,
+      sentAt: NOW - 2_000,
+      sourceType: 'ad',
+      sourceId: '120252638173670287',
+      headline: 'Chat with us',
+      ctwaClid: 'AfjK-4OyWoOufgO2Ynmc',
+    };
+    const channel = {
+      provider: 'whatsapp',
+      bindingId: 'chb_original',
+      bindingRevision: 3,
+      remoteMessageRef: `hmac:${'a'.repeat(64)}`,
+      providerSentAt: NOW - 2_000,
+      entryPoint,
+      attachments: [
+        {
+          url: 'https://channels.example/media/chb_original/1?sig=abc',
+          filename: 'shop.jpg',
+          mimetype: 'image/jpeg',
+          size: 1_000,
+          sha256: 'c'.repeat(64),
+          kind: 'image' as const,
+        },
+      ],
+    };
+    await withReceipts('receipt-narrow-channel', async (h) => {
+      const proposal = await h.prepare(1, '$thread-1', { channel });
+      expect(await h.receiptOrigin(proposal.id)).toEqual({
+        sessionId: '$thread-1',
+        roomId: '!origin:matrix.test',
+        client: 'channel',
+        channel: {
+          provider: 'whatsapp',
+          bindingId: 'chb_original',
+          bindingRevision: 3,
+          remoteMessageRef: `hmac:${'a'.repeat(64)}`,
+        },
+      });
+      await h.verify(proposal);
+      expect(await h.drain()).toBeUndefined();
+      expect(h.send).toHaveBeenCalledTimes(1);
+      const sent = h.send.mock.calls[0]?.[0];
+      expect(sent).toMatchObject({
+        roomId: '!origin:matrix.test',
+        threadId: '$thread-1',
+        origin: {
+          provider: 'whatsapp',
+          bindingId: 'chb_original',
+          remoteMessageRef: `hmac:${'a'.repeat(64)}`,
+        },
+        body: expect.stringContaining('confirmed on chain'),
+      });
+      expect(JSON.stringify(sent)).not.toContain(entryPoint.ctwaClid);
+    });
+  });
+
+  it('narrows a channel the same way for topic and transfer receipts', () => {
+    expect(receiptChannel(undefined)).toEqual({});
+    expect(
+      receiptChannel({
+        provider: 'whatsapp',
+        bindingId: 'chb_x',
+        remoteMessageRef: `hmac:${'b'.repeat(64)}`,
+        providerSentAt: 1,
+        entryPoint: {
+          kind: 'ad',
+          provider: 'meta',
+          sentAt: 1,
+          sourceType: 'ad',
+          sourceId: '1',
+          ctwaClid: 'clid',
+        },
+      }),
+    ).toEqual({
+      channel: {
+        provider: 'whatsapp',
+        bindingId: 'chb_x',
+        remoteMessageRef: `hmac:${'b'.repeat(64)}`,
+      },
+    });
+  });
+
+  it('still replays a receipt whose origin a previous runtime stored with the whole channel', async () => {
+    await withReceipts('receipt-wide-origin', async (h) => {
+      const proposal = await h.prepare(1);
+      await h.setReceiptOrigin(proposal.id, {
+        sessionId: '$thread-1',
+        roomId: '!origin:matrix.test',
+        client: 'channel',
+        channel: {
+          provider: 'whatsapp',
+          bindingId: 'chb_original',
+          bindingRevision: 2,
+          remoteMessageRef: `hmac:${'a'.repeat(64)}`,
+          replyContext: { kind: 'unavailable' },
+          providerSentAt: NOW - 2_000,
+        },
+      });
+      await h.verify(proposal);
+      expect(await h.drain()).toBeUndefined();
+      expect(h.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          roomId: '!origin:matrix.test',
+          threadId: '$thread-1',
+          origin: {
+            provider: 'whatsapp',
+            bindingId: 'chb_original',
+            remoteMessageRef: `hmac:${'a'.repeat(64)}`,
+          },
+        }),
+      );
     });
   });
 

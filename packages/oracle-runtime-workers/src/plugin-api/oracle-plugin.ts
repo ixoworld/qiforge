@@ -4,6 +4,12 @@ import type {
   RequestAdmissionResult,
 } from './request-admission';
 import type { ChannelEventResult, OracleChannelEvent } from './channel-events';
+import type { ModelCallReport, TurnModelUsage } from '../llm/model-call';
+import type {
+  TurnGateContext,
+  TurnGatePolicy,
+  TurnGateResult,
+} from './turn-gate';
 import type { z } from 'zod';
 import type { PluginRoute } from '../shell/app';
 import type {
@@ -40,6 +46,18 @@ export type { PluginRoute };
 
 /** HTTP methods a plugin route can be mounted on. */
 export type PluginRouteMethod = PluginRoute['method'];
+
+/** Why a channel turn failed, as `channelFailureReply` is told. */
+export interface ChannelFailureInfo {
+  /**
+   * The failure's class: `rate_limit`, `billing`, `auth`, `timeout`,
+   * `server`, `network` or `unknown` when the model could not be reached;
+   * `empty_reply` when the model answered, twice, with nothing to send.
+   */
+  kind: string;
+  /** The provider's HTTP status, when there was one. */
+  status?: number;
+}
 
 /**
  * Base class every plugin implements. Identical to the Node runtime's contract
@@ -151,6 +169,35 @@ export abstract class OraclePlugin {
     ctx: RuntimeContext,
   ): AgentMiddleware[] | Promise<AgentMiddleware[]>;
 
+  /**
+   * Decide whether a turn may start at all, before anything of it exists:
+   * asked on every way a turn starts (`ctx.trigger`: Portal, a Matrix direct
+   * or group room, a scheduled task, a channel message, notice or event),
+   * after authentication, before the run is recorded, the message stored or
+   * mirrored, a file read or a model called. Return `{ refuse }` to refuse
+   * it: a Portal request is answered with the refusal's status and a JSON
+   * body (`{ statusCode, message, code?, details?, requestId }`), a Matrix
+   * room gets `message` (and `details.action` as a link) as one notice, at
+   * most once per person and `code` in 10 minutes, a channel request a
+   * `turn_refused` refusal carrying `message`, `code` as `reason`,
+   * `retryAfterSeconds` and `action`, and a task run is skipped with the
+   * reason recorded on the run (`docs/usage-metering.md` has the table). Return
+   * `{ allow: true }` or nothing to let it run.
+   *
+   * Keep it cheap: it is on every turn's path. Answer from `ctx.kv`; a
+   * network call is the plugin's choice and counts against its time limit
+   * (`turnGate`). Gates of several plugins run concurrently and the first
+   * refusal in plugin order wins. Unlike `getRequestAdmission` it cannot
+   * answer the turn, only refuse it, and it runs where admission does not
+   * (group rooms, task runs, turns with files).
+   */
+  gateTurn?(
+    ctx: TurnGateContext,
+  ): TurnGateResult | undefined | Promise<TurnGateResult | undefined>;
+
+  /** Time limit of `gateTurn` and what its failure means (default: 1 s, fail open). */
+  readonly turnGate?: TurnGatePolicy;
+
   /** Runs before agent preparation. Only authorized deterministic reads may be handled. */
   getRequestAdmission?(
     ctx: RequestAdmissionContext,
@@ -173,6 +220,70 @@ export abstract class OraclePlugin {
     event: OracleChannelEvent,
     ctx: RuntimeContext,
   ): Promise<ChannelEventResult>;
+
+  /**
+   * Every model call the runtime makes for a person, once it ended or
+   * failed, exactly once per call: the turn's reply, its summary, a
+   * sub-agent, a plugin's own `ctx.llm` call, reading an attachment, the
+   * session title, a group room's summary, the capability router, channel
+   * routing, a `ctx.decisions` evaluation. `call.purpose` says which,
+   * `call.paidBy` whose key it ran on (`user` for a bring-your-own-LLM
+   * call, which the person pays their provider for), `call.callId` is its
+   * idempotency key; then requested and served model, provider, whether a
+   * fallback answered, tokens, the provider-reported cost, start, duration
+   * and the error's class. The record holds no message content, tool
+   * arguments or user ids. Called in the background after the call, never
+   * delaying the turn; a hook that throws is logged and ignored.
+   * `ctx.user` / `ctx.session` are the turn's (outside a turn: the person
+   * the call was for, and a request id of its own). Do not call a model
+   * here: a model call made in this hook is not reported.
+   */
+  onModelCall?(
+    call: ModelCallReport,
+    ctx: RuntimeContext,
+  ): void | Promise<void>;
+
+  /**
+   * Once per attempt of a turn that ran the agent, after the attempt ended
+   * and each of its calls has been through `onModelCall` (the session title
+   * included): the turn's calls and totals, for one usage event per turn.
+   * In the background, never delaying the reply; a hook that throws is
+   * logged and ignored. Calls made outside a turn (a group room's summary,
+   * channel routing before a run exists) reach `onModelCall` only.
+   */
+  onTurnUsage?(
+    usage: TurnModelUsage,
+    ctx: RuntimeContext,
+  ): void | Promise<void>;
+
+  /**
+   * The person's object woke for work a plugin asked to come back to
+   * (`ctx.requestWake(at)` from any hook): called on every plugin that
+   * defines it, in the object's housekeeping alarm, with no request from
+   * the person. `ctx.user` is the person the object serves (their deposited
+   * delegation, when there is one), `ctx.session.id` is empty and there is
+   * no run. Check your own state and return; ask for the next wake with
+   * `ctx.requestWake` (a wake fires once). Bounded: each call may take at
+   * most 30 s (it is then left running and the alarm moves on); a hook that
+   * throws is logged and ignored.
+   */
+  onWake?(ctx: RuntimeContext): void | Promise<void>;
+
+  /**
+   * The short message a channel user (WhatsApp) gets instead of silence
+   * when their turn failed because the model could not be reached
+   * (provider errors, the platform key's limit, a timeout), e.g. in the
+   * language the plugin keeps for the person. The first plugin to return
+   * a non-empty text decides; otherwise `CHANNEL_BUSY_REPLY`, else a short
+   * English default. Sent at most once per chat per 10 minutes. Must not
+   * call a model: the model is what failed. Also asked (`failure.kind`
+   * `empty_reply`, no cooldown) when a turn's reply stayed empty after the
+   * runtime asked the model once more.
+   */
+  channelFailureReply?(
+    ctx: RuntimeContext,
+    failure: ChannelFailureInfo,
+  ): string | undefined | Promise<string | undefined>;
 
   /**
    * Read-only accessors this plugin exposes to other plugins via `ctx.shared`.

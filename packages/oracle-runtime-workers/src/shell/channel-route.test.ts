@@ -593,6 +593,53 @@ describe('POST /channels/turn error bodies', () => {
     expect(turns).toEqual([]);
   });
 
+  it('refuses a turn whose ad entry point breaks a rule with the generic 400, echoing none of it', async () => {
+    const entryPoint = {
+      kind: 'ad',
+      provider: 'meta',
+      sentAt: Date.now(),
+      sourceType: 'ad',
+      sourceId: '120252638173670287',
+      sourceUrl: 'https://fb.me/91x4AM4CH',
+      headline: 'Chat \u202ewith us',
+      ctwaClid: 'AfjK-4OyWoOufgO2Ynmc',
+    };
+    const turn = await signedTurn({ ...input, entryPoint });
+    const { env, turns, authHubCalls } = environment(turn, false);
+    const logged = [
+      vi.spyOn(console, 'log').mockImplementation(() => {}),
+      vi.spyOn(console, 'warn').mockImplementation(() => {}),
+      vi.spyOn(console, 'error').mockImplementation(() => {}),
+    ];
+    const res = await send(turn, env);
+    expect(res.status).toBe(400);
+    const text = await res.text();
+    expect(JSON.parse(text)).toEqual({
+      code: 'invalid_request',
+      message: 'Invalid channel turn',
+    });
+    const printed = JSON.stringify(logged.map((spy) => spy.mock.calls));
+    for (const value of [
+      entryPoint.sourceId,
+      entryPoint.sourceUrl,
+      entryPoint.ctwaClid,
+      'Chat',
+    ]) {
+      expect(text).not.toContain(value);
+      expect(printed).not.toContain(value);
+    }
+    expect(turns).toEqual([]);
+    expect(authHubCalls).toEqual([]);
+    // The same turn with a valid entry point is admitted.
+    const valid = await signedTurn({
+      ...input,
+      entryPoint: { ...entryPoint, headline: 'Chat with us' },
+    });
+    const admitted = environment(valid, false);
+    expect((await send(valid, admitted.env)).status).toBe(200);
+    expect(admitted.turns).toEqual([USER_DID]);
+  });
+
   it("passes the object's refusal on as { code, message } with its status", async () => {
     const turn = await signedTurn();
     const { env } = environment(turn, false, async () => ({
@@ -606,6 +653,28 @@ describe('POST /channels/turn error bodies', () => {
     expect(await res.json()).toEqual({
       code: 'delegation_required',
       message: 'Delegation required: the user must authorize this oracle again',
+    });
+  });
+
+  it('passes a plugin refusal on with its reason, retry delay and action, and its status', async () => {
+    const turn = await signedTurn();
+    const { env } = environment(turn, false, async () => ({
+      ok: false,
+      status: 402,
+      code: 'turn_refused',
+      message: "You're out of IXO credits. Top up to keep chatting.",
+      reason: 'insufficient_credits',
+      retryAfterSeconds: 3600,
+      action: { label: 'Top up credits', url: 'https://portal.example/c' },
+    }));
+    const res = await send(turn, env);
+    expect(res.status).toBe(402);
+    expect(await res.json()).toEqual({
+      code: 'turn_refused',
+      reason: 'insufficient_credits',
+      message: "You're out of IXO credits. Top up to keep chatting.",
+      retryAfterSeconds: 3600,
+      action: { label: 'Top up credits', url: 'https://portal.example/c' },
     });
   });
 

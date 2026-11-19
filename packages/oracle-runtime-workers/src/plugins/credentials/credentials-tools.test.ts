@@ -1166,7 +1166,7 @@ describe('catalogued actions (self.identity-check)', () => {
       expiresAt: Date.UTC(2026, 10, 9, 14, 5) / 1000,
       message:
         'To do your identity check, open this link. You will scan your ID document and take a selfie. The link works once and ends at 18:05: https://dev.self.ixo.earth/l/tok',
-      hint: 'Send `message` as it is. Keep the linkId to read progress. A new link replaces one nobody has opened yet, so do not call this again to resend.',
+      hint: 'Send `message` as it is. Keep the linkId to read progress with credentials_action_status. Calling this again while the link is open answers the same link or its progress, never a new link; for "is it done?" or "how is it going?" use credentials_action_status.',
     });
     const create = calls.find((c) => c.url === `${SELF}/identity/v1/links`);
     expect(JSON.parse(create?.body ?? '')).toMatchObject({
@@ -1281,7 +1281,7 @@ describe('catalogued actions (self.identity-check)', () => {
       expiresAt: ends,
       message:
         'Your identity check is already in progress; it ends in 15 minutes. Please carry on with it.',
-      hint: `Its link cannot be sent again; read progress with this linkId when they write. ${NO_LATER_MESSAGE}`,
+      hint: `Its link cannot be sent again; read progress with credentials_action_status when they write. ${NO_LATER_MESSAGE}`,
     });
     await expect(
       run(
@@ -1297,6 +1297,220 @@ describe('catalogued actions (self.identity-check)', () => {
         ctx,
       ),
     ).resolves.toEqual(refusal('unauthorized', MESSAGES.notConfirmed));
+  });
+
+  describe('a second call while the link is open answers it, never a new link', () => {
+    const NOW = Date.UTC(2026, 10, 9, 13, 50);
+    const ENDS = Date.UTC(2026, 10, 9, 14, 5) / 1000;
+    const CREATED = {
+      linkId: 'lnk_1',
+      url: 'https://dev.self.ixo.earth/l/tok',
+      expiresAt: '2026-11-09T14:05:00.000Z',
+    };
+    const state = (
+      status: string,
+      extra: Record<string, unknown> = {},
+      expiresAt = '2026-11-09T14:05:00.000Z',
+    ) =>
+      json({
+        linkId: 'lnk_1',
+        status,
+        updatedAt: '2026-11-09T13:51:00.000Z',
+        expiresAt,
+        ...extra,
+      });
+
+    async function firstLink(
+      selfRoutes: Parameters<typeof routedFetch>[0],
+      nowMs = NOW,
+    ) {
+      const { adapter, oracleKey } = recordingUcan();
+      let now = nowMs;
+      const { fetchImpl, calls } = hubAndSelf({
+        [`POST ${SELF}/identity/v1/links`]: [
+          () => json(CREATED, 201),
+          () =>
+            json(
+              {
+                linkId: 'lnk_2',
+                url: 'https://dev.self.ixo.earth/l/tok2',
+                expiresAt: '2026-11-09T14:30:00.000Z',
+              },
+              201,
+            ),
+        ],
+        ...selfRoutes,
+      });
+      const tools = toolsFor(fetchImpl, oracleKey.doc, { now: () => now });
+      const ctx = channelCtx(adapter);
+      await run(
+        tools.credentials_request_action_permission,
+        { action: 'self.identity-check' },
+        ctx,
+      );
+      const first = await run(
+        tools.credentials_request_action,
+        { action: 'self.identity-check' },
+        ctx,
+      );
+      expect(first).toMatchObject({ status: 'sent', linkId: 'lnk_1' });
+      const creates = () =>
+        calls.filter(
+          (c) => c.method === 'POST' && c.url === `${SELF}/identity/v1/links`,
+        );
+      return {
+        tools,
+        ctx,
+        calls,
+        creates,
+        // Past the 5 s a status read is kept.
+        later: (ms = 10_000) => {
+          now += ms;
+        },
+        again: () =>
+          run(
+            tools.credentials_request_action,
+            { action: 'self.identity-check' },
+            ctx,
+          ),
+      };
+    }
+
+    it('tells Self the link is for a WhatsApp chat', async () => {
+      const { creates } = await firstLink({});
+      expect(JSON.parse(creates()[0]?.body ?? '')).toMatchObject({
+        channel: 'whatsapp',
+      });
+    });
+
+    it('unopened: the same link and button again, no new link', async () => {
+      const { again, creates, later } = await firstLink({
+        [`GET ${SELF}/identity/v1/links/lnk_1`]: () => state('sent'),
+      });
+      later();
+      const answer = await again();
+      expect(answer).toMatchObject({
+        status: 'sent',
+        again: true,
+        linkId: 'lnk_1',
+        url: 'https://dev.self.ixo.earth/l/tok',
+        expiresAt: ENDS,
+        message:
+          "You haven't opened your identity check link yet. Here it is again. You will scan your ID document and take a selfie. The link works once and ends in 15 minutes: https://dev.self.ixo.earth/l/tok",
+      });
+      expect(creates()).toHaveLength(1);
+    });
+
+    it('opened, not started: says so and makes no new link', async () => {
+      const { again, creates, later } = await firstLink({
+        [`GET ${SELF}/identity/v1/links/lnk_1`]: () => state('opened'),
+      });
+      later();
+      await expect(again()).resolves.toEqual({
+        status: 'already_open',
+        linkId: 'lnk_1',
+        linkStatus: 'opened',
+        expiresAt: ENDS,
+        message:
+          "You opened the link but haven't started the check yet. Please go back to the page you opened and start it before it ends in 15 minutes. If you closed that page, ask me again after that and I'll send a new link.",
+        hint: `Their link is open on the device that opened it (it cannot be opened again elsewhere), so no new link was made. Send \`message\` as it is. ${NO_LATER_MESSAGE}`,
+      });
+      expect(creates()).toHaveLength(1);
+    });
+
+    it('in progress: its status, no new link', async () => {
+      const { again, creates, later } = await firstLink({
+        [`GET ${SELF}/identity/v1/links/lnk_1`]: () => state('in_progress'),
+      });
+      later();
+      await expect(again()).resolves.toMatchObject({
+        status: 'already_open',
+        linkStatus: 'in_progress',
+        message:
+          'Your identity check is already in progress; it ends in 15 minutes. Please carry on with it.',
+      });
+      expect(creates()).toHaveLength(1);
+    });
+
+    it('in review: the first notice once, then "still being checked" (48 hours), from either tool', async () => {
+      const { again, creates, later, tools, ctx } = await firstLink({
+        [`GET ${SELF}/identity/v1/links/lnk_1`]: () =>
+          state('in_progress', { review: true }),
+      });
+      later();
+      await expect(again()).resolves.toMatchObject({
+        status: 'already_open',
+        review: true,
+        ...MESSAGES.inReview,
+      });
+      later();
+      await expect(again()).resolves.toMatchObject({
+        status: 'already_open',
+        review: true,
+        ...MESSAGES.stillInReview,
+      });
+      expect(MESSAGES.stillInReview.message).toContain('within 48 hours');
+      expect(MESSAGES.stillInReview.message).not.toContain(
+        'Thanks, your identity check is sent',
+      );
+      // The status tool, with no linkId: the newest link.
+      later();
+      await expect(
+        run(
+          tools.credentials_action_status,
+          { action: 'self.identity-check' },
+          ctx,
+        ),
+      ).resolves.toMatchObject({
+        linkId: 'lnk_1',
+        review: true,
+        ...MESSAGES.stillInReview,
+      });
+      expect(creates()).toHaveLength(1);
+    });
+
+    it('ended (failed, expired, stopped): a new link', async () => {
+      for (const ended of [
+        state('failed', { failure: 'too_many_attempts' }),
+        state('expired'),
+        state('cancelled'),
+      ]) {
+        const { again, creates, later } = await firstLink({
+          [`GET ${SELF}/identity/v1/links/lnk_1`]: () => ended.clone(),
+        });
+        later();
+        await expect(again()).resolves.toMatchObject({
+          status: 'sent',
+          linkId: 'lnk_2',
+        });
+        expect(creates()).toHaveLength(2);
+      }
+    });
+
+    it('about to end, or its status unreadable: a new link (Self still refuses one while a check runs)', async () => {
+      const soon = await firstLink({
+        [`GET ${SELF}/identity/v1/links/lnk_1`]: () =>
+          state('sent', {}, '2026-11-09T13:50:30.000Z'),
+      });
+      soon.later();
+      await expect(soon.again()).resolves.toMatchObject({ linkId: 'lnk_2' });
+      // No route: Self answers 404.
+      const unread = await firstLink({});
+      unread.later();
+      await expect(unread.again()).resolves.toMatchObject({ linkId: 'lnk_2' });
+    });
+
+    it('points "is it done?" questions at the status tool', () => {
+      const { oracleKey } = recordingUcan();
+      const { fetchImpl } = hubAndSelf();
+      const tools = toolsFor(fetchImpl, oracleKey.doc);
+      expect(tools.credentials_request_action?.description).toContain(
+        'Never call this to answer "is it done?"',
+      );
+      expect(tools.credentials_action_status?.description).toContain(
+        'never credentials_request_action',
+      );
+    });
   });
 
   it('sends the identity link as a Start check button where the chat can show one, else as today', async () => {
@@ -1349,7 +1563,9 @@ describe('catalogued actions (self.identity-check)', () => {
     expect(content.hint).toMatch(
       /^The message with the link has been sent for you as a message with a button; it is the whole reply\. Write nothing before or after it/,
     );
-    expect(content.hint).toContain('Keep the linkId to read progress.');
+    expect(content.hint).toContain(
+      'Keep the linkId to read progress with credentials_action_status.',
+    );
     expect(content.hint).not.toContain('Send `message`');
     // Self's site not approved: exactly today's answer.
     const plain = await run(
@@ -3207,6 +3423,14 @@ describe('the Hub is the source of truth, the kv a cache', () => {
       const { fetchImpl, calls } = routedFetch({
         ...listed(identityCard('card_7', 'allowed', fresh('HUB'))),
         [`POST ${SELF}/identity/v1/links`]: () => json(LINK, 201),
+        // Each link has ended by the next call, so a new one is made.
+        [`GET ${SELF}/identity/v1/links/lnk_1`]: () =>
+          json({
+            linkId: 'lnk_1',
+            status: 'expired',
+            updatedAt: '2026-11-09T14:05:00.000Z',
+            expiresAt: '2026-11-09T14:05:00.000Z',
+          }),
       });
       const tools = toolsFor(fetchImpl, oracleKey.doc);
       const { ctx, warnings } = loggedCtx(adapter, kv);

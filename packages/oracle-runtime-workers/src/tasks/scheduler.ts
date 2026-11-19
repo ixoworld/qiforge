@@ -45,6 +45,7 @@ import type {
 } from '../plugin-api/types';
 import type { DoSqliteDatabase } from '../sqlite/database';
 import type { TurnRequest, TurnResult } from '../do/contracts';
+import type { TurnRefusal } from '../plugin-api/turn-gate';
 import {
   backoffDelayMs,
   computeNextRunAtMs,
@@ -64,10 +65,28 @@ import {
   type TaskRunState,
 } from './store';
 import { taskExecutionProfile } from '../core/execution-profile';
+import { refusalAction } from '../core/turn-gate';
 import { retryGateway } from '../do/gateway-retry';
+import { escapeHtml } from '../matrix/reply-parts';
 
 /** Session-id prefix for the synthetic sessions task runs execute on. */
 export const TASK_SESSION_PREFIX = 'task:';
+
+/**
+ * The one notice a task ended by a gate's refusal posts in its room: the
+ * refusal's message, and its call to action (`details.action`) as a link
+ * (`label: url` on its own line in the plain body).
+ */
+export function taskRefusalNotice(
+  title: string,
+  refusal: TurnRefusal,
+): { body: string; formattedBody: string } {
+  const action = refusalAction(refusal);
+  return {
+    body: `🛑 **${title}** could not run: ${refusal.message}${action ? `\n${action.label}: ${action.url}` : ''}`,
+    formattedBody: `🛑 <strong>${escapeHtml(title)}</strong> could not run: ${escapeHtml(refusal.message)}${action ? `<br><a href="${escapeHtml(action.url)}">${escapeHtml(action.label)}</a>` : ''}`,
+  };
+}
 
 function taskIdOfSession(sessionId: string): string | undefined {
   return sessionId.startsWith(TASK_SESSION_PREFIX)
@@ -1364,6 +1383,11 @@ class AlarmTaskScheduler implements TaskScheduler {
         taskRunId: runId,
         executionProfile: task.executionProfile,
       });
+      if (result.refused) {
+        this.activeRuns.delete(runId);
+        await this.recordRefusal(task, nowMs, startedAt, runId, result.refused);
+        return;
+      }
       const text = result.text.trim();
       if (text.length === 0) throw new Error('Agent returned no output');
 
@@ -1524,6 +1548,90 @@ class AlarmTaskScheduler implements TaskScheduler {
     this.host.log.log(
       `[tasks] run delivered for ${task.id} (${text.length} chars${run.attempts > 0 ? `, round ${run.attempts + 1}` : ''})`,
     );
+  }
+
+  /**
+   * A run a plugin's turn gate refused (`OraclePlugin.gateTurn`): nothing
+   * ran, so it is skipped, not failed. The run row records the refusal, the
+   * task its last result, and the schedule moves on to its next occurrence
+   * with no backoff and no failure counted: a run refused for credits must
+   * not stop the task. A one-shot has no next occurrence and ends as
+   * `failed`; an approved run's schedule had already advanced. A task that
+   * ends here (a one-shot, a schedule with no next occurrence) gets one
+   * notice in its room carrying the refusal's message, like a task stopped
+   * by failures; a recurring task that moves on posts nothing (it would post
+   * once per refusal).
+   */
+  private async recordRefusal(
+    taskAtFire: TaskRecord,
+    nowMs: number,
+    startedAt: string,
+    runId: string,
+    refusal: TurnRefusal,
+  ): Promise<void> {
+    const finishedAt = new Date().toISOString();
+    const detail = `refused before it started (${refusal.status}${refusal.code ? ` ${refusal.code}` : ''}): ${refusal.message}`;
+    // Bookkeeping on the task as it is NOW: a pause or cancel meanwhile stands.
+    const task = (await this.store.get(taskAtFire.id)) ?? taskAtFire;
+    const active = task.status === 'active';
+    if (active) {
+      task.lastRunAt = startedAt;
+      task.lastResult = {
+        ok: false,
+        summary: `Skipped: ${refusal.message}`,
+        at: finishedAt,
+      };
+      task.updatedAt = finishedAt;
+      if (task.schedule.kind === 'once') {
+        task.status = 'failed';
+        delete task.nextRunAt;
+        delete task.pendingApprovalAt;
+      } else if (task.approval !== 'before-action') {
+        const nextMs = computeNextRunAtMs(
+          task.schedule,
+          Math.max(nowMs, Date.now()),
+        );
+        if (nextMs !== null) task.nextRunAt = new Date(nextMs).toISOString();
+        else {
+          task.status = 'failed';
+          delete task.nextRunAt;
+        }
+      }
+    }
+    const ended = active && task.status === 'failed';
+    await this.host.db.transaction(async () => {
+      if (active) await this.store.save(task);
+      await this.store.updateRun(runId, {
+        state: 'failed',
+        ok: false,
+        finishedAt,
+        detail,
+        retryAt: null,
+      });
+    });
+    this.host.log.warn(`[tasks] run ${runId} of ${task.id}: ${detail}`);
+    // A task the refusal ended says so in its room (a Topic deliverable's
+    // owner reads the stored result instead), so it never ends silently.
+    // Best-effort, under a fixed id: never two copies.
+    if (!ended || task.topicOperationId !== undefined) return;
+    const roomId = await this.resolveDeliveryRoom(task);
+    if (!roomId) return;
+    const notice = taskRefusalNotice(task.title, refusal);
+    await retryGateway(
+      () =>
+        this.host.gateway.sendText(roomId, notice.body, {
+          formattedBody: notice.formattedBody,
+          txnId: `task-${runId}-refused`,
+          priority: 'interactive',
+        }),
+      this.deliveryRetryDelaysMs
+        ? { delaysMs: this.deliveryRetryDelaysMs }
+        : {},
+    ).catch((postErr: unknown) => {
+      this.host.log.warn(
+        `[tasks] refusal notice for ${task.id} could not be posted: ${errorMessage(postErr)}`,
+      );
+    });
   }
 
   /**

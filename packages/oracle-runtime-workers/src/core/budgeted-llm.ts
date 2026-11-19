@@ -21,12 +21,19 @@
 import { BaseCallbackHandler } from '@langchain/core/callbacks/base';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { LLMResult } from '@langchain/core/outputs';
+import type { ModelCallReport } from '../llm/model-call';
 import type { ChatOpenAIFields, Logger, ModelRole } from '../plugin-api/types';
 import {
   estimateContentTokens,
   messageContentTokens,
   messageToolCallTokens,
 } from './context-budget';
+import {
+  attachCallback,
+  MODEL_ROLE_METADATA_KEY,
+  ModelCallReports,
+  replyMessageOf,
+} from './model-call-reporter';
 import type { LlmAdapter } from './runtime-context';
 import type { TurnBudget } from './turn-budget';
 import { NOOP_LOGGER } from './utils';
@@ -35,7 +42,7 @@ import { NOOP_LOGGER } from './utils';
 export const LLM_HEARTBEAT_MS = 60_000;
 
 /** Metadata key `budgetedLlm` stamps on the models it hands out. */
-const ROLE_METADATA_KEY = 'oracle_model_role';
+const ROLE_METADATA_KEY = MODEL_ROLE_METADATA_KEY;
 
 export interface BudgetedLlmOptions {
   budget: TurnBudget;
@@ -45,6 +52,13 @@ export interface BudgetedLlmOptions {
   signal?: AbortSignal;
   /** Receives the per-call trace (`[llm] start` / `end` / still running). */
   logger?: Logger;
+  /**
+   * Each call's report (`model-call.ts`), once, when the call ended or
+   * failed: the record read off the reply's `response_metadata.model_call`
+   * or the error (platform and BYO models both keep one), with the call's
+   * purpose (`model-call-reporter.ts`), id and start time.
+   */
+  onModelCall?: (call: ModelCallReport) => void;
 }
 
 export interface BudgetedLlm extends LlmAdapter {
@@ -173,11 +187,14 @@ class TurnBudgetHandler extends BaseCallbackHandler {
     }
   >();
   private readonly logger: Logger;
+  /** Each call's report, once (a call can reach the handler twice). */
+  private readonly reports: ModelCallReports;
   private readonly onAbort = (): void => this.closeAll();
 
   constructor(private readonly options: BudgetedLlmOptions) {
     super();
     this.logger = options.logger ?? NOOP_LOGGER;
+    this.reports = new ModelCallReports(options.onModelCall, this.logger);
     // A call the abort cut short may never report its end; its heartbeat
     // must not outlive the turn (a live timer keeps the object resident).
     options.signal?.addEventListener('abort', this.onAbort, { once: true });
@@ -259,12 +276,15 @@ class TurnBudgetHandler extends BaseCallbackHandler {
       tokens,
       summary: metadata?.lc_source === SUMMARIZATION_SOURCE,
     });
-    // Traced only once admitted: a refused call never starts a heartbeat.
+    // Traced (and its report opened) only once admitted: a refused call
+    // never starts a heartbeat and never reaches the provider.
+    this.reports.start(runId, metadata);
     this.traceStart(runId, extraParams, tags, metadata);
   }
 
   handleLLMEnd(output: LLMResult, runId: string): void {
     this.traceEnd(runId, 'end');
+    this.reports.end(runId, replyMessageOf(output));
     const reservation = this.reservations.get(runId);
     if (reservation === undefined) return;
     this.reservations.delete(runId);
@@ -273,8 +293,9 @@ class TurnBudgetHandler extends BaseCallbackHandler {
       this.options.budget.settleModel(reservation.tokens, reported);
   }
 
-  handleLLMError(_error: unknown, runId: string): void {
+  handleLLMError(error: unknown, runId: string): void {
     this.traceEnd(runId, 'error');
+    this.reports.end(runId, error);
     const reservation = this.reservations.get(runId);
     this.reservations.delete(runId);
     // A failed call keeps its reservation: the provider may have consumed
@@ -286,21 +307,6 @@ class TurnBudgetHandler extends BaseCallbackHandler {
     if (reservation?.summary)
       this.options.budget.releaseModel(reservation.tokens);
   }
-}
-
-function attach(model: BaseChatModel, handler: BaseCallbackHandler): void {
-  const existing = model.callbacks;
-  if (existing === undefined) {
-    model.callbacks = [handler];
-    return;
-  }
-  if (Array.isArray(existing)) {
-    if (!existing.includes(handler)) model.callbacks = [...existing, handler];
-    return;
-  }
-  const manager = existing.copy();
-  manager.addHandler(handler);
-  model.callbacks = manager;
 }
 
 export function budgetedLlm(
@@ -326,7 +332,7 @@ export function budgetedLlm(
       };
       const model = adapter.get(role, { ...params, metadata });
       model.metadata = { ...model.metadata, ...metadata };
-      attach(model, callback);
+      attachCallback(model, callback);
       return model;
     },
   };

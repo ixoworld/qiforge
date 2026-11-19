@@ -12,10 +12,32 @@ export type {
   RequestDisposition,
 } from './request-admission';
 export type {
+  ChannelFailureInfo,
   PluginEnv,
   PluginRoute,
   PluginRouteMethod,
 } from './oracle-plugin';
+export {
+  MODEL_CALL_METADATA_KEY,
+  MODEL_CALL_PURPOSES,
+  modelCallOf,
+  type ModelCallPayer,
+  type ModelCallPurpose,
+  type ModelCallRecord,
+  type ModelCallReport,
+  type TurnModelUsage,
+} from '../llm/model-call';
+export type {
+  PlatformModelsPolicy,
+  TurnGateContext,
+  TurnGatePolicy,
+  TurnGateResult,
+  TurnRefusal,
+  TurnRefusalAction,
+  TurnRefusalBody,
+  TurnRefusalDetails,
+  TurnTrigger,
+} from './turn-gate';
 export {
   IDENTITY_CHECK_EVENT_STATUSES,
   MAX_CHANNEL_EVENT_TEXT,
@@ -27,6 +49,8 @@ export {
   type PermissionAnsweredEvent,
   type PermissionEventStatus,
 } from './channel-events';
+/** The ad a channel turn's person tapped (`ctx.session.channel.entryPoint`); untrusted data. */
+export type { ChannelEntryPoint } from '../channels/contract';
 export { defineOraclePlugin } from './define-plugin';
 export type { DefineOraclePluginInput } from './define-plugin';
 export { tool } from './tool-helper';

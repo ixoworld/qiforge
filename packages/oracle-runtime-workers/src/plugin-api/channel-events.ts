@@ -59,11 +59,21 @@ export type OracleChannelEvent =
  * person's words, never sent to them): for `reply` it records what was
  * said, for `agent` it says what to do. Both are the plugin's own wording,
  * never text from the event, the Hub or Self.
+ *
+ * `facts` (optional, `reply` only): the structured facts behind `text`, for
+ * a plugin that extends this one and words the reply itself (the Yo agent
+ * rewrites a failed identity check's message with its own tips). The
+ * runtime neither sends nor stores them.
  */
 export type ChannelEventResult =
   | { kind: 'pass' }
   | { kind: 'ignore' }
-  | { kind: 'reply'; text: string; note: string }
+  | {
+      kind: 'reply';
+      text: string;
+      note: string;
+      facts?: Readonly<Record<string, string | number | boolean>>;
+    }
   | { kind: 'agent'; note: string };
 
 /** The longest `text` or `note` a plugin may return. */

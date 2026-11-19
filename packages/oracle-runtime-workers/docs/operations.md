@@ -124,7 +124,7 @@ it per client IP:
 
 | Field                                                                                             | Meaning                                                                                                                                                                                                                                         |
 | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `running`, `syncState`, `lastSyncAt`, `syncs`, `syncFailures`                                     | The sync loop. `syncFailures` climbing = homeserver trouble.                                                                                                                                                                                    |
+| `running`, `syncState`, `lastSyncAt`, `syncs`, `syncFailures`, `syncLoops`                        | The sync loop. `syncFailures` climbing = homeserver trouble. `syncLoops` is 1 while running (2 only during a device rotation); more is a leaked loop (fixed in bot SDK 0.7.1).                                                                  |
 | `deviceId`, `deviceRotations`, `resumedSync`                                                      | The current device; rotations since the object was created; whether this start resumed from a token.                                                                                                                                            |
 | `instanceId`, `instanceUptimeMs`                                                                  | A changing instance id with a short uptime means the object was killed or redeployed (see below).                                                                                                                                               |
 | `lastStart` (`restoreMs`, `cryptoInitMs`, `syncMs`, `totalMs`)                                    | Timings of the last boot.                                                                                                                                                                                                                       |
@@ -526,6 +526,70 @@ browser …; running it again`). A sent one follows the read / write rule
   `CREATE INDEX IF NOT EXISTS` on the first boot that has them), at one
   index entry per run-row update.
 
+### Turns: the loop limit
+
+Cloudflare refuses a call once a request chain has looped back into the
+Workers runtime 16 times. The refusal is the error `Subrequest depth limit
+exceeded. This request looped back into the Workers runtime too many times.`
+on a Durable Object RPC, and an HTTP `503` with the body `error code: 1019`
+on a fetch to a Worker-backed host (OpenRouter, the memory engine). A Durable
+Object's outgoing calls are charged to its newest in-flight incoming request,
+so the gateway and a user object that keep calling each other ratchet each
+other down. Measured on devnet (runtime 0.51.1, a user sending a message a
+few seconds after each reply in one thread): the budget left when a turn
+reached the user object went 13 → 9 → 14 (a user-object alarm happened to
+be the newest request) → 10 → 6 → 2 → 0, four hops per turn (dispatch,
+the turn's status-card post, closing the card gateway → user, its post back);
+from then on every turn's gateway calls, memory lookup and model call were
+refused in milliseconds and the user got `Sorry — something went wrong…`.
+Mainnet hit it in Matrix rooms only (Nov 9–13 2026, three users, about 90
+turns), never on Portal turns, which start from a browser request.
+
+Since the fix, work the gateway hands to a user object — a room turn
+(`runTurn` with an event id), closing a status card (`finishWorkStatus`), a
+group summary (`summarizeGroupMessages`) — waits until an alarm invocation
+of the user object has been delivered (`src/do/fresh-invocation.ts`): the
+alarm is a top-level event with the full budget, and from then on the
+work's calls are charged to it. The alarm hands the work a lease and keeps
+itself open (`waitUntil`) until the lease ends. A wake armed only for the
+gate re-arms the pending deadline and skips the full housekeeping tick (and
+never boots a bare object). The room turn is claimed by event id before it
+waits, so a gateway replay of the same message attaches to it.
+`finishWorkStatus` answers the gateway at once and makes the card's closing
+post in the background, so it never holds one of the gateway's turn slots.
+The wait is normally a few milliseconds (devnet: the budget at the turn's
+first call out was 16 on every turn, against 13 → 0 before).
+
+Known limits:
+
+- While an alarm handler of the object is running (a scheduled task's turn,
+  a flush upload) no new alarm can be delivered: gateway work then runs
+  where it is at once and logs `[loop-limit] an alarm handler is running; …`.
+  If the alarm cannot be armed or does not come within 3 s it logs
+  `[loop-limit] no alarm within 3000 ms for …` and also runs where it is.
+- Between the gateway's call arriving and the alarm (milliseconds) that call
+  is the object's newest request, so other work the object does in that
+  window is charged to it. A Stop from the Portal for a room turn still
+  waiting for its alarm finds no run to stop.
+
+Safety nets and what the logs say:
+
+- `[loop-limit] gateway.<method> was refused by Cloudflare's loop limit;
+retrying once from a fresh invocation` — a user object → gateway call was
+  refused and retried once after a new alarm. Only reads and sends that
+  carry a transaction id (the homeserver deduplicates them) are retried: the
+  same refusal can come back from a call the gateway itself made after it
+  had started work. Calls that carry a stream are never retried.
+- `[loop-limit] turn <requestId> (<client>) failed: …` — a turn still failed
+  on a refusal (either form); the gateway posts the "Sorry — something went wrong…" notice
+  in the thread and the gateway log line `turn <requestId> failed: <reason>`
+  now carries the reason.
+- Any other `Subrequest depth limit exceeded` / `error code: 1019` in the
+  logs means a new call path back into the gateway or the user object that
+  bypasses the gate: find who called whom (the gateway's `[matrix-bot] turn
+…` line is logged inside the request it was charged to) and route the work
+  through the gate.
+
 ### Transcript: paging
 
 `GET /sessions/:id/messages?limit=20&before=<cursor>&after=<cursor>` reads a
@@ -860,7 +924,7 @@ Settings and the measured latencies are in
 [configuration](configuration.md#first-turn-memory-prefetch).
 
 - **Waiting.** A thread with no checkpointed `userContext` (first contact)
-  waits for the result for at most 3 s (`USER_CONTEXT_PREFETCH_CAP_MS`);
+  waits for the result for at most 4 s (`USER_CONTEXT_PREFETCH_CAP_MS`);
   after that the turn runs without it and the request keeps going in the
   background, so the room's cache has it for the next session. The thread
   that missed it stays on first contact and asks again on its next turn (a
@@ -1253,12 +1317,23 @@ transient error.
 
 The gateway shares its isolate's 128 MB with the crypto WASM and every event
 being encrypted, and a crypto WASM's linear memory only grows inside one
-isolate. Two things keep it healthy: the encryption gate plus
-`MATRIX_TURN_CONCURRENCY` bound concurrent encryption sources, and after
-`MATRIX_RECYCLE_AFTER_SENDS` sends (default 300) the SDK recycles the object —
-only when nothing is in flight and no message arrived for 15 s, so nobody
-notices. The log line `planned recycle: N sends since boot` precedes every
-intentional instance change; an instance change without one is a kill worth
+isolate. The encryption gate plus `MATRIX_TURN_CONCURRENCY` bound concurrent
+encryption sources, and the SDK prunes fake-indexeddb's finished transactions
+(the ~250 KB per encrypted send that once killed the object every 300 sends);
+`cryptoStoreTransactions` in `/matrix/status` is the guard and stays at a
+handful whatever the number of sends.
+
+The planned recycle after `MATRIX_RECYCLE_AFTER_SENDS` sends is **off by
+default** (0). It restarts the bot in the same isolate, so it returns none of
+the crypto WASM's memory, and under steady load (300 sends every few minutes)
+it cancelled sends still waiting in the scheduler and held every gateway call
+until the bot was back, sometimes for minutes. With it off, a local gateway
+carried 2,000 encrypted sends in one instance with `cryptoStoreTransactions`
+at 0 and no growth in the worker's memory. Set a positive count only to bring
+it back on purpose; it then waits until nothing is in flight and no message
+arrived for 15 s, or forces itself at five times the count. The log line
+`planned recycle: N sends since boot` precedes such a restart; any other
+instance change (`/matrix/status` `instanceId`) is a reset or a kill worth
 investigating. Cloudflare's GraphQL analytics
 (`durableObjectsInvocationsAdaptiveGroups`, dimension `status`) show
 `exceededMemory` counts per five minutes and are the acceptance check after
@@ -1293,7 +1368,11 @@ catch-up, but it stalls sends for ~30 s.
   `device_id`, the old snapshot discarded, room keys restored from the
   account backup, the old device drained and logged out. Each rotation costs
   a fresh boot with a backup restore. `POST /debug/matrix/rotate-device`
-  does it on demand.
+  does it on demand. A rotation requested while the bot is still starting
+  waits for that start and then rotates (bot SDK 0.7.2); before, it left
+  the old device on the homeserver with its keys. After a rotation the
+  account's device list should hold one gateway device (plus the plugin
+  device).
 - **Media never sits in the gateway.** Attachment media (Portal and Matrix
   files, channel files' room copies, image recall) never crosses it: the
   gateway answers only the media event's small JSON (`eventMediaInfo`: the
@@ -1443,10 +1522,19 @@ becomes a turn (`src/matrix/group-chat.ts`):
   the Node runtime builds it. A decoupled
   deployment (users on one homeserver, the bot on another) resolves nothing
   otherwise. Room ids are cached per user for 30 minutes.
-- Room state right after an invite: `getRoomState` answers a 403 (not yet a
-  member) by accepting the pending invite and retrying for up to 5 s, so a
-  membership check that lands before the sync loop has joined a just-created
-  page room does not fail closed.
+- Room state right after an invite: `getRoomState`, `getRoomStateEvent` and
+  `sendStateEvent` answer a 403 (not yet a member) by accepting the pending
+  invite and retrying for up to 5 s, so a membership check, or the
+  delegation a new user's Hub deposit writes (`POST /delegation`), that
+  lands before the sync loop has joined a just-created room does not fail.
+  This happens while the bot restarts: an invite seen in the restart's first
+  sync is tried four times in about 3.5 s before the client is marked
+  running, gives up, and is joined only when the start finishes (the start
+  joins pending invites last), and a start sometimes takes 30 to 250 s after
+  its first sync (mainnet Yo, 14 Nov 2026: 194 starts in 10 h, median 1.3 s,
+  slowest 248 s). A call that still fails logs a warning
+  `[matrix-bot] <call> in <room> failed: <homeserver message>`; a join made
+  this way logs `[matrix-bot] <call>: joined <room> and trying again`.
 - Dedicated task rooms are created by the gateway (`createDedicatedRoom`:
   private, the user invited, a summary posted) for `before-action` tasks,
   on the `auto` heuristic or `dedicatedRoom: 'yes'`; replies there reach the
@@ -1721,10 +1809,105 @@ chunks stay SSE-only.
 
 Background work is bounded: the session-history indexer runs under
 `ctx.waitUntil` with at most two attempts, 3 s apart, each with a 20 s
-timeout on the memory-engine request; a failed session is retried on the
-next session create because its watermark did not move. Task-run sessions
+timeout on the memory-engine request; see
+[Session history uploads](#session-history-uploads-to-the-memory-engine)
+for the request rules, refusals and the catch-up. Task-run sessions
 (`task:<id>`) are never indexed: a session create indexes the user's most
 recent conversation, skipping task runs.
+
+### Session history uploads to the memory engine
+
+`src/memory/session-history-indexer.ts` sends a session's messages after its
+`last_processed_count` to `POST <MEMORY_ENGINE_URL>/messages` (triggers: a
+session create indexes the previous session, a delete, the last realtime
+disconnect, a channel session quiet for `CHANNEL_HISTORY_INDEX_DEBOUNCE_MS`,
+and the housekeeping catch-up below).
+
+Request rules (the engine's, `memory-engine-workers` docs/API.md): at most
+**50 messages per request, counted after the conversation filter**
+(`MEMORY_UPLOAD_MAX_MESSAGES`; tool results and flagged replies are not
+sent), at most 16 KiB of content per message
+(`MEMORY_UPLOAD_MAX_MESSAGE_BYTES`) and a body of at most 512 KiB (half the
+engine's 1 MiB cap). A longer backlog goes up as consecutive requests
+("parts"), oldest first; a part always holds whole transcript messages and
+the count advances after each accepted part, so a failure in part N keeps
+parts 1..N-1 and the next pass resumes at N. A message over 16 KiB is split
+into pieces marked `[part i/n] `; past 8 pieces (about 128 KiB) the rest is
+cut and the last piece ends `[message cut here: N more bytes not stored]`.
+Labels are cut to the engine's 500 characters. Every message carries a
+`uuid` (UUIDv8 over the session, the message's position and its text): a
+part sent again after a lost answer is stored once by the Workers engine,
+which deduplicates on it (the old engine ignores it).
+
+Before this fix a part was 200 transcript messages counted before the filter:
+any chat that passed about 50 messages without a quiet period was refused
+whole (`422 MESSAGES_INVALID` "Array must contain at most 50 element(s)"),
+retried, never advanced, and every later message of that session stayed out
+of memory (mainnet Yo, Nov 13–15 2026: 555 refusals, 222 sessions).
+
+Refusals follow the engine's error contract (`retryable`, `retry_after_ms`,
+and `reason` / `index` / `limit` when the engine sends them):
+
+| Refusal                                                                                            | What the indexer does                                                                                                                                                                                                                                                                                                                                                                                            |
+| -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| count rule (`reason` `too_many:messages`, or "at most N element(s)/items")                         | sends at most N (else half) per request from then on (for the object's life) and goes on                                                                                                                                                                                                                                                                                                                         |
+| 413 `BODY_TOO_LARGE` / `body_too_large`                                                            | lowers the body size (strictly, by a tenth at least) and goes on                                                                                                                                                                                                                                                                                                                                                 |
+| 413 `EPISODE_TOO_LARGE` / `too_large:messages[].content`                                           | splits messages at the engine's limit (strictly smaller, by a tenth at least) and goes on                                                                                                                                                                                                                                                                                                                        |
+| other content refusal (422 `MESSAGES_INVALID` / `BODY_INVALID`, 400 `BAD_JSON`, code-less 422/413) | narrows down to the message (the one `index` names, else by halving) and **skips it with a warning** and advances, so it cannot block the session — but only with evidence that the refusal is about that message: a request accepted since the last skip, else the messages after it accepted in one request. Otherwise (an engine refusing every request for a shared reason) the pass stops and skips nothing |
+| `retryable: true`, a 429 (`QUEUE_FULL`, `USER_RATE_LIMITED`, `BUDGET_EXCEEDED`, …)                 | waits `retry_after_ms` / `Retry-After` (else 1 s, 2 s) and resends the same part: ≤ 3 tries, ≤ 10 s a wait, ≤ 30 s a pass; a longer wait ends the pass with that wait as the backoff floor                                                                                                                                                                                                                       |
+| plain 5xx, network error, timeout                                                                  | the pass's two attempts (3 s apart), resending the same part                                                                                                                                                                                                                                                                                                                                                     |
+| anything else non-retryable (401/403 auth, 400 entity headers, 404, 507, 508 `CALLER_DEPTH`, …)    | stops the pass at once: the same request is not retried, nothing is skipped, the count stays                                                                                                                                                                                                                                                                                                                     |
+| the engine's DID document cannot be read (engine down)                                             | a failed pass (backoff, backlog kept), not a skip; only a missing delegation (the mint fails) is a skip                                                                                                                                                                                                                                                                                                          |
+
+A pass also stops starting requests after 100 requests or 60 s; the rest
+follows on the next pass. After a failed pass the session backs off (1 min
+doubling to 1 h; a pass that moved the count starts again at 1 min).
+
+**Catch-up.** Every trigger writes `history:backlog:<sessionId>` to the
+object's storage before its pass; a pass that leaves a backlog (failed,
+deferred, out of budget) keeps it with a next time (5 min after progress,
+else doubling from 10 min to 6 h, never sooner than the engine's
+`retry_after_ms`) and arms the housekeeping alarm for it; a pass that
+reaches the end removes it. Each full housekeeping tick starts one
+background run (never two at once) over up to 3 due sessions (a session
+with a run in progress waits) and keeps the recorded deadline, at least a
+minute out, so an idle copy is not evicted before its history is uploaded.
+Taking a session counts as an attempt, so a pass that never reports (the
+isolate died, a call hung) counts too; after 8 attempts in a row without
+progress the session is dropped from the record (`… dropping it from the
+catch-up`): about a day at most. Its count stays, and its next trigger
+uploads from there. The first full tick after the upgrade records the 5
+most recent conversations updated in the last 14 days once
+(`meta:historyBacklogSeeded`), so sessions stuck before the fix are uploaded
+even if the person never writes again. A session with nothing new sends
+nothing, but on a fresh instance its pass reads the transcript from the
+start (the resume cursor lives in memory only). An evicted object is never
+woken for it: the catch-up runs on ticks the object has anyway or that a
+pass armed.
+
+Recovery of a stuck session: its count is where the refusals left it, so the
+next pass — the person's next message (after the quiet period), a session
+create or end, or the catch-up (the first full tick after the upgrade: a
+recently active user's daily flush, at the latest the idle-eviction tick
+5 days after their last message) — uploads the whole backlog in parts of 50.
+
+Log lines (counts and sizes only, never content; the engine's `detail` only
+from a body with a `code`):
+
+- `[history-indexer] session <id>: part <k> accepted (<n> messages from <m> transcript messages, <bytes> bytes; lastProcessedCount → <count>)`
+- `[history-indexer] session <id>: backlog done, <n> messages in <k> parts[, <s> transcript messages skipped] (lastProcessedCount <from> → <to>)` — info, when a pass that needed more than one part reaches the end; a one-part pass logs `indexed session <id> into the memory engine (lastProcessedCount <from> → <to>)`.
+- `[history-indexer] memory engine refused an upload for session <id> (<status> <code> reason=… retryable=… retry_after_ms=… detail="…"; rule=<count|body|message|invalid|retry|stop>): <n> messages from <m> transcript messages, <bytes> bytes, largest message <b> bytes; <what happens next>` — warn.
+- `[history-indexer] stopping the pass for session <id>: …` and `giving up on session <id> … (lastProcessedCount <from> → <to>, <k> parts accepted this pass); next try in <s>s at the earliest` — the pass ended with a backlog.
+- `[history-indexer] session <id>: pass budget spent (…); the rest follows on the next pass`.
+- `[history-indexer] <userDid>: looking at the <n> most recent conversations once …` — the one-time seed.
+
+Known limits: a message split into pieces gets piece ids that depend on the
+limits in force, so if the engine's answer to such a part is lost and the
+part is sent again after the indexer learned a lower limit (or on a fresh
+instance), its pieces can be stored twice. The memory-echo filter
+(`conversationReader`) starts afresh on each page the live path reads, so a
+reply that repeats a memory search can still be sent when a page boundary
+falls inside its turn.
 
 ## Anonymous response feedback
 
@@ -2283,6 +2466,7 @@ that can handle the requested parameters` is the memory engine's own
 | A plugin with `requires` is refused although the user authorized it; `[UCAN] the delegation expired at …` | `GET /debug/delegation` (the stored delegation's expiry)                                                                              | Validity is checked at use: an expired stored delegation grants nothing even while the object stays warm. The user re-authorizes (a new delegation).                                                         |
 | An admin tool (or its whole plugin) is missing for a user; `[main-agent] admin tools withheld from <did>` | `GET /debug/delegation`; the grants the user issued                                                                                   | Expected without the grant: the user delegates `admin-tool/invoke` on `ixo:qiforge:admin-tool/<plugin>[/<tool>]` (architecture → Admin-plane tools).                                                         |
 | `Network connection lost` on a gateway RPC                                                                | Gateway just restarted                                                                                                                | Expected once per restart; waited sends retry by themselves.                                                                                                                                                 |
+| `Subrequest depth limit exceeded` or `error code: 1019` in a turn                                         | `[loop-limit]` lines; which request the failing call was charged to                                                                   | Cloudflare's loop limit; see [the loop limit](#turns-the-loop-limit). Route the new call path through the fresh-invocation gate.                                                                             |
 
 ## Model calls: liveness and the call trace
 
@@ -2291,16 +2475,34 @@ stream liveness guard ([configuration](configuration.md#model-call-liveness)).
 The trace never carries message content, tokens or credentials — only the
 role, the model id, the tags and timings.
 
-| Line                                                                                          | Level | Meaning                                                                                                               |
-| --------------------------------------------------------------------------------------------- | ----- | --------------------------------------------------------------------------------------------------------------------- |
-| `[llm] start role=<role> model=<id> tags=<tags>`                                              | debug | A call admitted by the turn budget.                                                                                   |
-| `[llm] end role=… model=… in N ms` / `[llm] error role=… model=… in N ms`                     | debug | The call returned or failed.                                                                                          |
-| `[llm] role=… model=… still running after N s`                                                | info  | Every 60 s while a call is open. A working long call shows it too: pair it with the absence of a stall line below.    |
-| `[llm] <label>: first byte after N ms`                                                        | debug | Time to the first body byte (`<label>` is `<lane> <role> <model>`, e.g. `openrouter subagent openai/gpt-5.6-luna`).   |
-| `[llm] <label>: no response for N s, retrying (attempt k)` / `no bytes for N s, retrying (…)` | warn  | A stall before anything reached the caller; the identical request is re-sent.                                         |
-| `[llm] <label>: no response/no bytes for N s; giving up after k attempts`                     | warn  | The retries are spent; the call fails (`kind: timeout`, "The model did not start responding").                        |
-| `[llm] <label>: no bytes for N s after B bytes (… s into the call); failing it — …`           | warn  | A stall mid-reply. Never retried: the call fails at once (`kind: timeout`, "The model stopped responding mid-reply"). |
-| `[tool-execution] <tool> (<callId>): ok in N ms` / `returned an error in N ms`                | debug | A tool call (a sub-agent's inner tools included) completed, timed from when it got its slot.                          |
+| Line                                                                                                                  | Level | Meaning                                                                                                               |
+| --------------------------------------------------------------------------------------------------------------------- | ----- | --------------------------------------------------------------------------------------------------------------------- |
+| `[llm] start role=<role> model=<id> tags=<tags>`                                                                      | debug | A call admitted by the turn budget.                                                                                   |
+| `[llm] end role=… model=… in N ms` / `[llm] error role=… model=… in N ms`                                             | debug | The call returned or failed.                                                                                          |
+| `[llm] role=… model=… still running after N s`                                                                        | info  | Every 60 s while a call is open. A working long call shows it too: pair it with the absence of a stall line below.    |
+| `[llm] <label>: first byte after N ms`                                                                                | debug | Time to the first body byte (`<label>` is `<lane> <role> <model>`, e.g. `openrouter subagent openai/gpt-5.6-luna`).   |
+| `[llm] <label>: no response for N s, retrying (attempt k)` / `no bytes for N s, retrying (…)`                         | warn  | A stall before anything reached the caller; the identical request is re-sent.                                         |
+| `[llm] <label>: no response/no bytes for N s; giving up after k attempts`                                             | warn  | The retries are spent; the call fails (`kind: timeout`, "The model did not start responding").                        |
+| `[llm] <label>: no bytes for N s after B bytes (… s into the call); failing it — …`                                   | warn  | A stall mid-reply. Never retried: the call fails at once (`kind: timeout`, "The model stopped responding mid-reply"). |
+| `[tool-execution] <tool> (<callId>): ok in N ms` / `returned an error in N ms`                                        | debug | A tool call (a sub-agent's inner tools included) completed, timed from when it got its slot.                          |
+| `[tool-execution] <tool> (<callId>): threw after N ms[ (turn aborted)]: <first line>`                                 | warn  | A tool call threw (an MCP `isError` result arrives this way). An outer layer usually hands the error to the model.    |
+| `[tool-error] <sub-agent>: <tool> (<callId>) threw; the error is its result[ (write, outcome unknown)]: <first line>` | info  | Inside a sub-agent: the thrown error became the call's error result; the sub-agent carries on (see below).            |
+| `<sub-agent>: the sub-agent failed: <first line>`                                                                     | warn  | The sub-agent itself failed (its model call, its setup); the parent reads `Error running <name>: …` + its hint.       |
+
+A tool that throws never ends its agent. On the main agent the outer
+`toolRetryMiddleware` turns the error into an error result; inside a
+sub-agent `createToolErrorResultMiddleware` does (LangChain's
+`toolErrorMiddleware`, the outermost tool layer of each dispatch, so the
+marks, the repetition guard and the write claims see the thrown error
+first). Both let a turn out of budget and LangGraph's interrupt / drain /
+parent command through; the sub-agent layer lets the turn's abort through
+too (on the main agent the aborted turn stops at its next model call). A
+schema rejection reads `Invalid arguments for <tool>: <reason>` on both. A
+sub-agent's write whose failure leaves its outcome unknown (timeout,
+dropped connection, 5xx) says so in its result and keeps its claim. So one
+failed fetch (a site that refuses a Firecrawl scrape) leaves the sub-agent
+its other results. Log lines carry an error's first line, cut to 300
+characters, and a schema rejection without its arguments.
 
 A stall looks like this in the tail: `[llm] start …`, one or more `still
 running` heartbeats, then a `no bytes` warning and `[llm] error … in N ms`
@@ -2315,6 +2517,166 @@ the platform lane, none on BYO lanes; see
 The client may resubmit; nothing is resubmitted for it. A tool whose own
 model call stalls fails with an outcome treated as unknown, so a write it
 was making keeps its claim (below).
+
+## Model calls: routing record, fallbacks and analytics
+
+Every platform model call (OpenRouter or Nebius, any role) logs one line when
+it ends or fails (`src/llm/platform-chat-model.ts`, `src/llm/model-call.ts`):
+
+```
+[llm-call] {"role":"main","requestedModel":"openai/gpt-5.6-luna","servedModel":"openai/gpt-5.6-luna","provider":"OpenAI","generationId":"gen-…","fallback":false,"modelFallback":false,"providerFallback":false,"promptTokens":37000,"cachedTokens":31500,"cacheWriteTokens":0,"outputTokens":105,"reasoningTokens":30,"costUsd":0.0021,"durationMs":2400,"ok":true,"finishReason":"stop"}
+```
+
+- `servedModel` / `provider` are what OpenRouter reports on the stream (the
+  model and upstream provider that answered). `modelFallback` is true when a
+  model of the `models` list answered (`OPENROUTER_MAIN_FALLBACKS`),
+  `providerFallback` when the requested model answered from a provider other
+  than the first of `provider.order` (e.g. Amazon Bedrock after OpenAI and
+  Azure); `fallback` is either.
+- A failed call logs the same line at `warn`, with `ok: false`, `errorKind`
+  (`rate_limit`, `billing`, `auth`, `timeout`, `server`, `network`,
+  `unknown`), `errorStatus`, `errorCode` and `detail` (the provider's message,
+  cut to 300 characters).
+- After a fallback or a failure that has a generation id, the turn reads
+  OpenRouter's generation record in the background (`waitUntil`, 3 s and 7 s
+  after the call, never delaying the reply) and logs each provider OpenRouter
+  tried:
+  `[llm-call-attempts] {"generationId":"gen-…","attempts":[{"provider":"OpenAI","status":400,…},{"provider":"Azure","status":400,…},{"provider":"Amazon Bedrock","status":200,…}]}`.
+  A `400` on the first providers is a request the provider refuses (our bug);
+  a `429` or `5xx` is capacity.
+- The stored reply carries the record as `response_metadata.model_call`
+  (LangSmith shows it on the run), and `response_metadata.usage` is the
+  provider's usage once. Before 0.52.0 it was exactly twice the real value
+  (tokens and cost): OpenRouter's last streamed chunk carries the usage with
+  a choice, and LangChain added it to the message twice. `usage_metadata`
+  was always right.
+- Plugins get each record through `OraclePlugin.onModelCall(call, ctx)`, in
+  the background, with `purpose`, `paidBy` (`platform` or `user` for a BYO
+  call), `callId` and `startedAt` added; every model call the runtime makes
+  for a person is reported this way, attachment extraction, titles, group
+  summaries and Decisions included, and each turn attempt's calls once more
+  through `onTurnUsage` ([usage-metering](usage-metering.md)). The record
+  holds no message content, tool arguments or user ids.
+- A turn a plugin's `gateTurn` refused logs
+  `[turn-gate] refused {"plugin","trigger","requestId","status","code","ms"}`;
+  a gate that threw or timed out logs `[turn-gate] {…,"failure","policy"}`
+  at `warn`; a refusal status other than 402/403/429/503 answered as 403
+  logs `[turn-gate] {…,"status","answeredAs":403}`. A refused task run's
+  ledger detail reads `refused before it started (<status> <code>):
+<message>`; a refusal that ends the task posts `🛑 **<title>** could not
+run: <message>` in its room.
+- A turn a gate restricted to the person's own provider
+  (`platformModels: 'deny'`) that would not run on it fails with
+  `PlatformModelsDeniedError` before any model call; a channel request so
+  restricted is never classified (routing reason `platform-models-denied`).
+- A platform streamed call cut off after output started logs its
+  `[llm-call]` line with `"usageEstimated":true` and chars/4 token counts.
+- A plugin's wake (`ctx.requestWake`) is `meta:pluginWakeAt` in DO storage,
+  served by the housekeeping tick; `[user-do] plugin <name>: onWake failed:
+…` at `warn`. Deleted with an evicted idle copy.
+
+### Tool schemas OpenAI refuses
+
+OpenAI and Azure compile each function parameter's `pattern` with Python's
+`re` and refuse the whole request when one does not compile (HTTP 400
+`invalid_function_parameters`, "… is not a 'regex'"): a Unicode property
+escape (`\p{L}`, from a zod `.regex(/…/u)`), a JavaScript named group
+(`(?<name>…)`), `\k<name>`, `\cX`, `[^]`, a variable-width look-behind, a
+`\u{…}` escape. On OpenRouter the call then goes to the model's other
+providers and its fallback models. The platform model leaves such a pattern
+out of the schema the model is shown (the tool still checks its arguments
+against its own schema, the pattern included) and logs once per isolate:
+
+`[tool-schema] tool "set_chat_language": the pattern of properties.language is not shown to the model (bad escape \p; OpenAI and Azure refuse the whole request for it); the tool still checks it when called. Pattern: …`
+
+A pattern Python compiles is sent unchanged. The rules were measured on
+79 patterns against OpenAI and Azure (`src/llm/python-regex.test.ts`).
+
+### Reasoning and tool output never reach a chat
+
+A chat reply (WhatsApp, Matrix) never carries text inside `<think>`,
+`<thinking>` or `<reasoning>` tags, before an unmatched closing tag or
+after an unclosed opening one, and a model step whose text quotes a JSON tool
+result of the thread verbatim is not delivered at all (`src/delivery/leak-guard.ts`;
+`[delivery] run …: N model step(s) not delivered: …`). On 13 Nov 2026 a
+fallback model's provider split its stream wrongly and its thinking, quoting
+the turn's tool result, went to a person as the reply.
+
+### Channel turns the model could not answer
+
+When a channel turn fails because its model call failed (every provider and
+fallback failed, the key's limit `402`/`403`, a timeout), the person gets one
+short message instead of silence (`src/channels/busy-reply.ts`): a plugin's
+`channelFailureReply` (in the person's language), else `CHANNEL_BUSY_REPLY`,
+else "Sorry, I'm a bit busy right now. Please try again in a few minutes."
+At most one per chat (channel binding) per 10 minutes; a failure inside that
+time ends the run with nothing to send (and no gateway failure reply). The
+run ends `finished` with the message as its plan, its row keeps the error,
+and nothing is retried. Lines: `[channels] run …: the model could not answer
+(<kind> <status>); sent the busy reply` or `…; a busy reply went to this chat
+N s ago, so nothing is sent`. An event turn reaches the oracle only while the
+person's WhatsApp window is open, and the gateway checks the window again
+before sending. A tool or runtime failure keeps the run `failed`.
+
+### Channel turns whose reply came out empty
+
+A channel turn (a message, a tap or an event) whose model run ended with
+nothing to send (no text, no rich part, no file: the model answered a tool
+result with an empty message; three such turns on the Yo mainnet oracle on
+13 Nov 2026, one person waited 40 minutes) is never left silent
+(`src/channels/busy-reply.ts`). The model is asked once more on the same
+thread with a hidden note (a delivery notice: the transcript, memory and
+session titles skip it), and its answer is sent. When that answer is empty
+too, the person gets the oracle's short line: a plugin's
+`channelFailureReply` told `kind: "empty_reply"`, else `CHANNEL_BUSY_REPLY`,
+else "Sorry, I couldn't finish my reply just now. Please send your message
+again." There is no cooldown: it is one line per turn. Lines: `[channels]
+run …: the model's reply was empty (empty_reply); asking it once more` and
+`…: the model's reply was empty after a retry (empty_reply); sent the
+fallback line`. An event turn reaches the oracle only while the person's
+WhatsApp window is open, and the gateway checks the window again before
+sending.
+
+### Tracing clients are per Durable Object
+
+Each user object has its own LangSmith client (`resolveLangsmithTracing`
+with `owner`). Workers runs several Durable Objects in one isolate, and a
+client shared between them uploaded one object's runs with I/O another
+object created: `Cannot perform I/O on behalf of a different Durable Object
+… (I/O type: Writable)` and `Error queueing run for tracing` (22 lines in one
+turn on the Yo mainnet oracle, 13 Nov 2026 15:56Z; the reply was delivered,
+only that trace was incomplete).
+
+### A gateway reset can leave the old instance running: it stands down
+
+A Durable Object reset with unchanged code (a `wrangler tail` or dashboard
+live log attaching, detaching or reconnecting; a platform reset) builds the
+new gateway instance in the same isolate while the old one runs on for
+seconds: Cloudflare lets its in-flight work finish as long as it stays away
+from storage. Until bot SDK 0.7.3 the old instance's 30 s crypto flush could
+run once after the new instance had restored the crypto store and attach
+itself to the new instance's store; every later crypto write then tried to
+save through the dead instance's storage handle: `[matrix-bot] flush(dirty)
+failed: Cannot perform I/O on behalf of a different Durable Object … (I/O
+type: ActorCacheInterface)`, every two seconds until the next reset (2,525
+lines in a week on four gateways, 8–15 Nov 2026). The live instance's own
+saves were not affected; the refused ones wrote nothing.
+
+From 0.7.3 a replaced instance stands down: one `warn` line, `[matrix-bot]
+instance <id> stood down: superseded by instance <id> of this Durable
+Object. It saves nothing more and has stopped syncing.` It ends its sync
+loop and timers, closes its crypto machine, and never writes the crypto
+store, the sync token or the alarm again. The gateway's own timers go with
+it (`onSuperseded`): debounce buffers, the sender-check retry, the typing
+refresh. A turn that was in flight on it sends no reply and no failure
+notice and keeps its inbox row; the live instance replays the row and the
+user's object serves the finished reply from its ledger (`turn …: this
+gateway instance was replaced while the turn ran; the live instance
+delivers the reply`).
+
+Do not keep `wrangler tail` running on a gateway: every attach, detach and
+reconnect is a reset about five minutes later (deferred code updates). Read
+the stored Workers Logs instead.
 
 ## Write claims and turn usage
 

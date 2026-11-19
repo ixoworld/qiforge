@@ -127,6 +127,8 @@ interface TurnEntry extends WorkStatusTurn {
   steps: number;
   pending?: StatusFrame;
   draining: boolean;
+  /** The running drain; it also posts any frame staged while it runs. */
+  drained?: Promise<void>;
 }
 
 export interface WorkStatusProducerDeps {
@@ -179,7 +181,7 @@ export class WorkStatusProducer {
   emit(requestId: string, phase: WorkStatusPhase, label?: string): void {
     const entry = this.turns.get(requestId);
     if (!entry) return;
-    this.enqueue(entry, phase, label);
+    void this.enqueue(entry, phase, label);
   }
 
   /**
@@ -192,18 +194,24 @@ export class WorkStatusProducer {
     const entry = this.turns.get(requestId);
     if (!entry) return;
     entry.steps += 1;
-    this.enqueue(entry, 'working', `Step ${entry.steps} · ${action}`);
+    void this.enqueue(entry, 'working', `Step ${entry.steps} · ${action}`);
   }
 
   /**
    * Post a final phase (`done`/`superseded`) and unregister the turn. Later
-   * emissions for this requestId become no-ops immediately.
+   * emissions for this requestId become no-ops immediately. Resolves once
+   * the card's queue has drained (the final frame posted, or its failure
+   * logged); never rejects.
    */
-  finish(requestId: string, phase: WorkStatusPhase, label?: string): void {
+  finish(
+    requestId: string,
+    phase: WorkStatusPhase,
+    label?: string,
+  ): Promise<void> {
     const entry = this.turns.get(requestId);
-    if (!entry) return;
+    if (!entry) return Promise.resolve();
     this.turns.delete(requestId);
-    this.enqueue(entry, phase, label);
+    return this.enqueue(entry, phase, label);
   }
 
   private async postWithRetry(
@@ -238,15 +246,17 @@ export class WorkStatusProducer {
     return this.turns.has(requestId);
   }
 
+  /** Stage a frame; the returned promise settles when the queue has drained. */
   private enqueue(
     entry: TurnEntry,
     phase: WorkStatusPhase,
     label?: string,
-  ): void {
+  ): Promise<void> {
     entry.pending = { phase, label };
-    if (entry.draining) return;
+    if (entry.draining && entry.drained) return entry.drained;
     entry.draining = true;
-    void this.drain(entry);
+    entry.drained = this.drain(entry);
+    return entry.drained;
   }
 
   private async drain(entry: TurnEntry): Promise<void> {

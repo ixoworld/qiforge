@@ -391,7 +391,11 @@ export const OraclesProvider = ({
         isRefused: (result) =>
           !result.ok &&
           RequestError.isRequestError(result.error) &&
-          isCredentialRefusal(result.error.status, result.error.code),
+          isCredentialRefusal(
+            result.error.status,
+            result.error.code,
+            result.error.refused,
+          ),
         renew:
           oracleDid && !isOneShotBody(options?.body)
             ? (stage) =>

@@ -597,6 +597,51 @@ describe('createToolExecutionMiddleware', () => {
     );
   });
 
+  it('warns when a tool throws, and still throws its error', async () => {
+    const logger = {
+      log: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    const { wrap } = middlewareFor({ logger });
+    const failure = new Error(
+      "MCP tool 'firecrawl_scrape' on server 'firecrawl' returned an error: 403\nbody",
+    );
+    await expect(
+      wrap(requestFor('get_page'), async () => {
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /^\[tool-execution\] get_page \(call_get_page\): threw after \d+ ms: MCP tool 'firecrawl_scrape' on server 'firecrawl' returned an error: 403$/,
+      ),
+    );
+  });
+
+  it('names an aborted turn in the warning for a tool that threw', async () => {
+    const logger = {
+      log: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    const controller = new AbortController();
+    const { wrap } = middlewareFor({ logger, signal: controller.signal });
+    await expect(
+      wrap(requestFor('get_page'), async () => {
+        controller.abort();
+        throw new DOMException('The operation was aborted', 'AbortError');
+      }),
+    ).rejects.toThrow('aborted');
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /^\[tool-execution\] get_page \(call_get_page\): threw after \d+ ms \(turn aborted\): The operation was aborted$/,
+      ),
+    );
+  });
+
   it('never claims reads or sub-agent dispatches', async () => {
     const { claims, wrap } = middlewareFor();
     await wrap(requestFor('get_thing'), async () => okResult('get_thing'));

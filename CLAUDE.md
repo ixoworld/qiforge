@@ -98,7 +98,7 @@ One Worker deployment = one oracle (optionally split into an oracle script and a
 
 ### Specs and plans
 
-- `packages/oracle-runtime-workers/docs/` — architecture, configuration, operations, testing, load tests, node-parity, channels, chat-delivery, frontend-bridge, ixo-transaction, pod-creator, chain-tools, asks.
+- `packages/oracle-runtime-workers/docs/` — architecture, configuration, operations, testing, load tests, node-parity, channels, chat-delivery, frontend-bridge, ixo-transaction, pod-creator, chain-tools, asks, usage-metering.
 - `docs/plans/` — design notes for the larger Workers changes (durable runs, context budgets, transcript paging, workers-harness-hardening).
 - Root `docs/` pages still maintained for Workers work: `docs/architecture/decisions.md` (the shared Decision module), `docs/architecture/request-admission.md`, `docs/testing/channels-acceptance.md`. The rest of `docs/` is Node-era and frozen.
 - `specs/` — `chat-native-delivery.md`, `pod-creator-plugin.md`, `ixo-transaction-signing-plugin.md` (design records of shipped Workers features), `open-decisions-trustworthy-action.md` (draft normative profile the Decision module follows); `ORA-219-plugin-based-runtime.md` is the original plugin-runtime design (Node era; the plugin model still applies).

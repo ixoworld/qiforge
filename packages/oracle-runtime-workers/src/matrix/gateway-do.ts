@@ -101,6 +101,15 @@ import {
   type UserServerNameLookup,
 } from './user-homeserver';
 import { replyPartTxnId, roomReplyMessages } from './reply-parts';
+import {
+  claimRefusalNotice,
+  clearRefusalNotices,
+  ensureRefusalNoticeTable,
+  hasRefusalNoticeTable,
+  refusalNoticeContent,
+  releaseRefusalNotice,
+} from './refusal-notice';
+import type { TurnRefusal } from '../plugin-api/turn-gate';
 import { VerifiedRoomAliases } from './room-alias';
 import { boundedSignal, raceSignal } from './media-deadline';
 
@@ -149,8 +158,22 @@ const SENDER_CHECK_RETRY_MS = 60_000;
 const PENDING_INVITE_GRACE_MS = 5_000;
 /** Room turns in flight at once (each ends in an encrypted reply). */
 const DEFAULT_TURN_CONCURRENCY = 4;
-/** Idle recycle of the object after this many sends (0 disables). */
-const DEFAULT_RECYCLE_AFTER_SENDS = 300;
+/**
+ * Planned recycle of the object after this many sends: 0 = off (default).
+ * `MATRIX_RECYCLE_AFTER_SENDS` opts back in.
+ *
+ * It was 300, against fake-indexeddb keeping every finished transaction
+ * (~250 KB per encrypted send). The SDK prunes those transactions now
+ * (`cryptoStoreTransactions` in `/matrix/status` stays at a handful): with
+ * the recycle off, a local gateway carried 2,000 encrypted sends in one
+ * instance with no transaction kept and no memory growth.
+ *
+ * The recycle restarts the bot in the same isolate, so the crypto WASM's
+ * memory is never returned. Under steady load it fired every few minutes:
+ * each restart cancelled sends still waiting in the scheduler and held every
+ * gateway call until the bot was back, sometimes for minutes.
+ */
+export const DEFAULT_RECYCLE_AFTER_SENDS = 0;
 const LOGIN_RETRY_ATTEMPTS = 3;
 const LOGIN_RETRY_MAX_MS = 30_000;
 
@@ -469,6 +492,8 @@ export class MatrixGatewayDO
   private oracleSecretsKeyJson: string | null = null;
   private oracleSigningMnemonic: string | null = null;
   private inboxTableReady = false;
+  /** Whether the refused-turn notice throttle table exists (null: not looked yet). */
+  private refusalNoticeTable: boolean | null = null;
   /** Event ids of turns running in this instance (a graceful restart must not replay them). */
   private readonly inFlightEvents = new Set<string>();
   /**
@@ -481,6 +506,8 @@ export class MatrixGatewayDO
   /** Inbox rows whose sender check had no verdict, waiting for `unverifiedRetry`. */
   private readonly unverifiedEvents = new Set<string>();
   private unverifiedRetry: ReturnType<typeof setTimeout> | null = null;
+  /** Typing-refresh intervals of the turns in flight (cleared with their turn, or when this instance is superseded). */
+  private readonly typingTimers = new Set<ReturnType<typeof setInterval>>();
   /** Group rooms: the gate and the per-room channel memory (see group-chat.ts). */
   private groupChatService: GroupChatService | null = null;
 
@@ -532,6 +559,7 @@ export class MatrixGatewayDO
       MATRIX_SEND_RATE_PER_SECOND: env.MATRIX_SEND_RATE_PER_SECOND,
       MATRIX_SEND_BURST: env.MATRIX_SEND_BURST,
       MATRIX_SEND_CONCURRENCY: env.MATRIX_SEND_CONCURRENCY,
+      // Off unless the deployment sets a positive count (see the constant).
       MATRIX_RECYCLE_AFTER_SENDS:
         env.MATRIX_RECYCLE_AFTER_SENDS ?? String(DEFAULT_RECYCLE_AFTER_SENDS),
       MATRIX_HOT_ROOMS: env.MATRIX_HOT_ROOMS,
@@ -676,6 +704,8 @@ export class MatrixGatewayDO
     if (this.unverifiedRetry) return;
     this.unverifiedRetry = setTimeout(() => {
       this.unverifiedRetry = null;
+      // A newer instance of this object took over: its start replays the inbox.
+      if (this.supersededReason !== null) return;
       const only = new Set(this.unverifiedEvents);
       this.unverifiedEvents.clear();
       this.scheduleInboxReplay(only);
@@ -864,6 +894,10 @@ export class MatrixGatewayDO
   }
 
   private async dispatchTurn(turn: IngestTurn): Promise<void> {
+    // A reset with unchanged code leaves this instance running for seconds
+    // beside the one that replaced it. From then on it dispatches nothing:
+    // the inbox row stays, and the live instance's start replays it.
+    if (this.supersededReason !== null) return;
     // In flight from the moment the turn exists, not only once it holds a
     // gate slot: an in-place restart replays the inbox, and a row still
     // queued behind the gate must not be offered (and charged) again.
@@ -879,6 +913,7 @@ export class MatrixGatewayDO
   }
 
   private async dispatchTurnNow(turn: IngestTurn): Promise<void> {
+    if (this.supersededReason !== null) return;
     const requestId = crypto.randomUUID();
     // Group rooms: the Node gate — answer a mention, a reply to the bot, or
     // a thread the bot is in; stay silent otherwise (the message is still
@@ -909,6 +944,9 @@ export class MatrixGatewayDO
           displayName: turn.matrixUserId,
         };
       });
+    // Replaced while the gate ran (its failure falls back to "answer"): the
+    // live instance decides, from the inbox row this one leaves in place.
+    if (this.supersededReason !== null) return;
     if (!decision.respond) {
       this.log(
         'info',
@@ -929,12 +967,41 @@ export class MatrixGatewayDO
         (err: unknown) =>
           this.log('debug', `turn ${requestId}: typing notice failed`, err),
       );
-      typing = setInterval(() => {
+      const typingTimer = setInterval(() => {
+        // Replaced by a newer instance: this interval ends itself here (the
+        // turn it belongs to may never settle in a dead instance).
+        if (this.supersededReason !== null) {
+          clearInterval(typingTimer);
+          this.typingTimers.delete(typingTimer);
+          return;
+        }
         this.setTyping(turn.roomId, true, TYPING_TIMEOUT_MS).catch(
           () => undefined,
         );
       }, TYPING_REFRESH_MS);
+      typing = typingTimer;
+      this.typingTimers.add(typingTimer);
       const result = await this.runTurn(turn, requestId, decision);
+      // Replaced while the turn ran: the reply is the live instance's to
+      // send. The inbox row is still there, its replay asks the user's
+      // object for the same turn, and that object serves the finished reply
+      // from its ledger — so nothing is sent, deleted or apologised for here.
+      if (this.supersededReason !== null) {
+        this.log(
+          'info',
+          `turn ${requestId}: this gateway instance was replaced while the turn ran; the live instance delivers the reply`,
+        );
+        return;
+      }
+      // A plugin refused the turn before it started: its message is the
+      // answer, as a notice (deduplicated on the event like a reply).
+      if (result.refused) {
+        await this.postRefusalNotice(turn, decision, result.refused, requestId);
+        deleteInboxRows(this.inboxSql(), turn.eventIds);
+        return;
+      }
+      // Allowed: a later refusal for this person here is told again at once.
+      this.clearRefusalThrottle(turn.roomId, turn.matrixUserId);
       if (result.replayed)
         this.log(
           'info',
@@ -968,6 +1035,9 @@ export class MatrixGatewayDO
       // has ended, the inbox row has done its job.
       deleteInboxRows(this.inboxSql(), turn.eventIds);
     } catch (err) {
+      // Whatever failed, a replaced instance reports nothing and keeps the
+      // inbox row: the live instance replays the turn.
+      if (this.supersededReason !== null) return;
       // A turn aborted because a newer message on the same thread superseded
       // it is not a failure: the new turn answers, the old card says so.
       if (isAbortError(err)) {
@@ -980,7 +1050,14 @@ export class MatrixGatewayDO
           'warn',
           `turn ${requestId}: the user object lost this turn in a reset and will not re-run it; asking the user to retry`,
         );
-      else this.log('error', `turn ${requestId} failed`, err);
+      // The message first: an error that crossed the RPC boundary logs a
+      // stack without it.
+      else
+        this.log(
+          'error',
+          `turn ${requestId} failed: ${err instanceof Error ? err.message : String(err)}`,
+          err,
+        );
       try {
         await this.sendNotice(turn.roomId, TURN_FAILED_NOTICE, {
           threadId: turn.threadId,
@@ -998,18 +1075,25 @@ export class MatrixGatewayDO
       // Told the user (or could not): either way this turn is over.
       deleteInboxRows(this.inboxSql(), turn.eventIds);
     } finally {
-      if (typing) clearInterval(typing);
-      await this.setTyping(turn.roomId, false).catch(() => undefined);
-      // Close the card on every exit — reply posted, empty reply, thrown
-      // error — so no turn can leave a spinner running in the room.
-      await this.finishWorkStatus(turn.userDid, requestId).catch(
-        (err: unknown) =>
-          this.log(
-            'warn',
-            `turn ${requestId}: could not close the status card`,
-            err,
-          ),
-      );
+      if (typing) {
+        clearInterval(typing);
+        this.typingTimers.delete(typing);
+      }
+      // The card and the typing notice are the live instance's once this one
+      // was replaced (its replay of the turn re-opens and closes them).
+      if (this.supersededReason === null) {
+        await this.setTyping(turn.roomId, false).catch(() => undefined);
+        // Close the card on every exit — reply posted, empty reply, thrown
+        // error — so no turn can leave a spinner running in the room.
+        await this.finishWorkStatus(turn.userDid, requestId).catch(
+          (err: unknown) =>
+            this.log(
+              'warn',
+              `turn ${requestId}: could not close the status card: ${err instanceof Error ? err.message : String(err)}`,
+              err,
+            ),
+        );
+      }
     }
   }
 
@@ -1051,6 +1135,73 @@ export class MatrixGatewayDO
   }
 
   // -------------------------------------------------------------------------
+  // Refused turns: one notice per (room, user, code) per window
+  // -------------------------------------------------------------------------
+
+  /**
+   * Post the refusal of a plugin's gate as one notice in the turn's thread
+   * (`refusal-notice.ts`), unless one for the same room, person and code
+   * was posted inside the window: then nothing is posted. Deduplicated on
+   * the event like a reply.
+   */
+  private async postRefusalNotice(
+    turn: IngestTurn,
+    decision: GateDecision,
+    refusal: TurnRefusal,
+    requestId: string,
+  ): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    if (this.refusalNoticeTable !== true) {
+      ensureRefusalNoticeTable(sql);
+      this.refusalNoticeTable = true;
+    }
+    const key = {
+      roomId: turn.roomId,
+      userId: turn.matrixUserId,
+      code: refusal.code ?? '',
+    };
+    const described = `${refusal.status}${refusal.code ? ` ${refusal.code}` : ''}`;
+    if (!claimRefusalNotice(sql, key, Date.now())) {
+      this.log(
+        'info',
+        `turn ${requestId}: refused before it started (${described}); notice already posted in this window, nothing sent`,
+      );
+      return;
+    }
+    this.log(
+      'info',
+      `turn ${requestId}: refused before it started (${described})`,
+    );
+    const content = refusalNoticeContent(refusal, {
+      roomKind: decision.roomKind,
+      userId: turn.matrixUserId,
+      displayName: decision.displayName,
+    });
+    try {
+      await this.sendNotice(turn.roomId, content.body, {
+        threadId: turn.threadId,
+        formattedBody: content.formattedBody,
+        ...(content.mentions ? { mentions: content.mentions } : {}),
+        ...(turn.eventIds[0]
+          ? { txnId: `${replyTxnId(turn.eventIds[0])}-refused` }
+          : {}),
+      });
+    } catch (err) {
+      // Not posted: the next refused message may try again.
+      releaseRefusalNotice(sql, key);
+      throw err;
+    }
+  }
+
+  /** A turn was allowed for `userId` in `roomId`: their throttle there ends. */
+  private clearRefusalThrottle(roomId: string, userId: string): void {
+    const sql = this.ctx.storage.sql;
+    // No table: this gateway never posted a refusal notice, nothing to clear.
+    this.refusalNoticeTable ??= hasRefusalNoticeTable(sql);
+    if (this.refusalNoticeTable) clearRefusalNotices(sql, roomId, userId);
+  }
+
+  // -------------------------------------------------------------------------
   // Turn inbox: room messages whose reply is not in the outbox yet
   // -------------------------------------------------------------------------
 
@@ -1088,6 +1239,8 @@ export class MatrixGatewayDO
 
   /** `only`: replay just these rows (the unverified-sender retry); omitted, every row. */
   private scheduleInboxReplay(only?: ReadonlySet<string>): void {
+    // The inbox belongs to the live instance of this object.
+    if (this.supersededReason !== null) return;
     if (this.inboxReplayRunning) {
       // A full replay already listed every row; a targeted one may not have,
       // so the rows asked for here wait for the next retry.
@@ -1110,6 +1263,7 @@ export class MatrixGatewayDO
    * stored reply, attach to the running turn, or refuse — never a second run.
    */
   private async replayInbox(only?: ReadonlySet<string>): Promise<void> {
+    if (this.supersededReason !== null) return;
     const sql = this.inboxSql();
     const rows = listInboxRows(sql).filter(
       (row) => !only || only.has(row.eventId),
@@ -1136,6 +1290,8 @@ export class MatrixGatewayDO
           err,
         );
       }
+      // Replaced while the notice was sent: the rows are the live instance's.
+      if (this.supersededReason !== null) return;
       deleteInboxRows(sql, [row.eventId]);
     }
     if (plan.replay.length > 0)
@@ -1144,6 +1300,7 @@ export class MatrixGatewayDO
         plan.replay.map((row) => row.eventId),
       );
     for (const row of plan.replay) {
+      if (this.supersededReason !== null) return;
       try {
         // Without an alias verdict a legacy sender would read as unmapped
         // and the row would be dropped: the row waits for the next retry
@@ -1186,6 +1343,24 @@ export class MatrixGatewayDO
     // Worded like the platform's own reset so RPC callers classify it as
     // transient (see `isTransientGatewayError`), exactly as in production.
     this.ctx.abort('gateway reset requested by the debug route');
+  }
+
+  /**
+   * This instance was replaced by a newer instance of the same object in the
+   * isolate (a reset that kept the isolate) and has stood down. Its own
+   * timers go with it — the debounce buffers, the sender-check retry, the
+   * typing refreshes of turns in flight — so nothing of it dispatches a turn,
+   * touches the inbox or calls the homeserver again. Memory only: storage and
+   * the client are already out of reach here.
+   */
+  protected override onSuperseded(_reason: string): void {
+    this.ingest?.clear();
+    this.debouncing.clear();
+    if (this.unverifiedRetry) clearTimeout(this.unverifiedRetry);
+    this.unverifiedRetry = null;
+    this.unverifiedEvents.clear();
+    for (const timer of this.typingTimers) clearInterval(timer);
+    this.typingTimers.clear();
   }
 
   override async stop(): Promise<void> {
@@ -1465,17 +1640,68 @@ export class MatrixGatewayDO
   }
 
   override async getRoomState(roomId: string): Promise<JsonString> {
+    return this.joinedRetry(roomId, 'getRoomState', () =>
+      super.getRoomState(roomId),
+    );
+  }
+
+  override async getRoomStateEvent(
+    roomId: string,
+    type: string,
+    stateKey?: string,
+  ): Promise<JsonString | null> {
+    return this.joinedRetry(roomId, `getRoomStateEvent(${type})`, () =>
+      super.getRoomStateEvent(roomId, type, stateKey),
+    );
+  }
+
+  override async sendStateEvent(
+    roomId: string,
+    type: string,
+    content: JsonString,
+    stateKey?: string,
+  ): Promise<string> {
+    return this.joinedRetry(roomId, `sendStateEvent(${type})`, () =>
+      super.sendStateEvent(roomId, type, content, stateKey),
+    );
+  }
+
+  /**
+   * A room-state read or write in a room the oracle may not have joined
+   * yet. 403 = not a member: the oracle was invited seconds ago (a user's
+   * new room, a page room) and the sync loop has not accepted the invite —
+   * for example while the bot restarts, when rooms created meanwhile are
+   * joined only after its first sync. The invite is accepted here and the
+   * call tried again, for up to `PENDING_INVITE_GRACE_MS`. The join fails
+   * quietly for a room the oracle is not invited to. A call that still
+   * fails is logged with the homeserver's own message before it is thrown.
+   */
+  private async joinedRetry<T>(
+    roomId: string,
+    what: string,
+    call: () => Promise<T>,
+  ): Promise<T> {
     const deadline = Date.now() + PENDING_INVITE_GRACE_MS;
+    let joined = false;
     for (;;) {
       try {
-        return await super.getRoomState(roomId);
+        return await call();
       } catch (err) {
-        // 403 = not a member. If the oracle was only just invited (a page
-        // room created by the user seconds ago), accept the invite here
-        // instead of waiting for the sync loop, then read again. The join
-        // fails quietly for a room we are not invited to.
-        if (!isForbidden(err) || Date.now() > deadline) throw err;
-        await this.joinRoom(roomId).catch(() => undefined);
+        if (!isForbidden(err) || Date.now() > deadline) {
+          this.log(
+            'warn',
+            `${what} in ${roomId} failed${joined ? ' after joining' : ''}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          throw err;
+        }
+        await this.joinRoom(roomId).then(
+          () => {
+            if (!joined)
+              this.log('info', `${what}: joined ${roomId} and trying again`);
+            joined = true;
+          },
+          () => undefined,
+        );
         await sleep(250);
       }
     }

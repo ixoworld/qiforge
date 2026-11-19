@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { FILE_SAFETY_NOTE } from '../plugins/sandbox/send-file';
 import { deliveryConfigWithEnv, resolveDeliveryProfile } from './profile';
 import { renderSurfaceSection } from './prompt';
+import { buildRichMessageTools } from './rich-tools';
+import type { RenderCapability } from './types';
 
 const whatsapp = {
   client: 'channel' as const,
@@ -143,6 +145,60 @@ describe('resolveDeliveryProfile', () => {
     expect(
       resolveDeliveryProfile({ client: 'matrix', sessionId: '$root' }, config),
     ).toMatchObject({ kind: 'chat' });
+  });
+
+  it('gives an event turn with render the same profile and rich tools as a message turn', () => {
+    const render: RenderCapability = {
+      kinds: ['reply_buttons', 'list', 'link_button', 'card', 'carousel'],
+      linkLabels: ['allow', 'start_check'],
+      linkOrigins: ['https://dev.self.ixo.earth'],
+    };
+    const messageTurn = {
+      ...whatsapp,
+      channel: { ...whatsapp.channel, render },
+    };
+    const toolNames = (profile: ReturnType<typeof resolveDeliveryProfile>) =>
+      profile.kind === 'chat' && profile.render
+        ? buildRichMessageTools(profile.render).map(({ tool }) => tool.name)
+        : [];
+    const fromMessage = resolveDeliveryProfile(messageTurn);
+    for (const channelEvent of [
+      {
+        kind: 'permission_answered' as const,
+        permissionId: 'card_1',
+        status: 'allowed' as const,
+      },
+      {
+        kind: 'identity_check_updated' as const,
+        linkId: 'link_1',
+        status: 'passed' as const,
+      },
+    ]) {
+      const fromEvent = resolveDeliveryProfile({
+        ...messageTurn,
+        channel: { ...messageTurn.channel, channelEvent, eventNote: 'note' },
+      });
+      expect(fromEvent).toEqual(fromMessage);
+      expect(toolNames(fromEvent)).toEqual([
+        'offer_choices',
+        'send_link_button',
+        'send_cards',
+      ]);
+    }
+    // An event without render (a gateway without rich events) stays text only.
+    const plainEvent = resolveDeliveryProfile({
+      ...whatsapp,
+      channel: {
+        ...whatsapp.channel,
+        channelEvent: {
+          kind: 'permission_answered',
+          permissionId: 'card_1',
+          status: 'allowed',
+        },
+      },
+    });
+    expect(plainEvent).not.toHaveProperty('render');
+    expect(toolNames(plainEvent)).toEqual([]);
   });
 
   it('lets an oracle override limits per surface', () => {

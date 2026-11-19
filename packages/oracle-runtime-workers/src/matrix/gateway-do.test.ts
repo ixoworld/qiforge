@@ -7,12 +7,25 @@
  * lookup with its deadline.
  */
 import { env, runInDurableObject } from 'cloudflare:test';
-import { MatrixBotDO, type BotMessage } from '@ixo/matrix-bot-workers-sdk';
+import {
+  MatrixBotDO,
+  shouldRecycle,
+  withDefaults,
+  type BotMessage,
+  type MatrixBotOptions,
+  type SendTextOpts,
+} from '@ixo/matrix-bot-workers-sdk';
+import { MatrixError } from 'matrix-js-sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SqliteTestDO } from '../sqlite/test-do';
 import type { JsonString, OracleWorkerEnv, TurnResult } from '../do/contracts';
-import { BACKGROUND_SEND_CONCURRENCY, MatrixGatewayDO } from './gateway-do';
-import type { GateDecision } from './group-chat';
+import {
+  BACKGROUND_SEND_CONCURRENCY,
+  DEFAULT_RECYCLE_AFTER_SENDS,
+  MatrixGatewayDO,
+} from './gateway-do';
+import { GroupChatService, type GateDecision } from './group-chat';
+import type { TurnRefusal } from '../plugin-api/turn-gate';
 import { insertInboxRow, listInboxRows, MAX_TURN_REPLAYS } from './inbox-store';
 import type { IngestTurn } from './ingest';
 import { MediaDownloadTimeoutError } from './media-deadline';
@@ -109,6 +122,10 @@ class TestGateway extends MatrixGatewayDO {
     return this.onMessage(message);
   }
 
+  botOptions(): Promise<MatrixBotOptions> {
+    return this.resolveOptions();
+  }
+
   restartReplay(): Promise<void> {
     return this.onStarted({ started: true, userId: BOT, deviceId: 'D' });
   }
@@ -157,8 +174,20 @@ class TestGateway extends MatrixGatewayDO {
     return '$reply';
   }
 
-  override async sendNotice(roomId: string, body: string): Promise<string> {
+  /** Every notice with the options it was sent with. */
+  readonly notices: Array<{
+    roomId: string;
+    body: string;
+    opts: SendTextOpts | undefined;
+  }> = [];
+
+  override async sendNotice(
+    roomId: string,
+    body: string,
+    opts?: SendTextOpts,
+  ): Promise<string> {
     this.sent.push({ kind: 'notice', roomId, body });
+    this.notices.push({ roomId, body, opts });
     return '$notice';
   }
 
@@ -237,6 +266,20 @@ async function withGateway(
 }
 
 const DEBOUNCE_MS = 500;
+
+const USER = '@did-ixo-ixo1user:ixo.test';
+const OUT_OF_CREDITS: TurnRefusal = {
+  status: 402,
+  code: 'insufficient_credits',
+  message: "You're out of IXO credits. Top up to keep chatting.",
+  details: {
+    action: { label: 'Top up credits', url: 'https://portal.example/credits' },
+  },
+};
+
+function refusedResult(refused: TurnRefusal): TurnResult {
+  return { sessionId: 's', requestId: 'r', text: '', toolCalls: [], refused };
+}
 /** The retry delay, shortened for the test (production: 60 s). */
 const SENDER_CHECK_RETRY_MS = 300;
 
@@ -403,6 +446,117 @@ describe('homeserver failures while a message is prepared', () => {
     });
   });
 
+  it('a turn a plugin gate refused is answered with one formatted notice in its thread, and its row dropped', async () => {
+    await withGateway('gw-turn-refused', async (gw, state) => {
+      gw.turnResult = async () => refusedResult(OUT_OF_CREDITS);
+      const msg = message(USER);
+      await gw.deliver(msg);
+      await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
+      expect(gw.turns).toHaveLength(1);
+      // A direct room: no mention, the action as a line and a link.
+      expect(gw.notices).toEqual([
+        {
+          roomId: ROOM,
+          body: "You're out of IXO credits. Top up to keep chatting.\nTop up credits: https://portal.example/credits",
+          opts: {
+            threadId: gw.turns[0]!.threadId,
+            formattedBody:
+              'You\'re out of IXO credits. Top up to keep chatting.<br><a href="https://portal.example/credits">Top up credits</a>',
+            txnId: expect.stringMatching(/-refused$/),
+          },
+        },
+      ]);
+      expect(listInboxRows(state.storage.sql)).toEqual([]);
+    });
+  });
+
+  it('posts one notice per (room, user, code) in the window; a later refused message is dropped silently', async () => {
+    await withGateway('gw-turn-refused-throttle', async (gw, state) => {
+      gw.turnResult = async () => refusedResult(OUT_OF_CREDITS);
+      await gw.deliver(message(USER));
+      await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
+      await gw.deliver(message(USER));
+      await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
+      expect(gw.turns).toHaveLength(2);
+      expect(gw.notices).toHaveLength(1);
+      // Both rows are gone: the second refusal is over, not pending.
+      expect(listInboxRows(state.storage.sql)).toEqual([]);
+      // Another code is its own notice.
+      gw.turnResult = async () =>
+        refusedResult({
+          status: 503,
+          code: 'credits_check_unavailable',
+          message: 'Please try again in a minute.',
+          details: { retryAfterSeconds: 60 },
+        });
+      await gw.deliver(message(USER));
+      await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
+      expect(gw.notices.map((n) => n.body)).toEqual([
+        expect.stringContaining('out of IXO credits'),
+        'Please try again in a minute.',
+      ]);
+    });
+  });
+
+  it('a turn allowed for the person clears the throttle: the next refusal is told again', async () => {
+    await withGateway('gw-turn-refused-cleared', async (gw) => {
+      gw.turnResult = async () => refusedResult(OUT_OF_CREDITS);
+      await gw.deliver(message(USER));
+      await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
+      gw.turnResult = async () => ({
+        sessionId: 's',
+        requestId: 'r',
+        text: 'reply',
+        toolCalls: [],
+      });
+      await gw.deliver(message(USER));
+      await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
+      gw.turnResult = async () => refusedResult(OUT_OF_CREDITS);
+      await gw.deliver(message(USER));
+      await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
+      expect(gw.sent.map((s) => s.kind)).toEqual(['notice', 'text', 'notice']);
+    });
+  });
+
+  it('in a group room the notice mentions the refused person', async () => {
+    await withGateway('gw-turn-refused-group', async (gw) => {
+      vi.spyOn(GroupChatService.prototype, 'gate').mockResolvedValue({
+        respond: true,
+        reason: 'mentioned',
+        roomKind: 'group',
+        memberCount: 5,
+        displayName: 'Alice <A>',
+      });
+      gw.turnResult = async () => refusedResult(OUT_OF_CREDITS);
+      await gw.deliver(message(USER));
+      await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
+      expect(gw.notices).toHaveLength(1);
+      const [notice] = gw.notices;
+      expect(notice!.body).toBe(
+        "Alice <A>: You're out of IXO credits. Top up to keep chatting.\nTop up credits: https://portal.example/credits",
+      );
+      expect(notice!.opts).toMatchObject({
+        mentions: [USER],
+        formattedBody: `<a href="https://matrix.to/#/${encodeURIComponent(USER)}">Alice &lt;A&gt;</a>: You're out of IXO credits. Top up to keep chatting.<br><a href="https://portal.example/credits">Top up credits</a>`,
+      });
+    });
+  });
+
+  it('a gateway that never posted a refusal notice keeps no throttle table', async () => {
+    await withGateway('gw-no-refusal-table', async (gw, state) => {
+      await gw.deliver(message(USER));
+      await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
+      expect(gw.sent.map((s) => s.kind)).toEqual(['text']);
+      expect(
+        state.storage.sql
+          .exec(
+            "SELECT name FROM sqlite_master WHERE name = 'refusal_notice_throttle'",
+          )
+          .toArray(),
+      ).toEqual([]);
+    });
+  });
+
   it('a failing typing notice does not cost the user their turn', async () => {
     await withGateway('gw-typing-fails', async (gw, state) => {
       gw.hs.typingFails = true;
@@ -509,6 +663,76 @@ describe('inbox replay', () => {
   });
 });
 
+describe('a gateway instance replaced by a newer one (a reset that keeps the isolate)', () => {
+  // Production, Nov 2026: a Durable Object reset with unchanged code builds
+  // the new instance in the same isolate while the old one runs on for
+  // seconds. The old instance's timers (debounce buffers, the sender-check
+  // retry, typing refreshes) and its turns in flight are not cancelled by
+  // the reset; each of them must end without dispatching, sending, or
+  // touching the inbox the live instance replays.
+  it('dispatches nothing more, sends nothing, keeps the inbox rows; the new instance replays and answers them', async () => {
+    const stub = env.SQLITE_TEST.get(
+      env.SQLITE_TEST.idFromName('gw-superseded'),
+    );
+    await runInDurableObject(stub, async (_i: SqliteTestDO, state) => {
+      const old = new TestGateway(state, gatewayEnv());
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((r) => {
+        release = r;
+      });
+      old.turnResult = async () => {
+        await held;
+        return { sessionId: 's', requestId: 'r', text: 'reply', toolCalls: [] };
+      };
+      // One turn in flight on the old instance…
+      const first = message('@did-ixo-ixo1a:ixo.test');
+      await old.deliver(first);
+      await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
+      expect(old.turns).toHaveLength(1);
+      // …and one message still in its debounce buffer when the reset lands.
+      const second = message('@did-ixo-ixo1b:ixo.test');
+      await old.deliver(second);
+      expect(listInboxRows(state.storage.sql)).toHaveLength(2);
+
+      const live = new TestGateway(state, gatewayEnv());
+      try {
+        // The old instance's debounce timer fires: nothing is dispatched.
+        await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 150));
+        expect(old.turns).toHaveLength(1);
+        // Its turn in flight comes back from the user object: no reply, no
+        // "something went wrong" notice, and the inbox row stays.
+        release();
+        await new Promise((r) => setTimeout(r, 100));
+        expect(old.sent).toEqual([]);
+        expect(
+          listInboxRows(state.storage.sql)
+            .map((r) => r.eventId)
+            .sort(),
+        ).toEqual([...first.eventIds, ...second.eventIds].sort());
+        // A replay asked of the old instance does nothing either.
+        await old.restartReplay();
+        await new Promise((r) => setTimeout(r, 50));
+        expect(old.turns).toHaveLength(1);
+
+        // The live instance replays both rows and answers each once.
+        await live.restartReplay();
+        await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 200));
+        expect(live.turns.map((t) => t.eventIds[0]).sort()).toEqual(
+          [...first.eventIds, ...second.eventIds].sort(),
+        );
+        expect(live.sent).toEqual([
+          { kind: 'text', roomId: ROOM, body: 'reply' },
+          { kind: 'text', roomId: ROOM, body: 'reply' },
+        ]);
+        expect(old.sent).toEqual([]);
+        expect(listInboxRows(state.storage.sql)).toEqual([]);
+      } finally {
+        await live.stop().catch(() => undefined);
+      }
+    });
+  });
+});
+
 describe('memos in front of storage', () => {
   it('two room lookups for a DID with no registered homeserver: one Blocksync request, no storage read the second time', async () => {
     await withGateway(
@@ -556,6 +780,71 @@ describe('health and status', () => {
         (await gw.fetch(new Request('https://matrix-gateway/other'))).status,
       ).toBe(404);
     });
+  });
+});
+
+describe('planned recycle', () => {
+  /** Signals far past any threshold: busy, recent inbound, pending rows. */
+  const overdue = {
+    sendsSinceBoot: 100_000,
+    sendsBusy: 6,
+    msSinceLastInbound: 0,
+    pendingDurable: 12,
+  };
+  /** Idle signals past a 300-send threshold. */
+  const idle = {
+    sendsSinceBoot: 301,
+    sendsBusy: 0,
+    msSinceLastInbound: 60_000,
+    pendingDurable: 0,
+  };
+  const policyOf = (resolved: { recycleAfterSends: number }) => ({
+    afterSends: resolved.recycleAfterSends,
+    quietForMs: 15_000,
+  });
+
+  it('is off by default: no send count, idle or overdue, recycles the bot', async () => {
+    expect(DEFAULT_RECYCLE_AFTER_SENDS).toBe(0);
+    await withGateway('gw-recycle-default', async (gw) => {
+      const resolved = withDefaults(await gw.botOptions());
+      expect(resolved.recycleAfterSends).toBe(0);
+      expect(shouldRecycle(idle, policyOf(resolved))).toBe(false);
+      expect(shouldRecycle(overdue, policyOf(resolved))).toBe(false);
+    });
+  });
+
+  it('MATRIX_RECYCLE_AFTER_SENDS=0 is off as well', async () => {
+    await withGateway(
+      'gw-recycle-zero',
+      async (gw) => {
+        const resolved = withDefaults(await gw.botOptions());
+        expect(resolved.recycleAfterSends).toBe(0);
+        expect(shouldRecycle(overdue, policyOf(resolved))).toBe(false);
+      },
+      { MATRIX_RECYCLE_AFTER_SENDS: '0' },
+    );
+  });
+
+  it('a positive MATRIX_RECYCLE_AFTER_SENDS opts back in', async () => {
+    await withGateway(
+      'gw-recycle-opt-in',
+      async (gw) => {
+        const resolved = withDefaults(await gw.botOptions());
+        expect(resolved.recycleAfterSends).toBe(300);
+        expect(shouldRecycle(idle, policyOf(resolved))).toBe(true);
+        expect(
+          shouldRecycle({ ...idle, sendsSinceBoot: 299 }, policyOf(resolved)),
+        ).toBe(false);
+        // Five thresholds in, it recycles under load too.
+        expect(
+          shouldRecycle(
+            { ...overdue, sendsSinceBoot: 1_500 },
+            policyOf(resolved),
+          ),
+        ).toBe(true);
+      },
+      { MATRIX_RECYCLE_AFTER_SENDS: '300' },
+    );
   });
 });
 
@@ -771,4 +1060,90 @@ describe('plugin device credentials', () => {
       expect(hs.logins()).toBe(2);
     });
   });
+});
+
+describe('room state in a room the oracle is only invited to', () => {
+  const notJoined = () =>
+    new MatrixError({ errcode: 'M_FORBIDDEN', error: 'User not in room' }, 403);
+
+  async function withPlainGateway(
+    name: string,
+    fn: (gw: MatrixGatewayDO) => Promise<void>,
+  ): Promise<void> {
+    const stub = env.SQLITE_TEST.get(env.SQLITE_TEST.idFromName(name));
+    await runInDurableObject(stub, async (_i: SqliteTestDO, state) => {
+      const gw = new MatrixGatewayDO(state, gatewayEnv({ LOG_LEVEL: 'warn' }));
+      try {
+        await fn(gw);
+      } finally {
+        await gw.stop().catch(() => undefined);
+      }
+    });
+  }
+
+  it('a state write refused as not joined joins the room and is written (a new user during a bot restart)', async () => {
+    await withPlainGateway('state-write-join', async (gw) => {
+      const send = vi
+        .spyOn(MatrixBotDO.prototype, 'sendStateEvent')
+        .mockRejectedValueOnce(notJoined())
+        .mockResolvedValueOnce('$state');
+      const join = vi.spyOn(gw, 'joinRoom').mockResolvedValue(ROOM);
+      await expect(
+        gw.sendStateEvent(ROOM, 'ixo.room.state', '{}', 'ucan_delegation'),
+      ).resolves.toBe('$state');
+      expect(join).toHaveBeenCalledWith(ROOM);
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(send).toHaveBeenLastCalledWith(
+        ROOM,
+        'ixo.room.state',
+        '{}',
+        'ucan_delegation',
+      );
+    });
+  });
+
+  it('a state read refused as not joined joins and reads again', async () => {
+    await withPlainGateway('state-read-join', async (gw) => {
+      vi.spyOn(MatrixBotDO.prototype, 'getRoomStateEvent')
+        .mockRejectedValueOnce(notJoined())
+        .mockResolvedValueOnce('{"a":1}');
+      const join = vi.spyOn(gw, 'joinRoom').mockResolvedValue(ROOM);
+      await expect(
+        gw.getRoomStateEvent(ROOM, 'ixo.room.state', 'ucan_delegation'),
+      ).resolves.toBe('{"a":1}');
+      expect(join).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('any other failure is thrown at once, with its message logged', async () => {
+    await withPlainGateway('state-write-other', async (gw) => {
+      vi.spyOn(MatrixBotDO.prototype, 'sendStateEvent').mockRejectedValue(
+        new Error('M_LIMIT_EXCEEDED: Too many requests'),
+      );
+      const join = vi.spyOn(gw, 'joinRoom').mockResolvedValue(ROOM);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      await expect(
+        gw.sendStateEvent(ROOM, 'ixo.room.state', '{}', 'ucan_delegation'),
+      ).rejects.toThrow('M_LIMIT_EXCEEDED');
+      expect(join).not.toHaveBeenCalled();
+      expect(
+        warn.mock.calls.some((call) =>
+          String(call[0]).includes('Too many requests'),
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('gives up after the grace period when joining does not help', async () => {
+    await withPlainGateway('state-write-never', async (gw) => {
+      vi.spyOn(MatrixBotDO.prototype, 'sendStateEvent').mockRejectedValue(
+        notJoined(),
+      );
+      vi.spyOn(gw, 'joinRoom').mockRejectedValue(new Error('not invited'));
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      await expect(
+        gw.sendStateEvent(ROOM, 'ixo.room.state', '{}', 'ucan_delegation'),
+      ).rejects.toBeInstanceOf(MatrixError);
+    });
+  }, 15_000);
 });

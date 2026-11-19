@@ -37,7 +37,13 @@ import {
 } from '../channels/contract';
 
 import type { SqliteTestDO } from '../sqlite/test-do';
-import { AIMessage, HumanMessage } from '@langchain/core/messages';
+import {
+  AIMessage,
+  HumanMessage,
+  type BaseMessage,
+} from '@langchain/core/messages';
+import { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import type { ChatResult } from '@langchain/core/outputs';
 import { turnLimitsFromEnv } from '../core/turn-budget';
 import { SessionsStore, UNTITLED_SESSION } from '../sqlite/sessions-store';
 import { RunCoordinator, type LiveRun } from './run-coordinator';
@@ -1302,6 +1308,197 @@ describe('turn preparation wiring', () => {
           portalTurn.identity.timezone,
         ),
       );
+      await disposeTurn(h, prepared);
+    });
+  });
+
+  const adEntryPoint = {
+    kind: 'ad' as const,
+    provider: 'meta' as const,
+    sentAt: Date.now() - 2_000,
+    sourceType: 'ad',
+    sourceId: '120252638173670287',
+    sourceUrl: 'https://fb.me/91x4AM4CH',
+    headline: 'Chat with us',
+    body: 'Internal test ad for a WhatsApp chat link. Please ignore.',
+    mediaType: 'image',
+    imageUrl:
+      'https://interncache-ldc.fbcdn.net/v/t45.1600-4/ad_n.jpg?oe=6B01DE60',
+    ctwaClid: 'AfjK-4OyWoOufgO2Ynmc',
+    welcomeMessageText: 'Hi! Please let us know how we can help you.',
+  };
+  const adTurn: TurnRequest = {
+    identity: { userDid: USER_DID },
+    sessionId: 's1',
+    message: 'Hi, I saw your ad',
+    client: 'channel',
+    requestId: 'wa:ad',
+    channel: {
+      provider: 'whatsapp',
+      bindingId: 'chb_ad',
+      bindingRevision: 2,
+      remoteMessageRef: `hmac:${'b'.repeat(64)}`,
+      providerSentAt: adEntryPoint.sentAt,
+      entryPoint: adEntryPoint,
+    },
+  };
+
+  it("hands a channel turn's ad entry point to plugin code only, the same on a resumed attempt", async () => {
+    const seen: unknown[] = [];
+    const reader = makePlugin({ name: 'ad-reader' });
+    reader.getRequestTools = (ctx) => {
+      seen.push(ctx.session.channel);
+      return [];
+    };
+    await withObject('turn-entry-point', { plugins: [reader] }, async (h) => {
+      await bootedForTurns(h);
+      const prepared = await h.call(
+        'prepareTurn',
+        adTurn,
+        { message: adTurn.message },
+        attemptRun(),
+      );
+      expect(seen).toEqual([
+        {
+          provider: 'whatsapp',
+          bindingId: 'chb_ad',
+          bindingRevision: 2,
+          providerSentAt: adEntryPoint.sentAt,
+          entryPoint: adEntryPoint,
+        },
+      ]);
+      // Nothing of the ad reaches the model's input (the message, its
+      // kwargs, the rest of the graph input) or the trace metadata.
+      const message = inputMessage(prepared);
+      expect(visibleText(message)).toBe(adTurn.message);
+      if (typeof prepared !== 'object' || prepared === null)
+        throw new Error('no prepared turn');
+      const graphInput = JSON.stringify(Reflect.get(prepared, 'stateInput'));
+      // The graph config carries it only in `context`, the runtime context
+      // plugin code reads; never in what LangSmith records with a run.
+      const config: unknown = Reflect.get(prepared, 'config');
+      if (typeof config !== 'object' || config === null)
+        throw new Error('no graph config');
+      const traced = JSON.stringify({
+        metadata: Reflect.get(config, 'metadata'),
+        configurable: Reflect.get(config, 'configurable'),
+      });
+      for (const value of [
+        adEntryPoint.sourceId,
+        adEntryPoint.sourceUrl,
+        adEntryPoint.headline,
+        adEntryPoint.body,
+        adEntryPoint.imageUrl,
+        adEntryPoint.ctwaClid,
+        adEntryPoint.welcomeMessageText,
+      ]) {
+        expect(graphInput).not.toContain(value);
+        expect(traced).not.toContain(value);
+      }
+      expect(JSON.stringify(message.additional_kwargs)).not.toContain(
+        'entryPoint',
+      );
+      await disposeTurn(h, prepared);
+
+      // A resumed attempt reads the request back from the run row, written
+      // by the channel host's own `begin` (the attempt it starts is a stub).
+      Reflect.set(h.host, 'runAttempt', async () => ({
+        status: 'finished',
+        text: '',
+      }));
+      const channelTurns: unknown = h.field('channelTurns');
+      if (typeof channelTurns !== 'object' || channelTurns === null)
+        throw new Error('no channel turns');
+      const channelHost: unknown = Reflect.get(channelTurns, 'host');
+      if (typeof channelHost !== 'object' || channelHost === null)
+        throw new Error('no channel host');
+      const begun: unknown = await Reflect.apply(
+        Reflect.get(channelHost, 'begin'),
+        channelHost,
+        ['run-ad', adTurn],
+      );
+      if (typeof begun !== 'object' || begun === null)
+        throw new Error('no run record');
+      const runStore = h.field('runStore');
+      if (!(runStore instanceof RunStore)) throw new Error('no run store');
+      const row = await runStore.get('run-ad');
+      if (!row) throw new Error('no stored run');
+      const stored = JSON.parse(row.request) as ReturnType<
+        typeof storedRunRequest
+      >;
+      expect(stored.turn.channel?.entryPoint).toEqual(adEntryPoint);
+      const resumed = await h.call(
+        'prepareTurn',
+        stored.turn,
+        { message: adTurn.message },
+        { ...attemptRun('run-2'), resumed: true },
+      );
+      expect(seen).toHaveLength(2);
+      expect(seen[1]).toEqual(seen[0]);
+      await disposeTurn(h, resumed);
+    });
+  });
+
+  it("never shows the ad to the model: the request the model gets holds the person's words only", async () => {
+    const requests: BaseMessage[][] = [];
+    class RecordingModel extends BaseChatModel {
+      _llmType(): string {
+        return 'recording';
+      }
+      override bindTools(): this {
+        return this;
+      }
+      async _generate(messages: BaseMessage[]): Promise<ChatResult> {
+        requests.push(messages);
+        const message = new AIMessage('Welcome!');
+        return { generations: [{ text: 'Welcome!', message }] };
+      }
+    }
+    const model = new RecordingModel({});
+    await withObject('turn-entry-point-model', {}, async (h) => {
+      await bootedForTurns(h);
+      const ambient = h.field('ambient');
+      if (typeof ambient !== 'object' || ambient === null)
+        throw new Error('not booted');
+      Reflect.set(h.host, 'ambient', { ...ambient, llm: { get: () => model } });
+      const prepared = await h.call(
+        'prepareTurn',
+        adTurn,
+        { message: adTurn.message },
+        attemptRun(),
+      );
+      if (typeof prepared !== 'object' || prepared === null)
+        throw new Error('no prepared turn');
+      const agent: unknown = Reflect.get(prepared, 'agent');
+      if (typeof agent !== 'object' || agent === null)
+        throw new Error('no agent');
+      await Reflect.apply(Reflect.get(agent, 'invoke'), agent, [
+        Reflect.get(prepared, 'stateInput'),
+        Reflect.get(prepared, 'config'),
+      ]);
+      expect(requests.length).toBeGreaterThan(0);
+      const seenByModel = JSON.stringify(
+        requests.map((messages) =>
+          messages.map((message) => ({
+            type: message.type,
+            content: message.content,
+            additional_kwargs: message.additional_kwargs,
+          })),
+        ),
+      );
+      // The system prompt and the person's words are there; the ad is not.
+      expect(requests[0]?.[0]?.type).toBe('system');
+      expect(seenByModel).toContain(adTurn.message);
+      for (const value of [
+        adEntryPoint.sourceId,
+        adEntryPoint.sourceUrl,
+        adEntryPoint.headline,
+        adEntryPoint.body,
+        adEntryPoint.imageUrl,
+        adEntryPoint.ctwaClid,
+        adEntryPoint.welcomeMessageText,
+      ])
+        expect(seenByModel).not.toContain(value);
       await disposeTurn(h, prepared);
     });
   });
@@ -3104,6 +3301,123 @@ describe('user-wide run listings and Stop', () => {
       expect(coordinatorOf(h).records()).toEqual([]);
       expect(await h.call('activeRuns', identity)).toEqual([]);
       expect(await h.call('abortTurn', 's1', identity)).toBe(false);
+    });
+  });
+});
+
+describe('work the gateway hands over starts from a fresh invocation (loop limit)', () => {
+  const HOUSEKEEPING_KEY = 'meta:housekeepingAt';
+
+  it('closing a status card answers at once; the post waits for an alarm, which skips the full tick', async () => {
+    await withObject('fresh-invocation-finish', {}, async (h) => {
+      await h.ready();
+      await h.settle();
+      const later = Date.now() + 3_600_000;
+      await h.storage.put(HOUSEKEEPING_KEY, later);
+      await h.storage.setAlarm(later);
+      const ticks = recordCalls(h.host, 'persistAccess');
+      const card = h.field('workStatus') as {
+        beginTurn: (turn: object) => void;
+        emit: (requestId: string, phase: string) => void;
+      };
+      card.beginTurn({
+        requestId: 'req-1',
+        roomId: '!room:mx',
+        threadId: '$thread',
+        sessionId: 'thread:$thread',
+        forEventId: '$msg',
+      });
+      card.emit('req-1', 'routing');
+      await vi.waitFor(() =>
+        expect(h.gateway.sendEvent).toHaveBeenCalledTimes(1),
+      );
+
+      // The RPC returns before the closing post; the post waits for an alarm.
+      await h.call('finishWorkStatus', 'req-1', 'done');
+      await vi.waitFor(async () => {
+        expect(await h.storage.getAlarm()).toBeLessThanOrEqual(Date.now());
+      });
+      expect(h.gateway.sendEvent).toHaveBeenCalledTimes(1);
+
+      await h.fireAlarm();
+      await h.settle();
+      expect(h.gateway.sendEvent).toHaveBeenCalledTimes(2);
+      expect(String(h.gateway.sendEvent.mock.calls[1]?.[2])).toContain(
+        '"phase":"done"',
+      );
+      // A wake only for the gate: no full housekeeping tick, and the alarm
+      // is back on the deadline that was pending.
+      expect(ticks).toHaveLength(0);
+      expect(await h.storage.getAlarm()).toBe(later);
+    });
+  });
+
+  it('a room turn waits for the alarm and a second dispatch of the same event attaches to it; Portal turns do not wait', async () => {
+    await withObject('fresh-invocation-claim', {}, async (h) => {
+      await h.ready();
+      await h.settle();
+      await h.storage.put(HOUSEKEEPING_KEY, Date.now() + 3_600_000);
+      const ran: string[] = [];
+      Object.defineProperty(h.host, 'runTurnInPlace', {
+        value: async (req: { requestId: string; eventId?: string }) => {
+          ran.push(req.requestId);
+          return {
+            sessionId: 's',
+            requestId: req.requestId,
+            text: 'hi',
+            toolCalls: [],
+          };
+        },
+      });
+      const identity = { userDid: USER_DID };
+      const room = (requestId: string) => ({
+        identity,
+        sessionId: 's',
+        message: 'hello',
+        client: 'matrix',
+        eventId: '$E',
+        roomId: '!room:mx',
+        requestId,
+      });
+      const first = h.call('runTurn', room('r1'));
+      const replay = h.call('runTurn', room('r2'));
+      await vi.waitFor(async () => {
+        expect(await h.storage.getAlarm()).toBeLessThanOrEqual(Date.now());
+      });
+      expect(ran).toEqual([]);
+
+      await h.fireAlarm();
+      const [a, b] = await Promise.all([first, replay]);
+      expect(ran).toEqual(['r1']);
+      expect(a).toEqual(b);
+
+      // Not a room turn: runs at once, no alarm needed.
+      await h.call('runTurn', {
+        ...room('r3'),
+        client: 'portal',
+        eventId: undefined,
+      });
+      expect(ran).toEqual(['r1', 'r3']);
+      await h.settle();
+    });
+  });
+
+  it('a gate wake does not boot a bare object', async () => {
+    await withObject('fresh-invocation-bare', {}, async (h) => {
+      const gate = h.field('freshInvocations') as {
+        enter: (label: string) => Promise<{ fresh: boolean; end: () => void }>;
+      };
+      const entered = gate.enter('group summary');
+      await vi.waitFor(async () => {
+        expect(await h.storage.getAlarm()).not.toBeNull();
+      });
+      await h.fireAlarm();
+      const lease = await entered;
+      expect(lease.fresh).toBe(true);
+      lease.end();
+      expect(h.db()).toBeNull();
+      expect(await h.storage.getAlarm()).toBeNull();
+      await h.settle();
     });
   });
 });

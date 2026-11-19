@@ -674,3 +674,142 @@ describe('UserOracleDO direct reads and the room mirror', () => {
     },
   );
 });
+
+describe('UserOracleDO admission on a channel turn', () => {
+  it('hands the turn binding and its ad entry point to the handler, and a direct read keeps the ad off the transcript', async () => {
+    const stub = env.SQLITE_TEST.get(
+      env.SQLITE_TEST.idFromName('admission-channel-entry-point'),
+    );
+    await runInDurableObject(stub, async (_instance, state) => {
+      const db = await DoSqliteDatabase.open(state, 'admission.db');
+      const saver = new SqliteSaver(db);
+      const sessions = new SessionsStore(db);
+      const runStore = new RunStore(db);
+      await runStore.setup();
+      const entryPoint = {
+        kind: 'ad' as const,
+        provider: 'meta' as const,
+        sentAt: Date.now() - 2_000,
+        sourceType: 'ad',
+        sourceId: '120252638173670287',
+        headline: 'Chat with us',
+        body: 'Internal test ad for a WhatsApp chat link. Please ignore.',
+        ctwaClid: 'AfjK-4OyWoOufgO2Ynmc',
+      };
+      const seen: unknown[] = [];
+      const admission = vi.fn(
+        async (
+          ctx: Parameters<NonNullable<OraclePlugin['getRequestAdmission']>>[0],
+        ) => {
+          seen.push(ctx.session.channel);
+          return {
+            kind: 'handled' as const,
+            text: 'Welcome! Ask me anything.',
+            title: 'Welcome',
+          };
+        },
+      );
+      const core = createRuntimeCore({
+        config: { name: 'Test' },
+        env: makeEnv(),
+        plugins: [makePlugin({ name: 'ads', getRequestAdmission: admission })],
+      });
+      const UserOracleDO = createUserOracleDO({ core: () => core });
+      const host: object = Object.create(UserOracleDO.prototype);
+      const forbidden = vi.fn(() => {
+        throw new Error('Generative preparation forbidden');
+      });
+      Object.assign(host, {
+        db,
+        saver,
+        sessions,
+        runStore,
+        ctx: state,
+        env: { ORACLE_DID: 'did:ixo:test' },
+        channelTurns: { isCancelled: async () => false },
+        delegations: new Map([
+          [
+            'did:ixo:alice',
+            { raw: 'DELEGATION', expiration: Date.now() / 1000 + 86_400 },
+          ],
+        ]),
+        prepareTurn: forbidden,
+        generateTitle: forbidden,
+        compareShadowRoute: forbidden,
+        markDirty: () => undefined,
+      });
+      const sessionId = 'local-channel';
+      const req: TurnRequest = {
+        sessionId,
+        requestId: 'wa:ad',
+        client: 'channel',
+        message: 'Hi, I saw your ad',
+        identity: { userDid: 'did:ixo:alice' },
+        channel: {
+          provider: 'whatsapp',
+          bindingId: 'chb_ad',
+          bindingRevision: 2,
+          remoteMessageRef: `hmac:${'b'.repeat(64)}`,
+          entryPoint,
+        },
+      };
+      await runStore.create({
+        runId: 'run',
+        sessionId,
+        requestId: req.requestId,
+        client: 'channel',
+        status: 'running',
+        request: JSON.stringify(storedRunRequest(req)),
+        checkpointId: null,
+        instanceId: 'test',
+      });
+      const record = await runStore.get('run');
+      if (!record) throw new Error('Missing run');
+      const live: LiveRun = {
+        runId: 'run',
+        sessionId,
+        requestId: req.requestId,
+        record,
+        buffer: new RunBuffer({
+          flushMs: 60000,
+          flushBytes: 100000,
+          onPack: () => undefined,
+        }),
+        abort: new AbortController(),
+        continuation: null,
+        done: Promise.resolve({ status: 'finished', text: '' }),
+        resolve: () => undefined,
+        attemptInFlight: true,
+        attemptSource: 'begin',
+      };
+      expect(await call(host, 'runAttempt', live, false)).toMatchObject({
+        status: 'finished',
+        text: 'Welcome! Ask me anything.',
+      });
+      expect(forbidden).not.toHaveBeenCalled();
+      expect(seen).toEqual([
+        {
+          provider: 'whatsapp',
+          bindingId: 'chb_ad',
+          bindingRevision: 2,
+          entryPoint,
+        },
+      ]);
+      // The direct read's transcript holds the person's words and the reply only.
+      const transcript = JSON.stringify(
+        await saver.listThreadMessages(sessionId),
+      );
+      expect(transcript).toContain('Hi, I saw your ad');
+      expect(transcript).toContain('Welcome! Ask me anything.');
+      for (const value of [
+        entryPoint.sourceId,
+        entryPoint.headline,
+        entryPoint.body,
+        entryPoint.ctwaClid,
+      ])
+        expect(transcript).not.toContain(value);
+      await live.buffer.close();
+      await db.close();
+    });
+  });
+});

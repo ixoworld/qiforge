@@ -1,5 +1,203 @@
 # @ixo/oracle-runtime-workers
 
+## 0.58.0
+
+### Minor Changes
+
+- [#565](https://github.com/ixoworld/qiforge/pull/565) [`6910777`](https://github.com/ixoworld/qiforge/commit/691077737bb907bb6e44050dea70a51eb05f1fb3) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Plugin hooks for usage metering and gating.
+
+  - `OraclePlugin.gateTurn(ctx)` (with `turnGate: { onFailure, timeoutMs }`) refuses a turn before anything of it exists, on every entry: a Portal request is answered with the refusal's status (e.g. 402) and `{ statusCode, message, code?, details?, requestId, refused: true }` (`TurnRefusalBody`; `refused: true` marks a gate's refusal, never an auth failure, so a client does not renew credentials on a refused 403), a Matrix room gets the message as a notice, a channel request a `turn_refused` refusal, a task run is skipped with the reason recorded (no failure counted). Gates run concurrently; the first refusal in plugin order wins; a gate that throws or times out fails open unless it declares `closed` (`503 turn_gate_unavailable`).
+  - `onModelCall` now receives a `ModelCallReport` for every model call the runtime makes for a person: `purpose` (`reply`, `summarization`, `subagent`, `plugin`, `attachment`, `title`, `group-summary`, `routing`, `decision`, `safety`, `other`), `paidBy` (`platform` or `user` for a bring-your-own-LLM call), `callId` and `startedAt`. Attachment extraction, `view_attachment`, memory document ingest, session titles, group summaries, the capability router, channel routing, `ctx.decisions` and BYO calls are reported now; before, only platform chat-model calls through the turn's adapter were.
+  - `OraclePlugin.onTurnUsage(usage, ctx)`: once per turn attempt, after its calls went through `onModelCall`, with the calls and the platform cost total.
+  - A gate may allow a turn on the person's own provider only: `{ allow: true, platformModels: 'deny' }` (the most restrictive allowance of several gates wins; stored with the run). That turn never touches the platform's model key: no platform fallback for a refused BYO model, roles the person's provider does not serve fail, no session title, files are not sent to the extraction model, no capability-router or channel-routing Decision, `ctx.decisions` unavailable; a turn that would not run on the person's provider fails before any model call.
+  - A refusal is answered with 402, 403, 429 or 503; any other status is answered as 403 (logged). A refused task run that ends its task (a one-shot) posts one notice in the task's room.
+  - `TurnRefusal.details` has two documented fields shown on every surface: `retryAfterSeconds` (1 to 86,400) and `action: { label, url }` (one call to action, https, label at most 40 characters); an invalid one is dropped from the refusal and logged. Portal answers carry `Retry-After` when `retryAfterSeconds` is set. A channel refusal is `{ code: "turn_refused", reason, message, retryAfterSeconds?, action? }` (`reason` = the plugin's `code`). A Matrix room gets one `m.notice` with the action as a link (`formatted_body`), in the message's thread; in a group room it mentions the refused person (`m.mentions`, matrix.to pill); at most one per (room, person, code) in 10 minutes, kept in the gateway's SQLite and cleared by an allowed turn. A task's refusal notice carries the action link too.
+  - A platform streamed call cut off after output started (an abort or an error before the provider's usage arrived) is reported with an estimate: `usageEstimated: true`, chars/4 prompt and output tokens, no cost. An abort no longer leaves a streamed call unreported.
+  - `onTurnUsage` also fires for an attempt that made calls without building the agent (an event turn a plugin decided, a build that failed after reading a file): every call with a run is in exactly one `onTurnUsage`, except for an attempt the object stops mid-way.
+  - `ctx.requestWake(at)` and `OraclePlugin.onWake(ctx)`: a plugin can have the person's object woken later (the housekeeping alarm) to finish pending work without a request; a pending wake is dropped when the idle copy is evicted.
+  - `ModelCallRecord` gains `paidBy` and `usageEstimated`. Exported types: `TurnGateContext`, `TurnGateResult`, `TurnGatePolicy`, `TurnRefusal`, `TurnTrigger`, `PlatformModelsPolicy`, `ModelCallReport`, `ModelCallPurpose`, `ModelCallPayer`, `TurnModelUsage`, `MODEL_CALL_PURPOSES`. See `docs/usage-metering.md`.
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @ixo/ixo-transaction@0.3.0
+
+## 0.57.0
+
+### Minor Changes
+
+- [#563](https://github.com/ixoworld/qiforge/pull/563) [`7bb1fa4`](https://github.com/ixoworld/qiforge/commit/7bb1fa4bb049d9771399607af7c821a3e0caf4ff) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Channel turns can carry the ad the person tapped to reach the chat
+  (`entryPoint`: Meta's Click-to-WhatsApp `referral`, every field mapped to
+  camelCase) and every turn result lists the new feature `entry_point`, so the
+  channel gateway sends it only to runtimes that take it. The runtime checks it
+  against the strict `ChannelEntryPoint` schema with the gateway's caps (ad id
+  digits, `https:` links of at most 2,048 characters, text caps in code points,
+  no control or bidi characters) and refuses a turn that breaks them, or that
+  carries it with a notice or an event.
+
+  Plugins read it as `ctx.session.channel.entryPoint` (type `ChannelEntryPoint`,
+  exported from the package) on turns where the agent is built, and at request
+  admission (`RequestAdmissionContext.session.channel`, now with the turn's
+  binding), so a handler that answers the turn itself can still record it. A
+  routing clarification, or a run cancelled or refused before either, never
+  shows it to a plugin, and the gateway sends an ad only once. The gateway may
+  attach an ad tapped before the person linked to a later message, so the ad's
+  time is `entryPoint.sentAt`, not the turn's. Hooks run again on a resumed
+  attempt: record it idempotently (keyed on `sourceId`). Oracles need no
+  configuration beyond this version; `docs/channels.md#ad-entry-point` has a
+  copy-paste plugin that records the ad in `ctx.kv`.
+
+  It is stored with the run in the user's working database (exported to the
+  owner store like all conversation data) and never put on the model's input,
+  the message's `additional_kwargs`, the oracle room, trace metadata or a log.
+  It is untrusted advertiser text, invisible format characters included, and the
+  click id (`ctwaClid`) must not be logged.
+
+  Action and topic receipts now keep only the channel fields their replay into
+  the oracle room reads (provider, binding, binding revision, message ref)
+  instead of the whole turn channel.
+
+## 0.56.4
+
+### Patch Changes
+
+- [#561](https://github.com/ixoworld/qiforge/pull/561) [`ac41f6b`](https://github.com/ixoworld/qiforge/commit/ac41f6b5b0d130b741e066e4f3e4f497d099efbf) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - A first turn now waits up to 4 s for the memory prefetch (`USER_CONTEXT_PREFETCH_CAP_MS`, default 3000 before). The memory engine now lets its reranker use 2 s inside a prefetch batch instead of 1.5 s, because a slow reranker call is late, not lost, so a slow batch can take half a second longer. Only a slow prefetch waits longer: on mainnet 15 of 4,718 first turns in four days reached the 3 s cap, and 13 of those prefetches finished within 4 s. An oracle that sets `USER_CONTEXT_PREFETCH_CAP_MS` keeps its own value.
+
+## 0.56.3
+
+### Patch Changes
+
+- [#559](https://github.com/ixoworld/qiforge/pull/559) [`98afa62`](https://github.com/ixoworld/qiforge/commit/98afa62be3c6f8099ea62ffa02d8d59b7c264ba5) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - A gateway instance that was replaced by a newer one never saves, sends or dispatches again. After a Durable Object reset with unchanged code (a `wrangler tail` or live log attaching, a platform reset) Cloudflare builds the new instance in the same isolate while the old one runs on for seconds. With bot SDK 0.7.3 the old instance stands down the moment it sees it was replaced, and its crypto saves can no longer go through the wrong instance (the `Cannot perform I/O on behalf of a different Durable Object` errors: 2,525 in a week across four gateways). In the gateway itself the old instance's own timers end with it: debounce buffers, the sender-check retry and the typing refresh of a turn in flight. A turn that was in flight on the old instance sends no reply and no failure notice and leaves its inbox row in place; the live instance replays it, and the user's object serves the finished reply from its ledger. Bumps `@ixo/matrix-bot-workers-sdk` to 0.7.3.
+
+- [#558](https://github.com/ixoworld/qiforge/pull/558) [`c8aac67`](https://github.com/ixoworld/qiforge/commit/c8aac670e5a70d9543fcfe2f5aca4616c0d28567) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Session history uploads never send the memory engine a request it refuses. A part holds at most 50 messages counted after the conversation filter (was 200 transcript messages counted before it, so any chat past about 50 messages without a quiet period was refused whole with `422 MESSAGES_INVALID` and stayed out of memory), at most 512 KiB of body, and no message over 16 KiB (longer ones are split into marked pieces, cut with a marker past 8). The count advances after each accepted part, and every message carries a stable `uuid`, so a resend is stored once. Refusals follow the engine's error contract: a count or size rule shrinks the parts and goes on, a message the engine refuses on its own is skipped with a warning instead of blocking the session (only when other messages are accepted, so an engine that refuses everything never causes skips), `retryable: true` / 429 waits as told within a bounded budget, and anything else non-retryable stops the pass without retrying the same request. A durable per-session record lets the housekeeping alarm upload backlogs no live trigger comes for (bounded: one run of up to 3 sessions at a time, dropped after 8 attempts without progress), and the first tick after the upgrade looks once at the 5 most recent conversations, so sessions stuck before the fix recover even if the person does not write again.
+
+## 0.56.2
+
+### Patch Changes
+
+- [#556](https://github.com/ixoworld/qiforge/pull/556) [`b4f52b6`](https://github.com/ixoworld/qiforge/commit/b4f52b6638a883510601e984a6e2614624c00fce) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Matrix gateway: bot SDK 0.7.2. A device rotation (one-time-key conflict loop, store-size limit, `POST /debug/matrix/rotate-device`) requested while the gateway bot was still starting took the half-started device apart and waited for that same start; the start finished on the old device, the rotation reported it as both retired and serving, and the real new device came up later with nothing left to log the old one out, so the old device stayed on the homeserver with its keys (IXO-6553). A rotation now waits for a start or stop in progress and then rotates the started device.
+
+## 0.56.1
+
+### Patch Changes
+
+- [#550](https://github.com/ixoworld/qiforge/pull/550) [`146f6f3`](https://github.com/ixoworld/qiforge/commit/146f6f3f8f246087392b83cbb734ad17a1fa0892) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Matrix gateway: bot SDK 0.7.1. A restart of the gateway bot (planned recycle, send watchdog, token rejection) that a gateway call raced used to start a second bot beside the stop and leave its sync loop running for the life of the isolate, each with its own Matrix client and crypto machine. On the Yo mainnet gateway 9–15 of them piled up per isolate and it was killed four times for exceeding the 128 MB memory limit (IXO-6552). Starts and stops are now serialised in the SDK, a second loop is never left running, and `/matrix/status` shows `syncLoops` (1 while running).
+
+## 0.56.0
+
+### Minor Changes
+
+- [#548](https://github.com/ixoworld/qiforge/pull/548) [`0b12cf0`](https://github.com/ixoworld/qiforge/commit/0b12cf070303e910e48f79d3e7508cdd242c438b) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Matrix gateway: the planned recycle after a number of sends is off by default (`MATRIX_RECYCLE_AFTER_SENDS` default 0, was 300). It was added against a fake-indexeddb leak of ~250 KB per encrypted send, which the bot SDK has pruned since its first release (`cryptoStoreTransactions` in `/matrix/status` stays at a handful). The recycle restarts the bot in the same isolate, so it never returned the crypto WASM's memory, and under steady load it fired every few minutes, cancelling sends still waiting in the scheduler and holding every gateway call until the bot was back. Set `MATRIX_RECYCLE_AFTER_SENDS` to a positive count to opt back in; other restarts (send watchdog, device rotation, Cloudflare resets) are unchanged.
+
+## 0.55.0
+
+### Minor Changes
+
+- [#546](https://github.com/ixoworld/qiforge/pull/546) [`c5c7693`](https://github.com/ixoworld/qiforge/commit/c5c7693d64b0e5b0a48bd1ec5ba61a7b5e367766) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Channel turns can carry the provider's send time of the person's message
+  (`providerSentAt`, epoch ms) and every turn result lists the new feature
+  `provider_sent_at`, so the channel gateway sends it only to runtimes that take
+  it. A value more than 5 minutes ahead or more than 48 hours old is ignored, not
+  refused; it is refused with a notice or an event. Plugins read it as
+  `ctx.session.channel.providerSentAt` and on the turn's human message as
+  `additional_kwargs.channel_provider_sent_at`, which the checkpoint save keeps.
+  An oracle can then tell a message sent before its last reply went out (two
+  messages in a row) from an answer to that reply.
+
+  `getRoomStateEvent` and `sendStateEvent` now join a room they are refused in as
+  not joined and try again for up to 5 s, as `getRoomState` already did. A new
+  user's delegation deposit (`POST /delegation`) failed with 500 when the bot had
+  not yet joined the user's fresh room, which happens while the bot restarts
+  (mainnet, 14 Nov 2026: 12 of about 1,024 deposits). A state call that still
+  fails logs the homeserver's message.
+
+## 0.54.0
+
+### Minor Changes
+
+- [#544](https://github.com/ixoworld/qiforge/pull/544) [`58efe2a`](https://github.com/ixoworld/qiforge/commit/58efe2a1d67bf1a1b5f4d85b888b57b728612eea) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Credentials plugin: Self's identity-check start limit is told kindly and truthfully. A new link refused with `429 daily_limit` now says when the person can try again as a friendly duration computed at the time of speaking ("You've used your 3 tries for now. You can try again in about 5 hours. Just message me then and I'll send you a new link."), from `resetsAt`, else `retryAfterSeconds` / `Retry-After`, else "later today", never the generic "Too many requests right now. Please try again in a minute." The answer carries `limit` (resetsAt, retryAfterSeconds, tryAgain, startsLeft 0, startsMax, windowHours) and a hint never to offer a new link before then. A failed check says the tries left ("You can try 2 more times.") or, with none left, the wait instead of "ask me for a new link"; an unstarted link whose start Self refused is not sent again. New failure `too_many_photos` (Self's `failureReason`) has its own words. The failed `identity_check_updated` reply carries the structured facts as `facts` for a plugin that words it itself; `ChannelEventResult`'s `reply` gains the optional `facts`. Exports: `failedAnswer`, `friendlyWait`, `startsLeftSentence`, `limitSentence`, `limitWait`, `startsOf`, `limitAnswer`, `limitHint`, `START_LIMIT_CODE` and their types.
+
+## 0.53.0
+
+### Minor Changes
+
+- [#542](https://github.com/ixoworld/qiforge/pull/542) [`a561e69`](https://github.com/ixoworld/qiforge/commit/a561e6935b976e6e291585d2180f3fa9943b4a88) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Identity checks and channel turns on WhatsApp, from the Yo mainnet review of 13 Nov 2026.
+
+  - `credentials_request_action` (`self.identity-check`) is state-aware: it reads the person's newest link at Self first and makes a new one only when that one ended (passed, failed, expired, stopped), is about to end, or cannot be read. While it is open it answers it instead: the same link and button again while nobody opened it (`status: "sent"`, `again: true`), "go back to the page you opened" once it was opened, or the check's progress. Both tool descriptions point "is it done?" and "how is it going?" at `credentials_action_status`, whose `ref` may now be left out for the newest link. The link is created with an optional `channel` field (`whatsapp` on a WhatsApp turn) so Self's pages can say "go back to your chat" only for chat links; a Self that does not read it ignores it.
+  - A person who asks again while their check is in review is told it is still being checked, that there is nothing more to do and that a person looks at it within 48 hours, instead of the first "Thanks, your identity check is sent" notice again.
+  - A channel turn whose reply came out empty (no text, no rich part) is never silent: the model is asked once more with a hidden note, and if that is empty too the person gets the oracle's short line (`channelFailureReply` told `kind: "empty_reply"`, else `CHANNEL_BUSY_REPLY`, else a default), logged as `empty_reply`.
+  - Each user Durable Object gets its own LangSmith client (`resolveLangsmithTracing` takes an optional `owner`): a client shared across the isolate's objects failed with "Cannot perform I/O on behalf of a different Durable Object" and lost that turn's trace.
+
+## 0.52.0
+
+### Minor Changes
+
+- [#540](https://github.com/ixoworld/qiforge/pull/540) [`2f812c9`](https://github.com/ixoworld/qiforge/commit/2f812c9a98e19a102f3137e3f18a3574d101ac5a) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Model calls that OpenAI accepts, cheaper fallbacks, a record per call, and no silence when the model fails.
+
+  - **Tool-schema guard.** OpenAI and Azure compile every function parameter's `pattern` with Python's `re` and refuse the whole request when one does not compile (a Unicode property escape `\p{L}` from a zod `.regex(/…/u)`, a JavaScript named group, `\k<…>`, `[^]`, …). The platform model now leaves such a pattern out of the schema the model is shown (the tool still validates its arguments against its own schema), and warns once per isolate naming the tool and field. Accepted patterns are sent unchanged. The rules were measured on 79 patterns against OpenAI and Azure.
+  - **Fallbacks.** The `main` role's OpenRouter fallbacks are now `google/gemini-3.1-flash-lite`, then `google/gemini-2.5-flash-lite` (was Qwen3-235B Thinking, uncached on its one provider at ~10× the cost). Per oracle: `OPENROUTER_MAIN_FALLBACKS` (comma list or `none`) and `OPENROUTER_PROVIDER_ORDER` (provider slugs for the default model, or `none`).
+  - **No reasoning or raw tool output in a chat reply.** Text inside `<think>`/`<thinking>`/`<reasoning>` tags (or before an unmatched closer) is removed, and a model step whose text quotes a JSON tool result verbatim is not delivered.
+  - **Per-call routing record.** One `[llm-call] {…}` line per platform model call: generation id, requested and served model, provider, fallback (model or provider), prompt / cached / cache-write / output / reasoning tokens, cost, duration, error class. After a fallback or an error, `[llm-call-attempts] {…}` lists every provider OpenRouter tried (read in the background). The record is on the reply as `response_metadata.model_call` and is handed to the new `OraclePlugin.onModelCall(call, ctx)` hook for analytics.
+  - **Usage counted once.** A streamed reply's `response_metadata.usage` (tokens and cost) was exactly twice the real value; it is now the provider's own.
+  - **Busy reply on channel turns.** When a channel turn fails because the model could not be reached (provider errors, key limit 402/403, timeout), the person gets one short message (`channelFailureReply` plugin hook, else `CHANNEL_BUSY_REPLY`, else an English default), at most once per chat per 10 minutes, with the cause logged.
+
+### Patch Changes
+
+- [#538](https://github.com/ixoworld/qiforge/pull/538) [`7859803`](https://github.com/ixoworld/qiforge/commit/785980349fd34a693a5c080b4a90d33bed09353a) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - A tapped WhatsApp button is read as the option the person chose again. The
+  turn marks the person's message with the tapped-choice note
+  (`channel_choice_note`), but saving the turn's first checkpoint dropped it:
+  the message serializer keeps only an allowlist of `additional_kwargs` and
+  writes the result back onto the live message, so every tool afterwards saw
+  the note and the title as one text and rejected the answer. The note is now
+  on the allowlist (broken since 0.50.0, when button taps arrived).
+
+  `userContent` also takes the notes off in the reverse of the order the turn
+  adds them: a tap that quotes the message it was on carries the quoted-reply
+  note outside the choice note, and the choice note stayed in the person's
+  words.
+
+  Two other markers the runtime sets and reads after a checkpoint were dropped
+  the same way and are kept now: `forwardedFrom` on a sub-agent's forwarded
+  calls (since 0.41.3 the parent model saw them again from the next step on)
+  and `capped` on a capped tool result (a pruned result pointed `read_result`
+  at the tool call id instead of the saved result).
+
+- [#539](https://github.com/ixoworld/qiforge/pull/539) [`fcaf7b9`](https://github.com/ixoworld/qiforge/commit/fcaf7b97a3d4188fef44855e05b06e9c4bce8213) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Matrix room turns no longer run out of Cloudflare's loop budget ("Subrequest depth limit exceeded"). A Durable Object's outgoing calls are charged to its newest incoming request, so the gateway and a user object calling each other spent about four hops per room turn until a user chatting in a room had their model, memory and gateway calls refused. Work the gateway hands to a user object (a room turn, closing the status card, a group summary) now starts from an alarm invocation of the user object, which carries the full budget; a gateway read or transaction-pinned send that is still refused is retried once from a fresh invocation, and a turn that fails on the limit logs a `[loop-limit]` warning (the gateway's failure log now includes the reason).
+
+## 0.51.1
+
+### Patch Changes
+
+- [#536](https://github.com/ixoworld/qiforge/pull/536) [`2977207`](https://github.com/ixoworld/qiforge/commit/2977207ff9a5ef549332bd97920b8f0970e18e9c) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - A tool that throws inside a sub-agent no longer ends the sub-agent. Its error
+  becomes the call's result (an error `ToolMessage`), so the sub-agent can try
+  another source or answer from what it already has; the main agent already
+  worked this way. Before, one failed fetch (an MCP tool's `isError`, e.g. a site
+  that answers Firecrawl's scrape with a 403) threw the whole Firecrawl Agent away,
+  its good searches included, and the parent read "Web search is unavailable".
+
+  - New `createToolErrorResultMiddleware` (LangChain's `toolErrorMiddleware` with
+    the runtime's rules), the outermost tool layer of every sub-agent dispatch,
+    right after the dangling-call repair. It still lets through an aborted turn, a
+    turn out of budget, and LangGraph interrupts / drains / parent commands. A
+    schema rejection reads `Invalid arguments for <tool>: <reason>`, as on the
+    main agent, now without the inner error's stack. All tools are covered,
+    writes too: a write whose failure leaves its outcome unknown says so in its
+    result and keeps its run-ledger claim, and the repetition guard refuses the
+    identical failed call. Sub-agents get their inner tools' effects from the main
+    agent for this.
+  - Forwarded sub-agent calls keep their error status in the parent's history.
+  - The tool-execution middleware logs a warning whenever a tool throws, and a
+    sub-agent that fails logs one too (both were silent). Error log lines are
+    capped at 300 characters, and a schema rejection is logged without its
+    arguments.
+  - The Firecrawl Agent's failure hint no longer says web search is unavailable;
+    its prompt says how to carry on after one page fails.
+
+## 0.51.0
+
+### Minor Changes
+
+- [#534](https://github.com/ixoworld/qiforge/pull/534) [`220f694`](https://github.com/ixoworld/qiforge/commit/220f69409dfbd0815962ecbcb8d14e0f13bcce58) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Rich messages on channel event turns: an event turn (a permission card answered, an identity check updated) may now carry `render`, and its run gets exactly what a message turn with `render` gets: `offer_choices`, `send_link_button`, `send_cards`, plugin rich parts through `renderOf(ctx)` / `withRichParts` (the credentials plugin's Allow and Start check buttons), the same plan parts, and taps on choices it offers. Turn results list the new `rich_events` feature so a gateway can tell this runtime from 0.50.0, which refuses `render` with an event. `choice` stays refused on an event turn.
+
 ## 0.50.0
 
 ### Minor Changes

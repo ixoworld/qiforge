@@ -48,6 +48,16 @@ The object runs the agent turn (LangChain `createAgent`) and streams SSE
 straight from the object. It is single-threaded, which replaces the Node
 runtime's per-user ref-counting, busy-timeouts and cron locks outright.
 
+**Turn gate.** Before anything of a turn exists (run, stored message, room
+mirror, Matrix ledger entry, file read, model call), on every entry (Portal,
+Matrix direct and group rooms, task runs, channel messages, notices and
+events), every plugin's `gateTurn(ctx)` may refuse it
+(`src/core/turn-gate.ts`): concurrently, first refusal in plugin order, each
+bounded by its plugin's `turnGate` time limit and failing open unless the
+plugin declares `closed`. A Portal request gets the refusal's HTTP status, a
+Matrix room a notice, a channel request `turn_refused`, a task run is skipped.
+See [usage-metering](usage-metering.md).
+
 **Request admission.** Before the agent is prepared, a turn is offered to
 every plugin's `getRequestAdmission(ctx)`, in the order the plugins were
 loaded (`src/core/request-admission.ts`). A handler answers `pass` or
@@ -462,8 +472,8 @@ an E2EE Matrix bot on Workers:
   outbox that survives restarts, poison-row eviction after three hung
   attempts;
 - resumable catch-up of rooms that had events while the bot was down;
-- invite handling, room upgrades, hot-room memory bounds, the idle recycle
-  and the one-time-key conflict detector.
+- invite handling, room upgrades, hot-room memory bounds, an opt-in idle
+  recycle (off in the gateway) and the one-time-key conflict detector.
 
 The subclass adds only what is specific to the oracle:
 
@@ -973,6 +983,27 @@ and an object stops hibernating or a request dies with an opaque error.
   no-op store instead. Tools register cleanups with `RuntimeContext.onTurnEnd`. With debug
   routes on, `GET /debug/realtime` → `pendingTimers` lists every live timer
   with its creation stack.
+- **Gateway work starts from a fresh invocation.** Cloudflare refuses a call
+  once a chain of Worker and Durable Object invocations has looped back into
+  the Workers runtime 16 times ("loop limit", error 1019; the refusal reads
+  `Subrequest depth limit exceeded. This request looped back into the
+Workers runtime too many times.`). Each DO RPC, service-binding call and
+  fetch to a Worker-backed host (OpenRouter, the memory engine, other IXO
+  Workers) spends one; a Matrix homeserver fetch does not. A Durable
+  Object's outgoing calls are charged to its **newest** in-flight incoming
+  request, whatever code makes them (workerd `IoContext::getIoChannelFactory()`
+  → `getCurrentIncomingRequest()`), and an object with work pending keeps its
+  last request current until the next arrives. The gateway and the user
+  objects call each other, so without care their budgets ratchet down about
+  four hops per Matrix turn until the turn's model and gateway calls are
+  refused. Rule: work another object hands to the user object (a room turn,
+  closing a status card, a group summary) first waits for an alarm
+  invocation of the user object (`src/do/fresh-invocation.ts`) — the alarm
+  is the object's only top-level event and carries the full budget. Any new
+  gateway → user RPC whose handler calls out again must go through the same
+  gate; never call back into the caller from inside its own request chain
+  when the work can be handed over instead. See
+  [operations](operations.md#turns-the-loop-limit).
 - **No MCP client may outlive a call.** A streamable-HTTP MCP client keeps a
   server→client stream open for as long as it exists, which counts as
   in-flight I/O: the object never hibernates and is billed around the
