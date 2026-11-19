@@ -93,6 +93,11 @@ export function makeMiddleware(label: string): AgentMiddleware {
 }
 
 export interface TestPluginInit {
+  gateTurn?: OraclePlugin['gateTurn'];
+  turnGate?: OraclePlugin['turnGate'];
+  onModelCall?: OraclePlugin['onModelCall'];
+  onTurnUsage?: OraclePlugin['onTurnUsage'];
+  onWake?: OraclePlugin['onWake'];
   getRequestAdmission?: OraclePlugin['getRequestAdmission'];
   getRequestMiddlewares?: OraclePlugin['getRequestMiddlewares'];
   name: string;
@@ -159,6 +164,11 @@ export function makePlugin(init: TestPluginInit): OraclePlugin {
 
     override getRequestTools = init.getRequestTools;
     override getRequestAdmission = init.getRequestAdmission;
+    override gateTurn = init.gateTurn;
+    override readonly turnGate = init.turnGate;
+    override onModelCall = init.onModelCall;
+    override onTurnUsage = init.onTurnUsage;
+    override onWake = init.onWake;
     override getRequestMiddlewares = init.getRequestMiddlewares;
     override getRequestSubAgents = init.getRequestSubAgents;
 

@@ -48,6 +48,16 @@ The object runs the agent turn (LangChain `createAgent`) and streams SSE
 straight from the object. It is single-threaded, which replaces the Node
 runtime's per-user ref-counting, busy-timeouts and cron locks outright.
 
+**Turn gate.** Before anything of a turn exists (run, stored message, room
+mirror, Matrix ledger entry, file read, model call), on every entry (Portal,
+Matrix direct and group rooms, task runs, channel messages, notices and
+events), every plugin's `gateTurn(ctx)` may refuse it
+(`src/core/turn-gate.ts`): concurrently, first refusal in plugin order, each
+bounded by its plugin's `turnGate` time limit and failing open unless the
+plugin declares `closed`. A Portal request gets the refusal's HTTP status, a
+Matrix room a notice, a channel request `turn_refused`, a task run is skipped.
+See [usage-metering](usage-metering.md).
+
 **Request admission.** Before the agent is prepared, a turn is offered to
 every plugin's `getRequestAdmission(ctx)`, in the order the plugins were
 loaded (`src/core/request-admission.ts`). A handler answers `pass` or

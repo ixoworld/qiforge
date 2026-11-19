@@ -656,6 +656,28 @@ describe('POST /channels/turn error bodies', () => {
     });
   });
 
+  it('passes a plugin refusal on with its reason, retry delay and action, and its status', async () => {
+    const turn = await signedTurn();
+    const { env } = environment(turn, false, async () => ({
+      ok: false,
+      status: 402,
+      code: 'turn_refused',
+      message: "You're out of IXO credits. Top up to keep chatting.",
+      reason: 'insufficient_credits',
+      retryAfterSeconds: 3600,
+      action: { label: 'Top up credits', url: 'https://portal.example/c' },
+    }));
+    const res = await send(turn, env);
+    expect(res.status).toBe(402);
+    expect(await res.json()).toEqual({
+      code: 'turn_refused',
+      reason: 'insufficient_credits',
+      message: "You're out of IXO credits. Top up to keep chatting.",
+      retryAfterSeconds: 3600,
+      action: { label: 'Top up credits', url: 'https://portal.example/c' },
+    });
+  });
+
   it('answers an unexpected failure with 503 unavailable and logs its cause, bounded', async () => {
     const turn = await signedTurn();
     const cause = new Error(`owner copy failed: ${'x'.repeat(500)}`);

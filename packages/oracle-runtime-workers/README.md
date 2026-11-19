@@ -176,6 +176,7 @@ and the wire contract in [channels](docs/channels.md#rich-messages).
 | [action-proposals](docs/action-proposals.md)             | Action cards: a transfer prepared from chat, signed in the Portal, verified on chain, receipted                            |
 | [topic-action-proposals](docs/topic-action-proposals.md) | Topic cards: discussion drafts and claim-access grants as multi-step journals with one-use permits                         |
 | [chain-tools](docs/chain-tools.md)                       | The bundled `ixo-chain` reader: live balances, the 30 lookup kinds, names from the IXO Names worker, retries and limits    |
+| [usage-metering](docs/usage-metering.md)                 | For plugin authors: `gateTurn` (refuse a turn, e.g. 402), `onModelCall` on every model call, `onTurnUsage`, BYO `paidBy`   |
 | [testing](docs/testing.md)                               | Unit, harness e2e, the devnet feature matrix, stress                                                                       |
 | [load-tests](docs/load-tests.md)                         | Measurements and the findings that shaped the gateway                                                                      |
 

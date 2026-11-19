@@ -5,7 +5,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { createLlmAdapter, OPENROUTER_MAIN_FALLBACKS } from '../core/llm';
 import type { Logger } from '../plugin-api/types';
-import { modelCallOf, MODEL_CALL_METADATA_KEY } from './model-call';
+import {
+  modelCallOf,
+  MODEL_CALL_METADATA_KEY,
+  type ModelCallReport,
+} from './model-call';
+import { ModelCallReporter } from '../core/model-call-reporter';
 
 const sse = (chunks: object[]): string =>
   chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join('') +
@@ -125,6 +130,7 @@ describe('PlatformChatModel', () => {
     const call = modelCallOf(reply);
     expect(call).toEqual({
       role: 'main',
+      paidBy: 'platform',
       requestedModel: 'openai/gpt-5.6-luna',
       servedModel: 'openai/gpt-5.6-luna',
       provider: 'OpenAI',
@@ -212,6 +218,129 @@ describe('PlatformChatModel', () => {
     );
     expect(warned).toHaveLength(1);
     expect(warned[0]!.text).toContain('Key limit exceeded');
+  });
+
+  /** A stream that sends `chunks` (no usage) and then fails or hangs. */
+  function brokenStream(
+    chunks: object[],
+    end: 'error' | 'hang',
+  ): () => Response {
+    return () => {
+      const encoder = new TextEncoder();
+      const queue = [...chunks];
+      const body = new ReadableStream<Uint8Array>({
+        // One chunk per read: the failure comes after they were read.
+        async pull(controller) {
+          const next = queue.shift();
+          if (next) {
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(next)}\n\n`),
+            );
+            return;
+          }
+          if (end === 'error') controller.error(new Error('connection reset'));
+          else await new Promise(() => undefined);
+        },
+      });
+      return new Response(body, {
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    };
+  }
+
+  const head = {
+    id: 'gen-cut-1',
+    object: 'chat.completion.chunk',
+    created: 1,
+    model: 'openai/gpt-5.6-luna',
+    provider: 'OpenAI',
+  };
+  const partial = [
+    { ...head, choices: [{ index: 0, delta: { content: 'Hello ' } }] },
+    { ...head, choices: [{ index: 0, delta: { content: 'there, wor' } }] },
+  ];
+
+  it('a stream that fails after output started reports an estimate, flagged, without cost', async () => {
+    stubFetch([brokenStream(partial, 'error')]);
+    const model = createLlmAdapter(
+      { OPEN_ROUTER_API_KEY: 'sk-test' },
+      capture().logger,
+    ).get('main', { maxRetries: 0 });
+    const error = await model
+      .stream([new HumanMessage('What is the weather like?')])
+      .then(async (stream) => {
+        for await (const chunk of stream) void chunk;
+      })
+      .then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+    const call = modelCallOf(error);
+    expect(call).toMatchObject({
+      ok: false,
+      paidBy: 'platform',
+      usageEstimated: true,
+      // chars/4: 'What is the weather like?' (25) and 'Hello there, wor' (16).
+      promptTokens: 7,
+      outputTokens: 4,
+    });
+    expect(call?.costUsd).toBeUndefined();
+  });
+
+  it('a stream abandoned on an abort is reported once, by its call, with an estimate', async () => {
+    stubFetch([brokenStream(partial, 'hang')]);
+    const model = createLlmAdapter(
+      { OPEN_ROUTER_API_KEY: 'sk-test' },
+      capture().logger,
+    ).get('main', { maxRetries: 0 });
+    const reports: ModelCallReport[] = [];
+    const reporter = new ModelCallReporter(
+      (call) => reports.push(call),
+      capture().logger,
+    );
+    const controller = new AbortController();
+    const error = await model
+      .stream([new HumanMessage('What is the weather like?')], {
+        signal: controller.signal,
+        callbacks: [reporter],
+      })
+      .then(async (stream) => {
+        let seen = 0;
+        for await (const chunk of stream) {
+          if (chunk.text) seen += 1;
+          if (seen === 2) controller.abort();
+        }
+      })
+      .then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+    expect(error).toBeDefined();
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({
+      ok: false,
+      paidBy: 'platform',
+      usageEstimated: true,
+      promptTokens: 7,
+      outputTokens: 4,
+    });
+    expect(reports[0]?.costUsd).toBeUndefined();
+  });
+
+  it('a stream that fails before any output carries no tokens and no estimate', async () => {
+    stubFetch([brokenStream([], 'error')]);
+    const model = createLlmAdapter(
+      { OPEN_ROUTER_API_KEY: 'sk-test' },
+      capture().logger,
+    ).get('main', { maxRetries: 0 });
+    const error = await streamAll(model).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    const call = modelCallOf(error);
+    expect(call).toMatchObject({ ok: false });
+    expect(call?.usageEstimated).toBeUndefined();
+    expect(call?.promptTokens).toBeUndefined();
   });
 
   it('records a non-streamed call too', async () => {

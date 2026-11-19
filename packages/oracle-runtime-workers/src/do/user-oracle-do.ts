@@ -97,8 +97,10 @@ import {
 import {
   CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
   ChannelError,
+  channelErrorOutcome,
   channelRequestHash,
   channelOrigin,
+  channelTurnRefusedError,
   delegationRequiredError,
   requireChannelDelegation,
   StaleSessionError,
@@ -339,6 +341,7 @@ import {
   type MemorySchemaDebug,
   TURN_INTERRUPTED_MARKER,
   type JsonString,
+  refusedTurnResult,
 } from './contracts';
 import { turnRecursionLimit } from './turn-config';
 import { decideMatrixTurn, MatrixTurnLedger } from './matrix-turn-ledger';
@@ -511,8 +514,32 @@ import { DomainContextStore } from './domain-context-store';
 import { buildRuntimeContext, EVENT_NAMES } from '../core/runtime-context';
 import {
   fetchGenerationAttempts,
-  type ModelCallRecord,
+  turnModelUsageTotals,
+  type ModelCallReport,
+  type TurnModelUsage,
 } from '../llm/model-call';
+import {
+  ModelCallReporter,
+  purposeLlm,
+  reportingDecisions,
+  reportingLlm,
+  TurnModelCalls,
+} from '../core/model-call-reporter';
+import {
+  isGateRefusal,
+  platformModelsOf,
+  runTurnGates,
+  turnGatePlugins,
+  turnRefusalResponse,
+  type TurnGateVerdict,
+} from '../core/turn-gate';
+import type { TurnTrigger } from '../plugin-api/turn-gate';
+import type { ExtractionProvider } from '../attachments/extract';
+import {
+  deniedDecisions,
+  deniedPlatformLlm,
+  PlatformModelsDeniedError,
+} from '../llm/platform-models-policy';
 import {
   busyReplyDue,
   busyReplyKey,
@@ -650,6 +677,21 @@ interface TurnBuildRun {
   domainPins?: DomainContextPins;
   /** A `router.update` step for the run's client while the build waits. */
   onProgress?: (step: string) => void;
+  /**
+   * The attempt's model-call reporting (`runAttempt`): every call the build
+   * and the turn make goes through `reportCall` to `onModelCall` and is
+   * collected in `modelCalls` for the attempt's `onTurnUsage`.
+   */
+  modelCalls: TurnModelCalls;
+  reportCall: (call: ModelCallReport) => void;
+}
+
+/** One run attempt's model calls and how it ended, for its `onTurnUsage`. */
+interface AttemptUsage {
+  calls: TurnModelCalls;
+  status: RunOutcome['status'];
+  /** The attempt got as far as building the agent. */
+  built: boolean;
 }
 
 /** Where the user-context prefetch runs: the engine and the `USER_CONTEXT_*` knobs. */
@@ -730,6 +772,33 @@ function admissionApplies(req: TurnRequest): boolean {
     req.roomKind !== 'group'
   );
 }
+
+/** How a turn request started, for the pre-turn gate. */
+function turnTriggerOf(req: TurnRequest): TurnTrigger {
+  if (req.client === 'portal') return 'portal';
+  if (req.client === 'channel')
+    return req.channel?.channelEvent
+      ? 'channel-event'
+      : req.channel?.notice
+        ? 'channel-notice'
+        : 'channel';
+  if (req.taskRunId || req.sessionId.startsWith(TASK_SESSION_PREFIX))
+    return 'task';
+  return req.roomKind === 'group' ? 'matrix-group' : 'matrix';
+}
+
+/**
+ * `req` as the gate admitted it: restricted to the person's own provider
+ * when a gate said so (`TurnRequest.platformModels`, stored with the run).
+ */
+function admittedTurn(req: TurnRequest, verdict: TurnGateVerdict): TurnRequest {
+  return platformModelsOf(verdict) === 'deny'
+    ? { ...req, platformModels: 'deny' }
+    : req;
+}
+
+/** How long a turn's usage report waits for its `onModelCall` deliveries. */
+const TURN_USAGE_SETTLE_MS = 60_000;
 
 function admissionTimeoutMs(env: Record<string, unknown>): number {
   const ms = env.REQUEST_ADMISSION_TIMEOUT_MS;
@@ -837,6 +906,14 @@ const META_USER_DID = 'meta:userDid';
  * retention; a boot clears it. The alarm then prunes on the bare object.
  */
 const META_RETENTION_WAKE = 'meta:interactionRetentionWake';
+/**
+ * The earliest wake a plugin asked for (`ctx.requestWake`), epoch ms: the
+ * housekeeping tick calls the plugins' `onWake` once it is due. Dropped when
+ * the idle working copy is evicted.
+ */
+const META_PLUGIN_WAKE_AT = 'meta:pluginWakeAt';
+/** Longest one plugin's `onWake` may hold the alarm tick. */
+const PLUGIN_WAKE_TIMEOUT_MS = 30_000;
 
 /** KV key of a session's context-guard counters (`GET /debug/context?session=`). */
 const contextStatsKey = (sessionId: string): string => `ctxstats:${sessionId}`;
@@ -2360,6 +2437,28 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             );
           }
         },
+        gateTurn: async (identity, input, sessionId) => {
+          const refused = await this.gateTurn({
+            identity,
+            trigger: input.event
+              ? 'channel-event'
+              : input.notice
+                ? 'channel-notice'
+                : 'channel',
+            client: 'channel',
+            requestId: input.requestId,
+            ...(sessionId ? { sessionId } : {}),
+            channel: {
+              provider: input.provider,
+              bindingId: input.bindingId,
+              bindingRevision: input.bindingRevision,
+            },
+            hasAttachments: Boolean(input.attachments?.length),
+          });
+          if (!isGateRefusal(refused)) return platformModelsOf(refused);
+          // The refusal's status, message, code (as `reason`) and details.
+          throw channelTurnRefusedError(refused.refusal);
+        },
         stopRuns: (runIds) => this.runs!.abortByIds(runIds),
         describeSessions: async (sessionIds) => {
           const found = await this.sessions!.summaries(sessionIds);
@@ -2415,7 +2514,25 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             .filter(Boolean),
           minProbability:
             channelRouting.CHANNEL_SEMANTIC_ROUTING_MIN_PROBABILITY,
-          evaluator: this.core.decisions,
+          // Before the request has a run: reported outside a turn, under the
+          // channel request's id (`metadata.request_id`, set by the caller).
+          evaluator: reportingDecisions(
+            this.core.decisions,
+            (call, options) => {
+              const meta = options?.metadata;
+              const requestId = meta?.request_id;
+              const sessionId = meta?.session_id;
+              this.outOfTurnObserver({
+                client: 'channel',
+                requestId:
+                  typeof requestId === 'string'
+                    ? requestId
+                    : crypto.randomUUID(),
+                sessionId: typeof sessionId === 'string' ? sessionId : '',
+              })?.(call);
+            },
+            () => 'routing',
+          ),
           ownsSession: async (sessionId) => {
             const session = await this.sessions!.getSession(sessionId);
             const roomId = await this.resolveMainRoomId(userDid);
@@ -2558,6 +2675,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         events: this.events,
         secrets: createSecretsAdapter(secretsService),
         background: (work) => this.ctx.waitUntil(work),
+        ...(core.plugins.some((plugin) => typeof plugin.onWake === 'function')
+          ? { requestWake: (at: number) => this.requestPluginWake(at) }
+          : {}),
       });
       this.capabilityRouter = createCapabilityRouter({
         evaluator: core.decisions,
@@ -3082,6 +3202,17 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         deadlines.push(Math.max(flush.at, now + 1000));
       }
 
+      // Plugins' wakes (`onWake`): run when due. A later one is armed after
+      // the eviction decision below: it is no reason to keep an idle copy.
+      let pluginWakeAt: number | null = null;
+      try {
+        pluginWakeAt = await this.pluginWakeTick(now);
+      } catch (err) {
+        console.error(
+          `[user-do] plugin wake tick failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
       if (this.taskScheduler) {
         let next: number | null;
         try {
@@ -3244,6 +3375,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         });
         if (outcome === 'evicted') {
           await this.ctx.storage.delete(META_HOUSEKEEPING_AT);
+          // A plugin's pending wake does not outlive the copy: its rows
+          // travel with the owner copy and its next hook resumes the work.
+          await this.ctx.storage.delete(META_PLUGIN_WAKE_AT);
           // Action-card drafts outlive the working copy: their retention
           // still needs a wake (handled on the bare object, see alarm()).
           const retentionAt = await this.interactionRetentionAt();
@@ -3295,6 +3429,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         if (next !== null) deadlines.push(next);
       }
       if (blobSweepPending) deadlines.push(now + 60_000);
+      if (pluginWakeAt !== null)
+        deadlines.push(Math.max(pluginWakeAt, now + 1000));
 
       deadlines.push(now + IDLE_EVICT_MS);
       const housekeeping = Math.min(...deadlines);
@@ -3302,6 +3438,74 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       await this.requestAlarm(
         nextPingAt === null ? housekeeping : Math.min(housekeeping, nextPingAt),
       );
+    }
+
+    /**
+     * A plugin asked to be woken at `at` (`ctx.requestWake`): keep the
+     * earliest requested wake and arm the alarm for it.
+     */
+    private async requestPluginWake(at: number): Promise<void> {
+      if (!Number.isFinite(at)) return;
+      const when = Math.max(Math.ceil(at), Date.now() + 1000);
+      const stored = await this.ctx.storage.get<number>(META_PLUGIN_WAKE_AT);
+      if (typeof stored === 'number' && stored <= when) return;
+      await this.ctx.storage.put(META_PLUGIN_WAKE_AT, when);
+      await this.requestHousekeeping(when);
+    }
+
+    /**
+     * The plugins' wake, in a full housekeeping tick: when the requested
+     * wake came due, clear it and call each plugin's `onWake` (bounded, a
+     * failure logged). Returns the wake still requested (a future one, or
+     * one a hook asked for again), or null.
+     */
+    private async pluginWakeTick(now: number): Promise<number | null> {
+      // An oracle with no `onWake` plugin never reads the key.
+      const plugins = this.core.plugins.filter(
+        (plugin) => typeof plugin.onWake === 'function',
+      );
+      if (plugins.length === 0) return null;
+      const at = await this.ctx.storage.get<number>(META_PLUGIN_WAKE_AT);
+      if (typeof at !== 'number') return null;
+      if (at > now + 1000) return at;
+      await this.ctx.storage.delete(META_PLUGIN_WAKE_AT);
+      const userDid = this.userDid;
+      if (userDid) {
+        const ctx = await this.pluginHookContext(
+          {
+            identity: { userDid },
+            message: '',
+            sessionId: '',
+            client: 'matrix',
+            requestId: crypto.randomUUID(),
+          },
+          undefined,
+          new AbortController().signal,
+        );
+        for (const plugin of ctx ? plugins : []) {
+          if (!ctx) break;
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([
+              Promise.resolve(plugin.onWake?.(ctx)),
+              new Promise((_, reject) => {
+                timer = setTimeout(
+                  () => reject(new Error('timed out')),
+                  PLUGIN_WAKE_TIMEOUT_MS,
+                );
+              }),
+            ]);
+          } catch (err) {
+            console.warn(
+              `[user-do] plugin ${plugin.name}: onWake failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          } finally {
+            clearTimeout(timer);
+          }
+        }
+      }
+      const next = await this.ctx.storage.get<number>(META_PLUGIN_WAKE_AT);
+      return typeof next === 'number' ? next : null;
     }
 
     /**
@@ -3732,13 +3936,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       } catch (error) {
         const refusal =
           error instanceof ChannelError ? error : classifyChannelFailure(error);
-        if (refusal)
-          return {
-            ok: false,
-            status: refusal.status,
-            code: refusal.code,
-            message: refusal.message,
-          };
+        if (refusal) return channelErrorOutcome(refusal);
         throw error;
       }
     }
@@ -3762,13 +3960,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         // file storage rejected it) is a final refusal, not a 503.
         const refusal =
           error instanceof ChannelError ? error : classifyChannelFailure(error);
-        if (refusal)
-          return {
-            ok: false,
-            status: refusal.status,
-            code: refusal.code,
-            message: refusal.message,
-          };
+        if (refusal) return channelErrorOutcome(refusal);
         throw error;
       }
     }
@@ -6081,7 +6273,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       await this.ready(req.identity);
       const eventId = req.client === 'matrix' ? req.eventId : undefined;
       const ledger = this.matrixLedger;
-      if (!eventId || !ledger) return this.runTurnOnce(req);
+      if (!eventId || !ledger) {
+        const verdict = await this.gateHeaderlessTurn(req);
+        return isGateRefusal(verdict)
+          ? refusedTurnResult(req, verdict.refusal)
+          : this.runTurnOnce(admittedTurn(req, verdict));
+      }
 
       const running = this.matrixTurnRuns.get(eventId);
       if (running) {
@@ -6117,8 +6314,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         case 'run':
           break;
       }
+      // Before the ledger records the event: a refused message leaves no
+      // trace, and the gateway's replay of it asks the gate again.
+      const verdict = await this.gateHeaderlessTurn(req);
+      if (isGateRefusal(verdict))
+        return refusedTurnResult(req, verdict.refusal);
       await ledger.start(eventId, req.sessionId, req.requestId);
-      const run = this.runTurnOnce(req)
+      const run = this.runTurnOnce(admittedTurn(req, verdict))
         .then(async (result) => {
           await ledger.answer(eventId, result.text, result.plan);
           return result;
@@ -6137,6 +6339,17 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // returns it.
       this.ctx.waitUntil(run.catch(() => undefined));
       return run;
+    }
+
+    /**
+     * The gate for a turn that comes through `runTurn` (Matrix rooms, task
+     * runs). A Portal request was gated by `fetch` already (the non-streamed
+     * turn reaches `runTurn` after it).
+     */
+    private gateHeaderlessTurn(req: TurnRequest): Promise<TurnGateVerdict> {
+      return req.client === 'portal'
+        ? Promise.resolve(null)
+        : this.gateTurn(this.gateScopeOf(req));
     }
 
     private async runTurnOnce(req: TurnRequest): Promise<TurnResult> {
@@ -6982,6 +7195,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         metadata: body.metadata ? JSON.stringify(body.metadata) : undefined,
         ...(attachments.length > 0 ? { attachments } : {}),
       };
+      // The plugins' pre-turn gate: a refusal is the HTTP answer, before the
+      // message is mirrored, a run recorded or anything streamed. A
+      // restriction rides on the request (and the run stored from it).
+      const verdict = await this.gateTurn(
+        this.gateScopeOf(req),
+        request.signal,
+      );
+      if (isGateRefusal(verdict))
+        return turnRefusalResponse(verdict.refusal, requestId);
+      if (platformModelsOf(verdict) === 'deny') req.platformModels = 'deny';
       const stream = body.stream !== false;
       if (!stream) {
         void this.replayToRoom(req, body.message, 'user');
@@ -7162,6 +7385,40 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     ): Promise<RunOutcome> {
       const stored = JSON.parse(live.record.request) as StoredRunRequest;
       const req = stored.turn;
+      // Every model call of this attempt (a plugin deciding an event turn,
+      // the build, the agent, its title) is reported to `onModelCall` and
+      // collected here; the attempt's `onTurnUsage` follows once it ended:
+      // always when it got as far as building the agent, otherwise when it
+      // made at least one call (an event turn a plugin decided, a build
+      // that failed after reading a file).
+      const usage: AttemptUsage = {
+        calls: new TurnModelCalls(),
+        status: 'failed',
+        built: false,
+      };
+      try {
+        const outcome = await this.runAttemptTurn(live, resumed, stored, usage);
+        usage.status = outcome.status;
+        return outcome;
+      } finally {
+        if (usage.built || usage.calls.size > 0)
+          this.reportTurnUsage(req, live.runId, usage.calls, usage.status);
+      }
+    }
+
+    private async runAttemptTurn(
+      live: LiveRun,
+      resumed: boolean,
+      stored: StoredRunRequest,
+      usage: AttemptUsage,
+    ): Promise<RunOutcome> {
+      const req = stored.turn;
+      const reportCall = this.modelCallObserver(
+        req,
+        live.runId,
+        live.abort.signal,
+        usage.calls,
+      );
       if (req.client === 'channel') {
         if (
           req.channel &&
@@ -7203,7 +7460,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         req.channel?.channelEvent &&
         req.channel.eventNote === undefined
       ) {
-        const decided = await this.decideChannelEvent(req, live);
+        const decided = await this.decideChannelEvent(req, live, reportCall);
         if (decided.kind === 'ignore') {
           announce();
           live.buffer.push('done', { runId: live.runId });
@@ -7316,8 +7573,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         byoProvider,
         toolOutputCapChars,
         delivery,
-        usage,
+        usage: budgetUsage,
         domainContext,
+        modelCalls,
       } = await this.prepareTurn(
         req,
         {
@@ -7334,6 +7592,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           resumed: !freshInput,
           continuation: freshInput ? null : live.continuation,
           ...(stored.domainPins ? { domainPins: stored.domainPins } : {}),
+          modelCalls: usage.calls,
+          reportCall,
           // The Portal shows `router.update` steps (as it shows "Queued…");
           // chat surfaces have no place for one.
           ...(req.client === 'portal'
@@ -7351,6 +7611,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             : {}),
         },
       );
+      usage.built = true;
       const sessionId = req.sessionId;
       // The anchors this run read are pinned on its row, so a resumed
       // attempt reads the same document revisions.
@@ -7447,6 +7708,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               capture,
               { kind: 'agent' },
               live.abort.signal,
+              {
+                observe: reportCall,
+                calls: modelCalls,
+                // No title on a turn restricted to the person's provider:
+                // the title model is the platform's.
+                title: req.platformModels !== 'deny',
+              },
             );
           },
           onError: (err) => {
@@ -7512,7 +7780,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           toolCalls,
           ...(outcome.status === 'failed' ? { error: outcome.error } : {}),
           // Written with the terminal status: one row update per run.
-          usage: usage(),
+          usage: budgetUsage(),
         };
       } finally {
         this.events.unregister(sessionId, sink);
@@ -7628,13 +7896,113 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /**
+     * The plugins' pre-turn gate (`OraclePlugin.gateTurn`, `core/turn-gate.ts`)
+     * for a turn about to start: the refusal, or null when it may run. Called
+     * by every entry before it records, stores or mirrors anything; costs
+     * nothing when no plugin gates. A refusal is the entry's to answer.
+     */
+    private async gateTurn(
+      scope: {
+        identity: TurnIdentity;
+        trigger: TurnTrigger;
+        client: TurnRequest['client'];
+        requestId: string;
+        sessionId?: string;
+        roomId?: string;
+        roomKind?: 'direct' | 'group';
+        taskRunId?: string;
+        channel?: {
+          provider: string;
+          bindingId: string;
+          bindingRevision?: number;
+        };
+        model?: string;
+        hasAttachments: boolean;
+      },
+      signal?: AbortSignal,
+    ): Promise<TurnGateVerdict> {
+      const gated = turnGatePlugins(this.core.plugins);
+      if (gated.length === 0) return null;
+      const ambient = this.ambient;
+      if (!ambient) throw new Error('turn gate asked before the object booted');
+      const userDid = scope.identity.userDid;
+      const matrixUserId = scope.identity.matrixUserId ?? '';
+      const ucanDelegation = await this.turnDelegation(scope.identity);
+      // The UCAN helpers exactly as a turn's runtime context binds them.
+      const { ucan } = buildRuntimeContext(
+        {
+          context: {
+            user: { did: userDid, matrixUserId, ucanDelegation },
+            session: {
+              id: scope.sessionId ?? '',
+              client: scope.client,
+              requestId: scope.requestId,
+            },
+          },
+        },
+        ambient,
+        { messages: [], loadedPlugins: new Set() },
+      );
+      const byo = this.byo;
+      return runTurnGates(
+        gated,
+        {
+          trigger: scope.trigger,
+          user: { did: userDid, matrixUserId, ucanDelegation },
+          session: {
+            client: scope.client,
+            requestId: scope.requestId,
+            ...(scope.sessionId ? { id: scope.sessionId } : {}),
+            ...(scope.roomId ? { roomId: scope.roomId } : {}),
+            ...(scope.roomKind ? { roomKind: scope.roomKind } : {}),
+            ...(scope.taskRunId ? { taskRunId: scope.taskRunId } : {}),
+            ...(scope.channel ? { channel: scope.channel } : {}),
+          },
+          ...(scope.model ? { model: scope.model } : {}),
+          hasAttachments: scope.hasAttachments,
+          config: ambient.config,
+          ...(ambient.kv ? { kv: ambient.kv } : {}),
+          ucan,
+          hasByoCredentials: () =>
+            byo ? byo.hasCredentials(userDid) : Promise.resolve(false),
+          logger: ambient.logger,
+          background: (work) => this.ctx.waitUntil(work),
+        },
+        {
+          requestId: scope.requestId,
+          ...(signal ? { signal } : {}),
+          log: (level, line) =>
+            level === 'warn' ? console.warn(line) : console.log(line),
+        },
+      );
+    }
+
+    /** The gate's view of a turn request. */
+    private gateScopeOf(req: TurnRequest): Parameters<typeof this.gateTurn>[0] {
+      return {
+        identity: req.identity,
+        trigger: turnTriggerOf(req),
+        client: req.client,
+        requestId: req.requestId,
+        sessionId: req.sessionId,
+        ...(req.roomId ? { roomId: req.roomId } : {}),
+        ...(req.roomKind ? { roomKind: req.roomKind } : {}),
+        ...(req.taskRunId ? { taskRunId: req.taskRunId } : {}),
+        ...(req.model ? { model: req.model } : {}),
+        hasAttachments: Boolean(
+          req.attachments?.length || req.channel?.attachments?.length,
+        ),
+      };
+    }
+
+    /**
      * The runtime context a plugin hook outside the agent gets for a turn
      * (`onModelCall`, `channelFailureReply`): the turn's user and session,
      * the person's kv, the ambient services.
      */
     private async pluginHookContext(
       req: TurnRequest,
-      runId: string,
+      runId: string | undefined,
       signal: AbortSignal,
     ) {
       const ambient = this.ambient;
@@ -7653,7 +8021,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               id: req.sessionId,
               client: req.client,
               requestId: req.requestId,
-              runId,
+              ...(runId ? { runId } : {}),
               ...(req.channel?.bindingRevision
                 ? {
                     channel: {
@@ -7673,21 +8041,26 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /**
-     * What happens with each model call's record during a turn, after the
-     * call, in the background: after a fallback or a failure, OpenRouter's
-     * record of every provider it tried is logged
-     * (`[llm-call-attempts] {…}`); then each plugin's `onModelCall` gets it.
+     * What happens with each model call's report, after the call, in the
+     * background: after a fallback or a failure, OpenRouter's record of every
+     * provider it tried is logged (`[llm-call-attempts] {…}`); then each
+     * plugin's `onModelCall` gets it with `req`'s context. Inside a turn
+     * `calls` collects the attempt's reports and tracks their delivery for
+     * `onTurnUsage`; a call outside a turn passes a `req` of its own and no
+     * run.
      */
     private modelCallObserver(
       req: TurnRequest,
-      runId: string,
+      runId: string | undefined,
       signal: AbortSignal,
-    ): (call: ModelCallRecord) => void {
+      calls?: TurnModelCalls,
+    ): (call: ModelCallReport) => void {
       let hookContext: ReturnType<typeof this.pluginHookContext> | undefined;
       const observers = this.core.plugins.filter(
         (plugin) => typeof plugin.onModelCall === 'function',
       );
       return (call) => {
+        calls?.add(call);
         const work: Promise<unknown>[] = [];
         const { providerConfig } = this.core.llm;
         if (
@@ -7744,8 +8117,99 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             ),
           );
         }
-        if (work.length > 0) this.ctx.waitUntil(Promise.all(work));
+        if (work.length > 0) {
+          const all = Promise.all(work);
+          calls?.track(all);
+          this.ctx.waitUntil(all);
+        }
       };
+    }
+
+    /**
+     * The report of one turn attempt's model calls (`onTurnUsage`), in the
+     * background once every call of the attempt went through `onModelCall`.
+     * Costs nothing when no plugin listens.
+     */
+    private reportTurnUsage(
+      req: TurnRequest,
+      runId: string,
+      calls: TurnModelCalls,
+      status: TurnModelUsage['status'],
+    ): void {
+      const listeners = this.core.plugins.filter(
+        (plugin) => typeof plugin.onTurnUsage === 'function',
+      );
+      if (listeners.length === 0) return;
+      this.ctx.waitUntil(
+        (async () => {
+          const settled = await calls.settled(TURN_USAGE_SETTLE_MS);
+          if (settled.timedOut)
+            console.warn(
+              `[llm-call] turn ${req.requestId}: model-call deliveries still running after ${TURN_USAGE_SETTLE_MS} ms; reporting the turn's usage without waiting`,
+            );
+          const ctx = await this.pluginHookContext(
+            req,
+            runId,
+            new AbortController().signal,
+          );
+          if (!ctx) return;
+          const usage: TurnModelUsage = {
+            requestId: req.requestId,
+            runId,
+            sessionId: req.sessionId,
+            status,
+            calls: settled.calls,
+            ...turnModelUsageTotals(settled.calls),
+          };
+          for (const plugin of listeners) {
+            try {
+              await plugin.onTurnUsage?.(usage, ctx);
+            } catch (error) {
+              console.warn(
+                `[llm-call] plugin ${plugin.name}: onTurnUsage failed: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          }
+        })().catch((error: unknown) =>
+          console.warn(
+            `[llm-call] turn usage hooks skipped: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        ),
+      );
+    }
+
+    /**
+     * The observer of model calls made for the person this object serves
+     * outside a turn: `scope` names the request the hooks see (a request id
+     * of the call's own when no turn has one). Undefined before boot.
+     */
+    private outOfTurnObserver(
+      scope: Pick<TurnRequest, 'sessionId' | 'client' | 'requestId'> &
+        Partial<Pick<TurnRequest, 'roomId'>>,
+    ): ((call: ModelCallReport) => void) | undefined {
+      const userDid = this.userDid;
+      if (!userDid) return undefined;
+      return this.modelCallObserver(
+        { identity: { userDid }, message: '', ...scope },
+        undefined,
+        new AbortController().signal,
+      );
+    }
+
+    /** `adapter` with its calls reported as `purpose` outside a turn. */
+    private outOfTurnLlm(
+      adapter: LlmAdapter,
+      purpose: Parameters<typeof reportingLlm>[2],
+      scope: Parameters<typeof this.outOfTurnObserver>[0],
+    ): LlmAdapter {
+      const observe = this.outOfTurnObserver(scope);
+      return observe
+        ? reportingLlm(
+            adapter,
+            new ModelCallReporter(observe, console),
+            purpose,
+          )
+        : adapter;
     }
 
     /**
@@ -7883,6 +8347,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private async decideChannelEvent(
       req: TurnRequest,
       live: LiveRun,
+      reportCall: (call: ModelCallReport) => void,
     ): Promise<ChannelEventDecision> {
       const event = req.channel?.channelEvent;
       const ambient = this.ambient;
@@ -7912,7 +8377,23 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           },
           signal: live.abort.signal,
         },
-        ambient,
+        // A plugin's own model calls here are the attempt's, like in a tool
+        // (and in its `onTurnUsage`). A restricted turn's plugin gets the
+        // denied adapter: event decisions run on the platform key.
+        {
+          ...ambient,
+          llm:
+            req.platformModels === 'deny'
+              ? deniedPlatformLlm()
+              : reportingLlm(
+                  ambient.llm,
+                  new ModelCallReporter(reportCall, console),
+                  'plugin',
+                ),
+          ...(req.platformModels === 'deny'
+            ? { decisions: deniedDecisions() }
+            : {}),
+        },
         { messages: [], loadedPlugins: new Set() },
       );
       return routeChannelEvent(
@@ -8436,6 +8917,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       model: string;
       ambientLlm: LlmAdapter;
       platform: OpenRouterLlmAdapter;
+      /** Receives the report of each extraction call. */
+      onModelCall: (call: ModelCallReport) => void;
+      /** The turn may not use platform models: files are not read by a model. */
+      platformDenied: boolean;
       signal: AbortSignal;
       /** Attachments of the turn now running (not necessarily persisted yet). */
       turnMetas: readonly AttachmentMeta[];
@@ -8458,7 +8943,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           store: this.channelAttachmentLinks,
           channelServiceDid: this.env.CHANNEL_SERVICE_DID,
         }),
-        extraction: this.extractionProvider(input.ambientLlm, input.platform),
+        extraction: this.extractionProvider(
+          input.ambientLlm,
+          input.platform,
+          input.onModelCall,
+          input.platformDenied,
+        ),
         caps: getModelCapabilities(input.model),
         roomId: input.roomId,
         signal: input.signal,
@@ -8557,17 +9047,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private extractionProvider(
       ambientLlm: LlmAdapter,
       platform: OpenRouterLlmAdapter,
-    ): {
-      baseURL: string;
-      apiKey: string;
-      headers: Record<string, string>;
-      model: string;
-    } | null {
+      onModelCall: (call: ModelCallReport) => void,
+      /** The turn may not use platform models: every request is refused. */
+      platformDenied = false,
+    ): ExtractionProvider | null {
       const adapter = isProviderAdapter(ambientLlm) ? ambientLlm : platform;
       if (!adapter.providerConfig.apiKey) return null;
       return {
         ...adapter.providerConfig,
         model: adapter.modelForRole('vision'),
+        onModelCall,
+        ...(platformDenied
+          ? {
+              deniedReason: new PlatformModelsDeniedError('Reading this file')
+                .message,
+            }
+          : {}),
       };
     }
 
@@ -8703,6 +9198,19 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           `[user-do] BYO turn — provider=${byoTurn.provider}, model=${byoTurn.mainModelId}, did=${req.identity.userDid}`,
         );
       }
+      // A gate restricted the turn to the person's own provider
+      // (`TurnRequest.platformModels`): a turn that would not run on it
+      // fails here, before any model is called; on a BYO turn every role the
+      // provider does not serve is denied, a refused BYO model is not
+      // answered by the platform, and the platform-only work around the
+      // turn (title, file reading, routing, Decisions) is skipped below.
+      const platformDenied = req.platformModels === 'deny';
+      if (platformDenied && !byoTurn)
+        throw new PlatformModelsDeniedError(
+          requestedModel !== undefined
+            ? `The model "${requestedModel}"`
+            : 'This message',
+        );
       // On a BYO turn the swapped adapter serves every role the provider
       // covers, so the whole turn runs on the user's credential; the
       // credential lives only in the adapter's closure.
@@ -8710,12 +9218,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         ? {
             ...baseAmbient,
             llm: createByoLlmAdapter(
-              baseAmbient.llm,
+              platformDenied ? deniedPlatformLlm() : baseAmbient.llm,
               {
                 credential: byoTurn.credential,
                 mainModelId: byoTurn.mainModelId,
                 chatGptBackend: byoTurn.chatGptBackend,
                 streamLiveness: streamLivenessFromEnv(core.validatedEnv, 'byo'),
+                ...(platformDenied ? { platformFallback: false } : {}),
               },
               console,
             ),
@@ -8757,6 +9266,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // is the run's own.
       const abortController = run.abortController;
       this.aborts.set(req.sessionId, abortController);
+      // Every model call of this attempt, wherever it is made (the agent,
+      // its files, its Decisions, its title), reported once each to
+      // `onModelCall` and collected for the attempt's `onTurnUsage`.
+      const { modelCalls, reportCall } = run;
 
       // Every turn runs inside the user's oracle room, like the Node
       // runtime's request preparer: plugins key per-room state on it and the
@@ -8888,7 +9401,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               source: this.matrixMediaSource(),
               ...(channelMedia ? { channel: channelMedia } : {}),
               ...(threadCopies ? { preloaded: threadCopies } : {}),
-              extraction: this.extractionProvider(baseAmbient.llm, core.llm),
+              extraction: this.extractionProvider(
+                baseAmbient.llm,
+                core.llm,
+                reportCall,
+                platformDenied,
+              ),
               sandbox: await this.sandboxArchiveConfig(req.identity.userDid),
               ...(this.env.IMAGES ? { images: this.env.IMAGES } : {}),
               signal: abortController.signal,
@@ -8922,6 +9440,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             model: attachmentModel,
             ambientLlm: baseAmbient.llm,
             platform: core.llm,
+            onModelCall: reportCall,
+            platformDenied,
             signal: abortController.signal,
             turnMetas,
             channelLinks: turnLinks,
@@ -8982,6 +9502,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                     ROUTER_RECENT_TURN_CHARS,
                   ),
                 requestId: req.requestId,
+                evaluator: platformDenied
+                  ? deniedDecisions()
+                  : reportingDecisions(
+                      core.decisions,
+                      reportCall,
+                      () => 'routing',
+                    ),
                 signal: abortController.signal,
                 trace: {
                   ...(tracing.callbacks && { callbacks: tracing.callbacks }),
@@ -9065,11 +9592,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         outputReserveTokens: contextBudget.outputReserveTokens,
         signal: abortController.signal,
         logger: console,
-        onModelCall: this.modelCallObserver(
-          req,
-          run.runId,
-          abortController.signal,
-        ),
+        onModelCall: reportCall,
       });
       const deadline = setTimeout(() => {
         if (abortController.signal.aborted) return;
@@ -9239,6 +9762,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         ambient: {
           ...ambient,
           llm: meteredLlm,
+          ...(platformDenied
+            ? { decisions: deniedDecisions() }
+            : ambient.decisions
+              ? {
+                  decisions: reportingDecisions(ambient.decisions, reportCall),
+                }
+              : {}),
           attachments: attachmentAccess,
           onTurnEnd: (dispose) => turnDisposables.add(dispose),
           markDispatched,
@@ -9276,10 +9806,17 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           ...(hostRoomTitle
             ? {
                 getRoomTitle: (roomId: string) =>
-                  hostRoomTitle(roomId, ambient),
+                  hostRoomTitle(roomId, { ...ambient, llm: meteredLlm }),
               }
             : {}),
-          ...(hostSafetyModel ? { safetyModel: hostSafetyModel(ambient) } : {}),
+          ...(hostSafetyModel
+            ? {
+                safetyModel: hostSafetyModel({
+                  ...ambient,
+                  llm: purposeLlm(meteredLlm, 'safety'),
+                }),
+              }
+            : {}),
           // The images of the newest user turns, back in each model request
           // (their bytes are not stored with the conversation).
           ...(suppliedContextOnly
@@ -9486,6 +10023,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         usage: (): string => JSON.stringify(budget.snapshot()),
         delivery,
         domainContext: built.domainContext,
+        modelCalls,
+        reportCall,
       };
     }
 
@@ -9895,6 +10434,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       messages: BaseMessage[],
       disposition: RequestDisposition = { kind: 'agent' },
       signal?: AbortSignal,
+      /** The turn's model-call reporting, for the title's call. */
+      reporting?: {
+        observe: (call: ModelCallReport) => void;
+        calls: TurnModelCalls;
+        /** false: no generated title (the turn may not use platform models). */
+        title?: boolean;
+      },
     ): Promise<void> {
       const sessions = this.sessions!;
       await sessions.touchSession(sessionId);
@@ -9910,13 +10456,24 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       if (
         row &&
         (!row.title || row.title === UNTITLED_SESSION) &&
+        reporting?.title !== false &&
         !(await this.isRestrictedTaskSession(sessionId))
       ) {
         if (disposition.kind === 'direct-read')
           await sessions.setTitle(sessionId, disposition.title, {
             onlyIfUntitled: true,
           });
-        else this.ctx.waitUntil(this.titleSession(sessionId, messages, signal));
+        else {
+          const titled = this.titleSession(
+            sessionId,
+            messages,
+            signal,
+            reporting?.observe,
+          );
+          // The title's call belongs to the turn's usage report.
+          reporting?.calls.track(titled);
+          this.ctx.waitUntil(titled);
+        }
       }
       this.markDirty();
       // Which chunks this turn touched, for the page tier's eviction policy
@@ -9988,10 +10545,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // invocation (fresh-invocation.ts).
       const lease = await this.freshInvocations.enter('group summary');
       try {
-        const model = (this.ambient?.llm ?? this.core.llm).get(
-          'session-title',
-          { temperature: 0.2, maxTokens: 800 },
-        );
+        // Reported for the person whose object summarizes (the room's
+        // latest speaker), under a request id of its own.
+        const model = this.outOfTurnLlm(
+          this.ambient?.llm ?? this.core.llm,
+          'group-summary',
+          { client: 'matrix', requestId: crypto.randomUUID(), sessionId: '' },
+        ).get('session-title', { temperature: 0.2, maxTokens: 800 });
         return await summarizeObservedMessages(
           model,
           parsed as ObservedMessage[],
@@ -10011,6 +10571,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       sessionId: string,
       messages: BaseMessage[],
       turnSignal: AbortSignal | undefined,
+      observe?: (call: ModelCallReport) => void,
     ): Promise<void> {
       const bound = new AbortController();
       const onAbort = (): void => bound.abort(turnSignal?.reason);
@@ -10024,7 +10585,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         TITLE_TIMEOUT_MS,
       );
       try {
-        const title = await this.generateTitle(messages, bound.signal);
+        const title = await this.generateTitle(messages, bound.signal, observe);
         // A session deleted (or reset away) meanwhile is not titled.
         const sessions = this.sessions;
         if (!title || !sessions || bound.signal.aborted) return;
@@ -10043,6 +10604,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private async generateTitle(
       messages: BaseMessage[],
       signal: AbortSignal,
+      observe?: (call: ModelCallReport) => void,
     ): Promise<string | null> {
       const human = messages.find((m) => m.type === 'human');
       const ai = [...messages].reverse().find((m) => m.type === 'ai');
@@ -10051,7 +10613,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       if (!human || isDeliveryNoticeMessage(human)) return null;
       // The ambient adapter honours LLM_PROVIDER; fall back to the core's
       // OpenRouter adapter if boot has not built the ambient bag yet.
-      const model = (this.ambient?.llm ?? this.core.llm).get('session-title');
+      const base = this.ambient?.llm ?? this.core.llm;
+      // Reported with the turn that asked for it (purpose `title`).
+      const model = (
+        observe
+          ? reportingLlm(base, new ModelCallReporter(observe, console), 'title')
+          : base
+      ).get('session-title');
       const prompt =
         'Write a 3–6 word title for this conversation. Reply with the title only, no quotes.\n\n' +
         `User: ${visibleText(human).slice(0, 500)}\n` +

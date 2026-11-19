@@ -785,6 +785,7 @@ describe('runTurnFrames BYO model refused by the provider', () => {
   async function runTurn(byo: RefusingModel, platform: FakeListChatModel) {
     const model = new ByoModelFallbackChatModel({
       provider: 'chatgpt',
+      role: 'main',
       modelId: 'gpt-6-luna',
       byo,
       platform: () => platform,

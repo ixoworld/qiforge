@@ -32,6 +32,7 @@ import type {
   ChannelTurnOutcome,
 } from '../channels/contract';
 import type { TaskExecutionProfile } from '../core/execution-profile';
+import type { TurnRefusal } from '../plugin-api/turn-gate';
 import type {
   CapabilityRouterMode,
   DecisionProviderName,
@@ -523,6 +524,12 @@ export interface TurnRequest {
   multitask?: 'interrupt' | 'enqueue';
   /** The scheduler's run id when this turn executes a scheduled task. */
   taskRunId?: string;
+  /**
+   * Set by the pre-turn gate (`TurnGateResult.platformModels`): the turn
+   * may run on the person's own provider only. Stored with the run, so a
+   * queued or resumed attempt keeps it.
+   */
+  platformModels?: 'deny';
 }
 
 /** `GET /debug/context` — the context budget a model gets on this object. */
@@ -733,6 +740,28 @@ export interface TurnResult {
   toolCalls: Array<{ name: string; status: 'done' | 'error' }>;
   /** The stored reply of a turn that had already finished (a gateway asked again after a reset). */
   replayed?: boolean;
+  /**
+   * A plugin's `gateTurn` refused the turn before anything of it existed
+   * (`text` is empty, nothing was stored or run). A refusal is an outcome,
+   * not an error: it never travels as a thrown RPC exception. The gateway
+   * posts it as a notice (`src/matrix/refusal-notice.ts`); a task run is
+   * skipped with it recorded.
+   */
+  refused?: TurnRefusal;
+}
+
+/** The `TurnResult` of a turn a gate refused. */
+export function refusedTurnResult(
+  req: Pick<TurnRequest, 'sessionId' | 'requestId'>,
+  refused: TurnRefusal,
+): TurnResult {
+  return {
+    sessionId: req.sessionId,
+    requestId: req.requestId,
+    text: '',
+    toolCalls: [],
+    refused,
+  };
 }
 
 /**

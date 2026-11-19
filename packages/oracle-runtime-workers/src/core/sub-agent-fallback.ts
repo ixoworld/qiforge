@@ -1,3 +1,4 @@
+import { withModelCallPurpose } from './model-call-reporter';
 import type { AgentMiddleware, StructuredTool } from 'langchain';
 import type {
   PluginContext,
@@ -132,7 +133,10 @@ function defaultToAgentSpec(
     }),
   );
 
-  const model = ambient.llm.get(subAgent.model ?? 'subagent');
+  const model = ambient.llm.get(
+    subAgent.model ?? 'subagent',
+    withModelCallPurpose(undefined, 'subagent'),
+  );
 
   // Normalize `forwardTools`:
   //   true       → all of this sub-agent's own tool names

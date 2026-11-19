@@ -2550,9 +2550,30 @@ it ends or fails (`src/llm/platform-chat-model.ts`, `src/llm/model-call.ts`):
   (tokens and cost): OpenRouter's last streamed chunk carries the usage with
   a choice, and LangChain added it to the message twice. `usage_metadata`
   was always right.
-- Plugins get each record of a turn through `OraclePlugin.onModelCall(call,
-ctx)`, in the background (for an analytics sink). The record holds no
-  message content, tool arguments or user ids.
+- Plugins get each record through `OraclePlugin.onModelCall(call, ctx)`, in
+  the background, with `purpose`, `paidBy` (`platform` or `user` for a BYO
+  call), `callId` and `startedAt` added; every model call the runtime makes
+  for a person is reported this way, attachment extraction, titles, group
+  summaries and Decisions included, and each turn attempt's calls once more
+  through `onTurnUsage` ([usage-metering](usage-metering.md)). The record
+  holds no message content, tool arguments or user ids.
+- A turn a plugin's `gateTurn` refused logs
+  `[turn-gate] refused {"plugin","trigger","requestId","status","code","ms"}`;
+  a gate that threw or timed out logs `[turn-gate] {…,"failure","policy"}`
+  at `warn`; a refusal status other than 402/403/429/503 answered as 403
+  logs `[turn-gate] {…,"status","answeredAs":403}`. A refused task run's
+  ledger detail reads `refused before it started (<status> <code>):
+<message>`; a refusal that ends the task posts `🛑 **<title>** could not
+run: <message>` in its room.
+- A turn a gate restricted to the person's own provider
+  (`platformModels: 'deny'`) that would not run on it fails with
+  `PlatformModelsDeniedError` before any model call; a channel request so
+  restricted is never classified (routing reason `platform-models-denied`).
+- A platform streamed call cut off after output started logs its
+  `[llm-call]` line with `"usageEstimated":true` and chars/4 token counts.
+- A plugin's wake (`ctx.requestWake`) is `meta:pluginWakeAt` in DO storage,
+  served by the housekeeping tick; `[user-do] plugin <name>: onWake failed:
+…` at `warn`. Deleted with an evicted idle copy.
 
 ### Tool schemas OpenAI refuses
 

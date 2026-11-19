@@ -328,6 +328,123 @@ describe('useSendMessage', () => {
     expect(chat.status).toBe('error');
   });
 
+  it('a 403 POST a plugin gate refused (refused: true) fails the send at once with the refusal, no renewal', async () => {
+    const renewOracleAuth = vi.fn<RenewOracleAuth>(async () => true);
+    context = makeContext({ renewOracleAuth });
+    respond = () =>
+      Response.json(
+        {
+          statusCode: 403,
+          message: 'This account cannot be billed.',
+          code: 'billing_account_unsupported',
+          details: { action: { label: 'Help', url: 'https://h.example' } },
+          requestId: 'req-refused',
+          refused: true,
+        },
+        { status: 403, headers: { 'x-request-id': 'req-refused' } },
+      );
+    const chat = newChat();
+    const { result } = setup(chat);
+
+    let failure: unknown;
+    await act(async () => {
+      failure = await result.current.sendMessage('hi').catch((e: unknown) => e);
+    });
+
+    expect(calls.filter((c) => c.method === 'POST')).toHaveLength(1);
+    expect(renewOracleAuth).not.toHaveBeenCalled();
+    expect(failure).toMatchObject({
+      name: 'RequestError',
+      status: 403,
+      code: 'billing_account_unsupported',
+      message: 'This account cannot be billed.',
+      details: { action: { label: 'Help', url: 'https://h.example' } },
+      requestId: 'req-refused',
+      refused: true,
+    });
+    expect(chat.status).toBe('error');
+  });
+
+  it.each([
+    {
+      status: 402,
+      code: 'insufficient_credits',
+      details: {
+        retryAfterSeconds: 3600,
+        action: { label: 'Top up credits', url: 'https://p.example/c' },
+      },
+    },
+    {
+      status: 503,
+      code: 'credits_check_unavailable',
+      details: { retryAfterSeconds: 60 },
+    },
+  ])(
+    'a $status refusal exposes its code and details on the send failure, no renewal',
+    async ({ status, code, details }) => {
+      const renewOracleAuth = vi.fn<RenewOracleAuth>(async () => true);
+      context = makeContext({ renewOracleAuth });
+      respond = () =>
+        Response.json(
+          {
+            statusCode: status,
+            message: 'Refused.',
+            code,
+            details,
+            requestId: 'req-r',
+            refused: true,
+          },
+          { status, headers: { 'x-request-id': 'req-r' } },
+        );
+      const chat = newChat();
+      const { result } = setup(chat);
+
+      let failure: unknown;
+      await act(async () => {
+        failure = await result.current
+          .sendMessage('hi')
+          .catch((e: unknown) => e);
+      });
+
+      expect(calls.filter((c) => c.method === 'POST')).toHaveLength(1);
+      expect(renewOracleAuth).not.toHaveBeenCalled();
+      expect(failure).toMatchObject({
+        status,
+        code,
+        message: 'Refused.',
+        details,
+        requestId: 'req-r',
+        refused: true,
+      });
+      expect(chat.status).toBe('error');
+    },
+  );
+
+  it('a 403 POST without the refusal marker is still renewed through both stages', async () => {
+    const renewOracleAuth = vi.fn<RenewOracleAuth>(async () => true);
+    context = makeContext({ renewOracleAuth });
+    respond = () =>
+      Response.json(
+        {
+          statusCode: 403,
+          message: 'Forbidden',
+          code: 'billing_account_unsupported',
+        },
+        { status: 403 },
+      );
+    const chat = newChat();
+    const { result } = setup(chat);
+
+    let failure: unknown;
+    await act(async () => {
+      failure = await result.current.sendMessage('hi').catch((e: unknown) => e);
+    });
+
+    expect(calls.filter((c) => c.method === 'POST')).toHaveLength(3);
+    expect(renewOracleAuth.mock.calls.map((call) => call[1])).toEqual([1, 2]);
+    expect(failure).toMatchObject({ status: 403 });
+  });
+
   it('a resume that finishes waiting for its delegation after a send started leaves the send alone', async () => {
     const { getDelegation, releaseDelegation } = delegationHeldOnce();
     context = makeContext({ getDelegation });

@@ -50,6 +50,9 @@ export const request = async <T>(
         statusCode: number;
         code?: unknown;
         retryable?: unknown;
+        details?: unknown;
+        refused?: unknown;
+        requestId?: unknown;
       };
 
       throw new RequestError(errorData.message, {
@@ -63,6 +66,14 @@ export const request = async <T>(
         ...(typeof errorData.code === 'string' && { code: errorData.code }),
         ...(typeof errorData.retryable === 'boolean' && {
           retryable: errorData.retryable,
+        }),
+        // A turn a plugin gate refused (`refused: true`): never a credential
+        // refusal; its `details` (call to action, retry delay) and request
+        // id ride along for the caller.
+        ...(errorData.refused === true && { refused: true }),
+        ...(isRecord(errorData.details) && { details: errorData.details }),
+        ...(typeof errorData.requestId === 'string' && {
+          requestId: errorData.requestId,
         }),
       });
     }
@@ -81,6 +92,10 @@ export const request = async <T>(
 
 export default request;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 class RequestError extends Error {
   status?: number;
   outstandingClaims?: string[];
@@ -88,6 +103,14 @@ class RequestError extends Error {
   code?: string;
   /** Whether repeating the same request can succeed, when the runtime says. */
   retryable?: boolean;
+  /**
+   * `true` when one of the oracle's plugin gates refused the turn (e.g. out
+   * of credits): never a credential problem, whatever `status` is; show
+   * `message` (and `details`) instead of asking the user to sign in again.
+   */
+  refused?: boolean;
+  /** The refusal's JSON details (`retryAfterSeconds`, `action`, …), when sent. */
+  details?: Record<string, unknown>;
   [key: string]: unknown;
 
   constructor(message: string, errorProps?: Record<string, unknown>) {

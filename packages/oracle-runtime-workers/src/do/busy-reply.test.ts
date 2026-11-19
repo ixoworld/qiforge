@@ -35,6 +35,7 @@ const chat = resolveDeliveryProfile({
 /** The record the platform model puts on the error of a key-limit failure. */
 const KEY_LIMIT: ModelCallRecord = {
   role: 'main',
+  paidBy: 'platform',
   requestedModel: 'openai/gpt-5.6-luna',
   fallback: false,
   modelFallback: false,

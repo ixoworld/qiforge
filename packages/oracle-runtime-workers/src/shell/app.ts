@@ -29,6 +29,7 @@ import {
 } from '../channels/auth';
 import {
   ChannelError,
+  channelErrorBody,
   ChannelTurnBody,
   ChannelControlBody,
   channelRequestHash,
@@ -548,16 +549,10 @@ export function createShell(
       );
       return outcome.ok
         ? c.json(outcome.result)
-        : c.json(
-            { code: outcome.code, message: outcome.message },
-            outcome.status,
-          );
+        : c.json(channelErrorBody(outcome), outcome.status);
     } catch (error) {
       if (error instanceof ChannelError)
-        return c.json(
-          { code: error.code, message: error.message },
-          error.status,
-        );
+        return c.json(channelErrorBody(error), error.status);
       console.error(
         `[channels] control failed: ${describeChannelFailure(error)}`,
       );
@@ -666,11 +661,7 @@ export function createShell(
         await assertActiveChannelBindingCached(identity, c.env);
         outcome = await stub.channelTurn(identity, parsed.data, requestHash);
       }
-      if (!outcome.ok)
-        return c.json(
-          { code: outcome.code, message: outcome.message },
-          outcome.status,
-        );
+      if (!outcome.ok) return c.json(channelErrorBody(outcome), outcome.status);
       const result = outcome.result;
       if (result.actionOutcomes?.length || result.hubActionOutcomes?.length)
         await assertActiveChannelBindingCached(identity, c.env);
@@ -680,10 +671,7 @@ export function createShell(
       );
     } catch (error) {
       if (error instanceof ChannelError)
-        return c.json(
-          { code: error.code, message: error.message },
-          error.status,
-        );
+        return c.json(channelErrorBody(error), error.status);
       // The cause only, never the request or its tokens: a 503 the gateway
       // retries must leave a trace of why it happened.
       console.error(
@@ -1668,7 +1656,7 @@ export function createShell(
     // Thrown on purpose with a status and a message meant for the client.
     if (err instanceof HTTPException) return err.getResponse();
     if (err instanceof ChannelError)
-      return c.json({ code: err.code, message: err.message }, err.status);
+      return c.json(channelErrorBody(err), err.status);
     const requestId = errorRequestId(c.req.header('x-request-id'));
     console.error(
       `[shell] ${c.req.method} ${loggedRoute(c)} failed (request ${requestId}):`,

@@ -376,6 +376,7 @@ describe('budgetedLlm call trace', () => {
 describe('budgetedLlm: model-call records', () => {
   const record = {
     role: 'main',
+    paidBy: 'platform' as const,
     requestedModel: 'openai/gpt-5.6-luna',
     servedModel: 'google/gemini-3.1-flash-lite',
     fallback: true,
@@ -410,12 +411,26 @@ describe('budgetedLlm: model-call records', () => {
     const error = new Error('403');
     attachModelCall(error, { ...record, ok: false, errorKind: 'auth' });
     handler.handleLLMError?.(new Error('wrapped', { cause: error }), 'run-2');
-    // A model that keeps no record (a BYO model) reports nothing.
+    // A model that keeps no record reports nothing.
     const plain: ChatGeneration = { text: '', message: new AIMessage('hi') };
     handler.handleLLMEnd?.({ generations: [[plain]] }, 'run-3');
+    // The handler adds what it knows: the call's id (its run id), its
+    // purpose (`other`: no start was seen to name one) and its start.
     expect(calls).toEqual([
-      record,
-      { ...record, ok: false, errorKind: 'auth' },
+      {
+        ...record,
+        purpose: 'other',
+        callId: 'run-1',
+        startedAt: expect.any(Number),
+      },
+      {
+        ...record,
+        ok: false,
+        errorKind: 'auth',
+        purpose: 'other',
+        callId: 'run-2',
+        startedAt: expect.any(Number),
+      },
     ]);
   });
 });

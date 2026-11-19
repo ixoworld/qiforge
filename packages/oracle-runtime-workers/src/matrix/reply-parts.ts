@@ -13,7 +13,8 @@ import { parseReplyPlan } from '../delivery/schema';
 import type { ReplyPart } from '../delivery/types';
 import { matrixTxnId } from './txn-id';
 
-function escapeHtml(value: string): string {
+/** Text (or a double-quoted attribute value) made safe for room HTML. */
+export function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')

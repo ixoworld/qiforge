@@ -287,6 +287,89 @@ describe('scheduled runs on the alarm', () => {
     expect(resumed.nextRunAt).toBeDefined();
   });
 
+  it('a run a turn gate refuses is skipped: no failure counted, no backoff, nothing posted', async () => {
+    const s = stub('gate-refused');
+    await s.init({ minCronIntervalSec: 1 });
+    await s.setTurnBehavior('refused');
+    const created = await s.create({
+      title: 'Metered',
+      intent: 'Needs credits.',
+      schedule: { kind: 'interval', everySeconds: 30 },
+    });
+    let due = Date.parse(created.nextRunAt!);
+    // Three refusals in a row: past the failure threshold, still active.
+    for (let n = 0; n < 3; n += 1) {
+      await s.tick(due + 1);
+      const t = await s.get(created.id);
+      expect(t?.status).toBe('active');
+      expect(t?.consecutiveFailures).toBe(0);
+      expect(t?.lastResult).toMatchObject({
+        ok: false,
+        summary: 'Skipped: Top up to continue.',
+      });
+      // The next occurrence, not a backoff (which starts at 60 s).
+      const next = Date.parse(t!.nextRunAt!);
+      expect(next - (due + 1)).toBeLessThanOrEqual(30_000);
+      due = next;
+    }
+    const runs = await s.runsFor(created.id);
+    expect(runs).toHaveLength(3);
+    for (const run of runs) {
+      expect(run.state).toBe('failed');
+      expect(run.detail).toBe(
+        'refused before it started (402 credits_exhausted): Top up to continue.',
+      );
+    }
+    // Only the dedicated room's intro: no result, no stop notice.
+    const posted = (await s.sentMessages()).map((m) => m.body);
+    expect(posted.some((b) => b.startsWith('🕒') || b.startsWith('🛑'))).toBe(
+      false,
+    );
+
+    // Allowed again: the next occurrence runs and is delivered.
+    await s.setTurnBehavior('ok');
+    await s.tick(due + 1);
+    const ran = await s.get(created.id);
+    expect(ran?.lastResult?.ok).toBe(true);
+    expect(
+      (await s.sentMessages()).filter((m) => m.body.startsWith('🕒')),
+    ).toHaveLength(1);
+  });
+
+  it('a refused once task ends as failed, with the refusal recorded', async () => {
+    const s = stub('gate-refused-once');
+    await s.init();
+    await s.setTurnBehavior('refused');
+    const at = inOneMinute();
+    const created = await s.create({
+      title: 'One shot',
+      intent: 'x',
+      schedule: { kind: 'once', at },
+    });
+    await s.tick(Date.parse(at) + 1);
+    const t = await s.get(created.id);
+    expect(t?.status).toBe('failed');
+    expect(t?.nextRunAt).toBeUndefined();
+    expect(t?.consecutiveFailures).toBe(0);
+    expect((await s.runsFor(created.id))[0]?.detail).toContain('refused');
+    expect(await s.nextWakeAt()).toBeNull();
+    // It ended: one notice in its room carries the refusal, never silence.
+    const notices = (await s.sentMessages()).filter((m) =>
+      m.body.startsWith('🛑'),
+    );
+    // The refusal's call to action rides along: a line in the body, a link
+    // (escaped) in the formatted body. One notice, never two.
+    expect(
+      notices.map(({ body, formattedBody }) => ({ body, formattedBody })),
+    ).toEqual([
+      {
+        body: '🛑 **One shot** could not run: Top up to continue.\nTop up <credits>: https://portal.example/top-up?a=1&b=2',
+        formattedBody:
+          '🛑 <strong>One shot</strong> could not run: Top up to continue.<br><a href="https://portal.example/top-up?a=1&amp;b=2">Top up &lt;credits&gt;</a>',
+      },
+    ]);
+  });
+
   it('a failing once task stops immediately with a notice', async () => {
     const s = stub('once-fails');
     await s.init();

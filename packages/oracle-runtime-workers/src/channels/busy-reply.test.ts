@@ -13,6 +13,7 @@ describe('modelFailureOf', () => {
     const error = new Error('402 requires more credits');
     attachModelCall(error, {
       role: 'main',
+      paidBy: 'platform',
       requestedModel: 'openai/gpt-5.6-luna',
       fallback: false,
       modelFallback: false,

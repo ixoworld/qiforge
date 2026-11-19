@@ -40,6 +40,7 @@ import type {
   UcanMintOptions,
 } from '../plugin-api/types';
 import { UcanMintUnavailableError } from '../plugin-api/ucan-errors';
+import { withModelCallPurpose } from './model-call-reporter';
 import { NOOP_LOGGER, sweepExpired } from './utils';
 
 // ── Adapter interfaces (implemented by the Durable Object layer) ────────────
@@ -217,6 +218,8 @@ export interface AmbientServices {
   onTurnEnd?: (dispose: () => void | Promise<void>) => void;
   /** Host keep-alive for un-awaited work (`ctx.waitUntil` on Workers). */
   background?: (work: Promise<unknown>) => void;
+  /** Host wake of the person's object for `onWake` (`RuntimeContext.requestWake`). */
+  requestWake?: (at: number) => Promise<void>;
   /**
    * Records that the tool call `toolCallId` of this turn left the object
    * (`ctx.markDispatched`). Set per turn by a host that keeps write-ahead
@@ -552,8 +555,10 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
         ambient.ucan.getServiceDelegation(userDid, opts),
     },
     decisions,
+    // A plugin's own model: its calls report as `plugin`.
     llm: {
-      get: (role, params) => ambient.llm.get(role, params),
+      get: (role, params) =>
+        ambient.llm.get(role, withModelCallPurpose(params, 'plugin')),
     },
     emit,
     logger: ambient.logger,
@@ -569,6 +574,7 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
     ...(ambient.attachments ? { attachments: ambient.attachments } : {}),
     ...(ambient.onTurnEnd ? { onTurnEnd: ambient.onTurnEnd } : {}),
     ...(ambient.background ? { background: ambient.background } : {}),
+    ...(ambient.requestWake ? { requestWake: ambient.requestWake } : {}),
     shared: EMPTY_SHARED,
     ...(toolCallId ? { toolCallId } : {}),
     ...(toolCallId && markDispatched
@@ -779,5 +785,6 @@ export function createNoopAmbient(
     ...(overrides.markDispatched
       ? { markDispatched: overrides.markDispatched }
       : {}),
+    ...(overrides.requestWake ? { requestWake: overrides.requestWake } : {}),
   };
 }
