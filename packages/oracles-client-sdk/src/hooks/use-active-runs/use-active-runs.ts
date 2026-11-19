@@ -39,7 +39,7 @@ function isUnsupportedAnswer(err: unknown): boolean {
 function isRefusedCredentials(err: unknown): boolean {
   return (
     RequestError.isRequestError(err) &&
-    isCredentialRefusal(err.status, err.code)
+    isCredentialRefusal(err.status, err.code, err.refused)
   );
 }
 

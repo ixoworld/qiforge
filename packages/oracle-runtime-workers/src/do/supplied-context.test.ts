@@ -1,6 +1,15 @@
 import { CallbackManager } from '@langchain/core/callbacks/manager';
 import { LangChainTracer } from '@langchain/core/tracers/tracer_langchain';
 import { FakeListChatModel } from '@langchain/core/utils/testing';
+import { AIMessageChunk } from '@langchain/core/messages';
+import { ChatGenerationChunk } from '@langchain/core/outputs';
+import {
+  MODEL_CALL_METADATA_KEY,
+  type ModelCallRecord,
+  type ModelCallReport,
+  type TurnModelUsage,
+} from '../llm/model-call';
+import type { OraclePlugin } from '../plugin-api/oracle-plugin';
 import { MemorySaver } from '@langchain/langgraph';
 import { describe, expect, it, vi } from 'vitest';
 import { createRuntimeCore } from '../core';
@@ -9,7 +18,9 @@ import {
   resolveLangsmithTracing,
 } from '../core/llm';
 import { createNoopAmbient } from '../core/runtime-context';
-import { makeEnv } from '../core/test-fixtures';
+import { makeEnv, makePlugin } from '../core/test-fixtures';
+import { TurnModelCalls } from '../core/model-call-reporter';
+import { PlatformModelsDeniedError } from '../llm/platform-models-policy';
 import { ToolScheduler } from '../core/tool-scheduler';
 import {
   LANGCHAIN_TRACING_SWITCHES,
@@ -53,6 +64,9 @@ function restrictedObject(
     sessions?: SessionRow[];
     /** Runs while the turn is prepared (inside the awaited context-window lookup). */
     duringPrepare?: () => void;
+    plugins?: OraclePlugin[];
+    /** The turn model; default a fake that keeps no call record. */
+    model?: () => FakeListChatModel;
   } = {},
 ) {
   const forbidden = vi.fn((): never => {
@@ -60,14 +74,16 @@ function restrictedObject(
   });
   const core = createRuntimeCore({
     config: { name: 'Test', org: 'Test', description: 'Test' },
-    plugins: [],
+    plugins: opts.plugins ?? [],
     env: makeEnv(),
   });
   const platformGet = vi.spyOn(core.llm, 'get');
   const models: FakeListChatModel[] = [];
   const llmGet = vi.fn((_role: ModelRole, _params?: unknown) => {
     // A second response so a call moves the model's cursor (`i`) off 0.
-    const model = new FakeListChatModel({ responses: ['# Brief', '# Again'] });
+    const model =
+      opts.model?.() ??
+      new FakeListChatModel({ responses: ['# Brief', '# Again'] });
     models.push(model);
     return model;
   });
@@ -119,6 +135,8 @@ function restrictedObject(
   };
   const indexed = vi.fn(async (_sessionId: string) => {});
   const runStore = { update: vi.fn(async () => {}) };
+  /** Work the object kept alive (`ctx.waitUntil`): the background hooks. */
+  const background: Promise<unknown>[] = [];
   const Oracle = createUserOracleDO({
     core: () => core,
     hooks: { getRoomTitle: forbidden, safetyModel: forbidden },
@@ -127,7 +145,9 @@ function restrictedObject(
   Object.defineProperty(host, 'gateway', { get: forbidden });
   Object.assign(host, {
     env: opts.env ?? {},
-    ctx: { waitUntil: vi.fn() },
+    ctx: {
+      waitUntil: vi.fn((work: Promise<unknown>) => background.push(work)),
+    },
     userDid: 'did:ixo:owner',
     ambient,
     saver: Object.assign(new MemorySaver(), {
@@ -173,6 +193,10 @@ function restrictedObject(
     scheduler,
     indexed,
     runStore,
+    /** Settle every background job so far (and those they start). */
+    settle: async () => {
+      for (let i = 0; i < background.length; i += 1) await background[i];
+    },
   };
 }
 
@@ -182,6 +206,8 @@ function attempt(resumed: boolean) {
     abortController: new AbortController(),
     resumed,
     continuation: null,
+    modelCalls: new TurnModelCalls(),
+    reportCall: () => undefined,
   };
 }
 
@@ -262,6 +288,138 @@ describe('a complete supplied-context run', () => {
         JSON.stringify(call).includes('usage'),
       ),
     ).toBe(false);
+  });
+});
+
+describe('a turn a gate restricted to the person’s own provider', () => {
+  it('fails before any model is built when it would not run on the person’s provider', async () => {
+    const usages: TurnModelUsage[] = [];
+    const o = restrictedObject({
+      plugins: [
+        makePlugin({
+          name: 'meter',
+          onTurnUsage: (usage) => {
+            usages.push(usage);
+          },
+        }),
+      ],
+    });
+    const restricted: TurnRequest = { ...taskRequest, platformModels: 'deny' };
+    const live = {
+      runId: 'run',
+      sessionId: TASK_SESSION,
+      requestId: restricted.requestId,
+      record: { request: JSON.stringify(storedRunRequest(restricted)) },
+      buffer: { isClosed: false, push: vi.fn() },
+      abort: new AbortController(),
+      continuation: null,
+    };
+    await expect(o.call('runAttempt', live, false)).rejects.toBeInstanceOf(
+      PlatformModelsDeniedError,
+    );
+    expect(o.llmGet).not.toHaveBeenCalled();
+    expect(o.platformGet).not.toHaveBeenCalled();
+    await o.settle();
+    // No call was made and the agent was never built: no usage report.
+    expect(usages).toEqual([]);
+  });
+});
+
+/** A turn model that keeps a call record, like the platform model. */
+const RECORD: ModelCallRecord = {
+  role: 'main',
+  paidBy: 'platform',
+  requestedModel: 'openai/gpt-5.6-luna',
+  fallback: false,
+  modelFallback: false,
+  providerFallback: false,
+  promptTokens: 120,
+  outputTokens: 8,
+  costUsd: 0.0007,
+  durationMs: 15,
+  ok: true,
+};
+
+class RecordedModel extends FakeListChatModel {
+  // The fake's own `bindTools` builds a plain `FakeListChatModel`; keep this
+  // one, as the platform model's `bindTools` does.
+  override bindTools(): ReturnType<FakeListChatModel['bindTools']> {
+    return this.withConfig({});
+  }
+
+  override async *_streamResponseChunks(
+    ...args: Parameters<FakeListChatModel['_streamResponseChunks']>
+  ): AsyncGenerator<ChatGenerationChunk> {
+    yield* super._streamResponseChunks(...args);
+    yield new ChatGenerationChunk({
+      text: '',
+      message: new AIMessageChunk({
+        content: '',
+        response_metadata: { [MODEL_CALL_METADATA_KEY]: RECORD },
+      }),
+    });
+  }
+}
+
+describe('model-call reports of a run', () => {
+  it('hands each call to onModelCall once, then the attempt to onTurnUsage with the same calls', async () => {
+    const order: string[] = [];
+    const calls: ModelCallReport[] = [];
+    const usages: TurnModelUsage[] = [];
+    const o = restrictedObject({
+      model: () => new RecordedModel({ responses: ['# Brief'] }),
+      plugins: [
+        makePlugin({
+          name: 'meter',
+          onModelCall: async (call, ctx) => {
+            // Delivered in the background: the turn does not wait for it.
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            order.push('call');
+            calls.push(call);
+            expect(ctx.user.did).toBe('did:ixo:owner');
+            expect(ctx.session.requestId).toBe(taskRequest.requestId);
+          },
+          onTurnUsage: (usage, ctx) => {
+            order.push('turn');
+            usages.push(usage);
+            expect(ctx.session.runId).toBe('run');
+          },
+        }),
+      ],
+    });
+    const live = {
+      runId: 'run',
+      sessionId: TASK_SESSION,
+      requestId: taskRequest.requestId,
+      record: { request: JSON.stringify(storedRunRequest(taskRequest)) },
+      buffer: { isClosed: false, push: vi.fn() },
+      abort: new AbortController(),
+      continuation: null,
+    };
+    expect(await o.call('runAttempt', live, false)).toMatchObject({
+      status: 'finished',
+    });
+    await o.settle();
+    expect(order).toEqual(['call', 'turn']);
+    expect(calls).toEqual([
+      {
+        ...RECORD,
+        purpose: 'reply',
+        callId: expect.any(String),
+        startedAt: expect.any(Number),
+      },
+    ]);
+    expect(usages).toEqual([
+      {
+        requestId: taskRequest.requestId,
+        runId: 'run',
+        sessionId: TASK_SESSION,
+        status: 'finished',
+        calls,
+        platformCostUsd: 0.0007,
+        unpricedPlatformCalls: 0,
+      },
+    ]);
   });
 });
 

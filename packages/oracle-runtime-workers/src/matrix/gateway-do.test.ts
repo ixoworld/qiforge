@@ -13,6 +13,7 @@ import {
   withDefaults,
   type BotMessage,
   type MatrixBotOptions,
+  type SendTextOpts,
 } from '@ixo/matrix-bot-workers-sdk';
 import { MatrixError } from 'matrix-js-sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -23,7 +24,8 @@ import {
   DEFAULT_RECYCLE_AFTER_SENDS,
   MatrixGatewayDO,
 } from './gateway-do';
-import type { GateDecision } from './group-chat';
+import { GroupChatService, type GateDecision } from './group-chat';
+import type { TurnRefusal } from '../plugin-api/turn-gate';
 import { insertInboxRow, listInboxRows, MAX_TURN_REPLAYS } from './inbox-store';
 import type { IngestTurn } from './ingest';
 import { MediaDownloadTimeoutError } from './media-deadline';
@@ -172,8 +174,20 @@ class TestGateway extends MatrixGatewayDO {
     return '$reply';
   }
 
-  override async sendNotice(roomId: string, body: string): Promise<string> {
+  /** Every notice with the options it was sent with. */
+  readonly notices: Array<{
+    roomId: string;
+    body: string;
+    opts: SendTextOpts | undefined;
+  }> = [];
+
+  override async sendNotice(
+    roomId: string,
+    body: string,
+    opts?: SendTextOpts,
+  ): Promise<string> {
     this.sent.push({ kind: 'notice', roomId, body });
+    this.notices.push({ roomId, body, opts });
     return '$notice';
   }
 
@@ -252,6 +266,20 @@ async function withGateway(
 }
 
 const DEBOUNCE_MS = 500;
+
+const USER = '@did-ixo-ixo1user:ixo.test';
+const OUT_OF_CREDITS: TurnRefusal = {
+  status: 402,
+  code: 'insufficient_credits',
+  message: "You're out of IXO credits. Top up to keep chatting.",
+  details: {
+    action: { label: 'Top up credits', url: 'https://portal.example/credits' },
+  },
+};
+
+function refusedResult(refused: TurnRefusal): TurnResult {
+  return { sessionId: 's', requestId: 'r', text: '', toolCalls: [], refused };
+}
 /** The retry delay, shortened for the test (production: 60 s). */
 const SENDER_CHECK_RETRY_MS = 300;
 
@@ -415,6 +443,117 @@ describe('homeserver failures while a message is prepared', () => {
       );
       expect(gw.turns.map((t) => t.eventIds)).toEqual([msg.eventIds]);
       expect(gw.sent.map((s) => s.kind)).toEqual(['text']);
+    });
+  });
+
+  it('a turn a plugin gate refused is answered with one formatted notice in its thread, and its row dropped', async () => {
+    await withGateway('gw-turn-refused', async (gw, state) => {
+      gw.turnResult = async () => refusedResult(OUT_OF_CREDITS);
+      const msg = message(USER);
+      await gw.deliver(msg);
+      await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
+      expect(gw.turns).toHaveLength(1);
+      // A direct room: no mention, the action as a line and a link.
+      expect(gw.notices).toEqual([
+        {
+          roomId: ROOM,
+          body: "You're out of IXO credits. Top up to keep chatting.\nTop up credits: https://portal.example/credits",
+          opts: {
+            threadId: gw.turns[0]!.threadId,
+            formattedBody:
+              'You\'re out of IXO credits. Top up to keep chatting.<br><a href="https://portal.example/credits">Top up credits</a>',
+            txnId: expect.stringMatching(/-refused$/),
+          },
+        },
+      ]);
+      expect(listInboxRows(state.storage.sql)).toEqual([]);
+    });
+  });
+
+  it('posts one notice per (room, user, code) in the window; a later refused message is dropped silently', async () => {
+    await withGateway('gw-turn-refused-throttle', async (gw, state) => {
+      gw.turnResult = async () => refusedResult(OUT_OF_CREDITS);
+      await gw.deliver(message(USER));
+      await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
+      await gw.deliver(message(USER));
+      await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
+      expect(gw.turns).toHaveLength(2);
+      expect(gw.notices).toHaveLength(1);
+      // Both rows are gone: the second refusal is over, not pending.
+      expect(listInboxRows(state.storage.sql)).toEqual([]);
+      // Another code is its own notice.
+      gw.turnResult = async () =>
+        refusedResult({
+          status: 503,
+          code: 'credits_check_unavailable',
+          message: 'Please try again in a minute.',
+          details: { retryAfterSeconds: 60 },
+        });
+      await gw.deliver(message(USER));
+      await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
+      expect(gw.notices.map((n) => n.body)).toEqual([
+        expect.stringContaining('out of IXO credits'),
+        'Please try again in a minute.',
+      ]);
+    });
+  });
+
+  it('a turn allowed for the person clears the throttle: the next refusal is told again', async () => {
+    await withGateway('gw-turn-refused-cleared', async (gw) => {
+      gw.turnResult = async () => refusedResult(OUT_OF_CREDITS);
+      await gw.deliver(message(USER));
+      await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
+      gw.turnResult = async () => ({
+        sessionId: 's',
+        requestId: 'r',
+        text: 'reply',
+        toolCalls: [],
+      });
+      await gw.deliver(message(USER));
+      await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
+      gw.turnResult = async () => refusedResult(OUT_OF_CREDITS);
+      await gw.deliver(message(USER));
+      await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
+      expect(gw.sent.map((s) => s.kind)).toEqual(['notice', 'text', 'notice']);
+    });
+  });
+
+  it('in a group room the notice mentions the refused person', async () => {
+    await withGateway('gw-turn-refused-group', async (gw) => {
+      vi.spyOn(GroupChatService.prototype, 'gate').mockResolvedValue({
+        respond: true,
+        reason: 'mentioned',
+        roomKind: 'group',
+        memberCount: 5,
+        displayName: 'Alice <A>',
+      });
+      gw.turnResult = async () => refusedResult(OUT_OF_CREDITS);
+      await gw.deliver(message(USER));
+      await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
+      expect(gw.notices).toHaveLength(1);
+      const [notice] = gw.notices;
+      expect(notice!.body).toBe(
+        "Alice <A>: You're out of IXO credits. Top up to keep chatting.\nTop up credits: https://portal.example/credits",
+      );
+      expect(notice!.opts).toMatchObject({
+        mentions: [USER],
+        formattedBody: `<a href="https://matrix.to/#/${encodeURIComponent(USER)}">Alice &lt;A&gt;</a>: You're out of IXO credits. Top up to keep chatting.<br><a href="https://portal.example/credits">Top up credits</a>`,
+      });
+    });
+  });
+
+  it('a gateway that never posted a refusal notice keeps no throttle table', async () => {
+    await withGateway('gw-no-refusal-table', async (gw, state) => {
+      await gw.deliver(message(USER));
+      await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 100));
+      expect(gw.sent.map((s) => s.kind)).toEqual(['text']);
+      expect(
+        state.storage.sql
+          .exec(
+            "SELECT name FROM sqlite_master WHERE name = 'refusal_notice_throttle'",
+          )
+          .toArray(),
+      ).toEqual([]);
     });
   });
 

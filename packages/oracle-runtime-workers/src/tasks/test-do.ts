@@ -16,7 +16,7 @@ import type {
  */
 import { DurableObject } from 'cloudflare:workers';
 import type { OracleTaskInput, OracleTaskRecord } from '../plugin-api/types';
-import type { TurnRequest } from '../do/contracts';
+import { refusedTurnResult, type TurnRequest } from '../do/contracts';
 import { ToolScheduler } from '../core/tool-scheduler';
 import {
   DoSqliteDatabase,
@@ -35,6 +35,7 @@ import {
 export interface SentMessage {
   roomId: string;
   body: string;
+  formattedBody?: string;
   txnId?: string;
 }
 
@@ -60,7 +61,14 @@ export type SendMode =
  * the slot longer than `WRITE_SLOT_WAIT_MS` — what a held write slot does to
  * a real turn, minus the ten-minute turn timeout.
  */
-export type TurnMode = 'ok' | 'fail' | 'empty' | 'hang' | 'write-tool';
+export type TurnMode =
+  | 'ok'
+  | 'fail'
+  | 'empty'
+  | 'hang'
+  | 'write-tool'
+  /** A plugin's turn gate refuses the run (`TurnResult.refused`). */
+  | 'refused';
 
 const WRITE_SLOT_WAIT_MS = 2_000;
 
@@ -245,7 +253,11 @@ export class TasksTestDO extends DurableObject {
           this.rooms.push({ roomId, name: opts.name, invite: opts.invite });
           return Promise.resolve({ roomId });
         },
-        sendText: (roomId: string, body: string, opts?: { txnId?: string }) => {
+        sendText: (
+          roomId: string,
+          body: string,
+          opts?: { txnId?: string; formattedBody?: string },
+        ) => {
           if (
             this.sendMode === 'fail' ||
             (this.failingBody !== null && body.includes(this.failingBody))
@@ -271,6 +283,9 @@ export class TasksTestDO extends DurableObject {
           this.sent.push({
             roomId,
             body,
+            ...(opts?.formattedBody
+              ? { formattedBody: opts.formattedBody }
+              : {}),
             ...(opts?.txnId ? { txnId: opts.txnId } : {}),
           });
           if (this.sendMode === 'lost-response-once') {
@@ -296,6 +311,18 @@ export class TasksTestDO extends DurableObject {
         if (this.turnMode === 'fail') {
           throw new Error('boom: simulated turn failure');
         }
+        if (this.turnMode === 'refused')
+          return refusedTurnResult(req, {
+            status: 402,
+            code: 'credits_exhausted',
+            message: 'Top up to continue.',
+            details: {
+              action: {
+                label: 'Top up <credits>',
+                url: 'https://portal.example/top-up?a=1&b=2',
+              },
+            },
+          });
         const result = {
           sessionId: req.sessionId,
           requestId: req.requestId,

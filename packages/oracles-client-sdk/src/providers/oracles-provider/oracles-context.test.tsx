@@ -471,4 +471,44 @@ describe('OraclesProvider credential renewal', () => {
     ).rejects.toMatchObject({ status: 403, code: 'VFS_AUTH_FAILED' });
     expect(createInvocation).toHaveBeenCalledTimes(1);
   });
+
+  it('a 403 a plugin gate refused (refused: true) is thrown with its details, without renewing, whatever its code', async () => {
+    const fetchMock = vi.fn(async () =>
+      Response.json(
+        {
+          statusCode: 403,
+          message: 'This account cannot be billed.',
+          code: 'billing_account_unsupported',
+          details: { action: { label: 'Help', url: 'https://h.example' } },
+          requestId: 'req-9',
+          refused: true,
+        },
+        { status: 403 },
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const createDelegation = counter('del');
+    const createInvocation = counter('inv');
+    const onDelegationRenewed = vi.fn();
+    const { result } = render(
+      createDelegation,
+      createInvocation,
+      onDelegationRenewed,
+    );
+
+    await expect(
+      result.current.authedRequest('https://o/x', 'POST', {}, ORACLE),
+    ).rejects.toMatchObject({
+      status: 403,
+      code: 'billing_account_unsupported',
+      message: 'This account cannot be billed.',
+      details: { action: { label: 'Help', url: 'https://h.example' } },
+      requestId: 'req-9',
+      refused: true,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(createInvocation).toHaveBeenCalledTimes(1);
+    expect(createDelegation).toHaveBeenCalledTimes(1);
+    expect(onDelegationRenewed).not.toHaveBeenCalled();
+  });
 });

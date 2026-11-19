@@ -10,8 +10,10 @@ import {
   channelAttachmentRef,
 } from '../attachments/channel';
 import type { AttachmentInput } from '../attachments/types';
+import { refusalAction, refusalRetryAfterSeconds } from '../core/turn-gate';
 import { RenderCapabilityWire } from '../delivery/rich';
 import type { ReplyPlan } from '../delivery/types';
+import type { TurnRefusal } from '../plugin-api/turn-gate';
 
 /**
  * A channel provider id (`whatsapp`, later others): lower-case, starts with a
@@ -628,6 +630,7 @@ export interface ChannelTurnResponse {
 export type ChannelErrorStatus =
   | 400
   | 401
+  | 402
   | 403
   | 404
   | 409
@@ -662,6 +665,10 @@ export type ChannelErrorStatus =
  * | `room_unavailable`                | 409    | the oracle cannot use the user's oracle room (final)  |
  * | `response_expired`                | 410    | the run was pruned; the request cannot run again      |
  * | `request_too_large`               | 413    | the body is over 64 kB                                |
+ * | `turn_refused`                    | (any)  | a plugin refused the turn (`gateTurn`): final for the |
+ * |                                   |        | message; relay `message` (and `action` as a link) to  |
+ * |                                   |        | the person; `reason` is the plugin's code; the status |
+ * |                                   |        | is the plugin's: 402, 403, 429 or 503                 |
  * | `room_not_ready`                  | 428    | the user has no oracle room yet                       |
  * | `delegation_required`             | 428    | no usable delegation to this oracle (see below)       |
  * | `rate_limited`                    | 429    | too many requests for this user                       |
@@ -687,30 +694,110 @@ export type ChannelErrorCode =
   | 'response_expired'
   | 'request_too_large'
   | 'room_not_ready'
+  | 'turn_refused'
   | 'delegation_required'
   | 'rate_limited'
   | 'not_configured'
   | 'binding_check_unavailable'
   | 'unavailable';
 
+/**
+ * What a `turn_refused` refusal carries besides `message`: the plugin's
+ * `code` as `reason`, and the refusal's documented details (each omitted
+ * when absent).
+ */
+export interface ChannelRefusalDetails {
+  reason?: string;
+  retryAfterSeconds?: number;
+  action?: { label: string; url: string };
+}
+
 export type ChannelTurnOutcome =
   | { ok: true; result: ChannelTurnResponse }
-  | {
+  | ({
       ok: false;
       status: ChannelErrorStatus;
       code: ChannelErrorCode;
       message: string;
-    };
+    } & ChannelRefusalDetails);
 
 export class ChannelError extends Error {
   constructor(
     readonly status: ChannelErrorStatus,
     message: string,
     readonly code: ChannelErrorCode,
+    /** `turn_refused` only: the plugin's reason and details. */
+    readonly refusal: ChannelRefusalDetails = {},
   ) {
     super(message);
     this.name = 'ChannelError';
   }
+}
+
+/** The failed outcome a `ChannelError` is answered with. */
+export function channelErrorOutcome(
+  error: ChannelError,
+): Exclude<ChannelTurnOutcome, { ok: true }> {
+  return {
+    ok: false,
+    status: error.status,
+    code: error.code,
+    message: error.message,
+    ...channelRefusalFields(error.refusal),
+  };
+}
+
+/**
+ * The JSON body of a channel refusal: `{ code, message }`, plus `reason`,
+ * `retryAfterSeconds` and `action` on a `turn_refused` that carries them.
+ */
+export function channelErrorBody(
+  error: Pick<ChannelError, 'code' | 'message'> & ChannelRefusalDetails,
+): { code: ChannelErrorCode; message: string } & ChannelRefusalDetails {
+  return {
+    code: error.code,
+    message: error.message,
+    ...channelRefusalFields(error),
+  };
+}
+
+function channelRefusalFields(
+  details: ChannelRefusalDetails,
+): ChannelRefusalDetails {
+  return {
+    ...(details.reason !== undefined ? { reason: details.reason } : {}),
+    ...(details.retryAfterSeconds !== undefined
+      ? { retryAfterSeconds: details.retryAfterSeconds }
+      : {}),
+    ...(details.action
+      ? { action: { label: details.action.label, url: details.action.url } }
+      : {}),
+  };
+}
+
+/** The statuses a `turn_refused` is answered with (the gate's own). */
+const CHANNEL_TURN_REFUSAL_STATUSES = [402, 403, 429, 503] as const;
+
+/**
+ * The `turn_refused` error for a refusal of a plugin's `gateTurn`: its
+ * status (402, 403, 429 or 503; anything else 403), its message, its `code`
+ * as `reason`, its `retryAfterSeconds` and `action`.
+ */
+export function channelTurnRefusedError(refusal: TurnRefusal): ChannelError {
+  const retryAfterSeconds = refusalRetryAfterSeconds(refusal);
+  const action = refusalAction(refusal);
+  return new ChannelError(
+    CHANNEL_TURN_REFUSAL_STATUSES.find(
+      (allowed) => allowed === refusal.status,
+    ) ?? 403,
+    refusal.message,
+    'turn_refused',
+    {
+      ...(refusal.code ? { reason: refusal.code } : {}),
+      ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
+      ...(action ? { action: { label: action.label, url: action.url } } : {}),
+    },
+  );
 }
 
 /**

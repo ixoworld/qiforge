@@ -63,6 +63,11 @@ export interface CapabilityRouteTurn {
    */
   recentTurns?: () => Promise<readonly string[]>;
   requestId: string;
+  /**
+   * The evaluator for this turn when it differs from the router's (the
+   * host's reporting wrapper, so the Decision reaches `onModelCall`).
+   */
+  evaluator?: DecisionEvaluator;
   /** The turn's abort signal; only an awaited (`on`) evaluation is bound to it. */
   signal?: AbortSignal;
   /**
@@ -231,7 +236,7 @@ export function createCapabilityRouter(
       }
       return Promise.all(
         batches(capabilities, CAPABILITY_PRELOAD_BATCH_SIZE).map((batch) =>
-          evaluator.evaluate(
+          (turn.evaluator ?? evaluator).evaluate(
             capabilityPreloadDecision,
             { text, recentTurns, capabilities: batch },
             options,

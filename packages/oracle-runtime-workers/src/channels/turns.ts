@@ -4,6 +4,7 @@ import type { DoSqliteDatabase } from '../sqlite/database';
 import { UNTITLED_SESSION } from '../sqlite/sessions-store';
 import type { RunRecord } from '../do/run-store';
 import type { TurnIdentity, TurnRequest } from '../do/contracts';
+import type { PlatformModelsPolicy } from '../plugin-api/turn-gate';
 import { parseReplyPlan, planText, planTextForModel } from '../delivery/schema';
 import type { ReplyPlan } from '../delivery/types';
 import { renderCapabilityOf } from '../delivery/rich';
@@ -250,6 +251,19 @@ export interface ChannelTurnsHost {
    */
   requireDelegation(identity: TurnIdentity): Promise<void>;
   /**
+   * The plugins' pre-turn gate (`OraclePlugin.gateTurn`) for a new request:
+   * throws a `ChannelError` (`turn_refused`) when a plugin refuses it, else
+   * resolves with the restriction on the turn's models (`deny`: the person's
+   * own provider only; no routing Decision is asked and the run carries the
+   * restriction). `sessionId` is the session the request will run in, null
+   * when it opens the binding's first one.
+   */
+  gateTurn(
+    identity: TurnIdentity,
+    input: ChannelTurnInput,
+    sessionId: string | null,
+  ): Promise<PlatformModelsPolicy>;
+  /**
    * Abort the named runs (unknown or ended ones are skipped). Signals all
    * of them first, then waits at most one shared grace; a run may still be
    * winding down when it resolves.
@@ -297,6 +311,8 @@ type Received =
 interface PreparedChannelTurn {
   sessionId: string;
   routing?: ChannelRouteAssignment;
+  /** The gate restricted the turn to the person's own provider. */
+  platformModels?: 'deny';
 }
 
 /**
@@ -1462,6 +1478,8 @@ export class ChannelTurns {
     input: ChannelTurnInput,
     baseline: string,
     storedJson: string | null,
+    /** false: no routing Decision (the turn may not use platform models). */
+    classify = true,
   ): Promise<ChannelRouteAssignment | undefined> {
     const routing = this.routing;
     if (!this.routingEnabled(input) || !routing || routing.mode === 'off')
@@ -1526,6 +1544,11 @@ export class ChannelTurns {
       // A file with no caption, only the gateway's placeholder: nothing to
       // classify, so it stays in the current conversation.
       assignment.reason = 'attachment-placeholder';
+    else if (!classify)
+      // The classifier runs on the platform's Decision provider, which this
+      // turn may not use: it stays in the current conversation, as with the
+      // classifier unavailable.
+      assignment.reason = 'platform-models-denied';
     else {
       const candidates = await this.routingCandidates(input, baseline);
       if (candidates.length) {
@@ -1541,9 +1564,16 @@ export class ChannelTurns {
           async (): Promise<ChannelRouteObservation> => {
             const started = this.now();
             try {
+              // The ids name the call for its model-call report.
               const evaluation = await routing.evaluator.evaluate(
                 channelSessionDecision,
                 evidence,
+                {
+                  metadata: {
+                    request_id: input.requestId,
+                    session_id: baseline,
+                  },
+                },
               );
               return {
                 ...decideChannelRoute(
@@ -1700,13 +1730,27 @@ export class ChannelTurns {
     storedRouting: string | null,
   ): Promise<PreparedChannelTurn> {
     await this.host.requireDelegation(identity);
+    // Before the session marker and the routing Decision: a refused request
+    // leaves nothing behind (its receipt is dropped by the caller).
+    const platformModels = await this.host.gateTurn(
+      identity,
+      input,
+      sessionId ?? (await this.boundSession(input.bindingId)),
+    );
+    const restricted = platformModels === 'deny';
     const session =
       sessionId ??
       (await this.boundSession(input.bindingId)) ??
       (await this.openSession(identity, input));
     await this.host.assertSession(identity, session);
-    const routing = await this.assignRoute(input, session, storedRouting);
-    if (!routing) return { sessionId: session };
+    const routing = await this.assignRoute(
+      input,
+      session,
+      storedRouting,
+      !restricted,
+    );
+    const restriction = restricted ? { platformModels: 'deny' as const } : {};
+    if (!routing) return { sessionId: session, ...restriction };
     const destination = routing.destination;
     const selected =
       destination.kind === 'new'
@@ -1729,7 +1773,7 @@ export class ChannelTurns {
         );
       throw error;
     }
-    return { sessionId: selected, routing };
+    return { sessionId: selected, routing, ...restriction };
   }
 
   /**
@@ -1951,6 +1995,7 @@ export class ChannelTurns {
       client: 'channel',
       requestId: input.requestId,
       multitask: 'enqueue',
+      ...(prepared.platformModels ? { platformModels: 'deny' as const } : {}),
       channel: {
         provider: input.provider,
         bindingId: input.bindingId,

@@ -615,6 +615,86 @@ describe('streamRun', () => {
     expect(result.ended).toBe('unauthorized');
   });
 
+  it('a POST a plugin gate refused (403, refused: true) is not renewed and throws at once, whatever its code', async () => {
+    const body = JSON.stringify({
+      statusCode: 403,
+      message: 'This account cannot be billed.',
+      code: 'billing_account_unsupported',
+      requestId: 'req-1',
+      refused: true,
+    });
+    let starts = 0;
+    const stages: number[] = [];
+    const error = await streamRun({
+      start: async () => {
+        starts += 1;
+        return new Response(body, {
+          status: 403,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+      join: async () => response(''),
+      onUnauthorized: (stage) => {
+        stages.push(stage);
+      },
+      onEvent: () => undefined,
+    }).catch((e: unknown) => e);
+    expect(starts).toBe(1);
+    expect(stages).toEqual([]);
+    expect(error).toBeInstanceOf(StreamRunStartError);
+    expect(error).toMatchObject({ status: 403, body });
+  });
+
+  it('the refusal marker also stops a renewal on a 401 (any status)', async () => {
+    let starts = 0;
+    const stages: number[] = [];
+    const error = await streamRun({
+      start: async () => {
+        starts += 1;
+        return response(
+          JSON.stringify({ statusCode: 401, message: 'no', refused: true }),
+          { status: 401 },
+        );
+      },
+      join: async () => response(''),
+      onUnauthorized: (stage) => {
+        stages.push(stage);
+      },
+      onEvent: () => undefined,
+    }).catch((e: unknown) => e);
+    expect(starts).toBe(1);
+    expect(stages).toEqual([]);
+    expect(error).toMatchObject({ status: 401 });
+  });
+
+  it('a 403 POST without the refusal marker is still renewed through both stages', async () => {
+    let starts = 0;
+    const stages: number[] = [];
+    const error = await streamRun({
+      start: async () => {
+        starts += 1;
+        // `refused` must be exactly `true`: anything else is no marker.
+        return response(
+          JSON.stringify({
+            statusCode: 403,
+            message: 'Forbidden',
+            code: 'billing_account_unsupported',
+            refused: 'true',
+          }),
+          { status: 403 },
+        );
+      },
+      join: async () => response(''),
+      onUnauthorized: (stage) => {
+        stages.push(stage);
+      },
+      onEvent: () => undefined,
+    }).catch((e: unknown) => e);
+    expect(starts).toBe(3);
+    expect(stages).toEqual([1, 2]);
+    expect(error).toMatchObject({ status: 403 });
+  });
+
   it("the user's abort while a refused POST is renewed ends the turn `aborted` without sending it again", async () => {
     const ac = new AbortController();
     let starts = 0;

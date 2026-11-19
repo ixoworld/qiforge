@@ -1192,6 +1192,19 @@ export interface RuntimeContext<TConfig = MergedConfig> {
    */
   background?: (work: Promise<unknown>) => void;
 
+  /**
+   * Ask the host to wake the person's object no earlier than about `at`
+   * (epoch ms) and call every plugin's `onWake` then, without a request
+   * from the person (a retry of work they left pending). Several requests
+   * keep the earliest; a wake fires once, so `onWake` asks again for the
+   * next one. A wake does not keep an idle working copy alive: once the
+   * object is evicted for idleness (days without a request) the pending
+   * wake is dropped, and the plugin's next hook for the person (their next
+   * turn) is where pending work resumes. Present only on hosts that run
+   * `onWake` (the Workers runtime) and when a plugin defines it.
+   */
+  requestWake?: (at: number) => Promise<void>;
+
   /** Propagates from the HTTP request / graph invocation. */
   abortSignal: AbortSignal;
 

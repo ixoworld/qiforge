@@ -101,6 +101,15 @@ import {
   type UserServerNameLookup,
 } from './user-homeserver';
 import { replyPartTxnId, roomReplyMessages } from './reply-parts';
+import {
+  claimRefusalNotice,
+  clearRefusalNotices,
+  ensureRefusalNoticeTable,
+  hasRefusalNoticeTable,
+  refusalNoticeContent,
+  releaseRefusalNotice,
+} from './refusal-notice';
+import type { TurnRefusal } from '../plugin-api/turn-gate';
 import { VerifiedRoomAliases } from './room-alias';
 import { boundedSignal, raceSignal } from './media-deadline';
 
@@ -483,6 +492,8 @@ export class MatrixGatewayDO
   private oracleSecretsKeyJson: string | null = null;
   private oracleSigningMnemonic: string | null = null;
   private inboxTableReady = false;
+  /** Whether the refused-turn notice throttle table exists (null: not looked yet). */
+  private refusalNoticeTable: boolean | null = null;
   /** Event ids of turns running in this instance (a graceful restart must not replay them). */
   private readonly inFlightEvents = new Set<string>();
   /**
@@ -982,6 +993,15 @@ export class MatrixGatewayDO
         );
         return;
       }
+      // A plugin refused the turn before it started: its message is the
+      // answer, as a notice (deduplicated on the event like a reply).
+      if (result.refused) {
+        await this.postRefusalNotice(turn, decision, result.refused, requestId);
+        deleteInboxRows(this.inboxSql(), turn.eventIds);
+        return;
+      }
+      // Allowed: a later refusal for this person here is told again at once.
+      this.clearRefusalThrottle(turn.roomId, turn.matrixUserId);
       if (result.replayed)
         this.log(
           'info',
@@ -1112,6 +1132,73 @@ export class MatrixGatewayDO
       ...(turn.attachments?.length ? { attachments: turn.attachments } : {}),
       requestId,
     });
+  }
+
+  // -------------------------------------------------------------------------
+  // Refused turns: one notice per (room, user, code) per window
+  // -------------------------------------------------------------------------
+
+  /**
+   * Post the refusal of a plugin's gate as one notice in the turn's thread
+   * (`refusal-notice.ts`), unless one for the same room, person and code
+   * was posted inside the window: then nothing is posted. Deduplicated on
+   * the event like a reply.
+   */
+  private async postRefusalNotice(
+    turn: IngestTurn,
+    decision: GateDecision,
+    refusal: TurnRefusal,
+    requestId: string,
+  ): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    if (this.refusalNoticeTable !== true) {
+      ensureRefusalNoticeTable(sql);
+      this.refusalNoticeTable = true;
+    }
+    const key = {
+      roomId: turn.roomId,
+      userId: turn.matrixUserId,
+      code: refusal.code ?? '',
+    };
+    const described = `${refusal.status}${refusal.code ? ` ${refusal.code}` : ''}`;
+    if (!claimRefusalNotice(sql, key, Date.now())) {
+      this.log(
+        'info',
+        `turn ${requestId}: refused before it started (${described}); notice already posted in this window, nothing sent`,
+      );
+      return;
+    }
+    this.log(
+      'info',
+      `turn ${requestId}: refused before it started (${described})`,
+    );
+    const content = refusalNoticeContent(refusal, {
+      roomKind: decision.roomKind,
+      userId: turn.matrixUserId,
+      displayName: decision.displayName,
+    });
+    try {
+      await this.sendNotice(turn.roomId, content.body, {
+        threadId: turn.threadId,
+        formattedBody: content.formattedBody,
+        ...(content.mentions ? { mentions: content.mentions } : {}),
+        ...(turn.eventIds[0]
+          ? { txnId: `${replyTxnId(turn.eventIds[0])}-refused` }
+          : {}),
+      });
+    } catch (err) {
+      // Not posted: the next refused message may try again.
+      releaseRefusalNotice(sql, key);
+      throw err;
+    }
+  }
+
+  /** A turn was allowed for `userId` in `roomId`: their throttle there ends. */
+  private clearRefusalThrottle(roomId: string, userId: string): void {
+    const sql = this.ctx.storage.sql;
+    // No table: this gateway never posted a refusal notice, nothing to clear.
+    this.refusalNoticeTable ??= hasRefusalNoticeTable(sql);
+    if (this.refusalNoticeTable) clearRefusalNotices(sql, roomId, userId);
   }
 
   // -------------------------------------------------------------------------

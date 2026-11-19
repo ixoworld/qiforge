@@ -21,3 +21,7 @@ New flow conditions require `source` equal to `configured_input` or `runtime_out
 `readFlowDecisionContext(ctx, ref?)` returns the authenticated `FlowSpecRead` snapshot, including its resolved `ref`, through the existing Matrix room-membership guard. It does not invoke inference or mutate the flow. Hosts must select and redact the fields needed for their Decision variables rather than trust model-supplied draft state. Input, condition, and semantic-gate edits update both the editor blocks and compiled `qi.flow.nodes` consumed by the runner.
 
 Decision calls combine caller cancellation with turn cancellation. Already cancelled calls do not reach the provider, cancellation rejects even if a provider ignores the signal, and a result arriving after cancellation cannot become an accepted answer.
+
+## Request admission and the turn gate
+
+`OraclePlugin.gateTurn` (Workers runtime, `packages/oracle-runtime-workers/docs/usage-metering.md`) is a separate, earlier hook: it can only refuse a turn (with an HTTP status such as 402 on Portal requests), never answer it, and it runs on every entry, group rooms, task runs and turns with files included. Admission's contract above is unchanged: a turn the gate refused never reaches admission.

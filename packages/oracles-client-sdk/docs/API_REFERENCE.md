@@ -1326,8 +1326,24 @@ class RequestError extends Error {
 
   claims?: string[];
   outstandingClaims?: string[];
+  status?: number;
+  code?: string;
+  requestId?: string;
+  /** Whether repeating the same request can succeed, when the runtime says. */
+  retryable?: boolean;
+  /**
+   * `true` when one of the oracle's plugin gates refused the turn (e.g. out
+   * of credits): never a credential problem, whatever `status` is. Such an
+   * answer is surfaced at once; the SDK does not renew credentials for it.
+   */
+  refused?: boolean;
+  /** The refusal's JSON details (`retryAfterSeconds`, `action: { label, url }`), when sent. */
+  details?: Record<string, unknown>;
 }
 ```
+
+See [Credentials and renewal](../README.md#credentials-and-renewal) for
+which refusals renew credentials.
 
 #### Example
 

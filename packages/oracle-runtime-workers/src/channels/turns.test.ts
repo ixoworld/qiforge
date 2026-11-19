@@ -418,6 +418,95 @@ describe('durable channel requests', () => {
     },
   );
 
+  it('a request a plugin gate refuses leaves nothing behind and is admitted once allowed', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('gate-refused');
+    await stub.refuseTurns({ status: 402, message: 'Top up to continue.' });
+    expect(await stub.submit(message)).toEqual({
+      ok: false,
+      status: 402,
+      code: 'turn_refused',
+      message: 'Top up to continue.',
+    });
+    // The plugin's code is the `reason`; its retry delay and action ride
+    // along (each omitted when absent).
+    await stub.refuseTurns({
+      status: 402,
+      code: 'insufficient_credits',
+      message: "You're out of IXO credits. Top up to keep chatting.",
+      details: {
+        retryAfterSeconds: 3600,
+        action: { label: 'Top up credits', url: 'https://portal.example/c' },
+        other: 'portal only',
+      },
+    });
+    expect(await stub.submit(message)).toEqual({
+      ok: false,
+      status: 402,
+      code: 'turn_refused',
+      reason: 'insufficient_credits',
+      message: "You're out of IXO credits. Top up to keep chatting.",
+      retryAfterSeconds: 3600,
+      action: { label: 'Top up credits', url: 'https://portal.example/c' },
+    });
+    await stub.refuseTurns({
+      status: 503,
+      code: 'credits_check_unavailable',
+      message: 'Please try again in a minute.',
+      details: { retryAfterSeconds: 60 },
+    });
+    expect(await stub.submit(message)).toEqual({
+      ok: false,
+      status: 503,
+      code: 'turn_refused',
+      reason: 'credits_check_unavailable',
+      message: 'Please try again in a minute.',
+      retryAfterSeconds: 60,
+    });
+    // No run, no receipt, no session marker, nothing owed to the room.
+    expect(await stub.count()).toBe(0);
+    expect(await stub.receipt(message.requestId)).toBeNull();
+    expect((await stub.hostCalls()).createSession).toBe(0);
+    expect((await stub.mirrors()).user).toBe(0);
+    // The same request once the gate allows it.
+    await stub.refuseTurns(null);
+    expect(await stub.submit(message)).toMatchObject({
+      ok: true,
+      result: { status: 'running' },
+    });
+    expect(await stub.count()).toBe(1);
+  });
+
+  it('a request the gate restricts to the person’s provider is never classified and its run carries the restriction', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('gate-restricted');
+    await stub.configureRouting('on');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.finish(first.result.runId, undefined, 'Sunny.');
+    const inputsBefore = (await stub.routingInputs()).length;
+    await stub.restrictTurns('deny');
+    const next = await stub.submit({
+      ...message,
+      requestId: 'wa:restricted',
+      message: 'And something else entirely?',
+    });
+    if (!next.ok) throw new Error('Turn rejected');
+    // No routing Decision: it stays in the current conversation.
+    expect((await stub.routingInputs()).length).toBe(inputsBefore);
+    expect(next.result.sessionId).toBe(first.result.sessionId);
+    const request = JSON.parse((await stub.run(next.result.runId))!.request);
+    expect(request.platformModels).toBe('deny');
+    // Unrestricted again: the run carries no restriction.
+    await stub.finish(next.result.runId, undefined, 'Done.');
+    await stub.restrictTurns('allow');
+    const free = await stub.submit({ ...message, requestId: 'wa:free' });
+    if (!free.ok) throw new Error('Turn rejected');
+    // ... and is classified as usual (the restriction was what skipped it).
+    expect((await stub.routingInputs()).length).toBeGreaterThan(inputsBefore);
+    expect(
+      JSON.parse((await stub.run(free.result.runId))!.request),
+    ).not.toHaveProperty('platformModels');
+  });
+
   it('refuses a delegation whose expiry is unknown', async () => {
     const stub = env.CHANNEL_TURNS_TEST.getByName('delegation-no-expiry');
     await stub.setDelegation({ raw: 'grant' });

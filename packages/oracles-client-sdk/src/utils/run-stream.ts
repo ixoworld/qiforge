@@ -29,7 +29,10 @@
  *     user's object), so the repeat cannot send a message twice. A re-join
  *     still refused ends the stream `unauthorized` instead of spending the
  *     re-join budget on it; a POST still refused throws
- *     `StreamRunStartError` with the refusal's status.
+ *     `StreamRunStartError` with the refusal's status;
+ *   - a POST a plugin gate refused (body `refused: true`, e.g. `402
+ *     insufficient_credits` or a `403` with any code) is not a credential
+ *     refusal: it throws `StreamRunStartError` at once, nothing renewed.
  *
  * Against a runtime without durable runs (no `run` frame, no `x-run-id`)
  * this degrades to the previous behaviour: the stream ends when the

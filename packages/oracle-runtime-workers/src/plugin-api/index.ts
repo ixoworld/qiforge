@@ -19,9 +19,25 @@ export type {
 } from './oracle-plugin';
 export {
   MODEL_CALL_METADATA_KEY,
+  MODEL_CALL_PURPOSES,
   modelCallOf,
+  type ModelCallPayer,
+  type ModelCallPurpose,
   type ModelCallRecord,
+  type ModelCallReport,
+  type TurnModelUsage,
 } from '../llm/model-call';
+export type {
+  PlatformModelsPolicy,
+  TurnGateContext,
+  TurnGatePolicy,
+  TurnGateResult,
+  TurnRefusal,
+  TurnRefusalAction,
+  TurnRefusalBody,
+  TurnRefusalDetails,
+  TurnTrigger,
+} from './turn-gate';
 export {
   IDENTITY_CHECK_EVENT_STATUSES,
   MAX_CHANNEL_EVENT_TEXT,

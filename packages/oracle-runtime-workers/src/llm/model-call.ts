@@ -19,9 +19,18 @@ export const MODEL_CALL_METADATA_KEY = 'model_call';
 /** Property of a thrown error that holds the failed call's record. */
 const MODEL_CALL_ERROR_KEY = '__modelCall';
 
+/**
+ * Who pays the provider for a call: `platform` is the oracle's own key
+ * (OpenRouter, Nebius, the Decision provider), `user` a bring-your-own-LLM
+ * credential of the person (`BYO_LLM_ENABLED`), billed to their account.
+ */
+export type ModelCallPayer = 'platform' | 'user';
+
 export interface ModelCallRecord {
   /** The role the model was created for (`main`, `summarizer`, `routing`, …). */
   role: string;
+  /** Whose key the call ran on: the platform's, or the user's own (BYO). */
+  paidBy: ModelCallPayer;
   /** The model id the call asked for. */
   requestedModel: string;
   /** The model that answered, as the provider reported it. */
@@ -41,8 +50,20 @@ export interface ModelCallRecord {
   cacheWriteTokens?: number;
   outputTokens?: number;
   reasoningTokens?: number;
-  /** USD, as OpenRouter reported it (`usage.cost`). */
+  /**
+   * USD, as the provider reported it (OpenRouter's `usage.cost`, sent on
+   * every response). The runtime never computes a price: absent when the
+   * provider sent none (Nebius, a BYO provider, a Decision provider, a call
+   * that failed before its usage arrived).
+   */
   costUsd?: number;
+  /**
+   * The token counts are the runtime's chars/4 estimates, not the
+   * provider's: a streamed platform call that failed or was aborted after
+   * output started, before the provider's usage arrived. No `costUsd` then;
+   * price it from the model's list price if you charge for it.
+   */
+  usageEstimated?: true;
   durationMs: number;
   ok: boolean;
   finishReason?: string;
@@ -110,6 +131,108 @@ export interface CallRequest {
   requestedModel: string;
   /** `provider.order` as sent, when the call sent one. */
   providerOrder?: readonly string[];
+  /** Defaults to `platform`. */
+  paidBy?: ModelCallPayer;
+}
+
+/**
+ * What a model call was for, as the runtime knows it at the call site:
+ *
+ * - `reply`: the main agent's model (a chat turn, a task run, the empty-reply
+ *   retry);
+ * - `summarization`: the turn's history compaction;
+ * - `subagent`: a plugin sub-agent's model;
+ * - `plugin`: a plugin's own `ctx.llm` call (in a tool, a middleware, a hook);
+ * - `attachment`: reading a file into text (a turn's attachments,
+ *   `view_attachment`, a document ingested into memory);
+ * - `title`: the session title written after a turn;
+ * - `group-summary`: a Matrix group room's channel-memory compaction;
+ * - `routing`: a Decision that routes the turn (the capability router,
+ *   channel conversation routing);
+ * - `decision`: a plugin's `ctx.decisions` evaluation;
+ * - `safety`: the host's safety-guardrail model;
+ * - `other`: a model the runtime handed out without knowing its use.
+ */
+export type ModelCallPurpose =
+  | 'reply'
+  | 'summarization'
+  | 'subagent'
+  | 'plugin'
+  | 'attachment'
+  | 'title'
+  | 'group-summary'
+  | 'routing'
+  | 'decision'
+  | 'safety'
+  | 'other';
+
+export const MODEL_CALL_PURPOSES: readonly ModelCallPurpose[] = [
+  'reply',
+  'summarization',
+  'subagent',
+  'plugin',
+  'attachment',
+  'title',
+  'group-summary',
+  'routing',
+  'decision',
+  'safety',
+  'other',
+];
+
+export function isModelCallPurpose(value: unknown): value is ModelCallPurpose {
+  return MODEL_CALL_PURPOSES.some((purpose) => purpose === value);
+}
+
+/**
+ * A call record as plugins get it (`OraclePlugin.onModelCall`,
+ * `TurnUsage.calls`): the record plus what the runtime adds where it
+ * reports the call.
+ */
+export interface ModelCallReport extends ModelCallRecord {
+  purpose: ModelCallPurpose;
+  /**
+   * Unique per call attempt and reported once: the idempotency key of a
+   * charge. A retried or fallback attempt is a new call with its own id.
+   */
+  callId: string;
+  /** When the call started, epoch ms (`startedAt + durationMs` is its end). */
+  startedAt: number;
+}
+
+/**
+ * Every model call one attempt of a turn made, handed to
+ * `OraclePlugin.onTurnUsage` once the attempt ended and every one of these
+ * calls has been through `onModelCall` (the session title written after the
+ * turn included). A run restarted after a reset is a new attempt with its
+ * own report; `callId`s never repeat across them.
+ */
+export interface TurnModelUsage {
+  requestId: string;
+  runId: string;
+  sessionId: string;
+  /** How the attempt ended. */
+  status: 'finished' | 'failed' | 'aborted' | 'interrupted';
+  /** In the order they ended. */
+  calls: readonly ModelCallReport[];
+  /** Sum of `costUsd` over the platform-paid calls that reported one. */
+  platformCostUsd: number;
+  /** Platform-paid calls with no `costUsd` (a plugin prices them by tokens). */
+  unpricedPlatformCalls: number;
+}
+
+/** The totals of a `TurnModelUsage`. */
+export function turnModelUsageTotals(
+  calls: readonly ModelCallReport[],
+): Pick<TurnModelUsage, 'platformCostUsd' | 'unpricedPlatformCalls'> {
+  let platformCostUsd = 0;
+  let unpricedPlatformCalls = 0;
+  for (const call of calls) {
+    if (call.paidBy !== 'platform') continue;
+    if (call.costUsd === undefined) unpricedPlatformCalls += 1;
+    else platformCostUsd += call.costUsd;
+  }
+  return { platformCostUsd, unpricedPlatformCalls };
 }
 
 /** The record of a call that ended (`error` absent) or failed. */
@@ -137,6 +260,7 @@ export function buildModelCallRecord(
     providerSlug(seen.provider) !== providerSlug(first);
   const record: ModelCallRecord = {
     role: request.role,
+    paidBy: request.paidBy ?? 'platform',
     requestedModel: request.requestedModel,
     ...(seen.servedModel ? { servedModel: seen.servedModel } : {}),
     ...(seen.provider ? { provider: seen.provider } : {}),
@@ -183,6 +307,48 @@ function errorCode(error: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * Calls whose reporter is waiting for their end, by LangChain run id. An
+ * abort usually ends a streamed call without any end LangChain reports:
+ * `Runnable.stream` races the signal outside the model's own loop and
+ * abandons the stream, so neither `handleLLMEnd` nor `handleLLMError` is
+ * called and the model never sees an error to put its record on. A model
+ * that sees its signal abort hands its record to the call's reporter here
+ * (`interruptCall`). Bounded: a call nobody ends (a consumer that stopped
+ * reading without an abort) is dropped oldest first.
+ */
+const awaitingEnd = new Map<string, Array<(record: ModelCallRecord) => void>>();
+const MAX_AWAITING_END = 1_024;
+
+/** `end` receives the record of call `runId` if it is interrupted. */
+export function awaitCallEnd(
+  runId: string,
+  end: (record: ModelCallRecord) => void,
+): void {
+  const ends = awaitingEnd.get(runId);
+  if (ends) {
+    ends.push(end);
+    return;
+  }
+  if (awaitingEnd.size >= MAX_AWAITING_END) {
+    const oldest = awaitingEnd.keys().next();
+    if (!oldest.done) awaitingEnd.delete(oldest.value);
+  }
+  awaitingEnd.set(runId, [end]);
+}
+
+/** The call `runId` ended through its reporter's usual path. */
+export function forgetCallEnd(runId: string): void {
+  awaitingEnd.delete(runId);
+}
+
+/** The call `runId` was interrupted: hand its record to its reporters, once. */
+export function interruptCall(runId: string, record: ModelCallRecord): void {
+  const ends = awaitingEnd.get(runId);
+  awaitingEnd.delete(runId);
+  for (const end of ends ?? []) end(record);
+}
+
 /** Keep `record` on the thrown `error`, for whoever handles the failure. */
 export function attachModelCall(error: unknown, record: ModelCallRecord): void {
   if (typeof error !== 'object' || error === null) return;
@@ -202,7 +368,8 @@ function isModelCallRecord(value: unknown): value is ModelCallRecord {
     isRecord(value) &&
     typeof value.role === 'string' &&
     typeof value.requestedModel === 'string' &&
-    typeof value.ok === 'boolean'
+    typeof value.ok === 'boolean' &&
+    (value.paidBy === 'platform' || value.paidBy === 'user')
   );
 }
 

@@ -38,6 +38,14 @@ export interface ByoTurnResolution {
   chatGptBackend?: ChatGptBackendConfig;
   /** The BYO lane's liveness budgets (`streamLivenessFromEnv(env, 'byo')`). */
   streamLiveness?: StreamLivenessSettings;
+  /**
+   * `false`: the turn may not use the platform's models (a gate's
+   * `platformModels: 'deny'`). A refused BYO model is not answered by the
+   * platform (`ByoModelFallbackChatModel.platformFallback`), and `platform`
+   * is expected to be a denying adapter (`deniedPlatformLlm`) for the roles
+   * the provider does not serve. Default true.
+   */
+  platformFallback?: boolean;
 }
 
 export function createByoLlmAdapter(
@@ -65,6 +73,7 @@ export function createByoLlmAdapter(
       // platform, not to the user's account.
       return new ByoModelFallbackChatModel({
         provider: turn.credential.provider,
+        role: String(role),
         modelId,
         byo: createByoChatModel({
           credential: turn.credential,
@@ -78,6 +87,7 @@ export function createByoLlmAdapter(
           logger,
         }),
         platform: () => platform.get(role, rest),
+        ...(turn.platformFallback === false ? { platformFallback: false } : {}),
         state: fallbackState,
         logger: logger ?? NOOP_LOGGER,
       });
