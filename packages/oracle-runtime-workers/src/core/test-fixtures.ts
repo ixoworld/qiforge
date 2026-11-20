@@ -100,6 +100,7 @@ export interface TestPluginInit {
   onWake?: OraclePlugin['onWake'];
   getRequestAdmission?: OraclePlugin['getRequestAdmission'];
   getRequestMiddlewares?: OraclePlugin['getRequestMiddlewares'];
+  getTurnScope?: OraclePlugin['getTurnScope'];
   name: string;
   version?: string;
   manifest?: PluginManifest;
@@ -171,6 +172,7 @@ export function makePlugin(init: TestPluginInit): OraclePlugin {
     override onWake = init.onWake;
     override getRequestMiddlewares = init.getRequestMiddlewares;
     override getRequestSubAgents = init.getRequestSubAgents;
+    override getTurnScope = init.getTurnScope;
 
     override getSharedState(): Record<
       string,
