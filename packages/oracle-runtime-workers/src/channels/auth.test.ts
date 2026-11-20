@@ -9,6 +9,8 @@ import {
 } from '@ixo/ucan';
 import {
   authenticateChannel,
+  authenticateChannelHistory,
+  ChannelHistory,
   assertActiveChannelBinding,
   assertChannelAttemptAllowed,
   channelAuthConfig,
@@ -27,7 +29,10 @@ import {
   ChannelOrigin,
   channelRequestHash,
   ChannelTurnBody,
+  canonicalHistoryQuery,
+  historyQueryHash,
   readChannelBody,
+  type ChannelHistoryInput,
   type ChannelTurnInput,
 } from './contract';
 
@@ -309,6 +314,89 @@ describe('channel UCAN authorization', () => {
         channelDids: [f.channelDid],
       }),
     ).rejects.toThrow();
+  });
+
+  it('accepts a telegram turn from a second listed gateway and refuses one whose grant names the other gateway', async () => {
+    const f = await fixture();
+    const telegramDid = 'did:web:channels-test-telegram.example.test';
+    const telegram = await generateKeypair();
+    f.resolver.register(telegramDid, telegram.did.slice('did:key:'.length));
+    const config = { ...f.config, channelDids: [f.channelDid, telegramDid] };
+    const turn: ChannelTurnInput = {
+      ...input,
+      provider: 'telegram',
+      requestId: 'wa:tg1',
+    };
+    const raw = JSON.stringify(turn);
+    const capability = (provider: string): Capability => ({
+      can: 'ixo:channel/invoke',
+      with: `ixo:channel:${turn.bindingId}`,
+      nb: {
+        provider,
+        bindingRevision: turn.bindingRevision,
+        oracleDid: f.oracle.did,
+      },
+    });
+    const grantTo = (audience: string, provider = 'telegram') =>
+      createDelegation({
+        issuer: f.signer,
+        audience,
+        capabilities: [capability(provider)],
+        expiration: Math.floor(Date.now() / 1000) + 300,
+      });
+    const invoke = async (
+      proof: Awaited<ReturnType<typeof grantTo>>,
+      provider = 'telegram',
+    ) =>
+      new Headers({
+        authorization: `Bearer ${await serializeInvocation(
+          await createInvocation({
+            issuer: telegram.signer.withDID(telegramDid),
+            audience: f.oracle.did,
+            capability: capability(provider),
+            proofs: [proof],
+            expiration: Math.floor(Date.now() / 1000) + 60,
+            facts: [
+              {
+                requestId: turn.requestId,
+                requestHash: await channelRequestHash(raw),
+              },
+            ],
+          }),
+        )}`,
+        'x-auth-type': 'ucan',
+      });
+
+    const accepted = await authenticateChannel(
+      await invoke(await grantTo(telegramDid)),
+      raw,
+      turn,
+      config,
+    );
+    expect(accepted.userDid).toBe(f.userDid);
+    expect(accepted.channel).toMatchObject({
+      callerDid: telegramDid,
+      provider: 'telegram',
+      bindingId: turn.bindingId,
+    });
+    // The grant is addressed to the WhatsApp gateway: refused.
+    await expect(
+      authenticateChannel(
+        await invoke(await grantTo(f.channelDid)),
+        raw,
+        turn,
+        config,
+      ),
+    ).rejects.toMatchObject({ status: 401, code: 'unauthorized' });
+    // A grant and invocation for `whatsapp` cannot carry a telegram turn.
+    await expect(
+      authenticateChannel(
+        await invoke(await grantTo(telegramDid, 'whatsapp'), 'whatsapp'),
+        raw,
+        turn,
+        config,
+      ),
+    ).rejects.toMatchObject({ status: 403, code: 'scope_mismatch' });
   });
 
   it('refuses a grant addressed to another listed service even when both resolve to the same key', async () => {
@@ -976,5 +1064,415 @@ describe('channel key lookups', () => {
     });
     await expect(f.turn()).rejects.toMatchObject({ status: 401 });
     expect(f.lookupLines()).toEqual([]);
+  });
+});
+
+const DEVICE_ID = `dev_${'A'.repeat(43)}`;
+
+const historyInput: ChannelHistoryInput = {
+  provider: 'web',
+  bindingId: 'chb_web',
+  bindingRevision: 4,
+  requestId: 'web-history:7d8f3a2e-0000-4000-8000-000000000001',
+  query: { limit: 20, before: 'c1.abc' },
+};
+
+/**
+ * A history read as the gateway sends it: the Hub's grant (`ixo:channel/
+ * history`, signed as the person, addressed to the web gateway) and the
+ * gateway's invocation under it. `grant` and `invocation` change one side.
+ */
+async function historyFixture() {
+  const user = await generateKeypair();
+  const service = await generateKeypair();
+  const oracle = await generateKeypair();
+  const userDid = 'did:ixo:ixo1webuser';
+  const channelDid = 'did:web:channels-web.example.test';
+  const signer = user.signer.withDID(userDid);
+  const caller = service.signer.withDID(channelDid);
+  const resolver = createLocalDIDResolver();
+  resolver.register(userDid, user.did.slice('did:key:'.length));
+  resolver.register(channelDid, service.did.slice('did:key:'.length));
+  const config = {
+    oracleDid: oracle.did,
+    channelDids: [channelDid],
+    didResolver: resolver,
+  };
+  const capabilityFor = async (
+    body: ChannelHistoryInput,
+    over: { can?: Capability['can']; nb?: Record<string, unknown> } = {},
+  ): Promise<Capability> => ({
+    can: over.can ?? 'ixo:channel/history',
+    with: `ixo:channel:${body.bindingId}`,
+    nb: over.nb ?? {
+      provider: body.provider,
+      bindingRevision: body.bindingRevision,
+      oracleDid: oracle.did,
+      queryHash: await historyQueryHash(body.query),
+      deviceId: DEVICE_ID,
+    },
+  });
+  const sign = async (
+    body: ChannelHistoryInput = historyInput,
+    options: {
+      capability?: Capability;
+      grantCapability?: Capability;
+      grantExpiration?: number;
+      grantNotBefore?: number;
+      expiration?: number;
+      requestHash?: string;
+      proofs?: 'none';
+    } = {},
+  ) => {
+    const raw = JSON.stringify(body);
+    const capability = options.capability ?? (await capabilityFor(body));
+    const grant = await createDelegation({
+      issuer: signer,
+      audience: channelDid,
+      capabilities: [options.grantCapability ?? capability],
+      expiration: options.grantExpiration ?? Math.floor(Date.now() / 1000) + 60,
+      ...(options.grantNotBefore !== undefined
+        ? { notBefore: options.grantNotBefore }
+        : {}),
+    });
+    const token = await serializeInvocation(
+      await createInvocation({
+        issuer: caller,
+        audience: oracle.did,
+        capability,
+        proofs: options.proofs === 'none' ? [] : [grant],
+        expiration: options.expiration ?? Math.floor(Date.now() / 1000) + 60,
+        facts: [
+          {
+            requestId: body.requestId,
+            requestHash: options.requestHash ?? (await channelRequestHash(raw)),
+          },
+        ],
+      }),
+    );
+    return {
+      raw,
+      headers: new Headers({
+        authorization: `Bearer ${token}`,
+        'x-auth-type': 'ucan',
+      }),
+    };
+  };
+  return { userDid, channelDid, oracle, config, capabilityFor, sign };
+}
+
+describe('channel history authorization', () => {
+  it('canonicalises the query as the device signs it: after, before, limit, no spaces', async () => {
+    expect(canonicalHistoryQuery({ limit: 20 })).toBe('{"limit":20}');
+    expect(canonicalHistoryQuery({ before: 'c1.x', limit: 5 })).toBe(
+      '{"before":"c1.x","limit":5}',
+    );
+    expect(canonicalHistoryQuery({ limit: 5, after: 'c1.y' })).toBe(
+      '{"after":"c1.y","limit":5}',
+    );
+    expect(await historyQueryHash({ limit: 20 })).toBe(
+      await channelRequestHash('{"limit":20}'),
+    );
+    expect(ChannelHistory.can).toBe('ixo:channel/history');
+  });
+
+  it('recovers the person and the web binding from a history grant', async () => {
+    const f = await historyFixture();
+    const { raw, headers } = await f.sign();
+    expect(
+      await authenticateChannelHistory(headers, raw, historyInput, f.config),
+    ).toEqual({
+      userDid: f.userDid,
+      channel: {
+        callerDid: f.channelDid,
+        provider: 'web',
+        bindingId: historyInput.bindingId,
+        bindingRevision: historyInput.bindingRevision,
+      },
+    });
+  });
+
+  it('refuses the wrong capability both ways: a turn grant never reads history, a history grant never runs a turn', async () => {
+    const f = await historyFixture();
+    const invoke = await f.capabilityFor(historyInput, {
+      can: 'ixo:channel/invoke',
+      nb: {
+        provider: 'web',
+        bindingRevision: historyInput.bindingRevision,
+        oracleDid: f.oracle.did,
+      },
+    });
+    const turnSigned = await f.sign(historyInput, { capability: invoke });
+    await expect(
+      authenticateChannelHistory(
+        turnSigned.headers,
+        turnSigned.raw,
+        historyInput,
+        f.config,
+      ),
+    ).rejects.toMatchObject({ status: 401, code: 'unauthorized' });
+
+    // The history grant presented on the turn path.
+    const turn: ChannelTurnInput = {
+      ...input,
+      provider: 'web',
+      bindingId: historyInput.bindingId,
+      bindingRevision: historyInput.bindingRevision,
+      requestId: historyInput.requestId,
+    };
+    const history = await f.sign(historyInput);
+    await expect(
+      authenticateChannel(
+        history.headers,
+        JSON.stringify(turn),
+        turn,
+        f.config,
+      ),
+    ).rejects.toMatchObject({ status: 401, code: 'unauthorized' });
+
+    // A grant for history with an invocation claiming invoke.
+    const mixed = await f.sign(historyInput, {
+      capability: invoke,
+      grantCapability: await f.capabilityFor(historyInput),
+    });
+    await expect(
+      authenticateChannelHistory(
+        mixed.headers,
+        mixed.raw,
+        historyInput,
+        f.config,
+      ),
+    ).rejects.toMatchObject({ status: 401 });
+  });
+
+  it('reads web bindings only: a whatsapp or telegram grant and body are refused', async () => {
+    const f = await historyFixture();
+    for (const provider of ['whatsapp', 'telegram']) {
+      const body = { ...historyInput, provider };
+      const { raw, headers } = await f.sign(body);
+      await expect(
+        authenticateChannelHistory(headers, raw, body, f.config),
+      ).rejects.toMatchObject({ status: 403, code: 'provider_not_supported' });
+    }
+    // A web grant cannot carry a body that says whatsapp.
+    const { headers } = await f.sign(historyInput);
+    const body = { ...historyInput, provider: 'whatsapp' };
+    await expect(
+      authenticateChannelHistory(headers, JSON.stringify(body), body, f.config),
+    ).rejects.toMatchObject({ status: 403, code: 'provider_not_supported' });
+  });
+
+  it('refuses another binding, another revision and another oracle', async () => {
+    const f = await historyFixture();
+    const { raw, headers } = await f.sign();
+    // Another binding: the grant's resource names this one.
+    await expect(
+      authenticateChannelHistory(
+        headers,
+        raw,
+        { ...historyInput, bindingId: 'chb_other' },
+        f.config,
+      ),
+    ).rejects.toMatchObject({ status: 401 });
+    // A grant of revision 3 for a body of revision 4.
+    const stale = await f.sign(historyInput, {
+      capability: await f.capabilityFor({
+        ...historyInput,
+        bindingRevision: 3,
+      }),
+    });
+    await expect(
+      authenticateChannelHistory(
+        stale.headers,
+        stale.raw,
+        historyInput,
+        f.config,
+      ),
+    ).rejects.toMatchObject({ status: 403, code: 'revision_mismatch' });
+    // A grant naming another oracle.
+    const elsewhere = await f.sign(historyInput, {
+      capability: await f.capabilityFor(historyInput, {
+        nb: {
+          provider: 'web',
+          bindingRevision: historyInput.bindingRevision,
+          oracleDid: 'did:ixo:ixo1anotheroracle',
+          queryHash: await historyQueryHash(historyInput.query),
+          deviceId: DEVICE_ID,
+        },
+      }),
+    });
+    await expect(
+      authenticateChannelHistory(
+        elsewhere.headers,
+        elsewhere.raw,
+        historyInput,
+        f.config,
+      ),
+    ).rejects.toMatchObject({ status: 403, code: 'scope_mismatch' });
+  });
+
+  it('refuses a query the device did not sign, and a changed body', async () => {
+    const f = await historyFixture();
+    // The grant names `{limit:20, before}`; the body asks for 50.
+    const wider = {
+      ...historyInput,
+      query: { ...historyInput.query, limit: 50 },
+    };
+    const signedForOther = await f.sign(wider, {
+      capability: await f.capabilityFor(historyInput),
+    });
+    await expect(
+      authenticateChannelHistory(
+        signedForOther.headers,
+        signedForOther.raw,
+        wider,
+        f.config,
+      ),
+    ).rejects.toMatchObject({ status: 403, code: 'scope_mismatch' });
+    // A queryHash that is not hex.
+    const odd = await f.sign(historyInput, {
+      capability: await f.capabilityFor(historyInput, {
+        nb: {
+          provider: 'web',
+          bindingRevision: historyInput.bindingRevision,
+          oracleDid: f.oracle.did,
+          queryHash: 'not-a-hash',
+          deviceId: DEVICE_ID,
+        },
+      }),
+    });
+    await expect(
+      authenticateChannelHistory(odd.headers, odd.raw, historyInput, f.config),
+    ).rejects.toMatchObject({ status: 403, code: 'scope_mismatch' });
+    // The body changed after the gateway signed it (facts no longer match).
+    const { headers } = await f.sign(historyInput);
+    const tampered = {
+      ...historyInput,
+      requestId: 'web-history:7d8f3a2e-0000-4000-8000-000000000002',
+    };
+    await expect(
+      authenticateChannelHistory(
+        headers,
+        JSON.stringify(tampered),
+        tampered,
+        f.config,
+      ),
+    ).rejects.toMatchObject({ status: 403, code: 'scope_mismatch' });
+    const raw = JSON.stringify(historyInput);
+    await expect(
+      authenticateChannelHistory(headers, `${raw} `, historyInput, f.config),
+    ).rejects.toMatchObject({ status: 403, code: 'scope_mismatch' });
+  });
+
+  it('requires the device the Auth Hub named in the grant, and a grant of at most about 60 s', async () => {
+    const f = await historyFixture();
+    const nb = {
+      provider: 'web',
+      bindingRevision: historyInput.bindingRevision,
+      oracleDid: f.oracle.did,
+      queryHash: await historyQueryHash(historyInput.query),
+    };
+    for (const deviceId of [undefined, 'dev_short', 'not-a-device']) {
+      const { raw, headers } = await f.sign(historyInput, {
+        capability: await f.capabilityFor(historyInput, {
+          nb: deviceId === undefined ? nb : { ...nb, deviceId },
+        }),
+      });
+      await expect(
+        authenticateChannelHistory(headers, raw, historyInput, f.config),
+      ).rejects.toMatchObject({ status: 403, code: 'scope_mismatch' });
+    }
+    // An invocation cannot name another device than its grant.
+    const other = await f.sign(historyInput, {
+      capability: await f.capabilityFor(historyInput, {
+        nb: { ...nb, deviceId: `dev_${'B'.repeat(43)}` },
+      }),
+      grantCapability: await f.capabilityFor(historyInput),
+    });
+    await expect(
+      authenticateChannelHistory(
+        other.headers,
+        other.raw,
+        historyInput,
+        f.config,
+      ),
+    ).rejects.toMatchObject({ status: 403, code: 'scope_mismatch' });
+    // The Hub's old 120 s grant is too long now; 60 s (plus skew) passes.
+    const now = Math.floor(Date.now() / 1000);
+    const long = await f.sign(historyInput, { grantExpiration: now + 120 });
+    await expect(
+      authenticateChannelHistory(
+        long.headers,
+        long.raw,
+        historyInput,
+        f.config,
+      ),
+    ).rejects.toMatchObject({ status: 401, code: 'unauthorized' });
+    const ok = await f.sign(historyInput, { grantExpiration: now + 60 });
+    await expect(
+      authenticateChannelHistory(ok.headers, ok.raw, historyInput, f.config),
+    ).resolves.toMatchObject({ userDid: f.userDid });
+  });
+
+  it('a grant that names its start may have been issued for at most 90 s', async () => {
+    const f = await historyFixture();
+    const now = Math.floor(Date.now() / 1000);
+    // Issued an hour ago for an hour and a minute: 60 s left, too long a grant.
+    const old = await f.sign(historyInput, {
+      grantNotBefore: now - 3600,
+      grantExpiration: now + 60,
+    });
+    await expect(
+      authenticateChannelHistory(old.headers, old.raw, historyInput, f.config),
+    ).rejects.toMatchObject({ status: 401, code: 'unauthorized' });
+    const fresh = await f.sign(historyInput, {
+      grantNotBefore: now - 5,
+      grantExpiration: now + 60,
+    });
+    await expect(
+      authenticateChannelHistory(
+        fresh.headers,
+        fresh.raw,
+        historyInput,
+        f.config,
+      ),
+    ).resolves.toMatchObject({ userDid: f.userDid });
+  });
+
+  it('refuses expired and long-lived grants and invocations, and a broken chain', async () => {
+    const f = await historyFixture();
+    const now = Math.floor(Date.now() / 1000);
+    // Expired: its own code, so the gateway asks for a fresh grant.
+    for (const options of [
+      { expiration: now - 1 },
+      { grantExpiration: now - 1 },
+    ]) {
+      const { raw, headers } = await f.sign(historyInput, options);
+      await expect(
+        authenticateChannelHistory(headers, raw, historyInput, f.config),
+      ).rejects.toMatchObject({ status: 401, code: 'expired' });
+    }
+    for (const options of [
+      { expiration: now + 120 },
+      { grantExpiration: now + 600 },
+      { proofs: 'none' as const },
+    ]) {
+      const { raw, headers } = await f.sign(historyInput, options);
+      await expect(
+        authenticateChannelHistory(headers, raw, historyInput, f.config),
+      ).rejects.toMatchObject({ status: 401, code: 'unauthorized' });
+    }
+    // A gateway that is not on the oracle's list.
+    const { raw, headers } = await f.sign();
+    await expect(
+      authenticateChannelHistory(headers, raw, historyInput, {
+        ...f.config,
+        channelDids: ['did:web:someone-else.example.test'],
+      }),
+    ).rejects.toMatchObject({ status: 401 });
+    // No token, or not a UCAN.
+    await expect(
+      authenticateChannelHistory(new Headers(), raw, historyInput, f.config),
+    ).rejects.toMatchObject({ status: 401 });
   });
 });

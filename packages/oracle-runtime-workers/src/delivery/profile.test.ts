@@ -31,6 +31,25 @@ describe('resolveDeliveryProfile', () => {
     });
   });
 
+  it('gives a web chat turn its own profile, labelled "a web chat", with the generic limits', () => {
+    const profile = resolveDeliveryProfile({
+      ...whatsapp,
+      channel: { ...whatsapp.channel, provider: 'web' },
+    });
+    expect(profile).toMatchObject({
+      kind: 'chat',
+      surface: 'web',
+      label: 'a web chat',
+    });
+    const generic = resolveDeliveryProfile({
+      ...whatsapp,
+      channel: { ...whatsapp.channel, provider: 'sms' },
+    });
+    if (profile.kind !== 'chat' || generic.kind !== 'chat')
+      throw new Error('expected chat profiles');
+    expect(profile.limits).toEqual(generic.limits);
+  });
+
   it('keeps ordinary answers in chat by default: only document-length steps spill', () => {
     const limitsOf = (provider: string) => {
       const profile = resolveDeliveryProfile({

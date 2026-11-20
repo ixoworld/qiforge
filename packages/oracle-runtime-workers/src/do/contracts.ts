@@ -11,6 +11,8 @@ import type {
   ChannelControlInput,
   ChannelControlOutcome,
   ChannelEntryPoint,
+  ChannelHistoryInput,
+  ChannelHistoryOutcome,
   ChannelFileNotice,
   ChannelEvent,
   ChannelReplyContext,
@@ -21,6 +23,7 @@ import type {
   TopicReceiptReferences,
 } from '@ixo/ixo-transaction/topic-proposals';
 import type { ProposalCommand } from '../action-proposals/store';
+import type { OpsAnalyticsDataset } from '../channels/ops-analytics';
 import type { ActionOutcomeV1 } from '@ixo/action-protocol';
 import type {
   TopicDeliverableCommand,
@@ -246,6 +249,13 @@ export interface OracleWorkerEnv {
    * per-isolate budget and never uses the shared `RATE_LIMIT` per IP.
    */
   CREDENTIALS_RATE_LIMIT?: RateLimit;
+  /**
+   * Optional Workers Analytics Engine dataset (`analytics_engine_datasets`)
+   * for operations metrics: one data point per channel request (index
+   * `oracle-runtime`; docs/operations.md#channel-request-metrics). Absent =
+   * nothing is written.
+   */
+  OPS_ANALYTICS?: OpsAnalyticsDataset;
 
   // --- anonymous response feedback (docs/configuration.md) ------------------
   // Read by the shell only (`src/feedback/config.ts`); never part of the
@@ -932,6 +942,11 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
     input: ChannelTurnInput,
     requestHash: string,
   ): Promise<ChannelTurnOutcome | null>;
+  /** One page of a web binding's conversations, as JSON text (`POST /channels/history`). */
+  channelHistory(
+    identity: TurnIdentity,
+    input: ChannelHistoryInput,
+  ): Promise<ChannelHistoryOutcome>;
   /** Run a turn and return the final text (used by the Matrix gateway). */
   runTurn(req: TurnRequest): Promise<TurnResult>;
   /**

@@ -3,7 +3,12 @@ import { DoSqliteDatabase, type SqlRow } from '../sqlite/database';
 import { runDurabilityConfig, RunStore, type RunRecord } from '../do/run-store';
 import { RunCoordinator, type RunOutcome } from '../do/run-coordinator';
 import type { ReplyPlan } from '../delivery/types';
-import { ChannelTurns, type ChannelSessionInfo } from './turns';
+import {
+  ChannelTurns,
+  type ChannelHistoryReply,
+  type ChannelHistoryRun,
+  type ChannelSessionInfo,
+} from './turns';
 import { DecisionRuntime } from '@ixo/common/ai/decisions';
 import type { ChannelRoutingMode } from './routing';
 import {
@@ -368,14 +373,81 @@ export class ChannelTurnsTestDO extends DurableObject {
     runId: string,
     plan?: ReplyPlan,
     text = 'One answer',
+    messageId: string | null = 'message-1',
   ): Promise<void> {
     await this.ready();
     if (plan) await this.runs!.setPlan(runId, JSON.stringify(plan));
     await this.runs!.update(runId, {
       status: 'finished',
       partialText: text,
-      messageId: 'message-1',
+      messageId,
     });
+  }
+
+  /** The sessions a binding owns, as a history read sees them. */
+  async ownedSessions(
+    input: Pick<ChannelTurnInput, 'provider' | 'bindingId' | 'bindingRevision'>,
+  ): Promise<{ sessionId: string; createdAt: number }[]> {
+    return (await this.ready()).ownedSessions(input);
+  }
+
+  /** Agent message id → its run, as a history read matches them (a plain object). */
+  async historyReplies(
+    bindingId: string,
+    sessionId: string,
+    messageIds: string[],
+  ): Promise<Record<string, ChannelHistoryReply>> {
+    return Object.fromEntries(
+      await (
+        await this.ready()
+      ).historyReplies(bindingId, sessionId, messageIds),
+    );
+  }
+
+  /** Request id → its run, as a history read finds a reply without a message (a plain object). */
+  async historyRuns(
+    bindingId: string,
+    sessionId: string,
+    requestIds: string[],
+  ): Promise<Record<string, ChannelHistoryRun>> {
+    return Object.fromEntries(
+      await (await this.ready()).historyRuns(bindingId, sessionId, requestIds),
+    );
+  }
+
+  /**
+   * The binding moves to another session at `bindingRevision`, as a
+   * routed or reset session would (the session exists in the store).
+   */
+  async moveBinding(
+    bindingId: string,
+    bindingRevision: number,
+    sessionId: string,
+  ): Promise<void> {
+    await this.ready();
+    await this.putSessionInfo(sessionId, {
+      title: null,
+      createdAt: this.nowMs,
+      updatedAt: this.nowMs,
+    });
+    await this.db!.run(
+      'INSERT INTO channel_sessions(binding_id,session_id) VALUES(?,?) ON CONFLICT(binding_id) DO UPDATE SET session_id=excluded.session_id',
+      [bindingId, sessionId],
+    );
+    await this.db!.run(
+      'INSERT OR IGNORE INTO channel_session_bindings(binding_id,binding_revision,session_id,created_at) VALUES(?,?,?,?)',
+      [bindingId, bindingRevision, sessionId, this.nowMs],
+    );
+  }
+
+  /** The indexes on `turn_runs`, by name. */
+  async runIndexes(): Promise<string[]> {
+    await this.ready();
+    return (
+      await this.db!.exec<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='turn_runs' ORDER BY name",
+      )
+    ).map((row) => row.name);
   }
 
   /** Keep the choices a plan offers, as the user object does when it builds the plan. */

@@ -692,14 +692,21 @@ describe('POST /channels/turn error bodies', () => {
       code: 'unavailable',
       message: 'Channel turn is temporarily unavailable',
     });
-    expect(logged).toHaveBeenCalledTimes(1);
+    // The cause line, then the structured request line (class name only).
+    expect(logged).toHaveBeenCalledTimes(2);
     const line = String(logged.mock.calls[0]?.[0]);
     expect(line).toBe(
       `[channels] turn failed unexpectedly: OwnerCopyUnavailableError: ${cause.message.slice(0, 300)}…`,
     );
+    const request = String(logged.mock.calls[1]?.[0]);
+    expect(request).toMatch(/^\[channel-request\] /);
+    expect(request).toContain('"code":"OwnerCopyUnavailableError"');
+    expect(request).not.toContain('owner copy failed');
     // Nothing from the request: no token, no message text.
-    expect(line).not.toContain(turn.headers.authorization.slice(7, 40));
-    expect(line).not.toContain(input.message);
+    for (const text of [line, request]) {
+      expect(text).not.toContain(turn.headers.authorization.slice(7, 40));
+      expect(text).not.toContain(input.message);
+    }
   });
 });
 
@@ -1017,5 +1024,113 @@ describe('POST /channels/control authorization', () => {
     expect(e.limiterKeys).toEqual([
       `${signed.oracleDid}|channel-control|${USER_DID}`,
     ]);
+  });
+});
+
+describe('channel request metrics on POST /channels/turn', () => {
+  type Point = { indexes?: string[]; blobs?: string[]; doubles?: number[] };
+  const sink = () => {
+    const points: Point[] = [];
+    return {
+      points,
+      OPS_ANALYTICS: {
+        writeDataPoint: (point: Point) => void points.push(point),
+      },
+    };
+  };
+  const send = (turn: Awaited<ReturnType<typeof signedTurn>>, env: object) =>
+    createShell().request(
+      '/channels/turn',
+      { method: 'POST', headers: turn.headers, body: turn.raw },
+      env,
+    );
+
+  it('counts a session conflict by its code, per channel, as an admitted turn', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { points, OPS_ANALYTICS } = sink();
+    for (const provider of ['whatsapp', 'telegram', 'web']) {
+      const body = {
+        ...input,
+        provider,
+        bindingId: `chb_${provider}`,
+        sessionId: '$someone-elses-session',
+      };
+      const turn = await signedTurn(body);
+      const { env } = environment(turn, false, async () => ({
+        ok: false,
+        status: 409,
+        code: 'session_conflict',
+        message:
+          'This chat does not hold the named session; send the request again without sessionId',
+      }));
+      expect((await send(turn, { ...env, OPS_ANALYTICS })).status).toBe(409);
+    }
+    expect(points.map((p) => p.blobs!.slice(1, 9))).toEqual(
+      ['whatsapp', 'telegram', 'web'].map((channel) => [
+        'POST /channels/turn',
+        'client_error',
+        '409',
+        'session_conflict',
+        '',
+        'gateway',
+        channel,
+        'admit',
+      ]),
+    );
+    const lines = warn.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.startsWith('[channel-request] '));
+    expect(lines).toHaveLength(3);
+    const text = JSON.stringify(points) + lines.join('\n');
+    for (const secret of [
+      USER_DID,
+      input.message,
+      input.remoteMessageRef,
+      input.requestId,
+      '$someone-elses-session',
+      'chb_whatsapp',
+    ])
+      expect(text).not.toContain(secret);
+  });
+
+  it('marks a poll a warm object answered, and times the object', async () => {
+    const turn = await signedTurn();
+    const { env } = environment(turn, false, undefined, {
+      channelPoll: async () => ({
+        ok: true,
+        result: { status: 'running', requestId: input.requestId },
+      }),
+    });
+    const { points, OPS_ANALYTICS } = sink();
+    expect((await send(turn, { ...env, OPS_ANALYTICS })).status).toBe(202);
+    expect(points).toHaveLength(1);
+    expect(points[0]!.blobs!.slice(2, 9)).toEqual([
+      'ok',
+      '202',
+      '',
+      '',
+      'gateway',
+      'whatsapp',
+      'poll',
+    ]);
+    expect(points[0]!.doubles![5]).toBeGreaterThanOrEqual(0);
+  });
+
+  it('records an unexpected failure as an exception, by class name only', async () => {
+    const turn = await signedTurn();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const cause = new Error(`failed for ${USER_DID}`);
+    cause.name = 'OwnerCopyUnavailableError';
+    const { env } = environment(turn, false, async () => {
+      throw cause;
+    });
+    const { points, OPS_ANALYTICS } = sink();
+    expect((await send(turn, { ...env, OPS_ANALYTICS })).status).toBe(503);
+    expect(points[0]!.blobs!.slice(2, 5)).toEqual([
+      'exception',
+      '503',
+      'OwnerCopyUnavailableError',
+    ]);
+    expect(JSON.stringify(points)).not.toContain(USER_DID);
   });
 });

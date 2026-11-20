@@ -518,6 +518,26 @@ describe('SqliteSaver (LangGraph checkpointer) inside a Durable Object', () => {
       });
       expect(first?.message).toBeInstanceOf(HumanMessage);
       expect(first?.message.content).toBe('turn 0');
+      // Only the asked-for message types, in the same order and paging.
+      expect(
+        ids(
+          await saver.listThreadMessageRows('thread-rows', {
+            direction: 'older',
+            limit: 10,
+            messageTypes: ['human'],
+          }),
+        ),
+      ).toEqual(['row-4', 'row-2', 'row-0']);
+      expect(
+        ids(
+          await saver.listThreadMessageRows('thread-rows', {
+            direction: 'newer',
+            anchor,
+            limit: 1,
+            messageTypes: ['ai'],
+          }),
+        ),
+      ).toEqual(['row-3']);
       await db.close();
     });
   });

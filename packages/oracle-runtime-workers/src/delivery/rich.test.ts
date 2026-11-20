@@ -5,7 +5,7 @@ import {
   ToolMessage,
   type BaseMessage,
 } from '@langchain/core/messages';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ChannelChoices, CHOICE_TTL_MS } from '../channels/choices';
 import { DoSqliteDatabase } from '../sqlite/database';
 import { makeRuntimeContext } from '../core/test-fixtures';
@@ -532,6 +532,39 @@ describe('cardsPart', () => {
     expect(built.reason).toContain('card 1');
   });
 
+  it("the web chat takes carousel cards without WhatsApp's carousel text limits; WhatsApp and Telegram keep them", () => {
+    const long = card(1, {
+      body: `${s(400)}\nsecond line\nthird line\nfourth line`,
+      imageUrl: 'https://yoma.world/favicon.ico',
+    });
+    const web = cardsPart(
+      { body: 'Near you:', items: [long, card(2)] },
+      ALL,
+      'web',
+    );
+    expect(web.reason).toBeNull();
+    expect(web.part.kind).toBe('cards');
+    for (const surface of ['whatsapp', 'telegram', undefined]) {
+      const other = cardsPart(
+        { body: 'Near you:', items: [long, card(2)] },
+        ALL,
+        surface,
+      );
+      expect(other.part.kind).toBe('text');
+      expect(other.reason).toContain('card 1');
+    }
+    // Every other rule still holds on the web: an unapproved link, a body
+    // over the message limit, an image that is not https.
+    for (const bad of [
+      card(2, { link: { url: 'https://evil.example/o', label: 'view' } }),
+      card(2, { body: s(1100) }),
+      card(2, { imageUrl: 'http://img.example/2.jpg' }),
+    ])
+      expect(
+        cardsPart({ body: 'x', items: [card(1), bad] }, ALL, 'web').part.kind,
+      ).toBe('text');
+  });
+
   it('carousel card text: one line break in the body fits, two fall back', () => {
     expect(
       cardsPart({ body: 'x', items: [card(1, { body: 'a\nb' }), card(2)] }, ALL)
@@ -979,6 +1012,61 @@ describe('the rich-message tools', () => {
         ctx('c2'),
       ),
     ).toContain('only one choices message');
+  });
+
+  it('send_cards on the web chat sends a carousel of long cards that WhatsApp would send as text', async () => {
+    const cards = [1, 2].map((n) => ({
+      title: `Opportunity ${n}`,
+      text: `${'A long description of the opportunity. '.repeat(6)}\nApply by Friday.\nOnline.`,
+      imageUrl: 'https://yoma.world/favicon.ico',
+      url: `https://yoma.world/opportunities/${n}`,
+      label: 'view',
+    }));
+    const web = new Map(
+      buildRichMessageTools(ALL, 'web').map((t) => [t.tool.name, t]),
+    ).get(SEND_CARDS_TOOL)!.tool;
+    expect(
+      JSON.parse(
+        String((await call(web, { intro: 'For you:', cards })).content),
+      ),
+    ).toMatchObject({ format: 'carousel' });
+    const whatsapp = byName(ALL).get(SEND_CARDS_TOOL)!.tool;
+    expect(
+      JSON.parse(
+        String(
+          (await call(whatsapp, { intro: 'For you:', cards }, 'c2')).content,
+        ),
+      ),
+    ).toMatchObject({
+      format: 'text',
+      reason: expect.stringContaining('card 1'),
+    });
+  });
+
+  it('logs why cards went out as text with counts and the rule only: no card text, link or label', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const cards = [
+      {
+        title: 'Thandi Mokoena',
+        text: 'Call me on +27821234567',
+        imageUrl: 'https://yoma.world/favicon.ico',
+        url: 'https://yoma.world/opportunities/secret-path?u=did:ixo:ixo1person',
+        label: 'my "label" with "quotes" inside',
+      },
+    ];
+    const tool = byName(ALL).get(SEND_CARDS_TOOL)!.tool;
+    expect(
+      JSON.parse(
+        String((await call(tool, { intro: 'For you:', cards })).content),
+      ),
+    ).toMatchObject({ format: 'text' });
+    const lines = warn.mock.calls
+      .map((args) => String(args[0]))
+      .filter((line) => line.startsWith('[delivery] send_cards as text'));
+    expect(lines).toEqual([
+      '[delivery] send_cards as text (1 cards, chat): card 1: the label "…" is not one of the fixed labels',
+    ]);
+    warn.mockRestore();
   });
 
   it('send_link_button on an unapproved site goes out as text and says why', async () => {

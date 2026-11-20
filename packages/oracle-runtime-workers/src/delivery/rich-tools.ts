@@ -13,6 +13,7 @@ import { tool } from '../plugin-api/tool-helper';
 import type { PluginTool } from '../plugin-api/types';
 import {
   cardsPart,
+  carouselTextUnbounded,
   choicesPart,
   chooseFormat,
   codePointLength,
@@ -166,6 +167,8 @@ const labelsLine = (render: RenderCapability) =>
  */
 export function buildRichMessageTools(
   render: RenderCapability,
+  /** The delivery profile's surface (`web`, `whatsapp`, …): the web chat's cards have no carousel text limit. */
+  surface?: string,
 ): Array<{ tool: PluginTool; returnDirect: boolean }> {
   const tools: Array<{ tool: PluginTool; returnDirect: boolean }> = [];
   const canChoose =
@@ -251,6 +254,12 @@ export function buildRichMessageTools(
             render,
           );
           offered = true;
+          // Why the set went out as it did (counts only, never the words):
+          // buttons need 2–3 options, titles of at most 20 and no description.
+          // eslint-disable-next-line no-console -- console IS the logger on Workers (Logs/observability).
+          console.log(
+            `[delivery] offer_choices as ${built.format}: ${args.options.length} options, longest title ${Math.max(...args.options.map((o) => codePointLength(o.title.trim())))}, descriptions ${args.options.some((o) => o.description?.trim()) ? 'yes' : 'no'}`,
+          );
           return result(
             OFFER_CHOICES_TOOL,
             ctx.toolCallId,
@@ -380,7 +389,9 @@ export function buildRichMessageTools(
               .trim()
               .max(RICH_LIMITS.body)
               .describe(
-                'The card text. With 2 or more cards, title and text together must stay within 157 characters, with at most one line break.',
+                carouselTextUnbounded(surface)
+                  ? 'The card text.'
+                  : 'The card text. With 2 or more cards, title and text together must stay within 157 characters, with at most one line break.',
               ),
             imageUrl: z
               .string()
@@ -427,7 +438,17 @@ export function buildRichMessageTools(
               })),
             },
             render,
+            surface,
           );
+          if (built.reason)
+            // The rule that sent the cards as text: never their text or links.
+            // A reason quotes only the model's link label; everything from
+            // the first quote to the last is cut, so a label holding a quote
+            // leaves nothing behind either.
+            // eslint-disable-next-line no-console -- console IS the logger on Workers (Logs/observability).
+            console.warn(
+              `[delivery] send_cards as text (${args.cards.length} cards, ${surface ?? 'chat'}): ${built.reason.replace(/"[\s\S]*"/, '"…"')}`,
+            );
           const format = built.reason
             ? 'text'
             : args.cards.length === 1
@@ -453,7 +474,7 @@ export function buildRichMessageTools(
           name: SEND_CARDS_TOOL,
           description: [
             'Show items to browse as image cards, each with a picture, a short text and one link button: one card alone, or a swipeable carousel of 2 to 10. Where cards are not available, they go out as one message listing each item with its picture link and link.',
-            `Every card has a public https image link (anyone must be able to open it; private or signed-in images do not show), a title, a short text and a link with a label from the fixed set: ${labelsLine(render)}. With 2 or more cards, title and text together stay within 157 characters with at most one line break in the text. If any card does not fit, or its link is not on an approved site, all of them go out as text.`,
+            `Every card has a public https image link (anyone must be able to open it; private or signed-in images do not show), a title, a short text and a link with a label from the fixed set: ${labelsLine(render)}.${carouselTextUnbounded(surface) ? '' : ' With 2 or more cards, title and text together stay within 157 characters with at most one line break in the text.'} If any card does not fit, or its link is not on an approved site, all of them go out as text.`,
             'Use it for a few concrete things the person may want to look at or open (opportunities, products, places), not for ordinary answers. It ends your reply: write anything you need to say first, in the same step; the intro is a short line shown before the cards. Do not repeat the items in your text.',
           ].join('\n\n'),
           schema,

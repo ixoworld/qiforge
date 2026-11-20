@@ -612,6 +612,11 @@ export class SqliteSaver extends BaseCheckpointSaver {
       /** Include the anchor row itself. */
       inclusive?: boolean;
       limit: number;
+      /**
+       * Only rows of these message types (`human`, `ai`, `tool`, …): rows of
+       * other types are skipped by SQLite and never decoded.
+       */
+      messageTypes?: readonly string[];
     },
   ): Promise<ThreadMessageRow[]> {
     await this.setup();
@@ -623,18 +628,22 @@ export class SqliteSaver extends BaseCheckpointSaver {
     const anchored = opts.anchor
       ? ` AND (created_at ${cmp} ? OR (created_at = ? AND rowid ${rowCmp} ?))`
       : '';
+    const types = opts.messageTypes?.length
+      ? ` AND message_type IN (${opts.messageTypes.map(() => '?').join(', ')})`
+      : '';
     const rows = await this.db.exec<{
       message: Uint8Array | string;
       message_id: string;
       created_at: string;
       rowid: number;
     }>(
-      `SELECT message, message_id, created_at, rowid FROM messages WHERE thread_id = ?${anchored} ORDER BY created_at ${order}, rowid ${order} LIMIT ?`,
+      `SELECT message, message_id, created_at, rowid FROM messages WHERE thread_id = ?${anchored}${types} ORDER BY created_at ${order}, rowid ${order} LIMIT ?`,
       [
         threadId,
         ...(opts.anchor
           ? [opts.anchor.createdAt, opts.anchor.createdAt, opts.anchor.rowid]
           : []),
+        ...(opts.messageTypes ?? []),
         opts.limit,
       ],
     );

@@ -47,6 +47,37 @@ describe('CredentialsPlugin', () => {
     ]);
   });
 
+  it('tells the model the tools work in WhatsApp, Telegram and the web chat, not WhatsApp alone', () => {
+    // The manifest, guide and tool descriptions are built once per isolate,
+    // with no turn and so no channel provider: they name both channels the
+    // gate accepts, so a Telegram turn is not told to refuse.
+    const plugin = new CredentialsPlugin();
+    const descriptions = plugin
+      .getTools(makeBuildCtx({ config: ON }))
+      .map((t) => t.description);
+    expect(descriptions).toHaveLength(7);
+    for (const description of descriptions)
+      expect(
+        description.endsWith(' WhatsApp, Telegram or web chat only.'),
+      ).toBe(true);
+    expect(plugin.manifest.summary).toContain(
+      'WhatsApp, Telegram or web chat only for now.',
+    );
+    expect(plugin.manifest.whenNotToUse?.[0]).toBe(
+      "Outside our WhatsApp, Telegram or web chat: every tool refuses there; tell the person it isn't available here yet.",
+    );
+    expect(plugin.operatingGuide).toContain(
+      '- These tools work only in our WhatsApp, Telegram or web chat. Anywhere else, say plainly that it is not available here yet.',
+    );
+    const modelText = [
+      ...descriptions,
+      plugin.manifest.summary,
+      ...(plugin.manifest.whenNotToUse ?? []),
+      plugin.operatingGuide ?? '',
+    ].join('\n');
+    expect(modelText).not.toMatch(/WhatsApp (chat )?only|our WhatsApp chat/);
+  });
+
   it('mounts the response endpoint outside UCAN auth, POST only', () => {
     const plugin = new CredentialsPlugin();
     expect(plugin.getRoutes().map((r) => [r.method, r.path])).toEqual([

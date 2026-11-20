@@ -14,6 +14,8 @@ export {
   PERMISSION_EVENT_TEXT,
   IDENTITY_CHECK_ACTION,
   ACTION_ID_PATTERN,
+  CARD_CHANNEL_PROVIDERS,
+  channelBinding,
   WHATSAPP_PROVIDER,
   whatsAppBinding,
   type CredentialsToolsDeps,

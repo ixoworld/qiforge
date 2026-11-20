@@ -4,7 +4,7 @@ The `credentials` plugin (`src/plugins/credentials/`) lets an oracle check a
 person's verifiable credentials and ask their permission, in the IXO wallet,
 before it does so. It is generic: any credential type, any issuers, any
 fields, plus the actions in the Auth Hub's approved list (today
-`self.identity-check`). It works in our WhatsApp chat only for now.
+`self.identity-check`). It works in our WhatsApp, Telegram or web chat only for now.
 
 It is in `BUNDLED_WORKERS_PLUGINS` and stays off unless
 `CREDENTIALS_ENABLED=true` and the oracle account's Hub key are set
@@ -620,11 +620,12 @@ a missing setting as `[credentials] not_available (<reason>)`: `disabled`,
 (`ResolverUnavailable code=resolver_unavailable source=blocksync`). Only
 class names and codes, never a message, DID, URL or token.
 
-## WhatsApp only
+## Our WhatsApp, Telegram and web chats only
 
-Every tool first calls `whatsAppBinding(ctx)`: the turn must come from IXO
-Channels (`ctx.session.client === 'channel'`) with
-`ctx.session.channel.provider === 'whatsapp'`. Both are set by the runtime
+Every tool first calls `channelBinding(ctx)` (also exported under its
+earlier name `whatsAppBinding`): the turn must come from IXO Channels
+(`ctx.session.client === 'channel'`) with `ctx.session.channel.provider`
+one of `CARD_CHANNEL_PROVIDERS` (`whatsapp`, `telegram`, `web`). Both are set by the runtime
 from the authenticated channel turn, never by the model. Anywhere else the
 tool answers `whatsapp_only` and calls nothing. The Hub only issues cards to
 channel bindings anyway: the card request carries the turn's `bindingId` and

@@ -352,6 +352,8 @@ export interface TranscriptRowSource {
       anchor?: ThreadMessageAnchor | null;
       inclusive?: boolean;
       limit: number;
+      /** Only rows of these message types; the others are never decoded. */
+      messageTypes?: readonly string[];
     },
   ): Promise<ThreadMessageRow[]>;
 }
@@ -477,6 +479,263 @@ async function pageOlder(
     nextCursor: rows.length ? rows[rows.length - 1]!.messageId : null,
     hasOlder,
     hasNewer: before !== undefined,
+  };
+}
+
+// ── Paging across sessions (a channel binding's conversations) ──────────────
+
+/** A message of one session, as a cross-session cursor names it. */
+export interface SessionMessageCursor {
+  sessionId: string;
+  messageId: string;
+}
+
+/** The rows one session contributes to a cross-session page, oldest first. */
+export interface SessionRowsSegment {
+  sessionId: string;
+  rows: ThreadMessageRow[];
+  /** The segment starts at the session's first row (a divider belongs before it). */
+  fromStart: boolean;
+}
+
+export interface SessionsTranscriptPage {
+  /** Oldest session first; a session with no rows in the page is absent. */
+  segments: SessionRowsSegment[];
+  /** Continue older from here; null once the oldest session's first row is in the page. */
+  prev: SessionMessageCursor | null;
+  /** Continue newer from here; null when no session has rows. */
+  next: SessionMessageCursor | null;
+  hasOlder: boolean;
+  hasNewer: boolean;
+}
+
+/**
+ * One page of several sessions read as one conversation (oldest session
+ * first in `sessionIds`), aligned to turns exactly as `pageThreadTranscript`
+ * is within one session: without a cursor the newest `limit` turns; `before`
+ * the `limit` turns older than a message; `after` what follows a message,
+ * the turn the cursor split re-sent from its start. Every read is a bounded
+ * range read of one session's person and agent rows (`TRANSCRIPT_ROW_BATCH`
+ * at a time; tool and system rows are never read), and a page stops reading
+ * once it holds its turns. A cursor whose session is not
+ * listed, or whose message the session does not hold, throws
+ * `TranscriptCursorError`.
+ */
+export async function pageSessionsTranscript(
+  source: TranscriptRowSource,
+  sessionIds: readonly string[],
+  options: {
+    limit: number;
+    before?: SessionMessageCursor;
+    after?: SessionMessageCursor;
+  },
+): Promise<SessionsTranscriptPage> {
+  const limit = Math.max(1, Math.min(options.limit, TRANSCRIPT_PAGE_MAX));
+  // Only the person's and the agent's rows: tool results and system rows
+  // (often the largest) are skipped by SQLite and never decoded.
+  const chatRows: TranscriptRowSource = {
+    findThreadMessageAnchor: (threadId, messageId) =>
+      source.findThreadMessageAnchor(threadId, messageId),
+    listThreadMessageRows: (threadId, opts) =>
+      source.listThreadMessageRows(threadId, {
+        ...opts,
+        messageTypes: SESSIONS_ROW_TYPES,
+      }),
+  };
+  if (options.after !== undefined)
+    return sessionsNewer(chatRows, sessionIds, options.after, limit);
+  return sessionsOlder(chatRows, sessionIds, options.before, limit);
+}
+
+/** The message types a cross-session page reads. */
+const SESSIONS_ROW_TYPES = ['human', 'ai'] as const;
+
+async function cursorAnchor(
+  source: TranscriptRowSource,
+  sessionIds: readonly string[],
+  cursor: SessionMessageCursor,
+): Promise<{ index: number; anchor: ThreadMessageAnchor }> {
+  const index = sessionIds.indexOf(cursor.sessionId);
+  const anchor =
+    index < 0
+      ? null
+      : await source.findThreadMessageAnchor(
+          cursor.sessionId,
+          cursor.messageId,
+        );
+  if (!anchor) throw new TranscriptCursorError(cursor.messageId);
+  return { index, anchor };
+}
+
+/** Whether a session holds any row older than `anchor` (any row without one). */
+async function hasRowsBefore(
+  source: TranscriptRowSource,
+  sessionId: string,
+  anchor: ThreadMessageAnchor | null,
+): Promise<boolean> {
+  return (
+    (
+      await source.listThreadMessageRows(sessionId, {
+        direction: 'older',
+        anchor,
+        limit: 1,
+      })
+    ).length > 0
+  );
+}
+
+async function sessionsOlder(
+  source: TranscriptRowSource,
+  sessionIds: readonly string[],
+  before: SessionMessageCursor | undefined,
+  limit: number,
+): Promise<SessionsTranscriptPage> {
+  let start = sessionIds.length - 1;
+  let startAnchor: ThreadMessageAnchor | null = null;
+  if (before !== undefined) {
+    const found = await cursorAnchor(source, sessionIds, before);
+    start = found.index;
+    startAnchor = found.anchor;
+  }
+  const segments: SessionRowsSegment[] = []; // newest session first
+  let turns = 0;
+  let full = false;
+  let hasOlder = false;
+  for (let s = start; s >= 0 && !full; s -= 1) {
+    const sessionId = sessionIds[s]!;
+    const collected: ThreadMessageRow[] = []; // newest first
+    let cursor = s === start ? startAnchor : null;
+    let fromStart = false;
+    for (;;) {
+      const batch = await source.listThreadMessageRows(sessionId, {
+        direction: 'older',
+        anchor: cursor,
+        limit: TRANSCRIPT_ROW_BATCH,
+      });
+      for (let i = 0; i < batch.length; i += 1) {
+        const row = batch[i]!;
+        collected.push(row);
+        if (!startsTurn(row)) continue;
+        turns += 1;
+        if (turns < limit) continue;
+        full = true;
+        const moreHere =
+          i + 1 < batch.length ||
+          (await hasRowsBefore(source, sessionId, row.anchor));
+        fromStart = !moreHere;
+        hasOlder = moreHere;
+        for (let t = s - 1; t >= 0 && !hasOlder; t -= 1)
+          hasOlder = await hasRowsBefore(source, sessionIds[t]!, null);
+        break;
+      }
+      if (full) break;
+      if (batch.length < TRANSCRIPT_ROW_BATCH) {
+        fromStart = true; // the session's first row is in the page
+        break;
+      }
+      cursor = batch[batch.length - 1]!.anchor;
+    }
+    if (collected.length)
+      segments.push({ sessionId, rows: collected.reverse(), fromStart });
+  }
+  segments.reverse();
+  const oldest = segments[0];
+  const newest = segments[segments.length - 1];
+  const firstRow = oldest?.rows[0];
+  const lastRow = newest?.rows[newest.rows.length - 1];
+  return {
+    segments,
+    prev:
+      hasOlder && oldest && firstRow
+        ? { sessionId: oldest.sessionId, messageId: firstRow.messageId }
+        : null,
+    next:
+      newest && lastRow
+        ? { sessionId: newest.sessionId, messageId: lastRow.messageId }
+        : null,
+    hasOlder,
+    hasNewer: before !== undefined,
+  };
+}
+
+async function sessionsNewer(
+  source: TranscriptRowSource,
+  sessionIds: readonly string[],
+  after: SessionMessageCursor,
+  limit: number,
+): Promise<SessionsTranscriptPage> {
+  const { index, anchor } = await cursorAnchor(source, sessionIds, after);
+  const segments: SessionRowsSegment[] = []; // oldest first
+  let turns = 0;
+  let hasNewer = false;
+  for (let s = index; s < sessionIds.length && !hasNewer; s += 1) {
+    const sessionId = sessionIds[s]!;
+    const fresh: ThreadMessageRow[] = [];
+    let cursor: ThreadMessageAnchor | null = s === index ? anchor : null;
+    outer: for (;;) {
+      const batch = await source.listThreadMessageRows(sessionId, {
+        direction: 'newer',
+        anchor: cursor,
+        limit: TRANSCRIPT_ROW_BATCH,
+      });
+      for (const row of batch) {
+        if (startsTurn(row)) {
+          turns += 1;
+          if (turns > limit) {
+            hasNewer = true;
+            break outer;
+          }
+        }
+        fresh.push(row);
+      }
+      if (batch.length < TRANSCRIPT_ROW_BATCH) break;
+      cursor = batch[batch.length - 1]!.anchor;
+    }
+    if (fresh.length)
+      segments.push({ sessionId, rows: fresh, fromStart: s !== index });
+  }
+  if (segments.length === 0)
+    return {
+      segments: [],
+      prev: null,
+      next: after,
+      hasOlder: false,
+      hasNewer: false,
+    };
+  // The cursor split a turn of its own session: re-send that turn from its
+  // start, as `pageThreadTranscript` does.
+  const first = segments[0]!;
+  if (first.sessionId === after.sessionId && !startsTurn(first.rows[0]!)) {
+    const head: ThreadMessageRow[] = []; // newest first, the cursor row included
+    let back: ThreadMessageAnchor | null = anchor;
+    let inclusive = true;
+    outer2: for (;;) {
+      const batch = await source.listThreadMessageRows(after.sessionId, {
+        direction: 'older',
+        anchor: back,
+        inclusive,
+        limit: TRANSCRIPT_ROW_BATCH,
+      });
+      for (const row of batch) {
+        head.push(row);
+        if (startsTurn(row)) break outer2;
+      }
+      if (batch.length < TRANSCRIPT_ROW_BATCH) break;
+      back = batch[batch.length - 1]!.anchor;
+      inclusive = false;
+    }
+    first.rows = [...head.reverse(), ...first.rows];
+  }
+  const newest = segments[segments.length - 1]!;
+  return {
+    segments,
+    prev: null,
+    next: {
+      sessionId: newest.sessionId,
+      messageId: newest.rows[newest.rows.length - 1]!.messageId,
+    },
+    hasOlder: false,
+    hasNewer,
   };
 }
 

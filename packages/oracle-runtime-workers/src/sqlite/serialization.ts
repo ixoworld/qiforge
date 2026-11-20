@@ -22,6 +22,7 @@ import {
   CHANNEL_PROVIDER_SENT_AT_KWARG,
   CHANNEL_DELIVERY_NOTICE_KWARG,
   CHANNEL_REPLY_NOTE_KWARG,
+  CHANNEL_REQUEST_ID_KWARG,
 } from '../channels/replies';
 import {
   CAPPED_META_KEY,
@@ -282,6 +283,8 @@ export interface CleanAdditionalKwargs {
   channel_choice_note?: string;
   /** The provider's send time of a channel message, epoch ms (see channels/replies.ts). */
   channel_provider_sent_at?: number;
+  /** The request id a channel turn was sent with (see channels/replies.ts). */
+  channel_request_id?: string;
   /** The parent call a forwarded sub-agent message came from (core/subagent-as-tool.ts). */
   forwardedFrom?: string;
   /** The result-cap marker of a capped tool result (core/middlewares/result-cap.ts). */
@@ -421,6 +424,15 @@ export function cleanAdditionalKwargs(
     providerSentAt >= 0
   )
     cleaned[CHANNEL_PROVIDER_SENT_AT_KWARG] = providerSentAt;
+  // Kept so the web chat's history tells the person's messages from the
+  // gateway's own inputs and finds the run that answered them.
+  const requestId = additionalKwargs[CHANNEL_REQUEST_ID_KWARG];
+  if (
+    typeof requestId === 'string' &&
+    requestId.length > 0 &&
+    requestId.length <= 180
+  )
+    cleaned[CHANNEL_REQUEST_ID_KWARG] = requestId;
   // Kept so the parent model keeps leaving a sub-agent's forwarded calls
   // out of its requests (`withoutForwarded`).
   const forwardedFrom = additionalKwargs[FORWARDED_FROM_KEY];

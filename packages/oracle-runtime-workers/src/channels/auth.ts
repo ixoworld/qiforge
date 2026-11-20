@@ -16,9 +16,11 @@ import {
 } from './key-lookup';
 import {
   ChannelError,
+  type ChannelHistoryInput,
   type ChannelTurnInput,
   type ChannelControlInput,
   channelRequestHash,
+  historyQueryHash,
 } from './contract';
 
 export const ChannelInvoke = defineCapability({
@@ -37,6 +39,40 @@ export const ChannelInvoke = defineCapability({
       ? { ok: {} }
       : {
           error: new Error('Channel caveats cannot change across a delegation'),
+        },
+});
+
+/**
+ * A read of a web binding's conversation history (`POST /channels/history`).
+ * The grant is minted by the Auth Hub only against a fresh signature of one
+ * of the binding's browser devices (`deviceId`, required here), and names
+ * the exact query it allows (`queryHash`, the SHA-256 of
+ * `canonicalHistoryQuery`). It lives 60 s.
+ */
+export const ChannelHistory = defineCapability({
+  can: 'ixo:channel/history',
+  protocol: 'ixo:',
+  supportWildcards: false,
+  nb: {
+    provider: Schema.string(),
+    bindingRevision: Schema.integer(),
+    oracleDid: Schema.string(),
+    queryHash: Schema.string(),
+    deviceId: Schema.string().optional(),
+  },
+  derives: (claimed, delegated) =>
+    claimed.nb?.provider === delegated.nb?.provider &&
+    claimed.nb?.bindingRevision === delegated.nb?.bindingRevision &&
+    claimed.nb?.oracleDid === delegated.nb?.oracleDid &&
+    claimed.nb?.queryHash === delegated.nb?.queryHash
+      ? // `deviceId` is compared by `authenticateChannelHistory` itself, so a
+        // grant and an invocation naming different devices answer
+        // `403 scope_mismatch` rather than a bare 401.
+        { ok: {} }
+      : {
+          error: new Error(
+            'Channel history caveats cannot change across a delegation',
+          ),
         },
 });
 
@@ -80,6 +116,176 @@ export async function authenticateChannel(
   input: ChannelTurnInput | ChannelControlInput,
   config: ChannelAuthConfig,
 ): Promise<TurnIdentity> {
+  const verified = await verifyChannelInvocation(
+    headers,
+    raw,
+    input,
+    config,
+    'invoke',
+  );
+  const nb = verified.nb;
+  if (
+    nb?.provider !== input.provider ||
+    nb.bindingRevision !== input.bindingRevision ||
+    nb.oracleDid !== config.oracleDid
+  )
+    throw new ChannelError(
+      403,
+      'Channel scope does not match this request',
+      'scope_mismatch',
+    );
+  await assertFactsMatch(verified.facts, input.requestId, raw);
+  return {
+    userDid: verified.userDid,
+    channel: {
+      callerDid: verified.channelDid,
+      provider: input.provider,
+      bindingId: input.bindingId,
+      bindingRevision: input.bindingRevision,
+    },
+  };
+}
+
+/**
+ * The provider whose bindings may read their history (`POST
+ * /channels/history`): only the web chat, which keeps no transcript of its
+ * own. WhatsApp and Telegram keep theirs in the person's app.
+ */
+export const CHANNEL_HISTORY_PROVIDER = 'web';
+
+/** A browser device id as the Auth Hub names it in a history grant (`dev_` + 43 base64url). */
+const CHANNEL_DEVICE_ID = /^dev_[A-Za-z0-9_-]{43}$/;
+
+/**
+ * The longest a history grant may live, in seconds: the Auth Hub mints it
+ * for 60 s; the rest allows for clock skew between the Hub and this oracle.
+ */
+export const CHANNEL_HISTORY_GRANT_MAX_SECONDS = 90;
+
+/**
+ * Verify a history read exactly like a channel turn (a direct grant from
+ * the person to a listed channel service, invoked by that service within
+ * 60 s, the facts naming this exact body), with its own capability
+ * `ixo:channel/history` (an `ixo:channel/invoke` grant never reads history,
+ * and a history grant never runs a turn), for a web binding only, and for
+ * the exact query the person's device signed (`nb.queryHash`).
+ */
+export async function authenticateChannelHistory(
+  headers: Headers,
+  raw: string,
+  input: ChannelHistoryInput,
+  config: ChannelAuthConfig,
+): Promise<TurnIdentity> {
+  const verified = await verifyChannelInvocation(
+    headers,
+    raw,
+    input,
+    config,
+    'history',
+  );
+  const nb = verified.nb;
+  if (
+    input.provider !== CHANNEL_HISTORY_PROVIDER ||
+    nb?.provider !== CHANNEL_HISTORY_PROVIDER
+  )
+    throw new ChannelError(
+      403,
+      'Channel history is only read for the web chat',
+      'provider_not_supported',
+    );
+  if (nb.bindingRevision !== input.bindingRevision)
+    throw new ChannelError(
+      403,
+      'The history grant is for another binding revision',
+      'revision_mismatch',
+    );
+  if (
+    nb.oracleDid !== config.oracleDid ||
+    typeof nb.deviceId !== 'string' ||
+    !CHANNEL_DEVICE_ID.test(nb.deviceId) ||
+    verified.grantNb?.deviceId !== nb.deviceId ||
+    typeof nb.queryHash !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(nb.queryHash) ||
+    nb.queryHash !== (await historyQueryHash(input.query))
+  )
+    throw new ChannelError(
+      403,
+      'Channel scope does not match this request',
+      'scope_mismatch',
+    );
+  await assertFactsMatch(verified.facts, input.requestId, raw);
+  return {
+    userDid: verified.userDid,
+    channel: {
+      callerDid: verified.channelDid,
+      provider: input.provider,
+      bindingId: input.bindingId,
+      bindingRevision: input.bindingRevision,
+    },
+  };
+}
+
+async function assertFactsMatch(
+  facts: readonly Record<string, unknown>[] | undefined,
+  requestId: string,
+  raw: string,
+): Promise<void> {
+  const hash = await channelRequestHash(raw);
+  if (
+    facts?.length !== 1 ||
+    facts[0]?.requestId !== requestId ||
+    facts[0]?.requestHash !== hash
+  )
+    throw new ChannelError(
+      403,
+      'Invocation does not authorize this request body',
+      'scope_mismatch',
+    );
+}
+
+/**
+ * The checks every channel invocation passes, whatever it asks for: a
+ * user-rooted chain of exactly two (the person, then one listed channel
+ * service), a direct grant with ONE capability `capability.can` on this
+ * binding that lives at most 300 s, an invocation that expires within 60 s.
+ * The caller checks the capability's caveats and the facts.
+ */
+/** Whether a token that failed validation, or a proof in it, has expired. */
+async function tokenExpired(token: string): Promise<boolean> {
+  try {
+    const invocation = await parseDelegation(token);
+    const now = Math.floor(Date.now() / 1000);
+    const expired = (expiration: number | undefined) =>
+      typeof expiration === 'number' &&
+      Number.isFinite(expiration) &&
+      expiration < now;
+    return (
+      expired(invocation.expiration) ||
+      invocation.proofs.some(
+        (proof) => 'expiration' in proof && expired(proof.expiration),
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function verifyChannelInvocation(
+  headers: Headers,
+  raw: string,
+  input: { bindingId: string },
+  config: ChannelAuthConfig,
+  kind: 'invoke' | 'history',
+): Promise<{
+  userDid: string;
+  channelDid: string;
+  nb: Record<string, unknown> | undefined;
+  /** The caveats of the person's grant itself (the invocation's are `nb`). */
+  grantNb: Record<string, unknown> | undefined;
+  facts: Record<string, unknown>[] | undefined;
+}> {
+  const capability = kind === 'invoke' ? ChannelInvoke : ChannelHistory;
+  const can = capability.can;
   const authorization = headers.get('authorization');
   const token = authorization?.match(/^Bearer ([A-Za-z0-9+/=_-]+)$/i)?.[1];
   if (
@@ -109,7 +315,7 @@ export async function authenticateChannel(
   });
   const result = await validator.validate(
     token,
-    ChannelInvoke,
+    capability,
     `ixo:channel:${input.bindingId}`,
   );
   const chain = result.proofChain;
@@ -123,6 +329,16 @@ export async function authenticateChannel(
       logChannelAuthRefusal(refusal ?? 'verification_failed', {
         code: result.error?.code,
       });
+    // A history read tells an expired grant or invocation apart (the
+    // gateway asks for a fresh grant); a turn keeps its one code. The
+    // validator reports an expired chain as unauthorized, so the token's
+    // own expiries are read (still 401: nothing is accepted).
+    if (kind === 'history' && (await tokenExpired(token)))
+      throw new ChannelError(
+        401,
+        'The channel history grant has expired',
+        'expired',
+      );
     throw new ChannelError(
       401,
       'Invalid user-rooted channel invocation',
@@ -157,16 +373,35 @@ export async function authenticateChannel(
     proof.issuer.did() !== userDid ||
     proof.audience.did() !== channelDid ||
     proof.capabilities.length !== 1 ||
-    proof.capabilities[0]?.can !== 'ixo:channel/invoke' ||
+    proof.capabilities[0]?.can !== can ||
     proof.capabilities[0]?.with !== `ixo:channel:${input.bindingId}` ||
     !Number.isFinite(proof.expiration) ||
     !proof.expiration ||
-    proof.expiration > now + 300
+    proof.expiration >
+      now + (kind === 'history' ? CHANNEL_HISTORY_GRANT_MAX_SECONDS : 300) ||
+    // A history grant that names when it starts was issued for at most
+    // `CHANNEL_HISTORY_GRANT_MAX_SECONDS` (the Auth Hub's grants name no
+    // start: their lifetime is then bounded by the time left above).
+    (kind === 'history' &&
+      typeof proof.notBefore === 'number' &&
+      proof.expiration - proof.notBefore > CHANNEL_HISTORY_GRANT_MAX_SECONDS)
   )
     throw new ChannelError(
       401,
       'A bounded, direct user channel grant is required',
       'unauthorized',
+    );
+  if (
+    kind === 'history' &&
+    ((result.expiration !== undefined && result.expiration <= now) ||
+      (Number.isFinite(invocation.expiration) &&
+        invocation.expiration > 0 &&
+        invocation.expiration <= now))
+  )
+    throw new ChannelError(
+      401,
+      'The channel history grant has expired',
+      'expired',
     );
   if (
     !result.expiration ||
@@ -181,38 +416,25 @@ export async function authenticateChannel(
       'Channel invocations must expire within 60 seconds',
       'unauthorized',
     );
-  const nb = result.capability?.nb;
   if (
-    result.capability?.can !== 'ixo:channel/invoke' ||
-    result.capability.with !== `ixo:channel:${input.bindingId}` ||
-    nb?.provider !== input.provider ||
-    nb.bindingRevision !== input.bindingRevision ||
-    nb.oracleDid !== config.oracleDid
+    result.capability?.can !== can ||
+    result.capability.with !== `ixo:channel:${input.bindingId}`
   )
     throw new ChannelError(
       403,
       'Channel scope does not match this request',
       'scope_mismatch',
     );
-  const hash = await channelRequestHash(raw);
-  if (
-    result.facts?.length !== 1 ||
-    result.facts[0]?.requestId !== input.requestId ||
-    result.facts[0]?.requestHash !== hash
-  )
-    throw new ChannelError(
-      403,
-      'Invocation does not authorize this request body',
-      'scope_mismatch',
-    );
+  const granted: unknown = proof.capabilities[0]?.nb;
   return {
     userDid,
-    channel: {
-      callerDid: channelDid,
-      provider: input.provider,
-      bindingId: input.bindingId,
-      bindingRevision: input.bindingRevision,
-    },
+    channelDid,
+    nb: result.capability.nb,
+    grantNb:
+      typeof granted === 'object' && granted !== null
+        ? { ...granted }
+        : undefined,
+    facts: result.facts,
   };
 }
 

@@ -2489,3 +2489,291 @@ describe('channel topics, rename and titles', () => {
     });
   });
 });
+
+describe('web chat sessions across binding revisions, and history replies', () => {
+  const web = (
+    bindingRevision: number,
+    requestId: string,
+  ): ChannelTurnInput => ({
+    ...message,
+    provider: 'web',
+    bindingId: 'chb_web',
+    bindingRevision,
+    requestId,
+  });
+  const control = (
+    provider: string,
+    bindingRevision: number,
+    requestId: string,
+    command: ChannelControlInput['command'],
+  ): ChannelControlInput => ({
+    provider,
+    bindingId: 'chb_web',
+    bindingRevision,
+    requestId,
+    cancelRequestIds: [],
+    command,
+  });
+  const COMMANDS: ChannelControlInput['command'][] = [
+    { kind: 'stop' },
+    { kind: 'status' },
+    { kind: 'new' },
+    { kind: 'resume', sessionId: '$channel-session-x' },
+    { kind: 'topics' },
+    { kind: 'rename', title: 'Mine' },
+  ];
+
+  /**
+   * Revision 1: a first session, then the binding moves to a second one.
+   * Then the binding is re-activated at revision 2 and its next turn arrives.
+   */
+  async function twoRevisions(
+    name: string,
+    provider: 'web' | 'whatsapp' | 'telegram',
+  ): Promise<{
+    stub: DurableObjectStub<ChannelTurnsTestDO>;
+    first: string;
+    second: string;
+  }> {
+    const stub = env.CHANNEL_TURNS_TEST.getByName(name);
+    const turn = (bindingRevision: number, requestId: string) => ({
+      ...web(bindingRevision, requestId),
+      provider,
+    });
+    const one = await stub.submit(turn(1, 'r:1'));
+    if (!one.ok) throw new Error('Turn rejected');
+    await stub.advance(60_000);
+    const second = '$channel-reset-second';
+    await stub.moveBinding('chb_web', 1, second);
+    const two = await stub.submit(turn(1, 'r:2'));
+    if (!two.ok) throw new Error('Turn rejected');
+    expect(two.result.sessionId).toBe(second);
+    // Disconnected, then signed in again: the same binding at revision 2.
+    const three = await stub.submit(turn(2, 'r:3'));
+    if (!three.ok) throw new Error('Turn rejected');
+    // The turn path continues the bound session on every provider.
+    expect(three.result.sessionId).toBe(second);
+    return { stub, first: one.result.sessionId, second };
+  }
+
+  it('keeps every session of a web binding owned across its revisions for history, oldest first', async () => {
+    const { stub, first, second } = await twoRevisions('web-owned', 'web');
+    expect(first).not.toBe(second);
+    expect(
+      (await stub.ownedSessions(web(2, 'x'))).map((s) => s.sessionId),
+    ).toEqual([first, second]);
+  });
+
+  it('refuses every session control for a web binding, before any work; WhatsApp and Telegram keep them', async () => {
+    const { stub, first } = await twoRevisions('web-controls', 'web');
+    const before = await stub.hostCalls();
+    for (const [i, command] of COMMANDS.entries())
+      expect(
+        await stub.control(control('web', 2, `c:${i}`, command)),
+      ).toMatchObject({
+        ok: false,
+        status: 403,
+        code: 'control_not_supported',
+      });
+    // Nothing was written or asked for.
+    expect(await stub.hostCalls()).toEqual(before);
+    expect(await stub.controlReceipts('chb_web')).toEqual([]);
+    expect(await stub.boundSession('chb_web')).not.toBe(first);
+    for (const provider of ['whatsapp', 'telegram'] as const) {
+      const other = await twoRevisions(`controls-${provider}`, provider);
+      expect(
+        await other.stub.control(
+          control(provider, 2, 'c:topics', { kind: 'topics' }),
+        ),
+      ).toMatchObject({ ok: true, result: { command: 'topics' } });
+      expect(
+        await other.stub.control(
+          control(provider, 2, 'c:status', { kind: 'status' }),
+        ),
+      ).toMatchObject({ ok: true, result: { sessionId: other.second } });
+      // An earlier revision's session stays out of reach, as before.
+      expect(
+        await other.stub.control(
+          control(provider, 2, 'c:resume', {
+            kind: 'resume',
+            sessionId: other.first,
+          }),
+        ),
+      ).toMatchObject({ ok: false, status: 404, code: 'session_not_found' });
+      expect(
+        await other.stub.control(
+          control(provider, 2, 'c:new', { kind: 'new' }),
+        ),
+      ).toMatchObject({ ok: true, result: { command: 'new' } });
+    }
+  });
+
+  it('keeps whatsapp and telegram sessions scoped to the current revision', async () => {
+    for (const provider of ['whatsapp', 'telegram'] as const) {
+      const { stub, first, second } = await twoRevisions(
+        `scoped-${provider}`,
+        provider,
+      );
+      expect(
+        (
+          await stub.ownedSessions({
+            provider,
+            bindingId: 'chb_web',
+            bindingRevision: 2,
+          })
+        ).map((s) => s.sessionId),
+      ).toEqual([second]);
+      expect(
+        (
+          await stub.ownedSessions({
+            provider,
+            bindingId: 'chb_web',
+            bindingRevision: 1,
+          })
+        ).map((s) => s.sessionId),
+      ).toEqual([first, second]);
+    }
+  });
+
+  it('a web turn may name only a session its binding holds', async () => {
+    const { stub, first } = await twoRevisions('web-named', 'web');
+    // A Portal session the binding never held: refused, nothing admitted.
+    await stub.setSessionInfo('$portal-only', { title: 'Portal chat' });
+    expect(
+      await stub.submit({ ...web(2, 'r:portal'), sessionId: '$portal-only' }),
+    ).toMatchObject({ ok: false, status: 409, code: 'session_conflict' });
+    expect(await stub.receipt('r:portal')).toBeNull();
+    // Its own earlier session is still the binding's (it then answers as
+    // any turn naming another session than the bound one does).
+    expect(
+      await stub.submit({ ...web(2, 'r:own'), sessionId: first }),
+    ).toMatchObject({ ok: false, status: 409, code: 'session_conflict' });
+    // WhatsApp is unchanged: a first message may name a session.
+    const wa = env.CHANNEL_TURNS_TEST.getByName('wa-named');
+    await wa.setSessionInfo('$portal-x', { title: 'x' });
+    expect(
+      await wa.submit({
+        ...message,
+        requestId: 'wa:named',
+        sessionId: '$portal-x',
+      }),
+    ).toMatchObject({ ok: true, result: { sessionId: '$portal-x' } });
+  });
+
+  it("refuses a turn of any provider that names another binding's session", async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('cross-binding');
+    const webTurn = await stub.submit(web(1, 'web:1'));
+    if (!webTurn.ok) throw new Error('Turn rejected');
+    const webSession = webTurn.result.sessionId;
+    // A WhatsApp and a Telegram binding of the same person, with no session yet.
+    for (const [provider, bindingId] of [
+      ['whatsapp', 'chb_wa'],
+      ['telegram', 'chb_tg'],
+    ] as const) {
+      expect(
+        await stub.submit({
+          ...message,
+          provider,
+          bindingId,
+          requestId: `x:${provider}`,
+          sessionId: webSession,
+        }),
+      ).toMatchObject({ ok: false, status: 409, code: 'session_conflict' });
+      expect(await stub.receipt(`x:${provider}`)).toBeNull();
+    }
+    // And the web binding cannot write into theirs either.
+    const wa = await stub.submit({
+      ...message,
+      bindingId: 'chb_wa',
+      requestId: 'wa:own',
+    });
+    if (!wa.ok) throw new Error('Turn rejected');
+    expect(
+      await stub.submit({ ...web(1, 'web:2'), sessionId: wa.result.sessionId }),
+    ).toMatchObject({ ok: false, status: 409, code: 'session_conflict' });
+    // A binding naming its own session is unchanged.
+    expect(
+      await stub.submit({
+        ...message,
+        bindingId: 'chb_wa',
+        requestId: 'wa:own-again',
+        sessionId: wa.result.sessionId,
+      }),
+    ).toMatchObject({ ok: true, result: { sessionId: wa.result.sessionId } });
+  });
+
+  it("never lists another binding's sessions or a session the user deleted", async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('web-isolated');
+    const mine = await stub.submit(web(1, 'w:1'));
+    const theirs = await stub.submit({
+      ...web(1, 'w:2'),
+      bindingId: 'chb_other',
+    });
+    if (!mine.ok || !theirs.ok) throw new Error('Turn rejected');
+    await stub.setSessionInfo('$portal-only', { title: 'Portal chat' });
+    expect(
+      (await stub.ownedSessions(web(1, 'x'))).map((s) => s.sessionId),
+    ).toEqual([mine.result.sessionId]);
+    await stub.markSessionDeleted(mine.result.sessionId);
+    expect(await stub.ownedSessions(web(1, 'x'))).toEqual([]);
+  });
+
+  it("matches an agent message to this binding's run by its final message id, with the plan until the run is pruned", async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('web-history-replies');
+    const turn = await stub.submit(web(1, 'web:1'));
+    if (!turn.ok) throw new Error('Turn rejected');
+    const plan: ReplyPlan = {
+      v: 1,
+      parts: [{ partId: 'p1', kind: 'text', text: 'Hello there' }],
+    };
+    await stub.finish(turn.result.runId, plan, 'Hello there', 'ai-final');
+    const { sessionId, runId } = turn.result;
+    expect(
+      await stub.historyReplies('chb_web', sessionId, ['ai-final', 'ai-early']),
+    ).toEqual({
+      'ai-final': { runId, requestId: 'web:1', plan },
+    });
+    expect(await stub.runIndexes()).toContain('idx_turn_runs_message');
+    // Another binding, or another session, never gets this run's plan.
+    expect(
+      await stub.historyReplies('chb_other', sessionId, ['ai-final']),
+    ).toEqual({});
+    expect(
+      await stub.historyReplies('chb_web', '$elsewhere', ['ai-final']),
+    ).toEqual({});
+    // Past the retention window the run and its plan are pruned together.
+    await stub.expire(RUN_RETENTION_MS + 24 * 3600 * 1000);
+    expect(
+      await stub.historyReplies('chb_web', sessionId, ['ai-final']),
+    ).toEqual({});
+  });
+
+  it('finds a run without a message (a busy line) by its request id, for this binding and session only', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('web-history-runs');
+    const turn = await stub.submit(web(1, 'wa:busy'));
+    if (!turn.ok) throw new Error('Turn rejected');
+    const busy: ReplyPlan = {
+      v: 1,
+      parts: [{ partId: 'busy_reply', kind: 'text', text: 'Busy, try again.' }],
+    };
+    await stub.finish(turn.result.runId, busy, '', null);
+    const { sessionId, runId } = turn.result;
+    const found = await stub.historyRuns('chb_web', sessionId, [
+      'wa:busy',
+      'wa:none',
+    ]);
+    expect(Object.keys(found)).toEqual(['wa:busy']);
+    expect(found['wa:busy']).toMatchObject({
+      runId,
+      requestId: 'wa:busy',
+      plan: busy,
+    });
+    expect(found['wa:busy']?.messageId).toBeNull();
+    expect(await stub.historyRuns('chb_other', sessionId, ['wa:busy'])).toEqual(
+      {},
+    );
+    expect(
+      await stub.historyRuns('chb_web', '$elsewhere', ['wa:busy']),
+    ).toEqual({});
+  });
+});

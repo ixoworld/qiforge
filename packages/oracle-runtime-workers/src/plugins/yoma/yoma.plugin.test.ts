@@ -394,6 +394,8 @@ function setup(
     hubActions?: (base: HubActions) => HubActions;
     capabilities?: Partial<Capabilities>;
     config?: Record<string, unknown>;
+    /** The turn's channel provider (default `meta`). */
+    provider?: string;
   } = {},
 ) {
   const plugin = new YomaPlugin({
@@ -457,7 +459,7 @@ function setup(
   };
   // The channel as a runtime with WhatsApp files passes it (a field newer than this package's type).
   const channel = {
-    provider: 'meta',
+    provider: opts.provider ?? 'meta',
     bindingId: 'binding-1',
     bindingRevision: 1,
     attachments,
@@ -1405,6 +1407,62 @@ describe('yoma_form', () => {
       longitude: 31.801,
       gridPrecision: 10,
       placeName: 'Mfuwe',
+    });
+  });
+
+  it('names the chat a pin is shared in: Telegram or the web chat on their turns, WhatsApp everywhere else', async () => {
+    const pinWords = async (provider?: string) => {
+      const { form } = setup(provider ? { provider } : {});
+      const ref = { form: 'claim', collectionId: '8724' };
+      await form({ action: 'next', ...ref });
+      let last: Record<string, unknown> = {};
+      for (const [field, reply] of [
+        ['schema:addressLocality', 'Mfuwe'],
+        ['schema:recipient', 'Grace Banda'],
+        ['ixo:treeSpecies', 'Mango'],
+      ])
+        last = await form({ action: 'answer', ...ref, field, reply });
+      const refused = await form({
+        action: 'answer',
+        ...ref,
+        field: 'geo:location',
+        reply: 'near the school',
+      });
+      return { next: last.next, refused };
+    };
+    // WhatsApp's words, byte for byte as before, on WhatsApp and on any
+    // other surface.
+    for (const provider of ['whatsapp', undefined]) {
+      const { next, refused } = await pinWords(provider);
+      expect(next).toMatchObject({
+        field: 'geo:location',
+        answer: 'WhatsApp location pin',
+      });
+      expect(refused).toEqual({
+        ok: true,
+        status: 'invalid',
+        say: 'This needs a location pin shared in WhatsApp (📎 → Location).',
+      });
+    }
+    const { next, refused } = await pinWords('telegram');
+    expect(next).toMatchObject({
+      field: 'geo:location',
+      answer: 'Telegram location pin',
+    });
+    expect(refused).toEqual({
+      ok: true,
+      status: 'invalid',
+      say: 'This needs a location pin shared in Telegram (📎 → Location).',
+    });
+    const web = await pinWords('web');
+    expect(web.next).toMatchObject({
+      field: 'geo:location',
+      answer: 'Web chat location pin',
+    });
+    expect(web.refused).toEqual({
+      ok: true,
+      status: 'invalid',
+      say: 'This needs a location pin shared in Web chat (📎 → Location).',
     });
   });
 

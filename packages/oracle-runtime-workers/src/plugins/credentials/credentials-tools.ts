@@ -129,25 +129,38 @@ import {
 } from './verifier';
 
 // ---------------------------------------------------------------------------
-// The WhatsApp gate.
+// The channel gate.
 
 /** The channel provider id of IXO Channels' WhatsApp. */
 export const WHATSAPP_PROVIDER = 'whatsapp';
 
 /**
- * The person's WhatsApp binding when this turn came from our WhatsApp
- * channel (`ctx.session.client === 'channel'` and
- * `ctx.session.channel.provider === 'whatsapp'`, both set by the runtime
+ * The IXO Channels providers whose bindings the Auth Hub's permission cards
+ * serve: WhatsApp, Telegram and the web chat. Every other surface is refused.
+ */
+export const CARD_CHANNEL_PROVIDERS = ['whatsapp', 'telegram', 'web'] as const;
+
+function isCardChannelProvider(
+  provider: string | undefined,
+): provider is (typeof CARD_CHANNEL_PROVIDERS)[number] {
+  return CARD_CHANNEL_PROVIDERS.some((p) => p === provider);
+}
+
+/**
+ * The person's channel binding when this turn came from one of our
+ * channels in `CARD_CHANNEL_PROVIDERS` (`ctx.session.client === 'channel'`
+ * and `ctx.session.channel.provider` one of them, both set by the runtime
  * from the authenticated channel turn, never by the model); null on every
  * other surface. Every tool of this plugin refuses without it.
  */
-export function whatsAppBinding(
+export function channelBinding(
   ctx: Pick<RuntimeContext, 'session'>,
 ): { bindingId: string; bindingRevision: number } | null {
   const channel = ctx.session.channel;
   if (
     ctx.session.client !== 'channel' ||
-    channel?.provider !== WHATSAPP_PROVIDER
+    !channel ||
+    !isCardChannelProvider(channel.provider)
   )
     return null;
   return {
@@ -155,6 +168,12 @@ export function whatsAppBinding(
     bindingRevision: channel.bindingRevision,
   };
 }
+
+/**
+ * The earlier, public name of `channelBinding` (the same function): it now
+ * also accepts a Telegram or web chat binding.
+ */
+export const whatsAppBinding = channelBinding;
 
 // ---------------------------------------------------------------------------
 // Inputs.
@@ -352,7 +371,7 @@ function readiness(
   ctx: RuntimeContext,
   cfg: CredentialsConfig,
 ): Ready | CredentialsRefusal {
-  const binding = whatsAppBinding(ctx);
+  const binding = channelBinding(ctx);
   if (!binding) return refusal('whatsapp_only', MESSAGES.whatsAppOnly);
   const { serviceKey, oracleDid } = cfg;
   if (!cfg.enabled || !serviceKey || !oracleDid || !ctx.ucan.hasSigningKey()) {
@@ -1737,7 +1756,7 @@ export function createCredentials(deps: CredentialsToolsDeps): {
         'Identity: ONE item {kind:"service-action", action:"self.identity-check", days} covers the identity link, the credential offer AND the standing consent to check IdentityLevel1 afterwards; add a credential-check item only for other credential types.',
         acceptedTypes,
         'Send the `message` (it holds the link) as it is, in a short message. Never paste ids or tokens. Then read the answer with credentials_permission_status, or go on once they say they allowed it.',
-        'status "already_allowed": a permission they allowed earlier still covers every item, so nothing was sent; go on with the task. If a card for the same items is still waiting for their answer, that same card comes back (no new one is made). WhatsApp only.',
+        'status "already_allowed": a permission they allowed earlier still covers every item, so nothing was sent; go on with the task. If a card for the same items is still waiting for their answer, that same card comes back (no new one is made). WhatsApp, Telegram or web chat only.',
       ].join(' '),
       schema: RequestPermissionsInput,
     },
@@ -1764,7 +1783,7 @@ export function createCredentials(deps: CredentialsToolsDeps): {
         'Ask for one credential type and as few fields as you need; the accepted issuers are configured (you may only narrow them).',
         acceptedTypes,
         'Send the `message` (it holds the link) as it is, in a short message. Never paste ids or tokens. Then check the answer with credentials_permission_status, or just call credentials_check once they say they allowed it. status "already_allowed": they allowed this earlier and nothing was sent; just call credentials_check.',
-        'WhatsApp only.',
+        'WhatsApp, Telegram or web chat only.',
       ].join(' '),
       schema: CheckPermissionInput,
     },
@@ -1855,7 +1874,7 @@ export function createCredentials(deps: CredentialsToolsDeps): {
     {
       name: 'credentials_permission_status',
       description:
-        'Read whether the person answered a permission card (pending, allowed, declined, expired or stopped) and, per item, its kind, state and what was granted (ids only, never tokens). The card is answered as a whole: Allow covers every item. Use the permissionId a credentials_request_* tool returned. Only call it when you need the answer to go on; do not poll in a loop. WhatsApp only.',
+        'Read whether the person answered a permission card (pending, allowed, declined, expired or stopped) and, per item, its kind, state and what was granted (ids only, never tokens). The card is answered as a whole: Allow covers every item. Use the permissionId a credentials_request_* tool returned. Only call it when you need the answer to go on; do not poll in a loop. WhatsApp, Telegram or web chat only.',
       schema: PermissionStatusInput,
       effect: 'read',
     },
@@ -1925,7 +1944,7 @@ export function createCredentials(deps: CredentialsToolsDeps): {
         acceptedTypes,
         'result: valid (claims holds only the fields you asked for), invalid, revoked, expired, none (they did not share one) or pending (no standing permission answered: send them the `message`, which holds their wallet link, or ask for standing permission first with credentials_request_permissions).',
         'Do not call it before the person has allowed the card that covers it (a credential-check item, or the identity-check entry); credentials_request_action is not for credential-check items.',
-        'Calling it again with the same fields continues the same request; it does not ask twice. Never quote the claims back beyond what the conversation needs. WhatsApp only.',
+        'Calling it again with the same fields continues the same request; it does not ask twice. Never quote the claims back beyond what the conversation needs. WhatsApp, Telegram or web chat only.',
       ].join(' '),
       schema: CheckInput,
     },
@@ -2141,7 +2160,7 @@ export function createCredentials(deps: CredentialsToolsDeps): {
         'One-item form of credentials_request_permissions: ask the person for permission to use a service on their behalf: an action from the Hub\'s approved list: use only an entry id the operator\'s instructions name; self.identity-check is the only built-in one (the Hub refuses ids it does not know). "self.identity-check" covers the identity link, the credential offer and the consent to check the identity credential afterwards, all on one card.',
         "They get a card in the IXO wallet showing who asks, the action, the service, what it allows and how long; they tap Allow or Don't allow.",
         'Send the `message` (it holds the link) as it is, in a short message; never paste ids or tokens. Once they allow it, call credentials_request_action. status "already_allowed": they allowed this earlier and nothing was sent; call credentials_request_action now. If you need more than this, use credentials_request_permissions.',
-        'WhatsApp only.',
+        'WhatsApp, Telegram or web chat only.',
       ].join(' '),
       schema: ActionPermissionInput,
     },
@@ -2487,7 +2506,7 @@ export function createCredentials(deps: CredentialsToolsDeps): {
         'Send the `message` (it holds the link) as it is. Keep the linkId to read progress with credentials_action_status. Never call this to answer "is it done?", "how is it going?" or "I finished": that is credentials_action_status. It reads their newest link first and makes a new one only when that one ended (passed, failed, expired, stopped): while it is open it answers it instead, status "sent" with again: true (the same link, still unopened) or status "already_open" (opened but not started, linkStatus "opened"; or their check is in progress: review: true: a person reviews it; saving: true: it passed and their proof is still being saved); relay the message and read progress with credentials_action_status only when they write. error "daily_limit": they used all their identity-check tries for now; its message says when they can try again (limit.tryAgain, limit.resetsAt): send it as it is, never offer a new link before then and never say "in a minute"; if they ask again later, call this again for the time left then. error "already_verified": they are already verified and no link is needed; go on with the task you were doing (a next step you were given comes first, and nothing else); call credentials_check only if this oracle itself needs to read a claim from the credential for its own decision.',
         'context (self.identity-check only): "next_step" when the check is the next step of a task already under way (after a reward claim, or right after they allowed the card; the message then opens with "Next, ..."), otherwise leave it out ("standalone").',
         'For any other entry id it answers status "granted" with the capabilities the person allowed (ids, capabilities, audiences and ends; never tokens) so another plugin or you can act on them. If they have not allowed it yet the answer says so: ask for permission first.',
-        'When what they allowed earlier no longer matches what the service needs now, it sends the card again by itself and answers status "sent" with a permissionId and a `message` asking for their OK once more: send it as it is and call this again once they allowed it. WhatsApp only.',
+        'When what they allowed earlier no longer matches what the service needs now, it sends the card again by itself and answers status "sent" with a permissionId and a `message` asking for their OK once more: send it as it is and call this again once they allowed it. WhatsApp, Telegram or web chat only.',
       ].join(' '),
       schema: ActionInput,
     },
@@ -2925,7 +2944,7 @@ export function createCredentials(deps: CredentialsToolsDeps): {
     {
       name: 'credentials_action_status',
       description:
-        'Read the progress of an action credentials_request_action started. Use this, never credentials_request_action, whenever the person asks about an identity check they were sent ("is it done?", "how is it going?", "did it work?", "I finished", "it doesn\'t work"). For "self.identity-check" pass the linkId as ref (or leave ref out for their newest link) (sent, opened, in_progress, passed, failed, expired, cancelled; in_progress with review: true means a person from support reviews it, which can take a while; in_progress with saving: true means it passed and their proof is still being saved, which can take a minute; failed with failure: "error" means a problem on our side, not about them, failure: "too_many_attempts" means they used up their tries and failure: "too_many_photos" means they used up the photo tries; without failure they were not verified; startsLeft is how many identity checks they can still start for now, and limit (startsLeft 0) means none until limit.resetsAt: never offer a new link before then). No personal data comes back. Only call it when the person writes and you need the answer; do not poll in a loop (at most 6 a minute per link; an answer is kept 5 seconds). You can never message them first. WhatsApp only.',
+        'Read the progress of an action credentials_request_action started. Use this, never credentials_request_action, whenever the person asks about an identity check they were sent ("is it done?", "how is it going?", "did it work?", "I finished", "it doesn\'t work"). For "self.identity-check" pass the linkId as ref (or leave ref out for their newest link) (sent, opened, in_progress, passed, failed, expired, cancelled; in_progress with review: true means a person from support reviews it, which can take a while; in_progress with saving: true means it passed and their proof is still being saved, which can take a minute; failed with failure: "error" means a problem on our side, not about them, failure: "too_many_attempts" means they used up their tries and failure: "too_many_photos" means they used up the photo tries; without failure they were not verified; startsLeft is how many identity checks they can still start for now, and limit (startsLeft 0) means none until limit.resetsAt: never offer a new link before then). No personal data comes back. Only call it when the person writes and you need the answer; do not poll in a loop (at most 6 a minute per link; an answer is kept 5 seconds). You can never message them first. WhatsApp, Telegram or web chat only.',
       schema: ActionStatusInput,
       effect: 'read',
     },

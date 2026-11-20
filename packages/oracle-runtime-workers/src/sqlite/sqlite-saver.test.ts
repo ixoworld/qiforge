@@ -37,6 +37,7 @@ import {
   CHANNEL_DELIVERY_NOTICE_KWARG,
   CHANNEL_PROVIDER_SENT_AT_KWARG,
   CHANNEL_REPLY_NOTE_KWARG,
+  CHANNEL_REQUEST_ID_KWARG,
   channelChoiceNote,
   userContent,
 } from '../channels/replies';
@@ -944,6 +945,40 @@ describe('runtime kwargs read after a checkpoint', () => {
       const oddBack = loaded(await saver.getTuple(config('sent-at')), 'h-odd');
       expect(oddBack?.additional_kwargs).not.toHaveProperty(
         CHANNEL_PROVIDER_SENT_AT_KWARG,
+      );
+      await db.close();
+    });
+  });
+
+  it("a channel message keeps its turn's request id after reload (a string of at most 180 characters)", async () => {
+    await runInDurableObject(stub('saver-request-id'), async (_i, state) => {
+      const db = await DoSqliteDatabase.open(state, 'request-id.db');
+      const saver = new SqliteSaver(db);
+      const kept = new HumanMessage({
+        id: 'h-req',
+        content: 'hello',
+        additional_kwargs: {
+          timestamp: TS,
+          [CHANNEL_REQUEST_ID_KWARG]: 'wa:abc',
+        },
+      });
+      const odd = new HumanMessage({
+        id: 'h-req-odd',
+        content: 'x',
+        additional_kwargs: {
+          timestamp: TS,
+          [CHANNEL_REQUEST_ID_KWARG]: 'x'.repeat(181),
+        },
+      });
+      await put(saver, 'request-id', [kept, odd]);
+      const back = loaded(await saver.getTuple(config('request-id')), 'h-req');
+      expect(back?.additional_kwargs[CHANNEL_REQUEST_ID_KWARG]).toBe('wa:abc');
+      const oddBack = loaded(
+        await saver.getTuple(config('request-id')),
+        'h-req-odd',
+      );
+      expect(oddBack?.additional_kwargs).not.toHaveProperty(
+        CHANNEL_REQUEST_ID_KWARG,
       );
       await db.close();
     });
