@@ -544,11 +544,22 @@ export function linkButtonPart(
 
 // ── Cards ───────────────────────────────────────────────────────────────
 
+/**
+ * Whether a surface takes carousel cards without WhatsApp's carousel limits
+ * (160 characters and two line breaks per card): the IXO Channels web chat
+ * draws every card in the browser, so its carousel cards hold as much as a
+ * single card (`RICH_LIMITS.body`).
+ */
+export function carouselTextUnbounded(surface: string | undefined): boolean {
+  return surface === 'web';
+}
+
 /** Why these cards cannot be shown on this turn, or null when they can. */
 export function cardsRefusal(
   intro: string,
   items: readonly CardItem[],
   render: RenderCapability,
+  surface?: string,
 ): string | null {
   if (items.length < 1 || items.length > RICH_LIMITS.cardsMax)
     return `give 1 to ${RICH_LIMITS.cardsMax} cards`;
@@ -568,7 +579,7 @@ export function cardsRefusal(
     )
       return `card ${n}: the title must be one line of 1 to ${RICH_LIMITS.cardTitle} characters`;
     const cardText = `*${item.title}*\n${item.body}`;
-    if (carousel) {
+    if (carousel && !carouselTextUnbounded(surface)) {
       if (codePointLength(cardText) > RICH_LIMITS.cardText)
         return `card ${n}: title and text together must stay within ${RICH_LIMITS.cardText - 3} characters in a carousel`;
       if (lineBreaks(cardText) > RICH_LIMITS.cardLineBreaks)
@@ -590,6 +601,7 @@ export function cardsRefusal(
 export function cardsPart(
   input: { body: string; items: readonly CardItem[] },
   render: RenderCapability | undefined,
+  surface?: string,
 ):
   | { part: RichContent; reason: null }
   | { part: { kind: 'text'; text: string }; reason: string } {
@@ -601,7 +613,7 @@ export function cardsPart(
   }));
   const text = cardsText(intro, items);
   const refused = render
-    ? cardsRefusal(intro, items, render)
+    ? cardsRefusal(intro, items, render, surface)
     : 'rich messages are not available here';
   if (refused) return { part: { kind: 'text', text }, reason: refused };
   // Every link passed `safeHttpsUrl`: send (and show) the parsed `href`s.

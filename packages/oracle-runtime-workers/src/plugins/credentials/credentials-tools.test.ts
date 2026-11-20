@@ -25,7 +25,10 @@ import type {
 import { recordPermission, writeGrantsCache } from './person-state';
 import { VerifierEntryMemo } from './credentials-client';
 import {
+  CARD_CHANNEL_PROVIDERS,
+  channelBinding,
   createCredentialsTools,
+  whatsAppBinding,
   type CredentialsToolsDeps,
 } from './credentials-tools';
 import {
@@ -39,6 +42,7 @@ import { MESSAGES, NO_LATER_MESSAGE, refusal } from './errors';
 import { canonicalJson, sha256Hex } from './hub-client';
 import { openResponseToken } from './response-route';
 import {
+  BINDING,
   BLOCKSYNC_URL,
   channelCtx,
   HUB,
@@ -306,8 +310,50 @@ const LIST_URL = `${HUB}/api/internal/permissions?bindingId=bind_1&bindingRevisi
 
 const CHECK_ARGS = { vct: VCT, issuers: [ISSUER_DID], claims: ['age_over_18'] };
 
-describe('the WhatsApp gate', () => {
-  it('refuses every tool outside our WhatsApp channel, before any call', async () => {
+describe('the channel gate', () => {
+  it('accepts a WhatsApp, Telegram or web chat binding and nothing else', () => {
+    const { adapter } = recordingUcan();
+    expect(whatsAppBinding).toBe(channelBinding);
+    expect(CARD_CHANNEL_PROVIDERS).toEqual(['whatsapp', 'telegram', 'web']);
+    for (const provider of ['whatsapp', 'telegram', 'web'])
+      expect(channelBinding(channelCtx(adapter, { provider }))).toEqual(
+        BINDING,
+      );
+    for (const ctx of [
+      channelCtx(adapter, { client: 'portal' }),
+      channelCtx(adapter, { client: 'matrix' }),
+      channelCtx(adapter, { provider: 'slack' }),
+      channelCtx(adapter, { provider: 'portal' }),
+      channelCtx(adapter, { provider: 'matrix' }),
+      channelCtx(adapter, { provider: 'WhatsApp' }),
+      channelCtx(adapter, { provider: 'Web' }),
+    ])
+      expect(channelBinding(ctx)).toBeNull();
+  });
+
+  for (const provider of ['telegram', 'web'])
+    it(`sends a ${provider} binding's card like a WhatsApp one`, async () => {
+      const { adapter, oracleKey } = recordingUcan();
+      const { fetchImpl, calls } = routedFetch({
+        [`POST ${HUB}/api/internal/permissions`]: () => json(CARD, 201),
+      });
+      const out = await run(
+        toolsFor(fetchImpl, oracleKey.doc).credentials_request_check_permission,
+        CHECK_ARGS,
+        channelCtx(adapter, { provider }),
+      );
+      expect(out).toMatchObject({
+        status: 'sent',
+        permissionId: 'card_1',
+        url: CARD.url,
+      });
+      expect(JSON.parse(cardPosts(calls)[0]?.body ?? '')).toMatchObject({
+        bindingId: BINDING.bindingId,
+        bindingRevision: BINDING.bindingRevision,
+      });
+    });
+
+  it('refuses every tool outside our WhatsApp and Telegram channels, before any call', async () => {
     const { adapter, oracleKey } = recordingUcan();
     const { fetchImpl, calls } = routedFetch({});
     const tools = toolsFor(fetchImpl, oracleKey.doc);
@@ -329,7 +375,7 @@ describe('the WhatsApp gate', () => {
     for (const ctx of [
       channelCtx(adapter, { client: 'portal' }),
       channelCtx(adapter, { client: 'matrix' }),
-      channelCtx(adapter, { provider: 'telegram' }),
+      channelCtx(adapter, { provider: 'slack' }),
     ])
       for (const [name, args] of Object.entries(inputs))
         await expect(run(tools[name], args, ctx)).resolves.toEqual(

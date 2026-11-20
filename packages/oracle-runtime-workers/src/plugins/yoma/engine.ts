@@ -905,7 +905,7 @@ export function encodeGeohash(
   return geohash;
 }
 
-/** A shared WhatsApp pin, as the gateway writes it: `📍 <lat>, <long>` then ` — name` and/or `, address`. */
+/** A shared WhatsApp or Telegram pin, as the gateway writes it: `📍 <lat>, <long>` then ` — name` and/or `, address`. */
 export function parsePin(
   text: string,
 ): { latitude: number; longitude: number; placeName?: string } | undefined {

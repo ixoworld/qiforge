@@ -6,8 +6,8 @@ import type { ChatLimits, DeliveryProfile } from './types';
  * `OracleConfig.delivery`: per-oracle tuning of chat delivery. Matrix room
  * turns use the chat style only when `matrixChat` is `true` (off by default;
  * `MATRIX_CHAT_DELIVERY` sets it per deployment); `limits` overrides the
- * defaults below per surface (`whatsapp`, `telegram`, `slack`, `matrix`,
- * `generic`).
+ * defaults below per surface (`whatsapp`, `telegram`, `web`, `slack`,
+ * `matrix`, `generic`).
  */
 export interface DeliveryConfig {
   matrixChat?: boolean;
@@ -40,6 +40,8 @@ const DEFAULT_LIMITS: Readonly<Record<string, ChatLimits>> = {
   // The generic limits are WhatsApp's: each entry below lists only what differs.
   whatsapp: { ...GENERIC },
   telegram: { ...GENERIC, bubbleTarget: 800, bubbleMax: 2000 },
+  // The IXO Channels web chat: a browser bubble, sized like WhatsApp's.
+  web: { ...GENERIC },
   slack: {
     ...GENERIC,
     bubbleTarget: 1200,
@@ -96,10 +98,30 @@ function validLimits(overrides: Partial<ChatLimits> = {}): Partial<ChatLimits> {
 const LABELS: Readonly<Record<string, string>> = {
   whatsapp: 'WhatsApp',
   telegram: 'Telegram',
+  web: 'a web chat',
   slack: 'Slack',
   matrix: 'a Matrix chat room',
   generic: 'a chat app',
 };
+
+/**
+ * The channel's name as a bracketed note shows it to the model
+ * (`[WhatsApp reply: …`): the provider id of an IXO Channels turn,
+ * `whatsapp` → `WhatsApp`, `telegram` → `Telegram`, `web` → `Web chat`,
+ * anything else (or none) → `Chat`.
+ */
+export function channelSurfaceLabel(provider: string | undefined): string {
+  switch (provider) {
+    case 'whatsapp':
+      return 'WhatsApp';
+    case 'telegram':
+      return 'Telegram';
+    case 'web':
+      return 'Web chat';
+    default:
+      return 'Chat';
+  }
+}
 
 /**
  * `OracleConfig.delivery` with the deployment's `MATRIX_CHAT_DELIVERY` applied:

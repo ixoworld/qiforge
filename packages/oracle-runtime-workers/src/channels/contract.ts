@@ -568,6 +568,64 @@ export function plausibleProviderSentAt(
   return value;
 }
 
+/** The most turns one history page holds, and how many when `limit` is absent. */
+export const CHANNEL_HISTORY_LIMIT_MAX = 50;
+export const CHANNEL_HISTORY_LIMIT_DEFAULT = 20;
+/** The largest history request body (bytes). */
+export const CHANNEL_HISTORY_BODY_MAX_BYTES = 4096;
+/** The longest cursor a history query carries (the Auth Hub accepts at most 512). */
+export const CHANNEL_HISTORY_CURSOR_MAX = 512;
+
+const HistoryCursorText = z
+  .string()
+  .min(1)
+  .max(CHANNEL_HISTORY_CURSOR_MAX)
+  .regex(/^[A-Za-z0-9._-]+$/);
+
+/**
+ * The page a history read asks for: `limit` turns (1-50, default 20), older
+ * than `before` or newer than `after` (both exclusive, never both). Cursors
+ * are opaque: they come from an earlier page of the same binding.
+ */
+export const ChannelHistoryQuery = z
+  .strictObject({
+    limit: z.number().int().min(1).max(CHANNEL_HISTORY_LIMIT_MAX).optional(),
+    before: HistoryCursorText.optional(),
+    after: HistoryCursorText.optional(),
+  })
+  .refine((query) => !(query.before && query.after), {
+    message: 'before and after are mutually exclusive',
+  });
+export type ChannelHistoryQuery = z.infer<typeof ChannelHistoryQuery>;
+
+/** `POST /channels/history`: one page of a web binding's conversations. */
+export const ChannelHistoryBody = z.strictObject({
+  provider: ChannelProviderId,
+  bindingId: z.string().regex(/^chb_[A-Za-z0-9_-]{1,120}$/),
+  bindingRevision: z.number().int().positive().safe(),
+  requestId: z.string().min(1).max(180),
+  query: ChannelHistoryQuery,
+});
+export type ChannelHistoryInput = z.infer<typeof ChannelHistoryBody>;
+
+/**
+ * The canonical JSON of a history query, as the person's device signed it
+ * and the Auth Hub hashed it into the grant: the keys present, in the order
+ * `after`, `before`, `limit`, no spaces.
+ */
+export function canonicalHistoryQuery(query: ChannelHistoryQuery): string {
+  const ordered: Record<string, string | number> = {};
+  if (query.after !== undefined) ordered.after = query.after;
+  if (query.before !== undefined) ordered.before = query.before;
+  if (query.limit !== undefined) ordered.limit = query.limit;
+  return JSON.stringify(ordered);
+}
+
+/** Lower-case hex SHA-256 of `canonicalHistoryQuery`: the grant's `nb.queryHash`. */
+export function historyQueryHash(query: ChannelHistoryQuery): Promise<string> {
+  return channelRequestHash(canonicalHistoryQuery(query));
+}
+
 export const ChannelOrigin = z.strictObject({
   v: z.literal(1),
   transport: ChannelProviderId,
@@ -650,7 +708,12 @@ export type ChannelErrorStatus =
  * | code                              | status | meaning                                               |
  * | --------------------------------- | ------ | ----------------------------------------------------- |
  * | `invalid_request`                 | 400    | body missing, not UTF-8, not JSON, or the wrong shape |
+ * | `invalid_cursor`                  | 400    | a history cursor names no message of this binding     |
  * | `unauthorized`                    | 401    | no valid user-rooted channel invocation               |
+ * | `expired`                         | 401    | a history grant or invocation has expired             |
+ * | `provider_not_supported`          | 403    | a history read for a provider other than `web`        |
+ * | `revision_mismatch`               | 403    | a history grant of another binding revision           |
+ * | `control_not_supported`           | 403    | a session control for a `web` binding                 |
  * | `scope_mismatch`                  | 403    | the invocation does not cover this binding or body    |
  * | `identity_mismatch`               | 403    | the channel identity does not match the request       |
  * | `identity_required`               | 403    | the binding check got no channel identity             |
@@ -678,7 +741,12 @@ export type ChannelErrorStatus =
  */
 export type ChannelErrorCode =
   | 'invalid_request'
+  | 'invalid_cursor'
   | 'unauthorized'
+  | 'expired'
+  | 'provider_not_supported'
+  | 'revision_mismatch'
+  | 'control_not_supported'
   | 'scope_mismatch'
   | 'identity_mismatch'
   | 'identity_required'
@@ -720,6 +788,15 @@ export type ChannelTurnOutcome =
       code: ChannelErrorCode;
       message: string;
     } & ChannelRefusalDetails);
+
+/**
+ * A history read's answer across RPC: the page as JSON text with how many
+ * items it holds and how many of them carry a Reply Plan (for the route's
+ * metrics), or the refusal.
+ */
+export type ChannelHistoryOutcome =
+  | { ok: true; json: string; items: number; plans: number }
+  | Exclude<ChannelTurnOutcome, { ok: true }>;
 
 export class ChannelError extends Error {
   constructor(
@@ -880,7 +957,10 @@ export async function channelRequestHash(raw: string): Promise<string> {
   ).join('');
 }
 
-export async function readChannelBody(request: Request): Promise<string> {
+export async function readChannelBody(
+  request: Request,
+  maxBytes = 64_000,
+): Promise<string> {
   const reader = request.body?.getReader();
   if (!reader)
     throw new ChannelError(
@@ -894,7 +974,7 @@ export async function readChannelBody(request: Request): Promise<string> {
     const chunk = await reader.read();
     if (chunk.done) break;
     size += chunk.value.byteLength;
-    if (size > 64_000) {
+    if (size > maxBytes) {
       await reader.cancel();
       throw new ChannelError(
         413,

@@ -88,7 +88,7 @@ export const NO_LATER_MESSAGE =
 export const MESSAGES = {
   whatsAppOnly: {
     message: "This isn't available in this chat yet.",
-    hint: 'These tools work only in our WhatsApp chat; nothing was sent.',
+    hint: 'These tools work only in our WhatsApp, Telegram or web chat; nothing was sent.',
   },
   notAvailable: {
     message: "This isn't available right now.",

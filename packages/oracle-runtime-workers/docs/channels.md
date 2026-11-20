@@ -13,6 +13,8 @@
 
 `CHANNEL_SERVICE_DID` is parsed as a list: entries are split on commas, trimmed, empty entries dropped and duplicates removed (`did:web:a.example, did:web:b.example`). An unset value, or one with no entry left, disables the route: it answers `503` with `Channels are not configured`. Binding validation needs the key and either `AUTH_HUB` or `AUTH_HUB_URL`; the service binding is used when both are set. The validation credential is separate from operator credentials. Neither the channel service nor its grant receives a Matrix access token. Required-ness and wrangler syntax are in [configuration](configuration.md#channels-ingress).
 
+An oracle reached on two channels lists both gateways, for example a WhatsApp and a Telegram gateway on devnet: `CHANNEL_SERVICE_DID = "did:web:channels-test.dev.ixo.earth,did:web:channels-test-telegram.dev.ixo.earth"`. Each gateway invokes with its own DID and a grant addressed to it. One `AUTH_HUB_CHANNEL_SERVICE_KEY` serves every channel of the oracle: it is the oracle account's Hub key, and the binding check carries the turn's `provider`, so no key per channel is needed.
+
 ## Authorization
 
 The `Authorization` header contains `Bearer <base64 UCAN CAR>`. The `x-auth-type` header is `ucan`. The invocation uses `@ixo/ucan` 2.2.0.
@@ -75,7 +77,7 @@ The object holds the delegation with its expiry (unix seconds), taken from where
 }
 ```
 
-`provider` is a provider id matching `^[a-z][a-z0-9_-]{0,31}$` (`whatsapp` today). The runtime does not enumerate providers: it echoes the id into the grant check (`nb.provider`), the Auth Hub binding check and the `org.ixo.qi.origin` Matrix event, and an id without its own delivery profile is shaped with the generic chat profile (WhatsApp keeps its own). `context.kind` is `oracle` (the gateway's value) or `companion` (accepted for gateways that predate channel accounts); the object is strict, so any other kind or extra field is `400 invalid_request`. The kind does not change behaviour: the oracle is always this deployment's.
+`provider` is a provider id matching `^[a-z][a-z0-9_-]{0,31}$` (`whatsapp`, `telegram` and `web` today). The runtime does not enumerate providers: it echoes the id into the grant check (`nb.provider`), the Auth Hub binding check and the `org.ixo.qi.origin` Matrix event, and an id without its own delivery profile is shaped with the generic chat profile (WhatsApp keeps its own). `context.kind` is `oracle` (the gateway's value) or `companion` (accepted for gateways that predate channel accounts); the object is strict, so any other kind or extra field is `400 invalid_request`. The kind does not change behaviour: the oracle is always this deployment's.
 
 `sessionId` is optional on the first request. An existing session must belong to this user and the canonical encrypted oracle room. The session is checked when a request is bound to it, before it starts a run; a poll of an admitted request checks nothing and writes nothing, so it does not mark the user's database dirty. Subsequent messages reuse the binding's session by default. Deleting that session releases the binding: its next message opens a new session.
 
@@ -437,9 +439,66 @@ The focused workerd tests exercise real UCAN signatures, negative authorization 
 
 Companion's `feat/workers-runtime` deployment must adopt the released runtime and configure these bindings. Live onboarding, revocation, encrypted Matrix event inspection, and provider delivery remain deployment acceptance checks. `pnpm test:e2e:channels` in the example app is the operator-run acceptance harness for them ([testing](testing.md#harness-end-to-end-minutes-local); its variables and checkpoints are in [`docs/testing/channels-acceptance.md`](../../../docs/testing/channels-acceptance.md)).
 
+## Web chat history
+
+The web chat (`provider: "web"`) keeps no transcript in the browser or the gateway: a browser that opens the chat reads the conversation back from the person's own object, page by page, with `POST /channels/history`. WhatsApp and Telegram keep theirs in the person's app and never call it.
+
+### Ownership across revisions
+
+A web binding keeps its sessions across its consent revisions (`sessionsSpanRevisions`): signing out everywhere, disconnecting at the Auth Hub and signing in again re-activates the same binding id at a new revision, and the person continues the same conversation with its whole history. For `web` a session is the binding's when a `channel_session_bindings` row of ANY revision names it, when it is the binding's current `channel_sessions` row, or when one of its `channel_requests` receipts names it. That rule serves two things only: history, and a web turn's own session (a web turn naming a `sessionId` the binding never held answers `409 session_conflict`). A turn of any provider that names a session another binding holds (and its own binding does not) answers `409 session_conflict` too, so a WhatsApp or Telegram binding never writes into the web chat's conversation, nor the other way round. The turn path continues the binding's bound session on every provider (`channel_sessions` is keyed by binding id).
+
+Session controls are refused for `web` (`assertChannelControlAllowed`): `POST /channels/control` with `provider: "web"` answers `403 control_not_supported` for every command (`stop`, `status`, `new`, `resume`, `topics`, `rename`) before any authorization, Auth Hub call or object call, and the user object refuses it again. The web chat keeps one conversation, and its earlier sessions are reachable only through history, under a grant the person's own browser proved: a gateway holding only a turn grant can neither list (`topics`) nor reopen (`resume`) them. Every other provider keeps its controls, revision-scoped as before.
+
+### Authorization
+
+`authenticateChannelHistory` verifies a history read exactly like a turn, with its own capability:
+
+- one direct grant from the person (`did:ixo:…`) to a listed `CHANNEL_SERVICE_DID`, invoked by that same service: a chain of exactly two;
+- the grant's ONE capability is `ixo:channel/history` on `ixo:channel:<bindingId>` (never `ixo:channel/invoke`: a turn grant cannot read history and a history grant cannot run a turn), and it lives at most 90 s (the Auth Hub mints it for 60 s; the rest is clock skew); the invocation expires within 60 s;
+- `nb.deviceId` names the browser device whose signature unlocked the grant (`dev_` + 43 base64url, required, the same in grant and invocation: otherwise `403 scope_mismatch`); a grant that names its start (`nbf`) must have been issued for at most 90 s (the Auth Hub's grants name none);
+- `nb.provider` and the body's `provider` are both `web` (anything else: `403 scope_mismatch`), `nb.bindingRevision` is the body's, `nb.oracleDid` is `ORACLE_DID`;
+- `nb.queryHash` is the lower-case hex SHA-256 of the canonical query JSON (`canonicalHistoryQuery`: the keys present in the order `after`, `before`, `limit`, no spaces), so the gateway can only ask for the exact page the person's device signed at the Auth Hub;
+- the facts are `[{requestId, requestHash}]` with `requestHash` the SHA-256 of the raw body, as for turns.
+
+Then the route checks the binding with the Auth Hub (`validate-binding`, provider `web`) on EVERY read, never from the isolate's cache: a browser signed out everywhere or disconnected stops reading at once. There is no replay store: the invocation lives 60 s and names its exact body, and the Hub refuses a device signature's nonce twice. The route has its own rate-limit budget per binding (`RATE_LIMIT`, key `<ORACLE_DID>|channel-history|<bindingId>`), spent after the invocation verified and before the Auth Hub call. The body is at most 4 KB (`413 request_too_large`).
+
+### Request and page
+
+```json
+{
+  "provider": "web",
+  "bindingId": "chb_…",
+  "bindingRevision": 3,
+  "requestId": "web-history:<uuid>",
+  "query": { "limit": 20, "before": "c1.…" }
+}
+```
+
+`limit` is 1-50 turns (default 20); `before` and `after` are exclusive and never both. The answer:
+
+```json
+{ "items": [
+    { "kind": "divider", "id": "div:<sessionId>", "at": "<ISO>", "sessionId": "…" },
+    { "kind": "message", "id": "<message id>", "sessionId": "…", "role": "user", "at": "<ISO>",
+      "text": "…", "remoteRef": "hmac:…|null" },
+    { "kind": "message", "id": "…", "sessionId": "…", "role": "oracle", "at": "<ISO>",
+      "text": "…", "requestId": "<gateway request id>|null", "plan": { "parts": [ … ] } }
+  ],
+  "prevCursor": "c1.…|null", "nextCursor": "c1.…|null", "hasOlder": true, "hasNewer": false }
+```
+
+- Every session the binding owns, oldest first by creation (at most the newest 200), read as one conversation and paged by turns exactly like `GET /sessions/:id/messages` within one session (`pageSessionsTranscript`); a `divider` stands before each session but the first, in the page that holds that session's first row. A binding that owns no session answers an empty page.
+- Tool messages, summaries, hidden notes (attachment text, delivery notices, events, runtime nudges), failed replies and Portal sessions the binding never held never appear. A `role: "user"` item is the person's own message on THIS binding only: its recorded origin (`org.ixo.qi.origin.binding_id`) is the binding being read (never a Portal message or another binding's turn written into the same session), and its turn's request id (`channel_request_id`, recorded on every channel user message) is a person's message id (`wa:`, the gateway's ids for text, taps and files, the referral first message included); a gateway-composed input (the `connect:` opening prompt) is left out, its reply kept. For a message written before the id was recorded, the request id of the run that answered it (while kept) decides; with none, it is NOT listed. An agent message is listed only when it answers this binding's own input, or is matched to one of this binding's runs. A file the person sent is a `[File sent: <name>]` line.
+- `remoteRef` is the turn's `remoteMessageRef` exactly as the gateway sent it (`hmac:<hex>`), only for this binding's own messages; the runtime never sees the browser's `clientMsgId`.
+- An agent message is matched to its run ONLY by the run's recorded final message id (`turn_runs.message_id`, the last AI message the run wrote, indexed by `idx_turn_runs_message`, made on the first history read), for a channel run of this binding (`run_id = channelRunId(bindingId, request_id)`) in the same session. That message carries the run's `requestId` and, while the run is kept (7 days; plans are pruned with their runs), the Reply Plan the gateway was given, with `text` = the plan as the model reads it (files named, not linked); the other agent messages of the same run are then left out (the plan is what the person received). An agent message no run names (an earlier message of a turn without a plan, a run pruned after 7 days, a Portal reply) keeps its text, `requestId: null` and no plan: a plan is never guessed. A run that finished with a plan but wrote no message (the busy line, the files of a failed run) is found through its input's recorded request id (`turn_runs` by `run_id = channelRunId(bindingId, requestId)`) and comes as one item `id: "run:<runId>"` right after that input, with its `requestId` and `plan`, while the run is kept; an empty plan (a busy line that was not sent) shows nothing. One item per run: such a run's partial text is then left out.
+- Cursors are `c1.` + base64url of `[sessionId, messageId]`, at most 512 characters (a longer one, or one outside `[A-Za-z0-9._-]`, is `400 invalid_request`; the runtime never issues a longer one: that cursor is answered `null`); one that does not decode, names a session the binding does not own or a message the session does not hold is `400 invalid_cursor`.
+- Refusals: `401 unauthorized` (no or bad invocation, chain or lifetime), `401 expired` (the grant or the invocation has expired), `403 provider_not_supported` (not `web`), `403 revision_mismatch` (a grant of another revision), `403 scope_mismatch` (another oracle, query or body), `403 binding_inactive`, `413 request_too_large`, `428 delegation_required`, `429 rate_limited`, `503 binding_check_unavailable`, `503 not_configured`, `503 unavailable`.
+
+Every read is a bounded, indexed range read of the person's own SQLite (`messages` by `thread_id, created_at`, person and agent rows only: tool and system rows are skipped by SQLite and never decoded; the binding tables by `binding_id`; `turn_runs` by `message_id` and by `run_id`; `turn_run_plans` by `run_id`), through the same page tier as any other read; no other object is called. The object answers the page as JSON text across RPC.
+
 ## Quoted replies and conversation controls
 
-`ChannelTurnBody.replyTo` is optional. A known reference carries `kind: "known"`, the originating `requestId`, `author` (`user` or `oracle`), and optionally a reply `partId`; an unresolved reference carries `kind: "unavailable"`. The runtime reads canonical content from that binding's request receipt only when it belongs to the selected session. With routing off or in shadow, this is the current session. With routing on, a verified quote can first select an older owned session within the same binding and consent revision. A split-bubble suffix resolves to its parent reply part. Unavailable references prompt clarification. The turn's `replyContext` then says why: `reason: "other_conversation"` when the quoted message is this binding's but belongs to a conversation other than the one the turn runs in (its text is not copied across), `reason: "unknown"` when nothing quotable was found (no receipt, no run, a run that did not finish, an unknown reply part, or a reference the gateway sent as `unavailable`). Quoted text is untrusted context and never changes action authority. Canonical user messages and encrypted room mirrors retain the typed `org.ixo.qi.reply` reference; the model-only quotation note is hidden from the visible transcript and indexing.
+`ChannelTurnBody.replyTo` is optional. A known reference carries `kind: "known"`, the originating `requestId`, `author` (`user` or `oracle`), and optionally a reply `partId`; an unresolved reference carries `kind: "unavailable"`. The runtime reads canonical content from that binding's request receipt only when it belongs to the selected session. With routing off or in shadow, this is the current session. With routing on, a verified quote can first select an older owned session within the same binding and consent revision. A split-bubble suffix resolves to its parent reply part. Unavailable references prompt clarification. The turn's `replyContext` then says why: `reason: "other_conversation"` when the quoted message is this binding's but belongs to a conversation other than the one the turn runs in (its text is not copied across), `reason: "unknown"` when nothing quotable was found (no receipt, no run, a run that did not finish, an unknown reply part, or a reference the gateway sent as `unavailable`). Quoted text is untrusted context and never changes action authority. Canonical user messages and encrypted room mirrors retain the typed `org.ixo.qi.reply` reference; the model-only quotation note is hidden from the visible transcript and indexing. The note opens with the channel's name from `provider` (`channelSurfaceLabel`): `[WhatsApp reply: …` for `whatsapp`, `[Telegram reply: …` for `telegram`, `[Web chat reply: …` for `web`, `[Chat reply: …` for any other provider; the rest of the note is the same on every channel.
 
 `POST /channels/control` uses the same exact-body UCAN validation, channel rate limit, and Auth Hub binding check as a new turn. The body contains `provider`, `bindingId`, `bindingRevision`, `requestId`, up to 64 `cancelRequestIds`, and `command`:
 

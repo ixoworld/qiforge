@@ -35,7 +35,7 @@ const IDENTITY_VCT = 'https://credentials.ixo.world/types/IdentityLevel1';
 const manifest: PluginManifest = {
   title: 'Credentials and permissions',
   summary:
-    "Check the person's verifiable credentials (age, verified identity or any other credential type and issuer) through their IXO wallet, and ask their permission, on ONE card in the wallet, to check credentials and to use services for them (an identity check by Self). WhatsApp chat only for now.",
+    "Check the person's verifiable credentials (age, verified identity or any other credential type and issuer) through their IXO wallet, and ask their permission, on ONE card in the wallet, to check credentials and to use services for them (an identity check by Self). WhatsApp, Telegram or web chat only for now.",
   category: 'auth',
   visibility: 'on-demand',
   brief: 'check credentials; ask permission on one wallet card',
@@ -46,7 +46,7 @@ const manifest: PluginManifest = {
     'You sent a permission card or an identity-check link and need to know how it went.',
   ],
   whenNotToUse: [
-    "Outside our WhatsApp chat: every tool refuses there; tell the person it isn't available here yet.",
+    "Outside our WhatsApp, Telegram or web chat: every tool refuses there; tell the person it isn't available here yet.",
     'To read or store files, notes or anything the person tells you: that is not a credential.',
     'To ask for more fields than the task needs: ask for the fewest (for age, age_over_18, never the birth date).',
   ],
@@ -92,7 +92,7 @@ const manifest: PluginManifest = {
 
 const operatingGuide = `### Credentials and permissions
 
-- These tools work only in our WhatsApp chat. Anywhere else, say plainly that it is not available here yet.
+- These tools work only in our WhatsApp, Telegram or web chat. Anywhere else, say plainly that it is not available here yet.
 - Every link (a permission card, the wallet, an identity-check link) goes to the person as ONE link in a short message. Each tool's \`message\` is ready to send. Never paste ids, tokens, DIDs or codes.
 - Ask for everything you need in ONE card with \`credentials_request_permissions\` (1-5 items): the person taps Allow once for all of it, or Don't allow for none. Never send several cards for one task. Items are credential checks (who asks, the credential, its issuer, the fields you will see, how long) and service actions from the Hub's approved list (use only an entry id the operator's instructions name; self.identity-check is the only built-in one). Do not describe anything else.
 - Ask for the fewest fields the task needs. The issuers accepted per credential type are configured by the operator: leave \`issuers\` out, or narrow them; anything else is refused.
@@ -130,9 +130,9 @@ export interface CredentialsPluginOptions {
  * the Credentials worker (`credentials_check`); carry out an allowed action
  * at Self (`credentials_request_action`, `credentials_action_status`).
  *
- * WhatsApp only: every tool refuses unless the turn came from our WhatsApp
- * channel (`whatsAppBinding`). Off unless `CREDENTIALS_ENABLED=true`; the
- * tools also need the oracle's signing key and the Hub key
+ * WhatsApp, Telegram or web chat only: every tool refuses unless the turn came from
+ * one of those IXO Channels providers (`channelBinding`). Off unless
+ * `CREDENTIALS_ENABLED=true`; the tools also need the oracle's signing key and the Hub key
  * (`AUTH_HUB_CHANNEL_SERVICE_KEY`), and `credentials_check` needs
  * `ORACLE_PUBLIC_URL` (its response endpoint, `POST
  * /credentials/response/:token`, is this plugin's one route).

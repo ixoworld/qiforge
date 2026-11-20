@@ -17,6 +17,7 @@ import {
   CHANNEL_CHOICE_NOTE_KWARG,
   CHANNEL_PROVIDER_SENT_AT_KWARG,
   CHANNEL_REPLY_NOTE_KWARG,
+  CHANNEL_REQUEST_ID_KWARG,
   isDeliveryNoticeMessage,
 } from '../channels/replies';
 import { channelRoutingConfig } from '../channels/routing';
@@ -47,8 +48,11 @@ import {
 import type {
   ChannelControlInput,
   ChannelControlOutcome,
+  ChannelHistoryInput,
+  ChannelHistoryOutcome,
   ChannelTurnResponse,
 } from '../channels/contract';
+import { readChannelHistory } from '../channels/history';
 import { refreshActionProposal } from '../action-proposals/reconcile';
 import { assertActionProposalPolicy } from '../action-proposals/policy';
 import { TopicReadUnavailable } from '../action-proposals/topic-errors';
@@ -557,7 +561,10 @@ import {
 } from '../artifacts/store';
 import { buildCreateArtifactTool } from '../artifacts/tool';
 import { buildRichMessageTools } from '../delivery/rich-tools';
-import { resolveDeliveryProfile } from '../delivery/profile';
+import {
+  channelSurfaceLabel,
+  resolveDeliveryProfile,
+} from '../delivery/profile';
 import {
   draftReplyPlan,
   failedRunFiles,
@@ -3961,6 +3968,59 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         const refusal =
           error instanceof ChannelError ? error : classifyChannelFailure(error);
         if (refusal) return channelErrorOutcome(refusal);
+        throw error;
+      }
+    }
+
+    /**
+     * One page of a web binding's conversations (`POST /channels/history`),
+     * read from this object's SQLite only: the binding's own sessions, their
+     * messages and the Reply Plans of runs still kept. The shell verified
+     * the history grant and checked the binding with the Auth Hub. Answers
+     * the page as JSON text (a plain copy across RPC).
+     */
+    async channelHistory(
+      identity: TurnIdentity,
+      input: ChannelHistoryInput,
+    ): Promise<ChannelHistoryOutcome> {
+      try {
+        if (
+          identity.channel?.bindingId !== input.bindingId ||
+          identity.channel.bindingRevision !== input.bindingRevision ||
+          identity.channel.provider !== input.provider
+        )
+          throw new ChannelError(
+            403,
+            'Channel identity does not match this request',
+            'identity_mismatch',
+          );
+        await this.readyChannel(identity);
+        const turns = this.channelTurns!;
+        const page = await readChannelHistory(input, {
+          rows: this.saver!,
+          ownedSessions: () => turns.ownedSessions(input),
+          replies: (sessionId, messageIds) =>
+            turns.historyReplies(input.bindingId, sessionId, messageIds),
+          runs: (sessionId, requestIds) =>
+            turns.historyRuns(input.bindingId, sessionId, requestIds),
+        });
+        return {
+          ok: true,
+          json: JSON.stringify(page),
+          items: page.items.length,
+          plans: page.items.filter((item) => 'plan' in item && item.plan)
+            .length,
+        };
+      } catch (error) {
+        const refusal =
+          error instanceof ChannelError ? error : classifyChannelFailure(error);
+        if (refusal)
+          return {
+            ok: false,
+            status: refusal.status,
+            code: refusal.code,
+            message: refusal.message,
+          };
         throw error;
       }
     }
@@ -8435,6 +8495,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               ...(req.channel.replyTo
                 ? { 'org.ixo.qi.reply': req.channel.replyTo }
                 : {}),
+              [CHANNEL_REQUEST_ID_KWARG]: req.requestId,
             }
           : {}),
         ...(req.client === 'matrix'
@@ -9691,7 +9752,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         // Buttons, lists, link buttons and cards: only on a turn whose
         // gateway said what it can show (`render`).
         ...(delivery.kind === 'chat' && delivery.render
-          ? buildRichMessageTools(delivery.render)
+          ? buildRichMessageTools(delivery.render, delivery.surface)
           : []),
       ];
 
@@ -9942,7 +10003,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const tapped = choiceNote
         ? withTurnTimeNote(noticed, choiceNote)
         : noticed;
-      const replyNote = channelReplyNote(req.channel?.replyContext);
+      const replyNote = channelReplyNote(
+        req.channel?.replyContext,
+        channelSurfaceLabel(req.channel?.provider),
+      );
       const referenced = replyNote
         ? withTurnTimeNote(tapped, replyNote)
         : tapped;
@@ -9960,6 +10024,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           ...(req.channel?.providerSentAt !== undefined
             ? { [CHANNEL_PROVIDER_SENT_AT_KWARG]: req.channel.providerSentAt }
             : {}),
+          ...(req.channel ? { [CHANNEL_REQUEST_ID_KWARG]: req.requestId } : {}),
           ...(noticeNote
             ? { [CHANNEL_DELIVERY_NOTICE_KWARG]: noticeNote }
             : {}),

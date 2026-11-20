@@ -23,18 +23,33 @@ import {
 import { ActionProposalConflict } from '../action-proposals/store';
 import {
   authenticateChannel,
+  authenticateChannelHistory,
+  assertActiveChannelBinding,
   assertActiveChannelBindingCached,
   channelAuthConfig,
   parseChannelServiceDids,
 } from '../channels/auth';
 import {
+  CHANNEL_HISTORY_BODY_MAX_BYTES,
+  CHANNEL_HISTORY_LIMIT_DEFAULT,
   ChannelError,
   channelErrorBody,
+  ChannelHistoryBody,
   ChannelTurnBody,
   ChannelControlBody,
   channelRequestHash,
   readChannelBody,
 } from '../channels/contract';
+import { assertChannelControlAllowed } from '../channels/turns';
+import {
+  channelRouteName,
+  finishChannelOp,
+  noteChannelOp,
+  startChannelOp,
+  thrownClass,
+  timedObjectCall,
+  type ChannelRequestOp,
+} from '../channels/ops-analytics';
 /* eslint-disable no-console -- console IS the logger on Workers (Logs/observability). */
 /**
  * The HTTP shell — a Hono app that speaks the same wire protocol as the Node
@@ -161,7 +176,7 @@ export interface ShellOptions {
   feedback?: FeedbackShellOptions | null;
 }
 
-type Variables = { auth: AuthResult };
+type Variables = { auth: AuthResult; channelOp?: ChannelRequestOp };
 
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -264,6 +279,7 @@ export function rateLimitKey(
     | 'poll'
     | 'channel'
     | 'channel-control'
+    | 'channel-history'
     | 'action'
     | 'artifact'
     | 'socket'
@@ -504,7 +520,21 @@ export function createShell(
     );
   });
 
+  // One Analytics Engine point per channel request (`OPS_ANALYTICS`, when
+  // bound) and one `[channel-request]` log line per refusal or failure; the
+  // routes add the provider, the refusal code and their timings
+  // (src/channels/ops-analytics.ts).
+  app.use('/channels/*', async (c, next) => {
+    const route = channelRouteName(c.req.method, c.req.path);
+    if (!route) return next();
+    const op = startChannelOp(route);
+    c.set('channelOp', op);
+    await next();
+    finishChannelOp(op, c.res.status, c.env.OPS_ANALYTICS);
+  });
+
   app.post('/channels/control', async (c) => {
+    const op = c.get('channelOp');
     try {
       if (parseChannelServiceDids(c.env.CHANNEL_SERVICE_DID).length === 0)
         throw new ChannelError(
@@ -526,6 +556,11 @@ export function createShell(
           'Invalid channel control',
           'invalid_request',
         );
+      noteChannelOp(op, { provider: parsed.data.provider });
+      // The web chat keeps one conversation, and its earlier messages are
+      // read only through `/channels/history` under a grant the person's
+      // own browser proved: no control reaches a web binding's sessions.
+      assertChannelControlAllowed(parsed.data.provider);
       const identity = await authenticateChannel(
         c.req.raw.headers,
         raw,
@@ -542,17 +577,24 @@ export function createShell(
       )
         throw new ChannelError(429, 'Too many requests', 'rate_limited');
       await assertActiveChannelBindingCached(identity, c.env);
-      const outcome = await userStub(c.env, identity.userDid).channelControl(
-        identity,
-        parsed.data,
-        await channelRequestHash(raw),
+      const requestHash = await channelRequestHash(raw);
+      const outcome = await timedObjectCall(op, async () =>
+        userStub(c.env, identity.userDid).channelControl(
+          identity,
+          parsed.data,
+          requestHash,
+        ),
       );
+      if (!outcome.ok) noteChannelOp(op, { code: outcome.code });
       return outcome.ok
         ? c.json(outcome.result)
         : c.json(channelErrorBody(outcome), outcome.status);
     } catch (error) {
-      if (error instanceof ChannelError)
+      if (error instanceof ChannelError) {
+        noteChannelOp(op, { code: error.code });
         return c.json(channelErrorBody(error), error.status);
+      }
+      noteChannelOp(op, { thrown: thrownClass(error) });
       console.error(
         `[channels] control failed: ${describeChannelFailure(error)}`,
       );
@@ -614,6 +656,7 @@ export function createShell(
   });
 
   app.post('/channels/turn', async (c) => {
+    const op = c.get('channelOp');
     try {
       if (parseChannelServiceDids(c.env.CHANNEL_SERVICE_DID).length === 0)
         throw new ChannelError(
@@ -631,6 +674,7 @@ export function createShell(
       const parsed = ChannelTurnBody.safeParse(json);
       if (!parsed.success)
         throw new ChannelError(400, 'Invalid channel turn', 'invalid_request');
+      noteChannelOp(op, { provider: parsed.data.provider });
       const identity = await authenticateChannel(
         c.req.raw.headers,
         raw,
@@ -656,12 +700,20 @@ export function createShell(
       // A poll of a run that exists is answered by the (warm) object with no
       // Auth Hub call; anything else is checked with the Auth Hub (an
       // "active" verdict is cached per isolate for 60 s) and admitted.
-      let outcome = await stub.channelPoll(identity, parsed.data, requestHash);
+      let outcome = await timedObjectCall(op, async () =>
+        stub.channelPoll(identity, parsed.data, requestHash),
+      );
+      noteChannelOp(op, { phase: outcome ? 'poll' : 'admit' });
       if (!outcome) {
         await assertActiveChannelBindingCached(identity, c.env);
-        outcome = await stub.channelTurn(identity, parsed.data, requestHash);
+        outcome = await timedObjectCall(op, async () =>
+          stub.channelTurn(identity, parsed.data, requestHash),
+        );
       }
-      if (!outcome.ok) return c.json(channelErrorBody(outcome), outcome.status);
+      if (!outcome.ok) {
+        noteChannelOp(op, { code: outcome.code });
+        return c.json(channelErrorBody(outcome), outcome.status);
+      }
       const result = outcome.result;
       if (result.actionOutcomes?.length || result.hubActionOutcomes?.length)
         await assertActiveChannelBindingCached(identity, c.env);
@@ -670,8 +722,11 @@ export function createShell(
         ['queued', 'running', 'recovering'].includes(result.status) ? 202 : 200,
       );
     } catch (error) {
-      if (error instanceof ChannelError)
+      if (error instanceof ChannelError) {
+        noteChannelOp(op, { code: error.code });
         return c.json(channelErrorBody(error), error.status);
+      }
+      noteChannelOp(op, { thrown: thrownClass(error) });
       // The cause only, never the request or its tokens: a 503 the gateway
       // retries must leave a trace of why it happened.
       console.error(
@@ -681,6 +736,91 @@ export function createShell(
         {
           code: 'unavailable',
           message: 'Channel turn is temporarily unavailable',
+        },
+        503,
+      );
+    }
+  });
+
+  // A web chat binding's conversations, page by page. Verified exactly like
+  // a turn, with its own capability and the exact query the person's device
+  // signed (`authenticateChannelHistory`); the binding is checked with the
+  // Auth Hub on every read (never cached: a read is rare, and a signed-out
+  // or disconnected browser must stop reading at once). No replay store:
+  // the invocation lives 60 s, names this exact body, and the Hub refuses a
+  // device signature's nonce twice. Limited per binding.
+  app.post('/channels/history', async (c) => {
+    const op = c.get('channelOp');
+    try {
+      if (parseChannelServiceDids(c.env.CHANNEL_SERVICE_DID).length === 0)
+        throw new ChannelError(
+          503,
+          'Channels are not configured',
+          'not_configured',
+        );
+      const raw = await readChannelBody(
+        c.req.raw,
+        CHANNEL_HISTORY_BODY_MAX_BYTES,
+      );
+      let json: unknown;
+      try {
+        json = JSON.parse(raw);
+      } catch {
+        throw new ChannelError(400, 'Invalid JSON request', 'invalid_request');
+      }
+      const parsed = ChannelHistoryBody.safeParse(json);
+      if (!parsed.success)
+        throw new ChannelError(
+          400,
+          'Invalid channel history request',
+          'invalid_request',
+        );
+      noteChannelOp(op, {
+        provider: parsed.data.provider,
+        limit: parsed.data.query.limit ?? CHANNEL_HISTORY_LIMIT_DEFAULT,
+        requestId: parsed.data.requestId,
+      });
+      const identity = await authenticateChannelHistory(
+        c.req.raw.headers,
+        raw,
+        parsed.data,
+        channelAuthConfig(c.env, executionWaitUntil(c)),
+      );
+      if (
+        c.env.RATE_LIMIT &&
+        !(
+          await c.env.RATE_LIMIT.limit({
+            key: rateLimitKey(c.env, 'channel-history', parsed.data.bindingId),
+          })
+        ).success
+      )
+        throw new ChannelError(429, 'Too many requests', 'rate_limited');
+      await assertActiveChannelBinding(identity, c.env);
+      const outcome = await timedObjectCall(op, async () =>
+        userStub(c.env, identity.userDid).channelHistory(identity, parsed.data),
+      );
+      if (!outcome.ok) {
+        noteChannelOp(op, { code: outcome.code });
+        return c.json(channelErrorBody(outcome), outcome.status);
+      }
+      noteChannelOp(op, { items: outcome.items, plans: outcome.plans });
+      return c.body(outcome.json, 200, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+      });
+    } catch (error) {
+      if (error instanceof ChannelError) {
+        noteChannelOp(op, { code: error.code });
+        return c.json(channelErrorBody(error), error.status);
+      }
+      noteChannelOp(op, { thrown: thrownClass(error) });
+      console.error(
+        `[channels] history failed unexpectedly: ${describeChannelFailure(error)}`,
+      );
+      return c.json(
+        {
+          code: 'unavailable',
+          message: 'Channel history is temporarily unavailable',
         },
         503,
       );

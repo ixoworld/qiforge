@@ -2,6 +2,7 @@ import { NetworkSchema } from '@ixo/ixo-transaction';
 import type { Model } from 'survey-core';
 import { z } from 'zod';
 import { ixoAddressOf } from '../../core/user-identity';
+import { channelSurfaceLabel } from '../../delivery/profile';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin';
 import type {
   MergedConfig,
@@ -419,13 +420,26 @@ const HOW: Partial<Record<FormQuestion['input'], string>> = {
   email: 'email (value)',
   phone: 'phone (value)',
   url: 'link (value)',
-  location: 'WhatsApp location pin',
 };
+
+/**
+ * The chat a location pin is shared in, as the model is told: Telegram on a
+ * Telegram turn (its gateway writes a pin as the same `📍 <lat>, <long>`
+ * text), the web chat on a web turn, WhatsApp everywhere else, as before.
+ */
+function pinChat(ctx: Pick<RuntimeContext, 'session'>): string {
+  const provider = ctx.session.channel?.provider;
+  return provider === 'telegram' || provider === 'web'
+    ? channelSurfaceLabel(provider)
+    : 'WhatsApp';
+}
 
 function howToAnswer(
   view: FormQuestion,
   job: { entityDid: string; collectionId: string },
+  chat: string,
 ): string {
+  if (view.input === 'location') return `${chat} location pin`;
   if (view.input === 'rating')
     return `number ${view.rateMin}–${view.rateMax} (value)`;
   if (view.input === 'file')
@@ -437,6 +451,7 @@ function howToAnswer(
 function questionView(
   view: FormQuestion,
   job: { entityDid: string; collectionId: string },
+  chat: string,
 ) {
   const options = view.options ?? [];
   const alone = options.filter((option) => option.exclusive);
@@ -444,7 +459,7 @@ function questionView(
     field: view.path,
     ask: view.title,
     ...(view.description ? { about: view.description } : {}),
-    answer: howToAnswer(view, job),
+    answer: howToAnswer(view, job, chat),
     ...(options.length
       ? { options: options.map((option) => option.text) }
       : {}),
@@ -460,13 +475,13 @@ function questionView(
   };
 }
 
-function stepView(model: Model, step: FormStep, draft: Draft) {
+function stepView(model: Model, step: FormStep, draft: Draft, chat: string) {
   const progress = progressOf(model, draft.skipped);
   if (step.kind === 'question')
     return {
       status: step.question.input === 'web-only' ? 'web_only' : 'in_progress',
       progress,
-      next: questionView(step.question, draft),
+      next: questionView(step.question, draft, chat),
     };
   if (step.kind === 'more')
     return {
@@ -1252,6 +1267,7 @@ export class YomaPlugin extends OraclePlugin {
     kv: Kv,
     input: FormInput,
     template: unknown,
+    chat: string,
     apply: (model: Model, current: Draft) => Applied,
   ): Promise<Record<string, unknown>> {
     let soft: Record<string, unknown> | undefined;
@@ -1307,7 +1323,7 @@ export class YomaPlugin extends OraclePlugin {
     const now = written.draft ?? after.draft;
     return {
       ok: true,
-      ...stepView(model, nextStep(model, now), now),
+      ...stepView(model, nextStep(model, now), now, chat),
       ...extra,
     };
   }
@@ -1352,54 +1368,68 @@ export class YomaPlugin extends OraclePlugin {
       case 'answer':
         return this.answer(input, ctx, kv, call, draft, model, template.value);
       case 'skip':
-        return this.applyStored(kv, input, template.value, (m, current) => {
-          const view = viewAt(m, input.field!);
-          if (!view)
+        return this.applyStored(
+          kv,
+          input,
+          template.value,
+          pinChat(ctx),
+          (m, current) => {
+            const view = viewAt(m, input.field!);
+            if (!view)
+              return {
+                result: invalid(
+                  `There is no question "${input.field}" right now.`,
+                ),
+              };
+            if (view.required)
+              return {
+                result: {
+                  ok: true,
+                  status: 'required',
+                  say: 'This one needs an answer.',
+                },
+              };
             return {
-              result: invalid(
-                `There is no question "${input.field}" right now.`,
-              ),
+              next: {
+                ...current,
+                skipped: [...new Set([...current.skipped, view.path])],
+                updatedAt: new Date().toISOString(),
+              },
+              extra: { skipped: view.path },
             };
-          if (view.required)
+          },
+        );
+      case 'section':
+        return this.applyStored(
+          kv,
+          input,
+          template.value,
+          pinChat(ctx),
+          (m, current) => {
+            let data = current.data;
+            if (input.addAnother) {
+              const added = addSectionItem(m, input.section!);
+              if (!added.ok) return { result: invalid(added.detail) };
+              data = added.data;
+            } else {
+              const below = sectionBelowMinimum(m, input.section!);
+              if (below)
+                return {
+                  result: { ok: true, status: 'needs_more', say: below },
+                };
+            }
             return {
-              result: {
-                ok: true,
-                status: 'required',
-                say: 'This one needs an answer.',
+              next: {
+                ...current,
+                data,
+                closedSections: input.addAnother
+                  ? current.closedSections.filter((s) => s !== input.section)
+                  : [...new Set([...current.closedSections, input.section!])],
+                updatedAt: new Date().toISOString(),
               },
             };
-          return {
-            next: {
-              ...current,
-              skipped: [...new Set([...current.skipped, view.path])],
-              updatedAt: new Date().toISOString(),
-            },
-            extra: { skipped: view.path },
-          };
-        });
-      case 'section':
-        return this.applyStored(kv, input, template.value, (m, current) => {
-          let data = current.data;
-          if (input.addAnother) {
-            const added = addSectionItem(m, input.section!);
-            if (!added.ok) return { result: invalid(added.detail) };
-            data = added.data;
-          } else {
-            const below = sectionBelowMinimum(m, input.section!);
-            if (below)
-              return { result: { ok: true, status: 'needs_more', say: below } };
-          }
-          return {
-            next: {
-              ...current,
-              data,
-              closedSections: input.addAnother
-                ? current.closedSections.filter((s) => s !== input.section)
-                : [...new Set([...current.closedSections, input.section!])],
-              updatedAt: new Date().toISOString(),
-            },
-          };
-        });
+          },
+        );
       case 'review':
         return this.review(input, ctx, kv, draft, model);
       case 'submit':
@@ -1515,6 +1545,7 @@ export class YomaPlugin extends OraclePlugin {
       return invalid(`There is no question "${input.field}" right now.`);
     if (view.input === 'web-only')
       return { ok: true, status: 'web_only', link: jamboLink(draft) };
+    const chat = pinChat(ctx);
     const at = new Date().toISOString();
     /** Sets `value` on the stored draft's model, refusing what the form refuses. */
     const save = (
@@ -1525,7 +1556,7 @@ export class YomaPlugin extends OraclePlugin {
         | Applied
         | { value: unknown; otherText?: string; evidence?: Evidence[] },
     ) =>
-      this.applyStored(kv, input, template, (m, current) => {
+      this.applyStored(kv, input, template, chat, (m, current) => {
         const now = viewAt(m, view.path);
         if (!now)
           return {
@@ -1540,7 +1571,7 @@ export class YomaPlugin extends OraclePlugin {
               ok: true,
               status: 'invalid',
               say: result.errors.join(' '),
-              question: questionView(now, current),
+              question: questionView(now, current, chat),
             },
           };
         const evidence = built.evidence ?? [];
@@ -1579,7 +1610,7 @@ export class YomaPlugin extends OraclePlugin {
           status: 'unclear',
           say: judgement.reason,
           ...(judgement.candidates ? { candidates: judgement.candidates } : {}),
-          question: questionView(view, draft),
+          question: questionView(view, draft, chat),
         };
       const value = choiceValue(view, judgement.picked, judgement.otherText);
       return save(() => ({
@@ -1597,7 +1628,7 @@ export class YomaPlugin extends OraclePlugin {
         return {
           ok: true,
           status: 'invalid',
-          say: 'This needs a location pin shared in WhatsApp (📎 → Location).',
+          say: `This needs a location pin shared in ${chat} (📎 → Location).`,
         };
       return save((m) => {
         const cell = gridCell(m, view.path, pin);
@@ -1676,7 +1707,7 @@ export class YomaPlugin extends OraclePlugin {
         ok: true,
         status: 'invalid',
         say: typed.say,
-        question: questionView(view, draft),
+        question: questionView(view, draft, chat),
       };
     return save(() => ({ value: typed.value }));
   }
@@ -1765,7 +1796,7 @@ export class YomaPlugin extends OraclePlugin {
       ...(draft.cardFailure
         ? { lastCard: lastCardView(draft.cardFailure) }
         : {}),
-      ...stepView(model, nextStep(model, draft), draft),
+      ...stepView(model, nextStep(model, draft), draft, pinChat(ctx)),
     };
   }
 
@@ -1973,7 +2004,8 @@ export class YomaPlugin extends OraclePlugin {
     }
     if (input.form === 'claim') {
       const lapsed = lapsedEvidence(liveEvidence(model, draft), Date.now());
-      if (lapsed.length) return this.dropLapsed(kv, input, template, lapsed);
+      if (lapsed.length)
+        return this.dropLapsed(kv, input, template, pinChat(ctx), lapsed);
     }
     const instant = this.options.instantPermission;
     if (input.form === 'application' && instant?.allows(input.collectionId))
@@ -2098,11 +2130,12 @@ export class YomaPlugin extends OraclePlugin {
     kv: Kv,
     input: FormInput,
     template: unknown,
+    chat: string,
     lapsed: Evidence[],
   ): Promise<Record<string, unknown>> {
     const gone = new Set(lapsed.map((item) => item.sha256));
     const paths = [...new Set(lapsed.map((item) => item.path))];
-    return this.applyStored(kv, input, template, (m, current) => {
+    return this.applyStored(kv, input, template, chat, (m, current) => {
       for (const path of paths) {
         const question = questionAt(m, path);
         const value: unknown = question?.value;

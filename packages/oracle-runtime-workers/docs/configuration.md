@@ -247,7 +247,7 @@ chain for `sign_ixo_transaction` and for the POD Creator's
 
 ### Channels ingress
 
-`POST /channels/turn` lets IXO Channels (WhatsApp now) submit a turn to the
+`POST /channels/turn` lets IXO Channels (WhatsApp, Telegram) submit a turn to the
 user's oracle session; the authorization model, retries and replies are in
 [channels](channels.md). Set these on the script that serves HTTP (the
 oracle script in a gateway split).
@@ -259,6 +259,18 @@ oracle script in a gateway split).
 | `AUTH_HUB`                     | one of these two | **Binding**, not a var: a Cloudflare service binding to Auth Hub (`"services": [{ "binding": "AUTH_HUB", "service": "<auth hub worker>" }]`). Used in preference to `AUTH_HUB_URL` when both are set.                                                                                              |
 | `AUTH_HUB_URL`                 | one of these two | Auth Hub's origin when there is no service binding. Must be `https`.                                                                                                                                                                                                                               |
 | `HUB_ACTIONS_ENABLED`          | no               | Set to `true` on the oracle script to enable Auth Hub action preparation (any-token bank sends included), status recovery, and the signed outcome callback route. Needs `AUTH_HUB_URL` and `AUTH_HUB_CHANNEL_SERVICE_KEY` as well (the `AUTH_HUB` binding alone is not enough). Unset is disabled. |
+
+An oracle reached on two channels lists both gateway DIDs, for example
+WhatsApp and Telegram on devnet:
+
+```jsonc
+"vars": {
+  "CHANNEL_SERVICE_DID": "did:web:channels-test.dev.ixo.earth,did:web:channels-test-telegram.dev.ixo.earth"
+}
+```
+
+The one `AUTH_HUB_CHANNEL_SERVICE_KEY` secret (the oracle account's Hub key)
+serves every channel of the oracle; there is no key per channel.
 
 Auth Hub signs its outcome callbacks (`POST /api/internal/actions/outcomes`)
 with the `#key-0` Ed25519 key of its did:web document; there is no shared
@@ -441,7 +453,7 @@ the class.
 The bundled credentials plugin
 ([credentials](../src/plugins/credentials/README.md)): credential checks
 as a verifier at the Credentials worker and the Auth Hub's two permission
-cards, WhatsApp only. Off unless `CREDENTIALS_ENABLED=true` and
+cards, in our WhatsApp and Telegram chats only. Off unless `CREDENTIALS_ENABLED=true` and
 `AUTH_HUB_CHANNEL_SERVICE_KEY` (secret, the oracle account's Hub key) are
 set. `AUTH_HUB_URL`, `CREDENTIALS_URL`, `SELF_API_URL` and `SELF_WEB_URL`
 default per `NETWORK`; `CREDENTIALS_TRUSTED_ISSUERS` (JSON, issuers per
@@ -520,6 +532,7 @@ per isolate. A refusal for size reports the file's size and the real limit.
 | `TOPIC_DELIVERABLES_ENABLED`  | `'true'` enables the owner-only Topic deliverable routes (`/topic-deliverables/*`, see [architecture](architecture.md#topic-deliverable-api)). Off by default: the routes and the object's RPC answer `404`. Read the known limits there before turning it on.                                                                                                                                                                                                               |
 | `LOG_LEVEL`                   | `debug` / `info` / `warn` / `error` (default `info`); also the SDK's log level in the gateway.                                                                                                                                                                                                                                                                                                                                                                               |
 | `BOOT_LINT_VERBOSE`           | `'true'` logs every plugin-manifest soft warning (`[boot] [plugin] field: …`) and every example that names a tool not registered at boot, one line each. Unset: one `[boot] manifest lint: N soft warning(s) (plugin=count, …)` line and one `[boot] manifest examples: …` line per core build (once per isolate).                                                                                                                                                           |
+| `OPS_ANALYTICS`               | Optional **binding**, a Workers Analytics Engine dataset (`"analytics_engine_datasets": [{ "binding": "OPS_ANALYTICS", "dataset": "…" }]`): one data point per channel request, index `oracle-runtime` ([operations](operations.md#channel-request-metrics)). Unbound: nothing is written.                                                                                                                                                                                   |
 | `CORS_ORIGIN`                 | Default `*`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
 ### Built-in limits

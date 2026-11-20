@@ -2678,6 +2678,136 @@ Do not keep `wrangler tail` running on a gateway: every attach, detach and
 reconnect is a reset about five minutes later (deferred code updates). Read
 the stored Workers Logs instead.
 
+## Channel request metrics
+
+Every request to `POST /channels/turn`, `/channels/control` and
+`/channels/history` writes one Workers Analytics Engine data point when the
+oracle binds the optional `OPS_ANALYTICS` dataset
+([configuration](configuration.md#ops-and-misc)), and every request the route
+refused or failed (status 400 or more) logs one line, bound or not
+(`src/channels/ops-analytics.ts`, the `/channels/*` middleware in
+`src/shell/app.ts`).
+
+- **Layout:** the IXO ops datasets' layout (`ixo_yo_ops`: Yo Rewards
+  `yo-rewards`, Yo Referrals `yo-referrals`, the Yo plugins `yo-agent`), under
+  the runtime's own index `oracle-runtime`. Bind it to the dataset the oracle
+  already writes, or to one of its own.
+- **Never in the way:** `writeDataPoint` is not awaited and is in a `try`;
+  the object calls are timed in a thunk (`timedObjectCall(op, async () =>
+stub.channelTurn(…))`), never through a Proxy around the stub.
+- **Nothing personal:** fixed names and codes only. Never a DID, binding id,
+  device id, session id, message text, cursor, URL or error message. A code
+  that does not look like one (`^[A-Za-z][A-Za-z0-9_.:-]{0,47}$`) is written
+  empty; a provider id other than `web`, `whatsapp` and `telegram` is
+  `other`. The log line carries a history read's request id only when it is
+  the gateway's `web-history:<uuid>`.
+- **Limits** ([Analytics Engine limits](https://developers.cloudflare.com/analytics/analytics-engine/limits/)):
+  one point per request (at most 250 per invocation), 9 short blobs, 6
+  doubles, one index; kept three months.
+
+| Column    | Meaning                                                                                                                                                                                 |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `index1`  | `oracle-runtime`                                                                                                                                                                        |
+| `blob1`   | Kind: `http`                                                                                                                                                                            |
+| `blob2`   | Route: `POST /channels/turn`, `POST /channels/control`, `POST /channels/history`                                                                                                        |
+| `blob3`   | Outcome: `ok`, `client_error` (4xx), `server_error` (5xx), `exception` (an error the route did not expect; it answered 503 `unavailable`)                                               |
+| `blob4`   | HTTP status                                                                                                                                                                             |
+| `blob5`   | The refusal code (`ChannelErrorCode`: `session_conflict`, `control_not_supported`, `invalid_cursor`, `binding_inactive`, `rate_limited`, …) or, for `exception`, the error's class name |
+| `blob6`   | Empty (campaign, Yo Rewards only)                                                                                                                                                       |
+| `blob7`   | Caller: `gateway`                                                                                                                                                                       |
+| `blob8`   | Channel: `web`, `whatsapp`, `telegram`, `other`; empty when the body did not parse                                                                                                      |
+| `blob9`   | Turn phase (`/channels/turn` only): `poll` (a warm object answered a poll of an existing run), `admit` (checked with the Auth Hub and admitted); else empty                             |
+| `double1` | Duration in milliseconds (the Workers clock moves on I/O only)                                                                                                                          |
+| `double2` | 1                                                                                                                                                                                       |
+| `double3` | History: items on the page (messages and dividers)                                                                                                                                      |
+| `double4` | History: items carrying a Reply Plan                                                                                                                                                    |
+| `double5` | History: turns asked for (`limit`, default 20)                                                                                                                                          |
+| `double6` | Milliseconds waiting on the person's object (its RPC calls); the rest of `double1` is the invocation check, the Auth Hub and the limiter                                                |
+
+The log line, `warn` for 4xx and `error` for 5xx (an unexpected failure also
+keeps its `[channels] … failed unexpectedly: <cause>` line):
+
+```
+[channel-request] {"event":"channels.history","status":400,"outcome":"client_error","code":"invalid_cursor","provider":"web","ms":41,"objectMs":12,"limit":20,"requestId":"web-history:5b0c4f2e-…"}
+```
+
+Events: `channels.turn`, `channels.control`, `channels.history`. Search Workers
+Logs for `[channel-request]` and the event. A web control is always refused
+(`control_not_supported`, 403) and a turn naming a session its binding does
+not hold is `session_conflict` (409).
+
+Alerts: the runtime has no alert for these routes. The channel gateway alerts
+when the oracle is unreachable or answers 5xx, for turns and history reads;
+the runtime's only Slack alert (`SLACK_ALERT_WEBHOOK_URL`) is the storage
+watermark.
+
+Queries ([SQL API](https://developers.cloudflare.com/analytics/analytics-engine/sql-api/);
+counts are `SUM(_sample_interval)`, percentiles
+`quantileExactWeighted(q)(doubleN, _sample_interval)`; replace `ixo_yo_ops`
+with the dataset the oracle binds):
+
+History latency and page size, per day:
+
+```sql
+SELECT toStartOfDay(timestamp) AS day, SUM(_sample_interval) AS reads,
+  quantileExactWeighted(0.5)(double1, _sample_interval) AS p50_ms,
+  quantileExactWeighted(0.95)(double1, _sample_interval) AS p95_ms,
+  quantileExactWeighted(0.95)(double6, _sample_interval) AS p95_object_ms,
+  round(SUM(double3 * _sample_interval) / SUM(_sample_interval), 1) AS mean_items,
+  round(SUM(double4 * _sample_interval) / SUM(_sample_interval), 1) AS mean_plans
+FROM ixo_yo_ops
+WHERE index1 = 'oracle-runtime' AND blob2 = 'POST /channels/history' AND blob3 = 'ok'
+  AND timestamp > NOW() - INTERVAL '7' DAY
+GROUP BY day
+ORDER BY day DESC
+```
+
+History failures by code:
+
+```sql
+SELECT blob3 AS outcome, blob4 AS status, blob5 AS code,
+  SUM(_sample_interval) AS reads, toUnixTimestamp(max(timestamp)) AS last_seen
+FROM ixo_yo_ops
+WHERE index1 = 'oracle-runtime' AND blob2 = 'POST /channels/history' AND blob3 != 'ok'
+  AND timestamp > NOW() - INTERVAL '7' DAY
+GROUP BY outcome, status, code
+ORDER BY reads DESC
+```
+
+Refusals by kind and channel (web controls, session conflicts, and every
+other code):
+
+```sql
+SELECT blob2 AS route, blob8 AS channel, blob5 AS code, blob4 AS status,
+  SUM(_sample_interval) AS requests
+FROM ixo_yo_ops
+WHERE index1 = 'oracle-runtime' AND blob3 != 'ok' AND timestamp > NOW() - INTERVAL '1' DAY
+GROUP BY route, channel, code, status
+ORDER BY requests DESC
+```
+
+Requests, failures and latency per route and channel:
+
+```sql
+SELECT blob2 AS route, blob8 AS channel, blob9 AS phase,
+  SUM(_sample_interval) AS requests,
+  SUM(IF(blob3 = 'client_error', _sample_interval, 0)) AS refused,
+  SUM(IF(blob3 IN ('server_error', 'exception'), _sample_interval, 0)) AS failed,
+  quantileExactWeighted(0.5)(double1, _sample_interval) AS p50_ms,
+  quantileExactWeighted(0.95)(double1, _sample_interval) AS p95_ms
+FROM ixo_yo_ops
+WHERE index1 = 'oracle-runtime' AND timestamp > NOW() - INTERVAL '1' DAY
+GROUP BY route, channel, phase
+ORDER BY requests DESC
+```
+
+The rich-message tools log, for each set that did not go out as asked, counts
+and the rule only: `[delivery] offer_choices as text: 4 options, longest title
+31, descriptions no` and `[delivery] send_cards as text (3 cards, whatsapp):
+card 2: title and text together must stay within 157 characters in a
+carousel`. A quoted link label is cut to `"…"`; never a title, a text or a
+link.
+
 ## Write claims and turn usage
 
 `turn_write_claims` (in the user's run ledger, next to `turn_runs` and

@@ -166,6 +166,60 @@ const CHANNEL_TITLE_LIMIT = 80;
 const CHANNEL_TOPIC_LOOKBACK = 5;
 /** Ids per statement: a Durable Object binds at most 100 parameters. */
 const CHANNEL_IDS_PER_STATEMENT = 50;
+/** The most session ids a history read collects for one binding. */
+const CHANNEL_HISTORY_SESSION_SCAN = 1_000;
+/** The most sessions (the newest) a history read pages through. */
+export const CHANNEL_HISTORY_MAX_SESSIONS = 200;
+
+/**
+ * Whether a binding keeps its sessions across its consent revisions. The
+ * web chat does: signing out, disconnecting at the Auth Hub and signing in
+ * again re-activates the SAME binding at a new revision, and the person
+ * continues the same conversation, whose earlier messages its browser reads
+ * through `POST /channels/history` only. Every other provider (WhatsApp,
+ * Telegram) scopes `/resume`, `topics` and their lines to the current
+ * revision: what was said under an earlier consent is not offered again.
+ */
+export function sessionsSpanRevisions(provider: string): boolean {
+  return provider === 'web';
+}
+
+/**
+ * Refuses every session control (`stop`, `status`, `new`, `resume`,
+ * `topics`, `rename`) for a web chat binding: it has one conversation, and
+ * its earlier sessions are reachable only through `POST /channels/history`,
+ * under a grant the person's own browser proved. A control would let a
+ * gateway holding only a turn grant list or reopen them.
+ */
+export function assertChannelControlAllowed(provider: string): void {
+  if (sessionsSpanRevisions(provider))
+    throw new ChannelError(
+      403,
+      'The web chat keeps one conversation; session controls are not available',
+      'control_not_supported',
+    );
+}
+
+/** A run of this binding found by its request id, for a history page. */
+export interface ChannelHistoryRun {
+  runId: string;
+  requestId: string;
+  /** The run's final message id; null when it wrote none (a busy line, a failed run's files). */
+  messageId: string | null;
+  /** When the run last changed (ISO). */
+  at: string;
+  /** The Reply Plan the gateway was given, while the run is kept. */
+  plan: ReplyPlan | null;
+}
+
+/** What a history page needs of one agent message's run. */
+export interface ChannelHistoryReply {
+  runId: string;
+  /** The gateway's request id of the turn that produced the message. */
+  requestId: string;
+  /** The Reply Plan the gateway was given, while the run is kept. */
+  plan: ReplyPlan | null;
+}
 
 /**
  * The text the gateway sends for a file with no caption: `[photo]`,
@@ -332,6 +386,7 @@ interface PreparedChannelTurn {
 export class ChannelTurns {
   private admission: Promise<unknown> = Promise.resolve();
   private setupPromise: Promise<void> | undefined;
+  private runMessagesIndexed: Promise<void> | undefined;
   /**
    * The session being opened for a binding's first message: concurrent
    * first messages of one binding share it instead of each sending a
@@ -510,6 +565,7 @@ export class ChannelTurns {
     input: ChannelControlInput,
     requestHash: string,
   ): Promise<ChannelControlResult> {
+    assertChannelControlAllowed(input.provider);
     if (
       !identity.channel ||
       identity.channel.bindingId !== input.bindingId ||
@@ -916,6 +972,206 @@ export class ChannelTurns {
       this.host.requestOf(run).identity.channel?.bindingRevision ===
         input.bindingRevision
     );
+  }
+
+  /**
+   * Whether the binding ever held `sessionId`, at any consent revision: a
+   * binding row of any revision, its current session, or one of its request
+   * receipts naming it. Three key lookups.
+   */
+  private async ownedAtAnyRevision(
+    bindingId: string,
+    sessionId: string,
+  ): Promise<boolean> {
+    return Boolean(
+      (await this.db.get(
+        'SELECT 1 FROM channel_session_bindings WHERE binding_id=? AND session_id=? LIMIT 1',
+        [bindingId, sessionId],
+      )) ??
+      (await this.db.get(
+        'SELECT 1 FROM channel_sessions WHERE binding_id=? AND session_id=?',
+        [bindingId, sessionId],
+      )) ??
+      (await this.db.get(
+        'SELECT 1 FROM channel_requests WHERE binding_id=? AND session_id=? LIMIT 1',
+        [bindingId, sessionId],
+      )),
+    );
+  }
+
+  /**
+   * Whether a binding other than `bindingId` holds `sessionId` (its current
+   * session, or a binding row of any revision). Both tables hold a few rows
+   * per binding of one person.
+   */
+  private async heldByAnotherBinding(
+    bindingId: string,
+    sessionId: string,
+  ): Promise<boolean> {
+    return Boolean(
+      (await this.db.get(
+        'SELECT 1 FROM channel_sessions WHERE session_id=? AND binding_id<>? LIMIT 1',
+        [sessionId, bindingId],
+      )) ??
+      (await this.db.get(
+        'SELECT 1 FROM channel_session_bindings WHERE session_id=? AND binding_id<>? LIMIT 1',
+        [sessionId, bindingId],
+      )),
+    );
+  }
+
+  /**
+   * The sessions a binding owns, oldest first by creation, that the
+   * sessions store still holds (a deleted one is left out): at most the
+   * newest `CHANNEL_HISTORY_MAX_SESSIONS`. For a provider whose sessions span
+   * revisions (`sessionsSpanRevisions`, the web chat) every session the
+   * binding ever held: its binding rows of any revision, its current
+   * session and the sessions its request receipts name. For any other
+   * provider only what `/resume` may return to: the binding rows of the
+   * current revision and the current session when it was used at it. Never
+   * a session of another binding, nor a Portal session the binding never
+   * held. Reads are index range scans bounded by
+   * `CHANNEL_HISTORY_SESSION_SCAN`.
+   */
+  async ownedSessions(
+    input: Pick<ChannelTurnInput, 'provider' | 'bindingId' | 'bindingRevision'>,
+  ): Promise<{ sessionId: string; createdAt: number }[]> {
+    await this.setup();
+    const ids = new Set<string>();
+    if (sessionsSpanRevisions(input.provider)) {
+      for (const sql of [
+        'SELECT DISTINCT session_id FROM channel_session_bindings WHERE binding_id=? LIMIT ?',
+        'SELECT session_id FROM channel_sessions WHERE binding_id=? LIMIT ?',
+        'SELECT DISTINCT session_id FROM channel_requests WHERE binding_id=? AND session_id IS NOT NULL LIMIT ?',
+      ])
+        for (const row of await this.db.exec<{ session_id: string }>(sql, [
+          input.bindingId,
+          CHANNEL_HISTORY_SESSION_SCAN,
+        ]))
+          ids.add(row.session_id);
+    } else {
+      for (const row of await this.db.exec<{ session_id: string }>(
+        'SELECT session_id FROM channel_session_bindings WHERE binding_id=? AND binding_revision=? LIMIT ?',
+        [input.bindingId, input.bindingRevision, CHANNEL_HISTORY_SESSION_SCAN],
+      ))
+        ids.add(row.session_id);
+      const bound = await this.boundSession(input.bindingId);
+      if (bound && !ids.has(bound) && (await this.usedByBinding(input, bound)))
+        ids.add(bound);
+    }
+    if (ids.size === 0) return [];
+    const described = await this.host.describeSessions([...ids]);
+    return [...described]
+      .map(([sessionId, info]) => ({ sessionId, createdAt: info.createdAt }))
+      .sort(
+        (a, b) =>
+          a.createdAt - b.createdAt ||
+          (a.sessionId < b.sessionId ? -1 : a.sessionId > b.sessionId ? 1 : 0),
+      )
+      .slice(-CHANNEL_HISTORY_MAX_SESSIONS);
+  }
+
+  /**
+   * The runs of this binding that answered the given request ids in one
+   * session (each a key lookup: a channel run's id is
+   * `channelRunId(bindingId, requestId)`), with their final message id and
+   * Reply Plan. A request id with no kept run (pruned after the retention
+   * window, never run, or another session's) is absent.
+   */
+  async historyRuns(
+    bindingId: string,
+    sessionId: string,
+    requestIds: readonly string[],
+  ): Promise<Map<string, ChannelHistoryRun>> {
+    await this.setup();
+    const found = new Map<string, ChannelHistoryRun>();
+    for (const requestId of requestIds) {
+      const runId = await channelRunId(bindingId, requestId);
+      const row = await this.db.get<{
+        message_id: string | null;
+        updated_at: string;
+      }>(
+        "SELECT message_id, updated_at FROM turn_runs WHERE run_id=? AND session_id=? AND client='channel'",
+        [runId, sessionId],
+      );
+      if (!row) continue;
+      const { plan } = await this.reply(runId, '');
+      found.set(requestId, {
+        runId,
+        requestId,
+        messageId: row.message_id,
+        at: row.updated_at,
+        plan,
+      });
+    }
+    return found;
+  }
+
+  /**
+   * An index on the runs' final message ids, made on the first history read
+   * of an object: `turn_runs` holds at most the retention window's runs, so
+   * building it is a bounded one-off, and each lookup is then a key seek.
+   */
+  private indexRunMessages(): Promise<void> {
+    this.runMessagesIndexed ??= (async () => {
+      if (
+        await this.db.get(
+          "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_turn_runs_message'",
+        )
+      )
+        return;
+      await this.db.run(
+        'CREATE INDEX IF NOT EXISTS idx_turn_runs_message ON turn_runs(message_id)',
+      );
+      await this.host.changed();
+    })().catch((error: unknown) => {
+      this.runMessagesIndexed = undefined;
+      throw error;
+    });
+    return this.runMessagesIndexed;
+  }
+
+  /**
+   * The runs of this binding that produced the given agent messages of one
+   * session, by the run's recorded final message id (`turn_runs.message_id`,
+   * the id of the last AI message the run wrote): message id → its run, the
+   * gateway's request id and the Reply Plan the gateway was given (null when
+   * the run had none). A run counts only when it is a channel run of this
+   * binding (its id is `channelRunId(bindingId, requestId)`); a message no
+   * run names (an earlier message of a turn, a Portal reply, a run pruned
+   * after the retention window) is absent. Plans and runs are pruned
+   * together (`RunStore.pruneEnded`).
+   */
+  async historyReplies(
+    bindingId: string,
+    sessionId: string,
+    messageIds: readonly string[],
+  ): Promise<Map<string, ChannelHistoryReply>> {
+    await this.setup();
+    await this.indexRunMessages();
+    const found = new Map<string, ChannelHistoryReply>();
+    for (let at = 0; at < messageIds.length; at += CHANNEL_IDS_PER_STATEMENT) {
+      const chunk = messageIds.slice(at, at + CHANNEL_IDS_PER_STATEMENT);
+      const rows = await this.db.exec<{
+        run_id: string;
+        request_id: string;
+        message_id: string;
+      }>(
+        `SELECT run_id, request_id, message_id FROM turn_runs WHERE message_id IN (${chunk.map(() => '?').join(', ')}) AND session_id=? AND client='channel'`,
+        [...chunk, sessionId],
+      );
+      for (const row of rows) {
+        if (row.run_id !== (await channelRunId(bindingId, row.request_id)))
+          continue;
+        const { plan } = await this.reply(row.run_id, '');
+        found.set(row.message_id, {
+          runId: row.run_id,
+          requestId: row.request_id,
+          plan,
+        });
+      }
+    }
+    return found;
   }
 
   async isCancelled(
@@ -1663,6 +1919,27 @@ export class ChannelTurns {
         'Channel response has expired; this request cannot execute again',
         'response_expired',
       );
+    // A turn may never write into a session another binding holds (a
+    // WhatsApp or Telegram turn into the web chat's conversation, or the
+    // other way round); a web turn may name only a session its binding holds
+    // (any revision): its earlier sessions are otherwise reachable only
+    // through history.
+    if (input.sessionId) {
+      const own = await this.ownedAtAnyRevision(
+        input.bindingId,
+        input.sessionId,
+      );
+      if (
+        !own &&
+        (sessionsSpanRevisions(input.provider) ||
+          (await this.heldByAnotherBinding(input.bindingId, input.sessionId)))
+      )
+        throw new ChannelError(
+          409,
+          'This chat does not hold the named session; send the request again without sessionId',
+          'session_conflict',
+        );
+    }
     const admitted = await this.db.run(
       `INSERT OR IGNORE INTO channel_requests
       (binding_id, request_id, request_hash, run_id, created_at) VALUES (?, ?, ?, ?, ?)`,
