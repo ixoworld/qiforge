@@ -1,5 +1,17 @@
 # @ixo/oracle-runtime-workers
 
+## 0.59.0
+
+### Minor Changes
+
+- [#567](https://github.com/ixoworld/qiforge/pull/567) [`e0f2e7e`](https://github.com/ixoworld/qiforge/commit/e0f2e7e7a4448bfc18ec7fc18857e401ab436d5b) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Channels: the web chat. `POST /channels/history` returns a `web` binding's conversations page by page (every session it owns, oldest first, a divider before each later session, turns paged across sessions from person and agent rows only, the Reply Plan on the final message of each run still kept, and a reply that has no message of its own, such as the busy line, as a `run:` item), authorized like a turn with its own capability `ixo:channel/history` (the grant names the exact query the person's browser signed, `nb.queryHash`), checked with the Auth Hub on every read and limited per binding, with distinct refusal codes (`expired`, `provider_not_supported`, `revision_mismatch`). Only the person's own messages are listed as theirs: channel user messages now record their turn's request id (`channel_request_id`), and gateway-composed inputs are left out. A `web` binding keeps its sessions across consent revisions for history and its own turns; session controls are refused for `web` (`403 control_not_supported`), and a web turn may name only a session its binding holds. WhatsApp and Telegram are unchanged. `web` gets its own delivery profile ("a web chat"), the `[Web chat reply: …` quote note, and the credentials plugin's tools accept a `web` binding.
+
+  Channel request metrics: with the optional `OPS_ANALYTICS` Analytics Engine binding, every `POST /channels/turn`, `/channels/control` and `/channels/history` request writes one data point (index `oracle-runtime`, the IXO ops layout: route, outcome, status, refusal code or error class, channel `web`/`whatsapp`/`telegram`, turn phase, duration, time in the user object, and for history the page size, plans attached and limit), and every refused or failed channel request logs one `[channel-request]` line with fixed fields only. Unbound, nothing is written. The `send_cards as text` log line now cuts a quoted link label whole.
+
+### Patch Changes
+
+- [#567](https://github.com/ixoworld/qiforge/pull/567) [`e0f2e7e`](https://github.com/ixoworld/qiforge/commit/e0f2e7e7a4448bfc18ec7fc18857e401ab436d5b) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Channels: Telegram turns. The quoted-reply note names the turn's channel (`[Telegram reply: …` for `telegram`, `[Chat reply: …` for a provider without a name of its own; WhatsApp's note is unchanged, byte for byte), and the credentials plugin's tools accept a `telegram` binding as well as a `whatsapp` one (`channelBinding`, `CARD_CHANNEL_PROVIDERS`; `whatsAppBinding` stays exported as the same function). The docs show a `CHANNEL_SERVICE_DID` listing two gateways, served by the oracle's one `AUTH_HUB_CHANNEL_SERVICE_KEY`.
+
 ## 0.58.0
 
 ### Minor Changes
