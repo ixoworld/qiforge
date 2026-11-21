@@ -242,7 +242,7 @@ describe('a revoked delegation re-labelled under another CID', () => {
       expect(res.error?.code).toBe('INVALID_FORMAT');
     });
 
-    it(`is refused by validateDelegation as ${name}`, async () => {
+    it(`is refused by verifyDelegation as ${name}`, async () => {
       const { root, grantBlock } = await revokedGrant();
       // A delegation addressed to the server, revoked, then re-labelled.
       const toServer = await Client.delegate({
@@ -262,14 +262,14 @@ describe('a revoked delegation re-labelled under another CID', () => {
         },
       });
       const token = await serializeDelegation(toServer);
-      expect((await validator.validateDelegation(token)).error?.code).toBe(
+      expect((await validator.verifyDelegation(token)).error?.code).toBe(
         'REVOKED',
       );
       const copy = await rewrap(
         token,
         await relabel({ cid: toServer.cid, bytes: toServer.root.bytes }),
       );
-      const res = await validator.validateDelegation(copy);
+      const res = await validator.verifyDelegation(copy);
       expect(res.ok).toBe(false);
       expect(res.error?.code).toBe('INVALID_FORMAT');
     });

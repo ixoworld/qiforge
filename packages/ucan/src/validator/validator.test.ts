@@ -1563,7 +1563,7 @@ describe('UCAN Validator', () => {
     });
   });
 
-  describe('validateDelegation', () => {
+  describe('verifyDelegation', () => {
     it('should validate a simple delegation with did:key', async () => {
       const server = await keygen();
       const user = await keygen();
@@ -1586,12 +1586,11 @@ describe('UCAN Validator', () => {
       });
 
       const serialized = await serializeDelegation(delegation);
-      const result = await validator.validateDelegation(serialized);
+      const result = await validator.verifyDelegation(serialized);
 
       expect(result.ok).toBe(true);
       expect(result.invoker).toBe(user.did);
-      expect(result.capability?.can).toBe('*');
-      expect(result.capability?.with).toBe('ixo:oracle');
+      expect('capability' in result).toBe(false);
       expect(result.proofChain).toEqual([user.did]);
     });
 
@@ -1625,7 +1624,7 @@ describe('UCAN Validator', () => {
       });
 
       const serialized = await serializeDelegation(delegation);
-      const result = await validator.validateDelegation(serialized);
+      const result = await validator.verifyDelegation(serialized);
 
       expect(result.ok).toBe(true);
       expect(result.invoker).toBe(ixoDid);
@@ -1654,7 +1653,7 @@ describe('UCAN Validator', () => {
       });
 
       const serialized = await serializeDelegation(delegation);
-      const result = await validator.validateDelegation(serialized);
+      const result = await validator.verifyDelegation(serialized);
 
       expect(result.ok).toBe(false);
       expect(result.error?.code).toBe('UNAUTHORIZED');
@@ -1682,7 +1681,7 @@ describe('UCAN Validator', () => {
       });
 
       const serialized = await serializeDelegation(delegation);
-      const result = await validator.validateDelegation(serialized);
+      const result = await validator.verifyDelegation(serialized);
 
       expect(result.ok).toBe(false);
       expect(result.error?.code).toBe('EXPIRED');
@@ -1713,7 +1712,7 @@ describe('UCAN Validator', () => {
       });
 
       const serialized = await serializeDelegation(delegation);
-      const result = await validator.validateDelegation(serialized);
+      const result = await validator.verifyDelegation(serialized);
 
       expect(result.ok).toBe(false);
       expect(result.error?.code).toBe('INVALID_SIGNATURE');
@@ -1727,7 +1726,7 @@ describe('UCAN Validator', () => {
         rootIssuers: [],
       });
 
-      const result = await validator.validateDelegation('not-valid-base64!!!');
+      const result = await validator.verifyDelegation('not-valid-base64!!!');
 
       expect(result.ok).toBe(false);
       expect(result.error?.code).toBe('INVALID_FORMAT');
@@ -1771,7 +1770,7 @@ describe('UCAN Validator', () => {
       });
 
       const serialized = await serializeDelegation(userToServer);
-      const result = await validator.validateDelegation(serialized);
+      const result = await validator.verifyDelegation(serialized);
 
       expect(result.ok).toBe(true);
       expect(result.invoker).toBe(user.did);
@@ -1819,7 +1818,7 @@ describe('UCAN Validator', () => {
       });
 
       const serialized = await serializeDelegation(userToServer);
-      const result = await validator.validateDelegation(serialized);
+      const result = await validator.verifyDelegation(serialized);
 
       expect(result.ok).toBe(true);
       expect(result.expiration).toBeDefined();
@@ -1863,7 +1862,7 @@ describe('UCAN Validator', () => {
       });
 
       const serialized = await serializeDelegation(userToServer);
-      const result = await validator.validateDelegation(serialized);
+      const result = await validator.verifyDelegation(serialized);
 
       expect(result.ok).toBe(false);
       expect(result.error?.code).toBe('UNAUTHORIZED');
@@ -1891,10 +1890,167 @@ describe('UCAN Validator', () => {
       });
 
       const serialized = await serializeDelegation(delegation);
-      const result = await validator.validateDelegation(serialized);
+      const result = await validator.verifyDelegation(serialized);
 
       expect(result.ok).toBe(true);
       expect(result.expiration).toBeUndefined();
+    });
+  });
+
+  describe('validateDelegation authorization policy', () => {
+    it('rejects a delegation rooted outside rootIssuers', async () => {
+      const server = await keygen();
+      const trustedRoot = await keygen();
+      const attacker = await keygen();
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: [trustedRoot.did],
+      });
+      const delegation = await createDelegation({
+        issuer: attacker.signer,
+        audience: server.did,
+        capabilities: [
+          {
+            can: 'test/read' as Capability['can'],
+            with: 'ixo:resource:123' as Capability['with'],
+          },
+        ],
+      });
+
+      const result = await validator.validateDelegation(
+        await serializeDelegation(delegation),
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(false);
+      expect(result.error?.code).toBe('UNAUTHORIZED');
+    });
+
+    it('rejects a child capability that widens its parent resource', async () => {
+      const server = await keygen();
+      const root = await keygen();
+      const user = await keygen();
+      const rootToUser = await Client.delegate({
+        issuer: root.signer,
+        audience: user.signer,
+        capabilities: [
+          { can: 'test/read' as const, with: 'ixo:resource:123' as const },
+        ],
+      });
+      const widened = await createDelegation({
+        issuer: user.signer,
+        audience: server.did,
+        capabilities: [
+          {
+            can: 'test/read' as Capability['can'],
+            with: 'ixo:*' as Capability['with'],
+          },
+        ],
+        proofs: [rootToUser],
+      });
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: [root.did],
+      });
+
+      const result = await validator.validateDelegation(
+        await serializeDelegation(widened),
+        TestRead,
+        'ixo:resource:999',
+      );
+
+      expect(result.ok).toBe(false);
+      expect(result.error?.code).toBe('UNAUTHORIZED');
+    });
+
+    it('rejects a child capability that widens a parent caveat', async () => {
+      const server = await keygen();
+      const root = await keygen();
+      const user = await keygen();
+      const rootToUser = await Client.delegate({
+        issuer: root.signer,
+        audience: user.signer,
+        capabilities: [
+          {
+            can: 'employees/read' as const,
+            with: 'myapp:employees' as const,
+            nb: { limit: 5 },
+          },
+        ],
+      });
+      const widened = await createDelegation({
+        issuer: user.signer,
+        audience: server.did,
+        capabilities: [
+          {
+            can: 'employees/read' as Capability['can'],
+            with: 'myapp:employees' as Capability['with'],
+            nb: { limit: 10 },
+          },
+        ],
+        proofs: [rootToUser],
+      });
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: [root.did],
+      });
+
+      const result = await validator.validateDelegation(
+        await serializeDelegation(widened),
+        EmployeesRead,
+        'myapp:employees',
+      );
+
+      expect(result.ok).toBe(false);
+      expect(result.error?.code).toBe('CAVEAT_VIOLATION');
+    });
+
+    it('accepts an attenuated chain rooted in rootIssuers', async () => {
+      const server = await keygen();
+      const root = await keygen();
+      const user = await keygen();
+      const rootToUser = await Client.delegate({
+        issuer: root.signer,
+        audience: user.signer,
+        capabilities: [
+          {
+            can: 'employees/read' as const,
+            with: 'myapp:employees/*' as const,
+            nb: { limit: 10 },
+          },
+        ],
+      });
+      const attenuated = await createDelegation({
+        issuer: user.signer,
+        audience: server.did,
+        capabilities: [
+          {
+            can: 'employees/read' as Capability['can'],
+            with: 'myapp:employees/team' as Capability['with'],
+            nb: { limit: 5 },
+          },
+        ],
+        proofs: [rootToUser],
+      });
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: [root.did],
+      });
+
+      const result = await validator.validateDelegation(
+        await serializeDelegation(attenuated),
+        EmployeesRead,
+        'myapp:employees/team',
+      );
+
+      expect(result.ok).toBe(true);
+      expect(result.capability).toEqual({
+        can: 'employees/read',
+        with: 'myapp:employees/team',
+        nb: { limit: 5 },
+      });
+      expect(result.proofChain).toEqual([root.did, user.did]);
     });
   });
 
@@ -2220,7 +2376,7 @@ describe('UCAN Validator', () => {
       expect(result.error).toBeUndefined();
     });
 
-    it('is inert without a checker in validateDelegation() too', async () => {
+    it('is inert without a checker in verifyDelegation() too', async () => {
       const server = await keygen();
       const user = await keygen();
 
@@ -2242,7 +2398,7 @@ describe('UCAN Validator', () => {
         revocationFailure: 'closed',
       });
 
-      const result = await validator.validateDelegation(
+      const result = await validator.verifyDelegation(
         await serializeDelegation(delegation),
       );
 
@@ -2250,7 +2406,7 @@ describe('UCAN Validator', () => {
       expect(result.error).toBeUndefined();
     });
 
-    it('rejects a revoked delegation in validateDelegation()', async () => {
+    it('rejects a revoked delegation in verifyDelegation()', async () => {
       const server = await keygen();
       const user = await keygen();
 
@@ -2275,7 +2431,7 @@ describe('UCAN Validator', () => {
         ]),
       });
 
-      const result = await validator.validateDelegation(serialized);
+      const result = await validator.verifyDelegation(serialized);
 
       expect(result.ok).toBe(false);
       expect(result.error?.code).toBe('REVOKED');
@@ -2432,7 +2588,7 @@ describe('UCAN Validator', () => {
       expect(result.proofChainCids).not.toContain(forged.cid.toString());
     });
 
-    it('accepts an unrevoked delegation in validateDelegation() and reports its cid', async () => {
+    it('accepts an unrevoked delegation in verifyDelegation() and reports its cid', async () => {
       const server = await keygen();
       const user = await keygen();
 
@@ -2455,7 +2611,7 @@ describe('UCAN Validator', () => {
         revocationChecker: new InMemoryRevocationStore(),
       });
 
-      const result = await validator.validateDelegation(serialized);
+      const result = await validator.verifyDelegation(serialized);
 
       expect(result.ok).toBe(true);
       expect(result.proofChainCids).toEqual([delegation.cid.toString()]);
@@ -2528,7 +2684,7 @@ describe('UCAN Validator', () => {
       expect(result.ok).toBe(true);
     });
 
-    it('rejects a delegation with unbounded expiry in validateDelegation()', async () => {
+    it('rejects a delegation with unbounded expiry in verifyDelegation()', async () => {
       const server = await keygen();
       const user = await keygen();
 
@@ -2549,7 +2705,7 @@ describe('UCAN Validator', () => {
         ],
       });
 
-      const result = await validator.validateDelegation(
+      const result = await validator.verifyDelegation(
         await serializeDelegation(delegation),
       );
 

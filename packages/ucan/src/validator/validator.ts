@@ -192,8 +192,8 @@ export interface ProofChainLimits {
   maxCapabilitiesPerLink: number;
   /**
    * Distinct issuer DIDs over the whole tree. Each is a DID resolution (the
-   * resolver is memoised per validation; validateDelegation() also resolves
-   * proof audiences, which maxNodes bounds).
+   * resolver is memoised per operation; verifyDelegation() also resolves proof
+   * audiences, which maxNodes bounds).
    */
   maxIssuers: number;
   /**
@@ -633,8 +633,8 @@ export interface ValidateResult {
 
   /**
    * Canonical CIDs of the verified chain, parents first. For validate() the
-   * last entry is the invocation's own CID; for validateDelegation() it is
-   * the delegation's. These are the identifiers a revocation targets.
+   * last entry is the invocation or delegation token's own CID. These are the
+   * identifiers a revocation targets.
    */
   proofChainCids?: string[];
 
@@ -659,6 +659,18 @@ export interface ValidateResult {
     message: string;
   };
 }
+
+/**
+ * Result of cryptographically verifying a delegation archive.
+ *
+ * This deliberately omits `capability`: signature verification establishes
+ * who signed the token, not whether its capability is rooted in configured
+ * authority or attenuated from its proofs.
+ */
+export type DelegationVerificationResult = Omit<
+  ValidateResult,
+  'capability'
+>;
 
 /**
  * A framework-agnostic UCAN validator
@@ -690,25 +702,31 @@ export interface UCANValidator {
   ): Promise<ValidateResult>;
 
   /**
-   * Validate a delegation (verify signatures, audience, expiration, and proof chain)
+   * Validate a delegation as authorization under a capability definition.
    *
-   * Unlike `validate()` which validates invocations against a capability definition,
-   * this method validates a standalone delegation token — verifying the cryptographic
-   * signature chain, checking audience matches this server, and validating expiration.
+   * This applies the same configured-root and capability-derivation policy as
+   * `validate()`, so the returned capability is safe to use for authorization.
    *
    * @param delegationBase64 - Base64-encoded CAR containing the delegation
-   * @returns Validation result
-   *
-   * @example
-   * ```typescript
-   * const result = await validator.validateDelegation(delegationBase64);
-   * if (result.ok) {
-   *   console.log('Delegation from:', result.invoker);
-   *   console.log('Capabilities:', result.capability);
-   * }
-   * ```
+   * @param capabilityDef - Capability definition, including caveat derivation
+   * @param resource - The specific resource URI to validate against
    */
-  validateDelegation(delegationBase64: string): Promise<ValidateResult>;
+  validateDelegation(
+    delegationBase64: string,
+    capabilityDef: CapabilityParser,
+    resource: string,
+  ): Promise<ValidateResult>;
+
+  /**
+   * Verify a delegation's signatures, audience, validity window, and complete
+   * proof chain without making an authorization decision.
+   *
+   * Use this only when the signed issuer identity is needed independently of
+   * the token's capabilities. The result intentionally has no `capability`.
+   */
+  verifyDelegation(
+    delegationBase64: string,
+  ): Promise<DelegationVerificationResult>;
 
   /**
    * The server's public DID (as provided in options)
@@ -768,10 +786,9 @@ export async function createUCANValidator(
       : positiveInteger(options.maxCapabilities, 'maxCapabilities');
   const allowUniversalResource = options.allowUniversalResource !== false;
 
-  // Lazily resolve server DID to a Verifier.
-  // Only needed for validate() (invocations), NOT for validateDelegation().
-  // This avoids requiring Ed25519 keys on the server DID doc when only
-  // delegation validation is needed.
+  // Lazily resolve server DID to a Verifier. This is needed by the two
+  // authorization methods, but not by signature-only verifyDelegation().
+  // That keeps identity-only verification independent of a server signing key.
   let serverVerifier: Verifier | undefined;
 
   async function getServerVerifier(): Promise<Verifier> {
@@ -965,8 +982,8 @@ export async function createUCANValidator(
 
   /**
    * Collect the canonical CIDs of a delegation and its whole proof chain,
-   * parents first. Used by validateDelegation(), which verifies the chain
-   * itself rather than going through ucanto's claim().
+   * parents first. Used by signature-only verifyDelegation(), which verifies
+   * every attached proof rather than going through ucanto's claim().
    */
   function delegationChainCids(delegation: unknown): string[] {
     const cids: string[] = [];
@@ -1154,45 +1171,46 @@ export async function createUCANValidator(
   }
 
   /**
-   * Steps 6–11 of validate(): authorise the decoded invocation with ucanto's
-   * claim() and derive the result from what ucanto verified. Runs while the
-   * invocation's replay reservation is held.
+   * Authorise a decoded token with ucanto's claim() and derive the result from
+   * what ucanto verified. Invocation callers hold their replay reservation
+   * while this runs; delegation callers do not apply replay semantics.
    */
-  async function authorizeInvocation(
-    invocation: UcantoDelegation,
+  async function authorizeToken(
+    token: UcantoDelegation,
     capabilityDef: CapabilityParser,
     resource: string,
     resolve: typeof resolveDIDKey,
     expect: ValidateInvocationOptions['expect'],
+    tokenKind: 'Invocation' | 'Delegation',
   ): Promise<ValidateResult> {
     // 6. Determine the authorization policy for ucanto's claim().
     //
     // SECURITY — the wildcard policy (`rootIssuers: ['*']`, "accept any
     // root") must NOT be expressed as `canIssue = () => true`. That makes
-    // ucanto treat the INVOKER as a self-issuing root, so it authorizes on
-    // the invocation's own signature alone and NEVER walks or verifies the
+    // ucanto treat the token issuer as a self-issuing root, so it authorizes
+    // on the token's own signature alone and NEVER walks or verifies the
     // attached delegation proofs — while buildProofChain() still reads
     // proofs[0] blindly and callers trust proofChain[0] as the root (the
     // row owner). An attacker could then forge a delegation naming any
     // victim as root and have the request attributed to that victim.
     //
     // Instead, in wildcard mode we accept ONLY the structural root of THIS
-    // invocation's proof chain as a root. canIssue returns false for the
+    // token's proof chain as a root. canIssue returns false for the
     // invoker and every intermediate, so ucanto is forced to walk the
     // entire chain and cryptographically verify it (signatures + caveat
     // attenuation) up to that root. A forged or over-broad proof fails that
-    // verification. Self-issued invocations (no proofs) are unaffected:
-    // their structural root IS the invoker, so canIssue accepts them.
+    // verification. Self-issued tokens (no proofs) are unaffected: their
+    // structural root IS the issuer, so canIssue accepts them.
     const wildcard = options.rootIssuers.includes('*');
     // An incomplete chain (a proof block missing from the token) has no
     // structural root: nobody is accepted as one, so the chain is refused.
     const structuralRoot = wildcard
-      ? buildProofChain(invocation)?.[0]
+      ? buildProofChain(token)?.[0]
       : undefined;
 
     // Server verifier is resolved lazily (first call resolves, subsequent calls use cache)
     const resolvedVerifier = await getServerVerifier();
-    const claimResult = claim(capabilityDef, [invocation], {
+    const claimResult = claim(capabilityDef, [token], {
       authority: resolvedVerifier,
       principal: ed25519.Verifier,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ucanto claim() expects a specific DID resolver signature incompatible with our async resolver
@@ -1209,8 +1227,8 @@ export async function createUCANValidator(
           resourceNamesIssuer(cap.with, issuer)
         )
           return true;
-        // Wildcard: accept ONLY the structural root of this invocation's
-        // proof chain — never the invoker or an intermediate link (see the
+        // Wildcard: accept ONLY the structural root of this token's proof
+        // chain — never its issuer or an intermediate link (see the
         // SECURITY note above). ucanto always calls canIssue with the
         // delegation's DECLARED issuer DID (never a resolved did:key), and
         // structuralRoot is read from that same declared DID, so a string
@@ -1323,24 +1341,23 @@ export async function createUCANValidator(
         ok: false,
         error: {
           code: 'UNAUTHORIZED',
-          message:
-            'Invocation has no expiration; this validator requires a bounded expiry',
+          message: `${tokenKind} has no expiration; this validator requires a bounded expiry`,
         },
       };
     }
 
-    // 10. Revocation: check the invocation and every VERIFIED delegation in
-    // its proof chain in one batched call. A revoked (or unverifiable)
-    // token fails here, which releases its replay reservation.
+    // 10. Revocation: check the token and every VERIFIED delegation in its
+    // proof chain in one batched call. A failing invocation later releases
+    // its replay reservation; delegations have no replay semantics.
     const revocation = await checkRevoked(proofChainCids);
     if (revocation) return revocation;
 
-    // 11. Extract facts from the invocation
-    const facts = invocation.facts;
+    // 11. Extract facts from the token
+    const facts = token.facts;
 
     return {
       ok: true,
-      invoker: invocation.issuer.did(),
+      invoker: token.issuer.did(),
       capability: validatedCap,
       expiration,
       proofChain,
@@ -1364,9 +1381,9 @@ export async function createUCANValidator(
   }
 
   /**
-   * Structural checks shared by validate() and validateDelegation(), run
-   * before any signature is verified or DID resolved: proof-tree shape bounds,
-   * then the universal-resource rule. Returns a failing result or null.
+   * Structural checks shared by both authorization methods and
+   * verifyDelegation(), run before any signature is verified or DID resolved:
+   * proof-tree shape bounds, then the universal-resource rule.
    */
   function structuralError(token: unknown): ValidateResult | null {
     if (proofChainLimits) {
@@ -1503,12 +1520,13 @@ export async function createUCANValidator(
 
       let accepted = false;
       try {
-        const result = await authorizeInvocation(
+        const result = await authorizeToken(
           invocation,
           capabilityDef,
           resource,
           memoizeResolver(resolveDIDKey),
           callOptions?.expect,
+          'Invocation',
         );
         if (result.ok) {
           await reservation.commit();
@@ -1528,9 +1546,77 @@ export async function createUCANValidator(
     }
   }
 
+  /**
+   * Validate a standalone delegation as authorization. Unlike the
+   * signature-only path below, claim() enforces configured roots and the
+   * capability definition's resource and caveat attenuation rules.
+   */
   async function validateDelegationToken(
     delegationBase64: string,
+    capabilityDef: CapabilityParser,
+    resource: string,
   ): Promise<ValidateResult> {
+    try {
+      const carBytes = new Uint8Array(Buffer.from(delegationBase64, 'base64'));
+      const extracted = await Delegation.extract(carBytes);
+      if (extracted.error) {
+        return {
+          ok: false,
+          error: {
+            code: 'INVALID_FORMAT',
+            message: `Failed to decode: ${extracted.error?.message ?? 'unknown'}`,
+          },
+        };
+      }
+
+      const delegation = 'ok' in extracted ? extracted.ok : extracted;
+      if (!delegation?.issuer?.did || !delegation?.audience?.did) {
+        return {
+          ok: false,
+          error: {
+            code: 'INVALID_FORMAT',
+            message: 'Delegation missing issuer or audience',
+          },
+        };
+      }
+
+      const audienceDid = delegation.audience.did();
+      if (audienceDid !== options.serverDid) {
+        return {
+          ok: false,
+          error: {
+            code: 'UNAUTHORIZED',
+            message: `Delegation addressed to ${audienceDid}, not ${options.serverDid}`,
+          },
+        };
+      }
+
+      const structural = structuralError(delegation);
+      if (structural) return structural;
+      const nonCanonical = await canonicalFormError(delegation);
+      if (nonCanonical) return nonCanonical;
+
+      return await authorizeToken(
+        delegation,
+        capabilityDef,
+        resource,
+        memoizeResolver(resolveDIDKey),
+        undefined,
+        'Delegation',
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      return { ok: false, error: { code: 'INVALID_FORMAT', message } };
+    }
+  }
+
+  /**
+   * Verify cryptographic and envelope properties only. No root or capability
+   * policy is applied, so this path must never return a trusted capability.
+   */
+  async function verifyDelegationToken(
+    delegationBase64: string,
+  ): Promise<DelegationVerificationResult> {
     try {
       // 1. Decode the delegation from base64 CAR
       const carBytes = new Uint8Array(Buffer.from(delegationBase64, 'base64'));
@@ -1634,9 +1720,9 @@ export async function createUCANValidator(
       const revocation = await checkRevoked(proofChainCids);
       if (revocation) return revocation;
 
-      // 8. Success — return delegation details
+      // 8. Success — return identity and chain metadata only. The token's
+      // capabilities are claims, not authorized results, on this path.
       const proofChain = buildProofChain(delegation) ?? undefined;
-      const cap = delegation.capabilities?.[0];
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- delegation type from Delegation.extract() is complex
       const facts = (delegation as any).facts as
         | Record<string, unknown>[]
@@ -1645,13 +1731,6 @@ export async function createUCANValidator(
       return {
         ok: true,
         invoker: delegation.issuer.did(),
-        capability: cap
-          ? {
-              can: cap.can,
-              with: cap.with,
-              nb: cap.nb as Record<string, unknown> | undefined,
-            }
-          : undefined,
         expiration,
         proofChain,
         proofChainCids,
@@ -1677,8 +1756,18 @@ export async function createUCANValidator(
       );
     },
 
-    async validateDelegation(delegationBase64) {
-      return clipped(await validateDelegationToken(delegationBase64));
+    async validateDelegation(delegationBase64, capabilityDef, resource) {
+      return clipped(
+        await validateDelegationToken(
+          delegationBase64,
+          capabilityDef,
+          resource,
+        ),
+      );
+    },
+
+    async verifyDelegation(delegationBase64) {
+      return clipped(await verifyDelegationToken(delegationBase64));
     },
   };
 }

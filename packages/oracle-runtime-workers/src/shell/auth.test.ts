@@ -246,6 +246,35 @@ describe('authenticate: a bare delegation', () => {
     if (outcome.ok) return;
     expect(outcome.error).toMatch(/^Invalid UCAN delegation:/);
   });
+
+  it('refuses a bare delegation that widens its parent resource', async () => {
+    const root = await generateKeypair();
+    const user = await generateKeypair();
+    const parent = await createDelegation({
+      issuer: root.signer,
+      audience: user.did,
+      capabilities: [{ can: 'memory/read', with: 'ixo:memory' }],
+      expiration: nowSeconds() + 3600,
+    });
+    const widened = await createDelegation({
+      issuer: user.signer,
+      audience: ORACLE_DID,
+      capabilities: [{ can: 'memory/read', with: 'ixo:*' }],
+      proofs: [parent],
+      expiration: nowSeconds() + 1800,
+    });
+
+    const outcome = await authenticate(
+      new Headers({
+        'x-ucan-delegation': await serializeDelegation(widened),
+      }),
+      { ...CFG, allowBareDelegation: true },
+    );
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error).toMatch(/^Invalid UCAN delegation:/);
+  });
 });
 
 describe('authenticate: did:ixo key resolution', () => {

@@ -27,6 +27,7 @@ import {
   createIxoDIDResolver,
   createUCANValidator,
   defineCapability,
+  parseDelegation,
   type DIDKeyResolver,
   type InvocationStore,
 } from '@ixo/ucan';
@@ -80,6 +81,13 @@ export const DEFAULT_UCAN_AUTH_MAX_TTL_SECONDS = 900;
 const THREE_MINUTES_MS = 3 * 60 * 1000;
 const ORACLE_AUTH_RESOURCE = 'ixo:oracle';
 const OracleAuthCapability = defineCapability({ can: '*', protocol: 'ixo:' });
+
+function resourceProtocol(resource: string): `${string}:` | null {
+  const separator = resource.indexOf(':');
+  return separator > 0
+    ? (resource.slice(0, separator + 1) as `${string}:`)
+    : null;
+}
 
 export interface AuthConfig {
   oracleDid: string;
@@ -240,8 +248,8 @@ async function verifyInvocation(
 
 /**
  * Validate a delegation for this oracle: signatures, audience, proof chain,
- * not expired, and a bounded expiry (the earliest across the chain).
- * `userDid` is the delegation's issuer.
+ * bounded expiry, and action/resource attenuation for every capability the
+ * runtime will consume. Users are intentional roots for their own grants.
  */
 export async function validateDelegation(
   header: string,
@@ -256,26 +264,63 @@ export async function validateDelegation(
 
   const validator = await createUCANValidator({
     serverDid: cfg.oracleDid,
-    rootIssuers: [],
+    rootIssuers: ['*'],
     didResolver: sharedIxoDIDResolver(cfg.blocksyncUri),
     invocationStore: reusableInvocations,
     requireExpiration: true,
   });
-  const result = await validator.validateDelegation(header);
-  if (!result.ok)
+  const verification = await validator.verifyDelegation(header);
+  if (!verification.ok)
     return {
       ok: false,
-      error: `[${result.error?.code}] ${result.error?.message}`,
+      error: `[${verification.error?.code}] ${verification.error?.message}`,
     };
-  if (!result.invoker)
+  if (!verification.invoker)
     return { ok: false, error: 'Delegation validated without an invoker DID' };
+
+  try {
+    const delegation = await parseDelegation(header);
+    for (const claim of delegation.capabilities) {
+      const resource = String(claim.with);
+      const protocol = resourceProtocol(resource);
+      if (!protocol) {
+        return {
+          ok: false,
+          error: `Delegation capability has an invalid resource: ${resource}`,
+        };
+      }
+      const authorization = await validator.validateDelegation(
+        header,
+        defineCapability({ can: String(claim.can), protocol }),
+        resource,
+      );
+      if (!authorization.ok) {
+        return {
+          ok: false,
+          error: `[${authorization.error?.code}] ${authorization.error?.message}`,
+        };
+      }
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Invalid delegation',
+    };
+  }
+
   // The validator refuses an unbounded chain; this also covers a validator
   // that reported success without the effective expiry.
-  if (typeof result.expiration !== 'number' || !isFinite(result.expiration)) {
+  if (
+    typeof verification.expiration !== 'number' ||
+    !isFinite(verification.expiration)
+  ) {
     return { ok: false, error: 'Delegation must declare an expiration' };
   }
-  const verdict = { userDid: result.invoker, expiration: result.expiration };
-  const ttlMs = Math.max(1000, result.expiration * 1000 - Date.now());
+  const verdict = {
+    userDid: verification.invoker,
+    expiration: verification.expiration,
+  };
+  const ttlMs = Math.max(1000, verification.expiration * 1000 - Date.now());
   delegationCache.set(key, verdict, Math.min(ttlMs, THREE_MINUTES_MS));
   return { ok: true, ...verdict };
 }

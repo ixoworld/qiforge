@@ -500,7 +500,7 @@ describe('replay protection', () => {
 });
 
 describe('effective expiry and not-before', () => {
-  it('validateDelegation() rejects a chain whose second proof has expired', async () => {
+  it('verifyDelegation() rejects a chain whose second proof has expired', async () => {
     const server = await keygen();
     const rootA = await keygen();
     const rootB = await keygen();
@@ -530,7 +530,7 @@ describe('effective expiry and not-before', () => {
       serverDid: server.did,
       rootIssuers: [],
     });
-    const result = await validator.validateDelegation(
+    const result = await validator.verifyDelegation(
       await serializeDelegation(delegation),
     );
 
@@ -538,7 +538,7 @@ describe('effective expiry and not-before', () => {
     expect(result.error?.code).toBe('EXPIRED');
   });
 
-  it('validateDelegation() reports the earliest expiry over every proof', async () => {
+  it('verifyDelegation() reports the earliest expiry over every proof', async () => {
     const server = await keygen();
     const rootA = await keygen();
     const rootB = await keygen();
@@ -569,7 +569,7 @@ describe('effective expiry and not-before', () => {
       serverDid: server.did,
       rootIssuers: [],
     });
-    const result = await validator.validateDelegation(
+    const result = await validator.verifyDelegation(
       await serializeDelegation(delegation),
     );
 
@@ -577,7 +577,7 @@ describe('effective expiry and not-before', () => {
     expect(result.expiration).toBe(early);
   });
 
-  it('validateDelegation() rejects a delegation that is not valid yet', async () => {
+  it('verifyDelegation() rejects a delegation that is not valid yet', async () => {
     const server = await keygen();
     const user = await keygen();
     const delegation = await Client.delegate({
@@ -592,7 +592,7 @@ describe('effective expiry and not-before', () => {
       serverDid: server.did,
       rootIssuers: [],
     });
-    const result = await validator.validateDelegation(
+    const result = await validator.verifyDelegation(
       await serializeDelegation(delegation),
     );
 
@@ -600,7 +600,7 @@ describe('effective expiry and not-before', () => {
     expect(result.error?.code).toBe('UNAUTHORIZED');
   });
 
-  it('validateDelegation() rejects a chain whose proof is not valid yet', async () => {
+  it('verifyDelegation() rejects a chain whose proof is not valid yet', async () => {
     const server = await keygen();
     const root = await keygen();
     const user = await keygen();
@@ -623,14 +623,14 @@ describe('effective expiry and not-before', () => {
       serverDid: server.did,
       rootIssuers: [],
     });
-    const result = await validator.validateDelegation(
+    const result = await validator.verifyDelegation(
       await serializeDelegation(delegation),
     );
 
     expect(result.ok).toBe(false);
   });
 
-  it('validateDelegation() accepts a not-before in the past', async () => {
+  it('verifyDelegation() accepts a not-before in the past', async () => {
     const server = await keygen();
     const user = await keygen();
     const delegation = await Client.delegate({
@@ -645,7 +645,7 @@ describe('effective expiry and not-before', () => {
       serverDid: server.did,
       rootIssuers: [],
     });
-    const result = await validator.validateDelegation(
+    const result = await validator.verifyDelegation(
       await serializeDelegation(delegation),
     );
 
@@ -838,7 +838,7 @@ describe('verification methods that are not Ed25519 keys', () => {
     expect(result.invoker).toBe(ixoDid);
   });
 
-  it('validateDelegation() skips unusable keys and verifies with the Ed25519 key', async () => {
+  it('verifyDelegation() skips unusable keys and verifies with the Ed25519 key', async () => {
     const server = await keygen();
     const userKey = await keygen();
     const validator = await createUCANValidator({
@@ -855,7 +855,7 @@ describe('verification methods that are not Ed25519 keys', () => {
       capabilities: [{ can: '*' as const, with: 'ixo:oracle' as const }],
       expiration: nowSeconds() + 600,
     });
-    const result = await validator.validateDelegation(
+    const result = await validator.verifyDelegation(
       await serializeDelegation(delegation),
     );
 
@@ -878,7 +878,7 @@ describe('verification methods that are not Ed25519 keys', () => {
       capabilities: [{ can: '*' as const, with: 'ixo:oracle' as const }],
       expiration: nowSeconds() + 600,
     });
-    const result = await validator.validateDelegation(
+    const result = await validator.verifyDelegation(
       await serializeDelegation(delegation),
     );
 
@@ -926,7 +926,7 @@ describe('malformed input', () => {
       expect(invocation.ok).toBe(false);
       expect(invocation.error?.code).toBe('INVALID_FORMAT');
 
-      const delegation = await validator.validateDelegation(input);
+      const delegation = await validator.verifyDelegation(input);
       expect(delegation.ok).toBe(false);
       expect(delegation.error?.code).toBe('INVALID_FORMAT');
     },
@@ -945,7 +945,7 @@ describe('malformed input', () => {
     expect(result.ok).toBe(false);
     expect(result.error?.code).toBe('INVALID_FORMAT');
 
-    const delegation = await validator.validateDelegation(
+    const delegation = await validator.verifyDelegation(
       truncated.toString('base64'),
     );
     expect(delegation.ok).toBe(false);
@@ -1088,7 +1088,7 @@ describe('chains', () => {
     expect(result.proofChainCids).toHaveLength(parties.length);
   });
 
-  it('validateDelegation() rejects an inner hop whose audience is not the next issuer', async () => {
+  it('verifyDelegation() rejects an inner hop whose audience is not the next issuer', async () => {
     const server = await keygen();
     const root = await keygen();
     const user = await keygen();
@@ -1112,7 +1112,7 @@ describe('chains', () => {
       serverDid: server.did,
       rootIssuers: [],
     });
-    const result = await validator.validateDelegation(
+    const result = await validator.verifyDelegation(
       await serializeDelegation(delegation),
     );
     expect(result.ok).toBe(false);
@@ -1190,7 +1190,7 @@ describe('resources', () => {
   });
 });
 
-describe('revocation checker failure in validateDelegation()', () => {
+describe('revocation checker failure in verifyDelegation()', () => {
   async function signedDelegation() {
     const server = await keygen();
     const user = await keygen();
@@ -1214,7 +1214,7 @@ describe('revocation checker failure in validateDelegation()', () => {
         },
       },
     });
-    const result = await validator.validateDelegation(token);
+    const result = await validator.verifyDelegation(token);
     expect(result.ok).toBe(false);
     expect(result.error?.code).toBe('REVOCATION_CHECK_FAILED');
   });
@@ -1231,7 +1231,7 @@ describe('revocation checker failure in validateDelegation()', () => {
         },
       },
     });
-    const result = await validator.validateDelegation(token);
+    const result = await validator.verifyDelegation(token);
     expect(result.ok).toBe(true);
   });
 });

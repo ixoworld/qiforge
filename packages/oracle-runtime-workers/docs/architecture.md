@@ -1093,10 +1093,12 @@ depend on:
   invocation's first one — and its `nb` is read through the capability's
   `nb` schema, so undeclared caveat fields are not returned. The channel
   capability declares every caveat field the channel validator reads.
-- **Expiry over the whole chain.** `validate()` reports the earliest expiry
-  across the verified authorization; `validateDelegation()` the earliest
-  expiry and the latest not-before across every proof (a future not-before
-  is `UNAUTHORIZED`). The shell caps an invocation at
+- **Delegation policy and expiry.** `validateDelegation()` uses the caller's
+  capability parser to enforce root and attenuation policy, while
+  `verifyDelegation()` checks every attached proof and reports the earliest
+  expiry and latest not-before (a future not-before is `UNAUTHORIZED`). The
+  shell explicitly accepts user-owned roots, authorizes every capability by
+  action and resource, and caps an invocation at
   `UCAN_AUTH_MAX_TTL_SECONDS` from that value.
 - **No replay marks.** The validator can reserve an invocation's CID before
   it verifies it (`InvocationStore.addIfAbsent`), but neither validator in
