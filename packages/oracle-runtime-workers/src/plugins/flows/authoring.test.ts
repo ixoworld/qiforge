@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import type * as Y from 'yjs';
 import { makeRuntimeContext } from '../../core/test-fixtures';
 import type { PluginTool, RuntimeContext } from '../../plugin-api/types';
+import { DOC_UPDATE_EVENT_TYPE } from '../editor/provider';
 import { readFlowSpec } from './read';
 import {
   TEST_HOMESERVER_URL,
@@ -32,7 +33,10 @@ function nextRoom(): string {
   return `!authoring-${roomCounter}-${crypto.randomUUID().slice(0, 6)}:test.example`;
 }
 
-function flowsContext(abortSignal?: AbortSignal): RuntimeContext {
+function flowsContext(
+  abortSignal?: AbortSignal,
+  authority?: { requester: number; oracle: number; required: number },
+): RuntimeContext {
   const base = makeRuntimeContext(abortSignal ? { abortSignal } : {});
   return {
     ...base,
@@ -46,6 +50,25 @@ function flowsContext(abortSignal?: AbortSignal): RuntimeContext {
             state_key: base.user.matrixUserId,
             content: { membership: 'join' },
           },
+          ...(authority
+            ? [
+                {
+                  type: 'm.room.power_levels',
+                  state_key: '',
+                  content: {
+                    users: {
+                      [base.user.matrixUserId ?? '']: authority.requester,
+                      [TEST_ORACLE_USER]: authority.oracle,
+                    },
+                    users_default: 0,
+                    events: {
+                      [DOC_UPDATE_EVENT_TYPE]: authority.required,
+                    },
+                    events_default: 0,
+                  },
+                },
+              ]
+            : []),
         ],
       }),
       botCredentials: async () => ({
@@ -344,6 +367,46 @@ describe('validation before the first change', () => {
 });
 
 describe('write outcome', () => {
+  it('refuses a joined requester below the write threshold before mutation', async () => {
+    const hs = new TestHomeserver();
+    const roomId = nextRoom();
+    seedFlow(hs, roomId);
+    const before = readFlowSpec(hs.docOf(roomId), roomId);
+
+    const result = await call(
+      toolsFor(hs),
+      'set_step_inputs',
+      { flowRef: roomId, stepId: 'a', inputs: { x: 'unauthorized' } },
+      flowsContext(undefined, { requester: 0, oracle: 100, required: 50 }),
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'needs_access' },
+    });
+    expect(updateSends(hs)).toBe(0);
+    expect(readFlowSpec(hs.docOf(roomId), roomId)).toEqual(before);
+  });
+
+  it('allows a requester who meets the write threshold', async () => {
+    const hs = new TestHomeserver();
+    const roomId = nextRoom();
+    seedFlow(hs, roomId);
+
+    const result = await call(
+      toolsFor(hs),
+      'set_step_inputs',
+      { flowRef: roomId, stepId: 'a', inputs: { x: 'authorized' } },
+      flowsContext(undefined, { requester: 50, oracle: 0, required: 50 }),
+    );
+
+    expect(result).toEqual({ ok: true });
+    expect(
+      readFlowSpec(hs.docOf(roomId), roomId)?.steps.find((s) => s.id === 'a')
+        ?.inputs,
+    ).toEqual({ x: 'authorized' });
+  });
+
   it('reports needs_access when the homeserver forbids the write', async () => {
     const hs = new TestHomeserver();
     const roomId = nextRoom();

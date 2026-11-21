@@ -30,7 +30,11 @@ import type { BlocknoteToolsConfig } from './editor-config';
 import { resolveEditorMatrixClient } from './editor-mx';
 import { noDocument, notAMember } from './failures';
 import { editorAgentPrompt } from './prompts';
-import { isUserInRoom } from './room-membership';
+import { DOC_UPDATE_EVENT_TYPE } from './provider';
+import {
+  canUserSendRoomEvent,
+  isUserInRoom,
+} from './room-membership';
 
 const standaloneEditorSchema = z.object({
   room_id: z
@@ -142,12 +146,13 @@ export function createStandaloneEditorTool(
         standaloneEditorSchema.parse(rawArgs);
       const roomId = explicitRoomId ?? readOpenDocument(ctx);
       if (!roomId) return JSON.stringify(noDocument());
+      const requesterUserId = ctx.user.matrixUserId;
 
       // The assistant acts with the oracle's admin identity, so "the user's
       // documents" must be computed from the *user's* membership — otherwise an
       // agent could be steered into any room id it is handed. On Workers the
       // check runs through the gateway Durable Object (ctx.matrix).
-      if (!(await isUserInRoom(ctx, roomId, ctx.user.matrixUserId))) {
+      if (!(await isUserInRoom(ctx, roomId, requesterUserId))) {
         ctx.logger.warn(
           `[editor] user ${ctx.user.did} is not a member of ${roomId} — refusing document access`,
         );
@@ -172,6 +177,13 @@ export function createStandaloneEditorTool(
               type: 'id',
               value: roomId,
             }),
+            authorizeWrite: () =>
+              canUserSendRoomEvent(
+                ctx,
+                roomId,
+                requesterUserId,
+                DOC_UPDATE_EVENT_TYPE,
+              ),
           },
           opts.openDocument,
         );

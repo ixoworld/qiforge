@@ -57,6 +57,7 @@ function openTools(hs: TestHomeserver) {
   const documents = sharedDocumentSource({
     matrixClient: hs.client(),
     appConfig: appConfig(),
+    authorizeWrite: async () => true,
   });
   const tools = new Map<string, PluginTool>(
     createContentTools({ documents }).map((t) => [t.name, t]),
