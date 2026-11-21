@@ -174,9 +174,10 @@ runtime since then exist only here; they are listed under
   API keys and the ChatGPT OAuth tokens, refresh token included) is
   neither listed nor read for a plugin (`src/do/secrets-adapter.ts`). Node
   serves them to plugins like any other secret, so its sandbox forwards
-  them as `x-us-*` headers to code the model writes. The user's other
-  secrets and the operator's `ORACLE_SECRETS` still reach the sandbox,
-  which is what they are stored for.
+  them as `x-us-*` headers to code the model writes. The Workers sandbox
+  defaults to forwarding no room secrets; a custom `SandboxPlugin` may read
+  only names approved per invocation by its trusted host authorizer. The
+  operator's explicit `ORACLE_SECRETS` still reach the sandbox.
 - **Matrix liveness**: the `work_status` card (`ixo.oracle.component`, edited
   in place: routing → Step n · … → delivering → done / superseded), quote-reply
   chains resolved to their thread (`src/matrix/reply-chain.ts`), and the
