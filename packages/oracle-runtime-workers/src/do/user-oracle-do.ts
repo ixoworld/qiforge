@@ -9958,6 +9958,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                 }
               : {}),
             roomId: sessionRoomId,
+            // The app's own panel speaks HTTP: a room or channel message
+            // carries no client metadata.
+            ...(req.client === 'portal' && meta.hostApp
+              ? { hostApp: meta.hostApp }
+              : {}),
           },
           model: effectiveModel,
         },

@@ -33,6 +33,31 @@ entry on asks' side ([Turning it on](#turning-it-on)).
 
 The manifest is `on-demand`, with a `brief` for the capability catalogue.
 
+## Inside asks.world
+
+A chat panel that runs inside asks.world sends `metadata.hostApp: "asks"` with
+each message, and plugins read it as `ctx.session.hostApp` for that message
+only: the same conversation may go on in the Portal or in WhatsApp, where a
+link is right. A room or channel message has none.
+
+The panel reads the links from these tools' answers (never from the reply,
+where a model can mistype one), opens each as a button of its own over the
+page, signs with the sign-in the person has there, and writes "Connected." or
+"Done." for them. So inside asks.world:
+
+- `asks_connect` still answers with its start link, for the panel, and tells
+  the model to say in one sentence what it needs Asks for: no link, no Google,
+  no sign-in.
+- an answer of a tool that acts, with a `/pay/ad_…` or `/do/ad_…` link on the
+  connector's own site, gets one line (`OPENS_IN_ASKS`): the app opens it, say
+  what it is, check it with `link_status` after "Done.". A report's link
+  (`/report/ad_…`) opens a form, so it stays a link; what a read shows of the
+  board is left as it came.
+- the sign-in-ended answer, `asks_status` and the skills' note say the same.
+
+The client says which app it is, so `hostApp` only changes the words. What a
+tool may do, and whose asks account it acts for, do not depend on it.
+
 ## Safety behaviour
 
 - The asks account that finishes a sign-in must be the oracle user's own

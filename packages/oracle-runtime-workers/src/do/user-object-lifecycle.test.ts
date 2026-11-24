@@ -1343,6 +1343,59 @@ describe('turn preparation wiring', () => {
     },
   };
 
+  it('names the app a message was sent from, for that message only and never off a channel', async () => {
+    const seen: unknown[] = [];
+    const reader = makePlugin({ name: 'app-reader' });
+    reader.getRequestTools = (ctx) => {
+      seen.push(ctx.session.hostApp);
+      return [];
+    };
+    await withObject('turn-host-app', { plugins: [reader] }, async (h) => {
+      await bootedForTurns(h);
+      const portal = {
+        identity: { userDid: USER_DID },
+        sessionId: 's1',
+        message: 'Set up an ask',
+        client: 'portal' as const,
+      };
+      const turns: TurnRequest[] = [
+        {
+          ...portal,
+          requestId: 'in-asks',
+          metadata: JSON.stringify({ hostApp: 'asks', page: '/me' }),
+        },
+        // The same conversation, from the Portal.
+        { ...portal, requestId: 'in-portal' },
+        {
+          ...portal,
+          requestId: 'in-another',
+          metadata: JSON.stringify({ hostApp: 'elsewhere' }),
+        },
+        {
+          ...adTurn,
+          requestId: 'wa:app',
+          metadata: JSON.stringify({ hostApp: 'asks' }),
+        },
+      ];
+      for (const turn of turns) {
+        const prepared = await h.call(
+          'prepareTurn',
+          turn,
+          { message: turn.message },
+          attemptRun(),
+        );
+        // Not state: nothing of it is checkpointed for a later message.
+        if (typeof prepared !== 'object' || prepared === null)
+          throw new Error('no prepared turn');
+        expect(Reflect.get(prepared, 'stateInput')).not.toHaveProperty(
+          'hostApp',
+        );
+        await disposeTurn(h, prepared);
+      }
+      expect(seen).toEqual(['asks', undefined, undefined, undefined]);
+    });
+  });
+
   it("hands a channel turn's ad entry point to plugin code only, the same on a resumed attempt", async () => {
     const seen: unknown[] = [];
     const reader = makePlugin({ name: 'ad-reader' });

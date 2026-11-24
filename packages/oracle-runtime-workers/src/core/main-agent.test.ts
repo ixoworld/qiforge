@@ -2251,6 +2251,26 @@ describe('createMainAgent — chat delivery', () => {
       '## Where this conversation is happening',
     );
     expect(context.session.surface).toEqual({ kind: 'stream' });
+    expect(context.session).not.toHaveProperty('hostApp');
+  });
+
+  it('gives tools the app the message was sent from', async () => {
+    const core = bootCore();
+    const { context } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(core, scriptedLlm({})),
+      requestCtx: {
+        ...requestCtx,
+        session: { ...requestCtx.session, hostApp: 'asks' },
+      },
+      state: {},
+      delivery: { kind: 'stream' },
+    });
+    expect(context.session.hostApp).toBe('asks');
+    expect(context.session.surface).toEqual({ kind: 'stream' });
   });
 });
 

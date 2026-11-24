@@ -30,6 +30,23 @@ describe('parseTurnMetadata', () => {
     expect(parseTurnMetadata(JSON.stringify({ editorRoomId: '' }))).toEqual({});
   });
 
+  it('names the app the message was sent from, only one it knows', () => {
+    const read = (hostApp: unknown) =>
+      parseTurnMetadata(JSON.stringify({ hostApp }));
+    expect(read('asks')).toEqual({ hostApp: 'asks' });
+    for (const other of ['ASKS', 'portal', '', 7, null, ['asks'], {}])
+      expect(read(other)).toEqual({});
+  });
+
+  it('that app is this message’s alone: never state, never checkpointed', () => {
+    const none = priorMetadataState({ hostApp: 'asks' });
+    expect(none).not.toHaveProperty('hostApp');
+    expect(metadataBuildState({ hostApp: 'asks' }, none)).not.toHaveProperty(
+      'hostApp',
+    );
+    expect(metadataGraphInput({ hostApp: 'asks' }, none)).toEqual({});
+  });
+
   it('tolerates missing, malformed and non-object metadata', () => {
     expect(parseTurnMetadata(undefined)).toEqual({});
     expect(parseTurnMetadata('{not json')).toEqual({});

@@ -105,6 +105,7 @@ export type { UserKvLimitKind } from '../core/user-kv';
 export type {
   ActionCallEventPayload,
   AgentMiddleware,
+  HostApp,
   HubActionStatusRead,
   AuthExcludedRoute,
   BrowserToolCallEventPayload,

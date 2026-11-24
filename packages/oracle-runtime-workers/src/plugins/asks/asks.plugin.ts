@@ -32,9 +32,10 @@ import {
 import {
   asksTools,
   connectAsksMcp,
+  insideAsks,
   keepTurnFiles,
-  preloadText,
   type McpConnect,
+  preloadText,
 } from './tools';
 
 const configSchema = z.object({
@@ -208,7 +209,9 @@ export class AsksPlugin extends OraclePlugin {
           return skill
             ? handler({
                 ...request,
-                systemMessage: request.systemMessage.concat(preloadText(skill)),
+                systemMessage: request.systemMessage.concat(
+                  preloadText(skill, insideAsks(rtCtx)),
+                ),
               })
             : handler(request);
         },

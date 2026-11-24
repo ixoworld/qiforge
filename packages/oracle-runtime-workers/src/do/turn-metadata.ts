@@ -17,7 +17,11 @@
  * Metadata crosses the Durable Object boundary as a JSON string; only string
  * values are honoured (and `null` for `currentEntityDid`), anything else is
  * ignored.
+ *
+ * `hostApp` is not agent state: it names the app this one message was sent
+ * from and goes to `ctx.session.hostApp`, never to a later message.
  */
+import type { HostApp } from '../plugin-api/types';
 
 export const EDITOR_PLUGIN_NAME = 'editor';
 
@@ -27,6 +31,8 @@ export interface TurnMetadata {
   sessionRunId?: string;
   /** `null`: the request cleared the selected subject. */
   currentEntityDid?: string | null;
+  /** The app whose chat panel sent this message; any other value is ignored. */
+  hostApp?: HostApp;
 }
 
 const KEYS = [
@@ -53,6 +59,7 @@ export function parseTurnMetadata(json: string | undefined): TurnMetadata {
     if (typeof value === 'string' && value.length > 0) out[key] = value;
   }
   if (record.currentEntityDid === null) out.currentEntityDid = null;
+  if (record.hostApp === 'asks') out.hostApp = record.hostApp;
   return out;
 }
 

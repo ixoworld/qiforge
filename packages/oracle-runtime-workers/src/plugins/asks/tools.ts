@@ -43,6 +43,43 @@ export const LEFT_OUT: ReadonlySet<string> = new Set([
 export const SIGN_IN_AGAIN =
   'The asks.world sign-in has ended (or was disconnected). Call asks_connect and send the person the new link.';
 
+/* ── inside asks.world ─────────────────────────────────────────────────── */
+
+/**
+ * Whether this message came from a chat panel inside asks.world. The panel
+ * reads the links from these tools' answers, shows the person each one as a
+ * button of its own, signs with the sign-in they have there, and writes
+ * "Connected." or "Done." for them. The client says so, so it only changes
+ * the words: nothing here is allowed because of it.
+ */
+export const insideAsks = (ctx: RuntimeContext): boolean =>
+  ctx.session.hostApp === 'asks';
+
+/** Beside an answer that hands over a link the panel opens itself. */
+export const OPENS_IN_ASKS =
+  'This chat is inside asks.world: the app opens this in front of the person when your reply ends, and writes "Done." for them once it is done. Reply with one short sentence: what it is, and the total if there is one. Do not send the link, and do not ask them to open, tap or tell you anything. After "Done.", check it with link_status and say what happened.';
+
+/** {@link SIGN_IN_AGAIN}, inside asks.world. */
+export const CONNECT_AGAIN =
+  'The asks.world connection has ended (or was disconnected). Call asks_connect.';
+
+const signInAgain = (ctx: RuntimeContext): string =>
+  insideAsks(ctx) ? CONNECT_AGAIN : SIGN_IN_AGAIN;
+
+/**
+ * Whether a tool's answer hands over a link the panel opens over the page:
+ * a payment (`/pay/`) or another one-tap action (`/do/`). A report's link
+ * (`/report/`) is a form to fill in, so it stays a link.
+ */
+export function handsOver(text: string, mcpUrl: string): boolean {
+  const origin = new URL(mcpUrl).origin;
+  return [
+    ...text.matchAll(
+      /(https?:\/\/[^\s"'<>()\\/]+)\/(?:pay|do)\/ad_[A-Za-z0-9_-]{22}(?![A-Za-z0-9_-])/g,
+    ),
+  ].some((found) => found[1] === origin);
+}
+
 /* ── the MCP side ──────────────────────────────────────────────────────── */
 
 export interface McpTool {
@@ -406,7 +443,7 @@ class AsksSession {
       if (read.reason === 'unreachable')
         throw new Error('asks.world did not answer. Try again in a minute.');
       await markSeen(this.turn, null);
-      return SIGN_IN_AGAIN;
+      return signInAgain(this.turn.ctx);
     }
     try {
       return await withCallTimeout(
@@ -430,7 +467,7 @@ class AsksSession {
       if (verdict !== 'ended') throw error;
       // asks ended the connection (e.g. a disconnect on /me/agents).
       await markSeen(this.turn, null);
-      return SIGN_IN_AGAIN;
+      return signInAgain(this.turn.ctx);
     }
   }
 }
@@ -467,7 +504,13 @@ function connectorTool(
           upload.address,
           turn.now() + upload.minutes * 60_000,
         );
-      return shown;
+      // Only a tool that acts hands over a link of its own: what a read shows
+      // of the board can carry a look-alike.
+      return insideAsks(turn.ctx) && !def.readOnly
+        ? mapText(shown, (text) =>
+            handsOver(text, turn.mcpUrl) ? `${text}\n${OPENS_IN_ASKS}` : text,
+          )
+        : shown;
     },
   };
 }
@@ -540,8 +583,9 @@ const surfaceOf = (ctx: RuntimeContext): Surface =>
 function connectTool(turn: AsksTurn): PluginTool {
   return {
     name: 'asks_connect',
-    description:
-      'Start the one-time asks.world sign-in (Google, on asks.world). Gives a link to send the person; they sign in there and come back. Use when Asks is not connected or a tool says the sign-in ended.',
+    description: insideAsks(turn.ctx)
+      ? "This chat is inside asks.world. Connects this person's Asks: the app shows them a Connect button, with no link to send and no sign-in. Use when Asks is not connected or a tool says the connection ended."
+      : 'Start the one-time asks.world sign-in (Google, on asks.world). Gives a link to send the person; they sign in there and come back. Use when Asks is not connected or a tool says the sign-in ended.',
     schema: z.object({}),
     handler: async () => {
       const now = await turn.conn.status();
@@ -554,6 +598,12 @@ function connectTool(turn: AsksTurn): PluginTool {
         surfaceOf(turn.ctx),
       );
       await markSeen(turn, { status: 'pending', until: expiresAt });
+      if (insideAsks(turn.ctx))
+        return [
+          'The app shows the person a Connect button when your reply ends, from this address (for the app, never for your message):',
+          link,
+          'They connect there in one tap, with the sign-in they have. Reply with one short sentence: what you need it for. Do not send the address, and do not mention a link, Google or signing in. "Connected." is written for them when it is done. Do not call other asks tools until then.',
+        ].join('\n');
       return [
         'Send the person this link in your final message, on its own line:',
         link,
@@ -577,6 +627,10 @@ function statusTool(turn: AsksTurn): PluginTool {
         return `asks.world is connected${accountWords(account)}. Its tools work from the next message on.`;
       }
       if (!pending) await markSeen(turn, null);
+      if (insideAsks(turn.ctx))
+        return pending
+          ? 'Not connected yet: the Connect button is still waiting for them.'
+          : 'Not connected. Call asks_connect.';
       return pending
         ? 'Not connected yet: the sign-in link is still waiting to be used.'
         : 'Not connected. Call asks_connect for a sign-in link.';
@@ -691,7 +745,16 @@ function attachTool(turn: AsksTurn): PluginTool {
 const SKILL_NOTE =
   'This skill is written for chat assistants with the asks plugin. Here: signing in is asks_connect; files from this chat go with asks_attach_files; the asks tools are named asks__<tool>; there is no plugin to install, update or switch, and this chat uses one network only.';
 
-export function skillTool(skills: readonly Skill[]): PluginTool {
+/** {@link SKILL_NOTE}, and what differs inside asks.world. */
+const skillNote = (inside: boolean): string =>
+  inside
+    ? `${SKILL_NOTE} This chat is inside asks.world: where a tool's answer says the app opens something (a sign-in, anything that needs the person's tap), leave its link out of your message and do not ask them to say when it is done: "Connected." or "Done." is written for them.`
+    : SKILL_NOTE;
+
+export function skillTool(
+  skills: readonly Skill[],
+  inside = false,
+): PluginTool {
   return {
     name: 'asks_skill',
     description: [
@@ -708,19 +771,23 @@ export function skillTool(skills: readonly Skill[]): PluginTool {
         (one) => one.name === name.trim().toLowerCase(),
       );
       return skill
-        ? `${SKILL_NOTE}\n\n${skill.text}`
+        ? `${skillNote(inside)}\n\n${skill.text}`
         : `No asks skill is called "${name}". The skills: ${skills.map((one) => one.name).join(', ')}.`;
     },
   };
 }
 
 /** The text a preloaded skill adds to this turn's system prompt. */
-export const preloadText = (skill: Skill): string =>
-  `\n\n### asks skill for this message: ${skill.name}\n${SKILL_NOTE}\n\n${skill.text}`;
+export const preloadText = (skill: Skill, inside = false): string =>
+  `\n\n### asks skill for this message: ${skill.name}\n${skillNote(inside)}\n\n${skill.text}`;
 
 /** Every asks tool for this turn. */
 export async function asksTools(turn: AsksTurn): Promise<PluginTool[]> {
-  const base = [connectTool(turn), statusTool(turn), skillTool(turn.skills)];
+  const base = [
+    connectTool(turn),
+    statusTool(turn),
+    skillTool(turn.skills, insideAsks(turn.ctx)),
+  ];
   if (!(await isConnected(turn))) return base;
   const remote = await connectorTools(turn).catch((error: unknown) => {
     turn.ctx.logger.warn(

@@ -101,6 +101,9 @@ runtime since then exist only here; they are listed under
   agent's state declares none of them, so the checkpoint never holds one and
   a turn that omits a field has none. The same holds for the browser tools
   and AG-UI actions a request declares.
+- **Request metadata → the session**: `metadata.hostApp` (`asks`) names the app
+  whose chat panel sent the message. It is not state: plugins read it as
+  `ctx.session.hostApp` for that message only. Workers only.
 - **Auth**: UCAN invocation (`Authorization: Bearer` + `X-Auth-Type: ucan`);
   DID keys resolved through Blocksync. **A bare `x-ucan-delegation` does not
   authenticate** (Node accepts it as a fallback): a delegation travels on as

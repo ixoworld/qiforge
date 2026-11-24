@@ -686,6 +686,12 @@ export interface MatrixPostOpts {
   txnId?: string;
 }
 
+/**
+ * `ctx.session.hostApp`: the app whose own chat panel sent this message,
+ * from request `metadata.hostApp`. `asks`: Qi's panel inside asks.world.
+ */
+export type HostApp = 'asks';
+
 /** `ctx.session.surface`: the delivery surface of the turn. */
 export type SessionSurface =
   | { kind: 'stream' }
@@ -808,6 +814,13 @@ export interface RuntimeContext<TConfig = MergedConfig> {
      * as short messages. Tools can keep their output compact on `chat`.
      */
     surface?: SessionSurface;
+    /**
+     * The app this message was sent from, when its own chat panel says so.
+     * It holds for this message only: the same conversation may go on in the
+     * Portal or in WhatsApp. The client sets it, so it may change what a
+     * reply says and never what it may do.
+     */
+    hostApp?: HostApp;
   };
 
   /** Read-only view over the graph state's history. */
