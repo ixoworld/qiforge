@@ -3,6 +3,13 @@ import { HumanMessage, type BaseMessage } from '@langchain/core/messages';
 import { RunnableLambda, type RunnableConfig } from '@langchain/core/runnables';
 import { tool } from '@langchain/core/tools';
 import { FakeListChatModel } from '@langchain/core/utils/testing';
+import {
+  interrupt,
+  MemorySaver,
+  MessagesAnnotation,
+  START,
+  StateGraph,
+} from '@langchain/langgraph';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { ModelCallReporter } from '../core/model-call-reporter';
@@ -11,6 +18,7 @@ import { turnModelUsageTotals, type ModelCallReport } from '../llm/model-call';
 import { RUNTIME_VERSION } from './runtime-version';
 import {
   RecordingModel,
+  TEST_CONFIG,
   fakeIngest,
   quietLogger,
   record,
@@ -538,5 +546,147 @@ describe('TurnTracer: never affects the turn', () => {
     expect(joined).not.toContain('my secret words');
     expect(joined).not.toContain('did:ixo:ixo1testuser');
     expect(joined).not.toContain('ixt_w_');
+  });
+});
+
+describe('TurnTracer: the whole turn, once', () => {
+  const report = (over: Partial<ModelCallReport>): ModelCallReport => ({
+    ...record({
+      promptTokens: 50,
+      cachedTokens: 0,
+      outputTokens: 3,
+      costUsd: 0.0001,
+    }),
+    purpose: 'routing',
+    callId: crypto.randomUUID(),
+    startedAt: Date.now(),
+    ...over,
+  });
+
+  it('adds the calls made outside its runs, never the title, never a run twice', async () => {
+    const reports: ModelCallReport[] = [];
+    const h = tracerHarness({ modelCalls: () => reports });
+    // The router decided before the graph, and the meter reports every graph call too.
+    reports.push(report({ purpose: 'routing' }));
+    const model = new RecordingModel(record());
+    const reporter = new ModelCallReporter(
+      (call) => reports.push(call),
+      quietLogger,
+    );
+    const agent = agentWith(async (state, config) => {
+      const reply = await model.invoke(state.messages, config);
+      return { messages: [...state.messages, reply] };
+    });
+    await runTurn(h, agent, { callbacks: [h.tracer, reporter] });
+    // The title comes after the reply: not part of the trace.
+    reports.push(report({ purpose: 'title', costUsd: 1 }));
+    const turn = onlyTurn(h);
+    expect(
+      reports.filter((r) => r.purpose === 'reply' || r.purpose === 'other'),
+    ).toHaveLength(1);
+    expect(turn.usage.input_tokens).toBe(1200 + 50);
+    expect(turn.usage.cost_usd).toBeCloseTo(0.0021 + 0.0001, 10);
+    const outside = turn.runs.filter((r) => r.tags?.includes('outside_graph'));
+    expect(outside.map((r) => r.name)).toEqual(['routing model call']);
+    expect(turn.runs.filter((r) => r.run_type === 'llm')).toHaveLength(2);
+  });
+
+  it('never sends a root twice, also when its id comes back after the send', async () => {
+    const h = tracerHarness();
+    const agent = agentWith(async (state) => state);
+    const runId = '0192f5d8-0000-7000-8000-0000000000aa';
+    await agent.invoke(input(), { callbacks: [h.tracer], runId });
+    await awaitAllCallbacks();
+    h.tracer.finish();
+    h.tracer.finish();
+    await h.settle();
+    // A resumed graph reusing the run id after the turn was sent.
+    await agent.invoke(input(), { callbacks: [h.tracer], runId });
+    await awaitAllCallbacks();
+    await h.settle();
+    expect(h.ingest.turns()).toHaveLength(1);
+    expect(h.ingest.starts()).toHaveLength(1);
+  });
+
+  it('sends neither a marker nor a turn for a root without a usable id', async () => {
+    const h = tracerHarness();
+    await h.tracer.handleChainStart(
+      { lc: 1, type: 'not_implemented', id: ['Yo! Agent'] },
+      { messages: [] },
+      '',
+      undefined,
+      [],
+      {},
+      'chain',
+      'Yo! Agent',
+    );
+    await h.tracer.handleChainEnd({ messages: [] }, '');
+    h.tracer.finish();
+    await h.settle();
+    expect(h.ingest.received).toEqual([]);
+  });
+
+  it('sends a valid turn for a graph stopped by interrupt()', async () => {
+    const h = tracerHarness();
+    const graph = new StateGraph(MessagesAnnotation)
+      .addNode('ask', () => {
+        interrupt({ question: 'Which one?' });
+        return {};
+      })
+      .addEdge(START, 'ask')
+      .compile({ checkpointer: new MemorySaver(), name: 'Yo! Agent' });
+    await graph.invoke(input(), {
+      callbacks: [h.tracer],
+      configurable: { thread_id: 't-interrupt' },
+    });
+    await awaitAllCallbacks();
+    h.tracer.finish();
+    await h.settle();
+    const turn = onlyTurn(h);
+    expect(turn.runs.length).toBeGreaterThan(1);
+    expect(turn.runs[0]!.id).toBe(turn.trace_id);
+  });
+
+  it('does not send the marker once its turn went (the turn replaces it)', async () => {
+    let releaseMarker: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      releaseMarker = resolve;
+    });
+    const ingest = fakeIngest();
+    const fetch: typeof ingest.fetch = async (url, init) => {
+      if (url.endsWith('/start')) await held;
+      return ingest.fetch(url, init);
+    };
+    const owner = {};
+    const h = tracerHarness(
+      { owner, transport: { fetch, sleep: async () => undefined } },
+      ingest,
+    );
+    // An earlier marker of this owner is still in flight: this turn's waits.
+    const blocker = new TurnTracer({
+      config: TEST_CONFIG,
+      waitUntil: () => undefined,
+      logger: quietLogger,
+      owner,
+      threadId: '$t',
+      userId: 'did:ixo:ixo1x',
+      transport: { fetch, sleep: async () => undefined },
+    });
+    await agentWith(async (s) => s).invoke(input(), { callbacks: [blocker] });
+    await agentWith(async (s) => s).invoke(input(), { callbacks: [h.tracer] });
+    await awaitAllCallbacks();
+    h.tracer.finish();
+    for (let i = 0; i < 200 && h.ingest.turns().length === 0; i += 1)
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(h.ingest.turns()).toHaveLength(1);
+    releaseMarker();
+    await h.settle();
+    blocker.finish();
+    await blocker.settled();
+    // Only the blocker's marker reached the service; this turn's was skipped.
+    expect(h.ingest.starts()).toHaveLength(1);
+    expect(h.ingest.starts()[0]!.body.trace_id).not.toBe(
+      h.ingest.turns()[0]!.body.trace_id,
+    );
   });
 });

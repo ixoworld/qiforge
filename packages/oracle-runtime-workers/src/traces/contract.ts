@@ -10,11 +10,26 @@
  *
  * Both carry the write key in `x-api-key`. The project comes from the key,
  * never from the body (a `project` field is rejected).
+ *
+ * Version: every body carries `v: CONTRACT_VERSION` and every request the
+ * `x-ixt-contract` header with the same number. Compatibility rule: within
+ * one version the service only adds optional fields and keeps accepting
+ * what it accepted; a breaking change is a new version, and the service
+ * keeps accepting the previous one while senders move. A service that
+ * answers "unsupported version" makes the tracer of that isolate stop
+ * sending for `VERSION_PAUSE_MS` (transport.ts), log it once, and try again.
  */
+
+export const CONTRACT_VERSION = 1;
 
 export const TURN_LIMITS = {
   maxCompressedBytes: 8 * 1024 * 1024,
-  maxDecompressedBytes: 64 * 1024 * 1024,
+  /**
+   * The inflated (gunzipped, UTF-8) body the service accepts. The service's
+   * own cap (`INGEST_MAX_DECOMPRESSED_BYTES`) is 16 MiB: a larger turn does
+   * not fit a 128 MB isolate's ingest.
+   */
+  maxDecompressedBytes: 16 * 1024 * 1024,
   maxRuns: 5_000,
   maxIdLength: 256,
   maxNameLength: 256,
@@ -27,7 +42,18 @@ export const TURN_LIMITS = {
   maxTagLength: 128,
   maxEventsPerRun: 2_000,
   maxPreviewTextLength: 8_000,
+  /** JSON nesting the service accepts (the turn object is level 1). */
+  maxJsonDepth: 64,
+  /**
+   * Sender-side bounds of one call's (and one turn's) numbers, so a provider
+   * that reports nonsense never makes the index refuse or overflow.
+   */
+  maxTokens: 1_000_000_000,
+  maxCostUsd: 10_000,
 } as const;
+
+/** Reserved by the service for its block references: never sent as a key. */
+export const BLOB_REF_KEY = '$blob';
 
 export const RUN_TYPES = [
   'llm',

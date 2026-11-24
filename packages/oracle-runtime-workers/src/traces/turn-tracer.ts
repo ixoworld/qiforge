@@ -24,15 +24,27 @@
  */
 import { BaseTracer, type Run } from '@langchain/core/tracers/base';
 import type { NewTokenIndices } from '@langchain/core/callbacks/base';
+import { inheritedByNestedRuns } from '../core/nested-run-callbacks';
 import {
   awaitCallEnd,
   modelCallOf,
   type ModelCallRecord,
+  type ModelCallReport,
 } from '../llm/model-call';
 import type { Logger } from '../plugin-api/types';
 import type { TracesConfig } from './config';
-import { TURN_LIMITS, TURN_METADATA_KEYS, type TurnStatus } from './contract';
-import { encodeTurn, type EncodeLimits, type TurnContext } from './payload';
+import {
+  CONTRACT_VERSION,
+  TURN_LIMITS,
+  TURN_METADATA_KEYS,
+  type TurnStatus,
+} from './contract';
+import {
+  contractId,
+  encodeTurn,
+  type EncodeLimits,
+  type TurnContext,
+} from './payload';
 import { RUNTIME_VERSION } from './runtime-version';
 import {
   shortId,
@@ -66,6 +78,15 @@ export interface TurnTracerOptions {
   finishGraceMs?: number;
   /** Send the start marker (default true). */
   startMarker?: boolean;
+  /**
+   * Every model call the turn reported so far (the attempt's
+   * `TurnModelCalls`). Read once, at `finish()`: the calls that are not model
+   * runs of the trace (the router's Decision, attachment extraction, calls
+   * inside middleware hooks) go into the turn's usage and as `llm` runs under
+   * the first root, each once. A call made after the reply (the session
+   * title, purpose `title`) is not part of the trace.
+   */
+  modelCalls?: () => readonly ModelCallReport[];
   /** Tests: transport and size limits. */
   transport?: TransportDeps;
   limits?: EncodeLimits;
@@ -84,6 +105,9 @@ interface RootState {
 
 const DEFAULT_FINISH_GRACE_MS = 5_000;
 
+const UUID =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
 function isAbortLike(error: unknown): boolean {
   return (
     error instanceof Error &&
@@ -98,6 +122,12 @@ export class TurnTracer extends BaseTracer {
   private readonly records = new Map<string, ModelCallRecord>();
   private readonly firstTokens = new Map<string, number>();
   private readonly capped = new Set<string>();
+  /** Every model run this tracer saw, of every root. */
+  private readonly llmRunIds = new Set<string>();
+  /** Roots already handed to the transport: a root id is sent once, ever. */
+  private readonly sentIds = new Set<string>();
+  /** The turn's calls outside its trees, and the root that carries them. */
+  private outside: { rootId: string; calls: ModelCallReport[] } | undefined;
   private readonly transport: TracesTransport;
   private readonly sends = new Set<Promise<SendOutcome | undefined>>();
   private runCount = 0;
@@ -105,6 +135,9 @@ export class TurnTracer extends BaseTracer {
 
   constructor(private readonly options: TurnTracerOptions) {
     super();
+    // A sub-agent or helper model invoked inside one of the turn's runs
+    // nests its runs under that run here (`nestedRunCallbacks`).
+    inheritedByNestedRuns(this);
     this.transport = new TracesTransport(
       options.config,
       options.logger,
@@ -127,6 +160,7 @@ export class TurnTracer extends BaseTracer {
     try {
       if (this.finished) return;
       this.finished = true;
+      this.collectOutsideCalls();
       for (const [id, state] of this.roots) {
         if (state.ended) this.ship(id, state);
         else this.giveUpLater(id, state);
@@ -160,9 +194,17 @@ export class TurnTracer extends BaseTracer {
         this.capped.add(run.id);
         run.inputs = {};
       }
-      if (run.parent_run_id === undefined && !this.roots.has(run.id)) {
+      if (run.run_type === 'llm') this.llmRunIds.add(run.id);
+      if (
+        run.parent_run_id === undefined &&
+        !this.roots.has(run.id) &&
+        !this.sentIds.has(run.id)
+      ) {
         this.roots.set(run.id, { run, ended: false, sent: false });
-        if (this.options.startMarker !== false) this.sendStart(run);
+        // A root whose id is not a UUID can never be stored (encodeTurn
+        // sends nothing for it): no marker either.
+        if (this.options.startMarker !== false && UUID.test(run.id))
+          this.sendStart(run);
       }
     } catch (error) {
       this.internalError('onRunCreate', error);
@@ -272,26 +314,45 @@ export class TurnTracer extends BaseTracer {
     this.options.waitUntil(send);
   }
 
+  /** The calls of `modelCalls` that are not model runs of the trace, once. */
+  private collectOutsideCalls(): void {
+    const reported = this.options.modelCalls?.() ?? [];
+    const calls = reported.filter(
+      (call) => call.purpose !== 'title' && !this.llmRunIds.has(call.callId),
+    );
+    let first: RootState | undefined;
+    for (const state of this.roots.values())
+      if (!first || state.run.start_time < first.run.start_time) first = state;
+    if (first && calls.length > 0)
+      this.outside = { rootId: first.run.id, calls };
+  }
+
   private sendStart(root: Run): void {
-    const marker = {
-      v: 1,
-      trace_id: root.id,
-      thread_id: this.options.threadId.slice(0, TURN_LIMITS.maxIdLength),
-      user_id: this.options.userId.slice(0, TURN_LIMITS.maxIdLength),
-      // The finished turn carries the same value: it picks the index shard.
-      start_time: new Date(root.start_time).toISOString(),
-      name: (root.name || root.run_type || 'run').slice(
-        0,
-        TURN_LIMITS.maxNameLength,
-      ),
-    };
+    // Same `start_time` as the finished turn (encodeTurn): it picks the
+    // index shard. Made when its lane is free; not sent at all once the
+    // turn itself went (the turn replaces the marker anyway).
     this.track(
-      this.transport.send('start', root.id, () =>
-        Promise.resolve({
+      this.transport.send('start', root.id, () => {
+        if (this.sentIds.has(root.id)) return Promise.resolve(undefined);
+        const start = Number.isFinite(root.start_time)
+          ? root.start_time
+          : Date.now();
+        const marker = {
+          v: CONTRACT_VERSION,
+          trace_id: root.id,
+          thread_id: contractId(this.options.threadId),
+          user_id: contractId(this.options.userId),
+          start_time: new Date(start).toISOString(),
+          name: (root.name || root.run_type || 'run').slice(
+            0,
+            TURN_LIMITS.maxNameLength,
+          ),
+        };
+        return Promise.resolve({
           bytes: new TextEncoder().encode(JSON.stringify(marker)),
           gzip: false,
-        }),
-      ),
+        });
+      }),
     );
   }
 
@@ -334,8 +395,11 @@ export class TurnTracer extends BaseTracer {
   }
 
   private ship(id: string, state: RootState, forced?: 'interrupted'): void {
-    if (state.sent) return;
+    if (state.sent || this.sentIds.has(id)) return;
     state.sent = true;
+    this.sentIds.add(id);
+    const outsideCalls =
+      this.outside?.rootId === id ? this.outside.calls : undefined;
     const { status, error } = forced
       ? { status: forced, error: null }
       : this.statusOf(state);
@@ -359,6 +423,7 @@ export class TurnTracer extends BaseTracer {
             records,
             firstTokens,
             context,
+            ...(outsideCalls ? { outsideCalls } : {}),
           },
           limits,
         );

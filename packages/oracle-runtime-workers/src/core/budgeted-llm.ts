@@ -34,6 +34,7 @@ import {
   ModelCallReports,
   replyMessageOf,
 } from './model-call-reporter';
+import { inheritedByNestedRuns } from './nested-run-callbacks';
 import type { LlmAdapter } from './runtime-context';
 import type { TurnBudget } from './turn-budget';
 import { NOOP_LOGGER } from './utils';
@@ -313,7 +314,9 @@ export function budgetedLlm(
   adapter: LlmAdapter,
   options: BudgetedLlmOptions,
 ): BudgetedLlm {
-  const callback = new TurnBudgetHandler(options);
+  // Also kept by a sub-agent's or helper model's nested runs
+  // (`nestedRunCallbacks`); it counts a call it sees twice once.
+  const callback = inheritedByNestedRuns(new TurnBudgetHandler(options));
   return {
     callback,
     dispose: () => callback.dispose(),

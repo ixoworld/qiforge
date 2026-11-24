@@ -2,27 +2,86 @@
  * TEST ONLY (not published: `src/**\/fixtures/` is outside the package files).
  *
  * A verbatim copy of the IXO Traces ingest validation
- * (`ixoworld/ixo-langsmith-traces`, `src/contracts/turn.ts` as of its
- * foundation merge 5854c86, and `parseTimestamp` from `src/lib/time.ts`), so
- * the tracer's tests check its output against the schema the service runs.
- * Only the import of `parseTimestamp` was inlined.
+ * (`ixoworld/ixo-langsmith-traces` at origin/main 9427474: `TurnSchema` and
+ * `TurnStartSchema` from `src/contracts/turn.ts`, `parseTimestamp` from
+ * `src/lib/time.ts`, `checkJsonShape` from `src/ingest/body.ts`), so the
+ * tracer's tests check its output against what the service runs. Only the
+ * imports were inlined and the error class replaced by a plain `Error`.
  */
 import { z } from 'zod';
-import { TURN_LIMITS, RUN_TYPES } from '../contract';
+import { BLOB_REF_KEY, TURN_LIMITS, RUN_TYPES } from '../contract';
+
+const MIN_EPOCH_MS = 1e12;
+
+const ISO_RE =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(\.\d{1,9})?)?(Z|([+-])(\d{2}):(\d{2}))$/;
+
+function daysInMonth(y: number, m: number): number {
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
 
 export function parseTimestamp(v: unknown): number | null {
   if (typeof v === 'number')
-    return Number.isFinite(v) && v >= 0 && v < 8.64e15 ? Math.floor(v) : null;
+    return Number.isFinite(v) && v >= MIN_EPOCH_MS && v < 8.64e15
+      ? Math.floor(v)
+      : null;
   if (typeof v !== 'string') return null;
-  if (/^\d{10,16}$/.test(v)) return parseTimestamp(Number(v));
+  if (/^\d+$/.test(v))
+    return v.length === 13 ? parseTimestamp(Number(v)) : null;
+  const m = ISO_RE.exec(v);
+  if (!m) return null;
+  const [y, mo, d, h, mi] = [1, 2, 3, 4, 5].map((i) => Number(m[i]));
   if (
-    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/.test(
-      v,
-    )
+    y === undefined ||
+    mo === undefined ||
+    d === undefined ||
+    h === undefined ||
+    mi === undefined
   )
     return null;
+  const s = m[6] === undefined ? 0 : Number(m[6]);
+  if (
+    mo < 1 ||
+    mo > 12 ||
+    d < 1 ||
+    d > daysInMonth(y, mo) ||
+    h > 23 ||
+    mi > 59 ||
+    s > 59
+  )
+    return null;
+  if (m[9] !== undefined) {
+    const oh = Number(m[10]);
+    const om = Number(m[11]);
+    if (om > 59 || oh * 60 + om > 14 * 60) return null;
+  }
   const ms = Date.parse(v);
   return Number.isNaN(ms) ? null : ms;
+}
+
+/** Iterative depth and reserved-key check of a parsed JSON value (the service answers 400). */
+export function checkJsonShape(
+  root: unknown,
+  maxDepth: number = TURN_LIMITS.maxJsonDepth,
+): void {
+  const stack: Array<{ v: unknown; d: number }> = [{ v: root, d: 1 }];
+  while (stack.length) {
+    const top = stack.pop();
+    if (!top) break;
+    const { v, d } = top;
+    if (v === null || typeof v !== 'object') continue;
+    if (d > maxDepth)
+      throw new Error(`JSON nests deeper than ${maxDepth} levels`);
+    if (Array.isArray(v)) {
+      for (const x of v)
+        if (x !== null && typeof x === 'object') stack.push({ v: x, d: d + 1 });
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(v, BLOB_REF_KEY))
+      throw new Error(`the key "${BLOB_REF_KEY}" is reserved`);
+    for (const x of Object.values(v))
+      if (x !== null && typeof x === 'object') stack.push({ v: x, d: d + 1 });
+  }
 }
 
 const TURN_STATUSES = ['success', 'error', 'interrupted'] as const;
@@ -50,7 +109,8 @@ const idString = z
   // eslint-disable-next-line no-control-regex
   .regex(/^[^\u0000-\u001f\u007f]+$/, 'must not contain control characters');
 
-const nonNegative = z.number().min(0);
+const tokens = z.number().int().min(0).max(TURN_LIMITS.maxTokens);
+const cost = z.number().min(0).max(TURN_LIMITS.maxCostUsd);
 
 const metadataSchema = z
   .record(
@@ -90,22 +150,22 @@ export const RunSchema = z
     tags: tagsSchema.optional(),
     events: z.array(jsonObject).max(TURN_LIMITS.maxEventsPerRun).optional(),
     serialized: jsonObject.nullable().optional(),
-    prompt_tokens: nonNegative.optional(),
-    completion_tokens: nonNegative.optional(),
-    total_tokens: nonNegative.optional(),
-    prompt_cost: nonNegative.optional(),
-    completion_cost: nonNegative.optional(),
-    total_cost: nonNegative.optional(),
+    prompt_tokens: tokens.optional(),
+    completion_tokens: tokens.optional(),
+    total_tokens: tokens.optional(),
+    prompt_cost: cost.optional(),
+    completion_cost: cost.optional(),
+    total_cost: cost.optional(),
     first_token_time: isoTime.nullable().optional(),
   })
   .loose();
 
 export const UsageSchema = z
   .object({
-    input_tokens: nonNegative.default(0),
-    cached_tokens: nonNegative.default(0),
-    output_tokens: nonNegative.default(0),
-    cost_usd: nonNegative.default(0),
+    input_tokens: tokens.default(0),
+    cached_tokens: tokens.default(0),
+    output_tokens: tokens.default(0),
+    cost_usd: cost.default(0),
   })
   .strict();
 

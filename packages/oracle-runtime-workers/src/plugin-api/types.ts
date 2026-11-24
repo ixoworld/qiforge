@@ -14,6 +14,7 @@ import type {
   DecisionEvaluation,
 } from '@ixo/common/ai/decisions';
 import type { z } from 'zod';
+import type { CallbackManager } from '@langchain/core/callbacks/manager';
 import type { BaseMessage } from '@langchain/core/messages';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { UserPreferences } from '../core/state';
@@ -1220,6 +1221,16 @@ export interface RuntimeContext<TConfig = MergedConfig> {
 
   /** Propagates from the HTTP request / graph invocation. */
   abortSignal: AbortSignal;
+
+  /**
+   * This tool call's tracing callbacks, for a model or agent the handler
+   * invokes itself: pass them on (`model.invoke(input, { signal:
+   * ctx.abortSignal, callbacks: ctx.callbacks })`) and its runs nest under
+   * this tool call in the turn's traces (IXO Traces, LangSmith). Only the
+   * runtime's tracers and meter, never the turn's event stream: the nested
+   * run's tokens never reach the person's reply. Absent outside a tool call.
+   */
+  callbacks?: CallbackManager;
 
   /**
    * Commerce routing outcome for this Matrix turn (support vs work persona,

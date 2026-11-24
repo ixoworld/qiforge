@@ -2654,9 +2654,14 @@ The turn tracer (`TRACES_API_KEY` + `TRACES` / `TRACES_ENDPOINT`, see
 inside the user object, and its requests run in that object's own lane, one
 at a time, so no request is ever read by another object. A turn that does not
 arrive in the store shows in the logs as `[traces] turn <id>… not stored`,
-`refused`, `dropped: HTTP 429` or `not sent`, with the count so far; a turn
-whose object died mid-turn has only its start marker, which the store shows
-as interrupted after 10 minutes.
+`refused` (with the service's error code and first issue path),
+`conflict: HTTP 409`, `dropped: HTTP 429` or `not sent`, with the count so
+far; a turn whose object died mid-turn has only its start marker, which the
+store shows as interrupted after 10 minutes. `[traces] the traces service
+does not accept contract version 1 …: turn traces of this isolate paused
+for 10 min` means the service was changed or rolled back to one that does
+not take this runtime's turns: nothing is sent from that isolate for 10
+minutes, then it tries again.
 
 ### A gateway reset can leave the old instance running: it stands down
 
