@@ -10,7 +10,9 @@ import {
 import {
   authenticateChannel,
   authenticateChannelHistory,
+  authenticateChannelMedia,
   ChannelHistory,
+  ChannelMedia,
   assertActiveChannelBinding,
   assertChannelAttemptAllowed,
   channelAuthConfig,
@@ -24,6 +26,11 @@ import {
   shortDid,
 } from './key-lookup';
 import { RunAttemptDeferred } from '../do/run-coordinator';
+import {
+  canonicalMediaQuery,
+  mediaQueryHash,
+  type ChannelMediaInput,
+} from './media';
 import {
   ChannelError,
   ChannelOrigin,
@@ -1473,6 +1480,317 @@ describe('channel history authorization', () => {
     // No token, or not a UCAN.
     await expect(
       authenticateChannelHistory(new Headers(), raw, historyInput, f.config),
+    ).rejects.toMatchObject({ status: 401 });
+  });
+});
+
+const mediaInput: ChannelMediaInput = {
+  provider: 'web',
+  bindingId: 'chb_web',
+  bindingRevision: 4,
+  requestId: 'web-media:7d8f3a2e-0000-4000-8000-000000000001',
+  query: {
+    kind: 'file',
+    sessionId: '$thread:hs.test',
+    ref: 'channel:0123456789abcdef',
+  },
+};
+
+/**
+ * A media read as the gateway sends it: the Hub's grant (`ixo:channel/media`
+ * unless `can` says otherwise) naming `nb.queryHash` (by default the media
+ * query's) and the gateway's invocation under it, over `body`.
+ */
+async function mediaFixture() {
+  const user = await generateKeypair();
+  const service = await generateKeypair();
+  const oracle = await generateKeypair();
+  const userDid = 'did:ixo:ixo1webmediauser';
+  const channelDid = 'did:web:channels-web.example.test';
+  const resolver = createLocalDIDResolver();
+  resolver.register(userDid, user.did.slice('did:key:'.length));
+  resolver.register(channelDid, service.did.slice('did:key:'.length));
+  const config = {
+    oracleDid: oracle.did,
+    channelDids: [channelDid],
+    didResolver: resolver,
+  };
+  const sign = async (
+    body: ChannelMediaInput = mediaInput,
+    options: {
+      can?: Capability['can'];
+      queryHash?: string;
+      nb?: Record<string, unknown>;
+      expiration?: number;
+      grantExpiration?: number;
+      /** Sign this body text instead (another route's body, `requestId` in it). */
+      raw?: string;
+    } = {},
+  ) => {
+    const raw = options.raw ?? JSON.stringify(body);
+    const capability: Capability = {
+      can: options.can ?? 'ixo:channel/media',
+      with: `ixo:channel:${body.bindingId}`,
+      nb: {
+        provider: body.provider,
+        bindingRevision: body.bindingRevision,
+        oracleDid: oracle.did,
+        queryHash: options.queryHash ?? (await mediaQueryHash(body.query)),
+        deviceId: DEVICE_ID,
+        ...options.nb,
+      },
+    };
+    const now = Math.floor(Date.now() / 1000);
+    const grant = await createDelegation({
+      issuer: user.signer.withDID(userDid),
+      audience: channelDid,
+      capabilities: [capability],
+      expiration: options.grantExpiration ?? now + 60,
+    });
+    const token = await serializeInvocation(
+      await createInvocation({
+        issuer: service.signer.withDID(channelDid),
+        audience: oracle.did,
+        capability,
+        proofs: [grant],
+        expiration: options.expiration ?? now + 60,
+        facts: [
+          {
+            requestId: body.requestId,
+            requestHash: await channelRequestHash(raw),
+          },
+        ],
+      }),
+    );
+    return {
+      raw,
+      headers: new Headers({
+        authorization: `Bearer ${token}`,
+        'x-auth-type': 'ucan',
+      }),
+    };
+  };
+  return { userDid, channelDid, oracle, config, sign };
+}
+
+describe('channel media authorization', () => {
+  it('canonicalises a media query as the Auth Hub hashes it: alphabetical keys, no spaces, JSON strings', async () => {
+    expect(canonicalMediaQuery(mediaInput.query)).toBe(
+      '{"kind":"file","ref":"channel:0123456789abcdef","sessionId":"$thread:hs.test"}',
+    );
+    const artifact = {
+      kind: 'artifact' as const,
+      sessionId: 's_"quoted"\\é',
+      artifactId: 'a'.repeat(32),
+    };
+    expect(canonicalMediaQuery(artifact)).toBe(
+      `{"artifactId":"${'a'.repeat(32)}","kind":"artifact","sessionId":"s_\\"quoted\\"\\\\é"}`,
+    );
+    // The same bytes as JSON.stringify of an object built in that key order.
+    expect(canonicalMediaQuery(artifact)).toBe(
+      JSON.stringify({
+        artifactId: artifact.artifactId,
+        kind: artifact.kind,
+        sessionId: artifact.sessionId,
+      }),
+    );
+    expect(await mediaQueryHash(mediaInput.query)).toBe(
+      await channelRequestHash(canonicalMediaQuery(mediaInput.query)),
+    );
+    // The Auth Hub's canonical strings, literally.
+    expect(
+      canonicalMediaQuery({
+        kind: 'file',
+        sessionId: '$abc:hs',
+        ref: 'channel:0123456789abcdef',
+      }),
+    ).toBe(
+      '{"kind":"file","ref":"channel:0123456789abcdef","sessionId":"$abc:hs"}',
+    );
+    expect(
+      canonicalMediaQuery({
+        kind: 'artifact',
+        sessionId: 's_1',
+        artifactId: '0123456789abcdef0123456789abcdef',
+      }),
+    ).toBe(
+      '{"artifactId":"0123456789abcdef0123456789abcdef","kind":"artifact","sessionId":"s_1"}',
+    );
+    // Never the history form: a media query has no history key.
+    expect(canonicalMediaQuery(mediaInput.query)).not.toBe('{}');
+    expect(await mediaQueryHash(mediaInput.query)).toBe(
+      await channelRequestHash(
+        '{"kind":"file","ref":"channel:0123456789abcdef","sessionId":"$thread:hs.test"}',
+      ),
+    );
+  });
+
+  it('recovers the person and the web binding from a grant for this exact media query', async () => {
+    const f = await mediaFixture();
+    const { raw, headers } = await f.sign();
+    expect(
+      await authenticateChannelMedia(headers, raw, mediaInput, f.config),
+    ).toEqual({
+      userDid: f.userDid,
+      channel: {
+        callerDid: f.channelDid,
+        provider: 'web',
+        bindingId: mediaInput.bindingId,
+        bindingRevision: mediaInput.bindingRevision,
+      },
+    });
+  });
+
+  it('has its own capability: a history grant never reads media (whatever its hash), a media grant never reads a page', async () => {
+    const f = await mediaFixture();
+    expect(ChannelMedia.can).toBe('ixo:channel/media');
+    // A history grant naming this very media query.
+    const historyGrant = await f.sign(mediaInput, {
+      can: 'ixo:channel/history',
+    });
+    await expect(
+      authenticateChannelMedia(
+        historyGrant.headers,
+        historyGrant.raw,
+        mediaInput,
+        f.config,
+      ),
+    ).rejects.toMatchObject({ status: 401, code: 'unauthorized' });
+    // History grants for pages, invoked over a media body.
+    for (const query of [{ limit: 20 }, { limit: 1, before: 'c1.abc' }]) {
+      const page = await f.sign(mediaInput, {
+        can: 'ixo:channel/history',
+        queryHash: await historyQueryHash(query),
+      });
+      await expect(
+        authenticateChannelMedia(page.headers, page.raw, mediaInput, f.config),
+      ).rejects.toMatchObject({ status: 401 });
+    }
+    // A media grant naming a page's hash, presented for that page.
+    const page: ChannelHistoryInput = {
+      provider: 'web',
+      bindingId: mediaInput.bindingId,
+      bindingRevision: mediaInput.bindingRevision,
+      requestId: mediaInput.requestId,
+      query: { limit: 20 },
+    };
+    // Signed over the page body itself: only the capability differs.
+    const overPage = await f.sign(mediaInput, {
+      queryHash: await historyQueryHash(page.query),
+      raw: JSON.stringify(page),
+    });
+    await expect(
+      authenticateChannelHistory(
+        overPage.headers,
+        overPage.raw,
+        page,
+        f.config,
+      ),
+    ).rejects.toMatchObject({ status: 401, code: 'unauthorized' });
+  });
+
+  it('never lets one media grant read another file, another session or a document', async () => {
+    const f = await mediaFixture();
+    for (const query of [
+      { ...mediaInput.query, ref: 'channel:fedcba9876543210' },
+      { ...mediaInput.query, sessionId: '$other:hs.test' },
+      {
+        kind: 'artifact' as const,
+        sessionId: mediaInput.query.sessionId,
+        artifactId: 'a'.repeat(32),
+      },
+    ]) {
+      const body = { ...mediaInput, query };
+      const signed = await f.sign(body, {
+        queryHash: await mediaQueryHash(mediaInput.query),
+      });
+      await expect(
+        authenticateChannelMedia(signed.headers, signed.raw, body, f.config),
+      ).rejects.toMatchObject({ status: 403, code: 'scope_mismatch' });
+    }
+  });
+
+  it('refuses every check a history read refuses', async () => {
+    const f = await mediaFixture();
+    const now = Math.floor(Date.now() / 1000);
+    const cases: {
+      body?: ChannelMediaInput;
+      options?: Parameters<typeof f.sign>[1];
+      raw?: (raw: string) => string;
+      headers?: Headers;
+      config?: Partial<typeof f.config>;
+      expected: { status: number; code: string };
+    }[] = [
+      {
+        body: { ...mediaInput, provider: 'whatsapp' },
+        expected: { status: 403, code: 'provider_not_supported' },
+      },
+      {
+        options: { nb: { bindingRevision: 3 } },
+        expected: { status: 403, code: 'revision_mismatch' },
+      },
+      {
+        options: { nb: { oracleDid: 'did:ixo:ixo1another' } },
+        expected: { status: 403, code: 'scope_mismatch' },
+      },
+      {
+        options: { nb: { deviceId: 'dev_short' } },
+        expected: { status: 403, code: 'scope_mismatch' },
+      },
+      {
+        options: { queryHash: 'not-a-hash' },
+        expected: { status: 403, code: 'scope_mismatch' },
+      },
+      {
+        raw: (raw) => `${raw} `,
+        expected: { status: 403, code: 'scope_mismatch' },
+      },
+      {
+        options: { expiration: now - 1 },
+        expected: { status: 401, code: 'expired' },
+      },
+      {
+        options: { grantExpiration: now - 1 },
+        expected: { status: 401, code: 'expired' },
+      },
+      {
+        options: { grantExpiration: now + 600 },
+        expected: { status: 401, code: 'unauthorized' },
+      },
+      {
+        options: { expiration: now + 120 },
+        expected: { status: 401, code: 'unauthorized' },
+      },
+      {
+        config: { channelDids: ['did:web:someone-else.example.test'] },
+        expected: { status: 401, code: 'unauthorized' },
+      },
+      {
+        headers: new Headers(),
+        expected: { status: 401, code: 'unauthorized' },
+      },
+    ];
+    for (const test of cases) {
+      const body = test.body ?? mediaInput;
+      const signed = await f.sign(body, test.options);
+      await expect(
+        authenticateChannelMedia(
+          test.headers ?? signed.headers,
+          test.raw ? test.raw(signed.raw) : signed.raw,
+          body,
+          { ...f.config, ...test.config },
+        ),
+      ).rejects.toMatchObject(test.expected);
+    }
+    // Another binding than the grant's resource.
+    const { raw, headers } = await f.sign();
+    await expect(
+      authenticateChannelMedia(
+        headers,
+        raw,
+        { ...mediaInput, bindingId: 'chb_other' },
+        f.config,
+      ),
     ).rejects.toMatchObject({ status: 401 });
   });
 });

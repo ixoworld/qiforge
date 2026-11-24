@@ -22,6 +22,7 @@ import {
   channelRequestHash,
   historyQueryHash,
 } from './contract';
+import { mediaQueryHash, type ChannelMediaInput } from './media';
 
 export const ChannelInvoke = defineCapability({
   can: 'ixo:channel/invoke',
@@ -72,6 +73,39 @@ export const ChannelHistory = defineCapability({
       : {
           error: new Error(
             'Channel history caveats cannot change across a delegation',
+          ),
+        },
+});
+
+/**
+ * A read of one file or document of a web binding's history (`POST
+ * /channels/media`). Minted by the Auth Hub exactly like a history grant
+ * (a fresh signature of one of the binding's browser devices, the proof
+ * labelled `ixo-channel-web-media/1`, `deviceId` required), naming the
+ * exact media query it allows (`queryHash`, the SHA-256 of
+ * `canonicalMediaQuery`). Its own capability: a history grant never reads
+ * media and a media grant never reads a page. It lives 60 s.
+ */
+export const ChannelMedia = defineCapability({
+  can: 'ixo:channel/media',
+  protocol: 'ixo:',
+  supportWildcards: false,
+  nb: {
+    provider: Schema.string(),
+    bindingRevision: Schema.integer(),
+    oracleDid: Schema.string(),
+    queryHash: Schema.string(),
+    deviceId: Schema.string().optional(),
+  },
+  derives: (claimed, delegated) =>
+    claimed.nb?.provider === delegated.nb?.provider &&
+    claimed.nb?.bindingRevision === delegated.nb?.bindingRevision &&
+    claimed.nb?.oracleDid === delegated.nb?.oracleDid &&
+    claimed.nb?.queryHash === delegated.nb?.queryHash
+      ? { ok: {} }
+      : {
+          error: new Error(
+            'Channel media caveats cannot change across a delegation',
           ),
         },
 });
@@ -176,12 +210,57 @@ export async function authenticateChannelHistory(
   input: ChannelHistoryInput,
   config: ChannelAuthConfig,
 ): Promise<TurnIdentity> {
-  const verified = await verifyChannelInvocation(
+  return authenticateWebRead(
     headers,
     raw,
     input,
     config,
     'history',
+    await historyQueryHash(input.query),
+  );
+}
+
+/**
+ * Verify a media read (`POST /channels/media`) exactly like a history read,
+ * with its own capability `ixo:channel/media` (a history grant is refused,
+ * whatever its `queryHash`, and a media grant never reads a page), whose
+ * `nb.queryHash` is the SHA-256 of `canonicalMediaQuery` of this body's
+ * query.
+ */
+export async function authenticateChannelMedia(
+  headers: Headers,
+  raw: string,
+  input: ChannelMediaInput,
+  config: ChannelAuthConfig,
+): Promise<TurnIdentity> {
+  return authenticateWebRead(
+    headers,
+    raw,
+    input,
+    config,
+    'media',
+    await mediaQueryHash(input.query),
+  );
+}
+
+/** The checks of a web read under its capability's grant (`kind`) for the query hashed as `queryHash`. */
+async function authenticateWebRead(
+  headers: Headers,
+  raw: string,
+  input: Pick<
+    ChannelHistoryInput,
+    'provider' | 'bindingId' | 'bindingRevision' | 'requestId'
+  >,
+  config: ChannelAuthConfig,
+  kind: 'history' | 'media',
+  queryHash: string,
+): Promise<TurnIdentity> {
+  const verified = await verifyChannelInvocation(
+    headers,
+    raw,
+    input,
+    config,
+    kind,
   );
   const nb = verified.nb;
   if (
@@ -206,7 +285,7 @@ export async function authenticateChannelHistory(
     verified.grantNb?.deviceId !== nb.deviceId ||
     typeof nb.queryHash !== 'string' ||
     !/^[0-9a-f]{64}$/.test(nb.queryHash) ||
-    nb.queryHash !== (await historyQueryHash(input.query))
+    nb.queryHash !== queryHash
   )
     throw new ChannelError(
       403,
@@ -275,7 +354,7 @@ async function verifyChannelInvocation(
   raw: string,
   input: { bindingId: string },
   config: ChannelAuthConfig,
-  kind: 'invoke' | 'history',
+  kind: 'invoke' | 'history' | 'media',
 ): Promise<{
   userDid: string;
   channelDid: string;
@@ -284,7 +363,12 @@ async function verifyChannelInvocation(
   grantNb: Record<string, unknown> | undefined;
   facts: Record<string, unknown>[] | undefined;
 }> {
-  const capability = kind === 'invoke' ? ChannelInvoke : ChannelHistory;
+  const capability =
+    kind === 'invoke'
+      ? ChannelInvoke
+      : kind === 'history'
+        ? ChannelHistory
+        : ChannelMedia;
   const can = capability.can;
   const authorization = headers.get('authorization');
   const token = authorization?.match(/^Bearer ([A-Za-z0-9+/=_-]+)$/i)?.[1];
@@ -333,7 +417,7 @@ async function verifyChannelInvocation(
     // gateway asks for a fresh grant); a turn keeps its one code. The
     // validator reports an expired chain as unauthorized, so the token's
     // own expiries are read (still 401: nothing is accepted).
-    if (kind === 'history' && (await tokenExpired(token)))
+    if (kind !== 'invoke' && (await tokenExpired(token)))
       throw new ChannelError(
         401,
         'The channel history grant has expired',
@@ -378,11 +462,11 @@ async function verifyChannelInvocation(
     !Number.isFinite(proof.expiration) ||
     !proof.expiration ||
     proof.expiration >
-      now + (kind === 'history' ? CHANNEL_HISTORY_GRANT_MAX_SECONDS : 300) ||
+      now + (kind !== 'invoke' ? CHANNEL_HISTORY_GRANT_MAX_SECONDS : 300) ||
     // A history grant that names when it starts was issued for at most
     // `CHANNEL_HISTORY_GRANT_MAX_SECONDS` (the Auth Hub's grants name no
     // start: their lifetime is then bounded by the time left above).
-    (kind === 'history' &&
+    (kind !== 'invoke' &&
       typeof proof.notBefore === 'number' &&
       proof.expiration - proof.notBefore > CHANNEL_HISTORY_GRANT_MAX_SECONDS)
   )
@@ -392,7 +476,7 @@ async function verifyChannelInvocation(
       'unauthorized',
     );
   if (
-    kind === 'history' &&
+    kind !== 'invoke' &&
     ((result.expiration !== undefined && result.expiration <= now) ||
       (Number.isFinite(invocation.expiration) &&
         invocation.expiration > 0 &&

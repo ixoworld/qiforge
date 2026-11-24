@@ -16,6 +16,7 @@ export {
   CHANNEL_LINK_DEFAULT_TTL_MS,
   ChannelAttachmentLinkStore,
   channelLinkExpiry,
+  roomCopyMediaInfo,
 } from './channel-links';
 export { classifyAttachment, type AttachmentKind } from './classify';
 export {

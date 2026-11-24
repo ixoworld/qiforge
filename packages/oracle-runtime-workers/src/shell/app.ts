@@ -24,6 +24,7 @@ import { ActionProposalConflict } from '../action-proposals/store';
 import {
   authenticateChannel,
   authenticateChannelHistory,
+  authenticateChannelMedia,
   assertActiveChannelBinding,
   assertActiveChannelBindingCached,
   channelAuthConfig,
@@ -41,6 +42,13 @@ import {
   readChannelBody,
 } from '../channels/contract';
 import { assertChannelControlAllowed } from '../channels/turns';
+import {
+  CHANNEL_MEDIA_BODY_MAX_BYTES,
+  CHANNEL_MEDIA_RATE_LIMIT_RETRY_AFTER_SECONDS,
+  ChannelMediaBody,
+  channelMediaErrorResponse,
+  channelMediaResponse,
+} from '../channels/media';
 import {
   channelRouteName,
   finishChannelOp,
@@ -280,6 +288,7 @@ export function rateLimitKey(
     | 'channel'
     | 'channel-control'
     | 'channel-history'
+    | 'channel-media'
     | 'action'
     | 'artifact'
     | 'socket'
@@ -824,6 +833,78 @@ export function createShell(
         },
         503,
       );
+    }
+  });
+
+  // A file the person sent or a document the oracle made, in a web chat
+  // binding's history (`channels/media.ts`). Authorized like a history
+  // read but under its own `ixo:channel/media` grant (a history grant never
+  // reads media), for this exact media query (`authenticateChannelMedia`,
+  // `canonicalMediaQuery`); the binding is checked with
+  // the Auth Hub on every read (never cached). Limited per binding, then one
+  // read at a time per person's object. Every refusal is `{ "error": code }`.
+  app.post('/channels/media', async (c) => {
+    const op = c.get('channelOp');
+    const refuse = (status: number, error: string, retryAfter?: number) => {
+      noteChannelOp(op, { code: error });
+      return channelMediaErrorResponse({
+        status,
+        error,
+        ...(retryAfter !== undefined ? { retryAfter } : {}),
+      });
+    };
+    try {
+      if (parseChannelServiceDids(c.env.CHANNEL_SERVICE_DID).length === 0)
+        return refuse(503, 'not_configured');
+      const raw = await readChannelBody(
+        c.req.raw,
+        CHANNEL_MEDIA_BODY_MAX_BYTES,
+      );
+      let json: unknown;
+      try {
+        json = JSON.parse(raw);
+      } catch {
+        return refuse(400, 'invalid_request');
+      }
+      const parsed = ChannelMediaBody.safeParse(json);
+      if (!parsed.success) return refuse(400, 'invalid_request');
+      noteChannelOp(op, {
+        provider: parsed.data.provider,
+        mediaKind: parsed.data.query.kind,
+      });
+      const identity = await authenticateChannelMedia(
+        c.req.raw.headers,
+        raw,
+        parsed.data,
+        channelAuthConfig(c.env, executionWaitUntil(c)),
+      );
+      if (
+        c.env.RATE_LIMIT &&
+        !(
+          await c.env.RATE_LIMIT.limit({
+            key: rateLimitKey(c.env, 'channel-media', parsed.data.bindingId),
+          })
+        ).success
+      )
+        return refuse(
+          429,
+          'rate_limited',
+          CHANNEL_MEDIA_RATE_LIMIT_RETRY_AFTER_SECONDS,
+        );
+      await assertActiveChannelBinding(identity, c.env);
+      const outcome = await timedObjectCall(op, async () =>
+        userStub(c.env, identity.userDid).channelMedia(identity, parsed.data),
+      );
+      if (!outcome.ok) noteChannelOp(op, { code: outcome.error });
+      return channelMediaResponse(outcome);
+    } catch (error) {
+      if (error instanceof ChannelError)
+        return refuse(error.status, error.code);
+      noteChannelOp(op, { thrown: thrownClass(error) });
+      console.error(
+        `[channels] media read failed unexpectedly: ${describeChannelFailure(error)}`,
+      );
+      return channelMediaErrorResponse({ status: 503, error: 'unavailable' });
     }
   });
 

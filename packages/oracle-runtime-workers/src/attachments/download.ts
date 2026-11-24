@@ -167,6 +167,14 @@ export class HomeserverUnauthorizedError extends Error {
   override readonly name: string = 'HomeserverUnauthorizedError';
 }
 
+/** The homeserver refused a media download with `status` (not 401: `HomeserverUnauthorizedError`). */
+export class HomeserverMediaError extends Error {
+  override readonly name: string = 'HomeserverMediaError';
+  constructor(readonly status: number) {
+    super(`Matrix media download failed: HTTP ${status}`);
+  }
+}
+
 /** `mxc://<server>/<media id>`, the parts checked before they go into a URL. */
 export const MXC_PATTERN = /^mxc:\/\/([A-Za-z0-9.:[\]-]+)\/([A-Za-z0-9_-]+)$/;
 
@@ -176,7 +184,8 @@ export const MXC_PATTERN = /^mxc:\/\/([A-Za-z0-9.:[\]-]+)\/([A-Za-z0-9_-]+)$/;
  * (`/_matrix/client/v1/media/download`), then the legacy one
  * (`/_matrix/media/v3/download`) when the server answers 404 — the order
  * matrix-js-sdk's `mxcUrlToHttp` and the bot SDK use. The body is returned
- * unread; a 401 is `HomeserverUnauthorizedError`.
+ * unread; a 401 is `HomeserverUnauthorizedError`, any other refusal
+ * `HomeserverMediaError` with its status.
  */
 export async function openHomeserverMedia(
   mxc: string,
@@ -204,7 +213,7 @@ export async function openHomeserverMedia(
       throw new HomeserverUnauthorizedError(
         'the homeserver rejected the access token (401)',
       );
-    throw new Error(`Matrix media download failed: HTTP ${res.status}`);
+    throw new HomeserverMediaError(res.status);
   }
   return res.body;
 }

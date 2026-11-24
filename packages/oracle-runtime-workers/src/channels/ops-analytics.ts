@@ -1,6 +1,6 @@
 /**
  * Operations metrics of the channel routes (`POST /channels/turn`,
- * `/channels/control`, `/channels/history`): one Workers Analytics Engine
+ * `/channels/control`, `/channels/history`, `/channels/media`): one Workers Analytics Engine
  * data point per request, and one structured log line per request the route
  * refused or failed. Layout and queries: docs/operations.md#channel-request-metrics.
  *
@@ -36,6 +36,7 @@ export const CHANNEL_ROUTES = [
   'POST /channels/turn',
   'POST /channels/control',
   'POST /channels/history',
+  'POST /channels/media',
 ] as const;
 export type ChannelRouteName = (typeof CHANNEL_ROUTES)[number];
 
@@ -44,6 +45,7 @@ const EVENTS: Record<ChannelRouteName, string> = {
   'POST /channels/turn': 'channels.turn',
   'POST /channels/control': 'channels.control',
   'POST /channels/history': 'channels.history',
+  'POST /channels/media': 'channels.media',
 };
 
 export type ChannelOpsOutcome =
@@ -70,6 +72,8 @@ export interface ChannelRequestOp {
   items?: number;
   plans?: number;
   limit?: number;
+  /** `/channels/media` only: what was asked for (`file` or `artifact`). */
+  mediaKind?: 'file' | 'artifact';
   /** `/channels/history` only: the gateway's request id, kept for the log line when it is `web-history:<uuid>`. */
   requestId?: string;
 }
@@ -168,7 +172,7 @@ export function channelOpsPoint(
       '', // blob6 campaign (Yo Rewards only)
       'gateway', // blob7 caller: the channel gateway
       channelOpsProvider(op.provider), // blob8 channel
-      op.phase ?? '', // blob9 turn phase
+      op.phase ?? op.mediaKind ?? '', // blob9 turn phase, or what a media read asked for
     ],
     doubles: [
       count(ms), // double1 duration ms
@@ -209,6 +213,7 @@ export function finishChannelOp(
       code: point.blobs[4] || undefined,
       provider: point.blobs[7] || undefined,
       phase: op.phase,
+      ...(op.mediaKind ? { kind: op.mediaKind } : {}),
       ms,
       objectMs: op.objectMs,
       ...(op.route === 'POST /channels/history'

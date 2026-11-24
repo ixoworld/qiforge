@@ -23,6 +23,7 @@ import {
   type TranscriptRowSource,
 } from '../do/transcript';
 import type { ThreadMessageRow } from '../sqlite/sqlite-saver';
+import { isChannelAttachmentRef } from '../attachments/channel';
 import {
   CHANNEL_HISTORY_CURSOR_MAX,
   CHANNEL_HISTORY_LIMIT_DEFAULT,
@@ -52,6 +53,12 @@ export type ChannelHistoryItem =
       text: string;
       /** The turn's `remoteMessageRef` as the gateway sent it; null when it was not this binding's. */
       remoteRef: string | null;
+      /**
+       * The files the person sent with this message, in the order sent: each
+       * readable with `POST /channels/media` (`kind: "file"`, this item's
+       * `sessionId` and the file's `ref`). Absent when the message had none.
+       */
+      files?: ChannelHistoryFile[];
     }
   | {
       kind: 'message';
@@ -64,6 +71,42 @@ export type ChannelHistoryItem =
       requestId: string | null;
       plan?: { parts: ReplyPlan['parts'] };
     };
+
+/**
+ * A file the person sent, as its message recorded it: no lookup beyond the
+ * message row (no link, no Matrix id). `size` is absent when the message did
+ * not record one.
+ */
+export interface ChannelHistoryFile {
+  /** The file's opaque channel reference, `channel:<16 hex>`. */
+  ref: string;
+  name: string;
+  mime: string;
+  size?: number;
+}
+
+/** The channel files of a message's attachments: only those with a `channel:` reference. */
+function channelFilesOf(
+  attachments: readonly AttachmentMeta[],
+): ChannelHistoryFile[] {
+  return attachments.flatMap((file) =>
+    typeof file.channelRef === 'string' &&
+    isChannelAttachmentRef(file.channelRef)
+      ? [
+          {
+            ref: file.channelRef,
+            name: file.filename,
+            mime: file.mimetype,
+            ...(typeof file.size === 'number' &&
+            Number.isSafeInteger(file.size) &&
+            file.size >= 0
+              ? { size: file.size }
+              : {}),
+          },
+        ]
+      : [],
+  );
+}
 
 export interface ChannelHistoryPage {
   items: ChannelHistoryItem[];
@@ -327,12 +370,13 @@ async function segmentItems(
     const at = iso(dto.createdAt ?? row.anchor.createdAt);
     if (dto.type === 'human') {
       if (!personsInput(r)) continue;
-      const files = (
-        dto.attachments ?? (dto.attachment ? [dto.attachment] : [])
-      )
+      const attachments =
+        dto.attachments ?? (dto.attachment ? [dto.attachment] : []);
+      const placeholders = attachments
         .map((file: AttachmentMeta) => `[File sent: ${file.filename}]`)
         .join('\n');
-      const text = [dto.content, files].filter(Boolean).join('\n\n');
+      const text = [dto.content, placeholders].filter(Boolean).join('\n\n');
+      const files = channelFilesOf(attachments);
       if (!text) continue;
       const origin = ChannelOrigin.safeParse(
         dto.metadata?.['org.ixo.qi.origin'],
@@ -348,6 +392,7 @@ async function segmentItems(
           origin.success && origin.data.binding_id === bindingId
             ? origin.data.remote_ref
             : null,
+        ...(files.length ? { files } : {}),
       });
       continue;
     }
