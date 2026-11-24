@@ -58,6 +58,8 @@ export default defineConfig({
       // Reads the source tree with node:fs and the TypeScript compiler;
       // runs in vitest.core.config.ts.
       'src/core/latin1-literals.test.ts',
+      // Plain-Node suites (timing and fetch fakes); run in vitest.core.config.ts.
+      'src/traces/**/*.test.ts',
       '**/node_modules/**',
     ],
     testTimeout: 60_000,

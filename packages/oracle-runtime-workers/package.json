@@ -40,7 +40,8 @@
     "!src/core/test-fixtures.ts",
     "!src/plugins/mcp-test-server.ts",
     "!src/plugins/pod-creator/test-fixtures.ts",
-    "!src/plugins/credentials/test-fixtures.ts"
+    "!src/plugins/credentials/test-fixtures.ts",
+    "!src/traces/test-helpers.ts"
   ],
   "dependencies": {
     "@ixo/action-protocol": "0.9.1",

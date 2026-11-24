@@ -161,6 +161,18 @@ export {
   type ResolveLangsmithTracingArgs,
 } from './core/llm';
 
+// --- IXO Traces (turn tracer) ----------------------------------------------
+export {
+  RUNTIME_VERSION,
+  TurnTracer,
+  traceSendStats,
+  tracesConfigFromEnv,
+  type IngestTurn,
+  type IngestTurnStart,
+  type TracesConfig,
+  type TurnTracerOptions,
+} from './traces';
+
 // --- task adapters -----------------------------------------------------------
 export {
   agentWakeFromTaskRecord,

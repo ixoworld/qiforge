@@ -2647,6 +2647,17 @@ object created: `Cannot perform I/O on behalf of a different Durable Object
 turn on the Yo mainnet oracle, 13 Nov 2026 15:56Z; the reply was delivered,
 only that trace was incomplete).
 
+### Turn traces (IXO Traces) are per Durable Object too
+
+The turn tracer (`TRACES_API_KEY` + `TRACES` / `TRACES_ENDPOINT`, see
+[configuration](configuration.md#ixo-traces-turn-tracer)) is created per turn
+inside the user object, and its requests run in that object's own lane, one
+at a time, so no request is ever read by another object. A turn that does not
+arrive in the store shows in the logs as `[traces] turn <id>… not stored`,
+`refused`, `dropped: HTTP 429` or `not sent`, with the count so far; a turn
+whose object died mid-turn has only its start marker, which the store shows
+as interrupted after 10 minutes.
+
 ### A gateway reset can leave the old instance running: it stands down
 
 A Durable Object reset with unchanged code (a `wrangler tail` or dashboard

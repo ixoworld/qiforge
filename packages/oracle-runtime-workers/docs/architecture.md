@@ -1201,7 +1201,8 @@ request) and keeps the source and result inside the turn:
   not on the next session create, not on a realtime drain, not on delete.
   The next session create indexes the user's latest conversation instead.
 - No tracing. The turn gets no LangSmith tracer and no tracing metadata,
-  whatever `LANGSMITH_TRACING` or `LANGSMITH_TRACED_DIDS` say. LangChain's
+  whatever `LANGSMITH_TRACING` or `LANGSMITH_TRACED_DIDS` say, and no IXO
+  Traces turn tracer whatever `TRACES_API_KEY` says. LangChain's
   own env-driven tracer cannot attach either: workerd fills `process.env`
   from the Worker's vars and secrets, and the runtime's entry
   (`src/index.ts`, through `src/core/tracing-env.ts`) removes the four names
