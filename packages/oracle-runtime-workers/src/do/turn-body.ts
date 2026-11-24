@@ -34,7 +34,8 @@ export interface TurnBody {
   model?: string;
   /**
    * Free-form client metadata (Node's `SendMessageDto.metadata`); the runtime
-   * reads `editorRoomId`, `spaceId`, `sessionRunId` and `currentEntityDid`.
+   * reads `editorRoomId`, `spaceId`, `sessionRunId`, `currentEntityDid` and
+   * `hostApp`.
    */
   metadata?: Record<string, unknown> & {
     editorRoomId?: string;
@@ -42,6 +43,8 @@ export interface TurnBody {
     sessionRunId?: string;
     /** `null` clears the selected subject; omitted keeps it. */
     currentEntityDid?: string | null;
+    /** The app whose chat panel sends this message (`ctx.session.hostApp`). */
+    hostApp?: string;
   };
   tools?: Array<{
     name: string;

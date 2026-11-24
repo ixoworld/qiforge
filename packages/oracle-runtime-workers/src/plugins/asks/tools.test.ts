@@ -14,10 +14,15 @@ import {
   connectAsksMcp,
   withoutPropertyNames,
   clearAsksToolDefs,
+  CONNECT_AGAIN,
+  handsOver,
   hideUploadAddress,
   LEFT_OUT,
   LIST_TIMEOUT_MS,
+  OPENS_IN_ASKS,
+  preloadText,
   SIGN_IN_AGAIN,
+  skillTool,
   type AsksTurn,
   type McpConnect,
   type McpTool,
@@ -477,6 +482,184 @@ describe('asks tools', () => {
       status: 'pending',
     });
   });
+});
+
+describe('inside asks.world', () => {
+  const inside = () =>
+    fakeContext({
+      session: {
+        id: 's1',
+        client: 'portal',
+        requestId: 'r1',
+        hostApp: 'asks',
+      },
+    });
+  const site = new URL(MCP_URL).origin;
+  const handOff = (page: string, origin = site) =>
+    `Ready. Open this link to pay for your ask and post it. It's for ixo1…abc only, works once, and lasts a day:\n${origin}/${page}/${DRAFT}\nNothing happens until you tap it there. Then tell me, and I'll check with link_status "${DRAFT}".`;
+  /** Their connection is known, as it is after a first connected turn. */
+  const connected = async (ctx: ReturnType<typeof fakeContext>) => {
+    await ctx.kv!.set('asks/connection', 'state', { status: 'connected' });
+    return ctx;
+  };
+  const answerOf = async (
+    tools: Awaited<ReturnType<typeof asksTools>>,
+    name: string,
+    ctx = inside(),
+  ) => tools.find((one) => one.name === name)!.handler({}, ctx);
+
+  it('asks_connect keeps its link for the app, and says not to send it', async () => {
+    const { conn } = fakeConnection({
+      status: () => Promise.resolve({ connected: false, pending: false }),
+    });
+    const ctx = inside();
+    const tools = await asksTools(turnWith(conn, fakeMcp([]).connect, ctx));
+    const connect = tools.find((one) => one.name === 'asks_connect')!;
+    expect(connect.description).toContain('This chat is inside asks.world');
+    expect(connect.description).not.toContain('Google');
+    const text = String(await connect.handler({}, ctx));
+    expect(text).toContain(
+      'https://companion.devnet.ixo.earth/asks/oauth/start/x',
+    );
+    expect(text).toContain('never for your message');
+    expect(text).toContain('"Connected." is written for them');
+    expect(text).not.toContain('Send the person this link');
+    expect(await ctx.kv!.get('asks/connection', 'state')).toMatchObject({
+      status: 'pending',
+    });
+    expect(String(await answerOf(tools, 'asks_status', ctx))).toBe(
+      'Not connected. Call asks_connect.',
+    );
+  });
+
+  it('the next message from elsewhere gets the link to send again', async () => {
+    const { conn } = fakeConnection({
+      status: () => Promise.resolve({ connected: false, pending: false }),
+    });
+    for (const ctx of [
+      fakeContext(),
+      fakeContext({
+        session: {
+          id: 's1',
+          client: 'channel',
+          requestId: 'r2',
+          channel: { provider: 'whatsapp', bindingId: 'b', bindingRevision: 1 },
+        },
+      }),
+    ]) {
+      const tools = await asksTools(turnWith(conn, fakeMcp([]).connect, ctx));
+      const connect = tools.find((one) => one.name === 'asks_connect')!;
+      expect(connect.description).toContain('Google');
+      const text = String(await connect.handler({}, ctx));
+      expect(text).toContain('Send the person this link');
+      expect(text).not.toContain('Connected.');
+    }
+  });
+
+  it('an answer that hands over a payment or another tap says the app opens it, and keeps the link', async () => {
+    for (const page of ['pay', 'do']) {
+      clearAsksToolDefs();
+      const mcp = fakeMcp([
+        mcpTool('post_ask', () => Promise.resolve(handOff(page))),
+        mcpTool('close_ask', () =>
+          Promise.resolve([
+            { type: 'text', text: 'Two asks will be closed.' },
+            { type: 'text', text: handOff(page) },
+          ]),
+        ),
+      ]);
+      const ctx = await connected(inside());
+      const { conn } = fakeConnection();
+      const tools = await asksTools(turnWith(conn, mcp.connect, ctx));
+      expect(await answerOf(tools, 'asks__post_ask', ctx)).toBe(
+        `${handOff(page)}\n${OPENS_IN_ASKS}`,
+      );
+      expect(await answerOf(tools, 'asks__close_ask', ctx)).toEqual([
+        { type: 'text', text: 'Two asks will be closed.' },
+        { type: 'text', text: `${handOff(page)}\n${OPENS_IN_ASKS}` },
+      ]);
+    }
+  });
+
+  it('everywhere else the answer is left as it came', async () => {
+    const mcp = fakeMcp([
+      mcpTool('post_ask', () => Promise.resolve(handOff('pay'))),
+    ]);
+    const ctx = await connected(fakeContext());
+    const { conn } = fakeConnection();
+    const tools = await asksTools(turnWith(conn, mcp.connect, ctx));
+    expect(await answerOf(tools, 'asks__post_ask', ctx)).toBe(handOff('pay'));
+  });
+
+  it('a report to fill in, another host and a read keep their links', async () => {
+    const look = handOff('pay');
+    const mcp = fakeMcp(
+      [
+        mcpTool('submit_work', () => Promise.resolve(handOff('report'))),
+        mcpTool('post_ask', () =>
+          Promise.resolve(handOff('pay', 'https://asks.world.evil.example')),
+        ),
+        mcpTool('list_asks', () => Promise.resolve(look)),
+      ],
+      ['list_asks'],
+    );
+    const ctx = await connected(inside());
+    const { conn } = fakeConnection();
+    const tools = await asksTools(turnWith(conn, mcp.connect, ctx));
+    for (const name of ['submit_work', 'post_ask', 'list_asks'])
+      expect(String(await answerOf(tools, `asks__${name}`, ctx))).not.toContain(
+        OPENS_IN_ASKS,
+      );
+  });
+
+  it('a connection asks ended is made again with the button, not a link', async () => {
+    let ended = false;
+    const { conn } = fakeConnection({
+      token: () =>
+        Promise.resolve(
+          ended
+            ? { ok: false as const, reason: 'ended' as const }
+            : { ok: true as const, access: 'asks_at_1' },
+        ),
+    });
+    const mcp = fakeMcp([mcpTool('my_status')]);
+    const ctx = await connected(inside());
+    const tools = await asksTools(turnWith(conn, mcp.connect, ctx));
+    ended = true;
+    expect(await answerOf(tools, 'asks__my_status', ctx)).toBe(CONNECT_AGAIN);
+  });
+
+  it('a skill says what differs here', async () => {
+    const skill = { name: 'create', description: 'Post an ask.', text: 'How.' };
+    const read = async (inAsks: boolean) =>
+      String(
+        await skillTool([skill as never], inAsks).handler(
+          { name: 'create' },
+          inside(),
+        ),
+      );
+    expect(await read(true)).toContain('This chat is inside asks.world');
+    expect(await read(false)).not.toContain('inside asks.world');
+    expect(preloadText(skill as never, true)).toContain('inside asks.world');
+    expect(preloadText(skill as never)).not.toContain('inside asks.world');
+  });
+
+  it.each([
+    [`${site}/pay/${DRAFT}`, true],
+    [`[Review](${site}/do/${DRAFT})`, true],
+    [`${site}/pay/${DRAFT}.`, true],
+    [`${site}/pay/${DRAFT}x`, false],
+    [`${site}/pay/ad_short`, false],
+    [`${site}/report/${DRAFT}`, false],
+    [`${site}/x/pay/${DRAFT}`, false],
+    [`https://asks.world.evil.example/pay/${DRAFT}`, false],
+    [`/pay/${DRAFT}`, false],
+  ])(
+    'only a whole draft link on the connector’s own site is a hand-over: %s',
+    (text, is) => {
+      expect(handsOver(text, MCP_URL)).toBe(is);
+    },
+  );
 });
 
 describe('hideUploadAddress', () => {

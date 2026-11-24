@@ -305,6 +305,9 @@ export async function createMainAgent(
         wsId: requestCtx.session.wsId,
         roomId: requestCtx.session.roomId,
         ...(surface ? { surface } : {}),
+        ...(requestCtx.session.hostApp
+          ? { hostApp: requestCtx.session.hostApp }
+          : {}),
       },
       ...(byoProvider ? { byo: { provider: byoProvider, active: true } } : {}),
     },

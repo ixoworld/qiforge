@@ -66,6 +66,7 @@ export const mainAgentRequestContextSchema = z.object({
       .optional(),
     wsId: z.string().optional(),
     roomId: z.string().optional(),
+    hostApp: z.enum(['asks']).optional(),
   }),
   history: z
     .object({

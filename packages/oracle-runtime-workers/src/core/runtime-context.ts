@@ -16,6 +16,7 @@ import type {
   ActionCallEventPayload,
   BrowserToolCallEventPayload,
   ChatOpenAIFields,
+  HostApp,
   Logger,
   MatrixEvent,
   MatrixPostOpts,
@@ -353,6 +354,7 @@ export interface RuntimeSessionContext {
   };
   roomId?: string;
   surface?: SessionSurface;
+  hostApp?: HostApp;
 }
 
 /** What LangGraph hands us at invocation time on `runtime.context`. */
