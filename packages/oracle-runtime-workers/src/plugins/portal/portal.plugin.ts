@@ -35,7 +35,7 @@ const manifest: PluginManifest = {
   summary:
     "The user's Portal UI: action cards (everything the person sees, answers, reviews or signs), forms, Topics, domains, pages, navigation.",
   whenToUse: [
-    'What the person sees, answers, reviews or signs is an action card: ask with `ask_question_card`; for a bid or claim call `list_action_cards`, then `prepare_action_card`. Only when the Portal declares no card tools, ask with `ask_user_question`.',
+    'What the person sees, answers, reviews or signs is an action card: ask with `ask_question_card`; for a bid or claim call `list_action_cards`, then `prepare_action_card`. Charts, tables, lists and files become cards by themselves when you make them; never prepare one. Only when the Portal declares no card tools, ask with `ask_user_question`.',
     'User asks for an action the Portal FE exposes as a browser tool (declared in `state.browserTools`).',
     "A task needs a browser-side capability the server can't do alone — open a URL in the user's tab, click a Portal button, fill a form.",
   ],
