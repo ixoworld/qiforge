@@ -52,3 +52,10 @@ OPEN_ROUTER_API_KEY=
 # turn may make — a write (default 1) and a read or repeatable UI step (5).
 # TURN_MAX_IDENTICAL_WRITES=1
 # TURN_MAX_IDENTICAL_READS=5
+
+# --- tracing: IXO Traces ----------------------------------------------------
+# One finished turn per request to IXO Traces, sent after the reply. On exactly
+# when the write key and a destination are set; independent of LANGSMITH_*.
+# Prefer a `TRACES` service binding in wrangler.jsonc over the public endpoint.
+# TRACES_API_KEY=ixt_w_...
+# TRACES_ENDPOINT=https://<traces host>

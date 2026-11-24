@@ -1217,6 +1217,14 @@ export interface LangsmithTracingDecision {
 /** The signature of a signed storage link, whatever carries the link. */
 const SIGNED_LINK_SIGNATURE = /(X-Amz-Signature=)[0-9a-f]+/gi;
 
+/**
+ * `text` (plain text or a JSON document: JSON escaping never touches the
+ * marker's characters) with the signature of every signed link replaced.
+ */
+export function redactSignedLinkText(text: string): string {
+  return text.replace(SIGNED_LINK_SIGNATURE, '$1[redacted]');
+}
+
 /** What `SIGNED_LINK_SIGNATURE` needs to match somewhere: the marker and one hex digit. */
 const SIGNED_LINK_MARKER = /X-Amz-Signature=[0-9a-f]/i;
 
@@ -1272,7 +1280,7 @@ export function redactSignedLinks(
 ): Record<string, unknown> {
   if (!needsSignedLinkPass(values)) return values;
   const json = stringify(values);
-  const redacted = json.replace(SIGNED_LINK_SIGNATURE, '$1[redacted]');
+  const redacted = redactSignedLinkText(json);
   if (redacted !== json) return JSON.parse(redacted) as Record<string, unknown>;
   // `stringify` answers with a bare string when it cannot serialize.
   return json.startsWith('{') ? values : {};

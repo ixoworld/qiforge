@@ -207,6 +207,7 @@ import {
   DEFAULT_MODEL_ID,
 } from '../core/llm';
 import { renderTurnTimeNote } from '../core/prompt-composer';
+import { TurnTracer, tracesConfigFromEnv } from '../traces';
 import type { RegisteredManifest } from '../core/registries';
 import {
   TURN_GUIDE_NOTE_KWARG,
@@ -9538,6 +9539,31 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             // isolate's objects uploads with another object's I/O.
             owner: this,
           });
+      // IXO Traces: on when the Worker has a traces key and an endpoint or
+      // binding (`tracesConfigFromEnv`), independent of LangSmith. It sends
+      // the turn once, after the reply (`finish` in the turn's cleanups),
+      // and never a supplied-context turn.
+      const tracesConfig = suppliedContextOnly
+        ? undefined
+        : tracesConfigFromEnv(this.env, console);
+      const turnTracer = tracesConfig
+        ? new TurnTracer({
+            config: tracesConfig,
+            waitUntil: (work) => this.ctx.waitUntil(work),
+            logger: console,
+            owner: this,
+            threadId: req.sessionId,
+            userId: req.identity.userDid,
+            userText: body.message,
+            oracleDid: this.env.ORACLE_DID,
+            // The env schema's default.
+            network: this.env.NETWORK ?? 'mainnet',
+            channel: req.channel?.provider ?? req.client,
+            requestId: req.requestId,
+            signal: abortController.signal,
+          })
+        : undefined;
+      if (turnTracer) turnDisposables.add(() => turnTracer.finish());
       // Capability router: from what is left to load this turn (the build
       // works that out from the turn's tools), the plugins this message needs.
       // `on` is awaited in the build, ahead of the first model call, and the
@@ -10073,7 +10099,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         signal: abortController.signal,
         recursionLimit: turnRecursionLimit(this.env),
         metadata: tracing.metadata,
-        callbacks: [meteredLlm.callback, ...(tracing.callbacks ?? [])],
+        callbacks: [
+          meteredLlm.callback,
+          ...(tracing.callbacks ?? []),
+          ...(turnTracer ? [turnTracer] : []),
+        ],
       };
       return {
         agent,

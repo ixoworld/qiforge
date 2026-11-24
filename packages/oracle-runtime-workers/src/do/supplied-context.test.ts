@@ -31,6 +31,7 @@ import { UNTITLED_SESSION } from '../sqlite/sessions-store';
 import type { TurnRequest } from './contracts';
 import { storedRunRequest } from './run-request';
 import { createUserOracleDO } from './user-oracle-do';
+import { TurnTracer } from '../traces';
 
 const TASK_SESSION = 'task:task_brief_0000001a';
 
@@ -217,7 +218,12 @@ describe('supplied-context turn preparation', () => {
     async (resumed) => {
       const o = restrictedObject({
         // Global tracing on: a restricted turn still gets no tracer.
-        env: { LANGSMITH_API_KEY: 'test-key', LANGSMITH_TRACING: 'true' },
+        env: {
+          LANGSMITH_API_KEY: 'test-key',
+          LANGSMITH_TRACING: 'true',
+          TRACES_API_KEY: 'ixt_w_test',
+          TRACES_ENDPOINT: 'https://traces.test',
+        },
       });
       const prepared = await o.call(
         'prepareTurn',
@@ -235,6 +241,11 @@ describe('supplied-context turn preparation', () => {
       expect(prepared).not.toMatchObject({
         config: {
           callbacks: expect.arrayContaining([expect.any(LangChainTracer)]),
+        },
+      });
+      expect(prepared).not.toMatchObject({
+        config: {
+          callbacks: expect.arrayContaining([expect.any(TurnTracer)]),
         },
       });
       expect(o.forbidden).not.toHaveBeenCalled();

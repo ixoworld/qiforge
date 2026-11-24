@@ -23,6 +23,9 @@ export default defineConfig({
       'src/memory/**/*.test.ts',
       'src/llm/**/*.test.ts',
       'src/attachments/**/*.test.ts',
+      // The turn tracer's unit suites: plain LangChain + fetch fakes (the
+      // DO-level traces test, `src/do/turn-traces.test.ts`, runs in workerd).
+      'src/traces/**/*.test.ts',
     ],
     // Streams a file through `crypto.DigestStream` and `FixedLengthStream`,
     // which only workerd has; runs in the Workers pool (`vitest.config.ts`).

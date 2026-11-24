@@ -393,6 +393,18 @@ export interface OracleWorkerEnv {
    */
   LANGSMITH_TRACED_DIDS?: string;
 
+  // --- IXO Traces ----------------------------------------------------------
+  /**
+   * The traces project's write key (`ixt_w_…`). With `TRACES` or
+   * `TRACES_ENDPOINT` it turns on the turn tracer (`src/traces/`): one
+   * finished turn per request, after the reply. Independent of LangSmith.
+   */
+  TRACES_API_KEY?: string;
+  /** IXO Traces base URL (`https://…`; `http://` only for a local host). */
+  TRACES_ENDPOINT?: string;
+  /** Service binding to the IXO Traces Worker; preferred over `TRACES_ENDPOINT`. */
+  TRACES?: Fetcher;
+
   // --- byo-llm -------------------------------------------------------------
   /** `'true'` enables bring-your-own-credential LLMs (`/byo-llm/*` surface). */
   BYO_LLM_ENABLED?: string;

@@ -14,7 +14,7 @@
     "lint:fix": "eslint packages --fix && eslint apps/qiforge-example --fix",
     "format": "prettier --write \"**/*.{ts,tsx,md,json}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,md,json}\"",
-    "version": "changeset version",
+    "version": "changeset version && node scripts/sync-runtime-version.mjs",
     "release": "changeset tag",
     "deploy": "./scripts/deploy.sh",
     "infra:up": "docker compose up -d redis redis-insight",

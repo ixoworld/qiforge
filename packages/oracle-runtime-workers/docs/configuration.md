@@ -335,6 +335,7 @@ wrangler r2 bucket lifecycle add <oracle>-artifacts artefact-expiry art/ --expir
 | `CONTEXT_CACHE_COLD_MS`, `CONTEXT_STALE_RESULT_TURNS`, `CONTEXT_PLUGIN_IDLE_TURNS`                                                                                                                                                                                                                    | What a cold turn may change. A turn is cold when it opens this long after the thread's last activity (default 2,100,000, 35 minutes: on `gpt-5.6-luna` a prefix left idle for 20 minutes still hit and one left for 35 missed); the provider's prompt cache is gone by then, so changing the request's prefix costs nothing, while the same change on a warm thread is a full miss. On a cold turn, tool results older than the last `CONTEXT_STALE_RESULT_TURNS` finished turns (2; 0 keeps them all) leave the request as one-line stubs `read_result` reads back, capabilities none of the last `CONTEXT_PLUGIN_IDLE_TURNS` turns touched (3; 0 keeps them all) are unloaded, and a channel thread adopts the room's newer user context. See [operations](operations.md#turns-context-budgets). `CONTEXT_CACHE_COLD_MS=0` makes every turn cold.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `TOOL_RESULT_TTL_HOURS`, `TOOL_RESULT_R2_MIN_BYTES`                                                                                                                                                                                                                                                   | Saved tool results (the whole text behind a capped result): lifetime (24) and the size from which they go to the R2 tier bucket instead of the object's SQLite (1000000; 65536 … 1500000).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, `LANGSMITH_ENDPOINT`, `LANGSMITH_TRACED_DIDS`                                                                                                                                                                                          | Global (`'true'`) or per-DID allowlist tracing (`*` = everyone). Read from the Worker `env` only. LangChain's own `process.env` switches (`LANGSMITH_TRACING`, `LANGCHAIN_TRACING`, `LANGSMITH_TRACING_V2`, `LANGCHAIN_TRACING_V2`) are removed from `process.env` when the isolate loads, so setting any of them never attaches LangChain's unredacted default tracer; set only these variables. A traced run uploads no `process.env` values and no runtime block (`omitTracedRuntimeInfo`), and its error text and metadata pass the signed-link redaction.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `TRACES_API_KEY` (secret), `TRACES_ENDPOINT`, service binding `TRACES`                                                                                                                                                                                                                                | IXO Traces, the turn tracer: one finished turn per request, sent after the reply. On exactly when `TRACES_API_KEY` and `TRACES` or `TRACES_ENDPOINT` are set; independent of the LangSmith variables (both can run). See [IXO Traces](#ixo-traces-turn-tracer).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `BYO_LLM_ENABLED`                                                                                                                                                                                                                                                                                     | `'true'` enables the bring-your-own-credential lane (`/byo-llm/*`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `BYO_CHATGPT_BACKEND_URL`, `BYO_CHATGPT_PROXY_AUTH_TOKEN`, `BYO_CHATGPT_CLIENT_ID`                                                                                                                                                                                                                    | ChatGPT-subscription backend proxy (required on Cloudflare, see operations), its optional gate token, OAuth client id override.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
@@ -574,6 +575,94 @@ from. Behaviour is in [operations](operations.md).
 
 `VFS_REQUEST_TIMEOUT_MS` (vfs plugin config, default 20,000 ms) covers a
 VFS request until its response body has been read.
+
+## IXO Traces (turn tracer)
+
+IXO Traces is IXO's own trace store (repo `ixoworld/ixo-langsmith-traces`,
+replacing LangSmith). The runtime's `TurnTracer` (`src/traces/`) collects
+every run of a turn through LangChain's tracer hook (`BaseTracer`, the base
+of LangSmith's `LangChainTracer`) and sends the finished turn once, as gzip
+JSON, to `POST /v1/ingest/turns`. When the root run starts it also sends the
+small "turn started" marker (`POST /v1/ingest/turns/start`, same
+`start_time`), so a turn lost to a dying Durable Object still shows as
+interrupted.
+
+Configure an oracle (no code change):
+
+```jsonc
+// wrangler.jsonc: either a service binding to the traces Worker (preferred:
+// same request, no public hop) …
+"services": [{ "binding": "TRACES", "service": "ixo-traces" }],
+// … or the public endpoint as a var:
+"vars": { "TRACES_ENDPOINT": "https://<traces host>" },
+```
+
+```bash
+# The project's write key (ixt_w_…), one per oracle and network:
+printf '%s' "$KEY" | wrangler secret put TRACES_API_KEY
+```
+
+With `TRACES` and `TRACES_ENDPOINT` both set, the binding is used.
+`TRACES_ENDPOINT` must be `https://` (`http://` only for `localhost`,
+`127.0.0.1` or `[::1]`); anything else turns the tracer off with one warning.
+Without a key nothing is sent. LangSmith (`LANGSMITH_*`) is untouched and
+independent: an oracle can run both during the switch.
+
+Which turns: every agent turn of a user object (Portal, Matrix, channel
+and task turns), except supplied-context turns, which are never traced. A
+turn that also asks the model again after an empty reply has two root runs
+and sends two turns (same `request_id`).
+
+What a turn carries:
+
+- The runs in LangSmith's Run shape (`id`, `parent_run_id`, `dotted_order`,
+  `run_type`, `name`, times, `status`, `inputs`, `outputs`, `error`,
+  `extra.metadata`, `tags`, `events`), with what the LangSmith client sends
+  today: the same collapsed graph state (`collapseTracedState`), signed-link
+  signatures redacted over the whole body, no runtime block and no
+  `process.env` values. Not sent: streamed-token events (never collected;
+  `first_token_time` is) and `serialized`.
+- Model runs: `prompt_tokens`, `completion_tokens`, `total_tokens`,
+  `total_cost` and `extra.metadata.served_model` / `fallback`, all from the
+  call's `model_call` record, the one `[llm-call]` logs and `onModelCall`
+  gets.
+- Turn header: `trace_id` (= the root run id), `thread_id` (the session),
+  `user_id` (the DID), `start_time`, `end_time`, `status` (`success`,
+  `error`, `interrupted`), `error`, `name`, `usage` (input, cached and
+  output tokens and USD cost summed over the turn's model runs),
+  `user_text` (the message as sent) and `reply_text` (the last AI message),
+  each at most 8,000 characters.
+- Turn metadata: `oracle_did`, `network`, `channel` (the channel provider,
+  e.g. `whatsapp`, else the client: `portal`, `matrix`), `runtime_version`,
+  `request_id`, `served_model` (the reply model that answered), `fallback`
+  (`"true"` when any call fell back), then the root run's own metadata
+  (`user_did`, `user_id`, `client`, `thread_id`, …). A truncated turn adds
+  `truncated: "true"` and `truncated_payloads` / `omitted_runs`.
+
+How it stays off the turn:
+
+- Each callback keeps references and a counter (a few µs a run, measured in
+  `src/traces/overhead.test.ts`); nothing is serialized during the turn.
+- The turn is built and gzipped after the reply, in the turn's cleanups
+  (`finish()`), inside `ctx.waitUntil`; the reply never waits for it (a 1 MB
+  turn builds in about 10 ms).
+- Size: at most 5,000 runs; a payload over 4 Mi characters is never
+  serialized; a turn over 12 Mi characters of JSON or 7.5 MiB gzipped drops
+  payloads in a fixed order (model invocation params, then prompts, graph
+  state, events, model replies, tool results, tool inputs, the root last;
+  largest first) and is still sent, marked `truncated`.
+- Delivery: one request per turn, the requests of one user object one at a
+  time (at most 8 waiting, beyond that skipped); 15 s timeout (5 s for the
+  marker); one retry after 0.25–1 s on a 5xx, timeout or network error; no
+  retry on a 4xx; a 429 is dropped. Nothing is queued for later.
+- A root still open when the turn ends (an abort) gets 5 s, then goes as
+  `interrupted` with its open runs `pending`. If the object dies mid-turn,
+  only the marker exists (by design).
+- Logs: `[traces] turn 0192ab34… : N runs, raw → gzip bytes, built in X ms`,
+  and on failure `[traces] turn 0192ab34… (N bytes) not stored: HTTP 503
+after 2 attempts (failed K so far)`, `… refused: HTTP 4xx`, `… dropped:
+HTTP 429`. Ids, statuses and sizes only: never content, keys or DIDs.
+  `traceSendStats` (exported) counts them per isolate.
 
 ## `createOracleWorker` options
 
