@@ -1,6 +1,7 @@
 import { ToolMessage } from '@langchain/core/messages';
 import { Command } from '@langchain/langgraph';
 import { capToolResult, type ResultCapConfig } from './middlewares/result-cap';
+import { nestedRunCallbacks } from './nested-run-callbacks';
 import { tool } from '@langchain/core/tools';
 import type { StructuredTool } from 'langchain';
 import { requireToolPlane, toolPlaneOf } from '../plugin-api/tool-plane';
@@ -123,6 +124,13 @@ export function wrapPluginTool(
         state,
         sharedFactory,
       );
+      // A model or agent the handler invokes nests under this tool call.
+      const callbacks = nestedRunCallbacks(
+        typeof runConfig === 'object' && runConfig !== null
+          ? Reflect.get(runConfig, 'callbacks')
+          : undefined,
+      );
+      if (callbacks) ctx.callbacks = callbacks;
       if (pluginName !== undefined)
         requireToolPlane(ctx, pluginName, pluginTool);
       const output = await pluginTool.handler(args, ctx);

@@ -13,7 +13,11 @@ import {
 } from '../llm/model-call';
 import type { Logger } from '../plugin-api/types';
 import type { TracesConfig } from './config';
-import { TurnSchema, TurnStartSchema } from './fixtures/turn-schema';
+import {
+  checkJsonShape,
+  TurnSchema,
+  TurnStartSchema,
+} from './fixtures/turn-schema';
 import { TurnTracer, type TurnTracerOptions } from './turn-tracer';
 
 export const TEST_CONFIG: TracesConfig = {
@@ -83,8 +87,9 @@ export function fakeIngest(
   };
 }
 
-/** Parse with the service's schema; throws with the issues when it refuses. */
+/** Check as the service does (shape, then schema); throws with the issues when it refuses. */
 export function validTurn(body: unknown) {
+  checkJsonShape(body);
   const result = TurnSchema.safeParse(body);
   if (!result.success)
     throw new Error(
@@ -94,6 +99,7 @@ export function validTurn(body: unknown) {
 }
 
 export function validStart(body: unknown) {
+  checkJsonShape(body);
   const result = TurnStartSchema.safeParse(body);
   if (!result.success)
     throw new Error(

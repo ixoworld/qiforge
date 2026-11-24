@@ -20,6 +20,7 @@ import {
 import { fetchOpenRouterPrices } from './openrouter-pricing';
 import type { LlmAdapter } from './runtime-context';
 import { stringify } from '../sqlite/serialization';
+import { inheritedByNestedRuns } from './nested-run-callbacks';
 import { NOOP_LOGGER } from './utils';
 
 // ── Catalog ─────────────────────────────────────────────────────────────────
@@ -1426,10 +1427,14 @@ export function resolveLangsmithTracing(
   return {
     metadata,
     callbacks: [
-      new LangChainTracer({
-        client: langsmithClientFor(env.apiKey, env.endpoint, owner),
-        ...(env.project && { projectName: env.project }),
-      }),
+      // Sub-agents and helper models nest their runs under the run that
+      // invoked them (`nestedRunCallbacks`).
+      inheritedByNestedRuns(
+        new LangChainTracer({
+          client: langsmithClientFor(env.apiKey, env.endpoint, owner),
+          ...(env.project && { projectName: env.project }),
+        }),
+      ),
     ],
   };
 }

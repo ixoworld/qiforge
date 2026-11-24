@@ -9,22 +9,40 @@
  * streamed-token events (never collected) and `serialized` (the class
  * description of each runnable).
  *
- * Size: each payload (a run's inputs, outputs, extra, events) is serialized
- * once. One larger than `maxPayloadChars` is never serialized (its size is
- * walked with a bound first). When the turn is over the raw budget or its
- * gzip is over the compressed limit, payloads are replaced by
- * `{"_truncated":{"chars":N}}` (events by `[]`) in `DROP_ORDER`, largest
- * first within a class, until it fits; the turn's metadata then says
- * `truncated: "true"`. A run's `extra.metadata` (model names, served model,
- * fallback) and the run itself are never dropped.
+ * Every value goes through `traceJson` (json.ts): nothing LangChain hands
+ * over can make the build throw or the service refuse the turn.
+ *
+ * Size, guaranteed: the turn sent is at most `maxInflatedBytes` of UTF-8
+ * JSON (what the service measures after gunzip) and `maxCompressedBytes` of
+ * gzip, both below the service's caps. Each payload (a run's inputs,
+ * outputs, extra, metadata, events) is first measured, never serialized past
+ * `maxPayloadChars`. When the turn does not fit, payloads are replaced by
+ * `{"_truncated":{"chars":N}}` (events by `[]`; a run's metadata keeps its
+ * model names and fallback flag) in `DROP_ORDER`, largest first within a
+ * class; when every payload is dropped and it still does not fit, the last
+ * runs (pre-order, so a parent is always kept before its children) are left
+ * out. The root run and the turn's own fields always stay, and they alone
+ * always fit. The turn's metadata says `truncated: "true"` with the counts.
+ * Only what is kept is ever serialized, so the build holds about one turn's
+ * worth of JSON, whatever the run tree holds.
+ *
+ * Usage: the turn's `usage` is every model call of the turn once: the model
+ * runs of its tree (sub-agents included) and the calls made outside the
+ * graph (`outsideCalls`: the capability router's Decision, attachment
+ * extraction, and model calls made inside middleware hooks, which LangChain
+ * gives no callbacks), which are also sent as `llm` runs under the root so
+ * the runs add up to the usage.
  */
 import type { Run } from '@langchain/core/tracers/base';
 import { convertToDottedOrderFormat } from 'langsmith/run_trees';
 import { collapseTracedState, redactSignedLinkText } from '../core/llm';
-import { purposeOfRun } from '../core/model-call-reporter';
-import type { ModelCallRecord } from '../llm/model-call';
-import { stringify } from '../sqlite/serialization';
 import {
+  MODEL_CALL_PURPOSE_METADATA_KEY,
+  purposeOfRun,
+} from '../core/model-call-reporter';
+import type { ModelCallRecord, ModelCallReport } from '../llm/model-call';
+import {
+  CONTRACT_VERSION,
   METADATA_KEY_PATTERN,
   RUN_METADATA_KEYS,
   RUN_TYPES,
@@ -34,6 +52,7 @@ import {
   type TurnStatus,
   type TurnUsage,
 } from './contract';
+import { traceJson } from './json';
 
 /** What the tracer knows of the turn beyond its runs. */
 export interface TurnContext {
@@ -61,32 +80,51 @@ export interface CollectedTurn {
   /** First streamed token of a model run, epoch ms, by run id. */
   firstTokens: ReadonlyMap<string, number>;
   context: TurnContext;
+  /**
+   * Model calls of the turn that are not model runs of this tree (each
+   * once: the tracer leaves out every call it saw as a run).
+   */
+  outsideCalls?: readonly ModelCallReport[];
 }
 
 export interface EncodeLimits {
+  /** Gzip bytes the turn may take. */
   maxCompressedBytes: number;
-  /** Characters of JSON a turn may hold before payloads are dropped. */
-  rawBudgetChars: number;
+  /** UTF-8 bytes of JSON the turn may take once inflated. */
+  maxInflatedBytes: number;
   /** Characters of JSON one payload may hold. */
   maxPayloadChars: number;
   maxRuns: number;
 }
 
 /**
- * Below the contract's 8 MiB compressed / 64 MiB decompressed limits, with a
- * margin, and small enough that the build never holds more than a few times
- * `rawBudgetChars` next to a 128 MB isolate's turn: a real turn is about
- * 1 MiB of JSON (the prompts of its model calls).
+ * Below the contract's 8 MiB compressed / 16 MiB inflated limits with a
+ * margin (512 KiB and 1 MiB), so a turn the tracer builds is always
+ * accepted; a real turn is about 1 MiB of JSON (the prompts of its model
+ * calls).
  */
 export const DEFAULT_ENCODE_LIMITS: EncodeLimits = {
   maxCompressedBytes: TURN_LIMITS.maxCompressedBytes - 512 * 1024,
-  rawBudgetChars: 12 * 1024 * 1024,
+  maxInflatedBytes: TURN_LIMITS.maxDecompressedBytes - 1024 * 1024,
   maxPayloadChars: 4 * 1024 * 1024,
   maxRuns: TURN_LIMITS.maxRuns,
 };
 
 /** A run's metadata is kept whole up to this size, else replaced by a marker. */
 const MAX_METADATA_CHARS = 64 * 1024;
+
+/**
+ * Nesting a payload may have: it sits at level 4 of the turn (turn, runs,
+ * run, payload; a run's metadata at 5), and the service refuses a body
+ * deeper than `maxJsonDepth`.
+ */
+const PAYLOAD_MAX_DEPTH = TURN_LIMITS.maxJsonDepth - 9;
+
+/** JSON a run adds around its skeleton and payloads (`,"inputs":` …). */
+const RUN_FRAME_CHARS = 48;
+
+const UUID_PATTERN =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 export interface EncodedTurn {
   bytes: Uint8Array;
@@ -99,13 +137,14 @@ export interface EncodedTurn {
   droppedPayloads: number;
 }
 
-type SlotField = 'inputs' | 'outputs' | 'extra' | 'events';
+type SlotField = 'metadata' | 'extra' | 'inputs' | 'outputs' | 'events';
 
 /**
  * Which payloads go first when a turn is too large (lower first, largest
  * first within one): the model calls' invocation params (tool schemas) and
  * prompts, the graph's intermediate state, the lifecycle events, then model
- * replies and tool results, and the root's own inputs and outputs last.
+ * replies and tool results, then runs' metadata (its model names and
+ * fallback flag stay), and the root's own payloads last.
  */
 const DROP_ORDER = {
   llmExtra: 0,
@@ -117,14 +156,22 @@ const DROP_ORDER = {
   toolOutputs: 6,
   toolInputs: 7,
   other: 8,
-  root: 9,
+  metadata: 9,
+  root: 10,
 } as const;
 
 interface Slot {
   field: SlotField;
   rank: number;
-  json: string;
+  /** What is serialized (already through the trace policy). */
+  value: unknown;
+  /** Exact JSON length of `value` (measured), or how far the walk got. */
+  chars: number;
+  /** Set once the payload is kept and serialized, or dropped (its marker). */
+  json?: string;
   dropped: boolean;
+  /** What replaces it when dropped. */
+  marker: string;
 }
 
 interface FlatRun {
@@ -133,135 +180,159 @@ interface FlatRun {
   dottedOrder: string;
 }
 
+/** One run as it is sent: its skeleton (everything but payloads) and payloads. */
+interface BuiltRun {
+  /** `{…,"extra":{"metadata":` up to (excluding) the metadata JSON. */
+  head: string;
+  slots: {
+    metadata: Slot;
+    extra: Slot;
+    inputs: Slot;
+    outputs: Slot;
+    events: Slot;
+  };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Epoch ms the service reads as a time (2001 to 2100: the service takes no
+ * epoch-seconds-looking value and no year past four digits), else `fallback`.
+ */
+function validMs(ms: unknown, fallback: number): number {
+  return typeof ms === 'number' &&
+    Number.isFinite(ms) &&
+    ms >= MIN_TIME_MS &&
+    ms <= MAX_TIME_MS
+    ? ms
+    : fallback;
+}
+
+const MIN_TIME_MS = 1e12;
+const MAX_TIME_MS = Date.UTC(2100, 0, 1);
+
 function iso(ms: number): string {
-  return new Date(ms).toISOString();
+  return new Date(validMs(ms, Date.now())).toISOString();
 }
 
 function clip(text: string, max: number): string {
   return text.length <= max ? text : text.slice(0, max);
 }
 
-/** Replacer for values plain `JSON.stringify` refuses or loses. */
-function jsonReplacer(this: unknown, _key: string, value: unknown): unknown {
-  if (typeof value === 'bigint') return value.toString();
-  if (value instanceof Map) return Object.fromEntries(value);
-  if (value instanceof Set) return [...value];
-  if (value instanceof Error)
-    return { name: value.name, message: value.message };
-  return value;
+/** A token count as the contract takes it: a whole number in [0, maxTokens]. */
+export function tokenCount(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0)
+    return 0;
+  return Math.min(Math.round(value), TURN_LIMITS.maxTokens);
 }
 
-/**
- * A bounded estimate of `value`'s JSON length: walks strings and keys
- * (through `toJSON`), and stops once past `limit`. Never serializes.
- */
-export function approxJsonChars(value: unknown, limit: number): number {
-  const pending: unknown[] = [value];
-  const seen = new Set<object>();
-  let total = 0;
-  try {
-    while (pending.length > 0) {
-      if (total > limit) return total;
-      const next = pending.pop();
-      if (typeof next === 'string') {
-        total += next.length + 2;
-        continue;
-      }
-      if (next === null || typeof next !== 'object') {
-        total += 6;
-        continue;
-      }
-      if (seen.has(next)) continue;
-      seen.add(next);
-      const toJSON: unknown = Reflect.get(next, 'toJSON');
-      if (typeof toJSON === 'function') {
-        pending.push(toJSON.call(next, ''));
-        continue;
-      }
-      if (Array.isArray(next)) {
-        total += 2 + next.length;
-        for (const item of next) pending.push(item);
-        continue;
-      }
-      for (const key of Object.keys(next)) {
-        total += key.length + 4;
-        pending.push(Reflect.get(next, key));
-      }
-    }
-  } catch {
-    return limit + 1;
-  }
-  return total;
+/** A cost as the contract takes it: USD in [0, maxCostUsd]. */
+export function costUsd(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0)
+    return 0;
+  return Math.min(value, TURN_LIMITS.maxCostUsd);
 }
 
-/** `value` as JSON (an object, or `null`), redacted; a marker when too large. */
-function payloadJson(
-  value: unknown,
-  maxChars: number,
-): { json: string; tooLarge: boolean } {
-  if (value === undefined || value === null)
-    return { json: 'null', tooLarge: false };
-  const estimate = approxJsonChars(value, maxChars);
-  if (estimate > maxChars)
-    return { json: truncatedMarker(estimate), tooLarge: true };
-  const json = stringify(value, jsonReplacer);
-  // `stringify` answers with a bare string when it cannot serialize.
-  if (!json.startsWith('{') && !json.startsWith('['))
-    return { json: '{}', tooLarge: false };
-  return { json: redactSignedLinkText(json), tooLarge: false };
+/** A thread or user id as the contract takes it: printable, 1–256 characters. */
+export function contractId(value: string): string {
+  const printable = clip(
+    // eslint-disable-next-line no-control-regex
+    value.replace(/[\u0000-\u001f\u007f]/g, ''),
+    TURN_LIMITS.maxIdLength,
+  );
+  return printable.length > 0 ? printable : 'unknown';
 }
 
 function truncatedMarker(chars: number): string {
-  return `{"_truncated":{"chars":${Math.round(chars)}}}`;
+  return `{"_truncated":{"chars":${Math.max(0, Math.round(chars))}}}`;
 }
 
-/** Runs in pre-order (a parent before its children), at most `maxRuns`. */
+/** `value` as a JSON object payload: a non-object is wrapped as `{ value }`. */
+function objectPayload(value: unknown): unknown {
+  if (value === undefined || value === null) return null;
+  if (
+    isRecord(value) &&
+    !(value instanceof Map) &&
+    !(value instanceof Set) &&
+    !(value instanceof Error) &&
+    !(value instanceof Date) &&
+    !ArrayBuffer.isView(value) &&
+    !(value instanceof ArrayBuffer) &&
+    typeof Reflect.get(value, 'toJSON') !== 'function'
+  )
+    return value;
+  return { value };
+}
+
+/** A run's events as the contract takes them: at most the cap, each an object. */
+function eventsPayload(events: unknown): unknown[] {
+  if (!Array.isArray(events)) return [];
+  return events
+    .slice(0, TURN_LIMITS.maxEventsPerRun)
+    .map((event: unknown) => (isRecord(event) ? event : { value: event }));
+}
+
+/**
+ * Runs in pre-order (a parent before its children), at most `maxRuns`. A run
+ * is left out, with its subtree, when it cannot be sent: an id that is not a
+ * UUID, an id already taken, or a `dotted_order` past the contract's length
+ * (a nesting too deep). `omitted` counts every run of the tree not listed.
+ */
 function flattenRuns(
   root: Run,
   maxRuns: number,
 ): { runs: FlatRun[]; omitted: number } {
   const runs: FlatRun[] = [];
-  let omitted = 0;
-  const pending: Array<{ run: Run; parent: FlatRun | null }> = [
-    { run: root, parent: null },
+  const ids = new Set<string>();
+  let total = 0;
+  const pending: Array<{ run: Run; parent: FlatRun | null; top: boolean }> = [
+    { run: root, parent: null, top: true },
   ];
   while (pending.length > 0) {
-    const { run, parent } = pending.pop()!;
-    if (runs.length >= maxRuns) {
-      omitted += 1;
-      for (const child of run.child_runs ?? [])
-        pending.push({ run: child, parent: null });
-      continue;
+    const { run, parent, top } = pending.pop()!;
+    total += 1;
+    const children = [...(run.child_runs ?? [])];
+    let flat: FlatRun | null = null;
+    if (
+      runs.length < maxRuns &&
+      typeof run.id === 'string' &&
+      UUID_PATTERN.test(run.id) &&
+      !ids.has(run.id.toLowerCase()) &&
+      (parent !== null || top)
+    ) {
+      const segment = convertToDottedOrderFormat(
+        validMs(run.start_time, Date.now()),
+        run.id,
+        typeof run.execution_order === 'number' ? run.execution_order : 1,
+      ).dottedOrder;
+      const own =
+        parent === null
+          ? typeof run.dotted_order === 'string' && run.dotted_order.length > 0
+            ? run.dotted_order
+            : segment
+          : typeof run.dotted_order === 'string' &&
+              run.dotted_order.startsWith(`${parent.dottedOrder}.`)
+            ? run.dotted_order
+            : `${parent.dottedOrder}.${segment}`;
+      if (own.length <= TURN_LIMITS.maxDottedOrderLength) {
+        flat = { run, parentId: parent?.run.id ?? null, dottedOrder: own };
+        ids.add(run.id.toLowerCase());
+        runs.push(flat);
+      }
     }
-    const segment = convertToDottedOrderFormat(
-      run.start_time,
-      run.id,
-      run.execution_order,
-    ).dottedOrder;
-    const own =
-      parent === null
-        ? (run.dotted_order ?? segment)
-        : run.dotted_order?.startsWith(`${parent.dottedOrder}.`)
-          ? run.dotted_order
-          : `${parent.dottedOrder}.${segment}`;
-    const flat: FlatRun = {
-      run,
-      parentId: parent?.run.id ?? null,
-      dottedOrder: own,
-    };
-    runs.push(flat);
-    // Reverse, so the earliest child is visited first.
-    const children = [...(run.child_runs ?? [])].sort(
+    // Reverse, so the earliest child is visited first. The subtree of a run
+    // left out is walked only to be counted (`parent` stays null for it).
+    children.sort(
       (a, b) =>
-        b.start_time - a.start_time || b.execution_order - a.execution_order,
+        validMs(b.start_time, 0) - validMs(a.start_time, 0) ||
+        (b.execution_order ?? 0) - (a.execution_order ?? 0),
     );
-    for (const child of children) pending.push({ run: child, parent: flat });
+    for (const child of children)
+      pending.push({ run: child, parent: flat, top: false });
   }
-  return { runs, omitted };
+  return { runs, omitted: total - runs.length };
 }
 
 /** The trace policy LangChain keeps on a run's `extra` (`Runnable.withConfig`). */
@@ -291,6 +362,7 @@ function applyPolicy(
 function rankOf(run: Run, field: SlotField, isRoot: boolean): number {
   if (isRoot) return DROP_ORDER.root;
   if (field === 'events') return DROP_ORDER.events;
+  if (field === 'metadata') return DROP_ORDER.metadata;
   switch (run.run_type) {
     case 'llm':
       return field === 'extra'
@@ -438,32 +510,17 @@ export function turnUsageOf(records: Iterable<ModelCallRecord>): TurnUsage {
     cost_usd: 0,
   };
   for (const record of records) {
-    usage.input_tokens += record.promptTokens ?? 0;
-    usage.cached_tokens += record.cachedTokens ?? 0;
-    usage.output_tokens += record.outputTokens ?? 0;
-    usage.cost_usd += record.costUsd ?? 0;
+    usage.input_tokens += tokenCount(record.promptTokens);
+    usage.cached_tokens += tokenCount(record.cachedTokens);
+    usage.output_tokens += tokenCount(record.outputTokens);
+    usage.cost_usd += costUsd(record.costUsd);
   }
-  return usage;
-}
-
-/** The model that answered the turn: the last reply call's, else the last call's. */
-function servedModelOf(
-  runs: readonly FlatRun[],
-  records: ReadonlyMap<string, ModelCallRecord>,
-): string | undefined {
-  let reply: string | undefined;
-  let any: string | undefined;
-  for (const { run } of runs) {
-    const served = records.get(run.id)?.servedModel;
-    if (!served) continue;
-    any = served;
-    const metadata =
-      isRecord(run.extra) && isRecord(run.extra.metadata)
-        ? run.extra.metadata
-        : undefined;
-    if (purposeOfRun(metadata) === 'reply') reply = served;
-  }
-  return reply ?? any;
+  return {
+    input_tokens: tokenCount(usage.input_tokens),
+    cached_tokens: tokenCount(usage.cached_tokens),
+    output_tokens: tokenCount(usage.output_tokens),
+    cost_usd: costUsd(usage.cost_usd),
+  };
 }
 
 function scalarString(value: unknown): string | undefined {
@@ -553,128 +610,353 @@ async function gzipPieces(
   return { bytes: new Uint8Array(await result), rawBytes };
 }
 
+/** A run's numbers (LangSmith names) from its call record. */
+function usageFields(
+  record: ModelCallRecord | undefined,
+): Record<string, number> {
+  if (!record) return {};
+  const fields: Record<string, number> = {};
+  const prompt =
+    record.promptTokens !== undefined
+      ? tokenCount(record.promptTokens)
+      : undefined;
+  const completion =
+    record.outputTokens !== undefined
+      ? tokenCount(record.outputTokens)
+      : undefined;
+  if (prompt !== undefined) fields.prompt_tokens = prompt;
+  if (completion !== undefined) fields.completion_tokens = completion;
+  if (prompt !== undefined || completion !== undefined)
+    fields.total_tokens = tokenCount((prompt ?? 0) + (completion ?? 0));
+  if (record.costUsd !== undefined) fields.total_cost = costUsd(record.costUsd);
+  return fields;
+}
+
+/** What a run's metadata keeps when it is dropped: model names, fallback, purpose. */
+function essentialMetadata(metadata: unknown): Record<string, unknown> {
+  if (!isRecord(metadata)) return {};
+  const kept: Record<string, unknown> = {};
+  for (const key of [
+    RUN_METADATA_KEYS.servedModel,
+    RUN_METADATA_KEYS.requestedModel,
+    RUN_METADATA_KEYS.fallback,
+    MODEL_CALL_PURPOSE_METADATA_KEY,
+  ]) {
+    let value: unknown;
+    try {
+      value = Reflect.get(metadata, key);
+    } catch {
+      continue;
+    }
+    if (typeof value === 'string') kept[key] = clip(value, 256);
+    else if (typeof value === 'boolean') kept[key] = value;
+  }
+  return kept;
+}
+
+/** A payload, measured (never serialized past its cap). */
+function makeSlot(
+  field: SlotField,
+  rank: number,
+  value: unknown,
+  maxChars: number,
+  markerOf: (chars: number) => string,
+): Slot {
+  const measured = traceJson(value, {
+    maxChars,
+    maxDepth: PAYLOAD_MAX_DEPTH,
+    measureOnly: true,
+  });
+  const marker = markerOf(measured.chars);
+  if (measured.tooLarge)
+    return {
+      field,
+      rank,
+      value: undefined,
+      chars: measured.chars,
+      json: marker,
+      dropped: true,
+      marker,
+    };
+  return { field, rank, value, chars: measured.chars, dropped: false, marker };
+}
+
+/** The JSON of a kept payload, in the shape its field must have. */
+function slotJson(slot: Slot, maxChars: number): string {
+  if (slot.json !== undefined) return slot.json;
+  const built = traceJson(slot.value, {
+    maxChars,
+    maxDepth: PAYLOAD_MAX_DEPTH,
+  });
+  let json = built.tooLarge ? slot.marker : built.json;
+  if (slot.field === 'events') {
+    if (!json.startsWith('[')) json = '[]';
+  } else if (
+    !json.startsWith('{') &&
+    !(json === 'null' && slot.field !== 'extra' && slot.field !== 'metadata')
+  )
+    json = slot.field === 'inputs' || slot.field === 'outputs' ? 'null' : '{}';
+  slot.json = json;
+  slot.value = undefined;
+  return json;
+}
+
+function slotChars(slot: Slot): number {
+  return slot.dropped ? slot.marker.length : (slot.json?.length ?? slot.chars);
+}
+
+interface BuildContext {
+  root: Run;
+  records: ReadonlyMap<string, ModelCallRecord>;
+  firstTokens: ReadonlyMap<string, number>;
+  limits: EncodeLimits;
+}
+
+function builtRun(
+  head: Record<string, unknown>,
+  parts: {
+    metadata: unknown;
+    rest: Record<string, unknown>;
+    inputs: unknown;
+    outputs: unknown;
+    events: unknown[];
+  },
+  rankFor: (field: SlotField) => number,
+  limits: EncodeLimits,
+): BuiltRun {
+  const json = JSON.stringify(head);
+  const essentials = essentialMetadata(parts.metadata);
+  const payload = (field: SlotField, value: unknown): Slot =>
+    makeSlot(field, rankFor(field), value, limits.maxPayloadChars, (chars) =>
+      field === 'events' ? '[]' : truncatedMarker(chars),
+    );
+  return {
+    head: `${json.slice(0, -1)},"extra":{"metadata":`,
+    slots: {
+      metadata: makeSlot(
+        'metadata',
+        rankFor('metadata'),
+        parts.metadata ?? {},
+        MAX_METADATA_CHARS,
+        (chars) =>
+          JSON.stringify({
+            _truncated: { chars: Math.round(chars) },
+            ...essentials,
+          }),
+      ),
+      extra: payload('extra', parts.rest),
+      inputs: payload('inputs', parts.inputs),
+      outputs: payload('outputs', parts.outputs),
+      events: payload('events', parts.events),
+    },
+  };
+}
+
+/** One run of the tree, as sent. */
+function treeRun(flat: FlatRun, ctx: BuildContext): BuiltRun {
+  const { run, parentId, dottedOrder } = flat;
+  const isRoot = parentId === null;
+  const record = run.run_type === 'llm' ? ctx.records.get(run.id) : undefined;
+  const firstToken = ctx.firstTokens.get(run.id);
+  const error = errorText(run.error);
+  const start = validMs(
+    run.start_time,
+    validMs(ctx.root.start_time, Date.now()),
+  );
+  const end =
+    run.end_time === undefined ? undefined : validMs(run.end_time, start);
+  const { metadata, rest } = extraParts(run, record);
+  return builtRun(
+    {
+      id: run.id.toLowerCase(),
+      trace_id: ctx.root.id.toLowerCase(),
+      parent_run_id: parentId?.toLowerCase() ?? null,
+      dotted_order: dottedOrder,
+      name: nameOf(run),
+      run_type: runTypeOf(run.run_type),
+      start_time: iso(start),
+      end_time: end !== undefined ? iso(end) : null,
+      status:
+        error !== null ? 'error' : end !== undefined ? 'success' : 'pending',
+      error,
+      tags: tagsOf(run.tags),
+      ...(firstToken !== undefined
+        ? { first_token_time: iso(validMs(firstToken, start)) }
+        : {}),
+      ...usageFields(record),
+    },
+    {
+      metadata,
+      rest,
+      inputs: objectPayload(applyPolicy(run, 'processInputs', run.inputs)),
+      outputs: objectPayload(applyPolicy(run, 'processOutputs', run.outputs)),
+      events: eventsPayload(run.events),
+    },
+    (field) => rankOf(run, field, isRoot),
+    ctx.limits,
+  );
+}
+
+/** A model call made outside the graph, as an `llm` run under the root. */
+function outsideRun(
+  call: ModelCallReport,
+  id: string,
+  rootDottedOrder: string,
+  ctx: BuildContext,
+): BuiltRun {
+  const start = validMs(
+    call.startedAt,
+    validMs(ctx.root.start_time, Date.now()),
+  );
+  const end = start + Math.max(0, validMs(call.durationMs, 0));
+  const failed = call.ok === false;
+  return builtRun(
+    {
+      id,
+      trace_id: ctx.root.id.toLowerCase(),
+      parent_run_id: ctx.root.id.toLowerCase(),
+      dotted_order: `${rootDottedOrder}.${convertToDottedOrderFormat(start, id, 1).dottedOrder}`,
+      name: clip(`${call.purpose} model call`, TURN_LIMITS.maxNameLength),
+      run_type: 'llm',
+      start_time: iso(start),
+      end_time: iso(end),
+      status: failed ? 'error' : 'success',
+      error: failed ? clip(call.errorKind ?? 'error', 256) : null,
+      tags: tagsOf([`purpose:${call.purpose}`, 'outside_graph']),
+      ...usageFields(call),
+    },
+    {
+      metadata: {
+        [RUN_METADATA_KEYS.requestedModel]: call.requestedModel,
+        ...(call.servedModel
+          ? { [RUN_METADATA_KEYS.servedModel]: call.servedModel }
+          : {}),
+        [RUN_METADATA_KEYS.fallback]: call.fallback,
+        [MODEL_CALL_PURPOSE_METADATA_KEY]: call.purpose,
+        ...(call.provider ? { provider: call.provider } : {}),
+      },
+      rest: {},
+      inputs: null,
+      outputs: null,
+      events: [],
+    },
+    () => DROP_ORDER.other,
+    ctx.limits,
+  );
+}
+
+function runPieces(built: BuiltRun, index: number, maxChars: number): string[] {
+  const { metadata, extra, inputs, outputs, events } = built.slots;
+  const rest = slotJson(extra, maxChars);
+  return [
+    `${index > 0 ? ',' : ''}${built.head}${slotJson(metadata, MAX_METADATA_CHARS)}${rest === '{}' ? '' : `,${rest.slice(1, -1)}`}}`,
+    `,"inputs":${slotJson(inputs, maxChars)},"outputs":${slotJson(outputs, maxChars)},"events":${slotJson(events, maxChars)}}`,
+  ];
+}
+
+function runChars(built: BuiltRun): number {
+  const { metadata, extra, inputs, outputs, events } = built.slots;
+  return (
+    built.head.length +
+    RUN_FRAME_CHARS +
+    slotChars(metadata) +
+    slotChars(extra) +
+    slotChars(inputs) +
+    slotChars(outputs) +
+    slotChars(events)
+  );
+}
+
+/** Rounds of gzip-and-check before the turn is cut to its root. */
+const MAX_FIT_ROUNDS = 6;
+
 /**
- * Build and gzip the turn. Undefined when it cannot fit the contract even
- * with every payload dropped.
+ * Build and gzip the turn. Undefined only when the root run cannot be sent
+ * at all (its id is not a UUID) or the limits leave no room even for the
+ * root alone (never with the default limits).
  */
 export async function encodeTurn(
   turn: CollectedTurn,
   limits: EncodeLimits = DEFAULT_ENCODE_LIMITS,
 ): Promise<EncodedTurn | undefined> {
   const { root, records, firstTokens, context } = turn;
-  const { runs, omitted } = flattenRuns(root, limits.maxRuns);
+  const { runs: candidates, omitted: unsendable } = flattenRuns(
+    root,
+    limits.maxRuns,
+  );
+  if (candidates.length === 0) return undefined;
+  const ctx: BuildContext = { root, records, firstTokens, limits };
 
-  // Every model call of the tree counts, also one past the run cap.
-  const allRecords: ModelCallRecord[] = [];
+  // Every model call of the tree counts once, also one of a run left out.
+  const calls: Array<{ record: ModelCallRecord; purpose: string }> = [];
+  const treeIds = new Set<string>();
   const pending: Run[] = [root];
   while (pending.length > 0) {
     const run = pending.pop()!;
+    if (typeof run.id === 'string') treeIds.add(run.id.toLowerCase());
     const record = run.run_type === 'llm' ? records.get(run.id) : undefined;
-    if (record) allRecords.push(record);
+    if (record) {
+      const metadata =
+        isRecord(run.extra) && isRecord(run.extra.metadata)
+          ? run.extra.metadata
+          : undefined;
+      calls.push({ record, purpose: purposeOfRun(metadata) });
+    }
     for (const child of run.child_runs ?? []) pending.push(child);
   }
-  const usage = turnUsageOf(allRecords);
-  const servedModel = servedModelOf(runs, records);
-  const fallback = allRecords.some((record) => record.fallback);
-
-  const skeletons: string[] = [];
-  const slots: Slot[][] = [];
-  let tooLargePayloads = 0;
-  for (const { run, parentId, dottedOrder } of runs) {
-    const isRoot = parentId === null;
-    const record = run.run_type === 'llm' ? records.get(run.id) : undefined;
-    const firstToken = firstTokens.get(run.id);
-    const error = errorText(run.error);
-    const skeleton: Record<string, unknown> = {
-      id: run.id,
-      trace_id: root.id,
-      parent_run_id: parentId,
-      dotted_order: dottedOrder,
-      name: nameOf(run),
-      run_type: runTypeOf(run.run_type),
-      start_time: iso(run.start_time),
-      end_time: run.end_time !== undefined ? iso(run.end_time) : null,
-      status:
-        error !== null
-          ? 'error'
-          : run.end_time !== undefined
-            ? 'success'
-            : 'pending',
-      error,
-      tags: tagsOf(run.tags),
-      ...(firstToken !== undefined
-        ? { first_token_time: iso(firstToken) }
-        : {}),
-      ...(record
-        ? {
-            ...(record.promptTokens !== undefined
-              ? { prompt_tokens: record.promptTokens }
-              : {}),
-            ...(record.outputTokens !== undefined
-              ? { completion_tokens: record.outputTokens }
-              : {}),
-            ...(record.promptTokens !== undefined ||
-            record.outputTokens !== undefined
-              ? {
-                  total_tokens:
-                    (record.promptTokens ?? 0) + (record.outputTokens ?? 0),
-                }
-              : {}),
-            ...(record.costUsd !== undefined
-              ? { total_cost: record.costUsd }
-              : {}),
-          }
-        : {}),
-    };
-    const { metadata, rest } = extraParts(run, record);
-    const metadataJson = payloadJson(metadata ?? {}, MAX_METADATA_CHARS).json;
-    const head = JSON.stringify(skeleton);
-    // `…,"extra":{"metadata":M,<rest>}`: the rest is the droppable part.
-    skeletons.push(`${head.slice(0, -1)},"extra":{"metadata":${metadataJson}`);
-    const runSlots: Slot[] = [];
-    const add = (field: SlotField, value: unknown, isArray = false): void => {
-      const made = payloadJson(value, limits.maxPayloadChars);
-      if (made.tooLarge) tooLargePayloads += 1;
-      runSlots.push({
-        field,
-        rank: rankOf(run, field, isRoot),
-        json: isArray && made.tooLarge ? '[]' : made.json,
-        dropped: made.tooLarge,
-      });
-    };
-    add('extra', rest);
-    add('inputs', applyPolicy(run, 'processInputs', run.inputs));
-    add('outputs', applyPolicy(run, 'processOutputs', run.outputs));
-    add(
-      'events',
-      (run.events ?? []).slice(0, TURN_LIMITS.maxEventsPerRun),
-      true,
-    );
-    slots.push(runSlots);
+  const outside: Array<{ call: ModelCallReport; id: string }> = [];
+  for (const call of turn.outsideCalls ?? []) {
+    const callId =
+      typeof call.callId === 'string' ? call.callId.toLowerCase() : '';
+    // A call that is a run of the tree is counted there.
+    if (treeIds.has(callId)) continue;
+    const id =
+      UUID_PATTERN.test(callId) && !treeIds.has(callId)
+        ? callId
+        : crypto.randomUUID();
+    treeIds.add(id);
+    outside.push({ call, id });
+    calls.push({ record: call, purpose: call.purpose });
   }
+  const usage = turnUsageOf(calls.map((c) => c.record));
+  let servedReply: string | undefined;
+  let servedAny: string | undefined;
+  for (const { record, purpose } of calls) {
+    if (!record.servedModel) continue;
+    servedAny = record.servedModel;
+    if (purpose === 'reply') servedReply = record.servedModel;
+  }
+  const servedModel = servedReply ?? servedAny;
+  const fallback = calls.some((c) => c.record.fallback);
 
-  const order = slots
-    .flat()
-    .sort((a, b) => a.rank - b.rank || b.json.length - a.json.length);
-  let cursor = 0;
-  let droppedPayloads = tooLargePayloads;
-  /** Drop payloads in order until about `chars` are freed; false when none was left. */
-  const dropAbout = (chars: number): boolean => {
-    let freed = 0;
-    let any = false;
-    while (freed < chars && cursor < order.length) {
-      const slot = order[cursor++]!;
-      if (slot.dropped) continue;
-      const marker =
-        slot.field === 'events' ? '[]' : truncatedMarker(slot.json.length);
-      freed += slot.json.length - marker.length;
-      slot.json = marker;
-      slot.dropped = true;
-      droppedPayloads += 1;
-      any = true;
+  // Runs in pre-order, then the calls made outside the graph; the run
+  // skeletons alone may take half the budget (the rest are left out).
+  const built: BuiltRun[] = [];
+  let omittedRuns = unsendable;
+  let skeletonChars = 0;
+  const skeletonBudget = limits.maxInflatedBytes / 2;
+  const rootDotted = candidates[0]!.dottedOrder;
+  const makers: Array<() => BuiltRun> = [
+    ...candidates.map((flat) => () => treeRun(flat, ctx)),
+    ...outside.slice(0, Math.max(0, limits.maxRuns - candidates.length)).map(
+      ({ call, id }) =>
+        () =>
+          outsideRun(call, id, rootDotted, ctx),
+    ),
+  ];
+  omittedRuns += Math.max(
+    0,
+    outside.length - (limits.maxRuns - candidates.length),
+  );
+  for (const [index, make] of makers.entries()) {
+    const run = make();
+    if (built.length > 0 && skeletonChars + run.head.length > skeletonBudget) {
+      omittedRuns += makers.length - index;
+      break;
     }
-    return any;
-  };
+    skeletonChars += run.head.length;
+    built.push(run);
+  }
 
   const userText = previewText(
     context.userText ?? lastMessageText(root.inputs, 'human'),
@@ -683,16 +965,17 @@ export async function encodeTurn(
     turn.status === 'success' || root.end_time !== undefined
       ? previewText(lastMessageText(root.outputs, 'ai'))
       : null;
+  const turnStart = validMs(root.start_time, Date.now());
 
-  const piecesOf = (): string[] => {
+  const headOf = (droppedPayloads: number, omitted: number): string => {
     const truncated = droppedPayloads > 0 || omitted > 0;
     const head = JSON.stringify({
-      v: 1,
-      trace_id: root.id,
-      thread_id: clip(context.threadId, TURN_LIMITS.maxIdLength),
-      user_id: clip(context.userId, TURN_LIMITS.maxIdLength),
-      start_time: iso(root.start_time),
-      end_time: iso(Math.max(turn.endTime, root.start_time)),
+      v: CONTRACT_VERSION,
+      trace_id: root.id.toLowerCase(),
+      thread_id: contractId(context.threadId),
+      user_id: contractId(context.userId),
+      start_time: iso(turnStart),
+      end_time: iso(Math.max(validMs(turn.endTime, turnStart), turnStart)),
       status: turn.status,
       error:
         turn.status === 'error'
@@ -720,53 +1003,83 @@ export async function encodeTurn(
       user_text: userText,
       reply_text: replyText,
     });
-    const pieces: string[] = [`${head.slice(0, -1)},"runs":[`];
-    runs.forEach((_, index) => {
-      const [extra, inputs, outputs, events] = slots[index]!;
-      const rest = extra!.json;
-      pieces.push(
-        `${index > 0 ? ',' : ''}${skeletons[index]}${rest === '{}' ? '' : `,${rest.slice(1, -1)}`}}`,
-        `,"inputs":${inputs!.json},"outputs":${outputs!.json},"events":${events!.json}}`,
-      );
-    });
-    pieces.push(']}');
-    return pieces;
+    return `${head.slice(0, -1)},"runs":[`;
+  };
+  // The head's size with its truncation counts at their longest.
+  const headChars = headOf(1e9, 1e9).length + 2;
+
+  // Drop order over every payload of the runs kept (a slot knows its run).
+  const order = built
+    .flatMap((run, index) =>
+      Object.values(run.slots).map((slot) => ({ slot, index })),
+    )
+    .sort((a, b) => a.slot.rank - b.slot.rank || b.slot.chars - a.slot.chars);
+  let cursor = 0;
+  let total = headChars + built.reduce((sum, run) => sum + runChars(run), 0);
+
+  /** Drop payloads, then the last runs, until about `target` characters. */
+  const shrink = (target: number): boolean => {
+    let progressed = false;
+    while (total > target) {
+      if (cursor < order.length) {
+        const { slot, index } = order[cursor++]!;
+        if (index >= built.length || slot.dropped) continue;
+        const before = slotChars(slot);
+        if (before <= slot.marker.length) continue;
+        slot.dropped = true;
+        slot.json = slot.marker;
+        slot.value = undefined;
+        total -= before - slot.marker.length;
+        progressed = true;
+        continue;
+      }
+      if (built.length <= 1) break;
+      total -= runChars(built.pop()!);
+      omittedRuns += 1;
+      progressed = true;
+    }
+    return progressed;
   };
 
-  const totalChars = (): number =>
-    skeletons.reduce((sum, s) => sum + s.length, 0) +
-    slots.flat().reduce((sum, slot) => sum + slot.json.length, 0);
-
-  const overBudget = totalChars() - limits.rawBudgetChars;
-  if (
-    overBudget > 0 &&
-    !dropAbout(overBudget) &&
-    totalChars() > limits.rawBudgetChars
-  )
-    return undefined;
-
-  for (let round = 0; round < 8; round += 1) {
-    const { bytes, rawBytes } = await gzipPieces(piecesOf());
+  shrink(limits.maxInflatedBytes);
+  for (let round = 0; round <= MAX_FIT_ROUNDS; round += 1) {
+    if (round === MAX_FIT_ROUNDS) shrink(0);
+    const droppedPayloads = built.reduce(
+      (sum, run) =>
+        sum + Object.values(run.slots).filter((slot) => slot.dropped).length,
+      0,
+    );
+    const pieces = [
+      headOf(droppedPayloads, omittedRuns),
+      ...built.flatMap((run, index) =>
+        runPieces(run, index, limits.maxPayloadChars),
+      ),
+      ']}',
+    ];
+    const chars = pieces.reduce((sum, piece) => sum + piece.length, 0);
+    const { bytes, rawBytes } = await gzipPieces(pieces);
     if (
       bytes.byteLength <= limits.maxCompressedBytes &&
-      rawBytes <= TURN_LIMITS.maxDecompressedBytes
+      rawBytes <= limits.maxInflatedBytes
     )
       return {
         bytes,
         rawBytes,
-        runCount: runs.length,
-        omittedRuns: omitted,
+        runCount: built.length,
+        omittedRuns,
         droppedPayloads,
       };
-    const ratio = bytes.byteLength / Math.max(rawBytes, 1);
-    const excessCompressed = bytes.byteLength - limits.maxCompressedBytes * 0.9;
-    const excessRaw = rawBytes - TURN_LIMITS.maxDecompressedBytes * 0.9;
-    const chars = Math.max(
-      excessCompressed / Math.max(ratio, 1e-6),
-      excessRaw,
-      1,
-    );
-    if (!dropAbout(chars)) return undefined;
+    if (round === MAX_FIT_ROUNDS) return undefined;
+    // Over a limit: cut by the excess, measured in characters of this
+    // build, with a margin, and at least a tenth of what is left.
+    total = chars;
+    const overRaw = (rawBytes - limits.maxInflatedBytes) * (chars / rawBytes);
+    const overGzip =
+      (bytes.byteLength - limits.maxCompressedBytes) *
+      (chars / Math.max(bytes.byteLength, 1));
+    const cut = Math.max(overRaw, overGzip) * 1.1 + chars * 0.02;
+    if (!shrink(Math.min(chars - cut, chars * 0.9)) && built.length <= 1)
+      round = MAX_FIT_ROUNDS - 1;
   }
   return undefined;
 }

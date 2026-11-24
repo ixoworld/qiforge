@@ -168,6 +168,8 @@ async function renderBinaryOrStub(
     const model = rtCtx.llm.get('vision');
     const result = await model.invoke([new HumanMessage({ content })], {
       signal: rtCtx.abortSignal,
+      // Nests under the tool call that read the file, in the turn's traces.
+      ...(rtCtx.callbacks ? { callbacks: rtCtx.callbacks } : {}),
     });
     const text = replyText(result.content);
     if (text.trim().length > 0) {

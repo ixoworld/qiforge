@@ -626,12 +626,31 @@ What a turn carries:
   `total_cost` and `extra.metadata.served_model` / `fallback`, all from the
   call's `model_call` record, the one `[llm-call]` logs and `onModelCall`
   gets.
+- Sub-agents: a sub-agent's runs (its graph, model calls and tools) nest
+  under the tool call that ran it, in IXO Traces and in LangSmith alike
+  (`nestedRunCallbacks`, `src/core/nested-run-callbacks.ts`: the tool run's
+  callback manager with only the turn's tracers and meter, never the
+  turn's event stream, so nothing of it reaches the reply stream). On
+  Workers nothing passes callbacks to a nested invocation by itself
+  (LangChain's web build sets up no AsyncLocalStorage), so a plugin that
+  invokes a model or an agent itself passes `ctx.callbacks` (the bundled
+  editor and VFS vision calls do).
+- Model calls outside the graph: the turn's other calls (the capability
+  router's Decision, attachment extraction, and the summarizer's and safety
+  guardrail's calls, made in middleware hooks that LangChain gives no
+  callbacks) are sent as `llm` runs under the root, tagged `outside_graph`
+  and `purpose:<purpose>`, named `<purpose> model call`, with their tokens,
+  cost and models. The session title (made after the reply) is not part of
+  the trace.
 - Turn header: `trace_id` (= the root run id), `thread_id` (the session),
   `user_id` (the DID), `start_time`, `end_time`, `status` (`success`,
   `error`, `interrupted`), `error`, `name`, `usage` (input, cached and
-  output tokens and USD cost summed over the turn's model runs),
-  `user_text` (the message as sent) and `reply_text` (the last AI message),
-  each at most 8,000 characters.
+  output tokens and USD cost of every model call of the turn once: the
+  same calls `onModelCall` gets, the title aside), `user_text` (the
+  message as sent) and `reply_text` (the last AI message), each at most
+  8,000 characters. Token counts are whole numbers in [0, 10⁹], costs in
+  [0, 10⁴] USD; ids are printable (`unknown` when empty); times always
+  valid.
 - Turn metadata: `oracle_did`, `network`, `channel` (the channel provider,
   e.g. `whatsapp`, else the client: `portal`, `matrix`), `runtime_version`,
   `request_id`, `served_model` (the reply model that answered), `fallback`
@@ -646,23 +665,55 @@ How it stays off the turn:
 - The turn is built and gzipped after the reply, in the turn's cleanups
   (`finish()`), inside `ctx.waitUntil`; the reply never waits for it (a 1 MB
   turn builds in about 10 ms).
-- Size: at most 5,000 runs; a payload over 4 Mi characters is never
-  serialized; a turn over 12 Mi characters of JSON or 7.5 MiB gzipped drops
-  payloads in a fixed order (model invocation params, then prompts, graph
-  state, events, model replies, tool results, tool inputs, the root last;
-  largest first) and is still sent, marked `truncated`.
-- Delivery: one request per turn, the requests of one user object one at a
-  time (at most 8 waiting, beyond that skipped); 15 s timeout (5 s for the
-  marker); one retry after 0.25–1 s on a 5xx, timeout or network error; no
-  retry on a 4xx; a 429 is dropped. Nothing is queued for later.
+- Size, guaranteed to be accepted: at most 15 MiB of UTF-8 JSON once
+  inflated (the service's cap is 16 MiB, measured the same way) and
+  7.5 MiB gzipped (cap 8 MiB). A payload over 4 Mi characters is never
+  serialized; a turn too large drops payloads in a fixed order (model
+  invocation params, then prompts, graph state, events, model replies, tool
+  results, tool inputs, runs' metadata down to their model names and
+  fallback flag, the root last; largest first), then, if still too large,
+  the last runs (a parent always stays before its children); the root and
+  the turn's own fields always stay. Every value serializes
+  (`src/traces/json.ts`: BigInt as digits, binary data as its size only,
+  cycles as `"[Circular]"`, nesting past the service's 64 levels as a
+  marker, the reserved key `$blob` as `_$blob`, …), so no turn is refused
+  for its content. Only what is kept is serialized, so a turn's build holds
+  about one turn's worth of JSON.
+- Delivery (`src/traces/transport.ts`): one request per turn; per user
+  object one turn at a time and, in a separate lane, one marker at a time
+  (a slow or failed marker never holds its turn back; a marker whose turn
+  already went is not sent). 200, 201 and 202 (stored, indexed later) are
+  sent; a 429 makes the turn wait its `Retry-After` plus up to 1 s of
+  jitter and try once more, when that is at most 30 s (longer: dropped and
+  counted; a marker's 429 is dropped at once); a 5xx, 408, timeout or
+  network error gets one retry after 0.25–1 s (a turn's 503 waits its
+  `Retry-After`, at most 30 s); a 409 (another body under this trace id)
+  is counted as a conflict and never retried; a 410 `gone` (or 404
+  `not_found` while the project is being deleted) is dropped, counted and
+  pauses every send with that write key in the isolate for 10 minutes; any
+  other 4xx is never
+  retried and is logged with the service's error code and first issue path.
+  Retries send the same bytes. Nothing is queued for later.
+- Contract version: every body carries `v: 1` and every request
+  `x-ixt-contract: 1`. Within a version the service only adds optional
+  fields; a breaking change is a new version, which the service accepts
+  next to the old one while senders move. A service that answers that it
+  does not accept the version (400 on `v`, `unsupported_version`, or 426)
+  pauses every send of the isolate for 10 minutes, with one log line per
+  pause, instead of failing every turn.
 - A root still open when the turn ends (an abort) gets 5 s, then goes as
   `interrupted` with its open runs `pending`. If the object dies mid-turn,
   only the marker exists (by design).
 - Logs: `[traces] turn 0192ab34… : N runs, raw → gzip bytes, built in X ms`,
   and on failure `[traces] turn 0192ab34… (N bytes) not stored: HTTP 503
-after 2 attempts (failed K so far)`, `… refused: HTTP 4xx`, `… dropped:
-HTTP 429`. Ids, statuses and sizes only: never content, keys or DIDs.
-  `traceSendStats` (exported) counts them per isolate.
+after 2 attempts (failed K so far)`, `… refused: HTTP 400
+validation_failed at runs.3.start_time`, `… conflict: HTTP 409`, `…
+dropped: HTTP 429 …`. Ids, statuses, error codes and sizes only: never
+  content, keys or DIDs. `traceSendStats` (exported) counts them per
+  isolate (`deferred` counts 202s, `gone` the 410s, `paused` the requests
+  not sent during a version or gone-key pause). A run or trace id that is
+  not a UUID (empty included) is never sent: the run and its subtree are
+  left out, and a root without one sends nothing.
 
 ## `createOracleWorker` options
 

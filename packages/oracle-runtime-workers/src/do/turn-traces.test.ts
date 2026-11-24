@@ -11,7 +11,8 @@ import {
   type OwnerCopy,
   type OwnerStore,
 } from '../owner-store/types';
-import { makePlugin } from '../core/test-fixtures';
+import { makePlugin, makeSubAgent, makeTool } from '../core/test-fixtures';
+import type { OraclePlugin } from '../plugin-api/oracle-plugin';
 import { DoSqliteDatabase } from '../sqlite/database';
 import { SessionsStore } from '../sqlite/sessions-store';
 import type { SqliteTestDO } from '../sqlite/test-do';
@@ -225,6 +226,7 @@ function storageWithMemoryAlarm(storage: DurableObjectStorage) {
 async function userObject(
   state: DurableObjectState,
   workerEnv: Record<string, unknown>,
+  plugins: OraclePlugin[] = [],
 ) {
   const reports: ModelCallReport[] = [];
   const core = createRuntimeCore({
@@ -235,6 +237,7 @@ async function userObject(
         name: 'meter',
         onModelCall: (call) => void reports.push(call),
       }),
+      ...plugins,
     ],
     logger: console,
   });
@@ -343,10 +346,11 @@ async function withObject(
   name: string,
   workerEnv: Record<string, unknown>,
   body: (o: Awaited<ReturnType<typeof userObject>>) => Promise<void>,
+  plugins: OraclePlugin[] = [],
 ): Promise<void> {
   const stub = env.SQLITE_TEST.get(env.SQLITE_TEST.idFromName(name));
   await runInDurableObject(stub, async (_instance, state) => {
-    const o = await userObject(state, workerEnv);
+    const o = await userObject(state, workerEnv, plugins);
     try {
       await body(o);
     } finally {
@@ -467,5 +471,233 @@ describe('IXO Traces from a user object turn', () => {
       await o.drain();
       expect(services.received).toEqual([]);
     });
+  });
+});
+
+const SUB_PROMPT = 'You research for the trace test.';
+
+function completionChunks(
+  model: string,
+  reply: { text: string } | { tool: string; args: Record<string, unknown> },
+  usage: Record<string, unknown>,
+): Array<Record<string, unknown>> {
+  const delta =
+    'text' in reply
+      ? { role: 'assistant', content: reply.text }
+      : {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              index: 0,
+              id: `call_${reply.tool}`,
+              type: 'function',
+              function: {
+                name: reply.tool,
+                arguments: JSON.stringify(reply.args),
+              },
+            },
+          ],
+        };
+  const base = {
+    id: `gen-${model}`,
+    object: 'chat.completion.chunk',
+    created: 1,
+    model,
+  };
+  return [
+    { ...base, choices: [{ index: 0, delta, finish_reason: null }] },
+    {
+      ...base,
+      choices: [
+        {
+          index: 0,
+          delta: {},
+          finish_reason: 'text' in reply ? 'stop' : 'tool_calls',
+        },
+      ],
+    },
+    { ...base, provider: 'OpenAI', choices: [], usage },
+  ];
+}
+
+/**
+ * OpenRouter for a turn that calls a sub-agent: the main model asks the
+ * sub-agent, the sub-agent calls its tool and answers, the main model
+ * replies. The traces ingest as in `stubServices`.
+ */
+function stubSubAgentServices() {
+  const received: Received[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(input, init);
+      if (request.url.startsWith(TRACES)) {
+        const raw = await request.arrayBuffer();
+        const text =
+          request.headers.get('content-encoding') === 'gzip'
+            ? await gunzipText(raw)
+            : new TextDecoder().decode(raw);
+        received.push({
+          path: new URL(request.url).pathname,
+          apiKey: request.headers.get('x-api-key'),
+          body: JSON.parse(text),
+        });
+        return new Response(null, { status: 201 });
+      }
+      if (request.url !== COMPLETIONS)
+        return new Response('not stubbed', { status: 404 });
+      const body = JSON.stringify(await request.json());
+      const parsed: unknown = JSON.parse(body);
+      const stream =
+        typeof parsed === 'object' &&
+        parsed !== null &&
+        Reflect.get(parsed, 'stream') === true;
+      const sub = body.includes(SUB_PROMPT);
+      const hasToolResult = body.includes('"role":"tool"');
+      const reply = body.includes('word title')
+        ? { text: 'A title' }
+        : sub
+          ? hasToolResult
+            ? { text: 'x is 42' }
+            : { tool: 'lookup', args: {} }
+          : hasToolResult
+            ? { text: 'Here is x.' }
+            : { tool: 'call_research_agent', args: { task: 'find x' } };
+      const usage = sub
+        ? {
+            prompt_tokens: 300,
+            completion_tokens: 9,
+            total_tokens: 309,
+            cost: 0.0001,
+          }
+        : {
+            prompt_tokens: 1234,
+            completion_tokens: 7,
+            total_tokens: 1241,
+            cost: 0.00042,
+          };
+      const model = sub ? 'openai/sub-model' : DEFAULT_MODEL_ID;
+      const chunks = completionChunks(model, reply, usage);
+      if (!stream) {
+        const message =
+          'text' in reply
+            ? { role: 'assistant', content: reply.text }
+            : {
+                role: 'assistant',
+                content: null,
+                tool_calls: [
+                  {
+                    id: `call_${reply.tool}`,
+                    type: 'function',
+                    function: {
+                      name: reply.tool,
+                      arguments: JSON.stringify(reply.args),
+                    },
+                  },
+                ],
+              };
+        return Response.json({
+          id: `gen-${model}`,
+          object: 'chat.completion',
+          created: 1,
+          model,
+          provider: 'OpenAI',
+          choices: [
+            {
+              index: 0,
+              message,
+              finish_reason: 'text' in reply ? 'stop' : 'tool_calls',
+            },
+          ],
+          usage,
+        });
+      }
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (const chunk of chunks)
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`),
+              );
+            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+            controller.close();
+          },
+        }),
+        { headers: { 'content-type': 'text/event-stream' } },
+      );
+    }),
+  );
+  return {
+    received,
+    turns: () => received.filter((r) => r.path === '/v1/ingest/turns'),
+  };
+}
+
+describe('IXO Traces of a user object turn with a sub-agent', () => {
+  it('nests the sub-agent’s runs under its tool call, counts them once, and keeps them off the reply stream', async () => {
+    const services = stubSubAgentServices();
+    const research = makePlugin({
+      name: 'research',
+      getSubAgents: () => [
+        makeSubAgent('Research Agent', {
+          systemPrompt: SUB_PROMPT,
+          tools: [makeTool('lookup', { handler: async () => 'found x' })],
+        }),
+      ],
+    });
+    await withObject(
+      'traces-subagent',
+      TRACES_ENV,
+      async (o) => {
+        const outcome = await o.turn('$session-sub', 'req-sub', 'Find x.');
+        expect(outcome).toMatchObject({
+          status: 'finished',
+          text: 'Here is x.',
+        });
+        await o.drain();
+        const turn = TurnSchema.parse(services.turns()[0]!.body);
+        const byId = new Map(turn.runs.map((r) => [r.id, r]));
+        const above = (id: string | null): string[] => {
+          const names: string[] = [];
+          for (
+            let r = id ? byId.get(id) : undefined;
+            r;
+            r = r.parent_run_id ? byId.get(r.parent_run_id) : undefined
+          )
+            names.push(r.name);
+          return names;
+        };
+        const llm = turn.runs.filter((r) => r.run_type === 'llm');
+        const subCalls = llm.filter((r) => r.total_cost === 0.0001);
+        // Both sub-agent model calls are in the trace, under the tool call.
+        expect(subCalls).toHaveLength(2);
+        for (const r of subCalls)
+          expect(above(r.parent_run_id)).toContain('call_research_agent');
+        expect(
+          above(turn.runs.find((r) => r.name === 'lookup')!.parent_run_id),
+        ).toContain('call_research_agent');
+        // The usage is the turn's calls to onModelCall (the title after the
+        // reply aside), each once: the main agent's two and the sub-agent's two.
+        const turnCalls = o.reports.filter((r) => r.purpose !== 'title');
+        expect(turnCalls).toHaveLength(4);
+        expect(turn.usage.input_tokens).toBe(
+          turnCalls.reduce((s, r) => s + (r.promptTokens ?? 0), 0),
+        );
+        expect(turn.usage.input_tokens).toBe(2 * 1234 + 2 * 300);
+        expect(turn.usage.cost_usd).toBeCloseTo(2 * 0.00042 + 2 * 0.0001, 10);
+        expect(llm).toHaveLength(4);
+        expect(turn.runs.some((r) => r.tags?.includes('outside_graph'))).toBe(
+          false,
+        );
+        // The person's stream saw only the main agent: its reply and its one tool call.
+        expect(
+          (
+            outcome as { toolCalls?: Array<{ toolName?: string }> }
+          ).toolCalls?.map((c) => c.toolName) ?? [],
+        ).not.toContain('lookup');
+      },
+      [research],
+    );
   });
 });

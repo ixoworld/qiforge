@@ -9627,6 +9627,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             channel: req.channel?.provider ?? req.client,
             requestId: req.requestId,
             signal: abortController.signal,
+            // The calls it did not see as runs (the router's Decision,
+            // attachment extraction, middleware hooks' models) count too.
+            modelCalls: () => modelCalls.snapshot(),
           })
         : undefined;
       if (turnTracer) turnDisposables.add(() => turnTracer.finish());

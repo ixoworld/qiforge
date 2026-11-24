@@ -190,10 +190,16 @@ export function createStandaloneEditorTool(
         });
 
         // The turn's signal stops the inner agent's model calls and document
-        // writes when the user cancels or the turn times out.
+        // writes when the user cancels or the turn times out; its runs nest
+        // under this tool call in the turn's traces, tagged like a
+        // sub-agent's.
         const result = await agent.invoke(
           { messages: [new HumanMessage(task)] },
-          { signal: ctx.abortSignal },
+          {
+            signal: ctx.abortSignal,
+            ...(ctx.callbacks ? { callbacks: ctx.callbacks } : {}),
+            tags: ['internal', 'subagent:editor'],
+          },
         );
         const messages = result.messages as BaseMessage[];
         const text = lastMessageContent(messages);

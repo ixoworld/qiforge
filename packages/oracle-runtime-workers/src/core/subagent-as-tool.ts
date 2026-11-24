@@ -5,6 +5,7 @@ import {
   ToolMessage,
   type BaseMessage,
 } from '@langchain/core/messages';
+import type { Callbacks } from '@langchain/core/callbacks/manager';
 import { tool } from '@langchain/core/tools';
 import { Command, isGraphBubbleUp } from '@langchain/langgraph';
 import {
@@ -14,6 +15,7 @@ import {
 } from 'langchain';
 import { createDanglingToolCallRepairMiddleware } from './middlewares/dangling-tool-calls';
 import { createToolErrorResultMiddleware } from './middlewares/tool-error-result';
+import { nestedRunCallbacks } from './nested-run-callbacks';
 import { isHarnessLimitError } from './turn-budget';
 import { z } from 'zod';
 import type { Logger } from '../plugin-api/types';
@@ -299,6 +301,7 @@ export function createSubagentAsTool(
     parentConfigurable: Record<string, unknown> | undefined,
     parentContext: Record<string, unknown> | undefined,
     signal: AbortSignal | undefined,
+    callbacks: Callbacks | undefined,
   ) => {
     // Merge parent's configurable so fields like `requestId` propagate into
     // the sub-agent's tool invocations. Override `thread_id` (for checkpoint
@@ -317,6 +320,10 @@ export function createSubagentAsTool(
         // The parent's abort (the user's, the deadline's) cancels the child
         // graph and every provider call it has in flight.
         ...(signal ? { signal } : {}),
+        // The tool run's tracers and meter (never its event stream): the
+        // sub-agent's runs nest under this tool call in IXO Traces and
+        // LangSmith, and its model calls count in the turn's usage once.
+        ...(callbacks ? { callbacks } : {}),
         runName: spec.name,
         // The sub-agent's model calls are the parent's tool work, not the
         // reply: the SSE stream drops model events carrying this tag so its
@@ -409,6 +416,7 @@ export function createSubagentAsTool(
           parentConfigurable,
           parentContext,
           config.signal,
+          nestedRunCallbacks(config.callbacks),
         );
 
         if (options?.onComplete) {

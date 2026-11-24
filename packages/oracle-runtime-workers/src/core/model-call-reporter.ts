@@ -255,6 +255,11 @@ export class TurnModelCalls {
     return this.calls.length;
   }
 
+  /** The calls reported so far, as they are now. */
+  snapshot(): readonly ModelCallReport[] {
+    return [...this.calls];
+  }
+
   /** Work that may still report a call or deliver one. */
   track(work: Promise<unknown>): void {
     const tracked: Promise<unknown> = work
