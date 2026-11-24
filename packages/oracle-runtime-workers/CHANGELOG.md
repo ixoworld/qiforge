@@ -1,5 +1,11 @@
 # @ixo/oracle-runtime-workers
 
+## 0.62.0
+
+### Minor Changes
+
+- [#573](https://github.com/ixoworld/qiforge/pull/573) [`da5d053`](https://github.com/ixoworld/qiforge/commit/da5d053f248b993e894f4251ad9a1a44f92896be) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Channels: web chat history names the files the person sent (`files: [{ ref, name, mime, size? }]` on a `role: "user"` item, from the message row alone), and `POST /channels/media` serves them after the gateway's 31 days, plus the documents the oracle made. Its own capability `ixo:channel/media` (an `ixo:channel/history` grant is refused, and the other way round), for the exact media query (`authenticateChannelMedia`, `canonicalMediaQuery`: alphabetical keys, no spaces; needs the Auth Hub that mints media grants), the Auth Hub binding check on every read, a per-binding budget (`<ORACLE_DID>|channel-media|<bindingId>`, `429 rate_limited` + `Retry-After: 60`), every refusal as `{ "error": code }` (503s with `Retry-After: 5`), and a channel request point (`blob9` = the kind). A person's file comes from its encrypted copy in the session thread, fetched and decrypted in the user's object and streamed on demand, size and SHA-256 checked, the last chunk held back until both match; the room copy's media info is now kept with its link row (`channel_attachment_links.media_json`, added at startup), so the read never calls the Matrix gateway object (one 15 s `eventMediaInfo` lookup only for rows written before). A document comes from the user's `artifacts` row as its share envelope (no share link read, made or extended). One read per object at a time (`429 busy`), 25 MiB cap, 35 s until the answer's headers (`504 timeout`, the slot freed at once) and 50 s for the whole read, the slot freed on every path, one log line per read. `openHomeserverMedia` now throws `HomeserverMediaError` (with `status`) for a refused download; its message is unchanged.
+
 ## 0.61.0
 
 ### Minor Changes
