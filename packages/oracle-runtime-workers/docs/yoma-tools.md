@@ -346,6 +346,23 @@ address, answers, signal }) }`. For a collection it `allows`, `submit` of a
     waits for the operator to accept the application through the bids bot.
     The plugin holds no wallet.
 
+## "You were accepted"
+
+The plugin cannot message first (the runtime gives plugins no timer and no
+send), so acceptance is told at the start of the person's next message,
+once. `getRequestMiddlewares` runs `newlyAccepted` (`accepted.ts`) before
+each turn: for the person's sent applications, newest first, it asks the
+chain whether the collection's admin now lets them log work (the same
+`SubmitClaimAuthorization` read as `canLogWorkNow`), at most every 5 minutes
+per application and for at most 3 applications a message. A newly accepted
+one is marked `acceptance.announcedAt` on its draft and the model gets a note
+to open with "Good news: you were accepted for …" and offer to log work. One
+the person already logs work on (a claim draft or a sent claim) is marked
+without a note. A failed read is a check too, so a chain outage does not slow
+every message; the turn never fails on it. Telling them within WhatsApp's
+24-hour window without waiting for a message needs a runtime timer and the
+Hub's channel notice, and is not built.
+
 ## Known limits
 
 - **Lockfile.** `@ixo/action-protocol` is pinned to 0.8.0, which is not on
