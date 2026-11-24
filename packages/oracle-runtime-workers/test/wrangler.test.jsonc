@@ -41,6 +41,7 @@
       { "name": "RESULT_STORE_TEST", "class_name": "ResultStoreTestDO" },
       { "name": "ARTIFACT_STORE_TEST", "class_name": "ArtifactStoreTestDO" },
       { "name": "FEEDBACK_TEST", "class_name": "FeedbackTestDO" },
+      { "name": "CHANNEL_MEDIA_TEST", "class_name": "ChannelMediaTestDO" },
     ],
   },
   "migrations": [
@@ -56,5 +57,6 @@
     { "tag": "v6", "new_sqlite_classes": ["FeedbackTestDO"] },
     { "tag": "v8", "new_sqlite_classes": ["HubActionTestDO"] },
     { "tag": "v9", "new_sqlite_classes": ["ActionInteractionsTestDO"] },
+    { "tag": "v10", "new_sqlite_classes": ["ChannelMediaTestDO"] },
   ],
 }

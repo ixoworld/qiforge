@@ -1072,6 +1072,40 @@ export class ChannelTurns {
   }
 
   /**
+   * Whether a web binding holds `sessionId` by the rule `ownedSessions`
+   * applies to it (a binding row of any revision, its current session, or
+   * a request receipt naming it), as ONE query of three indexed EXISTS
+   * probes (`channel_session_bindings` by its primary key prefix,
+   * `channel_sessions` by its key, `channel_requests` by
+   * `idx_channel_requests_session`). For a media read of that session:
+   * whatever the session held (files, artefacts) is removed with it, so a
+   * deleted session answers nothing there. False for any other provider.
+   */
+  async bindingOwnsSession(
+    input: Pick<ChannelTurnInput, 'provider' | 'bindingId'>,
+    sessionId: string,
+  ): Promise<boolean> {
+    if (!sessionsSpanRevisions(input.provider)) return false;
+    await this.setup();
+    return Boolean(
+      await this.db.get(
+        `SELECT 1 AS owned WHERE
+           EXISTS (SELECT 1 FROM channel_session_bindings WHERE binding_id=? AND session_id=?)
+           OR EXISTS (SELECT 1 FROM channel_sessions WHERE binding_id=? AND session_id=?)
+           OR EXISTS (SELECT 1 FROM channel_requests WHERE binding_id=? AND session_id=?)`,
+        [
+          input.bindingId,
+          sessionId,
+          input.bindingId,
+          sessionId,
+          input.bindingId,
+          sessionId,
+        ],
+      ),
+    );
+  }
+
+  /**
    * The runs of this binding that answered the given request ids in one
    * session (each a key lookup: a channel run's id is
    * `channelRunId(bindingId, requestId)`), with their final message id and

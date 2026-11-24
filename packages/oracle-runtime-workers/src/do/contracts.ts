@@ -23,6 +23,7 @@ import type {
   TopicReceiptReferences,
 } from '@ixo/ixo-transaction/topic-proposals';
 import type { ProposalCommand } from '../action-proposals/store';
+import type { ChannelMediaInput, ChannelMediaOutcome } from '../channels/media';
 import type { OpsAnalyticsDataset } from '../channels/ops-analytics';
 import type { ActionOutcomeV1 } from '@ixo/action-protocol';
 import type {
@@ -959,6 +960,15 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
     identity: TurnIdentity,
     input: ChannelHistoryInput,
   ): Promise<ChannelHistoryOutcome>;
+  /**
+   * One file or document of a web binding's history (`POST /channels/media`,
+   * `channels/media.ts`): a file as a plaintext byte stream, a document as
+   * JSON text. One read per object at a time (`429 busy` otherwise).
+   */
+  channelMedia(
+    identity: TurnIdentity,
+    input: ChannelMediaInput,
+  ): Promise<ChannelMediaOutcome>;
   /** Run a turn and return the final text (used by the Matrix gateway). */
   runTurn(req: TurnRequest): Promise<TurnResult>;
   /**

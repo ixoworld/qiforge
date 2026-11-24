@@ -1,7 +1,10 @@
 export { ActionInteractionsTestDO } from '../src/action-interactions/test-do';
 export { ActionProposalTestDO } from '../src/action-proposals/test-do';
 export { HubActionTestDO } from '../src/hub-actions/test-do';
-export { ChannelTurnsTestDO } from '../src/channels/test-do';
+export {
+  ChannelTurnsTestDO,
+  ChannelMediaTestDO,
+} from '../src/channels/test-do';
 export { ArtifactStoreTestDO } from '../src/artifacts/test-do';
 export { FeedbackTestDO } from '../src/feedback/test-do';
 /**

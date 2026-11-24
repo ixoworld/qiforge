@@ -2691,8 +2691,8 @@ the stored Workers Logs instead.
 
 ## Channel request metrics
 
-Every request to `POST /channels/turn`, `/channels/control` and
-`/channels/history` writes one Workers Analytics Engine data point when the
+Every request to `POST /channels/turn`, `/channels/control`,
+`/channels/history` and `/channels/media` writes one Workers Analytics Engine data point when the
 oracle binds the optional `OPS_ANALYTICS` dataset
 ([configuration](configuration.md#ops-and-misc)), and every request the route
 refused or failed (status 400 or more) logs one line, bound or not
@@ -2716,24 +2716,24 @@ stub.channelTurn(…))`), never through a Proxy around the stub.
   one point per request (at most 250 per invocation), 9 short blobs, 6
   doubles, one index; kept three months.
 
-| Column    | Meaning                                                                                                                                                                                 |
-| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `index1`  | `oracle-runtime`                                                                                                                                                                        |
-| `blob1`   | Kind: `http`                                                                                                                                                                            |
-| `blob2`   | Route: `POST /channels/turn`, `POST /channels/control`, `POST /channels/history`                                                                                                        |
-| `blob3`   | Outcome: `ok`, `client_error` (4xx), `server_error` (5xx), `exception` (an error the route did not expect; it answered 503 `unavailable`)                                               |
-| `blob4`   | HTTP status                                                                                                                                                                             |
-| `blob5`   | The refusal code (`ChannelErrorCode`: `session_conflict`, `control_not_supported`, `invalid_cursor`, `binding_inactive`, `rate_limited`, …) or, for `exception`, the error's class name |
-| `blob6`   | Empty (campaign, Yo Rewards only)                                                                                                                                                       |
-| `blob7`   | Caller: `gateway`                                                                                                                                                                       |
-| `blob8`   | Channel: `web`, `whatsapp`, `telegram`, `other`; empty when the body did not parse                                                                                                      |
-| `blob9`   | Turn phase (`/channels/turn` only): `poll` (a warm object answered a poll of an existing run), `admit` (checked with the Auth Hub and admitted); else empty                             |
-| `double1` | Duration in milliseconds (the Workers clock moves on I/O only)                                                                                                                          |
-| `double2` | 1                                                                                                                                                                                       |
-| `double3` | History: items on the page (messages and dividers)                                                                                                                                      |
-| `double4` | History: items carrying a Reply Plan                                                                                                                                                    |
-| `double5` | History: turns asked for (`limit`, default 20)                                                                                                                                          |
-| `double6` | Milliseconds waiting on the person's object (its RPC calls); the rest of `double1` is the invocation check, the Auth Hub and the limiter                                                |
+| Column    | Meaning                                                                                                                                                                                                                     |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `index1`  | `oracle-runtime`                                                                                                                                                                                                            |
+| `blob1`   | Kind: `http`                                                                                                                                                                                                                |
+| `blob2`   | Route: `POST /channels/turn`, `POST /channels/control`, `POST /channels/history`, `POST /channels/media`                                                                                                                    |
+| `blob3`   | Outcome: `ok`, `client_error` (4xx), `server_error` (5xx), `exception` (an error the route did not expect; it answered 503 `unavailable`)                                                                                   |
+| `blob4`   | HTTP status                                                                                                                                                                                                                 |
+| `blob5`   | The refusal code (`ChannelErrorCode`: `session_conflict`, `control_not_supported`, `invalid_cursor`, `binding_inactive`, `rate_limited`, …) or, for `exception`, the error's class name                                     |
+| `blob6`   | Empty (campaign, Yo Rewards only)                                                                                                                                                                                           |
+| `blob7`   | Caller: `gateway`                                                                                                                                                                                                           |
+| `blob8`   | Channel: `web`, `whatsapp`, `telegram`, `other`; empty when the body did not parse                                                                                                                                          |
+| `blob9`   | Turn phase (`/channels/turn` only): `poll` (a warm object answered a poll of an existing run), `admit` (checked with the Auth Hub and admitted); for `/channels/media` what was asked for: `file` or `artifact`; else empty |
+| `double1` | Duration in milliseconds (the Workers clock moves on I/O only)                                                                                                                                                              |
+| `double2` | 1                                                                                                                                                                                                                           |
+| `double3` | History: items on the page (messages and dividers)                                                                                                                                                                          |
+| `double4` | History: items carrying a Reply Plan                                                                                                                                                                                        |
+| `double5` | History: turns asked for (`limit`, default 20)                                                                                                                                                                              |
+| `double6` | Milliseconds waiting on the person's object (its RPC calls); the rest of `double1` is the invocation check, the Auth Hub and the limiter                                                                                    |
 
 The log line, `warn` for 4xx and `error` for 5xx (an unexpected failure also
 keeps its `[channels] … failed unexpectedly: <cause>` line):

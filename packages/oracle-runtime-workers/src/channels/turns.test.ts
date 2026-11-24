@@ -2564,6 +2564,27 @@ describe('web chat sessions across binding revisions, and history replies', () =
     ).toEqual([first, second]);
   });
 
+  it('answers a media read the same ownership in one query: every session of the web binding, never another binding or provider', async () => {
+    const { stub, first, second } = await twoRevisions('web-owns', 'web');
+    for (const sessionId of [first, second])
+      expect(await stub.bindingOwnsSession(web(2, 'x'), sessionId)).toBe(true);
+    expect(
+      await stub.bindingOwnsSession(
+        { ...web(2, 'x'), bindingId: 'chb_other' },
+        first,
+      ),
+    ).toBe(false);
+    expect(await stub.bindingOwnsSession(web(2, 'x'), '$someone-else')).toBe(
+      false,
+    );
+    expect(
+      await stub.bindingOwnsSession(
+        { ...web(2, 'x'), provider: 'whatsapp' },
+        first,
+      ),
+    ).toBe(false);
+  });
+
   it('refuses every session control for a web binding, before any work; WhatsApp and Telegram keep them', async () => {
     const { stub, first } = await twoRevisions('web-controls', 'web');
     const before = await stub.hostCalls();

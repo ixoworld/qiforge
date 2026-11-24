@@ -25,6 +25,20 @@ import {
   StaleSessionError,
 } from './contract';
 import type { TurnRefusal } from '../plugin-api/turn-gate';
+import {
+  createAttachmentDecryptor,
+  createAttachmentEncryptor,
+  type EncryptedFileInfo,
+} from '@ixo/matrix-bot-workers-sdk';
+import { ChannelAttachmentLinkStore } from '../attachments/channel-links';
+import type { EventMediaInfo } from '../do/contracts';
+import { hex } from '../attachments/channel';
+import {
+  ChannelMediaSlot,
+  serveChannelMedia,
+  type ChannelMediaOutcome,
+  type ChannelMediaQuery,
+} from './media';
 
 /** How the next room mirrors behave (`setMirror`). */
 type MirrorMode = 'ok' | 'transient' | 'forbidden' | 'hang';
@@ -389,6 +403,14 @@ export class ChannelTurnsTestDO extends DurableObject {
     input: Pick<ChannelTurnInput, 'provider' | 'bindingId' | 'bindingRevision'>,
   ): Promise<{ sessionId: string; createdAt: number }[]> {
     return (await this.ready()).ownedSessions(input);
+  }
+
+  /** Whether a web binding holds a session, as a media read checks it. */
+  async bindingOwnsSession(
+    input: Pick<ChannelTurnInput, 'provider' | 'bindingId'>,
+    sessionId: string,
+  ): Promise<boolean> {
+    return (await this.ready()).bindingOwnsSession(input, sessionId);
   }
 
   /** Agent message id → its run, as a history read matches them (a plain object). */
@@ -802,5 +824,173 @@ export class ChannelTurnsTestDO extends DurableObject {
     this.db = undefined;
     this.runs = undefined;
     this.turns = undefined;
+  }
+}
+
+/**
+ * Test-only Durable Object serving `POST /channels/media` file reads the way
+ * `UserOracleDO.channelMedia` does: the room copy looked up in the real
+ * link store (DO SQLite), one slot per object, the plaintext returned
+ * across RPC as a byte stream. The homeserver is an in-object stream of a
+ * real encrypted attachment that counts its reads. Bound as
+ * `CHANNEL_MEDIA_TEST` by `test/wrangler.test.jsonc`. Not part of the
+ * runtime.
+ */
+const SILENT_LOG = { warn: () => undefined };
+
+export class ChannelMediaTestDO extends DurableObject {
+  private db?: DoSqliteDatabase;
+  private store?: ChannelAttachmentLinkStore;
+  private readonly slot = new ChannelMediaSlot();
+  private file?: {
+    plain: Uint8Array;
+    cipher: Uint8Array;
+    info: EncryptedFileInfo;
+  };
+  private upstream = { pulls: 0, cancelled: false };
+  private eventMediaInfoCalls = 0;
+
+  private async links(): Promise<ChannelAttachmentLinkStore> {
+    this.db ??= await DoSqliteDatabase.open(this.ctx, 'channel-media-test.db');
+    this.store ??= new ChannelAttachmentLinkStore(this.db, SILENT_LOG);
+    return this.store;
+  }
+
+  /** Keep `ref`'s link in `sessionId` for `bindingId`, and its room event when given. */
+  async seed(input: {
+    sessionId: string;
+    ref: string;
+    bindingId: string;
+    sha256: string;
+    eventId?: string;
+    /** Record the stored file's media info with the event, as a post does now. */
+    withMedia?: boolean;
+  }): Promise<void> {
+    const links = await this.links();
+    await links.put(input.sessionId, [
+      {
+        ref: input.ref,
+        bindingId: input.bindingId,
+        sha256: input.sha256,
+        url: `https://channels.test/media/${input.bindingId}/obj?exp=9999999999`,
+      },
+    ]);
+    if (input.eventId)
+      await links.setEventIds(
+        input.sessionId,
+        new Map([[input.ref, input.eventId]]),
+        input.withMedia && this.file
+          ? new Map([[input.ref, this.mediaInfo(this.file)]])
+          : undefined,
+      );
+  }
+
+  async roomCopy(
+    sessionId: string,
+    ref: string,
+    bindingId: string,
+  ): Promise<{ eventId: string; sha256: string } | undefined> {
+    return (await this.links()).roomCopy(sessionId, ref, bindingId);
+  }
+
+  async forgetSession(sessionId: string): Promise<void> {
+    await (await this.links()).forgetSession(sessionId);
+  }
+
+  /** The stored file: `size` bytes, encrypted as a Matrix attachment. Returns its SHA-256. */
+  async storeFile(size: number): Promise<string> {
+    const plain = new Uint8Array(size);
+    for (let i = 0; i < size; i++) plain[i] = (i * 13 + 5) & 0xff;
+    const encryptor = createAttachmentEncryptor();
+    const cipher = new Uint8Array(
+      await new Response(
+        new Response(plain).body!.pipeThrough(encryptor.transform),
+      ).arrayBuffer(),
+    );
+    this.file = { plain, cipher, info: await encryptor.info };
+    return hex(await crypto.subtle.digest('SHA-256', plain));
+  }
+
+  /** One media read as `UserOracleDO.channelMedia` serves it, for `bindingId`'s session `ownedSession`. */
+  async read(
+    query: ChannelMediaQuery,
+    bindingId: string,
+    ownedSession: string,
+  ): Promise<ChannelMediaOutcome> {
+    const links = await this.links();
+    return serveChannelMedia(query, {
+      slot: this.slot,
+      prepare: async () => ({
+        ownsSession: async (sessionId) => sessionId === ownedSession,
+        fileRoomCopy: (sessionId, ref) =>
+          links.roomCopy(sessionId, ref, bindingId),
+        sessionRoom: async () => '!room:hs.test',
+        eventMediaInfo: async () => {
+          this.eventMediaInfoCalls += 1;
+          return this.file ? this.mediaInfo(this.file) : null;
+        },
+        openMedia: async () => {
+          const cipher = this.file!.cipher;
+          this.upstream = { pulls: 0, cancelled: false };
+          const upstream = this.upstream;
+          let offset = 0;
+          return new ReadableStream<Uint8Array>(
+            {
+              pull(controller) {
+                upstream.pulls += 1;
+                if (offset >= cipher.byteLength) {
+                  controller.close();
+                  return;
+                }
+                controller.enqueue(cipher.slice(offset, offset + 4096));
+                offset += 4096;
+              },
+              cancel() {
+                upstream.cancelled = true;
+              },
+            },
+            { highWaterMark: 0 },
+          );
+        },
+        decryptor: (info) => createAttachmentDecryptor(info),
+        artifact: async () => undefined,
+      }),
+    });
+  }
+
+  private mediaInfo(file: {
+    plain: Uint8Array;
+    info: EncryptedFileInfo;
+  }): EventMediaInfo {
+    return {
+      mxc: 'mxc://hs.test/media1',
+      file: file.info,
+      mimetype: 'application/pdf',
+      filename: 'cv.pdf',
+      size: file.plain.byteLength,
+    };
+  }
+
+  /** Overwrite a row's stored media info as raw text (a row this object did not write). */
+  async corruptMedia(sessionId: string, ref: string): Promise<void> {
+    await this.links();
+    await this.db!.run(
+      'UPDATE channel_attachment_links SET media_json = \'{"mxc":1}\' WHERE session_id = ? AND ref = ?',
+      [sessionId, ref],
+    );
+  }
+
+  async state(): Promise<{
+    busy: boolean;
+    pulls: number;
+    cancelled: boolean;
+    eventMediaInfoCalls: number;
+  }> {
+    return {
+      busy: this.slot.busy,
+      pulls: this.upstream.pulls,
+      cancelled: this.upstream.cancelled,
+      eventMediaInfoCalls: this.eventMediaInfoCalls,
+    };
   }
 }

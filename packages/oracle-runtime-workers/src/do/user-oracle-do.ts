@@ -53,6 +53,12 @@ import type {
   ChannelTurnResponse,
 } from '../channels/contract';
 import { readChannelHistory } from '../channels/history';
+import {
+  ChannelMediaSlot,
+  serveChannelMedia,
+  type ChannelMediaInput,
+  type ChannelMediaOutcome,
+} from '../channels/media';
 import { refreshActionProposal } from '../action-proposals/reconcile';
 import { assertActionProposalPolicy } from '../action-proposals/policy';
 import { TopicReadUnavailable } from '../action-proposals/topic-errors';
@@ -156,6 +162,7 @@ import {
   resizeForModel,
   sanitizeAttachmentFilename,
   ChannelAttachmentLinkStore,
+  roomCopyMediaInfo,
   type AttachmentViewSurface,
   type AttachmentInput,
   type MatrixMediaSource,
@@ -330,6 +337,7 @@ import {
 import {
   checkpointStorageKey,
   type BotCredentials,
+  type EventMediaInfo,
   type MatrixGatewayObject,
   type OracleWorkerEnv,
   type SessionSummary,
@@ -1348,6 +1356,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private attachmentTextCache: AttachmentTextCacheStore | null = null;
     /** The links behind the `channel:` references of each session's files. */
     private channelAttachmentLinks: ChannelAttachmentLinkStore | null = null;
+    /** The one `POST /channels/media` read this object serves at a time. */
+    private readonly mediaReads = new ChannelMediaSlot();
     /** Large texts of document ingestion, in memory (a few, minutes). */
     private readonly ingestTextLru = new IngestTextLru();
     /**
@@ -4024,6 +4034,62 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           };
         throw error;
       }
+    }
+
+    /**
+     * One file the person sent, or one document the oracle made, in a web
+     * binding's history (`POST /channels/media`, `channels/media.ts`): the
+     * shell verified the grant and checked the binding with the Auth Hub.
+     * One read per object at a time: a second is `429 busy` at once, before
+     * any boot or SQL. The slot is held until the read has ended (for a
+     * file, the body's last byte, a failure, the deadline or a cancel).
+     */
+    async channelMedia(
+      identity: TurnIdentity,
+      input: ChannelMediaInput,
+    ): Promise<ChannelMediaOutcome> {
+      return serveChannelMedia(input.query, {
+        slot: this.mediaReads,
+        prepare: async () => {
+          if (
+            identity.channel?.bindingId !== input.bindingId ||
+            identity.channel.bindingRevision !== input.bindingRevision ||
+            identity.channel.provider !== input.provider
+          )
+            throw new ChannelError(
+              403,
+              'Channel identity does not match this request',
+              'identity_mismatch',
+            );
+          try {
+            await this.readyChannel(identity);
+          } catch (error) {
+            throw (
+              (error instanceof ChannelError
+                ? error
+                : classifyChannelFailure(error)) ?? error
+            );
+          }
+          const turns = this.channelTurns!;
+          const links = this.channelAttachmentLinks!;
+          const sessions = this.sessions!;
+          return {
+            ownsSession: (sessionId) =>
+              turns.bindingOwnsSession(input, sessionId),
+            fileRoomCopy: (sessionId, ref) =>
+              links.roomCopy(sessionId, ref, input.bindingId),
+            sessionRoom: async (sessionId) =>
+              (await sessions.getSession(sessionId))?.roomId ?? undefined,
+            // Only for a room copy recorded before its media info was kept:
+            // the one call on the shared gateway object, the event's JSON.
+            eventMediaInfo: (roomId, eventId, timeoutMs) =>
+              this.gateway.eventMediaInfo(roomId, eventId, { timeoutMs }),
+            openMedia: (mxc, signal) => this.openMatrixMedia(mxc, signal),
+            decryptor: (file) => createAttachmentDecryptor(file),
+            artifact: async (artifactId) => this.artifacts?.get(artifactId),
+          };
+        },
+      });
     }
 
     /**
@@ -10362,7 +10428,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * - one event per file on the session's mirror chain, queued in message
      *   order right after the person's text (`afterChannelText`) at
      *   background priority, each within `CHANNEL_MEDIA_SEND_TIMEOUT_MS`;
-     *   their event ids then go to the link store (`setEventIds`), whose room
+     *   their event ids (with each event's media info) then go to the link
+     *   store (`setEventIds`), whose room
      *   copies serve the files once their links expire.
      *
      * A resumed attempt posts nothing: its first attempt did, or lost the
@@ -10470,6 +10537,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           );
         // Queued synchronously, one after the other: the chain keeps the
         // message order whichever upload ends first.
+        // What a later `/channels/media` read needs of each posted event
+        // (its mxc, `EncryptedFile` fields, type, name, size), kept with
+        // the link row so that read never asks the shared gateway object.
+        const postedMedia = new Map<string, EventMediaInfo>();
         const sent = await Promise.all(
           files.map(async (file): Promise<[string, string] | null> => {
             const bound = boundedSignal(
@@ -10487,6 +10558,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                   // A failed upload is logged by `startChannelFileUploads`.
                   const media = await upload?.uploaded.catch(() => null);
                   if (!media) return null;
+                  postedMedia.set(file.ref, roomCopyMediaInfo(media));
                   return {
                     roomId,
                     threadId: req.sessionId,
@@ -10517,7 +10589,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         const eventIds = new Map(
           sent.filter((entry): entry is [string, string] => entry !== null),
         );
-        await this.channelAttachmentLinks?.setEventIds(req.sessionId, eventIds);
+        await this.channelAttachmentLinks?.setEventIds(
+          req.sessionId,
+          eventIds,
+          postedMedia,
+        );
       });
       this.ctx.waitUntil(
         posted.catch((error: unknown) => {

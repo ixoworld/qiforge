@@ -14,10 +14,75 @@
  * outlives its link (the expiry sweep only removes rows without it). A
  * resend of the same file in a later turn refreshes the link and keeps the
  * event until the new post records its own.
+ *
+ * With the event the row keeps what reading it back needs (`media_json`:
+ * the mxc, the `EncryptedFile` fields with the file's key, its type, name
+ * and size), so a later read goes straight to the homeserver from the
+ * person's own object, never through the shared gateway object. That key
+ * stays in the person's own storage: it is never logged nor answered; it
+ * is deleted with its row (the session's deletion) and replaced when a
+ * resend's post records its own event.
  */
 import type { DoSqliteDatabase } from '../sqlite/database';
 import type { Logger } from '../plugin-api/types';
+import { z } from 'zod';
+import type { EventMediaInfo } from '../do/contracts';
+import type { MediaMessage } from '../do/room-mirror';
 import type { ChannelMediaLink } from './channel';
+import { MXC_PATTERN } from './download';
+
+/** What reading a posted file event back needs, from the event content this object sent. */
+export function roomCopyMediaInfo(media: MediaMessage): EventMediaInfo {
+  const { url, ...file } = media.file;
+  return {
+    mxc: url,
+    file,
+    mimetype: media.info.mimetype,
+    filename: media.filename,
+    size: media.info.size,
+  };
+}
+
+/**
+ * A stored `media_json`, as `roomCopyMediaInfo` writes it. Only its shape is
+ * checked here (this module stays free of the bot SDK, which plain-Node
+ * suites cannot load); the decryptor checks the key, IV and hash lengths.
+ */
+const StoredMediaInfo = z.object({
+  mxc: z.string().regex(MXC_PATTERN),
+  file: z.object({
+    v: z.literal('v2'),
+    key: z.object({
+      kty: z.literal('oct'),
+      key_ops: z.array(z.string()),
+      alg: z.literal('A256CTR'),
+      k: z.string(),
+      ext: z.boolean(),
+    }),
+    iv: z.string(),
+    hashes: z.object({ sha256: z.string() }),
+  }),
+  mimetype: z.string().optional(),
+  filename: z.string().optional(),
+  size: z.number().int().nonnegative().safe(),
+});
+
+/** A stored `media_json`, or undefined when it is absent or not one this object wrote. */
+function storedMediaInfo(json: string | null): EventMediaInfo | undefined {
+  if (!json) return undefined;
+  try {
+    const parsed = StoredMediaInfo.safeParse(JSON.parse(json));
+    if (!parsed.success) return undefined;
+    const { mimetype, filename, ...rest } = parsed.data;
+    return {
+      ...rest,
+      ...(mimetype !== undefined ? { mimetype } : {}),
+      ...(filename !== undefined ? { filename } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
 
 /** The gateway's link lifetime, for a link that carries no readable `exp`. */
 export const CHANNEL_LINK_DEFAULT_TTL_MS = 30 * 24 * 3600 * 1000;
@@ -62,6 +127,7 @@ export class ChannelAttachmentLinkStore {
          sha256 TEXT NOT NULL,
          expires_at INTEGER NOT NULL,
          event_id TEXT,
+         media_json TEXT,
          UNIQUE (session_id, ref)
        )`,
     );
@@ -73,6 +139,12 @@ export class ChannelAttachmentLinkStore {
     if (!columns.some((column) => column.name === 'event_id'))
       await this.db.run(
         'ALTER TABLE channel_attachment_links ADD COLUMN event_id TEXT',
+      );
+    // A table created before `media_json` existed: its rows read their
+    // event's media info from the gateway object once (`roomCopy`).
+    if (!columns.some((column) => column.name === 'media_json'))
+      await this.db.run(
+        'ALTER TABLE channel_attachment_links ADD COLUMN media_json TEXT',
       );
     await this.db.run(
       `CREATE INDEX IF NOT EXISTS idx_channel_attachment_links_expiry
@@ -150,22 +222,27 @@ export class ChannelAttachmentLinkStore {
 
   /**
    * Record the session-thread events the turn's files were posted as
-   * (reference → event id). A failure is logged: the files are then served
-   * by their links alone.
+   * (reference → event id), each with its media info when given (`media`,
+   * reference → what reading the event back needs; an event recorded
+   * without it drops any earlier one). A failure is logged: the files are
+   * then served by their links alone. The media info is never logged.
    */
   async setEventIds(
     sessionId: string,
     eventIds: ReadonlyMap<string, string>,
+    media: ReadonlyMap<string, EventMediaInfo> = new Map(),
   ): Promise<void> {
     if (eventIds.size === 0) return;
     try {
       await this.setup();
-      for (const [ref, eventId] of eventIds)
+      for (const [ref, eventId] of eventIds) {
+        const info = media.get(ref);
         await this.db.run(
-          `UPDATE channel_attachment_links SET event_id = ?
+          `UPDATE channel_attachment_links SET event_id = ?, media_json = ?
            WHERE session_id = ? AND ref = ?`,
-          [eventId, sessionId, ref],
+          [eventId, info ? JSON.stringify(info) : null, sessionId, ref],
         );
+      }
     } catch (error) {
       this.log.warn(
         `[attachments] could not keep the thread events of ${sessionId}'s channel files: ${error instanceof Error ? error.message : String(error)}`,
@@ -189,6 +266,42 @@ export class ChannelAttachmentLinkStore {
       );
       return undefined;
     }
+  }
+
+  /**
+   * The session-thread copy of `ref` in `sessionId` when the file arrived on
+   * `bindingId` and its event was recorded, expired link or not: the event,
+   * the SHA-256 the gateway announced for the file (the copy was posted only
+   * once its bytes matched it) and, for an event recorded with it, what
+   * reading it back needs (`media`; absent for rows written before it was
+   * kept, or not readable). One key lookup. Unlike the reads above, a
+   * failure is thrown: a media read must not answer "not found" for a
+   * database it could not read.
+   */
+  async roomCopy(
+    sessionId: string,
+    ref: string,
+    bindingId: string,
+  ): Promise<
+    { eventId: string; sha256: string; media?: EventMediaInfo } | undefined
+  > {
+    await this.setup();
+    const row = await this.db.get<{
+      event_id: string;
+      sha256: string;
+      media_json: string | null;
+    }>(
+      `SELECT event_id, sha256, media_json FROM channel_attachment_links
+       WHERE session_id = ? AND ref = ? AND binding_id = ? AND event_id IS NOT NULL`,
+      [sessionId, ref, bindingId],
+    );
+    if (!row || !/^[0-9a-f]{64}$/.test(row.sha256)) return undefined;
+    const media = storedMediaInfo(row.media_json);
+    return {
+      eventId: row.event_id,
+      sha256: row.sha256,
+      ...(media ? { media } : {}),
+    };
   }
 
   /** Drop every link of a deleted session. */

@@ -536,6 +536,75 @@ describe('readChannelHistory', () => {
     ]);
   });
 
+  it('lists the channel files of a message from its row alone: reference, name, type and size, no link and no extra lookup', async () => {
+    const thread = (withFiles: boolean) => ({
+      $s: [
+        new HumanMessage({
+          id: 'h1',
+          content: 'Two photos',
+          additional_kwargs: {
+            ...origin(1),
+            attachments: withFiles
+              ? [
+                  {
+                    filename: 'a.jpg',
+                    mimetype: 'image/jpeg',
+                    size: 1234,
+                    channelRef: 'channel:0123456789abcdef',
+                    category: 'image',
+                  },
+                  {
+                    filename: 'b.pdf',
+                    mimetype: 'application/pdf',
+                    channelRef: 'channel:fedcba9876543210',
+                    category: 'document',
+                  },
+                  // Not a channel file (no reference): a placeholder only.
+                  {
+                    filename: 'c.png',
+                    mimetype: 'image/png',
+                    mxcUri: 'mxc://hs/c',
+                    category: 'image',
+                  },
+                ]
+              : [],
+          },
+        }),
+        new AIMessage({ id: 'r1', content: 'Nice' }),
+      ],
+    });
+    const withFiles = source(thread(true));
+    const page = await readChannelHistory(request(), withFiles);
+    const user = page.items[0];
+    if (user?.kind !== 'message' || user.role !== 'user')
+      throw new Error('no user item');
+    expect(user.files).toEqual([
+      {
+        ref: 'channel:0123456789abcdef',
+        name: 'a.jpg',
+        mime: 'image/jpeg',
+        size: 1234,
+      },
+      {
+        ref: 'channel:fedcba9876543210',
+        name: 'b.pdf',
+        mime: 'application/pdf',
+      },
+    ]);
+    expect(user.text).toBe(
+      'Two photos\n\n[File sent: a.jpg]\n[File sent: b.pdf]\n[File sent: c.png]',
+    );
+    expect(JSON.stringify(page)).not.toContain('mxc://');
+    // The same reads and lookups as the page without files: the files come
+    // from the rows the page already read.
+    const withoutFiles = source(thread(false));
+    const plain = await readChannelHistory(request(), withoutFiles);
+    expect(withFiles.reads).toEqual(withoutFiles.reads);
+    expect(withFiles.lookups).toEqual(withoutFiles.lookups);
+    const plainUser = plain.items[0];
+    expect(plainUser && 'files' in plainUser).toBe(false);
+  });
+
   it("lists only this binding's own messages and their replies: never a Portal message or another binding's turn in the same session", async () => {
     const page = await readChannelHistory(
       request(),
