@@ -72,5 +72,10 @@ OPEN_ROUTER_API_KEY=
 # destination are set. On IXO's Cloudflare account prefer the `TRACES`
 # service binding (see wrangler.jsonc) over the endpoint; with both, the
 # binding is used. For your own instance, use its URL or Worker name.
+# It traces the same users as LangSmith (LANGSMITH_TRACING=true = everyone,
+# else the LANGSMITH_TRACED_DIDS list; neither set = everyone), unless
+# TRACES_TRACED_DIDS is set: `*` = everyone, or a comma-separated DID list
+# (runtime 0.64.0 or later).
 # TRACES_API_KEY=ixt_w_...
 # TRACES_ENDPOINT=https://traces.ixo.earth
+# TRACES_TRACED_DIDS=*

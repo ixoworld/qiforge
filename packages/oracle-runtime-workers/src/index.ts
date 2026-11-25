@@ -167,11 +167,19 @@ export {
   TurnTracer,
   traceSendStats,
   tracesConfigFromEnv,
+  turnTracesUsersFromEnv,
   type IngestTurn,
   type IngestTurnStart,
   type TracesConfig,
   type TurnTracerOptions,
 } from './traces';
+// Which users LangSmith and IXO Traces trace: one shared rule.
+export {
+  isTracedUser,
+  langsmithTracedUsers,
+  turnTracesUsers,
+  type TracedUsers,
+} from './core/traced-users';
 
 // --- task adapters -----------------------------------------------------------
 export {

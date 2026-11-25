@@ -21,6 +21,7 @@ import { fetchOpenRouterPrices } from './openrouter-pricing';
 import type { LlmAdapter } from './runtime-context';
 import { stringify } from '../sqlite/serialization';
 import { inheritedByNestedRuns } from './nested-run-callbacks';
+import { isTracedUser, langsmithTracedUsers } from './traced-users';
 import { NOOP_LOGGER } from './utils';
 
 // ── Catalog ─────────────────────────────────────────────────────────────────
@@ -1153,6 +1154,10 @@ function createNebiusAdapter(
  *  - **Global** — `LANGSMITH_TRACING === 'true'`: every turn is traced.
  *  - **Selective** — `LANGSMITH_TRACED_DIDS` allowlist (`*` = everyone):
  *    only turns whose UCAN-authenticated user DID matches are traced.
+ *  - Neither set: no turn is traced.
+ *
+ * The user rule is `langsmithTracedUsers` (`traced-users.ts`), which IXO
+ * Traces follows by default.
  *
  * Fail-closed: no API key ⇒ no tracer, nothing leaves the isolate. The
  * `metadata` is returned unconditionally — attached to the run config, it is
@@ -1383,22 +1388,6 @@ function langsmithClientFor(
   return client;
 }
 
-/** Single-slot memo for the parsed allowlist (raw string is deploy-stable). */
-let tracedDidsMemoRaw: string | undefined;
-let tracedDidsMemoSet: ReadonlySet<string> = new Set();
-
-function parseTracedDids(raw: string | undefined): ReadonlySet<string> {
-  if (raw === tracedDidsMemoRaw) return tracedDidsMemoSet;
-  tracedDidsMemoRaw = raw;
-  tracedDidsMemoSet = new Set(
-    (raw ?? '')
-      .split(',')
-      .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0),
-  );
-  return tracedDidsMemoSet;
-}
-
 export function resolveLangsmithTracing(
   args: ResolveLangsmithTracingArgs,
 ): LangsmithTracingDecision {
@@ -1417,12 +1406,8 @@ export function resolveLangsmithTracing(
     return { metadata };
   }
 
-  const globalOn = env.tracing?.trim() === 'true';
-  if (!globalOn) {
-    const allowlist = parseTracedDids(env.tracedDids);
-    const traced = allowlist.has('*') || allowlist.has(userDid);
-    if (!traced) return { metadata };
-  }
+  // The user rule IXO Traces follows too (`traced-users.ts`).
+  if (!isTracedUser(langsmithTracedUsers(env), userDid)) return { metadata };
 
   return {
     metadata,

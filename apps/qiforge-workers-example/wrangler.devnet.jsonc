@@ -69,7 +69,8 @@
   // key with `wrangler secret put TRACES_API_KEY`. Off another account, or
   // for your own instance, set TRACES_ENDPOINT in `vars` instead. LangSmith
   // (LANGSMITH_API_KEY secret + LANGSMITH_TRACING / LANGSMITH_PROJECT vars)
-  // can run at the same time.
+  // can run at the same time. IXO Traces traces the users LangSmith traces;
+  // TRACES_TRACED_DIDS ("*" or a DID list) sets its own users instead.
   // "services": [{ "binding": "TRACES", "service": "ixo-langsmith-traces" }],
   "vars": {
     "ORACLE_NAME": "Mike Matrix Test",

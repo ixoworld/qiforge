@@ -18,6 +18,7 @@ import { SessionsStore } from '../sqlite/sessions-store';
 import type { SqliteTestDO } from '../sqlite/test-do';
 import { TurnSchema, TurnStartSchema } from '../traces/fixtures/turn-schema';
 import { RUNTIME_VERSION } from '../traces/runtime-version';
+import { TurnTracer } from '../traces/turn-tracer';
 import type { TurnRequest } from './contracts';
 import { RunCoordinator } from './run-coordinator';
 import { storedRunRequest, type StoredRunRequest } from './run-request';
@@ -476,99 +477,243 @@ describe('IXO Traces from a user object turn', () => {
 
 const LANGSMITH = 'https://langsmith.test';
 
-describe('IXO Traces and LangSmith on the same turn', () => {
-  it('sends the turn to both, with the same runs, each model call counted once and the reply untouched', async () => {
+/**
+ * Every request LangSmith's client makes, answered locally: the uploads as
+ * text (gzip undone). Installed over `stubServices`' fetch.
+ */
+function stubLangsmith(): {
+  uploads: string[];
+  modelRequests: () => number;
+} {
+  const ixoFetch = vi.mocked(globalThis.fetch);
+  const uploads: string[] = [];
+  let modelRequests = 0;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(input, init);
+      if (request.url.startsWith(LANGSMITH)) {
+        if (request.url.endsWith('/info'))
+          return Response.json({
+            version: '0.11.0',
+            batch_ingest_config: { use_multipart_endpoint: true },
+            instance_flags: { gzip_body_enabled: true },
+          });
+        const raw = request.body;
+        const body =
+          raw && request.headers.get('content-encoding') === 'gzip'
+            ? raw.pipeThrough(new DecompressionStream('gzip'))
+            : raw;
+        uploads.push(await new Response(body).text());
+        return new Response('{}', { status: 200 });
+      }
+      if (request.url === COMPLETIONS) modelRequests += 1;
+      return ixoFetch(input, init);
+    }),
+  );
+  return { uploads, modelRequests: () => modelRequests };
+}
+
+const LANGSMITH_ENV = {
+  LANGSMITH_API_KEY: 'lsv2_test_key',
+  LANGSMITH_PROJECT: 'traces-users',
+  LANGSMITH_ENDPOINT: LANGSMITH,
+};
+
+/** Waits until LangSmith's background uploads mention `id` (or gives up). */
+async function langsmithSaw(uploads: string[], id: string): Promise<boolean> {
+  for (let i = 0; i < 300 && !uploads.join('\n').includes(id); i += 1)
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  return uploads.join('\n').includes(id);
+}
+
+describe('IXO Traces traces the users LangSmith traces', () => {
+  it('traces a user on the LangSmith list, like LangSmith', async () => {
     const services = stubServices();
-    const ixoFetch = vi.mocked(globalThis.fetch);
-    /** Every upload LangSmith's client made, as text (gzip undone). */
-    const langsmithUploads: string[] = [];
-    /** The platform model's streamed calls, as OpenRouter saw them. */
-    let modelRequests = 0;
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-        const request = new Request(input, init);
-        if (request.url.startsWith(LANGSMITH)) {
-          if (request.url.endsWith('/info'))
-            return Response.json({
-              version: '0.11.0',
-              batch_ingest_config: { use_multipart_endpoint: true },
-              instance_flags: { gzip_body_enabled: true },
-            });
-          const raw = request.body;
-          const body =
-            raw && request.headers.get('content-encoding') === 'gzip'
-              ? raw.pipeThrough(new DecompressionStream('gzip'))
-              : raw;
-          langsmithUploads.push(await new Response(body).text());
-          return new Response('{}', { status: 200 });
-        }
-        if (request.url === COMPLETIONS) modelRequests += 1;
-        return ixoFetch(input, init);
-      }),
-    );
+    const langsmith = stubLangsmith();
     await withObject(
-      'traces-and-langsmith',
+      'traces-listed',
       {
         ...TRACES_ENV,
-        LANGSMITH_TRACING: 'true',
-        LANGSMITH_API_KEY: 'lsv2_test_key',
-        LANGSMITH_PROJECT: 'traces-and-langsmith',
-        LANGSMITH_ENDPOINT: LANGSMITH,
+        ...LANGSMITH_ENV,
+        LANGSMITH_TRACED_DIDS: `did:ixo:ixo1someone, ${USER_DID}`,
       },
       async (o) => {
-        const outcome = await o.turn('$session-both', 'req-both');
-        expect(outcome).toMatchObject({ status: 'finished', text: 'Hello.' });
+        await o.turn('$session-listed', 'req-listed');
         await o.drain();
-
-        // IXO Traces: one turn, well-formed, its usage the meter's reports.
         expect(services.turns()).toHaveLength(1);
         const turn = TurnSchema.parse(services.turns()[0]!.body);
-        const turnCalls = o.reports.filter((r) => r.purpose === 'reply');
-        expect(turn.usage).toEqual({
-          input_tokens: turnCalls.reduce(
-            (s, r) => s + (r.promptTokens ?? 0),
-            0,
-          ),
-          cached_tokens: turnCalls.reduce(
-            (s, r) => s + (r.cachedTokens ?? 0),
-            0,
-          ),
-          output_tokens: turnCalls.reduce(
-            (s, r) => s + (r.outputTokens ?? 0),
-            0,
-          ),
-          cost_usd: turnCalls.reduce((s, r) => s + (r.costUsd ?? 0), 0),
-        });
-        // Two tracers cause no extra model call and no extra meter report:
-        // every call OpenRouter saw is reported once, and the trace holds
-        // one model run per reported reply call.
-        expect(o.reports).toHaveLength(modelRequests);
-        expect(turn.runs.filter((r) => r.run_type === 'llm')).toHaveLength(
-          turnCalls.length,
-        );
-
-        // LangSmith: its client uploads in the background; the same root
-        // run (IXO Traces' trace id) and the same model run reach it.
-        for (
-          let i = 0;
-          i < 300 && !langsmithUploads.join('\n').includes(turn.trace_id);
-          i += 1
-        )
-          await new Promise((resolve) => setTimeout(resolve, 10));
-        const sent = langsmithUploads.join('\n');
-        expect(sent).toContain(turn.trace_id);
-        const llmRun = turn.runs.find((r) => r.run_type === 'llm')!;
-        expect(sent).toContain(llmRun.id);
-        // Neither destination gets the other's key.
-        expect(sent).not.toContain('ixt_w_testtest_secret');
-        expect(JSON.stringify(turn)).not.toContain('lsv2_test_key');
-        expect(
-          services.received.every((r) => r.apiKey === 'ixt_w_testtest_secret'),
-        ).toBe(true);
+        expect(await langsmithSaw(langsmith.uploads, turn.trace_id)).toBe(true);
       },
     );
   });
+
+  it('sends nothing, builds nothing and logs nothing per turn for a user off the LangSmith list', async () => {
+    const services = stubServices();
+    const langsmith = stubLangsmith();
+    const runCreated = vi.spyOn(TurnTracer.prototype, 'onRunCreate');
+    const finished = vi.spyOn(TurnTracer.prototype, 'finish');
+    const logged = vi.spyOn(console, 'log');
+    await withObject(
+      'traces-unlisted',
+      {
+        ...TRACES_ENV,
+        ...LANGSMITH_ENV,
+        LANGSMITH_TRACED_DIDS: 'did:ixo:ixo1someone,did:ixo:ixo1other',
+      },
+      async (o) => {
+        for (const n of [1, 2, 3]) {
+          const outcome = await o.turn(`$session-unlisted-${n}`, `req-u${n}`);
+          expect(outcome).toMatchObject({ status: 'finished', text: 'Hello.' });
+        }
+        await o.drain();
+        // No tracer was made: no run reached one, no turn was finished.
+        expect(runCreated).not.toHaveBeenCalled();
+        expect(finished).not.toHaveBeenCalled();
+        // Not one request to IXO Traces (no start marker, no turn), none
+        // to LangSmith.
+        expect(services.received).toEqual([]);
+        expect(langsmith.uploads).toEqual([]);
+        // At most the one line per isolate that names the mode; never a DID.
+        const lines = logged.mock.calls
+          .map((args) => String(args[0]))
+          .filter((line) => line.startsWith('[traces]'));
+        expect(lines.length).toBeLessThanOrEqual(1);
+        for (const line of lines) expect(line).not.toContain('did:');
+      },
+    );
+  });
+
+  it('TRACES_TRACED_DIDS=* traces everyone while LangSmith keeps to its list', async () => {
+    const services = stubServices();
+    const langsmith = stubLangsmith();
+    await withObject(
+      'traces-override-everyone',
+      {
+        ...TRACES_ENV,
+        ...LANGSMITH_ENV,
+        LANGSMITH_TRACED_DIDS: 'did:ixo:ixo1someone',
+        TRACES_TRACED_DIDS: '*',
+      },
+      async (o) => {
+        await o.turn('$session-star', 'req-star');
+        await o.drain();
+        expect(services.turns()).toHaveLength(1);
+        TurnSchema.parse(services.turns()[0]!.body);
+        expect(langsmith.uploads).toEqual([]);
+      },
+    );
+  });
+
+  it('a TRACES_TRACED_DIDS list leaves out a user LangSmith traces', async () => {
+    const services = stubServices();
+    const langsmith = stubLangsmith();
+    await withObject(
+      'traces-override-list',
+      {
+        ...TRACES_ENV,
+        ...LANGSMITH_ENV,
+        LANGSMITH_TRACING: 'true',
+        TRACES_TRACED_DIDS: 'did:ixo:ixo1someone',
+      },
+      async (o) => {
+        await o.turn('$session-ovl', 'req-ovl');
+        await o.drain();
+        expect(services.received).toEqual([]);
+        // LangSmith still traces this user.
+        expect(await langsmithSaw(langsmith.uploads, USER_DID)).toBe(true);
+      },
+    );
+  });
+
+  it('a TRACES_TRACED_DIDS list traces its user while LangSmith has no list', async () => {
+    const services = stubServices();
+    await withObject(
+      'traces-override-listed',
+      { ...TRACES_ENV, TRACES_TRACED_DIDS: ` ${USER_DID} ` },
+      async (o) => {
+        await o.turn('$session-ovl2', 'req-ovl2');
+        await o.drain();
+        expect(services.turns()).toHaveLength(1);
+      },
+    );
+  });
+});
+
+describe('IXO Traces and LangSmith on the same turn', () => {
+  it.each([
+    ['LANGSMITH_TRACING=true', { LANGSMITH_TRACING: 'true' }],
+    ['the user on LANGSMITH_TRACED_DIDS', { LANGSMITH_TRACED_DIDS: USER_DID }],
+  ])(
+    'sends the turn to both (%s), with the same runs, each model call counted once and the reply untouched',
+    async (_label, selection) => {
+      const services = stubServices();
+      const langsmith = stubLangsmith();
+      const langsmithUploads = langsmith.uploads;
+      await withObject(
+        `traces-and-langsmith-${Object.keys(selection)[0]}`,
+        {
+          ...TRACES_ENV,
+          ...LANGSMITH_ENV,
+          ...selection,
+        },
+        async (o) => {
+          const modelRequests = (): number => langsmith.modelRequests();
+          const outcome = await o.turn('$session-both', 'req-both');
+          expect(outcome).toMatchObject({ status: 'finished', text: 'Hello.' });
+          await o.drain();
+
+          // IXO Traces: one turn, well-formed, its usage the meter's reports.
+          expect(services.turns()).toHaveLength(1);
+          const turn = TurnSchema.parse(services.turns()[0]!.body);
+          const turnCalls = o.reports.filter((r) => r.purpose === 'reply');
+          expect(turn.usage).toEqual({
+            input_tokens: turnCalls.reduce(
+              (s, r) => s + (r.promptTokens ?? 0),
+              0,
+            ),
+            cached_tokens: turnCalls.reduce(
+              (s, r) => s + (r.cachedTokens ?? 0),
+              0,
+            ),
+            output_tokens: turnCalls.reduce(
+              (s, r) => s + (r.outputTokens ?? 0),
+              0,
+            ),
+            cost_usd: turnCalls.reduce((s, r) => s + (r.costUsd ?? 0), 0),
+          });
+          // Two tracers cause no extra model call and no extra meter report:
+          // every call OpenRouter saw is reported once, and the trace holds
+          // one model run per reported reply call.
+          expect(o.reports).toHaveLength(modelRequests());
+          expect(turn.runs.filter((r) => r.run_type === 'llm')).toHaveLength(
+            turnCalls.length,
+          );
+
+          // LangSmith: its client uploads in the background; the same root
+          // run (IXO Traces' trace id) and the same model run reach it.
+          for (
+            let i = 0;
+            i < 300 && !langsmithUploads.join('\n').includes(turn.trace_id);
+            i += 1
+          )
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          const sent = langsmithUploads.join('\n');
+          expect(sent).toContain(turn.trace_id);
+          const llmRun = turn.runs.find((r) => r.run_type === 'llm')!;
+          expect(sent).toContain(llmRun.id);
+          // Neither destination gets the other's key.
+          expect(sent).not.toContain('ixt_w_testtest_secret');
+          expect(JSON.stringify(turn)).not.toContain('lsv2_test_key');
+          expect(
+            services.received.every(
+              (r) => r.apiKey === 'ixt_w_testtest_secret',
+            ),
+          ).toBe(true);
+        },
+      );
+    },
+  );
 });
 
 const SUB_PROMPT = 'You research for the trace test.';

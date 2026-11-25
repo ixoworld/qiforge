@@ -118,11 +118,12 @@ it straight into the Worker's secret, so nobody sees it.
 The tracer is on exactly when the Worker has `TRACES_API_KEY` and a
 destination. Otherwise it is off and costs nothing.
 
-| Setting           | Kind            | What it does                                                                                                                                                                                                                       |
-| ----------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `TRACES_API_KEY`  | secret          | The write key (`ixt_w_…`).                                                                                                                                                                                                         |
-| `TRACES`          | service binding | A binding to the traces Worker. Preferred: no public hop, no hostname. Works only when the oracle is on the same Cloudflare account as the traces Worker (IXO's account for IXO's instance). Used when both are set.               |
-| `TRACES_ENDPOINT` | var             | The base URL, `https://traces.ixo.earth`. Use it when the oracle is on another Cloudflare account. Must be `https://` (`http://` only for `localhost`, `127.0.0.1`, `[::1]`); anything else turns the tracer off with one warning. |
+| Setting              | Kind            | What it does                                                                                                                                                                                                                       |
+| -------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TRACES_API_KEY`     | secret          | The write key (`ixt_w_…`).                                                                                                                                                                                                         |
+| `TRACES`             | service binding | A binding to the traces Worker. Preferred: no public hop, no hostname. Works only when the oracle is on the same Cloudflare account as the traces Worker (IXO's account for IXO's instance). Used when both are set.               |
+| `TRACES_ENDPOINT`    | var             | The base URL, `https://traces.ixo.earth`. Use it when the oracle is on another Cloudflare account. Must be `https://` (`http://` only for `localhost`, `127.0.0.1`, `[::1]`); anything else turns the tracer off with one warning. |
+| `TRACES_TRACED_DIDS` | var or secret   | Which users to trace, when they should differ from LangSmith's (see [Which users](#which-users)). Unset: the same users as LangSmith. `*`: everyone. A comma-separated list of DIDs: only those.                                   |
 
 On IXO's Cloudflare account:
 
@@ -151,6 +152,53 @@ printf '%s' "$TRACES_WRITE_KEY" | npx wrangler secret put TRACES_API_KEY
 With a split layout (an oracle script and a gateway script), put the binding
 and the secret on the oracle script: the user objects send the traces.
 Deploy the oracle after the change.
+
+### Which users
+
+IXO Traces traces the same users as LangSmith, by the same rule (one shared
+function in the runtime, `src/core/traced-users.ts`), unless
+`TRACES_TRACED_DIDS` is set. Needs 0.64.0 or later; before it, IXO Traces
+traced every user.
+
+| `TRACES_TRACED_DIDS` | LangSmith variables                                          | IXO Traces traces                                 |
+| -------------------- | ------------------------------------------------------------ | ------------------------------------------------- |
+| unset                | `LANGSMITH_TRACING=true`                                     | everyone                                          |
+| unset                | `LANGSMITH_TRACED_DIDS` set (`LANGSMITH_TRACING` not `true`) | only the users on that list (`*` on it: everyone) |
+| unset                | neither set                                                  | everyone (there is no list to follow)             |
+| `*`                  | any                                                          | everyone                                          |
+| a list of DIDs       | any                                                          | only the users on this list                       |
+
+- A list is comma-separated. Spaces around an entry are ignored, an empty
+  entry is ignored, and `*` anywhere in it means everyone. A user matches
+  only an entry that is exactly their DID: case and spelling count, as in
+  `LANGSMITH_TRACED_DIDS`. A list of only commas or spaces counts as unset.
+- LangSmith's own rule is unchanged: `LANGSMITH_TRACING=true` traces
+  everyone, else `LANGSMITH_TRACED_DIDS` its users, else no one. It also
+  needs `LANGSMITH_API_KEY`. IXO Traces looks only at which users LangSmith
+  selects, not at the key: removing `LANGSMITH_API_KEY` alone does not change
+  who IXO Traces traces.
+- `TRACES_TRACED_DIDS` changes only IXO Traces. Use `*` to trace everyone on
+  IXO Traces while LangSmith keeps a short list (and its bill).
+- A turn of a user who is not traced costs nothing: the runtime makes no
+  tracer for it, so there is no start marker, no payload and no request, and
+  no log line for that turn.
+- The first traced-config turn of each isolate logs the mode once, with the
+  list size and never a DID, for example
+  `[traces] turn traces: 3 listed DIDs (the LangSmith selection)`,
+  `[traces] turn traces: everyone (TRACES_TRACED_DIDS)` or
+  `[traces] turn traces: everyone (no list set)`.
+
+To trace everyone on IXO Traces whatever LangSmith does:
+
+```jsonc
+// wrangler.jsonc
+"vars": {
+  "TRACES_TRACED_DIDS": "*",
+},
+```
+
+A list names people: keep it a secret, like `LANGSMITH_TRACED_DIDS`
+(`printf '%s' 'did:ixo:…,did:ixo:…' | npx wrangler secret put TRACES_TRACED_DIDS`).
 
 ### 3. Read the traces
 
@@ -191,8 +239,9 @@ Set A and B (or C) together. The two are independent:
   Billing and metering through `onModelCall` are not affected. The test
   `src/do/turn-traces.test.ts` ("IXO Traces and LangSmith on the same turn")
   proves this on a real user object turn.
-- LangSmith may trace only some users (`LANGSMITH_TRACED_DIDS`). IXO Traces
-  always traces every turn. Compare the same turns.
+- Both trace the same users unless `TRACES_TRACED_DIDS` is set
+  ([Which users](#which-users)). With `TRACES_TRACED_DIDS=*` IXO Traces has
+  every user and LangSmith only its list: compare the same turns.
 - The two may show cost differently. IXO Traces shows the cost the provider
   (OpenRouter) reported for each call. LangSmith shows its own figure.
 
@@ -204,9 +253,9 @@ To end the comparison, delete `LANGSMITH_API_KEY`
 
 ### Which turns
 
-Every agent turn of a user object: Portal, Matrix, channel (WhatsApp,
-Telegram, web) and task turns. A turn with supplied context only is never
-traced, by either tracer. The session-title call is left out: it runs after
+Every agent turn of a traced user's object ([Which users](#which-users)):
+Portal, Matrix, channel (WhatsApp, Telegram, web) and task turns. A turn with
+supplied context only is never traced, by either tracer. The session-title call is left out: it runs after
 the reply.
 
 ### What one turn sends
@@ -299,7 +348,10 @@ themselves.
 - Signed storage links lose their signature before any trace leaves the
   runtime. Keys and `process.env` values are never sent.
 - The runtime's `[traces]` log lines carry ids, counts, sizes and status
-  codes only: never content, keys or DIDs.
+  codes only: never content, keys or DIDs. The mode line gives a list's
+  size, not its DIDs.
+- To keep a user out of IXO Traces while LangSmith traces everyone, set
+  `TRACES_TRACED_DIDS` to a list without them.
 - Supplied-context turns are never traced.
 
 ## Check that it works
@@ -322,7 +374,8 @@ For LangSmith, open the project in LangSmith and find the turn by its thread or 
 ## Turn it off
 
 - IXO Traces: delete the secret (`npx wrangler secret delete TRACES_API_KEY`),
-  or remove the `TRACES` binding and `TRACES_ENDPOINT` and deploy.
+  or remove the `TRACES` binding and `TRACES_ENDPOINT` and deploy. To trace
+  fewer users instead, set `TRACES_TRACED_DIDS` to a list.
 - LangSmith: delete `LANGSMITH_API_KEY`, or remove `LANGSMITH_TRACING` and
   `LANGSMITH_TRACED_DIDS` and deploy.
 
@@ -341,13 +394,14 @@ Log lines read `[traces] turn <id>… (<bytes> bytes) <outcome>: HTTP <status> <
 
 Other lines:
 
-| Log line                                                    | Cause and fix                                                                                           |
-| ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| No `[traces]` line at all                                   | The key or the destination is missing, or the runtime is older than 0.60.0. Check both and the version. |
-| `TRACES_ENDPOINT is not an https:// base URL …`             | Fix the URL. Tracing is off until then.                                                                 |
-| `not sent: N trace requests already waiting`                | The service is slow. Turns are skipped rather than held in memory.                                      |
-| `turn … truncated: N payloads dropped, M runs left out`     | The turn was over 15 MiB. It was sent, cut down.                                                        |
-| `does not accept contract version 1 …: … paused for 10 min` | The service and the runtime disagree on the contract. Tell IXO.                                         |
+| Log line                                                    | Cause and fix                                                                                                                           |
+| ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| No `[traces]` line at all                                   | The key or the destination is missing, or the runtime is older than 0.60.0. Check both and the version.                                 |
+| `turn traces: N listed DIDs (…)` and no turn lines          | The users who wrote are not on the list IXO Traces follows ([Which users](#which-users)). Set `TRACES_TRACED_DIDS=*` to trace everyone. |
+| `TRACES_ENDPOINT is not an https:// base URL …`             | Fix the URL. Tracing is off until then.                                                                                                 |
+| `not sent: N trace requests already waiting`                | The service is slow. Turns are skipped rather than held in memory.                                                                      |
+| `turn … truncated: N payloads dropped, M runs left out`     | The turn was over 15 MiB. It was sent, cut down.                                                                                        |
+| `does not accept contract version 1 …: … paused for 10 min` | The service and the runtime disagree on the contract. Tell IXO.                                                                         |
 
 ## More detail
 
