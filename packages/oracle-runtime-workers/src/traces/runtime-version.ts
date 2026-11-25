@@ -4,4 +4,4 @@
  * (`scripts/sync-runtime-version.mjs`, after `changeset version`);
  * `runtime-version.test.ts` fails when they differ.
  */
-export const RUNTIME_VERSION = '0.63.1';
+export const RUNTIME_VERSION = '0.64.0';
