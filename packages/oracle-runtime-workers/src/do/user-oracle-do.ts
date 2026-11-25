@@ -214,7 +214,12 @@ import {
   DEFAULT_MODEL_ID,
 } from '../core/llm';
 import { renderTurnTimeNote } from '../core/prompt-composer';
-import { TurnTracer, tracesConfigFromEnv } from '../traces';
+import {
+  TurnTracer,
+  tracesConfigFromEnv,
+  turnTracesUsersFromEnv,
+} from '../traces';
+import { isTracedUser } from '../core/traced-users';
 import type { RegisteredManifest } from '../core/registries';
 import {
   TURN_GUIDE_NOTE_KWARG,
@@ -9595,43 +9600,52 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // switch or per-DID allowlist — see `resolveLangsmithTracing`).
       // A supplied-context turn is never traced: its source and output stay
       // off third-party services whatever the tracing switches say.
+      const langsmithEnv = langsmithEnvFromWorkerEnv(this.env);
       const tracing: LangsmithTracingDecision = suppliedContextOnly
         ? { metadata: {} }
         : resolveLangsmithTracing({
             userDid: req.identity.userDid,
             client: req.client,
-            env: langsmithEnvFromWorkerEnv(this.env),
+            env: langsmithEnv,
             // This object's own tracing client: one shared across the
             // isolate's objects uploads with another object's I/O.
             owner: this,
           });
       // IXO Traces: on when the Worker has a traces key and an endpoint or
-      // binding (`tracesConfigFromEnv`), independent of LangSmith. It sends
-      // the turn once, after the reply (`finish` in the turn's cleanups),
-      // and never a supplied-context turn.
+      // binding (`tracesConfigFromEnv`), for the users LangSmith's rule
+      // selects unless `TRACES_TRACED_DIDS` says otherwise
+      // (`turnTracesUsersFromEnv`). It sends the turn once, after the reply
+      // (`finish` in the turn's cleanups), and never a supplied-context
+      // turn. A user it does not trace gets no tracer at all: no marker, no
+      // payload, no request.
       const tracesConfig = suppliedContextOnly
         ? undefined
         : tracesConfigFromEnv(this.env, console);
-      const turnTracer = tracesConfig
-        ? new TurnTracer({
-            config: tracesConfig,
-            waitUntil: (work) => this.ctx.waitUntil(work),
-            logger: console,
-            owner: this,
-            threadId: req.sessionId,
-            userId: req.identity.userDid,
-            userText: body.message,
-            oracleDid: this.env.ORACLE_DID,
-            // The env schema's default.
-            network: this.env.NETWORK ?? 'mainnet',
-            channel: req.channel?.provider ?? req.client,
-            requestId: req.requestId,
-            signal: abortController.signal,
-            // The calls it did not see as runs (the router's Decision,
-            // attachment extraction, middleware hooks' models) count too.
-            modelCalls: () => modelCalls.snapshot(),
-          })
-        : undefined;
+      const turnTracer =
+        tracesConfig &&
+        isTracedUser(
+          turnTracesUsersFromEnv(this.env, langsmithEnv, console),
+          req.identity.userDid,
+        )
+          ? new TurnTracer({
+              config: tracesConfig,
+              waitUntil: (work) => this.ctx.waitUntil(work),
+              logger: console,
+              owner: this,
+              threadId: req.sessionId,
+              userId: req.identity.userDid,
+              userText: body.message,
+              oracleDid: this.env.ORACLE_DID,
+              // The env schema's default.
+              network: this.env.NETWORK ?? 'mainnet',
+              channel: req.channel?.provider ?? req.client,
+              requestId: req.requestId,
+              signal: abortController.signal,
+              // The calls it did not see as runs (the router's Decision,
+              // attachment extraction, middleware hooks' models) count too.
+              modelCalls: () => modelCalls.snapshot(),
+            })
+          : undefined;
       if (turnTracer) turnDisposables.add(() => turnTracer.finish());
       // Capability router: from what is left to load this turn (the build
       // works that out from the turn's tools), the plugins this message needs.

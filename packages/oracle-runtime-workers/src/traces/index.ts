@@ -1,5 +1,6 @@
 export {
   tracesConfigFromEnv,
+  turnTracesUsersFromEnv,
   type TracesConfig,
   type TracesFetcher,
 } from './config';

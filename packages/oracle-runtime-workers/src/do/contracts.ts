@@ -398,13 +398,21 @@ export interface OracleWorkerEnv {
   /**
    * The traces project's write key (`ixt_w_…`). With `TRACES` or
    * `TRACES_ENDPOINT` it turns on the turn tracer (`src/traces/`): one
-   * finished turn per request, after the reply. Independent of LangSmith.
+   * finished turn per request, after the reply, for the same users as
+   * LangSmith unless `TRACES_TRACED_DIDS` is set.
    */
   TRACES_API_KEY?: string;
   /** IXO Traces base URL (`https://…`; `http://` only for a local host). */
   TRACES_ENDPOINT?: string;
   /** Service binding to the IXO Traces Worker; preferred over `TRACES_ENDPOINT`. */
   TRACES?: Fetcher;
+  /**
+   * Which users the turn tracer traces. Unset: the users LangSmith traces
+   * (`LANGSMITH_TRACING=true` = everyone, else `LANGSMITH_TRACED_DIDS`;
+   * neither set = everyone). `*` = everyone. Otherwise a comma-separated DID
+   * list, matched exactly like `LANGSMITH_TRACED_DIDS`.
+   */
+  TRACES_TRACED_DIDS?: string;
 
   // --- byo-llm -------------------------------------------------------------
   /** `'true'` enables bring-your-own-credential LLMs (`/byo-llm/*` surface). */

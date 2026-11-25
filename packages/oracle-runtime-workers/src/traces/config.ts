@@ -7,8 +7,17 @@
  *   both, the binding is used: same request, no public hop.
  *
  * The tracer is on exactly when a key and a destination are configured, and
- * off otherwise. It is independent of the LangSmith variables.
+ * off otherwise. Which users it traces is `turnTracesUsersFromEnv`: by
+ * default the users LangSmith traces (`LANGSMITH_TRACING` /
+ * `LANGSMITH_TRACED_DIDS`), or `TRACES_TRACED_DIDS` when set
+ * (`core/traced-users.ts`).
  */
+import {
+  describeTurnTracesUsers,
+  turnTracesUsers,
+  type LangsmithUserSelectionEnv,
+  type TracedUsers,
+} from '../core/traced-users';
 import type { Logger } from '../plugin-api/types';
 
 /** The part of a service binding the tracer uses. */
@@ -78,4 +87,32 @@ export function tracesConfigFromEnv(
     return undefined;
   const baseUrl = endpointBase(endpoint.trim(), logger);
   return baseUrl ? { apiKey: apiKey.trim(), baseUrl } : undefined;
+}
+
+/** Selections already logged in this isolate: one line each, at the first turn. */
+const loggedSelections = new Set<string>();
+
+/**
+ * The users whose turns go to IXO Traces: `TRACES_TRACED_DIDS` when set
+ * (`*` = everyone, else its DIDs), else the users LangSmith traces, else
+ * (no LangSmith selection either) everyone. `langsmith` is the turn's
+ * LangSmith env (`langsmithEnvFromWorkerEnv`), so both read the same values.
+ *
+ * Logs which mode is active once per isolate: the mode and the list size,
+ * never a DID.
+ */
+export function turnTracesUsersFromEnv(
+  env: Record<string, unknown>,
+  langsmith: LangsmithUserSelectionEnv,
+  logger: Logger,
+): TracedUsers {
+  const raw = env.TRACES_TRACED_DIDS;
+  const override = typeof raw === 'string' && raw.length > 0 ? raw : undefined;
+  const selection = turnTracesUsers(langsmith, override);
+  const key = [langsmith.tracing, langsmith.tracedDids, override].join('\n');
+  if (!loggedSelections.has(key)) {
+    loggedSelections.add(key);
+    logger.log(`[traces] turn traces: ${describeTurnTracesUsers(selection)}`);
+  }
+  return selection.users;
 }
