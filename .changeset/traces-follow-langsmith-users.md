@@ -1,5 +1,0 @@
----
-'@ixo/oracle-runtime-workers': minor
----
-
-IXO Traces now traces the same users as LangSmith instead of every user: one shared rule (`src/core/traced-users.ts`, exported as `langsmithTracedUsers`, `turnTracesUsers`, `isTracedUser`) decides for both. LangSmith is unchanged: `LANGSMITH_TRACING=true` traces everyone, else the `LANGSMITH_TRACED_DIDS` list (entries trimmed, `*` = everyone, a DID matches only exactly), else no one. IXO Traces follows that selection, traces everyone when neither LangSmith variable is set, and takes its own users from the new `TRACES_TRACED_DIDS` when set (`*` = everyone, or a DID list with the same parsing and matching), so an oracle can trace everyone on IXO Traces while LangSmith keeps a short list. A user who is not traced gets no turn tracer at all: no start marker, no payload, no request, no per-turn log line. The first traced-config turn of an isolate logs the mode once (`[traces] turn traces: …`, the list size, never a DID). An oracle whose LangSmith list is set and that must keep tracing everyone on IXO Traces sets `TRACES_TRACED_DIDS=*`.
