@@ -53,9 +53,24 @@ OPEN_ROUTER_API_KEY=
 # TURN_MAX_IDENTICAL_WRITES=1
 # TURN_MAX_IDENTICAL_READS=5
 
-# --- tracing: IXO Traces ----------------------------------------------------
-# One finished turn per request to IXO Traces, sent after the reply. On exactly
-# when the write key and a destination are set; independent of LANGSMITH_*.
-# Prefer a `TRACES` service binding in wrangler.jsonc over the public endpoint.
+# --- tracing (optional, off by default) --------------------------------------
+# Trace turns to LangSmith, to IXO Traces, or to both at once (each turn is
+# then sent to both). Setup, cost and checks:
+# packages/oracle-runtime-workers/docs/tracing.md
+#
+# LangSmith: the key turns it on; TRACING=true traces every turn, or list the
+# DIDs to trace in LANGSMITH_TRACED_DIDS (`*` = everyone). EU accounts set
+# LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com.
+# LANGSMITH_API_KEY=lsv2_...
+# LANGSMITH_TRACING=true
+# LANGSMITH_PROJECT=my-oracle-devnet
+# LANGSMITH_TRACED_DIDS=did:ixo:ixo1...,did:ixo:ixo1...
+# LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com
+#
+# IXO Traces (runtime 0.63.0 or later recommended): one finished turn per
+# request, sent after the reply. On exactly when the write key and a
+# destination are set. On IXO's Cloudflare account prefer the `TRACES`
+# service binding (see wrangler.jsonc) over the endpoint; with both, the
+# binding is used. For your own instance, use its URL or Worker name.
 # TRACES_API_KEY=ixt_w_...
-# TRACES_ENDPOINT=https://<traces host>
+# TRACES_ENDPOINT=https://traces.ixo.earth

@@ -474,6 +474,103 @@ describe('IXO Traces from a user object turn', () => {
   });
 });
 
+const LANGSMITH = 'https://langsmith.test';
+
+describe('IXO Traces and LangSmith on the same turn', () => {
+  it('sends the turn to both, with the same runs, each model call counted once and the reply untouched', async () => {
+    const services = stubServices();
+    const ixoFetch = vi.mocked(globalThis.fetch);
+    /** Every upload LangSmith's client made, as text (gzip undone). */
+    const langsmithUploads: string[] = [];
+    /** The platform model's streamed calls, as OpenRouter saw them. */
+    let modelRequests = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const request = new Request(input, init);
+        if (request.url.startsWith(LANGSMITH)) {
+          if (request.url.endsWith('/info'))
+            return Response.json({
+              version: '0.11.0',
+              batch_ingest_config: { use_multipart_endpoint: true },
+              instance_flags: { gzip_body_enabled: true },
+            });
+          const raw = request.body;
+          const body =
+            raw && request.headers.get('content-encoding') === 'gzip'
+              ? raw.pipeThrough(new DecompressionStream('gzip'))
+              : raw;
+          langsmithUploads.push(await new Response(body).text());
+          return new Response('{}', { status: 200 });
+        }
+        if (request.url === COMPLETIONS) modelRequests += 1;
+        return ixoFetch(input, init);
+      }),
+    );
+    await withObject(
+      'traces-and-langsmith',
+      {
+        ...TRACES_ENV,
+        LANGSMITH_TRACING: 'true',
+        LANGSMITH_API_KEY: 'lsv2_test_key',
+        LANGSMITH_PROJECT: 'traces-and-langsmith',
+        LANGSMITH_ENDPOINT: LANGSMITH,
+      },
+      async (o) => {
+        const outcome = await o.turn('$session-both', 'req-both');
+        expect(outcome).toMatchObject({ status: 'finished', text: 'Hello.' });
+        await o.drain();
+
+        // IXO Traces: one turn, well-formed, its usage the meter's reports.
+        expect(services.turns()).toHaveLength(1);
+        const turn = TurnSchema.parse(services.turns()[0]!.body);
+        const turnCalls = o.reports.filter((r) => r.purpose === 'reply');
+        expect(turn.usage).toEqual({
+          input_tokens: turnCalls.reduce(
+            (s, r) => s + (r.promptTokens ?? 0),
+            0,
+          ),
+          cached_tokens: turnCalls.reduce(
+            (s, r) => s + (r.cachedTokens ?? 0),
+            0,
+          ),
+          output_tokens: turnCalls.reduce(
+            (s, r) => s + (r.outputTokens ?? 0),
+            0,
+          ),
+          cost_usd: turnCalls.reduce((s, r) => s + (r.costUsd ?? 0), 0),
+        });
+        // Two tracers cause no extra model call and no extra meter report:
+        // every call OpenRouter saw is reported once, and the trace holds
+        // one model run per reported reply call.
+        expect(o.reports).toHaveLength(modelRequests);
+        expect(turn.runs.filter((r) => r.run_type === 'llm')).toHaveLength(
+          turnCalls.length,
+        );
+
+        // LangSmith: its client uploads in the background; the same root
+        // run (IXO Traces' trace id) and the same model run reach it.
+        for (
+          let i = 0;
+          i < 300 && !langsmithUploads.join('\n').includes(turn.trace_id);
+          i += 1
+        )
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        const sent = langsmithUploads.join('\n');
+        expect(sent).toContain(turn.trace_id);
+        const llmRun = turn.runs.find((r) => r.run_type === 'llm')!;
+        expect(sent).toContain(llmRun.id);
+        // Neither destination gets the other's key.
+        expect(sent).not.toContain('ixt_w_testtest_secret');
+        expect(JSON.stringify(turn)).not.toContain('lsv2_test_key');
+        expect(
+          services.received.every((r) => r.apiKey === 'ixt_w_testtest_secret'),
+        ).toBe(true);
+      },
+    );
+  });
+});
+
 const SUB_PROMPT = 'You research for the trace test.';
 
 function completionChunks(

@@ -195,7 +195,7 @@ packages/sqlite-saver, packages/events (@ixo/oracles-events)
                             → Node-runtime persistence and streaming
 ```
 
-Workers runtime docs live in [`packages/oracle-runtime-workers/docs/`](./packages/oracle-runtime-workers/docs/) (architecture, configuration, operations, testing, Node parity, and the feature pages for channels, chat delivery, the frontend bridge, IXO transaction signing and POD Creator). Of the root [`docs/`](./docs/) tree, [`docs/architecture/decisions.md`](./docs/architecture/decisions.md) (the shared Decision module) and [`docs/architecture/request-admission.md`](./docs/architecture/request-admission.md) are kept current for the Workers runtime; the rest, and [`specs/ORA-219-plugin-based-runtime.md`](./specs/ORA-219-plugin-based-runtime.md), describe the deprecated Node runtime.
+Workers runtime docs live in [`packages/oracle-runtime-workers/docs/`](./packages/oracle-runtime-workers/docs/) (architecture, configuration, operations, tracing, testing, Node parity, and the feature pages for channels, chat delivery, the frontend bridge, IXO transaction signing and POD Creator). Of the root [`docs/`](./docs/) tree, [`docs/architecture/decisions.md`](./docs/architecture/decisions.md) (the shared Decision module) and [`docs/architecture/request-admission.md`](./docs/architecture/request-admission.md) are kept current for the Workers runtime; the rest, and [`specs/ORA-219-plugin-based-runtime.md`](./specs/ORA-219-plugin-based-runtime.md), describe the deprecated Node runtime.
 
 ---
 
@@ -243,7 +243,7 @@ cp .dev.vars.example .dev.vars   # fill in identity, Matrix and LLM secrets
 pnpm exec wrangler deploy
 ```
 
-See [`packages/oracle-runtime-workers/docs/configuration.md`](./packages/oracle-runtime-workers/docs/configuration.md) and [`operations.md`](./packages/oracle-runtime-workers/docs/operations.md). The `Dockerfile` and `fly.toml` at the repository root belong to the deprecated Node runtime.
+See [`packages/oracle-runtime-workers/docs/configuration.md`](./packages/oracle-runtime-workers/docs/configuration.md) and [`operations.md`](./packages/oracle-runtime-workers/docs/operations.md). To trace turns to LangSmith, to IXO Traces (hosted by IXO or your own instance) or to both, see [`tracing.md`](./packages/oracle-runtime-workers/docs/tracing.md). The `Dockerfile` and `fly.toml` at the repository root belong to the deprecated Node runtime.
 
 ---
 

@@ -63,6 +63,13 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["UserOracleDO", "MatrixGatewayDO"] },
   ],
+  // Tracing (optional; docs/tracing.md in the runtime package). IXO Traces
+  // on IXO's Cloudflare account: bind the traces Worker and set the write
+  // key with `wrangler secret put TRACES_API_KEY`. Off another account, or
+  // for your own instance, set TRACES_ENDPOINT in `vars` instead. LangSmith
+  // (LANGSMITH_API_KEY secret + LANGSMITH_TRACING / LANGSMITH_PROJECT vars)
+  // can run at the same time.
+  // "services": [{ "binding": "TRACES", "service": "ixo-langsmith-traces" }],
   // Non-secret config. Secrets (OPEN_ROUTER_API_KEY, MATRIX_ORACLE_ADMIN_PASSWORD,
   // MATRIX_RECOVERY_PHRASE, ...) go in `.dev.vars` locally / `wrangler secret put` in prod.
   "vars": {

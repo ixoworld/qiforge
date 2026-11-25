@@ -483,6 +483,8 @@ the deprecated Node runtime:
   `LLM_BYO_STREAM_IDLE_TIMEOUT_MS`, `LLM_STREAM_RETRIES`) and the `[llm]`
   call trace; Node relied on the SDK's headers-only timeout and the turn
   deadline — [configuration](configuration.md#model-call-liveness).
+- **IXO Traces** (the turn tracer, `TRACES_API_KEY` with a `TRACES` binding
+  or `TRACES_ENDPOINT`); Node has LangSmith only — [tracing](tracing.md).
 
 The portable-work and AgentWake adapters exist on both runtimes, over each
 runtime's own task shape (`portableWorkFromTaskRecord` /
