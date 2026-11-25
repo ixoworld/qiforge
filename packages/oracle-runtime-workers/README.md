@@ -102,6 +102,16 @@ Every variable, binding and migration is explained in
 The status fields, the runbook and the behaviour of both objects over their
 lifetime are in [operations](docs/operations.md).
 
+### Tracing
+
+Each turn can be traced to LangSmith, to IXO Traces (IXO's own trace store,
+hosted by IXO or run on your own Cloudflare account), or to both at once.
+Nothing is traced until you set it up, and no code change is needed:
+`LANGSMITH_API_KEY` with `LANGSMITH_TRACING=true` for LangSmith;
+`TRACES_API_KEY` with a `TRACES` service binding or `TRACES_ENDPOINT` for
+IXO Traces (0.63.0 or later recommended). Setup, cost, privacy, how to check
+it works and a troubleshooting table: [tracing](docs/tracing.md).
+
 ## Rich WhatsApp messages (for oracle authors)
 
 On WhatsApp through IXO Channels, every oracle can send reply buttons, list
@@ -167,6 +177,7 @@ and the wire contract in [channels](docs/channels.md#rich-messages).
 | [node-parity](docs/node-parity.md)                       | What is identical to the Node runtime, what differs, what is Workers-only, what is not ported                              |
 | [configuration](docs/configuration.md)                   | Wrangler config, migrations, every env var and binding, `createOracleWorker` options, setup                                |
 | [operations](docs/operations.md)                         | Routes, status fields, gateway and user-object lifecycle, the ChatGPT proxy, the runbook                                   |
+| [tracing](docs/tracing.md)                               | LangSmith, IXO Traces (hosted by IXO or your own) or both: setup, cost, what is sent, privacy, checks, troubleshooting     |
 | [chat-delivery](docs/chat-delivery.md)                   | Chat replies on WhatsApp and Matrix: profiles, Reply Plans, artefacts, rich messages (buttons, lists, link buttons, cards) |
 | [channels](docs/channels.md)                             | The IXO Channels ingress: authorization, retries, Reply Plans, Matrix continuity                                           |
 | [frontend-bridge](docs/frontend-bridge.md)               | Browser tools and AG-UI actions over the socket: one invocation, one socket, unknown outcomes                              |
