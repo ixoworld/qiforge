@@ -1,5 +1,11 @@
 # @ixo/oracle-runtime-workers
 
+## 0.63.1
+
+### Patch Changes
+
+- [#577](https://github.com/ixoworld/qiforge/pull/577) [`3b69224`](https://github.com/ixoworld/qiforge/commit/3b692247f7c6523f433d82032d3ed9dbb151b42c) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Docs: a tracing guide (`docs/tracing.md`) for LangSmith, IXO Traces hosted by IXO, your own IXO Traces instance, or both at once (setup, cost, what one turn sends, size and retry rules, privacy, checks, troubleshooting by status code), linked from the package README. The traces service binding is `ixo-langsmith-traces`. A user-object test proves IXO Traces and LangSmith on the same turn: same runs, usage counted once, no extra model call. No runtime code change.
+
 ## 0.63.0
 
 ### Minor Changes
