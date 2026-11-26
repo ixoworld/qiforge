@@ -32,4 +32,5 @@ export {
   type SandboxMcpClientLike,
   type SandboxMcpTool,
   type SandboxPluginOptions,
+  type SandboxUserSecretAuthorizer,
 } from './sandbox.plugin';

@@ -35,6 +35,7 @@ describe('SandboxPlugin (Workers port)', () => {
   let capturedConfigs: unknown[];
   let runInvocations: unknown[];
   let writeInvocations: unknown[];
+  let secretReads: string[][];
   let upstream: SandboxMcpTool[];
   let factory: SandboxMcpClientFactory;
 
@@ -42,6 +43,7 @@ describe('SandboxPlugin (Workers port)', () => {
     capturedConfigs = [];
     runInvocations = [];
     writeInvocations = [];
+    secretReads = [];
     upstream = [
       {
         name: 'sandbox_run',
@@ -103,11 +105,18 @@ describe('SandboxPlugin (Workers port)', () => {
             SKILLS_CAPSULES_BASE_URL: SKILLS_URL,
           },
           secrets: {
-            getIndex: async () => ({ MY_KEY: { key: 'MY_KEY' } }),
+            getIndex: async () => ({
+              MY_KEY: { key: 'MY_KEY' },
+              OTHER_KEY: { key: 'OTHER_KEY' },
+            }),
             getValues: async (_roomId, keys) => {
-              const values: Record<string, string> = {};
-              if (keys.includes('MY_KEY')) values.MY_KEY = 'user-secret';
-              return values;
+              secretReads.push(keys);
+              // Return an over-broad adapter result to prove the plugin still
+              // enforces the authorizer's exact name set at its own boundary.
+              return {
+                MY_KEY: 'user-secret',
+                OTHER_KEY: 'unrelated-secret',
+              };
             },
           },
         },
@@ -151,7 +160,7 @@ describe('SandboxPlugin (Workers port)', () => {
     );
   });
 
-  it('mints the full header set: Bearer + X-Auth-Type + X-Skills-Invocation + x-os-* + x-us-*', async () => {
+  it('discovers tools without reading or forwarding room secrets', async () => {
     const plugin = new SandboxPlugin({ mcpClientFactory: factory });
     await plugin.getRequestTools(makeCtx());
 
@@ -162,8 +171,8 @@ describe('SandboxPlugin (Workers port)', () => {
       'X-Skills-Invocation': 'skills-token',
       'x-os-api_key': 'os-value',
       'x-os-other_key': 'second',
-      'x-us-my_key': 'user-secret',
     });
+    expect(secretReads).toEqual([]);
   });
 
   it('proxies a happy-path sandbox_run call through the lazy connection', async () => {
@@ -178,8 +187,49 @@ describe('SandboxPlugin (Workers port)', () => {
     expect(result).toBe(
       JSON.stringify({ success: true, exitCode: 0, output: 'hi' }),
     );
+    expect(secretReads).toEqual([]);
+    expect(headersOf(capturedConfigs[1])).not.toHaveProperty('x-us-my_key');
     // Listing client (closed) + the lazy invocation's own client.
     expect(capturedConfigs.length).toBe(2);
+  });
+
+  it('scopes host-approved room secrets to one invocation', async () => {
+    const authorizerRequests: Array<{
+      toolName: string;
+      input: unknown;
+    }> = [];
+    const plugin = new SandboxPlugin({
+      mcpClientFactory: factory,
+      authorizeUserSecrets: ({ toolName, input }) => {
+        authorizerRequests.push({ toolName, input });
+        return toolName === 'sandbox_run' ? ['MY_KEY'] : [];
+      },
+    });
+    const ctx = makeCtx();
+    const tools = await plugin.getRequestTools(ctx);
+    const run = tools.find((t) => t.name === 'sandbox_run');
+    const write = tools.find((t) => t.name === 'sandbox_write_file');
+
+    await run?.handler({ code: 'printenv OTHER_KEY' }, ctx);
+    await write?.handler({ path: '/workspace/data/a', content: 'a' }, ctx);
+
+    expect(authorizerRequests).toEqual([
+      {
+        toolName: 'sandbox_run',
+        input: { code: 'printenv OTHER_KEY' },
+      },
+      {
+        toolName: 'sandbox_write_file',
+        input: { path: '/workspace/data/a', content: 'a' },
+      },
+    ]);
+    expect(secretReads).toEqual([['MY_KEY']]);
+    expect(headersOf(capturedConfigs[0])).not.toHaveProperty('x-us-my_key');
+    expect(headersOf(capturedConfigs[1])).toMatchObject({
+      'x-us-my_key': 'user-secret',
+    });
+    expect(headersOf(capturedConfigs[1])).not.toHaveProperty('x-us-other_key');
+    expect(headersOf(capturedConfigs[2])).not.toHaveProperty('x-us-my_key');
   });
 
   it('sandbox_write_blob resolves the blob server-side and forwards to sandbox_write_file', async () => {
