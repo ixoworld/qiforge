@@ -70,7 +70,7 @@ const MOCK_MCP_PORT = Number(process.env.MOCK_MCP_PORT ?? 34675);
 /** Each model turn gets this long. */
 const TURN_TIMEOUT_MS = 120_000;
 /** The runtime's default main model (`DEFAULT_MODEL_ID`), unless the env pins another. */
-const RUNTIME_DEFAULT_MODEL = 'openai/gpt-5.6-luna';
+const RUNTIME_DEFAULT_MODEL = 'openai/gpt-6-luna';
 const ENTITY_DID_PATTERN = /^did:ixo:entity:[0-9a-f]{32}$/;
 
 /** `ORACLE_ENTITY_DID` from the env if it is entity-shaped, else a placeholder derived from the account address. */

@@ -86,7 +86,7 @@ export interface ModelPrice {
  * The default model for a fresh chat. An oracle operator can override this
  * per deployment via the `DEFAULT_MODEL` env var (see `getDefaultModelId`).
  */
-export const DEFAULT_MODEL_ID = 'openai/gpt-5.6-luna';
+export const DEFAULT_MODEL_ID = 'openai/gpt-6-luna';
 
 /** Per-tier presentation, defined once so the wording stays consistent. */
 export const TIER_DISPLAY: Record<
@@ -149,13 +149,23 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
   // ── $$ Balanced — smarter, still affordable ─────────────────────────────
   {
     id: DEFAULT_MODEL_ID,
-    label: 'GPT-5.6 Luna',
+    label: 'GPT-6 Luna',
     family: 'openai',
     tier: 'balanced',
     blurb: 'A smart all-rounder that balances speed and reasoning.',
     vision: true,
     contextTokens: 1_050_000,
-    baselinePrice: { inputPerMillion: 1.0, outputPerMillion: 6.0 },
+    baselinePrice: { inputPerMillion: 0.1, outputPerMillion: 0.5 },
+  },
+  {
+    id: 'openai/gpt-5.6-luna',
+    label: 'GPT-5.6 Luna',
+    family: 'openai',
+    tier: 'balanced',
+    blurb: 'The previous Luna, for chats that should stay on it.',
+    vision: true,
+    contextTokens: 1_050_000,
+    baselinePrice: { inputPerMillion: 0.2, outputPerMillion: 1.2 },
   },
   {
     id: 'google/gemini-3.5-flash',
@@ -293,6 +303,12 @@ export const MODEL_INPUT_CAPS: Readonly<
   'moonshotai/kimi-k2.5': {
     image: true,
     file: false,
+    audio: false,
+    video: false,
+  },
+  'openai/gpt-6-luna': {
+    image: true,
+    file: true,
     audio: false,
     video: false,
   },
@@ -484,8 +500,8 @@ export type ProviderModelRole =
 export const OPENROUTER_MODEL_MAP: Record<ProviderModelRole, string> = {
   main: DEFAULT_MODEL_ID,
   summarizer: DEFAULT_MODEL_ID,
-  skills: 'openai/gpt-5.6-luna',
-  subagent: 'openai/gpt-5.6-luna',
+  skills: 'openai/gpt-6-luna',
+  subagent: 'openai/gpt-6-luna',
   vision: 'google/gemini-3.1-flash-lite',
   guard: 'meta-llama/llama-3.1-8b-instruct',
   routing: 'openai/gpt-oss-120b',
@@ -507,8 +523,8 @@ export const OPENROUTER_MAIN_FALLBACKS: readonly string[] = [
   'google/gemini-2.5-flash-lite',
 ];
 
-/** The provider order every GPT-5.6 call is pinned to (see {@link openRouterProviderRouting}). */
-export const OPENROUTER_GPT_5_6_PROVIDER_ORDER: readonly string[] = [
+/** The provider order every pinned OpenAI GPT call is sent with (see {@link openRouterProviderRouting}). */
+export const OPENROUTER_OPENAI_GPT_PROVIDER_ORDER: readonly string[] = [
   'openai',
   'azure',
 ];
@@ -530,11 +546,14 @@ export function parseListSetting(raw: unknown): string[] | undefined {
 export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 
 /**
- * OpenAI's GPT-5.6 models on OpenRouter. Every call to one of them, on any
- * role, is pinned to the providers that keep the prompt cache (see
+ * OpenAI's GPT-6 and GPT-5.6 models on OpenRouter. Every call to one of them,
+ * on any role, is pinned to the providers that keep the prompt cache (see
  * {@link openRouterProviderRouting}).
  */
-export const OPENROUTER_GPT_5_6_IDS: readonly string[] = [
+export const OPENROUTER_OPENAI_GPT_PINNED_IDS: readonly string[] = [
+  'openai/gpt-6-luna',
+  'openai/gpt-6-sol',
+  'openai/gpt-6-astra',
   'openai/gpt-5.6-luna',
   'openai/gpt-5.6-terra',
   'openai/gpt-5.6-sol',
@@ -561,10 +580,11 @@ export interface ProviderOrderSetting {
  * in order, with `allow_fallbacks` (`none` sends no pin). Every other call
  * follows the rules below.
  *
- * A GPT-5.6 model goes to OpenAI first, then Azure: both keep a repeated
- * prompt prefix cached between calls seconds apart, while the faster Amazon
- * Bedrock endpoint that latency sorting picks for `openai/gpt-5.6-luna` keeps
- * it only some of the time, and a miss costs about 11 times a hit.
+ * A GPT-6 or GPT-5.6 model ({@link OPENROUTER_OPENAI_GPT_PINNED_IDS}) goes
+ * to OpenAI first, then Azure: both keep a repeated prompt prefix cached
+ * between calls seconds apart, while the faster Amazon Bedrock endpoint that
+ * latency sorting picked for `openai/gpt-5.6-luna` kept it only some of the
+ * time, and a miss costs about 11 times a hit.
  * `allow_fallbacks` keeps a turn answering when both are down: OpenRouter then
  * uses the model's other providers (Bedrock, without the cache), and after
  * them the `models` fallback list. A fallback model OpenAI and Azure do not
@@ -585,10 +605,10 @@ export function openRouterProviderRouting(
       return { provider: { order: [...setting.order], allow_fallbacks: true } };
     return role === 'main' ? { provider: { sort: 'latency' } } : {};
   }
-  if (OPENROUTER_GPT_5_6_IDS.includes(modelId))
+  if (OPENROUTER_OPENAI_GPT_PINNED_IDS.includes(modelId))
     return {
       provider: {
-        order: [...OPENROUTER_GPT_5_6_PROVIDER_ORDER],
+        order: [...OPENROUTER_OPENAI_GPT_PROVIDER_ORDER],
         allow_fallbacks: true,
       },
     };
@@ -921,8 +941,8 @@ function asRecord(value: unknown): Record<string, unknown> {
  * provider by `LLM_PROVIDER` (`openrouter` default | `nebius`).
  * `ChatOpenAICompletions` speaks to both OpenAI-compatible endpoints over
  * `fetch`, so it runs unchanged on Workers. It always calls Chat Completions:
- * `ChatOpenAI` sends any model id containing `gpt-5.6` (the default
- * `openai/gpt-5.6-luna` among them) to the Responses API, a different request
+ * `ChatOpenAI` sends any model id containing `gpt-5.6` (the
+ * `openai/gpt-5.6-luna` catalog model among them) to the Responses API, a different request
  * body and stream shape that `useResponsesApi: false` cannot turn off. Every
  * model is created with `maxRetries: 2` and the
  * stream liveness guard (`src/llm/stream-liveness.ts`) as its `fetch`, with
@@ -932,8 +952,8 @@ function asRecord(value: unknown): Record<string, unknown> {
  * OpenRouter role handling mirrors the Node provider:
  *   - `main` → `DEFAULT_MODEL` (or the catalog default), with the OpenRouter
  *     `models` fallback array; reasoning effort from `MAIN_REASONING_EFFORT`.
- *   - provider routing from {@link openRouterProviderRouting}: a GPT-5.6
- *     model, on any role, is pinned to OpenAI, then Azure; any other model
+ *   - provider routing from {@link openRouterProviderRouting}: a GPT-6 or
+ *     GPT-5.6 model, on any role, is pinned to OpenAI, then Azure; any other model
  *     gets `sort: 'latency'` on `main` and no `provider` field elsewhere.
  *   - `summarizer` → the same model as `main` (no fallback array), with the
  *     helper calls' `medium` reasoning effort.

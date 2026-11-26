@@ -828,10 +828,12 @@ full history for the rest of this turn`); it never replaces the
   caching, and gets no `cache_control`. `CONTEXT_CACHE_COLD_MS` (35
   minutes) was measured on OpenAI: an Anthropic thread idle for 5 to 35
   minutes has lost its cache but still counts as warm.
-- **Provider routing.** Every call to a GPT-5.6 model on OpenRouter
-  (`openai/gpt-5.6-luna`, `-terra`, `-sol`; `OPENROUTER_GPT_5_6_IDS`), on
-  any role (`main`, and the summarizer, skills and sub-agent roles that run
-  luna by default, or any role given a GPT-5.6 id), carries
+- **Provider routing.** Every call to a GPT-6 or GPT-5.6 model on
+  OpenRouter (`openai/gpt-6-luna`, `-sol`, `-astra`,
+  `openai/gpt-5.6-luna`, `-terra`, `-sol`;
+  `OPENROUTER_OPENAI_GPT_PINNED_IDS`), on any role (`main`, and the
+  summarizer, skills and sub-agent roles that run `openai/gpt-6-luna` by
+  default, or any role given one of these ids), carries
   `provider: {"order": ["openai", "azure"], "allow_fallbacks": true}`
   (`openRouterProviderRouting`, `src/core/llm.ts`). Any other model's `main`
   call carries `provider: {"sort": "latency"}`; its calls on the other roles
@@ -842,7 +844,9 @@ full history for the rest of this turn`); it never replaces the
   Bedrock, where a repeat of an 8.3k-token prefix seconds later hit the
   cache on 0 of 5, 2 of 10, 6 of 12 and 5 of 5 calls in four runs, against
   every call on OpenAI and on Azure (Nov 9 2026); a miss costs about 11
-  times a hit ($0.0021 against $0.00019). OpenAI
+  times a hit ($0.0021 against $0.00019). GPT-6 Luna has the same
+  providers (OpenAI, Azure, Bedrock, plus Google Vertex) and the same
+  pin. OpenAI
   adds about 0.1 s to a non-streamed call and 0.4 s to the first streamed
   token against Bedrock; Azure adds 1.3 s, so it is second. `terra` and
   `sol` already went to OpenAI under latency sorting. With
@@ -854,8 +858,8 @@ full history for the rest of this turn`); it never replaces the
   uptime). The base slugs `openai` and `azure` leave out OpenAI's `flex`
   and `fast` tier endpoints and the regional Azure endpoints, which cost 10%
   more. Calls do not set OpenRouter's `provider.require_parameters`: it
-  would refuse every GPT-5.6 call with a 404, because no GPT-5.6 endpoint
-  accepts `temperature`.
+  would refuse every GPT-6 and GPT-5.6 call with a 404, because no
+  endpoint of these models accepts `temperature`.
 - **Stale results.** On a cold turn (one that opens at least
   `CONTEXT_CACHE_COLD_MS` after the turn before it) tool results older than
   the last `CONTEXT_STALE_RESULT_TURNS` finished turns become one-line stubs,

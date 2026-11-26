@@ -266,7 +266,7 @@ export const baseEnvSchema = z.object({
    * The providers OpenRouter tries first for the default model
    * (`DEFAULT_MODEL`), comma-separated provider slugs in order (`openai,azure`),
    * with the others still allowed after them; `none` sends no pin. Unset: the
-   * built-in routing (GPT-5.6 models pinned to `openai,azure`).
+   * built-in routing (GPT-6 and GPT-5.6 models pinned to `openai,azure`).
    */
   OPENROUTER_PROVIDER_ORDER: z.string().optional(),
   /**

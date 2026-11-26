@@ -47,7 +47,7 @@ import {
   MODEL_CATALOG,
   MODEL_INPUT_CAPS,
   NEBIUS_MODEL_MAP,
-  OPENROUTER_GPT_5_6_IDS,
+  OPENROUTER_OPENAI_GPT_PINNED_IDS,
   OPENROUTER_MAIN_FALLBACKS,
   OPENROUTER_MODEL_MAP,
   openRouterPromptCacheKwargs,
@@ -70,7 +70,7 @@ describe('MODEL_CATALOG', () => {
     expect(defaults).toHaveLength(1);
     expect(defaults[0]).toMatchObject({
       id: DEFAULT_MODEL_ID,
-      label: 'GPT-5.6 Luna',
+      label: 'GPT-6 Luna',
     });
     expect(listing.default).toBe(DEFAULT_MODEL_ID);
     // The "GPT-5.4 Nano" option runs GPT-5.4 Nano.
@@ -489,7 +489,7 @@ describe('the OpenRouter request of a main-model turn', () => {
    * full prompt-cache miss: it is pinned byte for byte.
    */
   const EXPECTED_BODY = {
-    model: 'openai/gpt-5.6-luna',
+    model: 'openai/gpt-6-luna',
     temperature: 0.8,
     stream: true,
     tools: [
@@ -579,7 +579,7 @@ describe('the OpenRouter request of a main-model turn', () => {
     id: 'gen-1',
     object: 'chat.completion.chunk',
     created: 1,
-    model: 'openai/gpt-5.6-luna',
+    model: 'openai/gpt-6-luna',
   };
   /** A streamed reply: reasoning, text, one tool call in three slices, usage last. */
   const REPLY = sse([
@@ -857,7 +857,7 @@ describe('prompt caching of Anthropic models on OpenRouter', () => {
 
   it('adds top-level cache_control to an Anthropic model’s request, and changes nothing else', async () => {
     const platform = createLlmAdapter({ OPEN_ROUTER_API_KEY: 'sk-test' });
-    // The reference model is neither Anthropic nor GPT-5.6, so its `main`
+    // The reference model is neither Anthropic nor GPT-6/GPT-5.6, so its `main`
     // body has the same provider routing as an Anthropic model's.
     const geminiDefault = createLlmAdapter({
       OPEN_ROUTER_API_KEY: 'sk-test',
@@ -970,27 +970,34 @@ describe('provider routing on OpenRouter', () => {
     return JSON.stringify(Object.fromEntries(entries));
   }
 
-  it('pins exactly the GPT-5.6 ids on every role; other models sort by latency on main only', () => {
-    expect(OPENROUTER_GPT_5_6_IDS).toEqual([
+  it('pins exactly the GPT-6 and GPT-5.6 ids on every role; other models sort by latency on main only', () => {
+    expect(OPENROUTER_OPENAI_GPT_PINNED_IDS).toEqual([
+      'openai/gpt-6-luna',
+      'openai/gpt-6-sol',
+      'openai/gpt-6-astra',
       'openai/gpt-5.6-luna',
       'openai/gpt-5.6-terra',
       'openai/gpt-5.6-sol',
     ]);
-    const catalogGpt56 = MODEL_CATALOG.map((entry) => entry.id).filter((id) =>
-      id.startsWith('openai/gpt-5.6-'),
+    const catalogPinnedFamilies = MODEL_CATALOG.map((entry) => entry.id).filter(
+      (id) =>
+        id.startsWith('openai/gpt-6-') || id.startsWith('openai/gpt-5.6-'),
     );
+    expect(catalogPinnedFamilies).toContain(DEFAULT_MODEL_ID);
     expect(
-      catalogGpt56.every((id) => OPENROUTER_GPT_5_6_IDS.includes(id)),
+      catalogPinnedFamilies.every((id) =>
+        OPENROUTER_OPENAI_GPT_PINNED_IDS.includes(id),
+      ),
     ).toBe(true);
     const roles = Object.keys(OPENROUTER_MODEL_MAP);
-    for (const id of OPENROUTER_GPT_5_6_IDS)
+    for (const id of OPENROUTER_OPENAI_GPT_PINNED_IDS)
       for (const role of roles)
         expect(openRouterProviderRouting(id, role)).toEqual({ provider: PIN });
     const others = [
       ...MODEL_CATALOG.map((entry) => entry.id),
       ...Object.values(OPENROUTER_MODEL_MAP),
       ...OPENROUTER_MAIN_FALLBACKS,
-    ].filter((id) => !OPENROUTER_GPT_5_6_IDS.includes(id));
+    ].filter((id) => !OPENROUTER_OPENAI_GPT_PINNED_IDS.includes(id));
     expect(others).toContain('anthropic/claude-sonnet-5');
     expect(others).toContain('google/gemini-3.5-flash');
     expect(others).toContain('meta-llama/llama-3.1-8b-instruct');
@@ -1003,7 +1010,7 @@ describe('provider routing on OpenRouter', () => {
     }
   });
 
-  it('sends a GPT-5.6 main call the pin, with the fallback list, and nothing else changed', async () => {
+  it('sends a GPT-6 or GPT-5.6 main call the pin, with the fallback list, and nothing else changed', async () => {
     const platform = createLlmAdapter({ OPEN_ROUTER_API_KEY: 'sk-test' });
     const reference = (
       await sentRequest(
@@ -1017,8 +1024,8 @@ describe('provider routing on OpenRouter', () => {
     const cases: { model: BaseChatModel; modelId: string }[] = [
       // The catalog default as the deployment default.
       { model: platform.get('main'), modelId: DEFAULT_MODEL_ID },
-      // Each GPT-5.6 id as a deployment default and as a per-request choice.
-      ...OPENROUTER_GPT_5_6_IDS.flatMap((modelId) => [
+      // Each pinned id as a deployment default and as a per-request choice.
+      ...OPENROUTER_OPENAI_GPT_PINNED_IDS.flatMap((modelId) => [
         {
           model: createLlmAdapter({
             OPEN_ROUTER_API_KEY: 'sk-test',
@@ -1035,9 +1042,9 @@ describe('provider routing on OpenRouter', () => {
       );
   });
 
-  it('pins every helper role that runs a GPT-5.6 model, by default or by choice, and changes nothing else', async () => {
+  it('pins every helper role that runs a GPT-6 or GPT-5.6 model, by default or by choice, and changes nothing else', async () => {
     const platform = createLlmAdapter({ OPEN_ROUTER_API_KEY: 'sk-test' });
-    // A helper role on a model that is not GPT-5.6: no `provider` field.
+    // A helper role on a model that is not pinned: no `provider` field.
     const reference = (
       await sentRequest(
         platform.get('subagent', { model: 'google/gemini-3.5-flash' }),
@@ -1046,12 +1053,12 @@ describe('provider routing on OpenRouter', () => {
     expect(JSON.parse(reference)).not.toHaveProperty('provider');
     expect(JSON.parse(reference)).not.toHaveProperty('models');
     const cases: { model: BaseChatModel; modelId: string }[] = [
-      // Roles whose default model is GPT-5.6 (the summarizer runs the main model).
+      // Roles whose default model is GPT-6 Luna (the summarizer runs the main model).
       ...(['summarizer', 'skills', 'subagent'] as const).map((role) => ({
         model: platform.get(role),
         modelId: DEFAULT_MODEL_ID,
       })),
-      // A GPT-5.6 id chosen for a role whose default is another model.
+      // A pinned id chosen for a role whose default is another model.
       ...(['session-title', 'vision', 'routing'] as const).map((role) => ({
         model: platform.get(role, { model: 'openai/gpt-5.6-sol' }),
         modelId: 'openai/gpt-5.6-sol',
