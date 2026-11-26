@@ -5,15 +5,16 @@
  * document. It enforces, in this order:
  *
  *   1. a live flow is read-only            → `read_only_flow`
- *   2. an earlier write in this session failed → the same answer as step 6
- *   3. the oracle's power level is below the room's write threshold → `needs_access`
- *   4. the prop allowlist (the caller's `plan` step) → `prop_not_editable` etc.
- *   5. one `doc.transact()` for the whole batch
- *   6. the provider manager's bounded `flush()` **before** success is reported:
+ *   2. an earlier write in this session failed → the same answer as step 7
+ *   3. the requester's power level is below the room's write threshold → `needs_access`
+ *   4. the oracle's power level is below the room's write threshold → `needs_access`
+ *   5. the prop allowlist (the caller's `plan` step) → `prop_not_editable` etc.
+ *   6. one `doc.transact()` for the whole batch
+ *   7. the provider manager's bounded `flush()` **before** success is reported:
  *      a forbidden write → `needs_access`, a definite refusal (413, 401,
  *      400) → `error`, an unacknowledged one → `write_not_saved`
  *
- * Step 6 exists because matrix-crdt writes are fire-and-forget: a Y.Doc
+ * Step 7 exists because matrix-crdt writes are fire-and-forget: a Y.Doc
  * mutation always "succeeds" locally, and a homeserver rejection or a failed
  * delivery surfaces only once the batched update is actually sent. Reporting
  * success before the flush is how tools ended up claiming edits that never
@@ -81,6 +82,8 @@ export interface DocumentSession {
   doc: Y.Doc;
   writer: DocumentWriter;
   matrixClient: RoomStateReader;
+  /** Re-checks the requesting Matrix user's authority before each mutation. */
+  authorizeWrite: () => Promise<boolean>;
   roomId: string;
   /** Canonical alias, when the homeserver exposes one. */
   alias: string | undefined;
@@ -146,6 +149,7 @@ async function resolveAlias(
 export interface DocumentParams {
   matrixClient: MatrixClient;
   appConfig: AppConfig;
+  authorizeWrite: () => Promise<boolean>;
 }
 
 /** An open document plus the call that releases it. */
@@ -176,6 +180,7 @@ function documentFailure(error: unknown, roomId: string): EditorFailure {
 export const openDocumentSession: DocumentOpener = async ({
   matrixClient,
   appConfig,
+  authorizeWrite,
 }) => {
   let roomId: string;
   try {
@@ -194,6 +199,7 @@ export const openDocumentSession: DocumentOpener = async ({
         doc,
         writer: manager,
         matrixClient,
+        authorizeWrite,
         roomId,
         alias,
         isFlow: isFlowAlias(alias),
@@ -377,6 +383,13 @@ export async function applyDocumentEdit<TPlan, TResult>(
       earlier,
       session.roomId,
       'a previous write to this document was rejected',
+    );
+  }
+
+  if (!(await session.authorizeWrite())) {
+    return needsAccess(
+      session.roomId,
+      "your Matrix power level in this room is below the document write threshold",
     );
   }
 

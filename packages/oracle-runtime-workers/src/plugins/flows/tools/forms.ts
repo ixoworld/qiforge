@@ -8,7 +8,7 @@ import { tool } from '../../../plugin-api/tool-helper';
 import type { PluginTool, RuntimeContext } from '../../../plugin-api/types';
 import { toToolError } from '../errors';
 import { stepIdSchema } from '../types';
-import { withFlowDoc } from '../flow-doc';
+import { withFlowDoc, withWritableFlowDoc } from '../flow-doc';
 import { describeForm, fillForm, setFormSchema } from '../forms';
 import {
   MAX_DESCRIPTION_CHARS,
@@ -92,7 +92,7 @@ export function buildFormTools(
         try {
           const { flowRef, stepId, questions } =
             setFormSchemaSchema.parse(args);
-          return await withFlowDoc(
+          return await withWritableFlowDoc(
             ctx,
             flowRef,
             matrixClient,
@@ -135,8 +135,11 @@ export function buildFormTools(
       async (args, ctx: RuntimeContext) => {
         try {
           const { flowRef, stepId, answers, merge } = fillSchema.parse(args);
-          return await withFlowDoc(ctx, flowRef, matrixClient, async (doc) =>
-            fillForm(doc, stepId, answers, merge ?? true),
+          return await withWritableFlowDoc(
+            ctx,
+            flowRef,
+            matrixClient,
+            async (doc) => fillForm(doc, stepId, answers, merge ?? true),
           );
         } catch (err) {
           return toToolError(err);

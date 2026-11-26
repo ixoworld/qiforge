@@ -16,7 +16,7 @@ import {
   setStepTrigger,
 } from '../edit';
 import { toToolError } from '../errors';
-import { withFlowDoc } from '../flow-doc';
+import { withWritableFlowDoc } from '../flow-doc';
 import { MAX_CONDITIONS_PER_STEP, MAX_NAME_CHARS } from '../input-policy';
 import {
   conditionSchema,
@@ -82,7 +82,7 @@ export function buildSettingsTools(
       async (args, ctx: RuntimeContext) => {
         try {
           const { flowRef, stepId, inputs } = inputsSchema.parse(args);
-          await withFlowDoc(ctx, flowRef, matrixClient, async (doc) =>
+          await withWritableFlowDoc(ctx, flowRef, matrixClient, async (doc) =>
             setStepInputs(doc, stepId, inputs),
           );
           return ok;
@@ -103,7 +103,7 @@ export function buildSettingsTools(
       async (args, ctx: RuntimeContext) => {
         try {
           const { flowRef, stepId, conditions } = conditionsSchema.parse(args);
-          await withFlowDoc(ctx, flowRef, matrixClient, async (doc) =>
+          await withWritableFlowDoc(ctx, flowRef, matrixClient, async (doc) =>
             setStepConditions(doc, stepId, conditions),
           );
           return ok;
@@ -122,7 +122,7 @@ export function buildSettingsTools(
       async (args, ctx: RuntimeContext) => {
         try {
           const { flowRef, stepId, due, commitTo } = scheduleSchema.parse(args);
-          await withFlowDoc(ctx, flowRef, matrixClient, async (doc) =>
+          await withWritableFlowDoc(ctx, flowRef, matrixClient, async (doc) =>
             setStepSchedule(doc, stepId, due, commitTo),
           );
           return ok;
@@ -141,7 +141,7 @@ export function buildSettingsTools(
       async (args, ctx: RuntimeContext) => {
         try {
           const { flowRef, stepId, assignTo } = assignmentSchema.parse(args);
-          await withFlowDoc(ctx, flowRef, matrixClient, async (doc) =>
+          await withWritableFlowDoc(ctx, flowRef, matrixClient, async (doc) =>
             setStepAssignment(doc, stepId, assignTo ?? undefined),
           );
           return ok;
@@ -163,7 +163,7 @@ export function buildSettingsTools(
         try {
           const { flowRef, stepId, requireConfirmation } =
             confirmationSchema.parse(args);
-          await withFlowDoc(ctx, flowRef, matrixClient, async (doc) =>
+          await withWritableFlowDoc(ctx, flowRef, matrixClient, async (doc) =>
             setStepConfirmation(doc, stepId, requireConfirmation),
           );
           return ok;
@@ -182,7 +182,7 @@ export function buildSettingsTools(
       async (args, ctx: RuntimeContext) => {
         try {
           const { flowRef, stepId, trigger } = triggerSchema.parse(args);
-          await withFlowDoc(ctx, flowRef, matrixClient, async (doc) =>
+          await withWritableFlowDoc(ctx, flowRef, matrixClient, async (doc) =>
             setStepTrigger(doc, stepId, trigger),
           );
           return ok;
