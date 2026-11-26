@@ -102,6 +102,7 @@ export {
   type ValidateInvocationOptions,
   type ProofChainLimits,
   type ValidateResult,
+  type DelegationVerificationResult,
   type UCANValidator,
 } from './validator/validator.js';
 
