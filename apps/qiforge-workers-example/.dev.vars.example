@@ -11,6 +11,17 @@ ORACLE_ENTITY_DID=did:ixo:entity:00000000000000000000000000000000
 # when unset it is read from the Matrix account room the way the Node runtime
 # stores it — needs MATRIX_ACCOUNT_ROOM_ID + MATRIX_VALUE_PIN below)
 # ORACLE_SIGNING_MNEMONIC=
+# secp256k1 wallet of the oracle account (did:ixo:<this address> must be
+# ORACLE_DID): signs paid-work claim intents and claims. Enables `ctx.chain`
+# with the SEQUENCE_MANAGER binding in wrangler.jsonc.
+# ORACLE_SECP_MNEMONIC=
+
+# --- paid services (oracle-payments plugin) ---------------------------------
+# The service catalog; the plugin stays off without it. Same service shape as
+# the buyer's agent-services/v1 agreement.
+# AGENT_CARD_JSON={"name":"Verde MRV Studio","services":[{"id":"mrv-plan","name":"MRV plan design","priceUsd":500,"doneMeans":["Indicator set","Data-collection schedule"],"deliveryTime":"P3D"}]}
+# Escrow denom (default upay = micro-USD).
+# ORACLE_PAYMENTS_DENOM=upay
 
 # --- auth: did:ixo key resolution ------------------------------------------
 BLOCKSYNC_GRAPHQL_URL=http://localhost:34582/graphql
