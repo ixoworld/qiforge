@@ -83,7 +83,7 @@ describe('DID mapping', () => {
     ).toBeNull();
   });
 
-  it('prefers the alias, falls back to the sender, and never attributes a DID sender to another user', () => {
+  it('attributes only DID-shaped senders and never substitutes the room alias owner', () => {
     expect(
       resolveUserDid({ alias: ALIAS, sender: USER, oracleDid: ORACLE_DID }),
     ).toBe('did:ixo:ixo1user');
@@ -93,7 +93,7 @@ describe('DID mapping', () => {
         sender: '@legacy:ixo.test',
         oracleDid: ORACLE_DID,
       }),
-    ).toBe('did:ixo:ixo1user');
+    ).toBeNull();
     expect(
       resolveUserDid({ alias: null, sender: USER, oracleDid: ORACLE_DID }),
     ).toBe('did:ixo:ixo1user');
@@ -126,20 +126,17 @@ describe('DID mapping', () => {
         oracleDid: ORACLE_DID,
       }),
     ).toEqual({ userDid: 'did:ixo:ixo1user', server: 'evil.example' });
-    // A non-DID sender borrows the room owner's identity, so the alias's
-    // server is the one that has to be the owner's.
+    // Even a matching alias server is room metadata, not a sender identity.
     expect(
       attributeUser({
         alias: '#did-ixo-ixo1user_did-ixo-ixo1oracle:evil.example',
         sender: '@legacy:evil.example',
         oracleDid: ORACLE_DID,
       }),
-    ).toEqual({ userDid: 'did:ixo:ixo1user', server: 'evil.example' });
+    ).toBeNull();
   });
 
-  it("never lends the room owner's identity to a non-DID account on another server", () => {
-    // The alias names a user registered on ixo.test; the sender's account
-    // lives on a server that did not mint it.
+  it("never lends the room owner's identity to any non-DID account", () => {
     expect(
       attributeUser({
         alias: ALIAS,
@@ -147,14 +144,15 @@ describe('DID mapping', () => {
         oracleDid: ORACLE_DID,
       }),
     ).toBeNull();
-    // Server names compare case-insensitively, as Matrix server names do.
+    // Sharing the alias's server, including case-insensitively, proves no
+    // owner-approved account-to-DID binding.
     expect(
       attributeUser({
         alias: ALIAS,
         sender: '@legacy:IXO.test',
         oracleDid: ORACLE_DID,
       }),
-    ).toEqual({ userDid: 'did:ixo:ixo1user', server: 'ixo.test' });
+    ).toBeNull();
     // A sender without a server part matches nothing.
     expect(
       attributeUser({ alias: ALIAS, sender: '@legacy', oracleDid: ORACLE_DID }),
@@ -210,22 +208,7 @@ describe('IngestPipeline', () => {
     expect(turns.map((t) => t.userDid)).toEqual(['did:ixo:ixo1user']);
   });
 
-  it("drops a non-DID sender in a room whose alias sits on a server that is not the owner's", () => {
-    const forged = harness({
-      alias: '#did-ixo-ixo1user_did-ixo-ixo1oracle:evil.example',
-    });
-    expect(forged.pipeline.offer(msg({ sender: '@legacy:evil.example' }))).toBe(
-      'foreign',
-    );
-
-    const genuine = harness();
-    expect(genuine.pipeline.offer(msg({ sender: '@legacy:ixo.test' }))).toBe(
-      'queued',
-    );
-    genuine.pipeline.clear();
-  });
-
-  it("leaves a non-DID sender from another server unmapped in an owner's room: no turn, no homeserver lookup", async () => {
+  it("leaves every non-DID sender unmapped in an owner's room: no turn, no homeserver lookup", async () => {
     const asked: string[] = [];
     const { pipeline, turns } = harness({
       userServerName: (did) => {
@@ -233,6 +216,9 @@ describe('IngestPipeline', () => {
         return 'ixo.test';
       },
     });
+    expect(pipeline.offer(msg({ sender: '@legacy:ixo.test' }))).toBe(
+      'unmapped',
+    );
     expect(pipeline.offer(msg({ sender: '@mallory:evil.example' }))).toBe(
       'unmapped',
     );
@@ -241,17 +227,20 @@ describe('IngestPipeline', () => {
     expect(asked).toEqual([]);
   });
 
-  it('attributes with the alias the caller verified, not a memo read afterwards', () => {
-    // The memo answers "no alias" (expired or invalidated meanwhile).
+  it('treats the caller-verified alias as metadata, never sender identity', () => {
     const { pipeline } = harness({ alias: null });
     expect(pipeline.offer(msg({ sender: '@legacy:ixo.test' }), ALIAS)).toBe(
-      'queued',
-    );
-    // And an explicit "none" is not overridden by a memo that has one.
-    const memo = harness();
-    expect(memo.pipeline.offer(msg({ sender: '@legacy:ixo.test' }), null)).toBe(
       'unmapped',
     );
+    expect(
+      pipeline.offer(
+        msg({ sender: '@did-ixo-ixo1guest:ixo.test' }),
+        ALIAS,
+      ),
+    ).toBe('queued');
+    expect(
+      pipeline.offer(msg({ sender: '@legacy:ixo.test' }), null),
+    ).toBe('unmapped');
     pipeline.clear();
   });
 
@@ -267,12 +256,12 @@ describe('IngestPipeline', () => {
     expect(
       pipeline.offer(msg({ sender: '@did-ixo-ixo1guest:evil.example' })),
     ).toBe('foreign');
-    // Legacy on the alias's server → the room owner.
+    // A non-DID sender on the alias's server remains unmapped.
     expect(
       pipeline.offer(
         msg({ eventId: '$legacy-right', sender: '@bob:ixo.test' }),
       ),
-    ).toBe('queued');
+    ).toBe('unmapped');
     // Legacy from another server → nobody.
     expect(pipeline.offer(msg({ sender: '@bob:evil.example' }))).toBe(
       'unmapped',
@@ -285,13 +274,8 @@ describe('IngestPipeline', () => {
       ),
     ).toBe('foreign');
     await sleep(60);
-    expect(
-      turns
-        .map((t) => [t.eventIds[0], t.userDid])
-        .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
-    ).toEqual([
+    expect(turns.map((t) => [t.eventIds[0], t.userDid])).toEqual([
       ['$did-right', 'did:ixo:ixo1guest'],
-      ['$legacy-right', 'did:ixo:ixo1user'],
     ]);
   });
 
