@@ -4,7 +4,7 @@
 // MODE=abort → the user's own /messages/abort), then send a plain second turn
 // on the same session and report whether the provider accepts the history.
 //
-//   ACCOUNT=devnet-user-2 MODE=reset MODELS=openai/gpt-5.6-luna,anthropic/claude-sonnet-5 \
+//   ACCOUNT=devnet-user-2 MODE=reset MODELS=openai/gpt-6-luna,anthropic/claude-sonnet-5 \
 //     pnpm exec tsx test/load/dangling-tool-call.mts
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
@@ -26,7 +26,7 @@ const ACCOUNT = process.env.ACCOUNT ?? 'devnet-user-2';
 const MODE = (process.env.MODE ?? 'reset') as 'reset' | 'abort';
 const MODELS = (
   process.env.MODELS ??
-  'openai/gpt-5.6-luna,anthropic/claude-sonnet-5,google/gemini-3.5-flash,byo:chatgpt/gpt-5.6-luna'
+  'openai/gpt-6-luna,anthropic/claude-sonnet-5,google/gemini-3.5-flash,byo:chatgpt/gpt-5.6-luna'
 ).split(',');
 const KILL_AFTER_MS = Number(process.env.KILL_AFTER_MS ?? 2500);
 

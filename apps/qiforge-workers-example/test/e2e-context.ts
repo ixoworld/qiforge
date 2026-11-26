@@ -154,7 +154,7 @@ async function main(): Promise<void> {
     // reachable in a few turns (32k → summarize at 18,400 tokens, what the
     // summarizer reads, below 60% of the window; cap 15,360 chars).
     localDefaultModel =
-      provisioned.devVars.DEFAULT_MODEL || 'openai/gpt-5.6-luna';
+      provisioned.devVars.DEFAULT_MODEL || 'openai/gpt-6-luna';
     await provisionDevVars({
       extra: {
         DRILL_TOOLS: 'true',

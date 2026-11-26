@@ -107,7 +107,7 @@ describe('PlatformChatModel', () => {
   });
 
   it('keeps OpenRouter usage once (it used to be exactly twice the real value)', async () => {
-    stubFetch([streamed(openRouterReply('openai/gpt-5.6-luna', 'OpenAI'))]);
+    stubFetch([streamed(openRouterReply('openai/gpt-6-luna', 'OpenAI'))]);
     const { logger } = capture();
     const reply = await streamAll(
       createLlmAdapter({ OPEN_ROUTER_API_KEY: 'sk-test' }, logger).get('main'),
@@ -122,7 +122,7 @@ describe('PlatformChatModel', () => {
   });
 
   it('records the call: generation id, served model, provider, tokens, cost', async () => {
-    stubFetch([streamed(openRouterReply('openai/gpt-5.6-luna', 'OpenAI'))]);
+    stubFetch([streamed(openRouterReply('openai/gpt-6-luna', 'OpenAI'))]);
     const { lines, logger } = capture();
     const reply = await streamAll(
       createLlmAdapter({ OPEN_ROUTER_API_KEY: 'sk-test' }, logger).get('main'),
@@ -131,8 +131,8 @@ describe('PlatformChatModel', () => {
     expect(call).toEqual({
       role: 'main',
       paidBy: 'platform',
-      requestedModel: 'openai/gpt-5.6-luna',
-      servedModel: 'openai/gpt-5.6-luna',
+      requestedModel: 'openai/gpt-6-luna',
+      servedModel: 'openai/gpt-6-luna',
       provider: 'OpenAI',
       generationId: 'gen-1794582969-abc',
       fallback: false,
@@ -158,7 +158,7 @@ describe('PlatformChatModel', () => {
 
   it('marks a provider fallback (Bedrock after the OpenAI, Azure pin) and a model fallback', async () => {
     stubFetch([
-      streamed(openRouterReply('openai/gpt-5.6-luna', 'Amazon Bedrock')),
+      streamed(openRouterReply('openai/gpt-6-luna', 'Amazon Bedrock')),
       streamed(
         openRouterReply('google/gemini-3.1-flash-lite', 'Google AI Studio'),
       ),
@@ -208,7 +208,7 @@ describe('PlatformChatModel', () => {
     expect(error).toBeDefined();
     expect(modelCallOf(error)).toMatchObject({
       role: 'main',
-      requestedModel: 'openai/gpt-5.6-luna',
+      requestedModel: 'openai/gpt-6-luna',
       ok: false,
       errorKind: 'auth',
       errorStatus: 403,
@@ -252,7 +252,7 @@ describe('PlatformChatModel', () => {
     id: 'gen-cut-1',
     object: 'chat.completion.chunk',
     created: 1,
-    model: 'openai/gpt-5.6-luna',
+    model: 'openai/gpt-6-luna',
     provider: 'OpenAI',
   };
   const partial = [
@@ -351,7 +351,7 @@ describe('PlatformChatModel', () => {
             id: 'gen-2',
             object: 'chat.completion',
             created: 1,
-            model: 'openai/gpt-5.6-luna',
+            model: 'openai/gpt-6-luna',
             provider: 'Azure',
             choices: [
               {
@@ -368,7 +368,7 @@ describe('PlatformChatModel', () => {
     const model = createLlmAdapter(
       { OPEN_ROUTER_API_KEY: 'sk-test' },
       capture().logger,
-    ).get('routing', { model: 'openai/gpt-5.6-luna' });
+    ).get('routing', { model: 'openai/gpt-6-luna' });
     const reply = await model.invoke([new HumanMessage('hi')]);
     expect(modelCallOf(reply)).toMatchObject({
       role: 'routing',
@@ -384,9 +384,9 @@ describe('PlatformChatModel', () => {
 
   it('sends the new fallback list, or the deployment’s own list and provider order', async () => {
     const bodies = stubFetch([
-      streamed(openRouterReply('openai/gpt-5.6-luna', 'OpenAI')),
-      streamed(openRouterReply('openai/gpt-5.6-luna', 'OpenAI')),
-      streamed(openRouterReply('openai/gpt-5.6-luna', 'OpenAI')),
+      streamed(openRouterReply('openai/gpt-6-luna', 'OpenAI')),
+      streamed(openRouterReply('openai/gpt-6-luna', 'OpenAI')),
+      streamed(openRouterReply('openai/gpt-6-luna', 'OpenAI')),
     ]);
     const { logger } = capture();
     await streamAll(
@@ -453,8 +453,8 @@ describe('the tool schemas a platform model sends', () => {
 
   it('leaves out the pattern OpenAI refuses, keeps the others, and warns once', async () => {
     const bodies = stubFetch([
-      streamed(openRouterReply('openai/gpt-5.6-luna', 'OpenAI')),
-      streamed(openRouterReply('openai/gpt-5.6-luna', 'OpenAI')),
+      streamed(openRouterReply('openai/gpt-6-luna', 'OpenAI')),
+      streamed(openRouterReply('openai/gpt-6-luna', 'OpenAI')),
     ]);
     const { lines, logger } = capture();
     const adapter = createLlmAdapter(
