@@ -144,11 +144,13 @@ export type DaoDaoProposalMessageInput =
       title: string;
       description: string;
       /**
-       * What the group's own account does if the proposal passes, as
-       * catalog messages (`DAODAO_PROPOSAL_ACTION_ACTORS` lists the types);
-       * none for a proposal that only asks for agreement.
+       * What the group's own account does if the proposal passes, in
+       * order: catalog messages (`DAODAO_PROPOSAL_ACTION_ACTORS` lists the
+       * types), each sent as a stargate action, or decoded actions
+       * (`buildDaoDaoGroupAction`); none for a proposal that only asks for
+       * agreement.
        */
-      actions?: readonly ITrxMsg[];
+      actions?: ReadonlyArray<ITrxMsg | DaoDaoProposalAction>;
     }
   | {
       action: 'vote';
@@ -177,9 +179,10 @@ function proposalStep(input: DaoDaoProposalMessageInput): {
         title: input.title,
         description: input.description,
         msgs: (input.actions ?? []).map(
-          (action): DaoDaoProposalAction => ({
-            stargate: { type_url: action.typeUrl, value: action.value },
-          }),
+          (action): DaoDaoProposalAction =>
+            'typeUrl' in action
+              ? { stargate: { type_url: action.typeUrl, value: action.value } }
+              : action,
         ),
       };
       return {
