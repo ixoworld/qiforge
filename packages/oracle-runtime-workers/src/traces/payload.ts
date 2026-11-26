@@ -871,6 +871,70 @@ function runChars(built: BuiltRun): number {
 const MAX_FIT_ROUNDS = 6;
 
 /**
+ * Tag prefix a sub-agent's runs carry (`subagent:<name>`, set by
+ * `createSubagentAsTool` and inherited by every run inside it).
+ */
+const SUBAGENT_TAG_PREFIX = 'subagent:';
+
+/** One model call of the main agent (purpose `reply`), for the turn's model. */
+interface ReplyCall {
+  startedAt: number;
+  /** The model that answered, when the provider reported it. */
+  servedModel: string | undefined;
+  /** The model the call asked for. */
+  requestedModel: string | undefined;
+}
+
+function hasSubagentTag(tags: unknown): boolean {
+  return (
+    Array.isArray(tags) &&
+    tags.some(
+      (tag) => typeof tag === 'string' && tag.startsWith(SUBAGENT_TAG_PREFIX),
+    )
+  );
+}
+
+/** A model id, or undefined for none (`unknown` is the reporters' placeholder). */
+function knownModel(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 && value !== 'unknown'
+    ? value
+    : undefined;
+}
+
+/**
+ * The model a model run asked for, from what LangChain put on it: the
+ * invocation params' `model`, else the run metadata's `ls_model_name`.
+ */
+function requestedOf(run: Run): string | undefined {
+  const extra = isRecord(run.extra) ? run.extra : undefined;
+  const invocation = isRecord(extra?.invocation_params)
+    ? extra.invocation_params
+    : undefined;
+  const metadata = isRecord(extra?.metadata) ? extra.metadata : undefined;
+  return (
+    knownModel(invocation?.model) ??
+    knownModel(metadata?.[RUN_METADATA_KEYS.requestedModel])
+  );
+}
+
+/**
+ * The turn's model (`served_model`): it describes the main agent's reply,
+ * never a helper call (routing, attachments, plugins, summaries, safety,
+ * sub-agents). The model that served the latest main-agent call that
+ * reported one; when no main-agent call reported a served model (the reply
+ * call failed first), the model the latest one asked for; else none. The
+ * contract has no turn-level key for "requested, not served": the LLM run
+ * itself still shows it (`ls_model_name` without `served_model`).
+ */
+function turnModelOf(replyCalls: readonly ReplyCall[]): string | undefined {
+  const latestFirst = [...replyCalls].sort((a, b) => b.startedAt - a.startedAt);
+  return (
+    latestFirst.find((call) => call.servedModel)?.servedModel ??
+    latestFirst.find((call) => call.requestedModel)?.requestedModel
+  );
+}
+
+/**
  * Build and gzip the turn. Undefined only when the root run cannot be sent
  * at all (its id is not a UUID) or the limits leave no room even for the
  * root alone (never with the default limits).
@@ -889,20 +953,34 @@ export async function encodeTurn(
 
   // Every model call of the tree counts once, also one of a run left out.
   const calls: Array<{ record: ModelCallRecord; purpose: string }> = [];
+  // The main agent's own model calls: the turn's model comes from them only.
+  const replyCalls: ReplyCall[] = [];
   const treeIds = new Set<string>();
-  const pending: Run[] = [root];
+  const pending: Array<{ run: Run; inSubagent: boolean }> = [
+    { run: root, inSubagent: false },
+  ];
   while (pending.length > 0) {
-    const run = pending.pop()!;
+    const { run, inSubagent: parentInSubagent } = pending.pop()!;
     if (typeof run.id === 'string') treeIds.add(run.id.toLowerCase());
-    const record = run.run_type === 'llm' ? records.get(run.id) : undefined;
-    if (record) {
+    const inSubagent = parentInSubagent || hasSubagentTag(run.tags);
+    if (run.run_type === 'llm') {
+      const record = records.get(run.id);
       const metadata =
         isRecord(run.extra) && isRecord(run.extra.metadata)
           ? run.extra.metadata
           : undefined;
-      calls.push({ record, purpose: purposeOfRun(metadata) });
+      const purpose = purposeOfRun(metadata);
+      if (record) calls.push({ record, purpose });
+      if (purpose === 'reply' && !inSubagent)
+        replyCalls.push({
+          startedAt: validMs(run.start_time, 0),
+          servedModel: record?.servedModel,
+          requestedModel:
+            knownModel(record?.requestedModel) ?? requestedOf(run),
+        });
     }
-    for (const child of run.child_runs ?? []) pending.push(child);
+    for (const child of run.child_runs ?? [])
+      pending.push({ run: child, inSubagent });
   }
   const outside: Array<{ call: ModelCallReport; id: string }> = [];
   for (const call of turn.outsideCalls ?? []) {
@@ -917,16 +995,15 @@ export async function encodeTurn(
     treeIds.add(id);
     outside.push({ call, id });
     calls.push({ record: call, purpose: call.purpose });
+    if (call.purpose === 'reply')
+      replyCalls.push({
+        startedAt: validMs(call.startedAt, 0),
+        servedModel: call.servedModel,
+        requestedModel: knownModel(call.requestedModel),
+      });
   }
   const usage = turnUsageOf(calls.map((c) => c.record));
-  let servedReply: string | undefined;
-  let servedAny: string | undefined;
-  for (const { record, purpose } of calls) {
-    if (!record.servedModel) continue;
-    servedAny = record.servedModel;
-    if (purpose === 'reply') servedReply = record.servedModel;
-  }
-  const servedModel = servedReply ?? servedAny;
+  const servedModel = turnModelOf(replyCalls);
   const fallback = calls.some((c) => c.record.fallback);
 
   // Runs in pre-order, then the calls made outside the graph; the run

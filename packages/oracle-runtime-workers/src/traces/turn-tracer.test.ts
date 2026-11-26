@@ -14,7 +14,11 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { ModelCallReporter } from '../core/model-call-reporter';
 import { HarnessLimitError } from '../core/turn-budget';
-import { turnModelUsageTotals, type ModelCallReport } from '../llm/model-call';
+import {
+  turnModelUsageTotals,
+  type ModelCallPurpose,
+  type ModelCallReport,
+} from '../llm/model-call';
 import { RUNTIME_VERSION } from './runtime-version';
 import {
   RecordingModel,
@@ -688,5 +692,159 @@ describe('TurnTracer: the whole turn, once', () => {
     expect(h.ingest.starts()[0]!.body.trace_id).not.toBe(
       h.ingest.turns()[0]!.body.trace_id,
     );
+  });
+});
+
+describe("TurnTracer: the turn's model is the main agent's", () => {
+  const REPLY_MODEL = 'openai/gpt-5.6-luna';
+  const ROUTER_MODEL = 'openai/gpt-5.6-luna-nano';
+  const routerReport = (): ModelCallReport => ({
+    ...record({
+      role: 'routing',
+      requestedModel: ROUTER_MODEL,
+      servedModel: `${ROUTER_MODEL}-20260709`,
+      promptTokens: 50,
+      cachedTokens: 0,
+      outputTokens: 3,
+      costUsd: 0.0001,
+    }),
+    purpose: 'routing',
+    callId: crypto.randomUUID(),
+    startedAt: Date.now(),
+  });
+  /** The main agent's reply call, failing before the provider named a model. */
+  const failedReply = (opts: { bare?: boolean } = {}) =>
+    new RecordingModel(
+      record({
+        requestedModel: REPLY_MODEL,
+        servedModel: undefined,
+        outputTokens: 0,
+        costUsd: undefined,
+      }),
+      { fail: true, ...opts },
+    );
+
+  it('sends the requested reply model when the reply call failed and only the router reported one', async () => {
+    const reports = [routerReport()];
+    const h = tracerHarness({ modelCalls: () => reports });
+    const model = failedReply();
+    const agent = agentWith(async (state, config) => {
+      await model.invoke(state.messages, config).catch(() => undefined);
+      return state;
+    });
+    await runTurn(h, agent);
+    const turn = onlyTurn(h);
+    expect(turn.metadata.served_model).toBe(REPLY_MODEL);
+    // The router's run still names its own model.
+    const router = turn.runs.find((r) => r.name === 'routing model call')!;
+    expect(router.extra).toMatchObject({
+      metadata: { served_model: `${ROUTER_MODEL}-20260709` },
+    });
+    const reply = turn.runs.find(
+      (r) => r.run_type === 'llm' && r.status === 'error',
+    )!;
+    expect(reply.extra?.metadata).toMatchObject({ ls_model_name: REPLY_MODEL });
+    expect(reply.extra?.metadata).not.toHaveProperty('served_model');
+  });
+
+  it('takes the requested model from the run when the failed call left no record', async () => {
+    const reports = [routerReport()];
+    const h = tracerHarness({ modelCalls: () => reports });
+    const model = failedReply({ bare: true });
+    const agent = agentWith(async (state, config) => {
+      await model.invoke(state.messages, config).catch(() => undefined);
+      return state;
+    });
+    await runTurn(h, agent);
+    expect(onlyTurn(h).metadata.served_model).toBe(REPLY_MODEL);
+  });
+
+  it('sends the fallback model that answered the reply', async () => {
+    const reports = [routerReport()];
+    const h = tracerHarness({ modelCalls: () => reports });
+    // The first attempt failed before a model answered; the fallback served.
+    const first = failedReply();
+    const fallback = new RecordingModel(
+      record({
+        requestedModel: REPLY_MODEL,
+        servedModel: 'anthropic/claude-sonnet-4.6',
+        fallback: true,
+        modelFallback: true,
+      }),
+    );
+    const agent = agentWith(async (state, config) => {
+      await first.invoke(state.messages, config).catch(() => undefined);
+      return {
+        messages: [
+          ...state.messages,
+          await fallback.invoke(state.messages, config),
+        ],
+      };
+    });
+    await runTurn(h, agent);
+    expect(onlyTurn(h).metadata).toMatchObject({
+      served_model: 'anthropic/claude-sonnet-4.6',
+      fallback: 'true',
+    });
+  });
+
+  it('sends no model for a turn of helper calls only', async () => {
+    const reports = [routerReport()];
+    const h = tracerHarness({ modelCalls: () => reports });
+    const helper = (role: string, purpose?: ModelCallPurpose) =>
+      new RecordingModel(
+        record({ role, servedModel: `served-by-${purpose ?? role}` }),
+        purpose ? { purpose } : {},
+      );
+    const helpers = [
+      helper('summarizer'),
+      helper('utility', 'attachment'),
+      helper('utility', 'plugin'),
+      helper('utility', 'safety'),
+      helper('subagent', 'subagent'),
+      // A model of role `main` invoked by a sub-agent is the sub-agent's.
+      helper('main'),
+    ];
+    const subAgent = RunnableLambda.from(
+      async (state: State, config?: RunnableConfig) =>
+        helpers[5]!.invoke(state.messages, config),
+    ).withConfig({
+      runName: 'research',
+      tags: ['internal', 'subagent:research'],
+    });
+    const agent = agentWith(async (state, config) => {
+      for (const model of helpers.slice(0, 5))
+        await model.invoke(state.messages, config);
+      await subAgent.invoke(state, config);
+      return state;
+    });
+    await runTurn(h, agent);
+    const turn = onlyTurn(h);
+    expect(turn.runs.filter((r) => r.run_type === 'llm')).toHaveLength(7);
+    expect(turn.metadata.served_model).toBeUndefined();
+  });
+
+  it('keeps a normal turn: the latest reply call that answered, never the router', async () => {
+    const reports = [routerReport()];
+    const h = tracerHarness({ modelCalls: () => reports });
+    const toolStep = new RecordingModel(
+      record({ servedModel: 'openai/gpt-5.6-luna-20260601' }),
+    );
+    const finalStep = new RecordingModel(record());
+    const agent = agentWith(async (state, config) => {
+      await toolStep.invoke(state.messages, config);
+      await lookup.invoke({ q: 'x' }, config);
+      return {
+        messages: [
+          ...state.messages,
+          await finalStep.invoke(state.messages, config),
+        ],
+      };
+    });
+    await runTurn(h, agent);
+    expect(onlyTurn(h).metadata).toMatchObject({
+      served_model: 'openai/gpt-5.6-luna-20260709',
+      fallback: 'false',
+    });
   });
 });

@@ -669,7 +669,11 @@ What a turn carries:
   valid.
 - Turn metadata: `oracle_did`, `network`, `channel` (the channel provider,
   e.g. `whatsapp`, else the client: `portal`, `matrix`), `runtime_version`,
-  `request_id`, `served_model` (the reply model that answered), `fallback`
+  `request_id`, `served_model` (the main agent's model that answered the
+  latest reply call; when no reply call reported one because it failed
+  first, the model it asked for; never a routing, attachment, plugin,
+  summary, safety or sub-agent model; left out when no reply call is
+  known — the service then takes the first `llm` run's model), `fallback`
   (`"true"` when any call fell back), then the root run's own metadata
   (`user_did`, `user_id`, `client`, `thread_id`, …). A truncated turn adds
   `truncated: "true"` and `truncated_payloads` / `omitted_runs`.
