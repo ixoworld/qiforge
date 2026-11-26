@@ -3,12 +3,18 @@
  * IXO Traces ingest that decodes what the tracer sends and validates it
  * against the service's own schema (`fixtures/turn-schema.ts`).
  */
+import type { LangSmithParams } from '@langchain/core/language_models/chat_models';
 import { AIMessage } from '@langchain/core/messages';
 import type { ChatResult } from '@langchain/core/outputs';
 import { FakeListChatModel } from '@langchain/core/utils/testing';
 import {
+  MODEL_CALL_PURPOSE_METADATA_KEY,
+  MODEL_ROLE_METADATA_KEY,
+} from '../core/model-call-reporter';
+import {
   attachModelCall,
   MODEL_CALL_METADATA_KEY,
+  type ModelCallPurpose,
   type ModelCallRecord,
 } from '../llm/model-call';
 import type { Logger } from '../plugin-api/types';
@@ -177,19 +183,52 @@ export function record(
   };
 }
 
-/** A chat model that keeps a call record on its reply (or error), like the platform model. */
+/**
+ * A chat model that keeps a call record on its reply (or error), like the
+ * platform model. Its run metadata carries the record's role, as the turn's
+ * metered adapter stamps it (`main` makes it the main agent's reply model),
+ * and `purpose` when given (`withModelCallPurpose`).
+ */
 export class RecordingModel extends FakeListChatModel {
   constructor(
     private readonly kept: ModelCallRecord,
-    private readonly opts: { fail?: boolean; reply?: string } = {},
+    private readonly opts: {
+      fail?: boolean;
+      /** Fail with no call record on the error (before the model built one). */
+      bare?: boolean;
+      reply?: string;
+      purpose?: ModelCallPurpose;
+    } = {},
   ) {
-    super({ responses: [opts.reply ?? 'Hi! How can I help?'] });
+    super({
+      responses: [opts.reply ?? 'Hi! How can I help?'],
+      metadata: {
+        [MODEL_ROLE_METADATA_KEY]: kept.role,
+        ...(opts.purpose
+          ? { [MODEL_CALL_PURPOSE_METADATA_KEY]: opts.purpose }
+          : {}),
+      },
+    });
+  }
+
+  /** The requested model on the run metadata (`ls_model_name`), as ChatOpenAI puts it. */
+  override getLsParams(options: this['ParsedCallOptions']): LangSmithParams {
+    return {
+      ...super.getLsParams(options),
+      ls_provider: 'openrouter',
+      ls_model_name: this.kept.requestedModel,
+    };
   }
 
   override async _generate(): Promise<ChatResult> {
     if (this.opts.fail) {
       const error = new Error('502 upstream');
-      attachModelCall(error, { ...this.kept, ok: false, errorKind: 'server' });
+      if (!this.opts.bare)
+        attachModelCall(error, {
+          ...this.kept,
+          ok: false,
+          errorKind: 'server',
+        });
       throw error;
     }
     const text = this.opts.reply ?? 'Hi! How can I help?';
