@@ -57,7 +57,7 @@ import {
   buildBatchSignTransactionActionArgs,
   buildDaoDaoGroupInstantiate,
   buildDaoDaoProposalMessage,
-  describeDaoDaoProposalAction,
+  describeProposalAction,
   describeValidationError,
   riskTextKey,
   validateTransactionBatch,
@@ -100,6 +100,10 @@ import {
   oracleChainCall,
   proposalNamed,
 } from './dao-proposal-check';
+import {
+  GroupActionRequestSchema,
+  resolveGroupActions,
+} from './dao-group-actions';
 import type { ProposalAction } from './proposal-actions';
 import type { IxoTransactionToolOptions } from './tools';
 import {
@@ -222,6 +226,13 @@ const proposeSchema = z
       .describe(
         'What the group’s own account does if the proposal passes: catalog messages (proto-JSON `{ typeUrl, value }`) whose actor is the group (`dao`), e.g. a MsgSend with fromAddress = the group. Leave out for a proposal that only asks for agreement.',
       ),
+    groupActions: z
+      .array(GroupActionRequestSchema)
+      .max(DAODAO_MAX_PROPOSAL_ACTIONS)
+      .optional()
+      .describe(
+        'Other things the group’s own account does if the proposal passes, by `type`, from the user’s own words: staking (delegate, undelegate, redelegate, withdraw-rewards), a network vote (gov-vote), its members (update-members), details (update-info), voting rules (update-voting-rules), who can propose (update-submission-rules), sub-DAOs, tracked tokens and NFTs (manage-sub-daos, manage-token-list, manage-nft-list), stored items (set-item, remove-item), cw20 tokens (send-group-tokens, stake-to-group, mint-group-tokens), NFTs (transfer-nft, burn-nft), token swaps (token-swap-fund, token-swap-withdraw), permissions (authz-grant, authz-revoke) and a contract’s admin (update-admin). Give only what the user said; the group’s own contracts and current settings are read on chain, and what the user does not change is kept. Done after `actions`, at most 4 in all.',
+      ),
     riskConfirmation,
   })
   .refine(
@@ -231,6 +242,15 @@ const proposeSchema = z
       message:
         'Give exactly one of `intake` (the usual way) or `proposalModule` (a list without an intake).',
       path: ['intake'],
+    },
+  )
+  .refine(
+    (input) =>
+      (input.actions?.length ?? 0) + (input.groupActions?.length ?? 0) <=
+      DAODAO_MAX_PROPOSAL_ACTIONS,
+    {
+      message: `A proposal holds at most ${DAODAO_MAX_PROPOSAL_ACTIONS} actions in all (actions and groupActions together).`,
+      path: ['groupActions'],
     },
   );
 
@@ -286,15 +306,41 @@ export function fittedSummary(
   return fits;
 }
 
-function proposeStep(args: unknown, sender: string, network: Network): DaoStep {
+/** A step refused before it is built (a group read that failed or ruled it out): nothing is sent. */
+class StepRefusal extends Error {
+  constructor(
+    message: string,
+    readonly retryable: boolean,
+  ) {
+    super(message);
+  }
+}
+
+async function proposeStep(
+  ctx: RuntimeContext,
+  args: unknown,
+  sender: string,
+  network: Network,
+): Promise<DaoStep> {
   const input = proposeSchema.parse(args);
-  const actions = input.actions ?? [];
+  const resolved = await resolveGroupActions(
+    ctx,
+    {
+      ...(input.intake !== undefined ? { intake: input.intake } : {}),
+      ...(input.proposalModule !== undefined
+        ? { proposalModule: input.proposalModule }
+        : {}),
+    },
+    input.groupActions ?? [],
+  );
+  if (!resolved.ok) throw new StepRefusal(resolved.message, resolved.retryable);
+  const actions = [...(input.actions ?? []), ...resolved.actions];
   const via = input.intake ? 'pre-propose' : 'proposal-module';
   const target = input.intake ?? input.proposalModule ?? '';
   const does =
     actions.length === 0
       ? 'nothing: it only asks for agreement'
-      : actions.map(describeDaoDaoProposalAction).join('; ');
+      : actions.map(describeProposalAction).join('; ');
   const summary = (description: string) =>
     `Create a group proposal on ${network} through ${via === 'pre-propose' ? 'the group’s intake' : 'the proposal list'} ${target}, from your account ${sender}: title "${input.title}"; ${description}. If it passes, the group’s own account does ${does}.`;
   return {
@@ -692,7 +738,7 @@ async function runDaoStep(
   ctx: RuntimeContext,
   options: IxoTransactionToolOptions,
   tool: string,
-  build: (sender: string, network: Network) => DaoStep,
+  build: (sender: string, network: Network) => DaoStep | Promise<DaoStep>,
 ): Promise<DaoProposalStepResult> {
   const signer = daoSigner(
     ctx,
@@ -707,9 +753,16 @@ async function runDaoStep(
   let daoStep: DaoStep;
   let message: ITrxMsg;
   try {
-    daoStep = build(sender, network);
+    daoStep = await build(sender, network);
     message = buildDaoDaoProposalMessage(daoStep.input);
   } catch (error) {
+    if (error instanceof StepRefusal)
+      return {
+        status: 'refused',
+        step: 'propose',
+        retryable: error.retryable,
+        message: error.message,
+      };
     return {
       status: 'validation_error',
       error: describeValidationError(error),
@@ -848,11 +901,11 @@ export function createDaoProposalTools(
     tool(
       (args, ctx) =>
         runDaoStep(ctx, options, 'create_dao_proposal', (sender, network) =>
-          proposeStep(args, sender, network),
+          proposeStep(ctx, args, sender, network),
         ),
       {
         name: 'create_dao_proposal',
-        description: `Create a proposal in a DAO DAO group (for example a POD's governance group) the user is a member of, from their own account. Find the group's \`intake\` with chain_lookup daos (or the POD's \`governingGroup\` with chain_lookup entity). Title and description are the user's own words. ${SHARED_RULES}`,
+        description: `Create a proposal in a DAO DAO group (for example a POD's governance group) the user is a member of, from their own account. Find the group's \`intake\` with chain_lookup daos (or the POD's \`governingGroup\` with chain_lookup entity). Title and description are the user's own words. What it does if it passes: \`actions\` (catalog messages such as a send from the group) and \`groupActions\` (staking, members, rules, tokens, NFTs, permissions and more, from plain fields). Never add an action the user did not ask for. A group read that fails or rules an action out answers \`refused\` with the reason. ${SHARED_RULES}`,
         schema: proposeSchema,
       },
     ),

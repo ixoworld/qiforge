@@ -1,5 +1,9 @@
 import { findMessageForValue, type FieldSpec } from './catalog.js';
-import { DAODAO_PROPOSAL_ACTION_ACTORS } from './daodao-schemas.js';
+import { describeDaoDaoGroupAction } from './daodao-actions.js';
+import {
+  DAODAO_PROPOSAL_ACTION_ACTORS,
+  type DaoDaoProposalAction,
+} from './daodao-schemas.js';
 import type { ITrxMsg } from './schemas.js';
 
 /** The most characters one field's value takes in a description. */
@@ -98,4 +102,24 @@ export function describeDaoDaoProposalAction(action: ITrxMsg): string {
     ([typeUrl]) => typeUrl === action.typeUrl,
   )?.[1];
   return describeMessageValues(action, actor ? { omit: [actor] } : {});
+}
+
+/**
+ * Any proposal action in one line: a catalog message (`{ typeUrl, value }`,
+ * or the `stargate` action that holds one) as
+ * {@link describeDaoDaoProposalAction} words it, every other kind in plain
+ * words with its values (`describeDaoDaoGroupAction`).
+ */
+export function describeProposalAction(
+  action: ITrxMsg | DaoDaoProposalAction,
+): string {
+  if ('typeUrl' in action) return describeDaoDaoProposalAction(action);
+  const words = describeDaoDaoGroupAction(action);
+  if (words !== undefined) return words;
+  return 'stargate' in action
+    ? describeDaoDaoProposalAction({
+        typeUrl: action.stargate.type_url,
+        value: action.stargate.value,
+      })
+    : 'an action';
 }

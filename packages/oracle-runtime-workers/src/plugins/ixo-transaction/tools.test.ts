@@ -1358,6 +1358,198 @@ describe('the DAO DAO step tools: the wallet round trip', () => {
     });
   });
 
+  describe('group actions from plain fields', () => {
+    const VOTING =
+      'ixo19ucr8u7fau8ewxcx5wxyj75m2smluuel70r8cjyd4dvpjddqxekqkur2kj';
+    const CW4 =
+      'ixo1t9hcqyjx2xqcl3svvtemdgzlksw00k9dsqfyl6fgz3wpn8j54gkqv9wv5g';
+    const VALIDATOR = 'ixovaloper1qyqszqgpqyqszqgpqyqszqgpqyqszqgp880a32';
+    const RULES = {
+      threshold: { absolute_count: { threshold: '1' } },
+      max_voting_period: { time: 604_800 },
+      min_voting_period: null,
+      only_members_execute: true,
+      allow_revoting: true,
+      dao: GROUP,
+      close_proposal_on_execution_failure: true,
+    };
+    const wasmError = (message: string) =>
+      json({ code: 2, message, details: [] }, 500);
+
+    /** The group on chain: its intake, proposal list, voting module and member list. */
+    function stubGroup(over: { groupContract?: () => Response } = {}) {
+      const urls: string[] = stubChain((n) => {
+        const { contract, query } = smartQueryOf(urls[n] ?? '');
+        const key = Object.keys(query as object)[0];
+        if (contract === INTAKE && key === 'proposal_module')
+          return json({ data: PROPOSALS });
+        if (contract === PROPOSALS && key === 'config')
+          return json({ data: RULES });
+        if (contract === GROUP && key === 'dump_state')
+          return json({
+            data: {
+              config: { name: 'River Group' },
+              voting_module: VOTING,
+              proposal_modules: [],
+            },
+          });
+        if (contract === VOTING && key === 'group_contract')
+          return over.groupContract?.() ?? json({ data: CW4 });
+        return wasmError(`unexpected query ${contract} ${key}`);
+      });
+      return urls;
+    }
+
+    const args = {
+      intake: INTAKE,
+      title: 'New member and rules',
+      description: 'Add a member, stop vote changes and stake',
+      groupActions: [
+        { type: 'update-members', add: [{ address: RECIPIENT }] },
+        { type: 'update-voting-rules', allowRevoting: false },
+        { type: 'delegate', validator: VALIDATOR, amount: '2000000' },
+      ],
+    };
+
+    it('reads the group’s own contracts and settings on chain, and builds each action as the Portal writes it', async () => {
+      const urls = stubGroup();
+      const bridge = fakeBridge();
+      const propose = toolNamed(toolsFor(), 'create_dao_proposal');
+      const preview = await propose.handler(
+        args,
+        memberContext(bridge.surface, 'testnet', undefined, SHOWN_REQUEST),
+      );
+      expect(preview).toMatchObject({
+        status: 'confirm',
+        summary: expect.stringContaining(
+          `If it passes, the group’s own account does change the members: add or set ${RECIPIENT} (weight 1); set the voting rules: a proposal passes with 1 yes votes; voting lasts 7 days; votes cannot be changed; only members can carry out a passed proposal; stake 2000000 uixo with validator ${VALIDATOR}.`,
+        ),
+        risks: expect.arrayContaining([
+          ...riskOf('propose'),
+          'Changes who can vote in the group and how much each vote counts.',
+          'Changes how the group’s proposals pass: how many votes they need, how long voting lasts and who can carry them out.',
+        ]),
+      });
+      // Each read once: intake → list → its rules (the group) → voting module → member list.
+      expect(urls.map((url) => smartQueryOf(url).contract)).toEqual([
+        INTAKE,
+        PROPOSALS,
+        GROUP,
+        VOTING,
+      ]);
+
+      const risks = (preview as { risks: string[] }).risks;
+      const pending = propose.handler(
+        {
+          ...args,
+          riskConfirmation: { confirmed: true, acceptedRisks: risks },
+        },
+        memberContext(bridge.surface),
+      );
+      await dispatched(bridge);
+      const [message] = sentArgs(bridge).messages;
+      expect(message?.value).toMatchObject({
+        msg: {
+          propose: {
+            msg: {
+              propose: {
+                msgs: [
+                  {
+                    wasm: {
+                      execute: {
+                        contract_addr: CW4,
+                        funds: [],
+                        msg: {
+                          update_members: {
+                            add: [{ addr: RECIPIENT, weight: 1 }],
+                            remove: [],
+                          },
+                        },
+                      },
+                    },
+                  },
+                  {
+                    wasm: {
+                      execute: {
+                        contract_addr: PROPOSALS,
+                        msg: {
+                          update_config: { ...RULES, allow_revoting: false },
+                        },
+                      },
+                    },
+                  },
+                  {
+                    staking: {
+                      delegate: {
+                        amount: { amount: '2000000', denom: 'uixo' },
+                        validator: VALIDATOR,
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      });
+      expect(sentArgs(bridge).riskLevel).toBe('high');
+      bridge.answer({ result: { success: true, transactionHash: TX_HASH } });
+      await expect(pending).resolves.toMatchObject({ status: 'signed' });
+    });
+
+    it('refuses, sending nothing, a member change for a group whose votes are not a member list', async () => {
+      stubGroup({
+        groupContract: () =>
+          wasmError(
+            'codespace wasm code 9: query wasm contract failed: Error parsing into type dao_voting_token_staked::msg::QueryMsg: unknown variant `group_contract`',
+          ),
+      });
+      const bridge = fakeBridge();
+      await expect(
+        toolNamed(toolsFor(), 'create_dao_proposal').handler(
+          args,
+          memberContext(bridge.surface),
+        ),
+      ).resolves.toEqual({
+        status: 'refused',
+        step: 'propose',
+        retryable: false,
+        message: expect.stringMatching(
+          /groupActions\.0 \(update-members\): The group’s votes do not come from a member list/,
+        ),
+      });
+      expect(bridge.calls).toEqual([]);
+    });
+
+    it('refuses more than four actions in all', async () => {
+      await expect(
+        toolNamed(toolsFor(), 'create_dao_proposal').handler(
+          {
+            ...args,
+            groupActions: [
+              ...args.groupActions,
+              { type: 'withdraw-rewards', validator: VALIDATOR },
+            ],
+            actions: [
+              {
+                typeUrl: '/cosmos.bank.v1beta1.MsgSend',
+                value: {
+                  fromAddress: GROUP,
+                  toAddress: RECIPIENT,
+                  amount: [{ denom: 'uixo', amount: '1' }],
+                },
+              },
+            ],
+          },
+          memberContext(fakeBridge().surface),
+        ),
+      ).resolves.toEqual({
+        status: 'validation_error',
+        error: expect.stringMatching(/at most 4 actions in all/),
+      });
+    });
+  });
+
   it('carries out a passed proposal and closes a rejected one, by its list and number', async () => {
     for (const step of ['execute', 'close'] as const) {
       stubChain(() =>
@@ -2459,6 +2651,59 @@ describe('the DAO DAO step tools: what a proposal does is disclosed', () => {
     });
     bridge.answer({ result: { success: true, transactionHash: TX_HASH } });
     await expect(pending).resolves.toMatchObject({ status: 'signed' });
+  });
+
+  it('reads back the group actions a proposal holds, as the Portal writes them, with their risks', async () => {
+    const VALIDATOR = 'ixovaloper1qyqszqgpqyqszqgpqyqszqgpqyqszqgp880a32';
+    const CW4 =
+      'ixo1t9hcqyjx2xqcl3svvtemdgzlksw00k9dsqfyl6fgz3wpn8j54gkqv9wv5g';
+    const contractMsg = (msg: unknown) =>
+      bytesToBase64(new TextEncoder().encode(JSON.stringify(msg)));
+    const msgs = [
+      {
+        wasm: {
+          execute: {
+            contract_addr: CW4,
+            funds: [],
+            msg: contractMsg({
+              update_members: { add: [], remove: [RECIPIENT] },
+            }),
+          },
+        },
+      },
+      {
+        staking: {
+          undelegate: {
+            amount: { amount: '3', denom: 'uixo' },
+            validator: VALIDATOR,
+          },
+        },
+      },
+      // Any other contract message is named, never guessed.
+      {
+        wasm: {
+          execute: {
+            contract_addr: CW4,
+            funds: [],
+            msg: contractMsg({ execute_admin_msgs: { msgs: [] } }),
+          },
+        },
+      },
+    ];
+    stubChain(() => json(proposalAnswer({ status: 'passed', msgs })));
+    await expect(preview('execute_dao_proposal')).resolves.toMatchObject({
+      status: 'confirm',
+      actions: [
+        `change the members: remove ${RECIPIENT}`,
+        `unstake 3 uixo from validator ${VALIDATOR} (21 days before it can be moved)`,
+        'an action this oracle cannot read (a wasm message): its effect is not shown here, so check it in the Portal’s Decisions tab before carrying the proposal out',
+      ],
+      risks: [
+        ...riskOf('execute'),
+        'Changes who can vote in the group and how much each vote counts.',
+        'Unstakes the group’s tokens: they earn nothing and cannot be moved for 21 days.',
+      ],
+    });
   });
 
   it('shows what carrying a proposal out does, action by action, and says plainly what it cannot read', async () => {

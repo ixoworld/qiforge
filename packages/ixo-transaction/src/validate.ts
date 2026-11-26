@@ -9,11 +9,16 @@ import {
   type RiskLevel,
 } from './catalog.js';
 import {
+  daoDaoGroupActionKind,
+  daoDaoGroupActionSpec,
+} from './daodao-actions.js';
+import {
   DAODAO_EXECUTE_ACTIONS,
   WASM_INSTANTIATE_TYPE_URL,
-  daoDaoProposalActions,
+  daoDaoProposalActionList,
   parseDaoDaoExecuteValue,
   parseDaoDaoInstantiateValue,
+  type DaoDaoProposalAction,
 } from './daodao-schemas.js';
 import { resolveIntent, type IntentResult } from './intent.js';
 import {
@@ -210,7 +215,22 @@ function parseValue(
  * move's risks and level, not only the proposal's.
  */
 function disclosedSpecs(spec: MessageSpec, message: ITrxMsg): MessageSpec[] {
-  return [spec, ...daoDaoProposalActions(message).map(requireSpec)];
+  return [spec, ...daoDaoProposalActionList(message).map(proposalActionSpec)];
+}
+
+/** The entry whose risks one (valid) proposal action discloses. */
+function proposalActionSpec(action: DaoDaoProposalAction): MessageSpec {
+  const kind = daoDaoGroupActionKind(action);
+  if (kind === 'catalog' && 'stargate' in action) {
+    return requireSpec({
+      typeUrl: action.stargate.type_url,
+      value: action.stargate.value,
+    });
+  }
+  if (kind === undefined || kind === 'catalog') {
+    throw new Error('A proposal action that is not one a proposal can hold');
+  }
+  return daoDaoGroupActionSpec(kind);
 }
 
 const uniqueRisks = (specs: readonly MessageSpec[]): string[] => [

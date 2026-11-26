@@ -56,6 +56,7 @@ function toBase64(bytes: Uint8Array): string {
 
 const GRANT_ENTITY_ACCOUNT_AUTHZ =
   '/ixo.entity.v1beta1.MsgGrantEntityAccountAuthz';
+const AUTHZ_GRANT = '/cosmos.authz.v1beta1.MsgGrant';
 
 /**
  * Encode an allowlisted authorization, given as structured proto-JSON, into
@@ -166,8 +167,20 @@ function chainInstantiateMsg(msg: DaoDaoInstantiateValue['msg']): unknown {
   };
 }
 
-/** A proposal action as the contract reads it: `value` the encoded protobuf. */
+/**
+ * A proposal action as the contract reads it, written as the Portal writes
+ * it: a stargate action's `value` the encoded protobuf, a contract message
+ * (`wasm.execute`) as base64 of its UTF-8 JSON; `bank`, `staking`,
+ * `distribution` and `wasm.update_admin` as they are.
+ */
 function chainProposalAction(action: DaoDaoProposalAction): unknown {
+  if (!('stargate' in action)) {
+    if (!('wasm' in action) || !('execute' in action.wasm)) return action;
+    const { contract_addr, funds, msg } = action.wasm.execute;
+    return {
+      wasm: { execute: { contract_addr, funds, msg: jsonBinary(msg) } },
+    };
+  }
   const message = {
     typeUrl: action.stargate.type_url,
     value: action.stargate.value,
@@ -220,7 +233,10 @@ function withWasmMsgBytes(message: ITrxMsg): Record<string, unknown> {
 
 function encodableValue(message: ITrxMsg): Record<string, unknown> {
   switch (message.typeUrl) {
+    // An entity-account grant, and a group proposal's permission grant:
+    // each with its authorization structured.
     case GRANT_ENTITY_ACCOUNT_AUTHZ:
+    case AUTHZ_GRANT:
       return withEncodedAuthorization(message.value);
     case WASM_INSTANTIATE_TYPE_URL:
     case WASM_EXECUTE_TYPE_URL:

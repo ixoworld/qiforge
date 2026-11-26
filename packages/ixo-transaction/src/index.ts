@@ -106,7 +106,26 @@ export {
   DESCRIBED_VALUE_MAX_CHARS,
   describeDaoDaoProposalAction,
   describeMessageValues,
+  describeProposalAction,
 } from './describe.js';
+export {
+  DAODAO_GRANT_DAYS,
+  DAODAO_GROUP_ACTION_NAMES,
+  buildDaoDaoGroupAction,
+  daoDaoGroupActionKind,
+  daoDaoGroupActionSpec,
+  describeDaoDaoGroupAction,
+} from './daodao-actions.js';
+export type {
+  DaoDaoCoin,
+  DaoDaoCoreConfig,
+  DaoDaoDeposit,
+  DaoDaoGroupActionInput,
+  DaoDaoGroupActionKind,
+  DaoDaoIntakeConfig,
+  DaoDaoPassRule,
+  DaoDaoProposalConfig,
+} from './daodao-actions.js';
 export {
   buildDaoDaoGroupInstantiate,
   buildDaoDaoGroupLinkMessages,
@@ -121,6 +140,9 @@ export type {
 export {
   DAODAO_CODE_IDS,
   DAODAO_CONTRACTS,
+  DAODAO_CW20_STAKE_MSG,
+  DAODAO_CW20_SWAP_MSG,
+  DAODAO_GROUP_STARGATE_ACTIONS,
   DAODAO_DEFAULT_ALLOW_REVOTING,
   DAODAO_EXECUTE_ACTIONS,
   DAODAO_MAX_DESCRIPTION_LENGTH,
@@ -133,13 +155,19 @@ export {
   DAODAO_VOTE_OPTIONS,
   DAODAO_VOTING_PERIOD_SECONDS,
   DaoDaoAccountAddressSchema,
+  DaoDaoAnyAddressSchema,
   DaoDaoContractAddressSchema,
+  DaoDaoProposalActionSchema,
+  DaoDaoValidatorAddressSchema,
   WASM_EXECUTE_TYPE_URL,
   WASM_INSTANTIATE_TYPE_URL,
+  daoDaoProposalActionList,
   daoDaoProposalActions,
 } from './daodao-schemas.js';
 export type {
   DaoDaoContract,
   DaoDaoExecuteAction,
+  DaoDaoGroupStargateTypeUrl,
+  DaoDaoProposalAction,
   DaoDaoVoteOption,
 } from './daodao-schemas.js';

@@ -305,9 +305,11 @@ time), every code id the network's
 checksummed members, threshold 1..members, wasm admin the sender or none,
 no funds; the execute steps go to a 32-byte contract address, with the
 Auth Hub's vote options and text limits, and a proposal holds at most 4
-actions of the allowlisted types (`DAODAO_PROPOSAL_ACTION_ACTORS`), each a
-valid catalog message whose actor is the group. A proposal's risks are its
-own and those of each action it holds (`daoDaoProposalActions` reads them),
+actions ([below](#group-proposal-actions)): catalog messages of the
+allowlisted types (`DAODAO_PROPOSAL_ACTION_ACTORS`) whose actor is the
+group, or group actions in the one shape the Portal's own proposal builder
+writes each. A proposal's risks are its own and those of each action it
+holds (`daoDaoProposalActionList` reads them),
 in the batch, the single draft and the Portal's consent sheet alike, and its
 level is the highest of them: a proposal that would send the group's funds
 is `high` and discloses `Transfers tokens to another address.`, one that
@@ -535,12 +537,12 @@ form has no summary). The generic route (`/ixo daodao vote` through
 guided to: the nested shapes are easy to get wrong, and a mainnet group has
 no testnet run to cite.
 
-| Tool                   | Input                                                                                                               | Message                                                                   |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| `create_dao_proposal`  | `intake` (or `proposalModule` for a list without one), `title`, `description`, `actions?` (catalog messages, max 4) | `propose` to the intake (`{ propose: { msg: { propose } } }`) or the list |
-| `vote_on_dao_proposal` | `proposalModule`, `proposalId`, `vote` (`yes` / `no` / `abstain`), `rationale?`                                     | `{ vote: { proposal_id, vote, rationale } }` (`null` without one)         |
-| `execute_dao_proposal` | `proposalModule`, `proposalId`                                                                                      | `{ execute: { proposal_id } }`                                            |
-| `close_dao_proposal`   | `proposalModule`, `proposalId`                                                                                      | `{ close: { proposal_id } }`                                              |
+| Tool                   | Input                                                                                                                                                                                            | Message                                                                   |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
+| `create_dao_proposal`  | `intake` (or `proposalModule` for a list without one), `title`, `description`, `actions?` (catalog messages), `groupActions?` (plain fields, [below](#group-proposal-actions)); at most 4 in all | `propose` to the intake (`{ propose: { msg: { propose } } }`) or the list |
+| `vote_on_dao_proposal` | `proposalModule`, `proposalId`, `vote` (`yes` / `no` / `abstain`), `rationale?`                                                                                                                  | `{ vote: { proposal_id, vote, rationale } }` (`null` without one)         |
+| `execute_dao_proposal` | `proposalModule`, `proposalId`                                                                                                                                                                   | `{ execute: { proposal_id } }`                                            |
+| `close_dao_proposal`   | `proposalModule`, `proposalId`                                                                                                                                                                   | `{ close: { proposal_id } }`                                              |
 
 Each also takes `riskConfirmation`. Without it the call sends nothing and
 answers `{ status: 'confirm', network, summary, risks, message }`: the model
@@ -559,7 +561,54 @@ other DID is `unavailable`), the network the oracle's chain network
 the chain signed for). Mainnet needs `IXO_TRANSACTION_ALLOW_MAINNET=true`
 and no testnet receipt: a group and its proposals exist on one network only.
 A proposal action must be a catalog message of an allowed type whose actor
-is the group (`DAODAO_PROPOSAL_ACTION_ACTORS`), checked by the package.
+is the group (`DAODAO_PROPOSAL_ACTION_ACTORS`), or one of the group actions
+below, checked by the package.
+
+### Group proposal actions
+
+Beyond the catalog messages, a proposal can hold the actions of the
+Portal's Create Proposal block whose message has one fixed shape, each
+written exactly as the Portal's builder
+(`lib/blocknote/transformActionsToMsgs.ts`) writes it
+(`packages/ixo-transaction/src/daodao-actions.ts`, tested against those
+shapes byte for byte):
+
+| `groupActions[].type`                                     | On chain                                                                                                         | Read on chain first                          | Risk level       |
+| --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | -------------------------------------------- | ---------------- |
+| `delegate`, `undelegate`, `redelegate`                    | `{ staking: { delegate / undelegate / redelegate } }`                                                            | nothing                                      | medium           |
+| `withdraw-rewards`                                        | `{ distribution: { withdraw_delegator_reward } }`                                                                | nothing                                      | low              |
+| `gov-vote`                                                | stargate `/cosmos.gov.v1beta1.MsgVote`, voter = the group                                                        | the group                                    | medium           |
+| `update-members`                                          | `update_members { add, remove }` on the group's cw4 member list                                                  | `group_contract` of its voting module        | high             |
+| `update-info`                                             | `update_config { config }` on the group (the whole config)                                                       | the group's `config`, carried over           | medium           |
+| `update-voting-rules`                                     | `update_config` on the proposal list (the whole config; a 2.4+ list's veto kept)                                 | the list's `config`, carried over            | high             |
+| `update-submission-rules`                                 | `update_config { deposit_info, open_proposal_submission }` on the intake (2.0.3 only)                            | the intake's code id (13) and `config`       | high             |
+| `manage-sub-daos`, `manage-token-list`, `manage-nft-list` | `update_sub_daos`, `update_cw20_list`, `update_cw721_list` on the group                                          | the group                                    | medium, low      |
+| `set-item`, `remove-item`                                 | `set_item`, `remove_item` on the group                                                                           | the group                                    | medium           |
+| `send-group-tokens`, `mint-group-tokens`                  | cw20 `transfer`, `mint` (mint: the governance token)                                                             | `token_contract` of the voting module (mint) | high             |
+| `stake-to-group`                                          | cw20 `send` to the staking contract with `{"stake": {}}`                                                         | `token_contract`, `staking_contract`         | medium           |
+| `transfer-nft`, `burn-nft`                                | cw721 `transfer_nft`, `burn` (never `send_nft`)                                                                  | nothing                                      | high, critical   |
+| `token-swap-fund`, `token-swap-withdraw`                  | `fund {}` with one native coin, or cw20 `send` with `{"ixo_initiate_token_swap":{}}`; `withdraw {}`              | nothing                                      | high, medium     |
+| `authz-grant`, `authz-revoke`                             | stargate `MsgGrant` (a generic authorization, a year from the start of today UTC) / `MsgRevoke`, granter = group | the group                                    | critical, medium |
+| `update-admin`                                            | `{ wasm: { update_admin } }`                                                                                     | nothing                                      | critical         |
+
+The model gives only the user's own words (amounts in base units, the
+addresses the user named); every address of the group's own contracts and
+every current setting comes from chain reads (`dao-group-actions.ts`, each
+read once per call, `restJson` under one budget), so a change of one
+setting keeps the others, as the Portal does. A group without the part an
+action needs (no member list, no governance token, an intake other than
+2.0.3) or a read that failed answers `refused` (`retryable` when asking
+again may help), nothing sent. In a proposal every `wasm.execute` must be
+one of these contract messages (strict shapes; funds only when funding a
+swap), never an arbitrary one: a migrate, instantiate, admin exec, authz
+exec or custom message, joining a DAO, accepting to the marketplace,
+validator actions and `send_nft` are refused. Every action that names the
+group (a stargate actor, a message to the group itself, `dao` of the
+voting rules) names the same one.
+
+The Portal's own Governance Vote action sets the voter to the signing
+wallet, not the group; inside a group proposal the group is the account
+that votes, so the voter here is always the group.
 
 The model finds what to pass with `chain_lookup`: a POD's group from
 `entity` (`governingGroup`: the core address of its `group` linked entity
@@ -585,12 +634,14 @@ follows DAO DAO 2.0.3 `dao-proposal-single`:
 
 The same answer's `msgs` are what a carry-out makes the group's own account
 do (`proposal-actions.ts`): a `stargate` action of an allowed type
-(`DAODAO_PROPOSAL_ACTION_ACTORS`) is decoded from its protobuf with the
-SDK's codec (`decode` + `toJSON`, the catalog's proto-JSON) and worded with
-its values and catalog risks; any other action (another stargate type, a
-`bank`, `wasm` or other message, a value that does not decode) is named
-and said plainly to be unreadable here, to check in the Portal's Decisions
-tab. The `execute_dao_proposal` preview's summary lists them (`…: the group’s
+(`DAODAO_PROPOSAL_ACTION_ACTORS`, or a group vote, grant or revoke) is
+decoded from its protobuf with the SDK's codec (`decode` + `toJSON`, the
+catalog's proto-JSON), a `wasm.execute`'s contract message from its base64
+JSON, and every group action above is checked against its one shape and
+worded with its values and risks; any other action (another stargate type,
+another contract message, a migrate, a value that does not decode) is
+named and said plainly to be unreadable here, to check in the Portal's
+Decisions tab. The `execute_dao_proposal` preview's summary lists them (`…: the group’s
 own account does its 2 actions: 1) MsgSend (to address ixo1…, amount 5000000
 uixo); 2) an action this oracle cannot read (a bank message): …`; a proposal
 without actions `only marks it carried out`; as many as fit the summary, the
